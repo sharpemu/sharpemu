@@ -219,4 +219,115 @@ public sealed class EmbeddedVertexFetchDetectorTests
 
         Assert.Empty(plan.Loads);
     }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LaneSavedTableRecord_RequiresSaveAndRestoreInTheSameBlock(bool branchSkipsSave)
+    {
+        var program = Program(
+            ScalarLoad(0, BufferTable, destination: 12, count: 4),
+            Branch(8, "SCbranchScc0", branchSkipsSave ? (short)3 : (short)0),
+            WriteLane(12, vectorRegister: 20, scalarRegister: 12, lane: 3),
+            MoveScalar(20, 12, 0),
+            ReadLane(24, scalarRegister: 12, vectorRegister: 20, lane: 3),
+            IndexSelect(32),
+            FetchLoad(36, 12, 4),
+            EndProgram(44));
+
+        var plan = EmbeddedVertexFetchDetector.Detect(program, AttributeTable, BufferTable, 0, 8, 32);
+
+        if (branchSkipsSave)
+        {
+            Assert.Empty(plan.Loads);
+        }
+        else
+        {
+            Assert.Equal(0, Assert.Single(plan.Loads).AttributeId);
+        }
+    }
+
+    [Theory]
+    [InlineData("SSetpcB64", false)]
+    [InlineData("SSwappcB64", false)]
+    [InlineData("SRfeB64", false)]
+    [InlineData("SGetpcB64", true)]
+    public void UnresolvedTransfersPreventFetchReplacementButGetpcDoesNot(
+        string opcode, bool shouldTrackSavedLane)
+    {
+        var program = Program(
+            ScalarLoad(0, BufferTable, destination: 12, count: 4),
+            WriteLane(8, vectorRegister: 20, scalarRegister: 12, lane: 3),
+            MoveScalar(16, 12, 0),
+            new Gen5ShaderInstruction(20, Gen5ShaderEncoding.Sop1, opcode, [0u],
+                [Gen5Operand.Scalar(0)], [], null),
+            ReadLane(24, scalarRegister: 12, vectorRegister: 20, lane: 3),
+            IndexSelect(32),
+            FetchLoad(36, 12, 4),
+            ScalarLoad(44, BufferTable, destination: 16, count: 4),
+            IndexSelect(52),
+            FetchLoad(56, 16, 4),
+            EndProgram(64));
+
+        var plan = EmbeddedVertexFetchDetector.Detect(program, AttributeTable, BufferTable, 0, 8, 32);
+
+        uint[] expectedFetchAddresses = shouldTrackSavedLane ? [36u, 56u] : [];
+        Assert.Equal(expectedFetchAddresses, plan.Loads.Select(load => load.Pc).ToArray());
+    }
+
+    [Theory]
+    [InlineData("SCbranchScc0", false)]
+    [InlineData("SCbranchExecz", false)]
+    [InlineData("SCbranchScc0", true)]
+    public void JoinRequiresTheSameScalarOnBothPaths(string branch, bool sameValue)
+    {
+        var program = Program(
+            ScalarLoad(0, BufferTable, destination: 12, count: 4),
+            Branch(8, branch, 2),
+            sameValue ? MoveScalarRegister(12, 12, 12) : MoveScalar(12, 12, 0),
+            Branch(16, "SBranch", 0),
+            WriteLane(20, vectorRegister: 20, scalarRegister: 12, lane: 3),
+            MoveScalar(28, 12, 0),
+            ReadLane(32, scalarRegister: 12, vectorRegister: 20, lane: 3),
+            IndexSelect(40), FetchLoad(44, 12, 4), EndProgram(52));
+        var plan = EmbeddedVertexFetchDetector.Detect(program, AttributeTable, BufferTable, 0, 8, 32);
+        Assert.Equal(sameValue ? 1 : 0, plan.Loads.Count);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SavedLaneAcrossLoopRequiresAnUnchangedBackEdge(bool clobber)
+    {
+        var program = Program(
+            ScalarLoad(0, BufferTable, destination: 12, count: 4),
+            WriteLane(8, vectorRegister: 20, scalarRegister: 12, lane: 3),
+            ReadLane(16, scalarRegister: 12, vectorRegister: 20, lane: 3),
+            IndexSelect(24), FetchLoad(28, 12, 4),
+            MoveScalar(36, 12, 0),
+            clobber ? WriteLane(40, vectorRegister: 20, scalarRegister: 12, lane: 3)
+                : new Gen5ShaderInstruction(40, Gen5ShaderEncoding.Sopp, "SNop", [0u, 0u], [], [], null),
+            Branch(48, "SCbranchScc1", -9), EndProgram(52));
+        var plan = EmbeddedVertexFetchDetector.Detect(program, AttributeTable, BufferTable, 0, 8, 32);
+        Assert.Equal(clobber ? 0 : 1, plan.Loads.Count);
+    }
+
+    [Fact]
+    public void UnreachableTableLoadsCannotSupplyAFetch()
+    {
+        var program = Program(Branch(0, "SBranch", 2),
+            ScalarLoad(4, BufferTable, destination: 12, count: 4),
+            IndexSelect(12), FetchLoad(16, 12, 4), EndProgram(24));
+        Assert.Empty(EmbeddedVertexFetchDetector.Detect(program, AttributeTable, BufferTable, 0, 8, 32).Loads);
+    }
+
+    [Fact]
+    public void VectorIndexMustBeValidOnEveryIncomingPath()
+    {
+        var program = Program(ScalarLoad(0, BufferTable, destination: 12, count: 4),
+            IndexSelect(8), Branch(12, "SCbranchScc0", 1),
+            Vop2(16, "VAddI32", 1, Operand(0), Operand(1)),
+            FetchLoad(20, 12, 4), EndProgram(28));
+        Assert.Empty(EmbeddedVertexFetchDetector.Detect(program, AttributeTable, BufferTable, 0, 8, 32).Loads);
+    }
 }
