@@ -530,7 +530,7 @@ public static partial class Gen5SpirvTranslator
                 if (_request.TraceDeviceAddressFaults)
                 {
                     var length = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _faultBuffer, 0);
-                    var recordStart = _module.AddInstruction(SpirvOp.ISub, _uintType, length, UInt(8));
+                    var recordStart = _module.AddInstruction(SpirvOp.ISub, _uintType, length, UInt(16));
                     var claim = _module.AddInstruction(SpirvOp.AtomicCompareExchange, _uintType,
                         BlockWordPointer(_faultBuffer, recordStart), UInt(1), UInt(0), UInt(0), UInt(1), UInt(0));
                     EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, claim, UInt(0)), () =>

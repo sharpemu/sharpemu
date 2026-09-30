@@ -123,6 +123,8 @@ public sealed class ShaderResourcePlan
         var tracked = ResourceTracker.Track(plan);
         plan.DescriptorSources = tracked.Sources;
         plan.Info = tracked.Info;
+        if (program.Instructions.Any(instruction => instruction.Control is ShaderCallFaultControl))
+            plan.Info.UsesDeviceAddresses = true;
         plan.IndirectImages = tracked.IndirectImages;
         plan.BufferCandidateTables = tracked.BufferCandidateTables;
         plan.DynamicReads = plan.DynamicReads.Where(read => !tracked.IndirectReads.Contains(read)).ToList();
