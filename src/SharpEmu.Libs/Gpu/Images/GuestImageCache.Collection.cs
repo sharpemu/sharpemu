@@ -8,10 +8,16 @@ namespace SharpEmu.Libs.Gpu.Images;
 // Garbage collection by recency and memory pressure, and the scheduled readback flush.
 public sealed partial class GuestImageCache
 {
-    public void RunGarbageCollector()
+    public void RunGarbageCollector() => RunGarbageCollector(endsFrame: true);
+
+    // Image ages are counted in frames. Collection also runs after guest submissions, so memory
+    // pressure is relieved during long stretches without a flip, but only a frame advances the
+    // age: a title submits dozens of command buffers per frame, and counting those made every
+    // texture it samples once per frame look stale, so it was deleted and uploaded again.
+    public void RunGarbageCollector(bool endsFrame)
     {
         using var held = _lock.Hold();
-        var tick = _collectionTick++;
+        var tick = endsFrame ? _collectionTick++ : _collectionTick;
         if (_totalUsedMemory < _collectionStartBytes)
         {
             return;

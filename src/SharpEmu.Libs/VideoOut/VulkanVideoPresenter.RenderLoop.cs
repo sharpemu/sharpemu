@@ -26,13 +26,13 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private void RunGuestCacheCollection()
+        private void RunGuestCacheCollection(bool endsFrame)
         {
             ProcessGuestCacheReadbacks();
 
             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.ImageCollect))
             {
-                _imageCache.RunGarbageCollector();
+                _imageCache.RunGarbageCollector(endsFrame);
             }
 
             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.BufferCollect))
