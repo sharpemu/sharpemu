@@ -349,6 +349,9 @@ public sealed record Gen5ShaderProgram(
     ulong Address,
     IReadOnlyList<Gen5ShaderInstruction> Instructions)
 {
+    public IReadOnlySet<uint> FunctionBufferAccesses { get; init; } = new HashSet<uint>();
+    public bool IsFusedProgram { get; init; }
+
     private const uint PixelColorTargetCount = 8;
     private const int PixelColorMaskBits = 4;
     private readonly uint _pixelColorExportMasks = ComputePixelColorExportMasks(Instructions);
