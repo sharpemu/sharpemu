@@ -61,7 +61,19 @@ public sealed partial class GuestImageCache
 
             if (owner.IsGpuModified)
             {
+                if (owner.IsMaybeCpuDirty)
+                {
+                    if (owner.NeedsMaybeCpuHash)
+                        continue;
+                    _ = owner.ResolveMaybeCpuHash(owner.HashGuestEdges());
+                }
+
                 var safe = CanReadBack(owner);
+                // A dirty buffer overlap does not prove that it replaces the image contents.
+                if (!safe && owner.SafeToDownload)
+                {
+                    continue;
+                }
                 if (safe && owner.Description.IsTiled)
                 {
                     continue;
