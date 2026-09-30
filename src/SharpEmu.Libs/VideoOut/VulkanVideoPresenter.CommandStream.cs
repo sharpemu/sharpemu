@@ -454,8 +454,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public bool IsFlipDone(int handle, int index) => VideoOutExports.IsFlipDone(handle, index);
 
-        public void PrepareCpuFlip(int handle, int index, ulong requestId) =>
+        public void PrepareCpuFlip(int handle, int index, ulong requestId)
+        {
+            VideoOutExports.MarkFlipOrdered(requestId);
             CaptureFlip(handle, index, requestId, flipMode: 0, flipArg: 0);
+        }
 
         public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments)
         {
