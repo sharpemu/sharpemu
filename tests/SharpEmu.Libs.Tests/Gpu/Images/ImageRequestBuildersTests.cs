@@ -212,6 +212,36 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Equal(3, fatal.Messages.Count);
     }
 
+    [Theory]
+    [InlineData(0u, 0u, 63u, 64u)]
+    [InlineData(0u, 0u, 64u, 64u)]
+    [InlineData(0u, 4u, 8191u, 60u)]
+    [InlineData(1u, 4u, 64u, 28u)]
+    [InlineData(0u, 4u, 7u, 4u)]
+    public void ColorTarget_VolumeViewUsesOnlyExistingMipSlices(
+        uint mipLevel, uint firstSlice, uint lastSlice, uint expectedLayers)
+    {
+        var words = RegisterWords.Color(Base, 64, 64, GuestTileMode.Standard4KB,
+            maxMip: 1, mipLevel: mipLevel, sliceMax: lastSlice, sliceStart: firstSlice,
+            dimension: 2, depth: 63);
+        var resolution = ImageRequestBuilders.ColorTarget(words, 0xF, 0, false);
+
+        Assert.NotNull(resolution);
+        Assert.Equal(new Extent3D(64, 64, 64), resolution.Value.Request.Description.Extent);
+        Assert.Equal(new SubresourceCount(2, 1), resolution.Value.Request.Description.Resources);
+        Assert.Equal(firstSlice, resolution.Value.Request.View.BaseLayer);
+        Assert.Equal(expectedLayers, resolution.Value.Request.View.LayerCount);
+    }
+
+    [Fact]
+    public void ColorTarget_VolumeViewRejectsFirstSliceOutsideMip()
+    {
+        using var fatal = new FatalScope();
+        var words = RegisterWords.Color(Base, 64, 64, GuestTileMode.Standard4KB,
+            maxMip: 1, mipLevel: 1, sliceStart: 32, sliceMax: 64, dimension: 2, depth: 63);
+        Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.ColorTarget(words, 0xF, 0, false));
+    }
+
     [Fact]
     public void SampleCount_DecodesTheLog2Encoding()
     {

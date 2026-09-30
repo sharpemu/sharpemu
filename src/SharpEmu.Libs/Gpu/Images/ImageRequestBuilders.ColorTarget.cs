@@ -308,6 +308,11 @@ public static partial class ImageRequestBuilders
         {
             throw SubmissionScheduler.Fatal($"The 3D render-target view starts past the mip depth: base={view.BaseLayer} count={view.LayerCount} depth={viewDepth} mip={words.MipLevel}.");
         }
+        if (volume)
+        {
+            // The slice window does not increase the storage depth of a volume.
+            view = view with { LayerCount = Math.Min(view.LayerCount, viewDepth - view.BaseLayer) };
+        }
 
         var description = ImageDescription.Create();
         description.Data = new GuestSpan(words.BaseAddress, backingSize);
