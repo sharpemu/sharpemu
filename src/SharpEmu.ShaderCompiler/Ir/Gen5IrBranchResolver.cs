@@ -16,7 +16,7 @@ public sealed class Gen5IrBranchResolver : IIrBranchResolver
 
     public bool IsConditional(Gen5ShaderInstruction instruction) => instruction.Opcode switch
     {
-        "SCbranchScc0" or
+        "SCbranchCallMismatch" or "SCbranchScc0" or
         "SCbranchScc1" or
         "SCbranchVccz" or
         "SCbranchVccnz" or
@@ -32,6 +32,16 @@ public sealed class Gen5IrBranchResolver : IIrBranchResolver
     public bool TryGetBranchTarget(Gen5ShaderInstruction instruction, out uint targetPc)
     {
         targetPc = 0;
+        if (instruction.Control is ShaderLinkedBranchControl linked)
+        {
+            targetPc = linked.TargetPc;
+            return true;
+        }
+        if (instruction.Control is ShaderCallMatchControl call)
+        {
+            targetPc = call.TargetPc;
+            return true;
+        }
         if (IsTerminator(instruction))
         {
             return false;

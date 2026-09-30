@@ -422,6 +422,12 @@ public sealed partial class ScalarValueGraph
         {
             // Lets ScalarValueGraph.Undefined record which instruction gave up.
             _graph.BuilderInstruction = (instruction.Pc, instruction.Opcode);
+            if (instruction.Control is ShaderCallEntryControl call)
+            {
+                state.WritePair(call.ReturnRegister, _graph.Constant((uint)call.ReturnAddress), _graph.Constant((uint)(call.ReturnAddress >> 32)));
+                state.WritePair(call.ArgumentRegister, _graph.Constant((uint)call.Argument), _graph.Constant((uint)(call.Argument >> 32)));
+                return;
+            }
             switch (instruction.Encoding)
             {
                 case Gen5ShaderEncoding.Sop1:
