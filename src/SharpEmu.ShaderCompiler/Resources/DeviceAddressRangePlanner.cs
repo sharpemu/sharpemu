@@ -252,6 +252,31 @@ public static class DeviceAddressRangePlanner
             result[index] = new DeviceAddressRange(range.Handle, baseAddress, planned ? size : 0, planned, range.Written);
         }
 
-        return result;
+        if (plan.Graph.Program.FunctionBufferAccesses.Count == 0) return result;
+        var functionRanges = new List<DeviceAddressRange>(result);
+        var seen = new HashSet<(ulong Base, ulong Size, bool Written)>();
+        foreach (var memory in plan.Memory.Entries)
+        {
+            if (!memory.DeviceDescriptor || !plan.Graph.Program.FunctionBufferAccesses.Contains(memory.Pc)) continue;
+            if (!plan.Memory.TryGetIndex(memory.Pc, memory.ComponentIndex, out var memoryIndex) ||
+                plan.Accesses[memoryIndex]?.Handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } handle)
+                throw new ResourcePlanException("The shader function buffer has no descriptor.");
+            var words = new uint[4];
+            for (var component = 0; component < 4; component++)
+                if (!evaluator.Evaluate(handle.Operands[component], out words[component]))
+                    throw new ResourcePlanException("The shader function buffer range cannot be resolved.");
+            var address = words[0] | ((ulong)(words[1] & 0xFFFF) << 32);
+            if ((words[1] & 0x80000000) != 0)
+                throw new ResourcePlanException("The shader function uses an unsupported swizzled buffer.");
+            var stride = (words[1] >> 16) & 0x3FFF;
+            var size = (ulong)words[2] * Math.Max(stride, 1u);
+            var written = memory.Access is MemoryAccess.Write or MemoryAccess.Atomic;
+            if (size == 0) continue;
+            if (size > AddressMask - address + 1)
+                throw new ResourcePlanException("The shader function buffer range wraps the guest address space.");
+            if (seen.Add((address, size, written)))
+                functionRanges.Add(new((uint)functionRanges.Count, address, size, true, written));
+        }
+        return functionRanges.ToArray();
     }
 }
