@@ -1458,6 +1458,15 @@ public static partial class Gen5SpirvTranslator
                     break;
                 }
 
+                case "VPkAddI16":
+                case "VPkSubI16":
+                    if (instruction.Control is not Gen5Vop3pControl { NegLoMask: 0, NegHiMask: 0 })
+                    {
+                        error = "packed integer source modifiers are not supported";
+                        return false;
+                    }
+                    result = EmitPackedIntegerAddSubtract(instruction);
+                    break;
                 case "VPkAddF16":
                 case "VPkMulF16":
                 case "VPkMinF16":
@@ -1468,12 +1477,6 @@ public static partial class Gen5SpirvTranslator
                         return false;
                     }
 
-                    break;
-                case "VPkAddI16":
-                    result = EmitPackedI16Arithmetic(instruction, subtract: false);
-                    break;
-                case "VPkSubI16":
-                    result = EmitPackedI16Arithmetic(instruction, subtract: true);
                     break;
                 case "VPkFmacF16":
                     result = EmitPackedF16Fmac(instruction, destination);
@@ -1744,32 +1747,6 @@ public static partial class Gen5SpirvTranslator
         // src1. The packed integer result is modulo 16 bits in each lane; the
         // signed and unsigned forms therefore share the same bit-level
         // implementation.
-        private uint EmitPackedI16Arithmetic(Gen5ShaderInstruction instruction, bool subtract)
-        {
-            var control = (Gen5Vop3pControl)instruction.Control!;
-            var left = GetRawSource(instruction, 0);
-            var right = GetRawSource(instruction, 1);
-            uint Arithmetic(uint a, uint b) => subtract ? ISubU(a, b) : IAdd(a, b);
-
-            uint SelectHalf(uint value, uint mask, int source)
-            {
-                return ((mask >> source) & 1) != 0
-                    ? ShiftRightLogical(value, UInt(16))
-                    : value;
-            }
-
-            var low = BitwiseAnd(
-                Arithmetic(
-                    BitwiseAnd(SelectHalf(left, control.OpSelMask, 0), UInt(0xFFFF)),
-                    BitwiseAnd(SelectHalf(right, control.OpSelMask, 1), UInt(0xFFFF))),
-                UInt(0xFFFF));
-            var high = BitwiseAnd(
-                Arithmetic(
-                    BitwiseAnd(SelectHalf(left, control.OpSelHiMask, 0), UInt(0xFFFF)),
-                    BitwiseAnd(SelectHalf(right, control.OpSelHiMask, 1), UInt(0xFFFF))),
-                UInt(0xFFFF));
-            return BitwiseOr(low, ShiftLeftLogical(high, UInt(16)));
-        }
 
         // V_FMA_MIX_F32 / _MIXLO_F16 / _MIXHI_F16 (VOP3P opcodes 0x20 / 0x21 /
         // 0x22). Unlike the packed v_pk_* ops these compute a single f32
