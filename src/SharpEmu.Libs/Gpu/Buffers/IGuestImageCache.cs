@@ -19,5 +19,8 @@ public interface IGuestImageCache
 
     void InvalidateMemoryFromGpu(ulong address, ulong size);
 
+    // A possible shader write through a raw buffer: only images that copy memory become stale.
+    void InvalidateMemoryCopiesFromGpu(ulong address, ulong size) { }
+
     bool TrySynchronizeBufferFromImage(GpuBuffer buffer, ulong address, ulong size);
 }

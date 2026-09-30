@@ -395,10 +395,15 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     }
 
     [Theory]
-    [InlineData(true, true)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    public void PrepareBindings_InvalidatesImagesOnlyForFormattedWrites(bool formatted, bool writable)
+    [InlineData(true, true, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, false, false)]
+    [InlineData(true, true, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, true)]
+    [InlineData(false, false, true)]
+    public void PrepareBindings_InvalidatesImagesAccordingToWriteTypeAndOwnership(bool formatted, bool writable, bool gpuOwned)
     {
         if (!Ready()) return;
         using var presenter = new PresenterUnderTest(_vulkan!);
@@ -412,11 +417,13 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         var snapshot = new ResourceSnapshot { Buffers = [[(uint)address, (uint)(address >> 32), 0x10000, 0]] };
         presenter.Run(() =>
         {
+            if (gpuOwned) image.MarkGpuModified();
             Assert.False(image.IsBufferModified);
             using var preparation = presenter.RenderHost.BeginPreparation();
             var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot));
             presenter.RenderHost.BindResources(prepared);
-            Assert.Equal(formatted && writable, image.IsBufferModified);
+            Assert.Equal(writable && (formatted || !gpuOwned), image.IsBufferModified);
+            Assert.Equal(gpuOwned && !(formatted && writable), image.IsGpuModified);
         });
         harness.Finish();
         harness.Shutdown();
