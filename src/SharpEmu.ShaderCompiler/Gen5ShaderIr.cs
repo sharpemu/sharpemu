@@ -341,6 +341,8 @@ public sealed record Gen5ShaderInstruction(
     public ulong? AddressOffset { get; init; }
 
     public ulong ProgramOffset => AddressOffset ?? Pc;
+    public uint DestinationWidth => Opcode is "SBcnt1I32B64" or "SFF1I32B64" or "SFlbitI32B64"
+        ? 1u : Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
 }
 
 public sealed record Gen5ShaderProgram(
