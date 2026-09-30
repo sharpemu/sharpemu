@@ -73,6 +73,31 @@ public sealed class ResourceTrackerTests
         Assert.Equal(0x80u, kept.Dwords[3]);
     }
 
+    [Theory]
+    [InlineData(0u, 5u, 0x1234u, 0x12340000u)]
+    [InlineData(1u, 5u, 0x8001u, 0x80010000u)]
+    [InlineData(1u, 4u, 0x8001u, 0xFFFF8001u)]
+    [InlineData(2u, 5u, 0x1234u, 0x12345678u)]
+    public void SdwaConditionalDescriptor_PlacesTheDestinationOnce(
+        uint unused, uint destination, uint source, uint expected)
+    {
+        var program = Program(
+            Vop1(0, "VMovB32", 1, Operand(0x5678)),
+            Vop2(4, "VCndmaskB32", 1, Operand(source), Operand(source)) with
+            {
+                Control = new Gen5SdwaControl(destination, unused, 4, 4,
+                    false, false, 0, 0, 0, false, null),
+            },
+            ReadFirstLane(12, 2, 1),
+            BufferLoad(16, 0),
+            EndProgram(24));
+        var plan = Extract(program);
+
+        Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(plan, plan.Info.Buffers[0].Source,
+            Inputs([0x1000, 0, 8, 0x16204]), out var descriptor));
+        Assert.Equal(expected, descriptor.Dwords[2]);
+    }
+
     [Fact]
     public void ImagesSamplersAndAliases()
     {

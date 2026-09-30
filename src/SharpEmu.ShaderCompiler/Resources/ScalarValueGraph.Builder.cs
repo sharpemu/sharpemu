@@ -1500,6 +1500,13 @@ public sealed partial class ScalarValueGraph
 
         private ScalarValue ApplySdwaDestination(Gen5SdwaControl control, ScalarValue value, ScalarValue previous)
         {
+            if (value.Kind == ScalarValueKind.Select && value.Operands.Length == 3)
+            {
+                return _graph.Select(value.Operands[0],
+                    ApplySdwaDestination(control, value.Operands[1], previous),
+                    ApplySdwaDestination(control, value.Operands[2], previous));
+            }
+
             if (control.DestinationSelect == 6)
             {
                 return value;
@@ -1514,6 +1521,8 @@ public sealed partial class ScalarValueGraph
             var shift = control.DestinationSelect <= 3 ? control.DestinationSelect * 8u : (control.DestinationSelect - 4u) * 16u;
             var lowMask = width == 8 ? 0xFFu : 0xFFFFu;
             var fieldMask = lowMask << (int)shift;
+            var upperStart = shift + width;
+            var upperMask = upperStart < 32 ? uint.MaxValue << (int)upperStart : 0u;
             var positioned = Binary(ScalarOperation.ShiftLeft32,
                 Binary(ScalarOperation.And32, value, _graph.Constant(lowMask)), _graph.Constant(shift));
 
@@ -1523,7 +1532,7 @@ public sealed partial class ScalarValueGraph
                 1 => Binary(ScalarOperation.Or32, positioned,
                     _graph.Select(NotZero(Binary(ScalarOperation.And32, positioned,
                         _graph.Constant(1u << (int)(shift + width - 1)))),
-                        _graph.Constant(uint.MaxValue << (int)(shift + width)), _graph.Constant(0u))),
+                        _graph.Constant(upperMask), _graph.Constant(0u))),
                 2 => Binary(ScalarOperation.Or32,
                     Binary(ScalarOperation.And32, previous, _graph.Constant(~fieldMask)), positioned),
                 _ => _graph.Undefined(ScalarValueType.U32),
