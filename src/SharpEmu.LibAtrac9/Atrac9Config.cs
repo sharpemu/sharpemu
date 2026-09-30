@@ -91,6 +91,11 @@ namespace LibAtrac9
 
             FramesPerSuperframe = 1 << SuperframeIndex;
             SuperframeBytes = FrameBytes << SuperframeIndex;
+            if ((uint)ChannelConfigIndex >= (uint)Tables.ChannelConfig.Length)
+            {
+                throw new InvalidDataException($"ATRAC9 channel config index {ChannelConfigIndex} is out of range");
+            }
+
             ChannelConfig = Tables.ChannelConfig[ChannelConfigIndex];
 
             ChannelCount = ChannelConfig.ChannelCount;
