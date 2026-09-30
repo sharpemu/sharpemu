@@ -218,6 +218,7 @@ internal static unsafe partial class VulkanVideoPresenter
             // A lookup needs a recording tick; the scheduler starts with the first batch.
             _ = BeginBatchedGuestCommands();
             var request = resolution.Request;
+            _imageCache.TraceNativeColorMetadata(request);
             _imageCache.SynchronizeColorMetadata(request);
             _ = BeginBatchedGuestCommands();
             var imageIdentifier = _imageCache.FindImage(ref request, exactFormat);
@@ -277,6 +278,24 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // A DCC fast clear may leave the color allocation stale; the deferred value lands when the surface binds.
         private bool ResolveDccAttachmentClear(ColorAttachment target, out ClearColorValue clearValue)
+        {
+            if (ImageClearTrace.Enabled && target.Request.Description.Metadata.Kind == MetadataKind.Dcc)
+            {
+                _imageCache.TraceColorClearState(target.Request.Description.Metadata.Range.Address);
+            }
+
+            var clear = TryResolveDccAttachmentClear(target, out clearValue);
+            if (ImageClearTrace.Enabled)
+            {
+                ImageClearTrace.Write($"decision image=0x{target.Address:X16} metadata=0x{target.Request.Description.Metadata.Range.Address:X16} " +
+                    $"format={target.Format} layer={target.Request.View.BaseLayer} layers={target.Request.View.LayerCount} clear={clear} " +
+                    $"valueBits=({clearValue.Uint32_0:X8},{clearValue.Uint32_1:X8},{clearValue.Uint32_2:X8},{clearValue.Uint32_3:X8})");
+            }
+
+            return clear;
+        }
+
+        private bool TryResolveDccAttachmentClear(ColorAttachment target, out ClearColorValue clearValue)
         {
             clearValue = default;
             if (target.Request.Description.Metadata.NativeColorClear) return false;
@@ -572,6 +591,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var resolution = ImageRequestBuilders.Texture(texture.Descriptor ?? [], texture.Shape);
             _ = BeginBatchedGuestCommands();
             var request = resolution.Request;
+            _imageCache.TraceTextureMetadata(request);
+            _ = BeginBatchedGuestCommands();
             var imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
             resolution = resolution with { Request = request };
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);

@@ -272,6 +272,14 @@ public sealed unsafe partial class GuestImageCache
         if (request.Role != ImageRole.DepthTarget)
         {
             var plan = PlanColorTransfer(image, request.Role, TransferDirection.Upload);
+            if (ImageClearTrace.Enabled && IsTracedImage(info))
+            {
+                TraceVolumeState("upload", image, request,
+                    $"sourceBuffer=0x{source.Handle.Handle:X} sourceOffset=0x{sourceOffset:X} tiled={plan.Tiled} linearSize=0x{plan.LinearSize:X} regions={plan.Regions.Count} tiles={plan.Tiles.Count}");
+                foreach (var region in plan.Regions)
+                    TraceVolumeState("upload-region", image, request,
+                        $"offset=0x{region.BufferOffset:X} rowLength={region.BufferRowLength} imageHeight={region.BufferImageHeight} mip={region.ImageSubresource.MipLevel} depth={region.ImageExtent.Depth}");
+            }
             if (!plan.Valid)
             {
                 throw SubmissionScheduler.Fatal(

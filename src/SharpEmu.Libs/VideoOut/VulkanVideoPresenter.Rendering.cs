@@ -262,6 +262,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public ResourceSlotIdentifier FindImage(ref ImageRequest request, bool exactFormat)
         {
+            _imageCache.TraceNativeColorMetadata(request);
+            _imageCache.TraceTextureMetadata(request);
             _imageCache.SynchronizeColorMetadata(request);
             _ = BeginBatchedGuestCommands();
             if (request.Role == ImageRole.ColorTarget && !request.Description.Metadata.NativeColorClear &&

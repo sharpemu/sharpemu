@@ -200,6 +200,8 @@ public static partial class ImageRequestBuilders
         Span<uint> padded = stackalloc uint[8];
         words[..Math.Min(words.Length, 8)].CopyTo(padded);
         var descriptor = new TextureDescriptorWords(padded);
+        if (ImageClearTrace.Enabled && descriptor.Type == GuestImageType.Color3D)
+            ImageClearTrace.Write($"volume-descriptor address=0x{descriptor.BaseAddress:X16} words={Convert.ToHexString(System.Runtime.InteropServices.MemoryMarshal.AsBytes(padded))}");
         var storage = shape.Storage;
         if (descriptor.BaseAddress == 0)
         {
@@ -319,6 +321,8 @@ public static partial class ImageRequestBuilders
 
         var view = TextureView(descriptor, shape, viewFormat, shaderConversion, viewLevels, description.Resources.Layers);
         var request = new ImageRequest(description, view, storage ? ImageRole.StorageImage : ImageRole.Texture);
+        if (ImageClearTrace.Enabled && volume && descriptor.MetadataCompress)
+            request.TraceTextureMetadataAddress = descriptor.MetadataAddress << 8;
         return new TextureRequestResolution(request, shaderConversion, pixelFormat, DestinationSwizzle(descriptor));
     }
 

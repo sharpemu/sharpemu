@@ -374,6 +374,13 @@ public static partial class ImageRequestBuilders
                 request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
             }
         }
+        if (ImageClearTrace.Enabled)
+        {
+            ImageClearTrace.Write($"target image=0x{words.BaseAddress:X16} extent={width}x{height} format={targetFormat.HostFormat} " +
+                $"metadata=0x{words.DccAddress:X16} enabled={hasDcc} mip={words.MipLevel} layer={view.BaseLayer} layers={view.LayerCount} " +
+                $"info=0x{words.Info:X8} control=0x{words.DccControl:X8} clear0=0x{words.ClearWord0:X8} " +
+                $"packedSupported={clearSupported} fixedSupported={fixedClearSupported}");
+        }
         return new ColorTargetResolution(
             request, words.BaseAddress, backingSize, viewExtent, words.MipLevel, view.BaseLayer, samples, targetFormat.ExportMapping,
             clearSupported, fixedClearSupported, clearValue);

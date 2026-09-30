@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.GuestMemory;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
@@ -198,8 +199,10 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         return CreateBuffer(guestAddress, size);
     }
 
-    public (GpuBuffer Buffer, ulong Offset) ObtainBuffer(ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer = false, ResourceSlotIdentifier bufferIdentifier = default)
+    public (GpuBuffer Buffer, ulong Offset) ObtainBuffer(ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer = false,
+        ResourceSlotIdentifier bufferIdentifier = default, ulong traceShaderHash = 0)
     {
+        if (isWritten && ImageClearTrace.Enabled) ImageCache?.TraceGuestWrite("shader-buffer-write", guestAddress, size, shaderHash: traceShaderHash);
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferAcquisitionChecks);
         var command = _scheduler.Current;
         if (command.IsInvalid || !IsValidRange(guestAddress, size))
@@ -383,6 +386,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         var images = RequireImageCache();
+        if (ImageClearTrace.Enabled) images.TraceGuestWrite("command-fill", guestAddress, size, value);
+        images.TraceMetadataFill(guestAddress, size, value);
         _ = images.ClearMetadata(guestAddress);
         var region = images.QueryRegion(guestAddress, size);
         if (!HasGpuDirtyBytes(guestAddress, size) && !region.GpuImageBytes)
@@ -541,6 +546,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         var images = RequireImageCache();
+        if (ImageClearTrace.Enabled && dstMemory) images.TraceGuestWrite("command-copy", dstVaddr, size, srcGds ? 0 : srcVaddr);
         var srcRegion = srcMemory ? images.QueryRegion(srcVaddr, size) : default;
         var dstRegion = dstMemory ? images.QueryRegion(dstVaddr, size) : default;
         if (srcMemory && dstMemory && !HasGpuDirtyBytes(srcVaddr, size) && !HasGpuDirtyBytes(dstVaddr, size) &&

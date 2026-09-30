@@ -122,6 +122,12 @@ internal static unsafe partial class VulkanVideoPresenter
             var resolution = ImageRequestBuilders.Texture(words, ShapeOf(image));
             _ = BeginBatchedGuestCommands();
             var request = resolution.Request;
+            _imageCache.TraceTextureMetadata(request);
+            if (Gpu.Images.ImageClearTrace.Enabled)
+            {
+                Gpu.Images.ImageTraceRange.NoteFollowedImage(program.Hash, index, request.Description.Data.Address, request.Description.Data.Size);
+            }
+            _ = BeginBatchedGuestCommands();
             var imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
             resolution = resolution with { Request = request };
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
@@ -502,7 +508,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"A storage buffer range or the device alignment is unsupported: buffer={slot} size=0x{size:X} alignment={alignment} hash=0x{program.Hash:X16}.");
             }
 
-            var (buffer, offset) = _bufferCache.ObtainBuffer(address, size, resource.Written, isTexelBuffer: resource.Formatted, bufferIdentifier);
+            var (buffer, offset) = _bufferCache.ObtainBuffer(address, size, resource.Written, isTexelBuffer: resource.Formatted, bufferIdentifier, program.Hash);
             TraceBufferParameter(program.Hash, slot, address, size, buffer.Handle.Handle, offset, resource.Written);
             var alignedOffset = offset - offset % alignment;
             var adjustment = offset - alignedOffset;
@@ -609,7 +615,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var size = ClampMappedSize(range.Base, range.Size);
                 if (range.Written)
                 {
-                    _ = _bufferCache.ObtainBuffer(range.Base, size, isWritten: true);
+                    _ = _bufferCache.ObtainBuffer(range.Base, size, isWritten: true, traceShaderHash: program.Hash);
                     _imageCache.InvalidateMemoryCopiesFromGpu(range.Base, size);
                 }
                 else
