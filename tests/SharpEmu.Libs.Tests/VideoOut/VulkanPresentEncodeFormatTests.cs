@@ -17,6 +17,15 @@ public sealed class VulkanPresentEncodeFormatTests
         Assert.Equal(SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Uint, decoded.OutputKind);
     }
 
+    [Fact]
+    public void UnsignedRgba32TargetUsesUnsignedPixelOutput()
+    {
+        Assert.True(VulkanVideoPresenter.TryDecodeRenderTargetFormat(14, 4, 0, out var decoded));
+        Assert.Equal(Format.R32G32B32A32Uint, decoded.Format);
+        Assert.Equal(SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Uint, decoded.OutputKind);
+        Assert.True(decoded.ExportMapping.IsIdentity);
+    }
+
     [Theory]
     [InlineData(Format.B8G8R8A8Srgb, Format.B8G8R8A8Unorm)]
     [InlineData(Format.R8G8B8A8Srgb, Format.R8G8B8A8Unorm)]
