@@ -73,31 +73,6 @@ public sealed class ResourceTrackerTests
         Assert.Equal(0x80u, kept.Dwords[3]);
     }
 
-    [Theory]
-    [InlineData(0u, 5u, 0x1234u, 0x12340000u)]
-    [InlineData(1u, 5u, 0x8001u, 0x80010000u)]
-    [InlineData(1u, 4u, 0x8001u, 0xFFFF8001u)]
-    [InlineData(2u, 5u, 0x1234u, 0x12345678u)]
-    public void SdwaConditionalDescriptor_PlacesTheDestinationOnce(
-        uint unused, uint destination, uint source, uint expected)
-    {
-        var program = Program(
-            Vop1(0, "VMovB32", 1, Operand(0x5678)),
-            Vop2(4, "VCndmaskB32", 1, Operand(source), Operand(source)) with
-            {
-                Control = new Gen5SdwaControl(destination, unused, 4, 4,
-                    false, false, 0, 0, 0, false, null),
-            },
-            ReadFirstLane(12, 2, 1),
-            BufferLoad(16, 0),
-            EndProgram(24));
-        var plan = Extract(program);
-
-        Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(plan, plan.Info.Buffers[0].Source,
-            Inputs([0x1000, 0, 8, 0x16204]), out var descriptor));
-        Assert.Equal(expected, descriptor.Dwords[2]);
-    }
-
     [Fact]
     public void ImagesSamplersAndAliases()
     {
@@ -153,6 +128,32 @@ public sealed class ResourceTrackerTests
         Assert.True(plan.Memory[index].DeviceDescriptor);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BufferLoadedFromDeviceAddress_UsesTheDeviceDescriptor(bool invalidRecordCount)
+    {
+        var program = Program(
+            ReadFirstLane(0, 12, 0),
+            MoveScalar(4, 13, 0),
+            ScalarLoad(8, 12, 16, count: 4),
+            invalidRecordCount ? MoveScalarRegister(16, 18, 90) : Nop(16),
+            BufferLoad(20, 16),
+            EndProgram(28));
+
+        if (invalidRecordCount)
+        {
+            Assert.Throws<ResourcePlanException>(() => Extract(program));
+            return;
+        }
+
+        var plan = Extract(program);
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.True(plan.Memory.Find(20)!.DeviceDescriptor);
+        Assert.Contains(plan.DeviceAddressRanges, range => range.MemoryIndices.Any(index => plan.Memory[index].Pc == 8));
+    }
+
     [Fact]
     public void SamplerWithDivergentBits_IsRejected()
     {
@@ -169,6 +170,98 @@ public sealed class ResourceTrackerTests
         var error = Assert.Throws<ResourcePlanException>(() => Extract(program));
         Assert.Contains("not a valid runtime value", error.Message);
         Assert.Contains("pc=0x00000200", error.Message);
+    }
+
+    [Fact]
+    public void FullDwordSdwaDescriptor_PreservesTheHostValue()
+    {
+        var program = Program(
+            Vop2(0, "VOrB32", 1, Gen5Operand.Scalar(1), Operand(0x40000)) with
+            {
+                Control = new Gen5SdwaControl(6, 0, 6, 6, false, false, 0, 0, 0, false, null),
+            },
+            ReadFirstLane(8, 1, 1),
+            BufferLoad(12, 0),
+            EndProgram(20));
+        var plan = Extract(program);
+
+        Assert.False(plan.Info.UsesDeviceAddresses);
+        Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(plan, plan.Info.Buffers[0].Source,
+            Inputs([0x1000, 0x20, 8, 0x16204]), out var descriptor));
+        Assert.Equal(0x40020u, descriptor.Dwords[1]);
+    }
+
+    [Fact]
+    public void BufferWithDeviceRecordCount_KeepsTheCountOnTheDevice()
+    {
+        var plan = Extract(Program(
+            BufferLoad(0, 0),
+            ReadFirstLane(8, 10, 4),
+            MoveScalarRegister(12, 8, 0),
+            MoveScalarRegister(16, 9, 1),
+            MoveScalar(20, 11, 0x16204),
+            BufferStore(24, 8),
+            EndProgram(32)));
+
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.Single(plan.Info.Buffers);
+        Assert.True(plan.Memory.Find(24)!.DeviceDescriptor);
+    }
+
+    [Theory]
+    [InlineData(0u, 5u, 0x1234u, 0x12340000u)]
+    [InlineData(1u, 5u, 0x8001u, 0x80010000u)]
+    [InlineData(1u, 4u, 0x8001u, 0xFFFF8001u)]
+    [InlineData(2u, 5u, 0x1234u, 0x12345678u)]
+    public void SdwaConditionalDescriptor_PlacesTheDestinationOnce(
+        uint unused, uint destination, uint source, uint expected)
+    {
+        var program = Program(
+            Vop1(0, "VMovB32", 1, Operand(0x5678)),
+            Vop2(4, "VCndmaskB32", 1, Operand(source), Operand(source)) with
+            {
+                Control = new Gen5SdwaControl(destination, unused, 4, 4,
+                    false, false, 0, 0, 0, false, null),
+            },
+            ReadFirstLane(12, 2, 1),
+            BufferLoad(16, 0),
+            EndProgram(24));
+        var plan = Extract(program);
+
+        Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(plan, plan.Info.Buffers[0].Source,
+            Inputs([0x1000, 0, 8, 0x16204]), out var descriptor));
+        Assert.Equal(expected, descriptor.Dwords[2]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DeviceRecordCountLoop_ValidatesEveryIncomingValue(bool invalidIncomingValue)
+    {
+        var program = Program(
+            BufferLoad(0, 0),
+            ReadFirstLane(8, 10, 4),
+            MoveScalarRegister(12, 8, 0),
+            MoveScalarRegister(16, 9, 1),
+            MoveScalar(20, 11, 0x16204),
+            MoveScalar(24, 12, 0),
+            BufferStore(28, 8),
+            invalidIncomingValue ? MoveScalarRegister(36, 10, 90) : Nop(36),
+            Sop2(40, "SAddU32", 12, Gen5Operand.Scalar(12), Operand(1)),
+            Sopc(44, "SCmpLtU32", Gen5Operand.Scalar(12), Operand(2)),
+            Branch(48, "SCbranchScc1", -6),
+            EndProgram(52));
+
+        if (invalidIncomingValue)
+        {
+            Assert.Throws<ResourcePlanException>(() => Extract(program));
+        }
+        else
+        {
+            var plan = Extract(program);
+            Assert.True(plan.Memory.Find(28)!.DeviceDescriptor);
+            Assert.True(plan.Info.UsesDeviceAddresses);
+        }
     }
 
     private static uint[] StorageDescriptorUserData(uint mipBase, uint mipLast) =>
