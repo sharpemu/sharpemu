@@ -15,6 +15,41 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 public sealed unsafe partial class GuestImageCacheTests
 {
     [Fact]
+    public void StencilAssociation_ReleasesFormerImageWriteProtection()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var stencilAddress = address + 0x10000;
+        var color = LinearRequest(stencilAddress, 4, Format.R32Uint, GuestPixelFormat.Bits32UInt,
+            GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var colorIdentifier = harness.Acquire(ref color);
+        var colorImage = harness.Image(colorIdentifier);
+        var colorBacking = colorImage.Backing.Handle;
+        Assert.True(colorImage.IsWatched);
+
+        var depth = AsDepthTarget(LinearRequest(address, 4, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1), Format.D32SfloatS8Uint);
+        depth.Description.Stencil = new GuestSpan(stencilAddress, 4);
+        depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        var depthIdentifier = harness.Find(ref depth);
+        harness.Worker.Run(() => harness.Images.AssociateStencilForTest(depthIdentifier, depth.Description.Stencil));
+
+        var association = harness.ProxyAt(stencilAddress, 4);
+        Assert.True(association.IsValid);
+        Assert.Equal(colorIdentifier, association);
+        Assert.Equal(depthIdentifier, colorImage.DepthOwner);
+        Assert.Equal(colorBacking, colorImage.Backing.Handle);
+        Assert.False(colorImage.IsWatched);
+        Assert.Equal(SharpEmu.HLE.Host.HostPageProtection.ReadWrite, harness.Protection(stencilAddress));
+        harness.Worker.Run(() => harness.Images.AssociateStencilForTest(depthIdentifier, depth.Description.Stencil));
+        Assert.Equal(association, harness.ProxyAt(stencilAddress, 4));
+
+        Assert.False(colorImage.IsWatched);
+        Assert.Equal(SharpEmu.HLE.Host.HostPageProtection.ReadWrite, harness.Protection(stencilAddress));
+    }
+
+    [Fact]
     public void BufferSynchronization_CopiesFittingMipsVolumesAndWholeDepthOnly()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
