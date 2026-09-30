@@ -119,6 +119,9 @@ public interface IRenderHost
     // Copies host bytes into the stream ring for the current recording.
     BufferBinding UploadTransient(ReadOnlySpan<byte> data, uint alignment);
 
+    ulong UploadMeshVertexIndices(ReadOnlySpan<uint> indices) =>
+        throw new NotSupportedException("The renderer does not support indexed mesh inputs.");
+
     void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input);
 
     void BindIndexBuffer(BufferBinding binding, IndexType type);
@@ -157,6 +160,9 @@ public interface IRenderHost
         throw new NotSupportedException("The render host does not draw from indirect arguments.");
 
     void InsertDrawTraceMarker(string label) { }
+
+    void DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ) =>
+        throw new NotSupportedException("The render host does not support mesh shaders.");
 
     void Dispatch(uint groupsX, uint groupsY, uint groupsZ);
 

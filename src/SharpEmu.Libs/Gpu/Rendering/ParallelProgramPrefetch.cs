@@ -12,9 +12,10 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 // GPU-ownership state; otherwise it resolves the draw itself.
 public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 {
-    public sealed class Job(RegisterBanks banks, long gate)
+    public sealed class Job(RegisterBanks banks, long gate, bool indexed = false)
     {
         internal readonly RegisterBanks Banks = banks;
+        internal readonly bool Indexed = indexed;
         // The count of stream items other than draws that must have run before the job resolves.
         internal readonly long Gate = gate;
         internal GraphicsProgramInputs Inputs;
@@ -55,9 +56,9 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     // A gate above zero holds the job until AdvanceGate reaches it: with the command stream on its own
     // thread, draws are submitted ahead of the work before them, which may change what they read.
-    public Job Submit(RegisterBanks banks, long gate = 0)
+    public Job Submit(RegisterBanks banks, long gate = 0, bool indexed = false)
     {
-        var job = new Job(banks, gate);
+        var job = new Job(banks, gate, indexed);
         lock (_lock)
         {
             _queue.Enqueue(job);
@@ -258,7 +259,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
         _concurrent.BeginConcurrentResolve();
         try
         {
-            job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, _host.Fatal);
+            job.Inputs = RenderExecutor.ProgramInputsOf(job.Banks, _host.FormatSupport, _host.Fatal, job.Indexed);
             job.Programs = _executor.ResolveGraphicsPrograms(job.Banks, in job.Inputs);
             job.Assumptions = _concurrent.EndConcurrentResolve();
             job.State = 1;
