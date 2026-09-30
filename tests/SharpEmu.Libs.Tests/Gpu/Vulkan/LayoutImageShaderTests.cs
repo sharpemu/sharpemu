@@ -294,6 +294,46 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         output.WriteLine($"Verified the duplicated point sampler on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void EqualDescriptorSourcesSampleThroughSharedBindings(bool distinctImages)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan)) return;
+        var program = Program(
+            MoveVector(0, 0, 0x3F00_0000), MoveVector(4, 1, 0x3F00_0000),
+            Image(8, "ImageSampleLz", 16, 32, dmask: 1),
+            BufferAccess(16, "BufferStoreDword", ResultRegister, 0, vectorData: 4),
+            Image(24, "ImageSampleLz", 24, 36, dmask: 1),
+            BufferAccess(32, "BufferStoreDword", ResultRegister, 4, vectorData: 4), EndProgram(40));
+        var registers = UserData();
+        uint[] descriptor = [(uint)FirstImageAddress, Format32Float << 20, 0, 0xFAC | (ImageType2D << 28), 0, 0, 0, 0];
+        descriptor.CopyTo(registers, 16);
+        descriptor.CopyTo(registers, 24);
+        if (distinctImages) registers[24] = (uint)SecondImageAddress;
+        using var run = new Run(vulkan, program, registers, 1);
+        Assert.Equal(2, run.Resources.Info.Images.Count);
+        var imageClass = ImageDescriptorBinding.ForImage(run.Resources.Info.Images[0])!.Value;
+        Assert.Equal(distinctImages ? 2 : 1, run.Request.Bindings.Find(imageClass)!.Resources.Count);
+        Assert.Single(run.Request.Bindings.Find(DescriptorBindingKind.Samplers)!.Resources);
+        var first = run.Harness.CreateImage(Describe(0, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
+        var second = run.Harness.CreateImage(Describe(0x10000, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 1, 1, 1));
+        run.Harness.UploadImage(first, MemoryMarshal.AsBytes<float>([0.25f]), ImageTestHarness.WholeImageCopies(first.Description, 0));
+        run.Harness.UploadImage(second, MemoryMarshal.AsBytes<float>([0.75f]), ImageTestHarness.WholeImageCopies(second.Description, 0));
+        var sampler = run.Runner.CreateSampler(Filter.Nearest);
+        var views = new Dictionary<int, DescriptorImageInfo[]> { [0] = [SampledView(first)], [1] = [SampledView(second)] };
+        run.Dispatch(run.BindImages(views, [sampler, sampler]), command =>
+        {
+            first.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, command);
+            second.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, command);
+        });
+        Assert.Equal(BitConverter.SingleToUInt32Bits(0.25f), run.ResultWord(0));
+        Assert.Equal(BitConverter.SingleToUInt32Bits(distinctImages ? 0.75f : 0.25f), run.ResultWord(1));
+        run.Harness.AssertNoValidationMessages();
+        output.WriteLine($"Verified descriptor aliases on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
+    }
+
     // Image 0 is plain, image 1 the indirect root, image 2 its candidate for key 1; a mip load
     // reads texel (0, 0) of mip 1 of two-level images.
     [Theory]

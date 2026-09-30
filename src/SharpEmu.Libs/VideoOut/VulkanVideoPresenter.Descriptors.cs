@@ -948,7 +948,16 @@ internal static unsafe partial class VulkanVideoPresenter
 
                     for (var index = 0; index < descriptors.Images.Length; index++)
                     {
-                        var expected = descriptors.Images[index].MipViews.Length == 0 ? 1u : (uint)descriptors.Images[index].MipViews.Length;
+                        var resources = stage.Resources.Info;
+                        var canonical = resources.GetCanonicalImageBinding((uint)index);
+                        if (canonical >= descriptors.Images.Length || resources.GetCanonicalImageBinding(canonical) != canonical)
+                        {
+                            throw SubmissionScheduler.Fatal($"An image alias has no canonical binding: image={index} canonical={canonical} hash=0x{program.Hash:X16}.");
+                        }
+
+                        var expected = canonical == index
+                            ? Math.Max(1u, (uint)descriptors.Images[index].MipViews.Length)
+                            : 0u;
                         if (occurrences[index] != expected)
                         {
                             throw SubmissionScheduler.Fatal($"An image is bound a different number of times than its views: image={index} occurrences={occurrences[index]} views={expected} hash=0x{program.Hash:X16}.");

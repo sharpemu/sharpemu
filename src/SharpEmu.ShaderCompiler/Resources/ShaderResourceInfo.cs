@@ -167,6 +167,10 @@ public sealed class ShaderResourceInfo
     public List<SamplerResource> Samplers { get; set; } = [];
     public List<SampledImagePair> SampledPairs { get; set; } = [];
     public List<BufferCandidateTableInfo> BufferCandidateTables { get; set; } = [];
+    public uint[] ImageBindings { get; set; } = [];
+    public uint[] SamplerBindings { get; set; } = [];
+    public uint GetCanonicalImageBinding(uint resource) => ImageBindings.Length == 0 ? resource : ImageBindings[resource];
+    public uint SamplerBinding(uint resource) => SamplerBindings.Length == 0 ? resource : SamplerBindings[resource];
     public List<StageInput> Inputs { get; set; } = [];
     public List<StageOutput> Outputs { get; set; } = [];
     public byte[] VertexFetchComponents { get; set; } = new byte[32];
@@ -182,6 +186,8 @@ public sealed class ShaderResourceInfo
         Samplers = Samplers.Select(sampler => sampler.Clone()).ToList(),
         SampledPairs = SampledPairs.Select(pair => pair.Clone()).ToList(),
         BufferCandidateTables = BufferCandidateTables.Select(table => table.Clone()).ToList(),
+        ImageBindings = [.. ImageBindings],
+        SamplerBindings = [.. SamplerBindings],
         Inputs = [.. Inputs],
         Outputs = [.. Outputs],
         VertexFetchComponents = (byte[])VertexFetchComponents.Clone(),

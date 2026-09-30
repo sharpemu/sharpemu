@@ -577,6 +577,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         var imageGroups = new List<uint>[ImageBindingCount];
         for (var index = 0; index < info.Images.Count; index++)
         {
+            if (info.GetCanonicalImageBinding((uint)index) != index) continue;
             var image = info.Images[index];
             var kind = ImageDescriptorBinding.ForImage(image);
             if (kind is null)
@@ -611,7 +612,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
         if (info.Samplers.Count != 0)
         {
-            descriptors.Add(new DescriptorBinding(DescriptorBindingKind.Samplers, Enumerable.Range(0, info.Samplers.Count).Select(index => (uint)index).ToArray()));
+            descriptors.Add(new DescriptorBinding(DescriptorBindingKind.Samplers, Enumerable.Range(0, info.Samplers.Count)
+                .Select(index => (uint)index).Where(index => info.SamplerBinding(index) == index).ToArray()));
         }
 
         if (usesGlobalDataShare)

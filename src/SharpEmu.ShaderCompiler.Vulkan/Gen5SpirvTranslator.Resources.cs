@@ -1422,7 +1422,7 @@ public static partial class Gen5SpirvTranslator
             }
 
             var classElements = imageClass.Resources.ToList();
-            var element = classElements.IndexOf((uint)resourceIndex);
+            var element = classElements.IndexOf(info.GetCanonicalImageBinding((uint)resourceIndex));
             if (element < 0)
             {
                 return false;
@@ -1525,7 +1525,7 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            var element = imageClass.Resources.ToList().IndexOf((uint)resourceIndex);
+            var element = imageClass.Resources.ToList().IndexOf(info.GetCanonicalImageBinding((uint)resourceIndex));
             if (element < 0)
             {
                 error = $"image {resourceIndex} is not an element of {kind.Value}";
@@ -1565,7 +1565,9 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
-                var samplerPointer = _module.AddInstruction(SpirvOp.AccessChain, _samplerPointer, _samplerArray, UInt(samplerIndex));
+                var samplerElement = request.Bindings.Find(DescriptorBindingKind.Samplers)!.Resources.ToList()
+                    .IndexOf(info.SamplerBinding(samplerIndex));
+                var samplerPointer = _module.AddInstruction(SpirvOp.AccessChain, _samplerPointer, _samplerArray, UInt((uint)samplerElement));
                 var sampler = Load(_samplerType, samplerPointer);
                 objectType = _module.TypeSampledImage(imageClass.ImageType);
                 imageObject = _module.AddInstruction(SpirvOp.SampledImage, objectType, imageValue, sampler);

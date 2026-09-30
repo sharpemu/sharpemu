@@ -1301,6 +1301,8 @@ public static class ResourceMaterializer
             Buffers = buffers,
             Images = images,
             BufferCandidateTables = candidateTables,
+            ImageDescriptorGroups = DescriptorBindingAliases.Group(snapshot.Images),
+            SamplerDescriptorGroups = DescriptorBindingAliases.Group(snapshot.Samplers.Take(info.Samplers.Count).ToArray()),
         };
         specializedSnapshot = snapshot;
         return true;
@@ -1561,6 +1563,7 @@ public static class ResourceMaterializer
             }
         }
 
+        DescriptorBindingAliases.Apply(info, source, specialization);
         return new SpecializedResourceInfo { Info = info, SamplerByMemoryIndex = samplerByMemory };
     }
 }
