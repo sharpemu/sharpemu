@@ -216,9 +216,9 @@ public static partial class Gen5MslTranslator
                 "VFractF32" => FloatResult(instruction, $"fract({F(instruction, 0)})"),
                 "VSqrtF32" => FloatResult(instruction, $"sqrt({F(instruction, 0)})"),
                 "VRsqF32" => FloatResult(instruction, $"rsqrt({F(instruction, 0)})"),
-                "VRcpF16" => Float16Result(instruction, destination, $"(1.0f / {F16(instruction, 0)})"),
-                "VSqrtF16" => Float16Result(instruction, destination, $"sqrt({F16(instruction, 0)})"),
-                "VLogF16" => Float16Result(instruction, destination, $"log2({F16(instruction, 0)})"),
+                "VRcpF16" => Float16Reciprocal(instruction, destination),
+                "VSqrtF16" => Float16SquareRoot(instruction, destination),
+                "VLogF16" => Float16Logarithm(instruction, destination),
                 "VExpF16" => Float16Result(instruction, destination, $"exp2({F16(instruction, 0)})"),
                 "VFloorF16" => Float16Result(instruction, destination, $"floor({F16(instruction, 0)})"),
                 "VCeilF16" => Float16Result(instruction, destination, $"ceil({F16(instruction, 0)})"),
@@ -1920,6 +1920,32 @@ public static partial class Gen5MslTranslator
             }
 
             return expression;
+        }
+
+        private string Float16Logarithm(Gen5ShaderInstruction instruction, uint destination)
+        {
+            var source = Temp("float", F16(instruction, 0));
+            return Float16Result(instruction, destination,
+                $"({source} == 0.0f ? as_type<float>(0xFF800000u) : " +
+                $"({source} > 0.0f ? (isinf({source}) ? {source} : log2({source})) : as_type<float>(0xFFC00000u)))");
+        }
+
+        private string Float16Reciprocal(Gen5ShaderInstruction instruction, uint destination)
+        {
+            var source = Temp("float", F16(instruction, 0));
+            var bits = Temp("uint", $"as_type<uint>({source})");
+            var magnitude = Temp("uint", $"({bits} & 0x7FFFFFFFu)");
+            return Float16Result(instruction, destination,
+                $"({magnitude} == 0u ? as_type<float>(({bits} & 0x80000000u) | 0x7F800000u) : " +
+                $"({magnitude} == 0x7F800000u ? as_type<float>({bits} & 0x80000000u) : (1.0f / {source})))");
+        }
+
+        private string Float16SquareRoot(Gen5ShaderInstruction instruction, uint destination)
+        {
+            var source = Temp("float", F16(instruction, 0));
+            return Float16Result(instruction, destination,
+                $"({source} == 0.0f ? {source} : ({source} > 0.0f ? " +
+                $"(isinf({source}) ? {source} : sqrt({source})) : as_type<float>(0xFFC00000u)))");
         }
 
         /// <summary>Rounds to f16 and preserves the unselected VGPR half.</summary>

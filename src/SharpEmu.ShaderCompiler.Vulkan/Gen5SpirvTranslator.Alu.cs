@@ -475,18 +475,66 @@ public static partial class Gen5SpirvTranslator
                         instruction,
                         Ext(32, _floatType, GetFloatSource(instruction, 0)));
                     break;
-                case "VRcpF16":
-                    result = EmitFloat16Result(instruction, destination, _module.AddInstruction(SpirvOp.FDiv, _floatType, Float(1), GetFloat16Source(instruction, 0)));
-                    break;
                 case "VSqrtF16":
-                    result = EmitFloat16Result(instruction, destination, Ext(31, _floatType, GetFloat16Source(instruction, 0)));
+                {
+                    var source = GetFloat16Source(instruction, 0);
+                    var positive = _module.AddInstruction(SpirvOp.FOrdGreaterThan, _boolType, source, Float(0));
+                    var zero = _module.AddInstruction(SpirvOp.FOrdEqual, _boolType, source, Float(0));
+                    var infinite = _module.AddInstruction(SpirvOp.FOrdEqual, _boolType, source, Float(float.PositiveInfinity));
+                    var argument = _module.AddInstruction(SpirvOp.Select, _floatType, positive, source, Float(1));
+                    var root = Ext(31, _floatType, argument);
+                    root = _module.AddInstruction(SpirvOp.Select, _floatType, infinite, source, root);
+                    root = _module.AddInstruction(SpirvOp.Select, _floatType, positive, root,
+                        Bitcast(_floatType, UInt(0xFFC00000)));
+                    root = _module.AddInstruction(SpirvOp.Select, _floatType, zero, source, root);
+                    result = EmitFloat16Result(instruction, destination, root);
                     break;
-                case "VLogF16":
-                    result = EmitFloat16Result(instruction, destination, Ext(30, _floatType, GetFloat16Source(instruction, 0)));
+                }
+                case "VRcpF16":
+                {
+                    var source = GetFloat16Source(instruction, 0);
+                    var bits = Bitcast(_uintType, source);
+                    var sign = BitwiseAnd(bits, UInt(0x80000000));
+                    var magnitude = BitwiseAnd(bits, UInt(0x7FFFFFFF));
+                    var zero = _module.AddInstruction(SpirvOp.IEqual, _boolType, magnitude, UInt(0));
+                    var infinite = _module.AddInstruction(SpirvOp.IEqual, _boolType, magnitude, UInt(0x7F800000));
+                    var denominator = _module.AddInstruction(SpirvOp.Select, _floatType, zero, Float(1), source);
+                    var reciprocal = _module.AddInstruction(SpirvOp.FDiv, _floatType, Float(1), denominator);
+                    reciprocal = _module.AddInstruction(SpirvOp.Select, _floatType, zero,
+                        Bitcast(_floatType, BitwiseOr(sign, UInt(0x7F800000))), reciprocal);
+                    reciprocal = _module.AddInstruction(SpirvOp.Select, _floatType, infinite,
+                        Bitcast(_floatType, sign), reciprocal);
+                    result = EmitFloat16Result(instruction, destination, reciprocal);
                     break;
+                }
                 case "VExpF16":
-                    result = EmitFloat16Result(instruction, destination, Ext(29, _floatType, GetFloat16Source(instruction, 0)));
+                {
+                    var source = GetFloat16Source(instruction, 0);
+                    var overflow = _module.AddInstruction(SpirvOp.FOrdGreaterThanEqual, _boolType, source, Float(128));
+                    var underflow = _module.AddInstruction(SpirvOp.FOrdLessThan, _boolType, source, Float(-126));
+                    var nan = _module.AddInstruction(SpirvOp.IsNan, _boolType, source);
+                    var exponential = Ext(29, _floatType, Ext(43, _floatType, source, Float(-126), Float(127)));
+                    exponential = _module.AddInstruction(SpirvOp.Select, _floatType, overflow, Float(float.PositiveInfinity), exponential);
+                    exponential = _module.AddInstruction(SpirvOp.Select, _floatType, underflow, Float(0), exponential);
+                    exponential = _module.AddInstruction(SpirvOp.Select, _floatType, nan, Bitcast(_floatType, UInt(0x7FC00000)), exponential);
+                    result = EmitFloat16Result(instruction, destination, exponential);
                     break;
+                }
+                case "VLogF16":
+                {
+                    var source = GetFloat16Source(instruction, 0);
+                    var positive = _module.AddInstruction(SpirvOp.FOrdGreaterThan, _boolType, source, Float(0));
+                    var zero = _module.AddInstruction(SpirvOp.FOrdEqual, _boolType, source, Float(0));
+                    var infinite = _module.AddInstruction(SpirvOp.FOrdEqual, _boolType, source, Float(float.PositiveInfinity));
+                    var argument = _module.AddInstruction(SpirvOp.Select, _floatType, positive, source, Float(1));
+                    var logarithm = Ext(30, _floatType, argument);
+                    logarithm = _module.AddInstruction(SpirvOp.Select, _floatType, infinite, source, logarithm);
+                    var invalid = _module.AddInstruction(SpirvOp.Select, _floatType, zero,
+                        Float(float.NegativeInfinity), Bitcast(_floatType, UInt(0xFFC00000)));
+                    result = EmitFloat16Result(instruction, destination,
+                        _module.AddInstruction(SpirvOp.Select, _floatType, positive, logarithm, invalid));
+                    break;
+                }
                 case "VFloorF16":
                     result = EmitFloat16Result(instruction, destination, Ext(8, _floatType, GetFloat16Source(instruction, 0)));
                     break;
