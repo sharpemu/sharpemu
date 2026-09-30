@@ -967,19 +967,6 @@ public static partial class Gen5SpirvTranslator
                             BitwiseAnd(GetRawSource(instruction, 0), lowBitsMask)));
                     break;
                 }
-                case "VLshlrevB64":
-                {
-                    // D.u64 = S1.u64 << (S0.u32 & 0x3F).
-                    var shiftAmount = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _ulongType,
-                        BitwiseAnd(GetRawSource(instruction, 0), UInt(63)));
-                    var shifted = ShiftLeftLogical64(GetRawSource64(instruction, 1), shiftAmount);
-                    result = Narrow(shifted);
-                    StoreV(destination + 1, Narrow(ShiftRightLogical64(
-                        shifted, _module.Constant64(_ulongType, 32))));
-                    break;
-                }
                 case "VBfmB32":
                 {
                     var width = BitwiseAnd(GetRawSource(instruction, 0), UInt(31));
@@ -1058,17 +1045,17 @@ public static partial class Gen5SpirvTranslator
                         SpirvOp.ShiftRightLogical,
                         reverse: true);
                     break;
+                case "VLshlrevB64":
                 case "VLshrrevB64":
                 {
-                    // V_LSHRREV_B64 writes a VGPR pair. Source 0 supplies the
-                    // shift count; source 1 is the 64-bit value to shift.
                     var shift = _module.AddInstruction(
                         SpirvOp.UConvert,
                         _ulongType,
                         BitwiseAnd(GetRawSource(instruction, 0), UInt(63)));
-                    var shifted = ShiftRightLogical64(
-                        GetRawSource64(instruction, 1),
-                        shift);
+                    var value = GetRawSource64(instruction, 1);
+                    var shifted = instruction.Opcode == "VLshlrevB64"
+                        ? ShiftLeftLogical64(value, shift)
+                        : ShiftRightLogical64(value, shift);
                     result = _module.AddInstruction(
                         SpirvOp.UConvert,
                         _uintType,
