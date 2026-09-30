@@ -20,6 +20,10 @@ public sealed record ShaderSource(RegisteredShader Registered, ulong Hash, uint[
 
     public uint CodeSize => Registered.TotalCodeSizeBytes;
 
+    public ulong ContinuationAddressOffset => Registered.IsFused
+        ? unchecked(Registered.ContinuationAddress - Address)
+        : 0;
+
     public string Label => Stage switch
     {
         ShaderStage.Vertex => "vertex",
@@ -44,12 +48,14 @@ public sealed class StageCompileOptions
 // The key of a program entry: what the emitter reads besides the resource specialization.
 public sealed class ProgramKey : IEquatable<ProgramKey>
 {
-    public ProgramKey(ShaderStage stage, ulong hash, uint userDataCount, uint codeSize, uint[] staticState)
+    public ProgramKey(ShaderStage stage, ulong hash, uint userDataCount, uint codeSize,
+        ulong continuationAddressOffset, uint[] staticState)
     {
         Stage = stage;
         Hash = hash;
         UserDataCount = userDataCount;
         CodeSize = codeSize;
+        ContinuationAddressOffset = continuationAddressOffset;
         StaticState = staticState;
     }
 
@@ -57,26 +63,31 @@ public sealed class ProgramKey : IEquatable<ProgramKey>
     public ulong Hash { get; }
     public uint UserDataCount { get; }
     public uint CodeSize { get; }
+    public ulong ContinuationAddressOffset { get; }
     public uint[] StaticState { get; }
 
     public bool Equals(ProgramKey? other) =>
         other is not null && Stage == other.Stage && Hash == other.Hash && UserDataCount == other.UserDataCount &&
-        CodeSize == other.CodeSize && StaticState.AsSpan().SequenceEqual(other.StaticState);
+        CodeSize == other.CodeSize && ContinuationAddressOffset == other.ContinuationAddressOffset &&
+        StaticState.AsSpan().SequenceEqual(other.StaticState);
 
     public override bool Equals(object? obj) => Equals(obj as ProgramKey);
 
     // Same-shape variants share a bucket; equality does the one exact comparison of the state words.
-    public override int GetHashCode() => HashCode.Combine(Stage, Hash, UserDataCount, CodeSize, StaticState.Length);
+    public override int GetHashCode() =>
+        HashCode.Combine(Stage, Hash, UserDataCount, CodeSize, ContinuationAddressOffset, StaticState.Length);
 }
 
 // A program key as a lookup sees it: the static state words stay in the caller's list, so a draw
 // that finds its program does not build a key object or copy the words.
-internal readonly ref struct ProgramKeyProbe(ShaderStage stage, ulong hash, uint userDataCount, uint codeSize, ReadOnlySpan<uint> staticState)
+internal readonly ref struct ProgramKeyProbe(ShaderStage stage, ulong hash, uint userDataCount, uint codeSize,
+    ulong continuationAddressOffset, ReadOnlySpan<uint> staticState)
 {
     public readonly ShaderStage Stage = stage;
     public readonly ulong Hash = hash;
     public readonly uint UserDataCount = userDataCount;
     public readonly uint CodeSize = codeSize;
+    public readonly ulong ContinuationAddressOffset = continuationAddressOffset;
     public readonly ReadOnlySpan<uint> StaticState = staticState;
 }
 
@@ -90,14 +101,17 @@ internal sealed class ProgramKeyComparer : IEqualityComparer<ProgramKey>, IAlter
 
     public bool Equals(ProgramKeyProbe alternate, ProgramKey key) =>
         alternate.Stage == key.Stage && alternate.Hash == key.Hash && alternate.UserDataCount == key.UserDataCount &&
-        alternate.CodeSize == key.CodeSize && alternate.StaticState.SequenceEqual(key.StaticState);
+        alternate.CodeSize == key.CodeSize && alternate.ContinuationAddressOffset == key.ContinuationAddressOffset &&
+        alternate.StaticState.SequenceEqual(key.StaticState);
 
     // The same value as ProgramKey.GetHashCode.
     public int GetHashCode(ProgramKeyProbe alternate) =>
-        HashCode.Combine(alternate.Stage, alternate.Hash, alternate.UserDataCount, alternate.CodeSize, alternate.StaticState.Length);
+        HashCode.Combine(alternate.Stage, alternate.Hash, alternate.UserDataCount, alternate.CodeSize,
+            alternate.ContinuationAddressOffset, alternate.StaticState.Length);
 
     public ProgramKey Create(ProgramKeyProbe alternate) =>
-        new(alternate.Stage, alternate.Hash, alternate.UserDataCount, alternate.CodeSize, alternate.StaticState.ToArray());
+        new(alternate.Stage, alternate.Hash, alternate.UserDataCount, alternate.CodeSize,
+            alternate.ContinuationAddressOffset, alternate.StaticState.ToArray());
 }
 
 // One compiled module of a program entry for one specialization and push-data start.
@@ -135,8 +149,8 @@ internal sealed class ShaderProgramCache
     private readonly IGuestGpuBackend _compiler;
     private readonly IShaderPipelineHost _host;
     private readonly Dictionary<ProgramKey, ProgramSourceEntry> _programs = new(ProgramKeyComparer.Instance);
-    private readonly Dictionary<(ulong Hash, uint CodeSize), Gen5ShaderProgram> _decoded = new();
-    private readonly Dictionary<(ulong Hash, uint CodeSize), ShaderCodeCapture> _codeCaptures = new();
+    private readonly Dictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), Gen5ShaderProgram> _decoded = new();
+    private readonly Dictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), ShaderCodeCapture> _codeCaptures = new();
     private readonly List<uint> _staticState = new(StageStaticKey.MaxWords);
     // Draws that re-bind unchanged resources reuse the last materialization.
     // SHARPEMU_RESOURCE_CACHE=0 materializes every draw, for A/B comparisons.
@@ -175,7 +189,7 @@ internal sealed class ShaderProgramCache
     // The decoded instructions of a program, shared by every static variant of the same code.
     public Gen5ShaderProgram Decode(ShaderSource source)
     {
-        var key = (source.Hash, source.CodeSize);
+        var key = (source.Hash, source.CodeSize, source.ContinuationAddressOffset);
         if (_decoded.TryGetValue(key, out var program))
         {
             return program;
@@ -254,7 +268,7 @@ internal sealed class ShaderProgramCache
         {
             BuildStaticState(source.Stage, options);
             var probe = new ProgramKeyProbe(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
-                CollectionsMarshal.AsSpan(_staticState));
+                source.ContinuationAddressOffset, CollectionsMarshal.AsSpan(_staticState));
             _programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out entry);
         }
         var sourceWasCached = entry is not null;
@@ -600,13 +614,14 @@ internal sealed class ShaderProgramCache
         var info = CreateProgramInfo(source, entry, resources, layout, request);
         if (source.Stage == ShaderStage.Compute &&
             _host.ShaderPrewarm is { } prewarm &&
-            _codeCaptures.TryGetValue((source.Hash, source.CodeSize), out var capture))
+            _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var capture))
         {
             prewarm.RecordCompute(capture, new ComputePrewarmRecord
             {
                 Hash = source.Hash,
                 CodeSize = source.CodeSize,
                 Address = capture.Address,
+                ContinuationAddressOffset = source.ContinuationAddressOffset,
                 UserDataBase = source.UserDataBase,
                 UserDataCount = (uint)source.UserData.Length,
                 PushDataCursor = pushDataCursor,
