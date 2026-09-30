@@ -13,6 +13,7 @@ public enum Gen5SpirvStage
     Vertex,
     Pixel,
     Compute,
+    Mesh,
 }
 
 public sealed record Gen5SpirvShader(

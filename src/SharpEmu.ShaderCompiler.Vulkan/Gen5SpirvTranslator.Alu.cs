@@ -60,12 +60,7 @@ public static partial class Gen5SpirvTranslator
                     }
                     else
                     {
-                        // SPIR-V's BroadcastFirst uses the first host-active
-                        // invocation. Guest EXEC is modeled as data, so obtain the
-                        // guest-active mask explicitly and broadcast from its first
-                        // set lane instead. This also updates the private SGPR copy
-                        // for lanes that are currently disabled and may be restored
-                        // by a later saveexec sequence.
+                        // Guest EXEC is data. Select the first guest-active lane, not the first host-active lane.
                         var activeLanes = _module.AddInstruction(
                             SpirvOp.GroupNonUniformBallot,
                             _uvec4Type,
@@ -77,6 +72,12 @@ public static partial class Gen5SpirvTranslator
                             activeLanes,
                             0);
                         var firstActiveLane = Ext(73, _uintType, activeLow);
+                        if (_stage == Gen5SpirvStage.Mesh && _request.Mesh?.DeviceSubgroupLaneCount == 64)
+                        {
+                            var activeHigh = _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, activeLanes, 1);
+                            firstActiveLane = SelectU(IsNotZero(activeLow), firstActiveLane,
+                                IAdd(Ext(73, _uintType, activeHigh), UInt(32)));
+                        }
                         value = _module.AddInstruction(
                             SpirvOp.GroupNonUniformBroadcast,
                             _uintType,
@@ -2827,7 +2828,7 @@ public static partial class Gen5SpirvTranslator
             var left = GetRawSource(instruction, 0);
             if (instruction.Opcode.EndsWith("SaveexecB32", StringComparison.Ordinal))
             {
-                var oldExec64 = BooleanToWaveMask(Load(_boolType, _exec));
+                var oldExec64 = ExecutionWaveMask();
                 var oldExec = _module.AddInstruction(
                     SpirvOp.UConvert,
                     _uintType,
@@ -3486,9 +3487,7 @@ public static partial class Gen5SpirvTranslator
             var left = GetRawSource64(instruction, 0);
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
-                var oldExec = _emulateWave64 && _subgroupInvocationIdInput != 0
-                    ? LoadS64(126)
-                    : BooleanToWaveMask(Load(_boolType, _exec));
+                var oldExec = ExecutionWaveMask();
                 var notLeft = _module.AddInstruction(SpirvOp.Not, _ulongType, left);
                 var newExec = instruction.Opcode switch
                 {
@@ -3853,7 +3852,8 @@ public static partial class Gen5SpirvTranslator
         private uint GetRawSource(
             Gen5ShaderInstruction instruction,
             int sourceIndex,
-            bool applySdwaIntegerModifiers = true)
+            bool applySdwaIntegerModifiers = true,
+            bool applyLaneSelection = true)
         {
             if ((uint)sourceIndex >= instruction.Sources.Count)
             {
@@ -3872,14 +3872,14 @@ public static partial class Gen5SpirvTranslator
                     _module.AddInstruction(
                         SpirvOp.Select,
                         _uintType,
-                        LogicalNot(WaveMaskAny(106, _vcc)),
+                        LogicalNot(WaveMaskHasLanes(106)),
                         UInt(1),
                         UInt(0)),
                 Gen5OperandKind.EncodedConstant when operand.Value == 252 =>
                     _module.AddInstruction(
                         SpirvOp.Select,
                         _uintType,
-                        LogicalNot(WaveMaskAny(126, _exec)),
+                        LogicalNot(WaveMaskHasLanes(126)),
                         UInt(1),
                         UInt(0)),
                 Gen5OperandKind.EncodedConstant when operand.Value == 253 =>
@@ -3899,12 +3899,12 @@ public static partial class Gen5SpirvTranslator
             // has always preserved this control, but treating it as an ordinary
             // local VGPR read breaks every wave reduction used by the XPR
             // renderer (min/max/OR scans become value-with-self operations).
-            if (sourceIndex == 0 &&
+            if (applyLaneSelection && sourceIndex == 0 &&
                 instruction.Control is Gen5DppControl dpp)
             {
                 value = ApplyDppSource(dpp, value);
             }
-            else if (sourceIndex == 0 &&
+            else if (applyLaneSelection && sourceIndex == 0 &&
                      instruction.Control is Gen5Dpp8Control dpp8)
             {
                 value = ApplyDpp8Source(dpp8, value);
@@ -4019,15 +4019,7 @@ public static partial class Gen5SpirvTranslator
             }
 
             var targetLane = IAdd(BitwiseAnd(lane, UInt(0xFFFF_FFF8)), selector);
-            // Ensure target lane is properly constrained to wave size (32 or 64)
-            if (_waveLaneCount == 64)
-            {
-                targetLane = BitwiseAnd(targetLane, UInt(63));
-            }
-            else
-            {
-                targetLane = BitwiseAnd(targetLane, UInt(31));
-            }
+            targetLane = BitwiseAnd(targetLane, UInt(NativeLaneMask));
             var shuffled = ShuffleLane(value, targetLane);
             if (control.FetchInactive)
             {
@@ -4060,11 +4052,13 @@ public static partial class Gen5SpirvTranslator
                 inRange,
                 targetLane,
                 lane);
-            // Mask to guest wave size (32 or 64 lanes) — on Radeon hardware, DPP 
-            // operations are limited to a single half-wave for some encodings, so we 
-            // must not clamp wave64 lanes to 31; use the full lane mask instead.
-            safeTarget = BitwiseAnd(safeTarget, UInt(_waveLaneCount == 64 ? 63u : 31u));
-            var shuffled = ShuffleLane(value, safeTarget);
+            if (!_pairedMeshLanes)
+            {
+                safeTarget = BitwiseAnd(safeTarget, UInt(NativeLaneMask));
+            }
+            var shuffled = _pairedMeshLanes
+                ? ShufflePairedValue(_pairedDppSources[0], _pairedDppSources[1], safeTarget)
+                : ShuffleLane(value, safeTarget);
 
             var sourceAvailable = inRange;
             if (!control.FetchInactive)
@@ -4075,7 +4069,9 @@ public static partial class Gen5SpirvTranslator
                     Load(_boolType, _exec),
                     UInt(1),
                     UInt(0));
-                var shuffledActive = ShuffleLane(activeWord, safeTarget);
+                var shuffledActive = _pairedMeshLanes
+                    ? ShufflePairedValue(_pairedActiveWords[0], _pairedActiveWords[1], safeTarget)
+                    : ShuffleLane(activeWord, safeTarget);
                 sourceAvailable = _module.AddInstruction(
                     SpirvOp.LogicalAnd,
                     _boolType,
@@ -5160,6 +5156,8 @@ public static partial class Gen5SpirvTranslator
             return true;
         }
 
+        private uint NativeLaneMask => _waveLaneCount == 64 &&
+            (_stage != Gen5SpirvStage.Mesh || _request.Mesh?.DeviceSubgroupLaneCount == 64) ? 63u : 31u;
 
         private uint EmitPermlane16(
             Gen5ShaderInstruction instruction,
@@ -5212,10 +5210,7 @@ public static partial class Gen5SpirvTranslator
             }
 
             var targetLane = IAdd(rowBase, selector);
-            // Mask to guest wave size — on Radeon hardware DPP is limited to a 
-            // single half-wave for some encodings, but we must not clamp wave64 
-            // lanes to 31; use the full lane mask instead.
-            targetLane = BitwiseAnd(targetLane, UInt(_waveLaneCount == 64 ? 63u : 31u));
+            targetLane = BitwiseAnd(targetLane, UInt(NativeLaneMask));
             var shuffled = ShuffleLane(value, targetLane);
             var fetchInactive = (control.OperandSelect & 1) != 0;
             if (fetchInactive)

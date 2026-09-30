@@ -109,6 +109,17 @@ public sealed class DeviceAddressRangePlannerTests
         Assert.Equal(0x7000_0000_0000_0000ul, Gen5InlineConstants.PrivateFlatApertureBase);
     }
 
+    [Fact]
+    public void MeshPointerIsPlannedButSystemScalarsRemainDynamic()
+    {
+        var program = Program(ScalarLoad(0, 0, 40, 8), ScalarLoad(8, 2, 48, 4), EndProgram(16));
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Mesh, Hash, 0, 12);
+        Assert.Equal(0xFCUL, plan.Graph.ExcludedUserDataRegisters);
+        Assert.Equal(new uint[] { 0, 1 }, BindingLayout.CollectUserDataRegisters(program, 0, 12,
+            plan.Graph.ExcludedUserDataRegisters));
+        Assert.DoesNotContain(plan.Graph.Values, value => value.Kind == ScalarValueKind.UserData &&
+            value.UserDataRegister >= 2 && value.UserDataRegister < 8);
+    }
     [Theory]
     [InlineData(0x70000000u, false, false)]
     [InlineData(0x70000000u, true, true)]
