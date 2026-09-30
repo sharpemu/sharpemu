@@ -166,6 +166,12 @@ public sealed class VertexInputInfo
     public ShaderStageResources Stage { get; set; }
 }
 
+public sealed record MeshDrawConfiguration
+{
+    public GuestGeometryConfiguration Geometry { get; init; } = new();
+    public MeshExecutionLimits Execution { get; init; } = new();
+}
+
 public readonly record struct MeshExecutionLimits
 {
     public uint DeviceSubgroupLaneCount { get; init; }
