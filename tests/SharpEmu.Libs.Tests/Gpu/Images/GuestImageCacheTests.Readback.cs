@@ -56,6 +56,69 @@ public sealed partial class GuestImageCacheTests
     }
 
     [Fact]
+    public void GarbageCollector_KeepsGpuContentsWhenBufferOverlapBlocksReadback()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Bytes(0x12345678u));
+        var request = Color32(address);
+        var identifier = harness.Acquire(ref request);
+        harness.Worker.Run(() =>
+        {
+            Assert.NotNull(harness.Cache.ObtainBuffer(address, 4, isWritten: true).Buffer);
+        });
+        harness.MarkGpuWritten(identifier);
+        Assert.True(harness.Cache.HasGpuDirtyBytes(address, 4));
+        Assert.True(harness.Image(identifier).SafeToDownload);
+        harness.Worker.Run(() =>
+        {
+            harness.Images.SetCollectionThresholds(0, 0, ulong.MaxValue, 81);
+            harness.Images.ResetRecency(new[] { identifier }, 81);
+            harness.Images.RunGarbageCollector();
+        });
+        Assert.True(harness.Images.Contains(identifier));
+        Assert.True(harness.Image(identifier).IsGpuModified);
+        harness.Shutdown();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GarbageCollector_ResolvesSamePageWritesBeforeDiscardingGpuContents(bool imageBytesChanged)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var imageAddress = address + 0x8000;
+        harness.Write(imageAddress, Bytes(0x12345678u));
+        var request = Color32(imageAddress);
+        var identifier = harness.Acquire(ref request);
+        harness.MarkGpuWritten(identifier);
+        Assert.True(harness.WriteFault(address + 0x8080));
+        Assert.True(harness.Image(identifier).IsMaybeCpuDirty);
+        Assert.False(harness.Image(identifier).NeedsMaybeCpuHash);
+        if (imageBytesChanged)
+            harness.Write(imageAddress, Bytes(0x87654321u));
+
+        harness.Worker.Run(() =>
+        {
+            harness.Images.SetCollectionThresholds(0, ulong.MaxValue, ulong.MaxValue, 17);
+            harness.Images.ResetRecency(new[] { identifier }, 17);
+            harness.Images.RunGarbageCollector();
+        });
+
+        Assert.Equal(!imageBytesChanged, harness.Images.Contains(identifier));
+        if (!imageBytesChanged)
+        {
+            Assert.True(harness.Image(identifier).IsGpuModified);
+            Assert.False(harness.Image(identifier).IsCpuDirty);
+            Assert.Equal(Bytes(0x12345678u), harness.ReadImageBytes(harness.Image(identifier)));
+        }
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void GarbageCollector_RetiresUnderPressureAndPublishesInOneTick()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
