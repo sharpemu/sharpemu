@@ -54,6 +54,8 @@ public sealed class ComputeProgram
 // The shader and pipeline caches behind the executor.
 public interface IShaderPipelineProvider
 {
+    void DumpRejectedGraphics(RegisterBanks banks, bool autoDraw) { }
+
     GraphicsPrograms GetGraphicsPrograms(
         VertexStageRegisters vertex,
         PixelStageRegisters pixel,
