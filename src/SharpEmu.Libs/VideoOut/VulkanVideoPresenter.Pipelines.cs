@@ -445,10 +445,14 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private ShaderModule CreateShaderModule(byte[] code)
         {
-            if (!_supportsFragmentShaderBarycentric && RequiresFragmentShaderBarycentric(code))
+            if (!_supportsFragmentShaderBarycentric && RequiresCapability(code, SpirvCapability.FragmentBarycentricKhr))
             {
                 throw new NotSupportedException(
                     "The shader requires the fragmentShaderBarycentric device feature.");
+            }
+            if (!_supportsShaderLayer && RequiresCapability(code, SpirvCapability.ShaderLayer))
+            {
+                throw new NotSupportedException("The shader requires the shaderOutputLayer device feature.");
             }
 
             string? dumpPath = null;
@@ -486,7 +490,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private static bool RequiresFragmentShaderBarycentric(ReadOnlySpan<byte> code)
+        private static bool RequiresCapability(ReadOnlySpan<byte> code, SpirvCapability capability)
         {
             for (var offset = 20; offset + 4 <= code.Length;)
             {
@@ -499,7 +503,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if ((header & 0xFFFF) == (uint)SpirvOp.Capability && wordCount == 2 &&
                     System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(code[(offset + 4)..]) ==
-                        (uint)SpirvCapability.FragmentBarycentricKhr)
+                        (uint)capability)
                 {
                     return true;
                 }

@@ -729,6 +729,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private bool _supportsFragmentShaderBarycentric;
         private bool _supportsPerVertexPixelInputs;
+        private bool _supportsShaderLayer;
         private const string FragmentShaderBarycentricExtensionName = "VK_KHR_fragment_shader_barycentric";
         private const string Maintenance5ExtensionName = "VK_KHR_maintenance5";
         private const string ImageViewMinLodExtensionName = "VK_EXT_image_view_min_lod";
@@ -925,30 +926,23 @@ internal static unsafe partial class VulkanVideoPresenter
                 SType = StructureType.PhysicalDeviceRobustness2FeaturesExt,
                 PNext = &maintenance8Features,
             };
-            var timelineSemaphoreFeatures = new PhysicalDeviceTimelineSemaphoreFeatures
+            var vulkan12Features = new PhysicalDeviceVulkan12Features
             {
-                SType = StructureType.PhysicalDeviceTimelineSemaphoreFeatures,
+                SType = StructureType.PhysicalDeviceVulkan12Features,
                 PNext = &robustness2Features,
-            };
-            var addressFeatures = new PhysicalDeviceBufferDeviceAddressFeatures
-            {
-                SType = StructureType.PhysicalDeviceBufferDeviceAddressFeatures,
-                PNext = &timelineSemaphoreFeatures,
-            };
-            var atomicInt64Features = new PhysicalDeviceShaderAtomicInt64Features
-            {
-                SType = StructureType.PhysicalDeviceShaderAtomicInt64Features,
-                PNext = &addressFeatures,
             };
             var featuresQuery = new PhysicalDeviceFeatures2
             {
                 SType = StructureType.PhysicalDeviceFeatures2,
-                PNext = &atomicInt64Features,
+                PNext = &vulkan12Features,
             };
             _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &featuresQuery);
-            var supportsTimelineSemaphore = timelineSemaphoreFeatures.TimelineSemaphore;
-            var supportsBufferDeviceAddress = addressFeatures.BufferDeviceAddress;
-            var supportsSharedInt64Atomics = atomicInt64Features.ShaderSharedInt64Atomics;
+            var supportsTimelineSemaphore = vulkan12Features.TimelineSemaphore;
+            var supportsBufferDeviceAddress = vulkan12Features.BufferDeviceAddress;
+            var supportsSharedInt64Atomics = vulkan12Features.ShaderSharedInt64Atomics;
+            _supportsShaderLayer = vulkan12Features.ShaderOutputLayer;
+            var supportsViewportIndexLayer = IsDeviceExtensionAvailable("VK_EXT_shader_viewport_index_layer") &&
+                vulkan12Features.ShaderOutputViewportIndex && vulkan12Features.ShaderOutputLayer;
             var supportsMaintenance8 = maintenance8Features.Maintenance8;
             var supportsRobustBufferAccess2 = robustness2Features.RobustBufferAccess2;
             var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
@@ -1008,7 +1002,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
-                if (IsDeviceExtensionAvailable("VK_EXT_shader_viewport_index_layer"))
+                if (supportsViewportIndexLayer)
                 {
                     extensions[extensionCount++] = viewportIndexLayerExtension;
                 }
@@ -1082,27 +1076,19 @@ internal static unsafe partial class VulkanVideoPresenter
                         "the buffer store needs bufferDeviceAddress, which this device lacks");
                 }
 
-                timelineSemaphoreFeatures.TimelineSemaphore = true;
-                timelineSemaphoreFeatures.PNext = supportsRobustness2
-                    ? &robustness2Features
-                    : (supportsMaintenance8 ? &maintenance8Features : null);
-                addressFeatures = new PhysicalDeviceBufferDeviceAddressFeatures
+                vulkan12Features = new PhysicalDeviceVulkan12Features
                 {
-                    SType = StructureType.PhysicalDeviceBufferDeviceAddressFeatures,
+                    SType = StructureType.PhysicalDeviceVulkan12Features,
+                    TimelineSemaphore = true,
                     BufferDeviceAddress = true,
-                    PNext = &timelineSemaphoreFeatures,
+                    ShaderSharedInt64Atomics = supportsSharedInt64Atomics,
+                    ShaderOutputLayer = _supportsShaderLayer,
+                    ShaderOutputViewportIndex = supportsViewportIndexLayer,
+                    PNext = supportsRobustness2
+                        ? &robustness2Features
+                        : (supportsMaintenance8 ? &maintenance8Features : null),
                 };
-                void* renderingChain = &addressFeatures;
-                if (supportsSharedInt64Atomics)
-                {
-                    atomicInt64Features = new PhysicalDeviceShaderAtomicInt64Features
-                    {
-                        SType = StructureType.PhysicalDeviceShaderAtomicInt64Features,
-                        ShaderSharedInt64Atomics = true,
-                        PNext = renderingChain,
-                    };
-                    renderingChain = &atomicInt64Features;
-                }
+                void* renderingChain = &vulkan12Features;
 
                 if (_supportsFragmentShaderBarycentric)
                 {

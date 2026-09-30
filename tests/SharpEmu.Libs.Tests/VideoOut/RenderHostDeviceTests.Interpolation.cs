@@ -18,6 +18,29 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 
 public sealed unsafe partial class RenderHostDeviceTests
 {
+    [Fact]
+    public void FragmentLayer_RejectsMissingDeviceFeatureBeforeModuleCreation()
+    {
+        if (!Ready()) return;
+        var (plan, resources, layout) = Prepare(Program(EndProgram(0)), ShaderStage.Pixel);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelInputAddress = 1u << 13,
+            PixelInputEnable = 1u << 13,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var compiled, out var compilationError), compilationError);
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.SetField("_supportsShaderLayer", false);
+        presenter.Run(() =>
+        {
+            var error = Assert.Throws<NotSupportedException>(() =>
+                ((IShaderPipelineHost)presenter.Instance).CreateShaderModule(
+                    new VulkanCompiledGuestShader(compiled.Spirv), ShaderStage.Pixel, 1, 1));
+            Assert.Contains("shaderOutputLayer", error.Message);
+        });
+        presenter.Harness.Shutdown();
+    }
+
     [Theory]
     [InlineData(0u, true, 191)]
     [InlineData(1u, true, 64)]
