@@ -32,6 +32,8 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public List<(ShaderStage Stage, ulong Hash, ulong ProgramId)> Modules { get; } = new();
 
+    public List<IGuestCompiledShader> CompiledShaders { get; } = new();
+
     public List<GraphicsPipelineDescription> GraphicsPipelines { get; } = new();
 
     public List<ComputePipelineDescription> ComputePipelines { get; } = new();
@@ -79,6 +81,7 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
     {
         Modules.Add((stage, hash, programId));
+        CompiledShaders.Add(shader);
         return _nextHandle++;
     }
 
