@@ -23,6 +23,8 @@ internal interface IGuestGpuBackend
     /// the window title on macOS where either backend can run.</summary>
     string BackendName { get; }
 
+    bool LinkedShaderCallsSupported => false;
+
     /// <summary>Starts the presenter (window + device) once; safe to call repeatedly.</summary>
     void EnsureStarted(uint width, uint height);
 

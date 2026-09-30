@@ -13,6 +13,28 @@ namespace SharpEmu.ShaderCompiler.Metal.Tests;
 /// </summary>
 public sealed class MslTranslationTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ShaderCallsReportTheBackendLimitation(bool linked)
+    {
+        var program = new Gen5ShaderProgram(0x1000, [
+            new(0, Gen5ShaderEncoding.Sop1, "SSwappcB64", [0xBE8E2100],
+                [Gen5Operand.Scalar(0)], [Gen5Operand.Scalar(14)], null),
+            new(4, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null)]);
+        if (linked)
+        {
+            var function = new Gen5ShaderProgram(0x2000, [
+                new(0, Gen5ShaderEncoding.Sop1, "SSetpcB64", [0xBE80200E],
+                    [Gen5Operand.Scalar(14)], [], null)]);
+            program = Gen5ShaderCallLinker.Link(program, [new ShaderCallSite(0, 0, 2, 14, 0x1004,
+                [new ShaderCallTarget(0x2000, 0, function)])]);
+        }
+        var request = Gen5ComputeFixtures.RequestOrThrow(program, ShaderStage.Compute);
+        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
+        Assert.Equal("Metal does not support linked shader calls.", error);
+    }
+
     [Fact]
     public void ComputeFixturesResolveDescriptorFormatsBeforeCompilation()
     {

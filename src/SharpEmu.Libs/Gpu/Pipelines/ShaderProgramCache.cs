@@ -299,6 +299,11 @@ internal sealed class ShaderProgramCache
             ShaderCacheCounters.CountProgram();
         }
 
+        var hasShaderCalls = entry.Program.Instructions.Any(instruction => instruction.Opcode == "SSwappcB64");
+        if (hasShaderCalls && !_compiler.LinkedShaderCallsSupported)
+            throw new ShaderProgramRejectedException(
+                $"The backend does not support linked shader calls: backend={_compiler.BackendName} stage={source.Label} hash=0x{source.Hash:X16}.");
+
         // Both are assigned by the materialization that follows; a failed one throws.
         ResourceSnapshot snapshot = null!;
         ResourceSpecialization specialization = null!;
