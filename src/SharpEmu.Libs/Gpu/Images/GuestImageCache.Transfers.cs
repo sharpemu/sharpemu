@@ -260,7 +260,7 @@ public sealed unsafe partial class GuestImageCache
         UploadRegions(destination, copies.ToList(), linear);
     }
 
-    private void UploadFromBuffer(CachedImage image, in ImageRequest request, GpuBuffer source, ulong sourceOffset)
+    private void UploadFromBuffer(CachedImage image, in ImageRequest request, GpuBuffer source, ulong sourceOffset, byte[]? backingBytes = null)
     {
         if (image.DepthOwner.IsValid)
         {
@@ -290,6 +290,7 @@ public sealed unsafe partial class GuestImageCache
                 linear = _tiler.SwapBgra16(linear);
             }
 
+            DumpVolumeUpload(image, source, sourceOffset, linear, plan, backingBytes);
             UploadRegions(image, plan.Regions, linear);
             return;
         }
@@ -399,9 +400,10 @@ public sealed unsafe partial class GuestImageCache
                     ? PieceHashPlan(image, request)
                     : null;
                 var pieceHashes = piecePlan != null ? HashGuestPieces(image.Description.Data, piecePlan.Tiles) : null;
+                var backingBytes = SnapshotVolumeBacking(image);
                 var (source, sourceOffset) = _bufferCache.ObtainBufferForImage(image.Description.Data.Address, image.Description.Data.Size);
                 sourceFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-                UploadFromBuffer(image, request, source, sourceOffset);
+                UploadFromBuffer(image, request, source, sourceOffset, backingBytes);
                 image.SetGuestPieceHashes(pieceHashes);
             }
 
