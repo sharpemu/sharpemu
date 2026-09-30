@@ -578,6 +578,7 @@ public sealed partial class GuestImageCache
         if (ImageClearTrace.Enabled)
             _metadataHistory.RecordRange(CreateMetadataEvent("unmap", address, size));
         RecordResourceHistory("unmap", address, size);
+        Interlocked.Increment(ref _unmapGeneration);
         var end = address + size;
         var stale = new List<ulong>();
         foreach (var metadataAddress in _surfaceMetadata.Keys)

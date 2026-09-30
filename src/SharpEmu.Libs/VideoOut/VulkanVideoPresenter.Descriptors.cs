@@ -126,6 +126,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (Gpu.Images.ImageClearTrace.Enabled)
             {
                 Gpu.Images.ImageTraceRange.NoteFollowedImage(program.Hash, index, request.Description.Data.Address, request.Description.Data.Size);
+                _imageCache.TraceTextureBinding(program.Hash, index, words, request);
             }
             _ = BeginBatchedGuestCommands();
             var imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
