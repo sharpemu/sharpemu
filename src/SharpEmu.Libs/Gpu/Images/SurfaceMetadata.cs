@@ -22,5 +22,6 @@ public sealed class SurfaceMetadata
     public ulong FillSize;
     public ulong Size;
     public ulong RangeSize;
+    public bool NativeColorClear;
     public bool Invalidated;
 }

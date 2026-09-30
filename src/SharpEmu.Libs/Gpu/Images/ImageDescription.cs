@@ -33,6 +33,11 @@ public struct MetadataDescription
     public bool StencilCompressed;
     public bool DccClearRegisterValid;
     public bool DccAlphaMsb;
+    public bool NativeColorClear;
+    public bool ColorAlphaOnLeastSignificantBits;
+    public uint ColorMetadataBaseLayer;
+    public bool PackedColorClearSupported;
+    public ClearColorValue PackedColorClear;
 }
 
 public readonly record struct SubresourceCount(uint Levels, uint Layers) : IComparable<SubresourceCount>
