@@ -554,7 +554,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             return;
         }
 
-        var perDestination = scalarDestinations.Count > 1 ? 1u : width;
+        var perDestination = scalarDestinations.Count > 1 ? 1u : instruction.DestinationWidth;
         foreach (var destination in scalarDestinations)
         {
             for (uint index = 0; index < perDestination && destination.Value + index < ScalarRegisterCount; index++)
