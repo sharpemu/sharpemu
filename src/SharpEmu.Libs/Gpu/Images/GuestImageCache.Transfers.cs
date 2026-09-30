@@ -359,6 +359,7 @@ public sealed unsafe partial class GuestImageCache
         }
 
         var measureUpload = RenderPhaseProfile.ImageUploadDetailsEnabled;
+        ReportImageLifetime(image, "populate-attempt");
         var watchStarted = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         WatchImage(imageIdentifier);
         var watchFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;

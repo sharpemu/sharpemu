@@ -20,6 +20,45 @@ public sealed class GuestImageCacheLockTests : IClassFixture<HeadlessVulkanFixtu
 
     public GuestImageCacheLockTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task UnrelatedCpuWriteDoesNotWaitForTheImageLock(bool registerMetadata)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x300000, ReadWrite);
+        var metadataAddress = address + 0x200000;
+        if (registerMetadata)
+        {
+            harness.Images.RegisterHtileMetadataForTest(metadataAddress);
+            Assert.True(harness.Images.ClearMetadata(metadataAddress));
+        }
+        using var locked = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        harness.Worker.Post(() =>
+        {
+            using var held = harness.Images.HoldLockForTest();
+            locked.Set();
+            release.Wait();
+        });
+        Task<bool>? write = null;
+        try
+        {
+            Assert.True(locked.Wait(5000));
+            write = Task.Run(() => harness.ImageStore.MarkCpuWrite(address, 4));
+            Assert.False(await write.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        finally
+        {
+            release.Set();
+            if (write is not null) await write.WaitAsync(TimeSpan.FromSeconds(5));
+            harness.Worker.Run(() => { });
+        }
+        if (registerMetadata) Assert.True(harness.Images.IsMetadataCleared(metadataAddress, 0));
+        harness.Shutdown();
+    }
+
     // The worker waits inside Finish with the lock held: pending GPU work and a completion action
     // drain first, then the guest writer that spun on the lock completes.
     [Fact]

@@ -87,7 +87,7 @@ public sealed unsafe partial class CachedImage : IDisposable
     public int RecencyEntryIndex;
 
     public CachedImage(GpuDeviceInfo device, SubmissionScheduler scheduler, IGuestBackedSpace guestBacking, in ImageDescription description,
-        ImageBackingPool? pool = null)
+        ImageBackingPool? pool = null, Action? reportAllocationFailure = null)
     {
         _device = device;
         _scheduler = scheduler;
@@ -145,6 +145,7 @@ public sealed unsafe partial class CachedImage : IDisposable
         var creationResult = vk.CreateImage(device.Device, &create, null, out Backing.Handle);
         if (creationResult != Result.Success)
         {
+            reportAllocationFailure?.Invoke();
             throw CreateFailure(create, "vkCreateImage", creationResult);
         }
 
@@ -182,6 +183,7 @@ public sealed unsafe partial class CachedImage : IDisposable
             device.FreeMemory(Backing.Memory);
             Backing.Handle = default;
             Backing.Memory = default;
+            reportAllocationFailure?.Invoke();
             throw CreateFailure(create, !allocationAttempted ? "select_device_local_memory_type" :
                 allocated != Result.Success ? "vkAllocateMemory" : "vkBindImageMemory",
                 bindingResult, requirements.Size, requirements.MemoryTypeBits);
