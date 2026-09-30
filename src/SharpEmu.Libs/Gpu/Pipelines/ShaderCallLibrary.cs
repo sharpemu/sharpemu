@@ -86,7 +86,7 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
                 targets.Add(new(target, argument, function));
             }
             calls.Add(new(call.Pc, call.Sources[0].Value, argumentRegister, call.Destinations[0].Value,
-                caller.Address + caller.GetNextGuestAddressOffset(call), targets));
+                unchecked(caller.Address + call.ProgramOffset + (ulong)call.Words.Count * sizeof(uint)), targets));
         }
         identity.AppendData(BitConverter.GetBytes(caller.Address));
         return new(Convert.ToHexString(identity.GetHashAndReset()), calls);

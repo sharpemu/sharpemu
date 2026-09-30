@@ -30,7 +30,8 @@ public static partial class Gen5MslTranslator
             BindingLayoutValidator.Validate(
                 request.Bindings,
                 request.Resources.Info,
-                BindingLayout.CollectUserDataRegisters(request.Program, request.UserDataBase, request.UserDataCount),
+                BindingLayout.CollectUserDataRegisters(request.Program, request.UserDataBase, request.UserDataCount,
+                    request.ExcludedUserDataRegisters),
                 request.UsesGlobalDataShare,
                 request.UsesFlattenedTable,
                 request.ReadsShaderBase,
