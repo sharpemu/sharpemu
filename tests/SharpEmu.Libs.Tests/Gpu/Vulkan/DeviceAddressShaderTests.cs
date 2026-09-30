@@ -28,6 +28,66 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
     private const uint OffsetRegister = 3;
 
     [Theory]
+    [InlineData(0x2000u, 0u, 10u, 77u)]
+    [InlineData(0x2000u, 0u, 11u, 99u)]
+    [InlineData(0x2000u, 0u, 12u, 0u)]
+    [InlineData(0x3000u, 0u, 10u, 55u)]
+    [InlineData(0x2000u, 1u, 10u, 0u)]
+    public void LinkedCalls_SelectArgumentsPreserveSccAndReportUnknownTargets(uint addressLow, uint addressHigh, uint argument, uint expected)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var caller = Program(MoveScalar(0, 14, addressLow), MoveScalar(4, 15, addressHigh),
+            MoveScalar(8, 16, argument), MoveScalar(12, 17, 0),
+            Sopc(16, "SCmpEqU32", Operand(1), Operand(1)),
+            Sop1(20, "SSwappcB64", 14, Gen5Operand.Scalar(14)),
+            Sop2(24, "SCselectB32", 8, Operand(123), Operand(9)),
+            Vop1(28, "VMovB32", 2, Gen5Operand.Scalar(8)),
+            Vop1(32, "VMovB32", 3, Gen5Operand.Scalar(14)),
+            Vop1(36, "VMovB32", 4, Gen5Operand.Scalar(15)),
+            BufferAccess(40, "BufferStoreDwordx4", ResultRegister, dwords: 4, vectorData: 1), EndProgram(48));
+        Gen5ShaderProgram Function(uint value) => Program(
+            Vop1(0, "VMovB32", 1, Operand(value)),
+            Sop1(4, "SSetpcB64", 0, Gen5Operand.Scalar(14)));
+        var linked = Gen5ShaderCallLinker.Link(caller,
+            [new(20, 14, 16, 14, caller.Address + 24,
+                [new(0x2000, 10, Function(77)), new(0x2000, 11, Function(99)), new(0x3000, 10, Function(55))])]);
+        var run = new Run(vulkan, linked);
+        run.Dispatch(GuestBase);
+        Assert.Equal(expected, run.ResultWord(0));
+        if (expected != 0)
+        {
+            Assert.Equal(123u, run.ResultWord(4));
+            Assert.Equal(24u, run.ResultWord(8));
+            Assert.Equal(0u, run.ResultWord(12));
+            Assert.All(run.FaultWords(), word => Assert.Equal(0u, word));
+        }
+        else Assert.Equal(new uint[] { 2, (uint)run.Request.Hash, (uint)(run.Request.Hash >> 32),
+            20, addressLow, addressHigh, (uint)ShaderStage.Compute, 1 }, run.FaultWords()[^8..]);
+        run.Finish(output, nameof(LinkedCalls_SelectArgumentsPreserveSccAndReportUnknownTargets));
+    }
+
+    [Fact]
+    public void LinkedCalls_SelectTheLastRecordBeyondSixtyFourEntries()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var caller = Program(MoveScalar(0, 14, 0x2000), MoveScalar(4, 15, 0),
+            MoveScalar(8, 16, 64), MoveScalar(12, 17, 0),
+            Sop1(16, "SSwappcB64", 14, Gen5Operand.Scalar(14)),
+            BufferAccess(20, "BufferStoreDword", ResultRegister, vectorData: 1), EndProgram(28));
+        var function = Program(Vop1(0, "VMovB32", 1, Gen5Operand.Scalar(16)),
+            Sop1(4, "SSetpcB64", 0, Gen5Operand.Scalar(14)));
+        var targets = Enumerable.Range(0, 65).Select(index => new ShaderCallTarget(0x2000, (ulong)index, function)).ToArray();
+        var linked = Gen5ShaderCallLinker.Link(caller, [new(16, 14, 16, 14, 20, targets)]);
+        var run = new Run(vulkan, linked);
+        run.Dispatch(GuestBase);
+        Assert.Equal(64u, run.ResultWord(0));
+        Assert.All(run.FaultWords(), word => Assert.Equal(0u, word));
+        run.Finish(output, nameof(LinkedCalls_SelectTheLastRecordBeyondSixtyFourEntries));
+    }
+
+    [Theory]
     [InlineData("VPkAddI16", false, 0x80008000u)]
     [InlineData("VPkAddI16", true, 0x7FFF7FFFu)]
     [InlineData("VPkSubI16", false, 0x7FFE7FFEu)]
@@ -379,7 +439,7 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
             _harness = new ImageTestHarness(vulkan);
             _runner = new LayoutComputeRunner(_harness, Request, shader.Spirv);
             _result = _runner.CreateBuffer(ResultBytes);
-            _fault = _runner.CreateBuffer(tableEntries / 8);
+            _fault = _runner.CreateBuffer(tableEntries / 8 + 64);
             _tableEntries = tableEntries;
         }
 
