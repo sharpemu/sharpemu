@@ -500,10 +500,12 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         }
 
         prepared.Textures = SnapshotImages(program, prepared);
-        var samplers = new GuestSampler[info.Samplers.Count];
+        var samplerResources = program.Bindings!.Find(DescriptorBindingKind.Samplers)?.Resources ?? [];
+        var samplers = new GuestSampler[samplerResources.Count];
         for (var index = 0; index < samplers.Length; index++)
         {
-            samplers[index] = ResolveSampler(info.Samplers[index], snapshot.Samplers[index], program, index);
+            var resource = (int)samplerResources[index];
+            samplers[index] = ResolveSampler(info.Samplers[resource], snapshot.Samplers[resource], program, resource);
         }
 
         prepared.Samplers = samplers;
