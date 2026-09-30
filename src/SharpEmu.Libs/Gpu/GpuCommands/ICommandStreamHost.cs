@@ -104,6 +104,9 @@ public interface ICommandStreamHost
 
     void CopyBuffer(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds);
 
+    // Records a direct packet write for the image-clear trace; see docs/image-clear-tracing.md.
+    void TraceGuestWrite(string operation, ulong address, ulong size) { }
+
     void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount);
 
     void RecordEndOfPipe(in EndOfPipeWrite write);

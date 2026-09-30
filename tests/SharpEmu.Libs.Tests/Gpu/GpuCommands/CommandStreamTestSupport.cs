@@ -29,6 +29,15 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public List<string> Calls { get; } = new();
 
+    public List<(string Operation, ulong Address, ulong Size, byte[] Bytes)> TracedWrites { get; } = new();
+
+    public void TraceGuestWrite(string operation, ulong address, ulong size)
+    {
+        var bytes = new byte[checked((int)size)];
+        GuestMemory.TryRead(address, bytes);
+        TracedWrites.Add((operation, address, size, bytes));
+    }
+
     public List<EndOfPipeWrite> EndOfPipeWrites { get; } = new();
 
     public List<ulong> GuestReads { get; } = new();
