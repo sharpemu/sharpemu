@@ -26,11 +26,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private readonly ShaderProgramCache _programs;
     private readonly Dictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
     private readonly Dictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
+    private readonly Dictionary<Gen5ShaderProgram, bool> _rayTracingComputePrograms = new();
     private readonly object _gate = new();
     // The pipeline maps: a lookup takes this lock or _gate, an addition both; a cached draw so does
     // not wait for the program preparation a resolving thread holds _gate for.
     private readonly object _pipelineGate = new();
     private readonly bool _strictShaders = Environment.GetEnvironmentVariable("SHARPEMU_STRICT_COMPUTE") != "0";
+    private readonly bool _skipRayTracing = Environment.GetEnvironmentVariable("SHARPEMU_SKIP_RT") != "0";
     private readonly HashSet<(ShaderStage Stage, ulong Hash, uint CodeSize)> _reportedShaderSkips = [];
 
     public ShaderPipelineCache(CpuContext context, IShaderPipelineHost host, IGuestGpuBackend compiler, ShaderHeaderRegistry registry)
@@ -521,9 +523,26 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var source = PrepareSource(compute.Address, ShaderStage.Compute, "compute", compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, userDataBase: 0);
+        var program = _programs.Decode(source);
+        if (_skipRayTracing)
+        {
+            lock (_gate)
+            {
+                if (!_rayTracingComputePrograms.TryGetValue(program, out var usesRayTracing))
+                {
+                    usesRayTracing = program.Instructions.Any(instruction =>
+                        instruction.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay");
+                    _rayTracingComputePrograms.Add(program, usesRayTracing);
+                    if (usesRayTracing)
+                        Console.Error.WriteLine($"[GPU][WARN][RAY_TRACING_SKIPPED] Compute dispatch skipped: hash=0x{source.Hash:X16}. " +
+                            "The shader contains BVH ray-intersection instructions. Ray-traced effects can be missing or incorrect. " +
+                            "Set SHARPEMU_SKIP_RT=0 before launch to disable this skip.");
+                }
+                if (usesRayTracing) return new ComputeProgram { Available = false };
+            }
+        }
         var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
         var systemRegisters = DecodeComputeSystemRegisters(compute);
-        var program = _programs.Decode(source);
         if (TrySubmitMaskedDwordCopyKernel(program, source, systemRegisters, input, out var description))
         {
             if (RenderTrace.Enabled)
