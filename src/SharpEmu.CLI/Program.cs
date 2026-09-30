@@ -45,6 +45,7 @@ internal static partial class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        RosettaGcBudget.ReexecIfNeeded(args);
         ConfigureManagedPluginResolution();
 
         if (args.Length > 0 && args[0] == SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument)
