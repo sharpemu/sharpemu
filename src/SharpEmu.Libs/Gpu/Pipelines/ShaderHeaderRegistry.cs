@@ -18,6 +18,8 @@ public sealed record RegisteredShader(
     ulong ContinuationAddress,
     uint ContinuationSizeBytes)
 {
+    public uint ContinuationScratchDwords { get; init; }
+
     public bool IsFused => ContinuationAddress != 0;
 
     // The code ranges the identity covers, in program order.
@@ -91,10 +93,16 @@ public sealed class ShaderHeaderRegistry
 
         var continuationAddress = 0ul;
         var continuationSize = 0u;
+        ushort continuationScratchDwords = 0;
         if (_fusedPartsOf(codeAddress) is { } parts)
         {
             continuationAddress = parts.ContinuationAddress;
             continuationSize = RequireCodeSize(parts.ContinuationHeaderAddress, parts.ContinuationAddress, label);
+            if (!_context.TryReadUInt16(parts.ContinuationHeaderAddress + ScratchDwordsPerThreadOffset,
+                    out continuationScratchDwords))
+            {
+                throw SubmissionScheduler.Fatal($"The continuation shader scratch size is unreadable: label={label} shader=0x{parts.ContinuationAddress:X16}.");
+            }
         }
 
         return new RegisteredShader(
@@ -106,7 +114,10 @@ public sealed class ShaderHeaderRegistry
             inputSemanticsAddress,
             inputSemanticsCount,
             continuationAddress,
-            continuationSize);
+            continuationSize)
+        {
+            ContinuationScratchDwords = continuationScratchDwords,
+        };
     }
 
     private uint RequireCodeSize(ulong headerAddress, ulong codeAddress, string label)
