@@ -191,10 +191,8 @@ public static partial class Gen5MslTranslator
                     $"{F16(instruction, 0)} * {F16(instruction, 1)}"),
                 "VMinF32" => FloatResult(instruction, $"fmin({F(instruction, 0)}, {F(instruction, 1)})"),
                 "VMaxF32" => FloatResult(instruction, $"fmax({F(instruction, 0)}, {F(instruction, 1)})"),
-                "VMinF16" => Float16Result(
-                    instruction,
-                    destination,
-                    $"fmin({F16(instruction, 0)}, {F16(instruction, 1)})"),
+                "VMin3F16" => MinimumHalfResult(instruction, destination, true),
+                "VMinF16" => MinimumHalfResult(instruction, destination, false),
                 "VMaxF16" => Float16Result(
                     instruction,
                     destination,
@@ -239,8 +237,6 @@ public static partial class Gen5MslTranslator
                 "VCosF32" => FloatResult(instruction, $"cos({F(instruction, 0)} * {TauLiteral})"),
                 "VLdexpF32" =>
                     FloatResult(instruction, $"ldexp({F(instruction, 0)}, as_type<int>({RawSource(instruction, 1)}))"),
-                "VMin3F16" => Float16Result(instruction, destination,
-                    $"fmin(fmin({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)})"),
                 "VMax3F16" => Float16Result(instruction, destination,
                     $"fmax(fmax({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)})"),
                 "VMed3F16" => Float16Result(instruction, destination,
@@ -1946,6 +1942,71 @@ public static partial class Gen5MslTranslator
             return Float16Result(instruction, destination,
                 $"({source} == 0.0f ? {source} : ({source} > 0.0f ? " +
                 $"(isinf({source}) ? {source} : sqrt({source})) : as_type<float>(0xFFC00000u)))");
+        }
+
+        private string ReadMinimumHalfBits(Gen5ShaderInstruction instruction, int sourceIndex)
+        {
+            var operand = instruction.Sources[sourceIndex];
+            string bits;
+            if (operand.Kind == Gen5OperandKind.EncodedConstant &&
+                Gen5InlineConstants.TryDecode(operand.Value, out var inline))
+            {
+                var number = operand.Value switch
+                {
+                    >= 128 and <= 192 => (float)(operand.Value - 128),
+                    >= 193 and <= 208 => -(float)(operand.Value - 192),
+                    _ => BitConverter.UInt32BitsToSingle(inline),
+                };
+                bits = FormatUInt(BitConverter.HalfToUInt16Bits((Half)number));
+            }
+            else
+            {
+                var raw = RawSource(instruction, sourceIndex, applySdwaIntegerModifiers: false);
+                var shift = instruction.Control is Gen5Vop3Control selection &&
+                    (selection.OperandSelect & (1u << sourceIndex)) != 0 ? 16 : 0;
+                bits = $"((({raw}) >> {shift}) & 0xFFFFu)";
+            }
+            var (absolute, negate) = instruction.Control switch
+            {
+                Gen5Vop3Control control => (control.AbsoluteMask, control.NegateMask),
+                Gen5SdwaControl control => (control.AbsoluteMask, control.NegateMask),
+                Gen5DppControl control => (control.AbsoluteMask, control.NegateMask),
+                _ => (0u, 0u),
+            };
+            if ((absolute & (1u << sourceIndex)) != 0) bits = $"({bits} & 0x7FFFu)";
+            if ((negate & (1u << sourceIndex)) != 0) bits = $"({bits} ^ 0x8000u)";
+            return Temp("uint", bits);
+        }
+
+        private string MinimumHalfBits(string left, string right)
+        {
+            var leftNan = Temp("bool", $"(({left} & 0x7FFFu) > 0x7C00u)");
+            var rightNan = Temp("bool", $"(({right} & 0x7FFFu) > 0x7C00u)");
+            string Ordered(string value) => $"({value} ^ (({value} & 0x8000u) != 0u ? 0xFFFFu : 0x8000u))";
+            var result = $"({leftNan} ? {right} : ({rightNan} ? {left} : ({Ordered(left)} < {Ordered(right)} ? {left} : {right})))";
+            if (_request.IeeeMode)
+                result = $"(({leftNan} && ({left} & 0x200u) == 0u) ? ({left} | 0x200u) : " +
+                    $"(({rightNan} && ({right} & 0x200u) == 0u) ? ({right} | 0x200u) : {result}))";
+            return Temp("uint", result);
+        }
+
+        private string MinimumHalfResult(Gen5ShaderInstruction instruction, uint destination, bool ternary)
+        {
+            var bits = MinimumHalfBits(ReadMinimumHalfBits(instruction, 0), ReadMinimumHalfBits(instruction, 1));
+            if (ternary) bits = MinimumHalfBits(bits, ReadMinimumHalfBits(instruction, 2));
+            var control = instruction.Control as Gen5Vop3Control;
+            var modifier = _request.IeeeMode ? 0u : control?.OutputModifier ?? 0u;
+            if (modifier != 0)
+            {
+                var scale = modifier == 1 ? "2.0f" : modifier == 2 ? "4.0f" : "0.5f";
+                bits = Temp("uint", $"(({bits} & 0x7FFFu) > 0x7C00u ? {bits} : " +
+                    $"(uint)as_type<ushort>(half((float)as_type<half>((ushort){bits}) * {scale})))");
+            }
+            if (control?.Clamp == true)
+                bits = Temp("uint", $"((({bits} & 0x8000u) != 0u || ({bits} & 0x7FFFu) > 0x7C00u) ? 0u : min({bits}, 0x3C00u))");
+            return ((control?.OperandSelect ?? 0) & 8) != 0
+                ? $"((v[{destination}] & 0x0000FFFFu) | ({bits} << 16))"
+                : $"((v[{destination}] & 0xFFFF0000u) | {bits})";
         }
 
         /// <summary>Rounds to f16 and preserves the unselected VGPR half.</summary>

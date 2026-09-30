@@ -84,6 +84,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             vertex.ExportAddress, ShaderStage.Vertex, "vertex", vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount,
             probeWrittenRegisters: true, VertexUserDataBase);
         var vertexInfo = PrepareVertexInput(vertexSource, shaderInterface, context);
+        vertexInfo.IeeeMode = vertex.GeometryResource1.IeeeMode;
         ShaderSource? pixelSource = null;
         PixelInputInfo? pixelInfo = null;
         Gen5PixelOutputBinding[] pixelOutputs = [];
@@ -116,6 +117,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
             // the vertex program must declare every location the pixel program reads.
             attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(pixelProgram, pixelInfo));
+            pixelInfo.IeeeMode = pixel.Resource1.IeeeMode;
         }
 
         ShaderProgram vertexProgram;

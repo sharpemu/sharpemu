@@ -163,6 +163,7 @@ public sealed class ShaderCompileRequest
 
     public uint WaveSize { get; init; } = 32;
     public bool EnableExecGuardElision { get; init; } = true;
+    public bool IeeeMode { get; init; }
     public uint ScratchDwords { get; init; }
     public bool EnableGraphicsSubgroupOperations { get; init; } = true;
 

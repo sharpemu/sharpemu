@@ -132,6 +132,7 @@ public sealed class VertexInputInfo
     public bool FetchEmbedded { get; init; }
     public int FetchAttributeRegister { get; init; }
     public int FetchBufferRegister { get; init; }
+    public bool IeeeMode { get; set; }
     public uint ScratchDwords { get; init; }
     public uint PositionExportControl { get; init; }
     public ClipSpaceTransform ClipSpace { get; init; }
@@ -151,6 +152,7 @@ public sealed class PixelInputInfo
     public uint[] InterpolatorSettings { get; init; } = new uint[InterpolatorCount];
     public byte[] TargetOutputModes { get; init; } = new byte[TargetCount];
     public ColorComponentMap[] TargetExportMappings { get; init; } = new ColorComponentMap[TargetCount];
+    public bool IeeeMode { get; set; }
     public uint ScratchDwords { get; init; }
     public bool PositionX { get; init; }
     public bool PositionY { get; init; }
@@ -185,6 +187,7 @@ public sealed class ComputeInputInfo
     public bool ThreadGroupSizeEnabled { get; init; }
     public uint WaveSize { get; init; } = 64;
     public uint LocalDataShareDwords { get; init; }
+    public bool IeeeMode { get; set; }
     public uint ScratchDwords { get; init; }
     public bool NeedsLocalDataShareBarriers { get; init; }
     public int WorkgroupRegister { get; init; }

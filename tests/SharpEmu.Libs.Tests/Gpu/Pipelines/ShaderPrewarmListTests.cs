@@ -32,39 +32,73 @@ public sealed class ShaderPrewarmListTests : IDisposable
         return shader.Spirv;
     }
 
-    private static (IShaderPipelineHost Host, byte[] Spirv) CompileAtRuntime(ShaderPrewarmList list, uint format)
+    private static (IShaderPipelineHost Host, byte[] Spirv) CompileAtRuntime(ShaderPrewarmList list, uint format, bool ieeeMode = false)
     {
-        var guest = new PipelineTestGuest(Compile);
+        var guest = new PipelineTestGuest(request =>
+        {
+            Assert.Equal(ieeeMode, request.IeeeMode);
+            return Compile(request);
+        });
         guest.Host.ShaderPrewarm = list;
         guest.RegisterProgram(CodeAddress, HeaderAddress, PipelineTestGuest.FormatLoadProgram);
         var userData = PipelineTestGuest.BufferDescriptor(BufferAddress, 4, 64, format);
         var cursor = 0u;
+        var options = PipelineTestGuest.ComputeOptions(threadsX: 64);
+        options.ComputeInfo!.IeeeMode = ieeeMode;
         guest.Programs.GetOrCompile(
-            guest.Source(CodeAddress, ShaderStage.Compute, userData), PipelineTestGuest.ComputeOptions(threadsX: 64), ref cursor, out _);
+            guest.Source(CodeAddress, ShaderStage.Compute, userData), options, ref cursor, out _);
         return (guest.Host, Assert.Single(guest.Compiler.Shaders).Spirv);
     }
 
     private ShaderPrewarmList Open() => ShaderPrewarmList.Open(_directory) ?? throw new InvalidOperationException("The list did not open.");
 
-    [Fact]
-    public void ARecordedComputeProgramCompilesToTheSameSpirvAfterReload()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ARecordedComputeProgramCompilesToTheSameSpirvAfterReload(bool ieeeMode)
     {
         byte[] runtime;
         IShaderPipelineHost host;
         using (var list = Open())
         {
-            (host, runtime) = CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+            (host, runtime) = CompileAtRuntime(list, BufferDescriptorWords.Format32UInt, ieeeMode);
         }
 
         using var reloaded = Open();
         var (record, code) = Assert.Single(reloaded.LoadedComputes());
+        Assert.Equal(ieeeMode, record.Info.IeeeMode);
+        var compiler = new FakeShaderCompiler(request =>
+        {
+            Assert.Equal(ieeeMode, request.IeeeMode);
+            return Compile(request);
+        });
         Assert.True(
             ShaderProgramCache.TryCompilePrewarm(
-                record, code, new FakeShaderCompiler(Compile), host.SharedInt64AtomicsEnabled, host.ExecGuardElisionEnabled,
+                record, code, compiler, host.SharedInt64AtomicsEnabled, host.ExecGuardElisionEnabled,
                 out var compiled, out var layout, out var error),
             error);
         Assert.NotNull(layout);
         Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
+    }
+
+    [Fact]
+    public void OlderFormatRecordsAreRejectedBeforeAppending()
+    {
+        using (var list = Open())
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+        var path = Path.Combine(_directory, ShaderPrewarmList.FileName);
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Write))
+        {
+            stream.Position = sizeof(uint);
+            stream.Write(BitConverter.GetBytes(1u));
+        }
+        using (var list = Open())
+        {
+            Assert.Empty(list.LoadedComputes());
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt, true);
+        }
+        using var reloaded = Open();
+        Assert.True(Assert.Single(reloaded.LoadedComputes()).Record.Info.IeeeMode);
     }
 
     [Fact]
@@ -75,11 +109,12 @@ public sealed class ShaderPrewarmListTests : IDisposable
             CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
             CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
             CompileAtRuntime(list, BufferDescriptorWords.Format32x4UInt);
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt, true);
         }
 
         using var reloaded = Open();
         var loaded = reloaded.LoadedComputes();
-        Assert.Equal(2, loaded.Count);
+        Assert.Equal(3, loaded.Count);
         Assert.Same(loaded[0].Code.Ranges, loaded[1].Code.Ranges);
     }
 

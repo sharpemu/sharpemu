@@ -604,6 +604,7 @@ internal sealed class ShaderProgramCache
                 {
                     WaveSize = 32,
                     TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
+                    IeeeMode = info.IeeeMode,
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
@@ -631,6 +632,7 @@ internal sealed class ShaderProgramCache
                 {
                     WaveSize = 32,
                     TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
+                    IeeeMode = info.IeeeMode,
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
@@ -666,6 +668,7 @@ internal sealed class ShaderProgramCache
         {
             WaveSize = info.WaveSize,
             EnableExecGuardElision = info.WaveSize != 64 || execGuardElision,
+            IeeeMode = info.IeeeMode,
             TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
             ScratchDwords = info.ScratchDwords,
             SupportsSharedInt64Atomics = sharedInt64Atomics,
