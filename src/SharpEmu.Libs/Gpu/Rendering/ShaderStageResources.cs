@@ -166,6 +166,31 @@ public sealed class VertexInputInfo
     public ShaderStageResources Stage { get; set; }
 }
 
+public readonly record struct MeshExecutionLimits
+{
+    public uint DeviceSubgroupLaneCount { get; init; }
+    public uint MaxGroupCountX { get; init; }
+    public uint MaxGroupCountY { get; init; }
+    public uint MaxGroupTotalCount { get; init; }
+}
+
+public readonly record struct GuestGeometryConfiguration
+{
+    public uint ThreadsPerGroup { get; init; }
+    public bool InputTriangleStrip { get; init; }
+    public uint InputPrimitiveCountPerWorkgroup { get; init; }
+    public uint InputVertexCountPerWorkgroup { get; init; }
+    public uint OutputVertexCapacity { get; init; }
+    public uint OutputPrimitiveCapacity { get; init; }
+    public uint ProvokingVertex { get; init; }
+    public uint WaveSize { get; init; }
+    public bool IeeeMode { get; init; }
+    public uint ScratchDwords { get; init; }
+    public uint LocalDataShareDwords { get; init; }
+    public uint PositionExportControl { get; init; }
+    public ClipSpaceTransform ClipSpace { get; init; }
+}
+
 public sealed class PixelInputInfo
 {
     public const int InterpolatorCount = 32;
