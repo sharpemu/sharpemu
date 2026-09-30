@@ -183,6 +183,10 @@ public sealed partial class RenderExecutor
     private void DrawIndexedCore(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawExecutor);
+        var traceSample = IndexedDrawTrace.Enabled && _host is ICommandStreamHost traceHost
+            ? IndexedDrawTrace.Capture(arguments.IndexCount, arguments.IndexTypeAndSize, arguments.IndexAddress, traceHost.Memory.TryRead)
+            : null;
+        IndexedDrawTrace.Write(traceSample, "executor", submitId, arguments.PacketAddress);
         if (!_host.IsRecording)
         {
             throw _host.Fatal("An indexed draw has no recording command buffer.");
@@ -304,7 +308,8 @@ public sealed partial class RenderExecutor
             0,
             indirect ? arguments.FirstInstance : ResolveInstanceOffset(state.Programs.VertexInput),
             arguments.IndirectArgumentsAddress);
-        RecordDraw(submitId, banks, in draw, ref state, topology, in emission, in indexSource, primitiveRestart, setBindDebug: true, setAutoDebug: false);
+        RecordDraw(submitId, banks, in draw, ref state, topology, in emission, in indexSource, primitiveRestart,
+            setBindDebug: true, setAutoDebug: false, indexedTrace: traceSample, packetAddress: arguments.PacketAddress);
         _host.ResetBindings();
     }
 
