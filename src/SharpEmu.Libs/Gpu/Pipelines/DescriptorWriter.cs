@@ -41,6 +41,7 @@ public static class DescriptorWriter
         ShaderStage.Vertex => ShaderStageFlags.VertexBit,
         ShaderStage.Pixel => ShaderStageFlags.FragmentBit,
         ShaderStage.Compute => ShaderStageFlags.ComputeBit,
+        ShaderStage.Mesh => ShaderStageFlags.MeshBitExt,
         _ => throw SubmissionScheduler.Fatal($"The shader stage is unknown: stage={stage}."),
     };
 
@@ -60,6 +61,11 @@ public static class DescriptorWriter
         if ((stages & ShaderStageFlags.ComputeBit) != 0)
         {
             result |= PipelineStageFlags.ComputeShaderBit;
+        }
+
+        if ((stages & ShaderStageFlags.MeshBitExt) != 0)
+        {
+            result |= PipelineStageFlags.MeshShaderBitExt;
         }
 
         if (result == PipelineStageFlags.None)

@@ -14,6 +14,7 @@ public enum ShaderStageKind
     Vertex,
     Pixel,
     Compute,
+    Mesh,
 }
 
 public enum ImageResourceClass : byte
@@ -80,6 +81,8 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
 
     public DispatchThreadLimits? ThreadLimits { get; init; }
 
+    public MeshDrawParameters? MeshDraw { get; init; }
+
     public void WriteDispatchThreadLimits(Span<uint> shaderData)
     {
         if (Program?.Bindings is not { UsesDispatchThreadLimits: true } layout) return;
@@ -93,9 +96,33 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
         shaderData[offset + 1] = limits.Y;
         shaderData[offset + 2] = limits.Z;
     }
+
+    public void WriteMeshDrawParameters(Span<uint> shaderData)
+    {
+        if (Program?.Bindings is not { UsesMeshDrawParameters: true } layout) return;
+        if (MeshDraw is not { } draw || shaderData.Length != layout.ShaderDataDwordCount)
+        {
+            throw SubmissionScheduler.Fatal("The mesh draw has missing parameters or invalid shader data.");
+        }
+
+        var offset = (int)layout.MeshDrawParametersDword;
+        shaderData[offset] = draw.VertexCount;
+        shaderData[offset + 1] = draw.FirstVertex;
+        shaderData[offset + 2] = draw.FirstInstance;
+        shaderData[offset + 3] = draw.IndexElementSize;
+        shaderData[offset + 4] = (uint)draw.IndexAddress;
+        shaderData[offset + 5] = (uint)(draw.IndexAddress >> 32);
+    }
 }
 
 public readonly record struct DispatchThreadLimits(uint X, uint Y, uint Z);
+
+public readonly record struct MeshDrawParameters(
+    uint VertexCount,
+    uint FirstVertex,
+    uint FirstInstance,
+    uint IndexElementSize,
+    ulong IndexAddress);
 
 // The vertex buffer words of one fetch slot as the vertex program declares them.
 public readonly record struct VertexInputBuffer(ulong Address, uint Stride, uint RecordCount, bool PerInstance = false)
