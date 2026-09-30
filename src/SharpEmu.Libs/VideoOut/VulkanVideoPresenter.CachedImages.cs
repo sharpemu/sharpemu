@@ -249,7 +249,10 @@ internal static unsafe partial class VulkanVideoPresenter
             // A lookup needs a recording tick; the scheduler starts with the first batch.
             _ = BeginBatchedGuestCommands();
             var request = resolution.Request;
+            _imageCache.SynchronizeColorMetadata(request);
+            _ = BeginBatchedGuestCommands();
             var imageIdentifier = _imageCache.FindImage(ref request, exactFormat);
+            _imageCache.ApplyNativeColorClear(imageIdentifier, request);
             BindRenderTarget(imageIdentifier);
             return new ColorAttachment { ImageIdentifier = imageIdentifier, Request = request, Resolution = resolution };
         }
@@ -307,6 +310,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool ResolveDccAttachmentClear(ColorAttachment target, out ClearColorValue clearValue)
         {
             clearValue = default;
+            if (target.Request.Description.Metadata.NativeColorClear) return false;
             if (target.Request.Description.Metadata.Kind != MetadataKind.Dcc || target.Request.Description.Metadata.Range.Size != 0)
             {
                 return false;
