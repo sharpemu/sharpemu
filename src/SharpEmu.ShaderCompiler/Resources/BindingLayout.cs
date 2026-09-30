@@ -373,13 +373,14 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         {
             uses[block] = new bool[ScalarRegisterCount];
             definitions[block] = new bool[ScalarRegisterCount];
-            var range = controlFlow.Blocks[block];
-            foreach (var instruction in program.Instructions)
+        }
+
+        foreach (var instruction in program.Instructions)
+        {
+            var block = controlFlow.BlockOf(instruction.Pc);
+            if (block >= 0)
             {
-                if (instruction.Pc >= range.StartPc && instruction.Pc < range.EndPc)
-                {
-                    RecordUsesAndDefinitions(instruction, uses[block], definitions[block]);
-                }
+                RecordUsesAndDefinitions(instruction, uses[block], definitions[block]);
             }
         }
 

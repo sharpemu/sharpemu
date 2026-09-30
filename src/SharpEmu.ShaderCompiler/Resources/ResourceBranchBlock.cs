@@ -18,17 +18,26 @@ public sealed record ResourceBranchBlock(ScalarValue? Condition, int[] Successor
         var flow = plan.Graph.ControlFlow;
         var blocks = new ResourceBranchBlock[flow.Blocks.Count];
         var hasCondition = false;
+        var lastByBlock = new Gen5ShaderInstruction?[blocks.Length];
+        var instructionPcs = new HashSet<uint>();
+        foreach (var instruction in instructions)
+        {
+            instructionPcs.Add(instruction.Pc);
+            var block = flow.BlockOf(instruction.Pc);
+            if (block >= 0) lastByBlock[block] = instruction;
+        }
+
         for (var blockIndex = 0; blockIndex < blocks.Length; blockIndex++)
         {
             var range = flow.Blocks[blockIndex];
-            var last = instructions.LastOrDefault(instruction => instruction.Pc >= range.StartPc && instruction.Pc < range.EndPc);
+            var last = lastByBlock[blockIndex];
             if (last is null) return [];
             var successors = flow.Successors[blockIndex].ToArray();
             ScalarValue? condition = null;
             var resolver = Gen5IrBranchResolver.Instance;
             if (resolver.IsConditional(last) || Gen5IrBranchResolver.IsUnconditionalBranch(last))
             {
-                if (!resolver.TryGetBranchTarget(last, out var target) || !instructions.Any(instruction => instruction.Pc == target)) return [];
+                if (!resolver.TryGetBranchTarget(last, out var target) || !instructionPcs.Contains(target)) return [];
                 if (resolver.IsConditional(last))
                 {
                     if (blockIndex + 1 >= blocks.Length) return [];
