@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
@@ -215,7 +216,54 @@ public sealed partial class RenderExecutor
         var context = banks.Context;
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
+        var meshInput = state.Programs.MeshInput;
         using var preparation = _host.BeginPreparation();
+        var meshVertexCount = draw.Count;
+        if (MeshDrawTrace.Active)
+            MeshDrawTrace.Write("programs", $"mesh={meshInput is not null} vertexHash=0x{vertexInput.Stage.Program?.Hash:X16} pixelHash=0x{pixelInput.Stage.Program?.Hash:X16} pixelActive={state.PixelActive}");
+        if (meshInput is not null)
+        {
+            if (topology is not (PrimitiveTopology.TriangleList or PrimitiveTopology.TriangleStrip))
+            {
+                throw _host.Fatal("The mesh draw does not use triangle primitives.");
+            }
+
+            ulong indexAddress = 0;
+            if (emission.Indexed)
+            {
+                var byteCount = checked((int)indexSource.Size);
+                var elementSize = indexSource.Type == IndexType.Uint16 ? 2u : 4u;
+                var triangleStrip = topology == PrimitiveTopology.TriangleStrip;
+                var capacity = MeshIndexAssembly.GetMaximumCount(byteCount, elementSize, triangleStrip);
+                if (capacity == 0) return "no-primitives";
+                byte[]? rentedBytes = null;
+                uint[]? rentedIndices = null;
+                try
+                {
+                    var bytes = indexSource.HostData is { } hostData ? hostData.AsSpan(0, byteCount)
+                        : (rentedBytes = ArrayPool<byte>.Shared.Rent(byteCount)).AsSpan(0, byteCount);
+                    if (indexSource.HostData is null && !_host.TryReadGuest(indexSource.Address, bytes))
+                        throw _host.Fatal("The mesh index buffer cannot be read.");
+                    rentedIndices = ArrayPool<uint>.Shared.Rent(capacity);
+                    var written = MeshIndexAssembly.ExpandTriangles(bytes, rentedIndices.AsSpan(0, capacity),
+                        elementSize, emission.VertexOffset, triangleStrip, primitiveRestart,
+                        elementSize == 2 ? ushort.MaxValue : uint.MaxValue, context.RasterMode.ProvokingVertexLast);
+                    meshVertexCount = checked((uint)written);
+                    if (written == 0) return "no-primitives";
+                    indexAddress = _host.UploadMeshVertexIndices(rentedIndices.AsSpan(0, written));
+                }
+                finally
+                {
+                    if (rentedIndices is not null) ArrayPool<uint>.Shared.Return(rentedIndices);
+                    if (rentedBytes is not null) ArrayPool<byte>.Shared.Return(rentedBytes);
+                }
+            }
+            vertexInput.Stage = vertexInput.Stage with
+            {
+                MeshDraw = new MeshDrawParameters(meshVertexCount, emission.Indexed ? 0 : emission.FirstVertex,
+                    emission.FirstInstance, emission.Indexed ? 4u : 0u, indexAddress),
+            };
+        }
         IPreparedBindings vertexBindings;
         IPreparedBindings? pixelBindings;
         try
@@ -225,6 +273,7 @@ public sealed partial class RenderExecutor
         }
         catch (DrawImageTypeMismatchException rejection)
         {
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("resource-rejected", rejection.Message);
             IndexedDrawTrace.Write(indexedTrace, "resource-rejected", submitId, packetAddress);
             if (_strictDrawResources)
             {
@@ -252,8 +301,8 @@ public sealed partial class RenderExecutor
             _host.BindResources(pixelBindings);
         }
 
-        var vertexBuffers = AcquireVertexBuffers(vertexInput);
-        var indexBuffer = AcquireIndexBuffer(in indexSource);
+        var vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : [];
+        var indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
         var indirectArguments = emission.IndirectArgumentsAddress != 0
             ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, IndexedIndirectArgumentsSize, isWritten: false)
             : default;
@@ -282,7 +331,10 @@ public sealed partial class RenderExecutor
             SetDrawDebugPhase(submitId, in draw, 0x200);
         }
 
-        _host.BindVertexBuffers(vertexBuffers, vertexInput);
+        if (meshInput is null)
+        {
+            _host.BindVertexBuffers(vertexBuffers, vertexInput);
+        }
 
         if (pixelBindings is not null && setAutoDebug)
         {
@@ -308,6 +360,7 @@ public sealed partial class RenderExecutor
         }
 
         _host.BeginRendering(in state.Rendering);
+        if (MeshDrawTrace.Active) MeshDrawTrace.Write("rendering", $"width={state.Rendering.Width} height={state.Rendering.Height} layers={state.Rendering.Layers} colors={state.ColorCount}");
         _host.BindPipeline(PipelineBindPoint.Graphics, in pipeline);
         if (setAutoDebug)
         {
@@ -317,7 +370,32 @@ public sealed partial class RenderExecutor
         if (indexedTrace is { } trace)
             _host.InsertDrawTraceMarker(IndexedDrawTrace.CreateLabel(trace, submitId, packetAddress));
 
-        if (emission.IndirectArgumentsAddress != 0)
+        if (meshInput is { } mesh)
+        {
+            var primitiveCount = mesh.Geometry.InputTriangleStrip ? (meshVertexCount >= 3 ? meshVertexCount - 2 : 0) : meshVertexCount / 3;
+            var groupCount = (uint)(((ulong)primitiveCount + mesh.Geometry.InputPrimitiveCountPerWorkgroup - 1) / mesh.Geometry.InputPrimitiveCountPerWorkgroup);
+            var totalGroupCount = (ulong)groupCount * draw.InstanceCount;
+            if (groupCount > mesh.Execution.MaxGroupCountX || draw.InstanceCount > mesh.Execution.MaxGroupCountY ||
+                totalGroupCount > mesh.Execution.MaxGroupTotalCount)
+            {
+                throw _host.Fatal($"The mesh draw exceeds device group limits: groups={groupCount}/{mesh.Execution.MaxGroupCountX} " +
+                    $"instances={draw.InstanceCount}/{mesh.Execution.MaxGroupCountY} " +
+                    $"total={totalGroupCount}/{mesh.Execution.MaxGroupTotalCount}.");
+            }
+            if (RenderTrace.Enabled)
+            {
+                RenderTrace.Write($"MeshDraw shader=0x{banks.Shader.Vertex.ExportAddress:X16} " +
+                    $"vertices={draw.Count} instances={draw.InstanceCount} groups={groupCount} " +
+                    $"threads={mesh.Geometry.ThreadsPerGroup} ldsDwords={mesh.Geometry.LocalDataShareDwords}");
+            }
+            _host.DrawMeshTasks(groupCount, draw.InstanceCount, 1);
+            if (MeshDrawTrace.Active)
+            {
+                MeshDrawTrace.Write("command-recorded", $"groups={groupCount}/{draw.InstanceCount}/1 threads={mesh.Geometry.ThreadsPerGroup} wave={mesh.Geometry.WaveSize} lds={mesh.Geometry.LocalDataShareDwords} firstVertex={emission.FirstVertex} firstInstance={emission.FirstInstance}");
+                MeshDrawTrace.Recorded();
+            }
+        }
+        else if (emission.IndirectArgumentsAddress != 0)
         {
             // Uploads and shader writes end with barriers to all commands, so the
             // indirect read sees them.
@@ -336,7 +414,7 @@ public sealed partial class RenderExecutor
         var writeStages = PipelineStageFlags.None;
         if (HasBufferWrites(vertexInput.Stage))
         {
-            writeStages |= PipelineStageFlags.VertexShaderBit;
+            writeStages |= meshInput is null ? PipelineStageFlags.VertexShaderBit : PipelineStageFlags.MeshShaderBitExt;
         }
 
         if (state.PixelActive && HasBufferWrites(pixelInput.Stage))
@@ -346,6 +424,7 @@ public sealed partial class RenderExecutor
 
         if (writeStages != PipelineStageFlags.None)
         {
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("write-barrier", $"sourceStages={writeStages}");
             _host.EndRendering();
             _host.ShaderWriteBarrier(writeStages);
         }

@@ -97,13 +97,25 @@ public sealed partial class RenderExecutor
 
     public void DrawIndexed(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
     {
-        if (arguments.IndirectArgumentsAddress != 0 && !CanDrawIndirectOnGpu(banks, in arguments))
+        using var meshTrace = MeshDrawTrace.Begin(submitId, banks.Shader.Vertex.ExportAddress, banks.Context.ShaderStages);
+        try
         {
-            DrawIndexedWithCpuArguments(submitId, banks, in arguments);
-            return;
-        }
+            // Mesh index assembly needs the resolved counts and offsets on the CPU.
+            if (arguments.IndirectArgumentsAddress != 0 &&
+                (UsesMeshExecution(banks) || !CanDrawIndirectOnGpu(banks, in arguments)))
+            {
+                DrawIndexedWithCpuArguments(submitId, banks, in arguments);
+                return;
+            }
 
-        DrawIndexedCore(submitId, banks, in arguments);
+            DrawIndexedCore(submitId, banks, in arguments);
+        }
+        catch (Exception exception) when (meshTrace is not null)
+        {
+            meshTrace?.Complete("failed");
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("failure", $"type={exception.GetType().Name} message={exception.Message}");
+            throw;
+        }
     }
 
     // The GPU reads the arguments of an indirect draw unless the draw is emulated from
@@ -182,6 +194,7 @@ public sealed partial class RenderExecutor
 
     private void DrawIndexedCore(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
     {
+        if (MeshDrawTrace.Active) MeshDrawTrace.Write("selection", $"indexed=true count={arguments.IndexCount}");
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawExecutor);
         var traceSample = IndexedDrawTrace.Enabled && _host is ICommandStreamHost traceHost
             ? IndexedDrawTrace.Capture(arguments.IndexCount, arguments.IndexTypeAndSize, arguments.IndexAddress, traceHost.Memory.TryRead)
@@ -307,7 +320,7 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        ResolveShaderPrograms(banks, ref state);
+        ResolveShaderPrograms(banks, ref state, indexed: true);
         if (!ApplyProgramAdaptations(banks, in draw, ref state, new TargetlessDrawArguments(submitId, true, arguments, default)))
         {
             TraceDisposition("adapted");
@@ -334,6 +347,23 @@ public sealed partial class RenderExecutor
 
     public void DrawAuto(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
     {
+        using var meshTrace = MeshDrawTrace.Begin(submitId, banks.Shader.Vertex.ExportAddress, banks.Context.ShaderStages);
+        try
+        {
+            DrawAutoCore(submitId, banks, arguments);
+        }
+        catch (Exception exception) when (meshTrace is not null)
+        {
+            meshTrace?.Complete("failed");
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("failure", $"type={exception.GetType().Name} message={exception.Message}");
+            throw;
+        }
+    }
+
+    private void DrawAutoCore(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
+    {
+        if (MeshDrawTrace.Active)
+            MeshDrawTrace.Write("selection", $"count={arguments.VertexCount} instances={arguments.InstanceCount} firstVertex={arguments.FirstVertex} firstInstance={arguments.FirstInstance} primitive={banks.UserConfig.PrimitiveType} geometry=0x{banks.Shader.Vertex.GeometryAddress:X16} hull=0x{banks.Shader.Vertex.HullAddress:X16} local=0x{banks.Shader.Vertex.LocalAddress:X16}");
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawExecutor);
         if (!_host.IsRecording)
         {
@@ -547,13 +577,17 @@ public sealed partial class RenderExecutor
 
     private static bool IsKnownGeometryOutputPrimitiveType(uint value) => value <= 4;
 
-    // Only the plain vertex path and the primitive-shader vertex path with default geometry state run.
     private bool IsUnsupportedGeometryStage(RegisterBanks banks, bool autoDraw)
     {
         var context = banks.Context;
         var shaderInterface = context.ShaderInterface;
         var vertex = banks.Shader.Vertex;
         var stages = context.ShaderStages;
+        if (UsesMeshExecution(banks))
+        {
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("gate", "accepted=true");
+            return false;
+        }
         var primitiveShaderVertexPath =
             IsPrimitiveShaderStageMask(stages) && vertex.ExportAddress != 0 &&
             (vertex.GeometryAddress == 0 ||
@@ -575,11 +609,13 @@ public sealed partial class RenderExecutor
         {
             Console.Error.WriteLine(
                 "Warning: the title uses unsupported graphics pipelines; some draw calls were skipped. " +
+                $"autoDraw={autoDraw} meshSupported={_pipelines.MeshShadersSupported} " +
                 $"stages=0x{stages:X8} subgroup=0x{shaderInterface.PrimitiveShaderSubgroupControl:X8} " +
                 $"maxOutput=0x{shaderInterface.MaxOutputPerSubgroup:X8} " +
                 $"maxVerticesOut=0x{shaderInterface.GeometryMaxVerticesOut:X8} " +
                 $"outputPrimitive=0x{shaderInterface.GeometryOutputPrimitiveType:X8} " +
                 $"export=0x{vertex.ExportAddress:X16} geometry=0x{vertex.GeometryAddress:X16} " +
+                $"hull=0x{vertex.HullAddress:X16} local=0x{vertex.LocalAddress:X16} " +
                 $"unsupportedMask={unsupportedStageMask} unsupportedGeometry={unsupportedGeometryStage} " +
                 $"unsupportedRegisters={geometryRegisters}.");
         }
@@ -594,6 +630,7 @@ public sealed partial class RenderExecutor
                 $"outputPrimitive=0x{shaderInterface.GeometryOutputPrimitiveType:X8} export=0x{vertex.ExportAddress:X16} geometry=0x{vertex.GeometryAddress:X16}");
         }
 
+        if (MeshDrawTrace.Active) MeshDrawTrace.Write("gate", $"accepted=false auto={autoDraw} supported={_pipelines.MeshShadersSupported}");
         return true;
     }
 
@@ -717,7 +754,15 @@ public sealed partial class RenderExecutor
         return true;
     }
 
-    private void ResolveShaderPrograms(RegisterBanks banks, ref DrawState state)
+    private static bool RequiresMeshExecution(uint stages) =>
+        (stages & 0x20u) != 0 || (stages & 0x0200203Fu) == 0x2000u;
+
+    private bool UsesMeshExecution(RegisterBanks banks) =>
+        _pipelines.MeshShadersSupported && RequiresMeshExecution(banks.Context.ShaderStages) &&
+        banks.Shader.Vertex.ExportAddress != 0 &&
+        banks.Shader.Vertex.HullAddress == 0 && banks.Shader.Vertex.LocalAddress == 0;
+
+    private void ResolveShaderPrograms(RegisterBanks banks, ref DrawState state, bool indexed = false)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawProgramResolution);
         var context = banks.Context;
@@ -729,14 +774,20 @@ public sealed partial class RenderExecutor
             targetExportMapping[(int)color.Slot] = color.Resolution.ExportMapping;
         }
 
-        state.Programs = _pipelines.GetGraphicsPrograms(
-            banks.Shader.Vertex,
-            banks.Shader.Pixel,
-            context.ShaderInterface,
-            context,
-            targetExportMapping,
-            state.PixelActive,
-            state.Depth.HasTarget);
+        var meshUserConfig = banks.UserConfig;
+        var usesMesh = UsesMeshExecution(banks);
+        if (indexed && usesMesh)
+        {
+            meshUserConfig = meshUserConfig.Copy();
+            meshUserConfig.PrimitiveType = (uint)GuestPrimitiveType.TriangleList;
+        }
+        state.Programs = usesMesh
+            ? _pipelines.GetMeshGraphicsPrograms(
+                banks.Shader.Vertex, banks.Shader.Pixel, context.ShaderInterface, context,
+                meshUserConfig, targetExportMapping, state.PixelActive, state.Depth.HasTarget)
+            : _pipelines.GetGraphicsPrograms(
+                banks.Shader.Vertex, banks.Shader.Pixel, context.ShaderInterface, context,
+                targetExportMapping, state.PixelActive, state.Depth.HasTarget);
     }
 
     [System.Runtime.CompilerServices.InlineArray(RenderingState.ColorAttachmentCapacity)]

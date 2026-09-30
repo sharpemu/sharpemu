@@ -139,6 +139,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private bool _renderingActive;
         private RenderingState _renderingState;
+        private VulkanCommandProfile.MeshDrawState _profileMeshDrawState;
         private long _renderingScopesBegun;
         // SHARPEMU_DEFER_GLOBAL_BARRIERS=0 ends the rendering scope at every guest cache flush again.
         private static readonly bool DeferGlobalBarriers =
@@ -345,6 +346,24 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         public BufferBinding NullBuffer => new(_bufferCache.GetBuffer(GuestBufferCache.NullBufferId).Handle.Handle, 0);
+
+        public ulong UploadMeshVertexIndices(ReadOnlySpan<uint> indices)
+        {
+            var preparation = RequirePreparation();
+            var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(indices);
+            var buffer = CreateHostBuffer(bytes,
+                BufferUsageFlags.StorageBufferBit | BufferUsageFlags.ShaderDeviceAddressBit,
+                out var memory, out _);
+            preparation.OverflowBuffers.Add((buffer, memory));
+            var addressInfo = new BufferDeviceAddressInfo
+            {
+                SType = StructureType.BufferDeviceAddressInfo,
+                Buffer = buffer,
+            };
+            var address = _vk.GetBufferDeviceAddress(_device, &addressInfo);
+            if (address == 0) throw new InvalidOperationException("The mesh index buffer has no device address.");
+            return address;
+        }
 
         public BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten)
         {
@@ -659,6 +678,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 new Offset2D(state.Scissor.Left, state.Scissor.Top),
                 new Extent2D((uint)(state.Scissor.Right - state.Scissor.Left), (uint)(state.Scissor.Bottom - state.Scissor.Top)));
             _vk.CmdSetScissor(command, 0, 1, &scissor);
+            if (_gpuCommandProfile is not null)
+                _profileMeshDrawState = new(0, 0, state.ViewportWidth, state.ViewportHeight,
+                    scissor.Extent.Width, scissor.Extent.Height, state.DepthTestEnabled, state.DepthWriteEnabled);
             _vk.CmdSetLineWidth(command, state.LineWidth);
             var blendConstants = stackalloc float[4] { state.BlendRed, state.BlendGreen, state.BlendBlue, state.BlendAlpha };
             _vk.CmdSetBlendConstants(command, blendConstants);
@@ -1053,6 +1075,24 @@ internal static unsafe partial class VulkanVideoPresenter
             CountDraw();
         }
 
+        void IRenderHost.DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ)
+        {
+            if (_cmdDrawMeshTasks is null)
+            {
+                throw SubmissionScheduler.Fatal("The Vulkan device has no mesh shader draw command.");
+            }
+
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
+            var command = BeginBatchedGuestCommands();
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
+            _cmdDrawMeshTasks(command, groupCountX, groupCountY, groupCountZ);
+            if (MeshDrawTrace.Active) MeshDrawTrace.RecordedCommand((ulong)command.Handle);
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.MeshDraw,
+                _boundGraphicsPipeline?.Id ?? 0, groupCountX, groupCountY, groupCountZ,
+                _profileMeshDrawState with { Width = _renderingState.Width, Height = _renderingState.Height });
+            CountDraw();
+        }
+
         public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
@@ -1103,7 +1143,8 @@ internal static unsafe partial class VulkanVideoPresenter
             RecordMemoryBarrier(
                 sourceStages,
                 PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.VertexInputBit | PipelineStageFlags.VertexShaderBit |
-                PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit | PipelineStageFlags.ColorAttachmentOutputBit,
+                PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit | PipelineStageFlags.ColorAttachmentOutputBit |
+                (_supportsMeshShader ? PipelineStageFlags.MeshShaderBitExt : PipelineStageFlags.None),
                 AccessFlags.ShaderWriteBit,
                 AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit | AccessFlags.VertexAttributeReadBit | AccessFlags.IndexReadBit |
                 AccessFlags.UniformReadBit | AccessFlags.TransferReadBit | AccessFlags.TransferWriteBit |

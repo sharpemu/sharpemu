@@ -612,7 +612,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var bindings = new List<DescriptorSetLayoutBinding>();
-            CollectLayoutBindings(bindings, description.VertexStage, ShaderStage.Vertex);
+            CollectLayoutBindings(bindings, description.VertexStage,
+                description.VertexStage.Stage == ShaderStageKind.Mesh ? ShaderStage.Mesh : ShaderStage.Vertex);
             if (description.PixelStage is { } pixelStage)
             {
                 CollectLayoutBindings(bindings, pixelStage, ShaderStage.Pixel);
@@ -623,7 +624,10 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 SetLayout = setLayout,
                 Demand = demand,
-                Layout = CreatePipelineLayout(setLayout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit),
+                Layout = CreatePipelineLayout(setLayout,
+                    (description.VertexStage.Stage == ShaderStageKind.Mesh
+                        ? ShaderStageFlags.MeshBitExt : ShaderStageFlags.VertexBit) |
+                    ShaderStageFlags.FragmentBit),
                 UsesPushDescriptors = usesPushDescriptors,
                 Description = description,
                 ProfileVertexHash = description.VertexStage.Hash,
@@ -783,7 +787,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 shaderStages[0] = new PipelineShaderStageCreateInfo
                 {
                     SType = StructureType.PipelineShaderStageCreateInfo,
-                    Stage = ShaderStageFlags.VertexBit,
+                    Stage = description.VertexStage.Stage == ShaderStageKind.Mesh
+                        ? ShaderStageFlags.MeshBitExt : ShaderStageFlags.VertexBit,
+                    Flags = description.VertexStage.Stage == ShaderStageKind.Mesh
+                        ? PipelineShaderStageCreateFlags.RequireFullSubgroupsBit : 0,
                     Module = vertexModule,
                     PName = entryPoint,
                 };
@@ -947,8 +954,8 @@ internal static unsafe partial class VulkanVideoPresenter
                         PNext = &renderingInfo,
                         StageCount = stageCount,
                         PStages = shaderStages,
-                        PVertexInputState = &vertexInput,
-                        PInputAssemblyState = &inputAssembly,
+                        PVertexInputState = description.VertexStage.Stage == ShaderStageKind.Mesh ? null : &vertexInput,
+                        PInputAssemblyState = description.VertexStage.Stage == ShaderStageKind.Mesh ? null : &inputAssembly,
                         PViewportState = &viewportState,
                         PRasterizationState = &rasterization,
                         PMultisampleState = &multisample,
