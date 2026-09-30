@@ -13,6 +13,7 @@ public sealed class DescriptorBindingAliasTests
 {
     [Theory]
     [InlineData(16)]
+    [InlineData(96)]
     public void SourceTableSharesBindingsAndSeparatesChangedDescriptors(int descriptorCount)
     {
         var instructions = new List<Gen5ShaderInstruction>();

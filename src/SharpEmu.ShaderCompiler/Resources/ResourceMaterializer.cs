@@ -803,7 +803,7 @@ public static class ResourceMaterializer
             var found = result.Descriptors.FindIndex(existing => existing.SameAs(words));
             if (found < 0)
             {
-                if (result.Descriptors.Count >= ShaderResourceInfo.MaxImages)
+                if (result.Descriptors.Count >= ShaderResourceInfo.MaxIndirectImageCandidates)
                 {
                     failure = ResourceMaterializationFailure.ImageCapacityExceeded;
                     return false;
@@ -896,13 +896,7 @@ public static class ResourceMaterializer
                 return Fail("indirect image table has an invalid root or candidate count");
             }
 
-            if (imageCount + table.Descriptors.Count - 1 > ShaderResourceInfo.MaxImages)
-            {
-                failure = ResourceMaterializationFailure.ImageCapacityExceeded;
-                return Fail("indirect image candidates exceed the dense image resource limit");
-            }
-
-            imageCount += table.Descriptors.Count - 1;
+            imageCount = checked(imageCount + table.Descriptors.Count - 1);
             mappingWordCount = checked(mappingWordCount + 1 + table.Keys.Count * 2);
         }
 
@@ -1310,7 +1304,7 @@ public static class ResourceMaterializer
 
     private sealed class SamplerPlan
     {
-        public uint[] PointSampler = new uint[ShaderResourceInfo.MaxSamplers];
+        public uint[] PointSampler = [];
         public uint SamplerCount;
     }
 
@@ -1318,15 +1312,11 @@ public static class ResourceMaterializer
     // copy; when every pair does, the sampler itself switches.
     private static bool BuildSamplerPlan(ShaderResourceInfo info, IReadOnlyList<ImageSpecialization> images, out SamplerPlan plan)
     {
-        plan = new SamplerPlan();
-        if (info.Samplers.Count > plan.PointSampler.Length)
-        {
-            return false;
-        }
+        plan = new SamplerPlan { PointSampler = new uint[info.Samplers.Count] };
 
         Array.Fill(plan.PointSampler, DescriptorConstants.NoIndex);
         plan.SamplerCount = (uint)info.Samplers.Count;
-        var usage = new byte[ShaderResourceInfo.MaxSamplers];
+        var usage = new byte[info.Samplers.Count];
         foreach (var pair in info.SampledPairs)
         {
             if (pair.Image >= images.Count || pair.Sampler >= info.Samplers.Count)
@@ -1351,11 +1341,6 @@ public static class ResourceMaterializer
             }
             else
             {
-                if (plan.SamplerCount >= ShaderResourceInfo.MaxSamplers)
-                {
-                    return false;
-                }
-
                 plan.PointSampler[index] = plan.SamplerCount++;
             }
         }
@@ -1489,16 +1474,16 @@ public static class ResourceMaterializer
         // sampling. Vulkan bakes compareEnable into VkSampler, so those uses cannot
         // share one host sampler. Split only the mixed cases; compare-only samplers
         // can use their existing slot.
-        var compareUsage = new byte[ShaderResourceInfo.MaxSamplers];
+        var compareUsage = new byte[info.Samplers.Count];
         foreach (var pair in info.SampledPairs)
         {
             var image = info.Images[(int)pair.Image];
             compareUsage[pair.Sampler] |= image.DepthCompare ? (byte)2 : (byte)1;
         }
 
-        var compareSampler = new uint[ShaderResourceInfo.MaxSamplers];
+        var compareSampler = new uint[info.Samplers.Count];
         Array.Fill(compareSampler, DescriptorConstants.NoIndex);
-        for (var index = 0; index < info.Samplers.Count; index++)
+        for (var index = 0; index < compareUsage.Length; index++)
         {
             if ((compareUsage[index] & 2) == 0)
             {
@@ -1510,11 +1495,6 @@ public static class ResourceMaterializer
                 info.Samplers[index].DepthCompare = true;
                 compareSampler[index] = (uint)index;
                 continue;
-            }
-
-            if (info.Samplers.Count >= ShaderResourceInfo.MaxSamplers)
-            {
-                throw new ResourcePlanException($"shader resource specialization exceeds the sampler limit: hash=0x{plan.Hash:X16}");
             }
 
             var sampler = info.Samplers[index].Clone();
