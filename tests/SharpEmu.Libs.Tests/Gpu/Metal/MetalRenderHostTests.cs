@@ -75,6 +75,30 @@ public sealed class MetalRenderHostTests : IDisposable
 
     public void Dispose() => _fatal.Dispose();
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Dispatch_BindsSamplersInCanonicalResourceOrder(bool aliased)
+    {
+        var executor = Executor(out var provider);
+        var info = new ShaderResourceInfo
+        {
+            Samplers = [new SamplerResource(), new SamplerResource(), new SamplerResource()],
+            SamplerBindings = aliased ? [0, 0, 2] : [0, 1, 2],
+        };
+        provider.ComputeOverride = Program(ShaderStageKind.Compute, 9, info);
+        provider.ComputeSnapshotOverride = new ResourceSnapshot
+        {
+            Samplers = [[0, 11, 0, 0], [0, aliased ? 11u : 22u, 0, 0], [0, 33, 0, 0]],
+        };
+        executor.Dispatch(1, _banks, 4, 1, 1, 1);
+        var stage = Assert.IsType<GuestStageBindings>(Assert.Single(_backend.Dispatches).Stage);
+        Assert.Equal(aliased ? new uint[] { 11, 33 } : new uint[] { 11, 22, 33 },
+            stage.Samplers.Select(sampler => sampler.Word1));
+        Assert.Equal(aliased ? new uint[] { 0, 2 } : new uint[] { 0, 1, 2 },
+            provider.ComputeOverride.Bindings!.Find(DescriptorBindingKind.Samplers)!.Resources);
+    }
+
     private static MetalCompiledGuestShader Shader(string name, Gen5MslStage stage) =>
         new(new Gen5MslShader($"// {name}", name, stage, AttributeCount: 0));
 
