@@ -61,6 +61,11 @@ internal interface IShaderPipelineHost
     bool PerVertexPixelInputsSupported => true;
     bool ClipDistanceEnabled => false;
 
+    bool MeshShadersSupported => false;
+
+    MeshShaderLimits MeshLimits => default;
+    uint MeshSubgroupSize => ComputeWave64Supported ? 64u : 32u;
+
     RenderHostLimits Limits { get; }
 
     // The sample counts a pipeline without attachments can rasterize at.
