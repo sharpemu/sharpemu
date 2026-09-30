@@ -1902,6 +1902,7 @@ public sealed partial class DirectExecutionBackend
 			"BmMjYxmew1w" or // scePthreadCondTimedwait
 			"Op8TBGY5KHg" or // pthread_cond_wait
 			"27bAgiJmOh0" or // pthread_cond_timedwait
+			"Zxa0VhQVTsk" or // sceKernelWaitSema
 			"n88vx3C5nW8" or // gettimeofday
 			"lLMT9vJAck0" or // clock_gettime
 			"-2IRUCO--PM" or // sceKernelReadTsc
