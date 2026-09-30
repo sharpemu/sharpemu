@@ -113,6 +113,7 @@ internal sealed class ShaderProgramCache
     private readonly IGuestGpuBackend _compiler;
     private readonly IShaderPipelineHost _host;
     private readonly Dictionary<ProgramKey, ProgramSourceEntry> _programs = new();
+    private readonly Dictionary<(ProgramKey Key, string Library), ProgramSourceEntry> _linkedPrograms = new();
     private readonly Dictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), Gen5ShaderProgram> _decoded = new();
     private readonly Dictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), ShaderCodeCapture> _codeCaptures = new();
     private readonly List<uint> _staticState = new(StageStaticKey.MaxWords);
@@ -148,7 +149,7 @@ internal sealed class ShaderProgramCache
 
     public int ProgramCount => _programs.Count;
 
-    public IEnumerable<ProgramSourceEntry> Entries => _programs.Values;
+    public IEnumerable<ProgramSourceEntry> Entries => _programs.Values.Concat(_linkedPrograms.Values);
 
     // The decoded instructions of a program, shared by every static variant of the same code.
     public Gen5ShaderProgram Decode(ShaderSource source)
@@ -292,6 +293,40 @@ internal sealed class ShaderProgramCache
             }
         }
 
+        if (hasShaderCalls)
+        {
+            ShaderResourcePlan? failedLinkedPlan = null;
+            var captureLinkedImages = CompiledShaderDump.ShouldWrite(source.Address, source.Hash);
+            try
+            {
+                var caller = entry.Program with { Address = source.Address };
+                var library = ShaderCallLibrary.Read(caller, entry.Plan.Memory, snapshot, _host.TryReadCleanGuestWord);
+                var linkedKey = (key, library.Identity);
+                if (!_linkedPrograms.TryGetValue(linkedKey, out var linked))
+                {
+                    var program = Gen5ShaderCallLinker.Link(caller, library.Calls);
+                    var plan = ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase,
+                        (uint)source.UserData.Length,
+                        beforeResourceTracking: captureLinkedImages ? plan => failedLinkedPlan = plan : null,
+                        waveSize: options.ComputeInfo?.WaveSize ?? 32u);
+                    failedLinkedPlan = null;
+                    linked = new ProgramSourceEntry { Program = program, Plan = plan,
+                        HasBitwiseExclusiveOr = program.Instructions.Any(instruction => instruction.Opcode.Contains("Xor", StringComparison.Ordinal)) };
+                    _linkedPrograms.Add(linkedKey, linked);
+                }
+                entry = linked;
+                if (!ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization))
+                    throw new InvalidOperationException("The linked shader resources could not be materialized.");
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or ResourcePlanException)
+            {
+                if (failedLinkedPlan is not null) ShaderImageDescriptorDump.Write(source, failedLinkedPlan, inputs);
+                if (CompiledShaderDump.ShouldWrite(source.Address, source.Hash))
+                    ShaderCallDump.Write(CompiledShaderDump.GetBasePath(source.Label, source.Address, source.Hash),
+                        entry.Program, snapshot, entry.Plan.Memory, _host.TryReadCleanGuestWord, exception as ShaderFunctionReadException);
+                throw new ShaderProgramRejectedException($"The shader call library cannot be linked: hash=0x{source.Hash:X16} error={exception.Message}");
+            }
+        }
         _imageDescriptorTrace.Record(source, entry.Plan, snapshot);
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPermutationLookup))
         {

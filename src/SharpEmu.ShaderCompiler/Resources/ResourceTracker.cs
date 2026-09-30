@@ -842,6 +842,15 @@ public sealed partial class ResourceTracker
             return;
         }
 
+        if (isBuffer && _graph.Program.FunctionBufferAccesses.Contains(memory.Pc))
+        {
+            if (access?.Handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 })
+                throw Failure(memory.Pc, "linked function buffer has no descriptor handle");
+            memory.DeviceDescriptor = true;
+            _info.UsesDeviceAddresses = true;
+            return;
+        }
+
         if (access is null)
         {
             if (HasIndirectPcTransferBefore(memory.Pc))

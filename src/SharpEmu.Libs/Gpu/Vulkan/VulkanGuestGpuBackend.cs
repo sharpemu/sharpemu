@@ -19,6 +19,8 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 {
     public string BackendName => "Vulkan";
 
+    public bool LinkedShaderCallsSupported => true;
+
 
     private static readonly IGuestCompiledShader DepthOnlyFragmentShader =
         new VulkanCompiledGuestShader(SpirvFixedShaders.CreateDepthOnlyFragment());

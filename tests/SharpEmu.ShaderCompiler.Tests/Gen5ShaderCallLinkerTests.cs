@@ -10,6 +10,20 @@ namespace SharpEmu.ShaderCompiler.Tests;
 
 public sealed class Gen5ShaderCallLinkerTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LinkedFunctionBuffers_KeepDescriptorsOnTheDevice(bool scalar)
+    {
+        var load = scalar ? ScalarBufferLoad(0, 0, 8) : BufferLoad(0, 0);
+        var linked = Link(Program(load, Sop1(8, "SSetpcB64", 0, Gen5Operand.Scalar(14))));
+        var plan = ShaderResourcePlan.Extract(linked, ShaderStage.Compute, Hash, 0, 4);
+        Assert.Single(plan.Memory.Entries);
+        Assert.All(plan.Memory.Entries, memory => Assert.True(memory.DeviceDescriptor));
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Info.UsesDeviceAddresses);
+    }
+
     [Fact]
     public void Link_PreservesGuestValuesAndResolvesEachReturn()
     {
