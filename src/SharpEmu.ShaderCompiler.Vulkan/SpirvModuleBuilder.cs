@@ -614,6 +614,14 @@ public sealed class SpirvModuleBuilder
         return id;
     }
 
+    public uint TypeArrayDistinct(uint elementType, uint count)
+    {
+        var length = Constant(TypeInt(32, false), count);
+        var id = AllocateId();
+        Emit(_typesConstantsGlobals, SpirvOp.TypeArray, id, elementType, length);
+        return id;
+    }
+
     public uint TypeRuntimeArray(uint elementType)
     {
         if (_runtimeArrayTypes.TryGetValue(elementType, out var existing))

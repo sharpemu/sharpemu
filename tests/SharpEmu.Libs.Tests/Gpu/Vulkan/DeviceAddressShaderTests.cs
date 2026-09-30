@@ -88,6 +88,101 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
     }
 
     [Theory]
+    [InlineData(0x10000u)]
+    [InlineData(0x80000000u)]
+    public void SharedFlatAddressReadAtRunTime_UsesLocalStorage(uint segment)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var program = Program(
+            MoveVector(0, 2, 0),
+            GlobalMemory(8, "GlobalLoadDword", AddressLow, 2, 3, 3),
+            MoveVector(16, 4, 0x12345678),
+            GlobalMemory(24, "FlatStoreDword", 125, 2, 4, 4),
+            GlobalMemory(32, "FlatLoadDword", 125, 2, 5, 5),
+            BufferAccess(40, "BufferStoreDword", ResultRegister, 0, 1, vectorData: 5),
+            EndProgram(48));
+        var run = new Run(vulkan, program);
+        var data = new byte[16];
+        WriteWord(data, 0, segment);
+        run.MapPage(GuestBase, data);
+        run.Dispatch(GuestBase);
+        var result = run.ResultWord(0);
+        var faults = run.FaultWords();
+        run.Finish(output, nameof(SharedFlatAddressReadAtRunTime_UsesLocalStorage));
+        Assert.All(faults, word => Assert.Equal(0u, word));
+        Assert.Equal(0x12345678u, result);
+    }
+
+    [Theory]
+    [InlineData(235u, 0u)]
+    [InlineData(237u, 0u)]
+    [InlineData(235u, 131072u)]
+    [InlineData(237u, 131072u)]
+    [InlineData(0x80000000u, 0u)]
+    [InlineData(0x70000000u, 0u)]
+    [InlineData(0x80000000u, 131072u)]
+    [InlineData(0x70000000u, 131072u)]
+    public void FlatApertures_UseLocalStorageAndRejectOutOfRange(uint aperture, uint offset)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var read = aperture is 235 or 0x80000000
+            ? new Gen5ShaderInstruction(32, Gen5ShaderEncoding.Ds, "DsReadB32", [0u, 0u],
+                [Gen5Operand.Vector(2)], [Gen5Operand.Vector(5)], new Gen5DataShareControl(0, 0, false))
+            : new Gen5ShaderInstruction(32, Gen5ShaderEncoding.Flat, "ScratchLoadDword", [0u, 0u],
+                [Gen5Operand.Vector(2)], [Gen5Operand.Vector(5)], new Gen5GlobalMemoryControl(1, 2, 0, 5, 125, 0, false, false, false));
+        var program = Program(
+            aperture < 256 ? Sop1(0, "SMovB64", 8, Gen5Operand.Source(aperture)) : MoveScalar(0, 9, aperture),
+            MoveVector(4, 2, offset),
+            Vop1(12, "VMovB32", 3, Gen5Operand.Scalar(9)),
+            MoveVector(16, 4, 0x12345678),
+            GlobalMemory(24, "FlatStoreDword", 125, 2, 4, 4, 0),
+            offset == 0 ? read : GlobalMemory(32, "FlatLoadDword", 125, 2, 5, 5, 0),
+            BufferAccess(40, "BufferStoreDword", ResultRegister, 0, 1, vectorData: 5),
+            EndProgram(48));
+        var run = new Run(vulkan, program);
+        run.Dispatch(GuestBase);
+        Assert.Equal(offset == 0 ? 0x12345678u : 0u, run.ResultWord(0));
+        Assert.All(run.FaultWords(), word => Assert.Equal(0u, word));
+        run.Finish(output, nameof(FlatApertures_UseLocalStorageAndRejectOutOfRange));
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(0x78000000u)]
+    public void FlatSegments_DoNotAliasGlobalMemory(uint segment)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var program = Program(
+            MoveVector(0, 2, (uint)GuestBase),
+            MoveVector(8, 3, segment),
+            MoveVector(16, 4, 0x12345678),
+            GlobalMemory(24, "FlatStoreDword", 125, 2, 4, 4),
+            GlobalMemory(32, "FlatLoadDword", 125, 2, 5, 5),
+            BufferAccess(40, "BufferStoreDword", ResultRegister, 0, 1, vectorData: 5),
+            EndProgram(48));
+        var run = new Run(vulkan, program);
+        run.MapPage(GuestBase, new byte[16]);
+        if (segment == 0)
+        {
+            Assert.Single(run.Plan.WrittenRangeSlotByHandle);
+            run.Dispatch(GuestBase, (GuestBase, 16));
+        }
+        else
+        {
+            Assert.Empty(run.Plan.WrittenRangeSlotByHandle);
+            run.Dispatch(GuestBase);
+        }
+        var expected = segment == 0 ? 0x12345678u : 0u;
+        Assert.Equal(expected, run.PageWord(GuestBase, 0));
+        Assert.Equal(expected, run.ResultWord(0));
+        Assert.All(run.FaultWords(), word => Assert.Equal(0u, word));
+        run.Finish(output, nameof(FlatSegments_DoNotAliasGlobalMemory));
+    }
+
+    [Theory]
     [InlineData("VPkAddI16", false, 0x80008000u)]
     [InlineData("VPkAddI16", true, 0x7FFF7FFFu)]
     [InlineData("VPkSubI16", false, 0x7FFE7FFEu)]
@@ -113,6 +208,30 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
     [Fact]
     public void PageBits_MatchTheHostCache() =>
         Assert.Equal(GuestBufferCache.CachingPageBits, Gen5SpirvTranslator.DeviceAddressPageBits);
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PrivateFlatStores_AreIsolatedBetweenInvocations(bool explicitAperture)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var program = Program(
+            explicitAperture ? MoveScalar(0, 9, 0x70000000) : Sop1(0, "SMovB64", 8, Gen5Operand.Source(237)),
+            MoveVector(4, 2, 0),
+            Vop1(8, "VMovB32", 3, Gen5Operand.Scalar(9)),
+            Vop2(12, "VAddU32", 4, Operand(16), Gen5Operand.Vector(0)),
+            GlobalMemory(16, "FlatStoreDword", 125, 2, 4, 4),
+            new Gen5ShaderInstruction(24, Gen5ShaderEncoding.Flat, "ScratchLoadDword", [0u, 0u],
+                [Gen5Operand.Vector(2)], [Gen5Operand.Vector(5)], new Gen5GlobalMemoryControl(1, 2, 0, 5, 125, 0, false, false, false)),
+            Vop2(32, "VLshlrevB32", 2, Operand(2), Gen5Operand.Vector(0)),
+            BufferAccess(36, "BufferStoreDword", ResultRegister, 0, 1, vectorData: 5, offsetEnabled: true, vectorAddress: 2),
+            EndProgram(44));
+        var run = new Run(vulkan, program, threadCount: 8);
+        run.Dispatch(GuestBase);
+        for (uint lane = 0; lane < 8; lane++) Assert.Equal(16 + lane, run.ResultWord(lane * 4));
+        run.Finish(output, nameof(PrivateFlatStores_AreIsolatedBetweenInvocations));
+    }
+
 
     [Fact]
     public void GlobalLoadThroughThePageTable_ReturnsTheGuestBytes()
@@ -433,7 +552,7 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
         {
             var (plan, resources, layout) = Prepare(program);
             Plan = plan;
-            Request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = threadCount, ThreadCountX = threadCount };
+            Request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = threadCount, ThreadCountX = threadCount, ScratchDwords = 32 };
             Assert.True(resources.Info.UsesDeviceAddresses);
             Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request, out var shader, out var error), error);
             _harness = new ImageTestHarness(vulkan);

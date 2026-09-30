@@ -382,7 +382,7 @@ internal sealed class WaveMaskSelectorBounds(ScalarValue firstRecord, ScalarValu
         {
             if (index < 0 || index >= _instructions.Length || !IsBranch(_instructions[index])) return -1;
             var instruction = _instructions[index];
-            var target = unchecked(instruction.Pc + 4 + (uint)((short)instruction.Words[0] * 4));
+            if (!Ir.Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target)) return -1;
             // A branch may target a wait that was removed from the matching sequence.
             return Array.FindIndex(_instructions, candidate => candidate.Pc >= target);
         }

@@ -876,6 +876,20 @@ public static partial class Gen5SpirvTranslator
                 return TryEmitScratchMemory(instruction, control, out error);
             }
 
+            if (control.UsesFlatAddress &&
+                (instruction.Opcode.StartsWith("FlatLoadDword", StringComparison.Ordinal) ||
+                 instruction.Opcode.StartsWith("FlatStoreDword", StringComparison.Ordinal)))
+            {
+                return TryEmitFlatDwordMemory(instruction, control, out error);
+            }
+
+            if (control.UsesFlatAddress && _request.Program.Instructions.Any(operation =>
+                    operation.Sources.Any(source => source.Kind == Gen5OperandKind.EncodedConstant && source.Value is >= 235 and <= 238)))
+            {
+                error = $"local aperture access is not supported for {instruction.Opcode}";
+                return false;
+            }
+
             var request = _request;
             if (!request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex))
             {

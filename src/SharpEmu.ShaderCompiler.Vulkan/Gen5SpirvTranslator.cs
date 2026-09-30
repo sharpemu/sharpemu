@@ -180,6 +180,7 @@ public static partial class Gen5SpirvTranslator
         private uint _scratch;
         private uint _scratchElementPointer;
         private uint _scratchDwordCount;
+        private uint _ldsDwordCount;
         private uint _positionOutput;
         private uint _pointSizeOutput;
         private uint _clipDistanceOutput;
@@ -601,15 +602,14 @@ public static partial class Gen5SpirvTranslator
         private void DeclareScratch()
         {
             if (!_request.Program.Instructions.Any(static instruction =>
-                    instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal)) &&
-                !_request.Memory.Entries.Any(static memory =>
-                    memory.AddressSpace is FlatAddressSpace.Private or FlatAddressSpace.SharedOrPrivate))
+                    instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal) ||
+                    instruction.Opcode.StartsWith("Flat", StringComparison.Ordinal)))
             {
                 return;
             }
 
             _scratchDwordCount = Math.Max(_request.ScratchDwords, 1u);
-            var arrayType = _module.TypeArray(_uintType, _scratchDwordCount);
+            var arrayType = _module.TypeArrayDistinct(_uintType, _scratchDwordCount);
             var arrayPointer = _module.TypePointer(SpirvStorageClass.Private, arrayType);
             _scratchElementPointer = _module.TypePointer(SpirvStorageClass.Private, _uintType);
             _scratch = _module.AddGlobalVariable(
@@ -686,6 +686,7 @@ public static partial class Gen5SpirvTranslator
             var dwordCount = _stage == Gen5SpirvStage.Compute
                 ? ComputeLdsGuestDwordCount()
                 : PrivateLdsDwordCount;
+            _ldsDwordCount = dwordCount;
             _ldsDwordMask = dwordCount - 1;
             var arrayDwordCount = UsesWave64Exchange() && dwordCount < LdsDwordCount
                 ? dwordCount + Wave64ExchangeDwordCount
@@ -8387,14 +8388,13 @@ public static partial class Gen5SpirvTranslator
             _module.AddLabel(mergeLabel);
         }
 
-        // Only instructions that address LDS memory need the array. ds_swizzle/ds_bpermute move data
-        // between lanes and GDS instructions use the global data share, so a graphics stage using
-        // just those must not get an 8 KiB zero-initialized per-invocation array: Metal pays for it
-        // in compile time (seconds for a large pixel shader) and in private memory per pixel.
+        // Allocate LDS for direct or FLAT access, but not for lane-only or GDS operations.
         private bool UsesLds() =>
             _request.Program.Instructions.Any(static instruction =>
-                instruction.Control is Gen5DataShareControl { Gds: false } &&
-                instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32")) ||
+                (instruction.Control is Gen5DataShareControl { Gds: false } &&
+                 instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32")) ||
+                instruction.Control is Gen5GlobalMemoryControl { UsesFlatAddress: true } ||
+                instruction.Sources.Any(source => source.Kind == Gen5OperandKind.EncodedConstant && source.Value is 235 or 236)) ||
             _request.Memory.Entries.Any(static memory =>
                 memory.AddressSpace is FlatAddressSpace.Shared or FlatAddressSpace.SharedOrPrivate);
 

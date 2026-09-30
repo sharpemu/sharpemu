@@ -3866,6 +3866,8 @@ public static partial class Gen5SpirvTranslator
                 Gen5OperandKind.VectorRegister => LoadV(operand.Value),
                 Gen5OperandKind.ScalarRegister => LoadS(operand.Value),
                 Gen5OperandKind.LiteralConstant => UInt(operand.Value),
+                Gen5OperandKind.EncodedConstant when operand.Value is >= 235 and <= 238 =>
+                    UInt((uint)(Gen5InlineConstants.DecodeAperture64(operand.Value) >> 32)),
                 Gen5OperandKind.EncodedConstant when operand.Value == 251 =>
                     _module.AddInstruction(
                         SpirvOp.Select,
