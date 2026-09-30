@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -206,7 +207,9 @@ public sealed partial class RenderExecutor
         in IndexSource indexSource,
         bool primitiveRestart,
         bool setBindDebug,
-        bool setAutoDebug)
+        bool setAutoDebug,
+        IndexedDrawTrace.Sample? indexedTrace = null,
+        ulong packetAddress = 0)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawResourcePreparation);
         var context = banks.Context;
@@ -222,6 +225,7 @@ public sealed partial class RenderExecutor
         }
         catch (DrawImageTypeMismatchException rejection)
         {
+            IndexedDrawTrace.Write(indexedTrace, "resource-rejected", submitId, packetAddress);
             if (_strictDrawResources)
             {
                 throw _host.Fatal(rejection.Message);
@@ -310,6 +314,9 @@ public sealed partial class RenderExecutor
             SetDrawDebugPhase(submitId, in draw, 0x500);
         }
 
+        if (indexedTrace is { } trace)
+            _host.InsertDrawTraceMarker(IndexedDrawTrace.CreateLabel(trace, submitId, packetAddress));
+
         if (emission.IndirectArgumentsAddress != 0)
         {
             // Uploads and shader writes end with barriers to all commands, so the
@@ -320,6 +327,7 @@ public sealed partial class RenderExecutor
         {
             EmitDraw(banks.UserConfig, vertexInput, in draw, in emission);
         }
+        IndexedDrawTrace.Write(indexedTrace, "emitted", submitId, packetAddress);
         if (setAutoDebug)
         {
             SetDrawDebugPhase(submitId, in draw, 0x600);

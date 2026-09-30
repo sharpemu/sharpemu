@@ -995,6 +995,12 @@ internal static unsafe partial class VulkanVideoPresenter
             CountDraw();
         }
 
+        void IRenderHost.InsertDrawTraceMarker(string label)
+        {
+            var command = BeginBatchedGuestCommands();
+            InsertDebugLabel(command, label);
+        }
+
         void IRenderHost.DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);

@@ -296,6 +296,7 @@ public sealed partial class GpuCommandInterpreter
 
             if (PacketHeader.IsPredicated(header) && PredicateSkip)
             {
+                TraceSkippedPackets("predicated", packetAddress, length, PacketHeader.Opcode(header));
                 cursor.Offset += length;
                 execution.MadeProgress = true;
                 continue;
@@ -421,6 +422,15 @@ public sealed partial class GpuCommandInterpreter
         {
             throw _host.Fatal($"The command stream cannot read guest memory: address=0x{address:X16} size={destination.Length}.");
         }
+    }
+
+    internal void TraceSkippedPackets(string kind, ulong packetAddress, uint dwords, uint detail)
+    {
+        if (IndexedDrawTrace.Enabled)
+            SkippedIndexedDrawScanner.Scan(_host.Memory.TryRead, packetAddress, dwords, IndexTypeAndSize, IndexBaseAddress,
+                (count, type, address, packet) => IndexedDrawTrace.Write(
+                    IndexedDrawTrace.Capture(count, type, address, _host.Memory.TryRead),
+                    $"{kind}-candidate", SubmitId, packet), IndexedDrawTrace.ScanIssue);
     }
 
     internal void WriteDword(ulong address, uint value)

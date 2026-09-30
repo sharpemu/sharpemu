@@ -671,6 +671,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"queue={_activeGuestQueue.Name} submission={_activeGuestQueue.SubmissionId} " +
                     $"request={requestId} addr=0x{displayBuffer.Address:X16} " +
                     $"size={extent.Width}x{extent.Height}");
+                IndexedDrawTrace.OnFlip(version);
                 VisibilityResultTrace.OnFlip(version);
                 RenderDocCapture.OnGuestFlipBoundary(version);
                 VideoOutExports.TraceGpuFlip(_guestMemory, handle, index, flipMode, flipArg, displayBuffer.Address, VideoOutExports.GetFlipEventCount(requestId));
