@@ -57,6 +57,49 @@ public sealed class DescriptorBindingAliasTests
         Compile(plan, resources);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(32)]
+    [InlineData(96)]
+    public void MixedDepthSamplersKeepSnapshotCopiesBeyondTheFormerLimit(int descriptorCount)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        for (uint index = 0; index < descriptorCount; index++)
+        {
+            var pc = index * 32;
+            instructions.Add(ScalarLoad(pc, 0, 16, 8, (int)index * 48));
+            instructions.Add(ScalarLoad(pc + 8, 0, 24, 4, (int)index * 48 + 32));
+            instructions.Add(Image(pc + 16, "ImageSampleLz", 16, 24));
+            instructions.Add(Image(pc + 24, "ImageSampleCLz", 16, 24));
+        }
+        instructions.Add(EndProgram((uint)descriptorCount * 32));
+        var plan = Extract(Program([.. instructions]), userDataCount: 2);
+        Assert.Equal(descriptorCount, plan.Info.Samplers.Count);
+        var memory = new TestWordMemory { Words = new uint[0x10000 / 4] };
+        for (var index = 0; index < descriptorCount; index++)
+        {
+            var address = 0x1000 + (ulong)index * 48;
+            var descriptor = ResourceTrackerTests.ImageDescriptor();
+            descriptor[1] = 22u << 20;
+            ResourceTrackerTests.WriteImage(memory, address, descriptor);
+            memory.At(address + 32) = (uint)index;
+        }
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], memory.Read, memory.Read),
+            ref snapshot, ref specialization));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        Assert.Equal(descriptorCount * 2, snapshot.Samplers.Length);
+        Assert.Equal(snapshot.Samplers.Length, resources.Info.Samplers.Count);
+        for (var index = 0; index < descriptorCount; index++)
+        {
+            Assert.Equal((uint)index, snapshot.Samplers[index][0]);
+            Assert.Equal(snapshot.Samplers[index], snapshot.Samplers[index + descriptorCount]);
+            Assert.False(resources.Info.Samplers[index].DepthCompare);
+            Assert.True(resources.Info.Samplers[index + descriptorCount].DepthCompare);
+        }
+    }
+
     private static void Compile(ShaderResourcePlan plan, SpecializedResourceInfo resources)
     {
         var layout = BindingLayout.Allocate(resources.Info,
