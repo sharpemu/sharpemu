@@ -208,6 +208,7 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
     [Fact]
     public void PageBits_MatchTheHostCache() =>
         Assert.Equal(GuestBufferCache.CachingPageBits, Gen5SpirvTranslator.DeviceAddressPageBits);
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -232,6 +233,82 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
         run.Finish(output, nameof(PrivateFlatStores_AreIsolatedBetweenInvocations));
     }
 
+    [Fact]
+    public void DescriptorLoadedThroughRuntimeScalarAddress_ReadsTheBuffer()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var program = Program(
+            Vop2(0, "VAddU32", 2, Operand((uint)GuestBase), Gen5Operand.Vector(0)),
+            ReadFirstLane(8, 12, 2),
+            MoveScalar(12, 13, (uint)(GuestBase >> 32)),
+            ScalarLoad(16, 12, 16, count: 4),
+            BufferAccess(24, "BufferLoadDword", 16, 0, 1, vectorData: 5),
+            BufferAccess(32, "BufferStoreDword", ResultRegister, 0, 1, vectorData: 5),
+            EndProgram(40));
+        var run = new Run(vulkan, program);
+        Assert.True(run.Plan.Memory.Find(24)!.DeviceDescriptor);
+        var data = new byte[64];
+        WriteWord(data, 0, (uint)(GuestBase + 32));
+        WriteWord(data, 4, (uint)(GuestBase >> 32) | 0x40000);
+        WriteWord(data, 8, 4);
+        WriteWord(data, 12, 0x16204);
+        WriteWord(data, 32, 0x12345678);
+        run.MapPage(GuestBase, data);
+        run.Dispatch(GuestBase);
+        var result = run.ResultWord(0);
+        var faults = run.FaultWords();
+        run.Finish(output, nameof(DescriptorLoadedThroughRuntimeScalarAddress_ReadsTheBuffer));
+        Assert.All(faults, word => Assert.Equal(0u, word));
+        Assert.Equal(0x12345678u, result);
+    }
+
+    [Theory]
+    [InlineData(8u, 1u)]
+    [InlineData(4u, 1u)]
+    [InlineData(8u, 2u)]
+    [InlineData(4u, 2u)]
+    public void DeviceRecordCount_ControlsIndexedStoreBounds(uint recordCount, uint iterations)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+
+        var program = Program(
+            MoveVector(0, OffsetRegister, 0),
+            GlobalMemory(4, "GlobalLoadDword", AddressLow, OffsetRegister, 1, 1, 0),
+            ReadFirstLane(12, 10, 1),
+            MoveScalarRegister(16, 8, AddressLow),
+            Vop2(20, "VOrB32", 2, Gen5Operand.Scalar(AddressHigh), Operand(0x40000)) with
+            {
+                Control = new Gen5SdwaControl(6, 0, 6, 6, false, false, 0, 0, 0, false, null),
+            },
+            ReadFirstLane(28, 9, 2),
+            MoveScalar(32, 11, 0x16204),
+            MoveScalar(36, 12, 0),
+            MoveVector(40, 2, 0x12345678),
+            BufferAccess(48, "BufferStoreDword", 8, 16, 1, vectorData: 2, indexEnabled: true),
+            Vop2(56, "VLshlrevB32", 3, Operand(2), Gen5Operand.Vector(0)),
+            BufferAccess(60, "BufferStoreDword", ResultRegister, 0, 1, vectorData: 1,
+                offsetEnabled: true, vectorAddress: 3),
+            Sop2(68, "SAddU32", 12, Gen5Operand.Scalar(12), Operand(1)),
+            Sopc(72, "SCmpLtU32", Gen5Operand.Scalar(12), Operand(iterations)),
+            Branch(76, "SCbranchScc1", -8),
+            EndProgram(80));
+        var run = new Run(vulkan, program, threadCount: 8);
+        var data = new byte[64];
+        WriteWord(data, 0, recordCount);
+        run.MapPage(GuestBase, data);
+        run.Dispatch(GuestBase);
+
+        Assert.Equal(recordCount, run.ResultWord(0));
+        for (uint index = 0; index < 8; index++)
+        {
+            Assert.Equal(index + 4 < recordCount ? 0x12345678u : 0u,
+                run.PageWord(GuestBase, 16 + index * 4));
+        }
+        Assert.Equal(0u, run.FaultWord(GuestBase));
+        run.Finish(output, nameof(DeviceRecordCount_ControlsIndexedStoreBounds));
+    }
 
     [Fact]
     public void GlobalLoadThroughThePageTable_ReturnsTheGuestBytes()
