@@ -23,7 +23,7 @@ public sealed partial class ScalarValueGraph
     private readonly List<ScalarValue> _values = [];
 
     private ScalarValueGraph(Gen5ShaderProgram program, IrControlFlowGraph controlFlow, MemoryAccessTable memory, uint userDataBase, uint userDataCount,
-        uint waveSize)
+        uint waveSize, ulong excludedUserDataRegisters)
     {
         Program = program;
         WaveSize = waveSize;
@@ -31,6 +31,7 @@ public sealed partial class ScalarValueGraph
         Memory = memory;
         UserDataBase = userDataBase;
         UserDataCount = userDataCount;
+        ExcludedUserDataRegisters = excludedUserDataRegisters;
     }
 
     public Gen5ShaderProgram Program { get; }
@@ -38,6 +39,7 @@ public sealed partial class ScalarValueGraph
     public MemoryAccessTable Memory { get; }
     public uint UserDataBase { get; }
     public uint UserDataCount { get; }
+    public ulong ExcludedUserDataRegisters { get; }
     // A wave32 lane mask fills one SGPR; wave64 fills an aligned pair.
     public uint WaveSize { get; }
 
@@ -60,11 +62,11 @@ public sealed partial class ScalarValueGraph
             : _invariantPhis.GetOrAdd(value, static (phi, memory) => ScalarValueEquivalence.ResolveInvariantPhi(memory, phi), Memory);
 
     public static ScalarValueGraph Build(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
-        IReadOnlySet<uint>? fixedFunctionVertexLoads = null, uint waveSize = 64)
+        IReadOnlySet<uint>? fixedFunctionVertexLoads = null, uint waveSize = 64, ulong excludedUserDataRegisters = 0)
     {
         var controlFlow = IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance);
         var graph = new ScalarValueGraph(program, controlFlow, MemoryAccessTable.Build(program, fixedFunctionVertexLoads), userDataBase, userDataCount,
-            waveSize);
+            waveSize, excludedUserDataRegisters);
         new Builder(graph).Run();
         return graph;
     }

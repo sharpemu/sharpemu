@@ -133,6 +133,13 @@ public sealed class ShaderCallLibraryTests
         Assert.Equal(first.Identity, Read(caller).Identity);
         var site = Assert.Single(first.Calls);
         Assert.Equal(36ul, site.ReturnAddress);
+        var relocated = caller with
+        {
+            Address = 0x8000,
+            Instructions = caller.Instructions.Select(instruction => instruction.Pc == 32
+                ? instruction with { AddressOffset = 0x1_0000_0020UL } : instruction).ToArray(),
+        };
+        Assert.Equal(0x1_0000_8024UL, Assert.Single(Read(relocated).Calls).ReturnAddress);
         Assert.Equal(0x3000ul, Assert.Single(site.Targets).Argument);
         Assert.DoesNotContain(Gen5ShaderCallLinker.Link(caller, first.Calls).Instructions,
             instruction => instruction.Opcode == "SSwappcB64");
