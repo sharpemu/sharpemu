@@ -340,6 +340,14 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine(
 				$"[LOADER][TRACE] bootstrap_call#{num}: op=0x{value:X16} sym_ptr=0x{value2:X16} sym='{symbolText}' out_ptr=0x{num3:X16} ret=0x{num7:X16}");
 		}
+		// Once the host is shutting down, a guest thread still running reaches no more HLE: the
+		// services behind the imports are being torn down, and a title that sees them fail (a null
+		// command buffer from the GPU library, say) crashes the process on its way out.
+		if (_forcedGuestExit && !ActiveForcedGuestExit && TryEndGuestSliceForShutdown(argPackPtr))
+		{
+			cpuContext[CpuRegister.Rax] = 1uL;
+			return 1uL;
+		}
 		if (!isGuestWorker &&
 			!ActiveForcedGuestExit &&
 			ShouldForceGuestExitOnImportLoop(in importStubEntry, num7, num, value, value2))
@@ -1765,6 +1773,20 @@ public sealed partial class DirectExecutionBackend
 
 			frame = next;
 		}
+	}
+
+	// Returns the import straight to the host entry stub, which ends this guest slice.
+	private unsafe bool TryEndGuestSliceForShutdown(nint argPackPtr)
+	{
+		ulong sentinel = ActiveEntryReturnSentinelRip;
+		if (sentinel < 65536 || !TryPatchActiveGuestReturnSlot(sentinel))
+		{
+			return false;
+		}
+
+		*(ulong*)(argPackPtr + 96) = sentinel;
+		ActiveForcedGuestExit = true;
+		return true;
 	}
 
 	private unsafe bool TryForceGuestExitToHostStub(nint argPackPtr, long dispatchIndex, ulong returnRip, string nid)
