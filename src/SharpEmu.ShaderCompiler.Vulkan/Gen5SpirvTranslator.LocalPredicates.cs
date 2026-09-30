@@ -11,7 +11,7 @@ public static partial class Gen5SpirvTranslator
 
         private void FindLocalComparisonPredicates(IReadOnlyList<ShaderBlock> blocks)
         {
-            if (_stage != Gen5SpirvStage.Compute || !_emulateWave64) return;
+            if (_stage != Gen5SpirvStage.Compute || _waveLowering is not EmulatedWave64Lowering) return;
             foreach (var block in blocks)
             {
                 var maskIsUnused = false;
