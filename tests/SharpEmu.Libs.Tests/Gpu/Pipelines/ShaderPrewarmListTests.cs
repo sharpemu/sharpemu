@@ -145,6 +145,42 @@ public sealed class ShaderPrewarmListTests : IDisposable
     }
 
     [Fact]
+    public void ReloadKeepsSeparateContinuationsAtTheSameEntryAddress()
+    {
+        using (var list = Open())
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+        using (var list = Open())
+        {
+            var (original, code) = Assert.Single(list.LoadedComputes());
+            foreach (var offset in new ulong[] { 0x100, 0x1_0000_0000 })
+            {
+                var capture = new ShaderCodeCapture
+                {
+                    Hash = code.Hash, CodeSize = code.CodeSize, Address = code.Address,
+                    Generation = code.Generation, Ranges = code.Ranges,
+                    Fused = new FusedCodeParts(HeaderAddress, code.Address + offset, HeaderAddress + offset),
+                };
+                list.RecordCompute(capture, new ComputePrewarmRecord
+                {
+                    Hash = original.Hash, CodeSize = original.CodeSize, Address = original.Address,
+                    ContinuationAddressOffset = offset, UserDataBase = original.UserDataBase,
+                    UserDataCount = original.UserDataCount, PushDataCursor = original.PushDataCursor,
+                    Info = original.Info, SystemRegisters = original.SystemRegisters,
+                    Specialization = original.Specialization,
+                });
+            }
+        }
+        using var reloaded = Open();
+        var records = reloaded.LoadedComputes();
+        Assert.Equal(3, records.Count);
+        Assert.Equal(new ulong[] { 0, 0x100, 0x1_0000_0000 },
+            records.Select(entry => entry.Record.ContinuationAddressOffset));
+        foreach (var (record, code) in records)
+            Assert.Equal(record.ContinuationAddressOffset,
+                code.Fused is { } fused ? unchecked(fused.ContinuationAddress - code.Address) : 0);
+    }
+
+    [Fact]
     public void TheStampMatchesOnlyTheTextLastWritten()
     {
         using var list = Open();
