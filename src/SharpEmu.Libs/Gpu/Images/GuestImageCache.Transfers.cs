@@ -272,6 +272,7 @@ public sealed unsafe partial class GuestImageCache
         if (request.Role != ImageRole.DepthTarget)
         {
             var plan = PlanColorTransfer(image, request.Role, TransferDirection.Upload);
+            if (ImageClearTrace.Enabled && info.IsVolume) ReportVolumeProvenance(image);
             if (ImageClearTrace.Enabled && IsTracedImage(info))
             {
                 TraceVolumeState("upload", image, request,

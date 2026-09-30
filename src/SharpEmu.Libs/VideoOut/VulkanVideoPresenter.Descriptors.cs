@@ -199,6 +199,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 Gpu.Images.ImageTraceRange.NoteFollowedImage(program.Hash, index,
                     resolution.Request.Description.Data.Address, resolution.Request.Description.Data.Size);
+                _imageCache.TraceTextureBinding(program.Hash, index, words, resolution.Request);
             }
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
             BindImage(imageIdentifier, storage);
