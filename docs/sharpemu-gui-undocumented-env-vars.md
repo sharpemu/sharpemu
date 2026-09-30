@@ -30,6 +30,9 @@ Ray-traced effects can be missing or incorrect.
 
 ## How to use a variable
 
+See [Import results and diagnostic logging](import-result-logging.md) for expected
+result filters, mutex warning sampling, and diagnostic selection.
+
 1. Set the variable in the shell before you start the emulator or the GUI.
 2. You can also enter additional env vars using the button next to the "Play" button from GUI.
 3. The GUI also accepts a variable in the `EnvironmentToggles` list of its settings file. Write `NAME` or `NAME=value`. An entry without a value gets the value `1`.
@@ -175,7 +178,7 @@ These variables apply to audio output and video playback.
 | `SHARPEMU_BINK_MODE` | text (`native`, `ffmpeg`, `dummy`, `skip`, `guest`) | Selects how the emulator handles Bink movies. `native` or `ffmpeg` decodes on the host and is the default. `dummy` shows a placeholder frame, `skip` skips the movie, and `guest` lets the guest decode. | `HostMovieBridge.cs` |
 | `SHARPEMU_LOG_MOVIE_SYNC` | `1` | Records the difference between the movie clock and the guest audio position during movie playback. The emulator reads the value one time at start. | `MediaFramePlayback.cs` |
 | `SHARPEMU_MOVIE_CLOCK` | `wall` | Sets the time base for host-decoded movie playback. By default, playback follows the guest audio clock and uses the wall clock when no guest audio flows. `wall` makes playback always use the wall clock. | `MediaFramePlayback.cs` |
-| `SHARPEMU_TRACE_AVPLAYER_IMAGES` | `1` | Set to `1` to write `[AVPLAYER][TRACE]` lines for video buffer addresses and the first 16 video frame payloads. It also marks the video buffer ranges for image traces in other components. The default is off. | `AvPlayerExports.cs` |
+| `SHARPEMU_TRACE_AVPLAYER_IMAGES` | `1` | Traces video buffer addresses, the first 16 frame payload summaries per process, and stop, close, and end-of-stream transitions. Transition lines include the video timestamp and playback clock. It also enables video buffer range checks for image traces. The default is off. | `AvPlayerExports.cs` |
 
 ## Input
 
@@ -295,10 +298,10 @@ Each variable adds one group of messages to the log. The default is off.
 | `SHARPEMU_LOG_PROC_PARAM` | `1` | Shows the address and the contents of the process parameter block of the guest program. The default is off. | `KernelRuntimeCompatExports.cs` |
 | `SHARPEMU_LOG_PS5_USER_SLOTS` | `1` | Adds four 0x60-byte memory dumps to the IL2CPP exception diagnostic. The dumps start at the fixed guest address 0x801A73110 and have a step of 0x51C8 bytes. | `DirectExecutionBackend.Imports.cs` |
 | `SHARPEMU_LOG_PSML` | `1` | Writes `psml.` trace lines for the PSML library calls to stderr. The default is off. | `PsmlExports.cs` |
-| `SHARPEMU_LOG_PTHREADS` | `1` | Writes trace lines for the pthread calls of the guest. It also starts the condition variable trace of `SHARPEMU_LOG_PTHREAD_CONDS`. The default is off. | `KernelPthreadCompatExports.cs`, `KernelExports.cs` |
+| `SHARPEMU_LOG_PTHREADS` | `1` | Writes pthread trace lines and enables the condition variable trace. Mutex lines include the guest object words, owner, recursion count, type, and result. These lines do not require an error and do not contain retained event history. The default is off. | `KernelPthreadCompatExports.cs`, `KernelExports.cs` |
 | `SHARPEMU_LOG_PTHREAD_CONDS` | `1` | Writes a `pthread_cond_` trace line for each condition variable operation. The line shows the waiter count, the signal epoch, and the result. | `KernelPthreadCompatExports.cs` |
 | `SHARPEMU_LOG_PTHREAD_FASTPATH` | `1` | Writes trace lines for the mutex fast path. It shows the first 16 fast-path unlocks with the mutex object words. It shows one busy result for each mutex address. | `KernelPthreadCompatExports.cs` |
-| `SHARPEMU_LOG_PTHREAD_MUTEX_FILTER` | list of hex addresses | Limits the mutex trace to the given mutex addresses. Use a comma, a semicolon, or a space between the hexadecimal addresses. The listed mutexes are in the trace even if `SHARPEMU_LOG_PTHREADS` is not set. | `KernelPthreadCompatExports.cs` |
+| `SHARPEMU_LOG_PTHREAD_MUTEX_FILTER` | list of hex addresses | Selects mutex trace lines by guest mutex address or resolved address. Use a comma, a semicolon, or a space between hexadecimal addresses. A valid address list enables the selected lines without `SHARPEMU_LOG_PTHREADS`. Output does not require an error. | `KernelPthreadCompatExports.cs` |
 | `SHARPEMU_LOG_REFSCAN_ADDRS` | list of hex addresses | After a guest fault, scans executable guest memory from 0x800000000 to 0x810000000 for instructions that refer to the given addresses. It shows a maximum of 24 hits for each address. Use a comma between the hexadecimal addresses. | `DirectExecutionBackend.Exceptions.cs` |
 | `SHARPEMU_LOG_REGISTER_WINDOWS` | `1` | After a guest fault, shows a 0x80-byte memory window at each general register value that is 0x10000 or more. The default is off. | `DirectExecutionBackend.Exceptions.cs` |
 | `SHARPEMU_LOG_SAVEDATA` | `1` | Writes `savedata.` and `save_data_dialog.` trace lines for the save data calls to stderr. The default is off. | `SaveDataExports.cs`, `SaveDataDialogExports.cs` |
