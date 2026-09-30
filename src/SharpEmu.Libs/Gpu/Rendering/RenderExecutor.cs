@@ -186,7 +186,13 @@ public sealed partial class RenderExecutor
         var traceSample = IndexedDrawTrace.Enabled && _host is ICommandStreamHost traceHost
             ? IndexedDrawTrace.Capture(arguments.IndexCount, arguments.IndexTypeAndSize, arguments.IndexAddress, traceHost.Memory.TryRead)
             : null;
-        IndexedDrawTrace.Write(traceSample, "executor", submitId, arguments.PacketAddress);
+        var tracePacket = arguments.PacketAddress;
+        void TraceDisposition(string disposition)
+        {
+            IndexedDrawTrace.Write(traceSample, disposition == "recorded" ? "record-path-returned" : disposition, submitId, tracePacket);
+            TraceDrawTargets(banks, disposition);
+        }
+        IndexedDrawTrace.Write(traceSample, "executor", submitId, tracePacket);
         if (!_host.IsRecording)
         {
             throw _host.Fatal("An indexed draw has no recording command buffer.");
@@ -203,22 +209,26 @@ public sealed partial class RenderExecutor
         _host.SetDebugInformation(RecordedOperation.DrawIndex, submitId, arguments.IndexCount, 0, 1, arguments.InstanceCount, arguments.IndexAddress);
         if (arguments.IndexCount == 0 || arguments.InstanceCount == 0)
         {
+            TraceDisposition("zero-count");
             return;
         }
 
         if (ConsumesColorMetadataOperation(banks.Context) || TryDepthStencilCopy(banks.Context))
         {
+            TraceDisposition("metadata-operation");
             _host.ResetBindings();
             return;
         }
 
         if (!HasValidVertexShader(shader))
         {
+            TraceDisposition("missing-vertex-shader");
             return;
         }
 
         if (IsUnsupportedGeometryStage(banks, autoDraw: false))
         {
+            TraceDisposition("unsupported-geometry-stage");
             return;
         }
 
@@ -232,6 +242,7 @@ public sealed partial class RenderExecutor
         ValidateDrawRegisters(banks);
         if (!ResolveTopology(userConfig, autoDraw: false, out var topology))
         {
+            TraceDisposition("no-topology");
             return;
         }
 
@@ -284,6 +295,7 @@ public sealed partial class RenderExecutor
         var state = DrawState.Create();
         if (!TryResolveDrawTargets(banks, in draw, ref state))
         {
+            TraceDisposition("no-targets");
             _host.ResetBindings();
             return;
         }
@@ -298,6 +310,7 @@ public sealed partial class RenderExecutor
         ResolveShaderPrograms(banks, ref state);
         if (!ApplyProgramAdaptations(banks, in draw, ref state, new TargetlessDrawArguments(submitId, true, arguments, default)))
         {
+            TraceDisposition("adapted");
             _host.ResetBindings();
             return;
         }
@@ -313,8 +326,9 @@ public sealed partial class RenderExecutor
             0,
             indirect ? arguments.FirstInstance : ResolveInstanceOffset(state.Programs.VertexInput),
             arguments.IndirectArgumentsAddress);
-        RecordDraw(submitId, banks, in draw, ref state, topology, in emission, in indexSource, primitiveRestart,
-            setBindDebug: true, setAutoDebug: false, indexedTrace: traceSample, packetAddress: arguments.PacketAddress);
+        var disposition = RecordDraw(submitId, banks, in draw, ref state, topology, in emission, in indexSource, primitiveRestart,
+            setBindDebug: true, setAutoDebug: false, indexedTrace: traceSample, packetAddress: tracePacket);
+        TraceDisposition(disposition);
         _host.ResetBindings();
     }
 
@@ -337,22 +351,26 @@ public sealed partial class RenderExecutor
         _host.SetDebugInformation(RecordedOperation.DrawIndexAuto, submitId, arguments.VertexCount, 0, arguments.FirstVertex, arguments.InstanceCount, arguments.FirstInstance);
         if (arguments.VertexCount == 0 || arguments.InstanceCount == 0)
         {
+            TraceDrawTargets(banks, "zero-count");
             return;
         }
 
         if (ConsumesColorMetadataOperation(banks.Context) || TryDepthStencilCopy(banks.Context))
         {
+            TraceDrawTargets(banks, "metadata-operation");
             _host.ResetBindings();
             return;
         }
 
         if (!HasValidVertexShader(shader))
         {
+            TraceDrawTargets(banks, "missing-vertex-shader");
             return;
         }
 
         if (IsUnsupportedGeometryStage(banks, autoDraw: true))
         {
+            TraceDrawTargets(banks, "unsupported-geometry-stage");
             return;
         }
 
@@ -368,6 +386,7 @@ public sealed partial class RenderExecutor
         var state = DrawState.Create();
         if (!TryResolveDrawTargets(banks, in draw, ref state))
         {
+            TraceDrawTargets(banks, "no-targets");
             _host.ResetBindings();
             return;
         }
@@ -375,6 +394,7 @@ public sealed partial class RenderExecutor
         if (!ResolveTopology(userConfig, autoDraw: true, out var topology))
         {
             TraceDrawDisposition(banks, in draw, "no-primitive-topology");
+            TraceDrawTargets(banks, "no-topology");
             _host.ResetBindings();
             return;
         }
@@ -392,12 +412,14 @@ public sealed partial class RenderExecutor
                     $"pixel=0x{shader.Pixel.Address:X16} export=0x{shader.Vertex.ExportAddress:X16} geometry=0x{shader.Vertex.GeometryAddress:X16}");
             }
 
+            TraceDrawTargets(banks, "rectangle-list-without-exports");
             _host.ResetBindings();
             return;
         }
 
         if (!ApplyProgramAdaptations(banks, in draw, ref state, new TargetlessDrawArguments(submitId, false, default, arguments)))
         {
+            TraceDrawTargets(banks, "adapted");
             _host.ResetBindings();
             return;
         }
@@ -412,7 +434,8 @@ public sealed partial class RenderExecutor
             0,
             (uint)vertexOffset,
             indirect ? arguments.FirstInstance : ResolveInstanceOffset(vertexInput));
-        RecordDraw(submitId, banks, in draw, ref state, topology, in emission, default, primitiveRestart: false, setBindDebug: false, setAutoDebug: true);
+        var disposition = RecordDraw(submitId, banks, in draw, ref state, topology, in emission, default, primitiveRestart: false, setBindDebug: false, setAutoDebug: true);
+        TraceDrawTargets(banks, disposition);
         _host.ResetBindings();
     }
 
@@ -507,6 +530,20 @@ public sealed partial class RenderExecutor
     }
 
     private static bool HasValidVertexShader(ShaderProgramRegisters shader) => shader.Vertex.ExportAddress != 0;
+
+    // Records active color-target bases with the draw's outcome for the image-clear trace.
+    private void TraceDrawTargets(RegisterBanks banks, string disposition)
+    {
+        if (!Images.ImageClearTrace.Enabled) return;
+        var context = banks.Context;
+        for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
+        {
+            if (context.RenderTargetMaskForSlot(slot) == 0) continue;
+            var address = context.ColorTargets[slot].BaseAddress;
+            if (address != 0)
+                _host.TraceDrawTarget(disposition, address, banks.Shader.Pixel.Address, banks.Shader.Vertex.ExportAddress);
+        }
+    }
 
     private static bool IsKnownGeometryOutputPrimitiveType(uint value) => value <= 4;
 

@@ -80,6 +80,11 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public List<string> Calls { get; } = new();
 
+    public List<(string Disposition, ulong Address, ulong PixelShader, ulong VertexShader)> DrawTargets { get; } = new();
+
+    public void TraceDrawTarget(string disposition, ulong address, ulong pixelShaderAddress, ulong vertexShaderAddress) =>
+        DrawTargets.Add((disposition, address, pixelShaderAddress, vertexShaderAddress));
+
     public List<RenderingState> BegunRenderings { get; } = new();
 
     public List<DynamicDrawState> DynamicStates { get; } = new();

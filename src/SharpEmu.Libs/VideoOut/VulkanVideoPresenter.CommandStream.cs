@@ -591,6 +591,9 @@ internal static unsafe partial class VulkanVideoPresenter
             _bufferCache.CopyBuffer(destination, source, size, destinationIsGds, sourceIsGds);
         }
 
+        public void TraceDrawTarget(string disposition, ulong address, ulong pixelShaderAddress, ulong vertexShaderAddress) =>
+            _imageCache.TraceGuestWrite($"draw-target-{disposition}", address, 1, pixelShaderAddress, vertexShaderAddress);
+
         public void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount)
         {
             if (OnCommandThread)
