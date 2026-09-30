@@ -90,6 +90,30 @@ public sealed partial class GuestImageCacheTests
     }
 
     [Fact]
+    public void RawBufferWrite_InvalidatesMemoryCopiesAndKeepsGpuOwnedImages()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Bytes(0x01010101u));
+        harness.Write(address + 0x6000, Bytes(0x02020202u));
+        var copy = LinearRequest(address, 4, Format.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var copyId = harness.Find(ref copy);
+        var owned = LinearRequest(address + 0x6000, 4, Format.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var ownedId = harness.Find(ref owned);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address + 0x6000, 4, 0xaabbccddu)));
+        Assert.True(harness.Image(ownedId).IsGpuModified);
+
+        harness.Worker.Run(() => harness.Images.InvalidateMemoryCopiesFromGpu(address, 0x10000));
+
+        Assert.True(harness.Image(copyId).IsBufferModified);
+        Assert.False(harness.Image(ownedId).IsBufferModified);
+        Assert.True(harness.Image(ownedId).IsGpuModified);
+        Assert.Equal(new byte[] { 0xdd, 0xcc, 0xbb, 0xaa }, harness.ReadImageBytes(harness.Image(ownedId)));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void FullColorClear_SkipsSourceBufferAndRetainsWriteObservation()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

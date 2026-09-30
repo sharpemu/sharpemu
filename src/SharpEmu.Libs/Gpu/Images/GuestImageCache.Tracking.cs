@@ -463,6 +463,27 @@ public sealed partial class GuestImageCache
         }
     }
 
+    // A GPU-modified image owns its bytes; a raw binding can overlap it without writing there.
+    public void InvalidateMemoryCopiesFromGpu(ulong address, ulong size)
+    {
+        if (!IsValidRange(address, size))
+        {
+            return;
+        }
+
+        using var held = _lock.Hold();
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
+        {
+            var image = _slots[imageIdentifier];
+            if (image.DepthOwner.IsValid || image.IsGpuModified || !image.Overlaps(address, size))
+            {
+                continue;
+            }
+
+            image.MarkBufferModified();
+        }
+    }
+
     public ImageRegionInfo QueryRegion(ulong address, ulong size)
     {
         GpuMemoryAccessProfile.CountImageQuery(gpuDirtyOnly: false);

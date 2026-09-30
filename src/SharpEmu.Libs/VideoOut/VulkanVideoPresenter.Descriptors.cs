@@ -516,6 +516,10 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _imageCache.InvalidateMemoryFromGpu(address, size);
             }
+            else if (resource.Written)
+            {
+                _imageCache.InvalidateMemoryCopiesFromGpu(address, size);
+            }
 
             return new BufferView(buffer.Handle, alignedOffset, size + adjustment);
         }
@@ -606,6 +610,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (range.Written)
                 {
                     _ = _bufferCache.ObtainBuffer(range.Base, size, isWritten: true);
+                    _imageCache.InvalidateMemoryCopiesFromGpu(range.Base, size);
                 }
                 else
                 {
