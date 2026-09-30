@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Rendering;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Scheduling;
@@ -466,6 +467,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             }
         }
 
+        if (MeshDrawTrace.Enabled) MeshDrawTrace.Submitted((ulong)buffer, tick, submitted, failure);
         if (!submitted)
         {
             Console.Error.WriteLine($"[GPU][ERROR] submission history known_completed_tick={_timeline.CompletedTick}");

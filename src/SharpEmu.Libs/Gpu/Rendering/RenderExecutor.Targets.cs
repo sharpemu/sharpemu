@@ -37,6 +37,7 @@ public sealed partial class RenderExecutor
             }
 
             var request = resolution.Request;
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("color-request", $"slot={slot} address=0x{request.Description.Data.Address:X16} size=0x{request.Description.Data.Size:X} view={request.View}");
             var image = _host.FindImage(ref request, exactFormat: false);
             _host.BindRenderTarget(image);
             state.Colors[(int)state.ColorCount++] = new ColorTargetState(in resolution, resolvedSlot, image);
@@ -45,6 +46,7 @@ public sealed partial class RenderExecutor
         if (DepthTargetResolver.Resolve(context, _host.FormatSupport, _host.Fatal) is { } depthTarget)
         {
             var request = depthTarget.Target.Request;
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("depth-request", $"address=0x{request.Description.Data.Address:X16} size=0x{request.Description.Data.Size:X} view={request.View}");
             var image = _host.FindImage(ref request, exactFormat: false);
             _host.BindRenderTarget(image);
             state.Depth = new DepthAttachmentState(in depthTarget, image);

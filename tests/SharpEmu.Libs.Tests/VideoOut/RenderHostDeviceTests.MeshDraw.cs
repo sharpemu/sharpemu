@@ -27,6 +27,9 @@ public sealed unsafe partial class RenderHostDeviceTests
     [InlineData(32u, true)]
     [InlineData(64u, true)]
     public void MeshDrawRendersGuestInputsAndRetainsUploadedIndices(uint waveSize, bool indexed)
+        => RenderMeshDraw(waveSize, indexed);
+
+    private void RenderMeshDraw(uint waveSize, bool indexed, ulong? traceShaderAddress = null)
     {
         if (!GatePrerequisites.Ready(_vulkan, shaderInt64: true)) return;
         if (!_vulkan.SupportsMeshShaders || !_vulkan.SupportsDynamicRendering || _vulkan.SubgroupSize != 32)
@@ -44,6 +47,7 @@ public sealed unsafe partial class RenderHostDeviceTests
         var target = harness.MapBacked(0x10000, ReadWrite);
         var words = RegisterWords.Color(target, Size, Size);
         var banks = Banks(words);
+        if (traceShaderAddress is { } shaderAddress) banks.Shader.Vertex.ExportAddress = shaderAddress;
         banks.Context.ShaderStages = 0x20;
         var provider = new MeshFrameProgramProvider((IShaderPipelineHost)presenter.Instance, waveSize);
         var executor = new RenderExecutor(presenter.RenderHost, provider);

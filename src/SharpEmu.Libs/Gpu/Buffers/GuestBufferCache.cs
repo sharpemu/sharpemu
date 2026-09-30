@@ -6,6 +6,7 @@ using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.GuestMemory;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
@@ -203,6 +204,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         ResourceSlotIdentifier bufferIdentifier = default, ulong traceShaderHash = 0)
     {
         if (isWritten && ImageClearTrace.Enabled) ImageCache?.TraceGuestWrite("shader-buffer-write", guestAddress, size, shaderHash: traceShaderHash);
+        if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-obtain", guestAddress, size, $"written={isWritten} texel={isTexelBuffer} hash=0x{traceShaderHash:X16}", remember: true);
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferAcquisitionChecks);
         var command = _scheduler.Current;
         if (command.IsInvalid || !IsValidRange(guestAddress, size))
@@ -220,6 +222,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 _backing.TryReadBacking(guestAddress, _stream.Mapped.Slice((int)streamOffset, (int)size)))
             {
                 _stream.Commit();
+                if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-stream-upload", guestAddress, size, $"offset=0x{streamOffset:X}");
                 return (_stream, streamOffset);
             }
         }
@@ -1167,6 +1170,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private PendingDownload? BeginReadMemoryOnGpu(ulong guestAddress, ulong size, bool isWrite, GuestMemoryProfile.ReadbackSource source,
         bool allowPending, bool markHot = false)
     {
+        if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("cpu-synchronize", guestAddress, size, $"write={isWrite} source={source}");
         using var readbackScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.BufferReadback);
         using var foreignRead = _device.Slabs.BeginForeignRead();
         var readbackStarted = GuestMemoryProfile.ReadbackDetailsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
@@ -1471,6 +1475,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         var planner = new BufferDownloadBatchPlanner(_download.Size);
         foreach (var piece in copies)
         {
+            if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("buffer-download-planned", piece.Address, piece.Size, $"sourceOffset=0x{piece.SourceOffset:X}");
             var copy = piece;
             while (copy.Size != 0)
             {
@@ -1635,6 +1640,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             {
                 throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copy.Address:X16} size=0x{placement.DataSize:X16}");
             }
+            if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("buffer-published", copy.Address, placement.DataSize, $"tick={completionTick}");
         }
 
         batch.Clear();
@@ -1739,6 +1745,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         if (source != null)
         {
             buffer.NoteGpuWrite();
+            if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-upload", guestAddress, size, $"bytes={totalSize} copies={copies.Count}");
             var command = _scheduler.Current;
             command.EndRendering();
             var native = new CommandBuffer(command.Handle);
