@@ -75,6 +75,8 @@ public static partial class Gen5SpirvTranslator
         private readonly uint _waveLaneCount;
         private readonly IWaveLowering _waveLowering;
         private bool _guestLaneFromSubgroup;
+        private readonly bool _hasIndirectControlFlow;
+        private readonly Dictionary<uint, Dictionary<uint, uint>> _savedLaneValues = new();
 
         // Safety valve for the PC-dispatcher loop. Each iteration executes one
         // GCN basic block; a correctly-translated shader always reaches its
@@ -1440,6 +1442,7 @@ public static partial class Gen5SpirvTranslator
             error = string.Empty;
             var block = blocks[blockIndex];
             _waveLowering.BeginBlock();
+            _savedLaneValues.Clear();
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
                 var instruction = _request.Program.Instructions[index];
@@ -7652,6 +7655,7 @@ public static partial class Gen5SpirvTranslator
 
         private void StoreVDynamic(uint registerIndex, uint value)
         {
+            _savedLaneValues.Clear();
             // With EXEC known to be all ones the write needs no EXEC test.
             var exec = _execKnownFull ? 0 : Load(_boolType, _exec);
             for (var register = _dynamicVectorRange.First; register <= _dynamicVectorRange.Last; register++)
@@ -7799,8 +7803,9 @@ public static partial class Gen5SpirvTranslator
             return _observationPlan;
         }
 
-        private void StoreV(uint register, uint value, bool guardWithExec = true)
+        private void StoreV(uint register, uint value, bool guardWithExec = true, bool preserveSavedLanes = false)
         {
+            if (!preserveSavedLanes) _savedLaneValues.Remove(register);
             if (guardWithExec && !_execKnownFull && !_unobservedWrites.Contains(register))
             {
                 var active = Load(_boolType, _exec);

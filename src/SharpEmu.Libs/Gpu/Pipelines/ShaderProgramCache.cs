@@ -359,7 +359,8 @@ internal sealed class ShaderProgramCache
 
     // The key of the entry the static state was just built for.
     private ProgramKey BuildProgramKey(ShaderSource source) =>
-        new(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize, _staticState.ToArray());
+        new(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
+            source.ContinuationAddressOffset, _staticState.ToArray());
 
     private static ShaderStageResources CreateStageResources(
         ShaderProgramInfo program, ResourceSnapshot snapshot, ShaderSource source, StageCompileOptions options)
