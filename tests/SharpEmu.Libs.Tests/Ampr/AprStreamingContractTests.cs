@@ -22,6 +22,7 @@ public sealed class AprStreamingContractTests
         const ulong pathAddress = memoryBase + 0x200;
         const ulong idsAddress = memoryBase + 0x800;
         const ulong statAddress = memoryBase + 0x900;
+        const ulong sizeAddress = memoryBase + 0x9A0;
         const ulong commandBufferAddress = memoryBase + 0x1000;
         const ulong recordBufferAddress = memoryBase + 0x1100;
         const ulong destinationAddress = memoryBase + 0x2000;
@@ -67,6 +68,16 @@ public sealed class AprStreamingContractTests
             Span<byte> stat = stackalloc byte[120];
             Assert.True(memory.TryRead(statAddress, stat));
             Assert.Equal(fileContents.Length, BinaryPrimitives.ReadInt64LittleEndian(stat[72..]));
+
+            WriteUInt64(memory, sizeAddress, 0xDEAD_BEEF);
+            context[CpuRegister.Rdi] = fileId;
+            context[CpuRegister.Rsi] = sizeAddress;
+
+            Assert.Equal(0, KernelMemoryCompatExports.KernelAprGetFileSize(context));
+            Assert.Equal((ulong)fileContents.Length, ReadUInt64(memory, sizeAddress));
+
+            context[CpuRegister.Rdi] = 0xFFFF_FFFE;
+            Assert.NotEqual(0, KernelMemoryCompatExports.KernelAprGetFileSize(context));
 
             context[CpuRegister.Rdi] = commandBufferAddress;
             context[CpuRegister.Rsi] = recordBufferAddress;

@@ -1985,6 +1985,48 @@ public static partial class KernelMemoryCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // Signature: (SceKernelAprFileId id, uint64_t* size). Callers size their read buffer from the
+    // answer and may pass an uninitialized slot, so the size must always be written on success.
+    [SysAbiExport(
+        Nid = "WvEu7yl3Ivg",
+        ExportName = "sceKernelAprGetFileSize",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelAprGetFileSize(CpuContext ctx)
+    {
+        var fileId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var sizeAddress = ctx[CpuRegister.Rsi];
+        if (sizeAddress == 0)
+        {
+            KernelRuntimeCompatExports.TrySetErrno(ctx, Einval);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!AmprFileRegistry.TryGetHostPath(fileId, out var hostPath))
+        {
+            LogIoTrace("apr_get_file_size", $"id=0x{fileId:X8}", "result=id_not_registered");
+            KernelRuntimeCompatExports.TrySetErrno(ctx, 2);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        if (!TryGetAprFileSize(hostPath, out var size))
+        {
+            LogIoTrace("apr_get_file_size", hostPath, $"id=0x{fileId:X8} result=not_found");
+            KernelRuntimeCompatExports.TrySetErrno(ctx, 2);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        if (!TryWriteUInt64Compat(ctx, sizeAddress, size))
+        {
+            KernelRuntimeCompatExports.TrySetErrno(ctx, Efault);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        LogIoTrace("apr_get_file_size", hostPath, $"id=0x{fileId:X8} size={size}");
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "kBwCPsYX-m4",
         ExportName = "sceKernelFstat",
