@@ -45,6 +45,10 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     public bool GraphicsSubgroupOperationsEnabled => true;
 
     public bool SharedInt64AtomicsEnabled => false;
+    public bool MeshShadersSupported { get; set; }
+
+    public MeshShaderLimits MeshLimits { get; set; }
+    public uint MeshSubgroupSize { get; set; } = 32;
 
     public ShaderPrewarmList? ShaderPrewarm { get; set; }
 
