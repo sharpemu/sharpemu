@@ -619,6 +619,8 @@ public sealed partial class GuestImageCache
 
         var record = _slots[association];
         TouchImage(record);
+        // Associations bypass CPU image invalidation, so they cannot retain an image write watch.
+        UnwatchImage(association);
         record.AssociateDepth(depthImageIdentifier);
         return association;
     }
