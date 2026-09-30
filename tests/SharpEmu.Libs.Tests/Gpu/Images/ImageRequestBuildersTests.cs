@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
@@ -16,6 +17,25 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixture>
 {
     private const ulong Base = 0x1_0000_0000;
+
+    [Fact]
+    public void EightBitUnsignedScaledTextureUsesUnormBackingWithShaderConversion()
+    {
+        Assert.Equal(ImageNumericClass.Float, GuestImageFormat.SampledNumericClass(GuestImageFormat.Format8Uscaled));
+        Assert.Equal(1u, GuestImageFormat.Remap(GuestImageFormat.Format8Uscaled));
+
+        var request = ImageRequestBuilders.Texture(
+            RegisterWords.Texture(Base, GuestPixelFormat.Bits8UScaled, 32, 32),
+            new ShaderImageShape(false, false, false, false, TextureNumericClass.Float));
+        Assert.Equal(Format.R8Unorm, request.Request.Description.PixelFormat);
+        Assert.True(request.ExactFormat);
+
+        var twoChannel = ImageRequestBuilders.Texture(
+            RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8UScaled, 32, 32),
+            new ShaderImageShape(false, false, false, false, TextureNumericClass.Float));
+        Assert.Equal(Format.R8G8Unorm, twoChannel.Request.Description.PixelFormat);
+        Assert.True(twoChannel.ExactFormat);
+    }
 
     [Fact]
     public void StorageWithoutMipOperandUsesTheAvailableMipRange()

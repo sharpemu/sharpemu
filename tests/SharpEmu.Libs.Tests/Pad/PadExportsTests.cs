@@ -64,6 +64,24 @@ public sealed class PadExportsTests
         Assert.Equal(cookie, BitConverter.ToUInt64(guard));
     }
 
+    [Fact]
+    public void GetExtControllerInformation_DoesNotOverwriteCallerCookie()
+    {
+        const ulong informationAddress = Base + 0x100;
+        const ulong cookieAddress = informationAddress + 0x30;
+        const ulong cookie = 0xC0DEC0DECAFEBA00UL;
+
+        Assert.True(_memory.TryWrite(cookieAddress, BitConverter.GetBytes(cookie)));
+        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rsi] = informationAddress;
+
+        Assert.Equal(0, PadExports.PadGetExtControllerInformation(_ctx));
+
+        Span<byte> guard = stackalloc byte[8];
+        Assert.True(_memory.TryRead(cookieAddress, guard));
+        Assert.Equal(cookie, BitConverter.ToUInt64(guard));
+    }
+
     [Theory]
     [InlineData(2)]
     [InlineData(-1)]

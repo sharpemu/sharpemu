@@ -5320,6 +5320,25 @@ public static partial class Gen5SpirvTranslator
             SpirvImageResource resource,
             uint texel)
         {
+            if (resource.ConversionFormat is GuestImageFormat.Format8Uscaled or GuestImageFormat.Format8x2Uscaled)
+            {
+                var scaled = _module.AddInstruction(SpirvOp.FMul, resource.VectorType, texel,
+                    _module.AddInstruction(SpirvOp.CompositeConstruct, resource.VectorType,
+                        Float(255), Float(255), Float(1), Float(1)));
+                var channels = new uint[4];
+                for (var component = 0; component < channels.Length; component++)
+                {
+                    var selector = (resource.ShaderSwizzle >> (component * 3)) & 7u;
+                    channels[component] = selector switch
+                    {
+                        1u => Float(1),
+                        >= 4u => _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, scaled, selector - 4u),
+                        _ => Float(0),
+                    };
+                }
+                return _module.AddInstruction(SpirvOp.CompositeConstruct, resource.VectorType, channels);
+            }
+
             if (!TryGetPackedImageConversion(
                     resource,
                     out var componentCount,

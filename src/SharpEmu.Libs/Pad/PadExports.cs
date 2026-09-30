@@ -234,45 +234,20 @@ public static class PadExports
     }
 
     [SysAbiExport(
+        Nid = "PZSoY8j0Pko",
+        ExportName = "scePadGetFeatureReport",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePad")]
+    public static int PadGetFeatureReport(CpuContext ctx) =>
+        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+
+    [SysAbiExport(
         Nid = "hGbf2QTBmqc",
         ExportName = "scePadGetExtControllerInformation",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libScePad")]
-    public static int PadGetExtControllerInformation(CpuContext ctx)
-    {
-        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        var informationAddress = ctx[CpuRegister.Rsi];
-        if (!IsPrimaryPadHandle(handle))
-        {
-            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
-        }
-
-        if (informationAddress == 0)
-        {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
-        }
-
-        // Base ScePadControllerInformation + device-class/connection fields: report a connected
-        // DualSense so the guest's open -> get-ext-info -> close probe loop resolves.
-        Span<byte> information = stackalloc byte[0x40];
-        information.Clear();
-        BinaryPrimitives.WriteSingleLittleEndian(information[0x00..], 44.86f);
-        BinaryPrimitives.WriteUInt16LittleEndian(information[0x04..], 1920);
-        BinaryPrimitives.WriteUInt16LittleEndian(information[0x06..], 943);
-        information[0x08] = 30;
-        information[0x09] = 30;
-        information[0x0A] = StandardPortType;
-        information[0x0B] = 1;   // connected count
-        information[0x0C] = 1;   // connected
-        BinaryPrimitives.WriteInt32LittleEndian(information[0x10..], 0);
-        information[0x1C] = 0;   // deviceClass: 0 = standard controller / DualSense
-        information[0x1D] = 1;   // connected (ext)
-        information[0x1E] = 0;   // connectionType: local
-
-        return ctx.Memory.TryWrite(informationAddress, information)
-            ? ctx.SetReturn(0)
-            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-    }
+    public static int PadGetExtControllerInformation(CpuContext ctx) =>
+        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
 
     [SysAbiExport(
         Nid = "AcslpN1jHR8",

@@ -69,4 +69,30 @@ public sealed class FontExportsTests
             (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
             FontExports.GetVerticalLayout(_ctx));
     }
+
+    [Fact]
+    public void DrawGlyph_WritesOnlySetPixelsInsideScissor()
+    {
+        const ulong surface = Base + 0x200;
+        const ulong pixels = Base + 0x300;
+        Span<byte> descriptor = stackalloc byte[0x28];
+        BinaryPrimitives.WriteUInt64LittleEndian(descriptor, pixels);
+        BinaryPrimitives.WriteUInt32LittleEndian(descriptor[8..], 8);
+        BinaryPrimitives.WriteUInt32LittleEndian(descriptor[12..], 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(descriptor[16..], 8);
+        BinaryPrimitives.WriteUInt32LittleEndian(descriptor[20..], 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(descriptor[24..], 2);
+        BinaryPrimitives.WriteUInt32LittleEndian(descriptor[28..], 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(descriptor[32..], 6);
+        BinaryPrimitives.WriteUInt32LittleEndian(descriptor[36..], 1);
+        Assert.True(_ctx.Memory.TryWrite(surface, descriptor));
+
+        var font = new byte[4096];
+        font['A' * 16] = 0xff;
+        Assert.True(FontExports.DrawGlyph(_ctx, surface, 'A', 0, 0, 8, 1, font));
+
+        Span<byte> result = stackalloc byte[8];
+        Assert.True(_ctx.Memory.TryRead(pixels, result));
+        Assert.Equal(new byte[] { 0, 0, 255, 255, 255, 255, 0, 0 }, result.ToArray());
+    }
 }

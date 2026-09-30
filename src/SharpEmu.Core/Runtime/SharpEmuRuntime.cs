@@ -667,14 +667,15 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         var moduleDirectories = new[]
         {
-            // A linked PRX can be beside eboot.bin. Load only the app-root modules
-            // named by the main image at boot. Map the other app-root modules so
-            // sceKernelLoadStartModule can start them later.
-            (Path: ebootDirectory, StartAtBoot: true, LinkedOnly: true, SearchOption: SearchOption.TopDirectoryOnly),
-            (Path: ebootDirectory, StartAtBoot: false, LinkedOnly: false, SearchOption: SearchOption.TopDirectoryOnly),
             (Path: Path.Combine(ebootDirectory, "sce_module"), StartAtBoot: true, LinkedOnly: false, SearchOption: SearchOption.TopDirectoryOnly),
             (Path: Path.Combine(ebootDirectory, "sce_modules"), StartAtBoot: true, LinkedOnly: false, SearchOption: SearchOption.TopDirectoryOnly),
             (Path: Path.Combine(ebootDirectory, "Media", "Modules"), StartAtBoot: true, LinkedOnly: false, SearchOption: SearchOption.TopDirectoryOnly),
+            // A linked PRX can be beside eboot.bin. Load only the app-root modules
+            // named by the main image at boot, after the normal module directories
+            // they may depend on. Map the other app-root modules so
+            // sceKernelLoadStartModule can start them later.
+            (Path: ebootDirectory, StartAtBoot: true, LinkedOnly: true, SearchOption: SearchOption.TopDirectoryOnly),
+            (Path: ebootDirectory, StartAtBoot: false, LinkedOnly: false, SearchOption: SearchOption.TopDirectoryOnly),
             // Unity native plugins are loaded later through sceKernelLoadStartModule. Map
             // them up front so the HLE loader can return a real module handle and dlsym
             // can resolve their exports, but defer DT_INIT until the guest requests them.

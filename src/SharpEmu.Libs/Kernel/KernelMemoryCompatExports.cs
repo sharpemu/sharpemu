@@ -5177,7 +5177,7 @@ public static partial class KernelMemoryCompatExports
         return root;
     }
 
-    private static string ResolveTemp0Root()
+    internal static string ResolveTemp0Root()
     {
         const string temp0VariableName = "SHARPEMU_TEMP0_DIR";
         var configuredRoot = Environment.GetEnvironmentVariable(temp0VariableName);
@@ -5197,7 +5197,7 @@ public static partial class KernelMemoryCompatExports
 
         var invalidChars = Path.GetInvalidFileNameChars();
         appName = new string(appName.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray());
-        var root = Path.Combine(AppContext.BaseDirectory, "user", "temp", appName, "temp0");
+        var root = Path.Combine(Path.GetTempPath(), "SharpEmu", "temp0", appName, Path.GetRandomFileName());
         Environment.SetEnvironmentVariable(temp0VariableName, root);
         return root;
     }
@@ -6958,7 +6958,7 @@ public static partial class KernelMemoryCompatExports
 
     private static int KernelGetdirentriesCore(CpuContext ctx, int fd, ulong bufferAddress, int requested, ulong basePointerAddress)
     {
-        if (fd < 0 || bufferAddress == 0 || requested < 512)
+        if (fd < 0 || bufferAddress == 0 || requested < 12)
         {
             ctx[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
@@ -6999,27 +6999,41 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        var entryName = directory.Entries[currentIndex];
-        directory.NextIndex = currentIndex + 1;
+        var payload = new byte[Math.Min(requested, 65536)];
+        var written = 0;
+        while (currentIndex < directory.Entries.Length)
+        {
+            var entryName = directory.Entries[currentIndex];
+            var entryBytes = Encoding.UTF8.GetBytes(entryName);
+            var nameLength = Math.Min(entryBytes.Length, 255);
+            var recordLength = (8 + nameLength + 1 + 3) & ~3;
+            if (recordLength > payload.Length - written)
+            {
+                if (written == 0)
+                {
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+                }
 
-        var entryBytes = Encoding.UTF8.GetBytes(entryName);
-        var nameLength = Math.Min(entryBytes.Length, 255);
-        var entryPath = Path.Combine(directory.Path, entryName);
-        var entryType = Directory.Exists(entryPath) ? (byte)4 : (byte)8;
+                break;
+            }
 
-        var payload = new byte[512];
-        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0, sizeof(uint)), ComputeDirectoryEntryHash(entryBytes.AsSpan(0, nameLength)));
-        BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(4, sizeof(ushort)), 512);
-        payload[6] = entryType;
-        payload[7] = unchecked((byte)nameLength);
-        entryBytes.AsSpan(0, nameLength).CopyTo(payload.AsSpan(8));
+            var record = payload.AsSpan(written, recordLength);
+            BinaryPrimitives.WriteUInt32LittleEndian(record, ComputeDirectoryEntryHash(entryBytes.AsSpan(0, nameLength)));
+            BinaryPrimitives.WriteUInt16LittleEndian(record[4..], unchecked((ushort)recordLength));
+            record[6] = Directory.Exists(Path.Combine(directory.Path, entryName)) ? (byte)4 : (byte)8;
+            record[7] = unchecked((byte)nameLength);
+            entryBytes.AsSpan(0, nameLength).CopyTo(record[8..]);
+            written += recordLength;
+            currentIndex++;
+        }
 
-        if (!TryWriteCompat(ctx, bufferAddress, payload))
+        if (!TryWriteCompat(ctx, bufferAddress, payload.AsSpan(0, written)))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        ctx[CpuRegister.Rax] = 512;
+        directory.NextIndex = currentIndex;
+        ctx[CpuRegister.Rax] = unchecked((ulong)written);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 

@@ -8,6 +8,8 @@ namespace SharpEmu.ShaderCompiler.Resources;
 public static class GuestImageFormat
 {
     public const uint Invalid = 0;
+    public const uint Format8Uscaled = 3;
+    public const uint Format8x2Uscaled = 16;
     public const uint Format16Unorm = 7;
     public const uint Format32Uint = 20;
     public const uint Format32Sint = 21;
@@ -32,7 +34,7 @@ public static class GuestImageFormat
     // is unsupported for sampling.
     private static readonly (uint Format, ImageNumericClass Class)[] SampledFormats =
     [
-        (1, ImageNumericClass.Float), (5, ImageNumericClass.Uint), (7, ImageNumericClass.Float), (8, ImageNumericClass.Float),
+        (1, ImageNumericClass.Float), (Format8Uscaled, ImageNumericClass.Float), (5, ImageNumericClass.Uint), (7, ImageNumericClass.Float), (8, ImageNumericClass.Float),
         (11, ImageNumericClass.Uint), (12, ImageNumericClass.Sint), (13, ImageNumericClass.Float), (14, ImageNumericClass.Float),
         (15, ImageNumericClass.Float), (16, ImageNumericClass.Float), (18, ImageNumericClass.Uint), (19, ImageNumericClass.Sint), (20, ImageNumericClass.Uint),
         (21, ImageNumericClass.Sint), (22, ImageNumericClass.Float), (23, ImageNumericClass.Float), (24, ImageNumericClass.Float),
@@ -67,7 +69,13 @@ public static class GuestImageFormat
     }
 
     // The 11_11_10 integer format is read as one 32-bit integer.
-    public static uint Remap(uint format) => format == Format11x2x10Uint ? Format32Uint : format;
+    public static uint Remap(uint format) => format switch
+    {
+        Format8Uscaled => 1,
+        Format8x2Uscaled => 14,
+        Format11x2x10Uint => Format32Uint,
+        _ => format,
+    };
 
     public static uint ImageTypeOf(ReadOnlySpan<uint> descriptor) => (descriptor[3] >> 28) & 0xF;
 

@@ -154,14 +154,25 @@ internal sealed unsafe class FfmpegMediaStream : Stream
             if (codecContext is null ||
                 ffmpeg.avcodec_parameters_to_context(
                     codecContext,
-                    formatContext->streams[streamIndex]->codecpar) < 0 ||
-                ffmpeg.avcodec_open2(codecContext, decoder, null) < 0)
+                    formatContext->streams[streamIndex]->codecpar) < 0)
             {
                 if (codecContext is not null)
                 {
                     ffmpeg.avcodec_free_context(&codecContext);
                 }
 
+                ffmpeg.avformat_close_input(&formatContext);
+                return false;
+            }
+
+            if (mediaType == AVMediaType.AVMEDIA_TYPE_VIDEO)
+            {
+                codecContext->thread_count = 0;
+                codecContext->thread_type = ffmpeg.FF_THREAD_FRAME | ffmpeg.FF_THREAD_SLICE;
+            }
+            if (ffmpeg.avcodec_open2(codecContext, decoder, null) < 0)
+            {
+                ffmpeg.avcodec_free_context(&codecContext);
                 ffmpeg.avformat_close_input(&formatContext);
                 return false;
             }

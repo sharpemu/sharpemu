@@ -7,6 +7,7 @@ namespace SharpEmu.Libs.Np;
 
 public static class NpSessionSignalingExports
 {
+    private const int NpErrorSignedOut = unchecked((int)0x80550006);
     private static int _nextContextId;
 
     [SysAbiExport(
@@ -31,4 +32,18 @@ public static class NpSessionSignalingExports
         ctx[CpuRegister.Rax] = unchecked((ulong)contextId);
         return contextId;
     }
+
+    [SysAbiExport(
+        Nid = "r8mVMwlafF8",
+        ExportName = "sceNpSessionSignalingRequestPrepare",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpSessionSignaling")]
+    public static int NpSessionSignalingRequestPrepare(CpuContext ctx) => ctx.SetReturn(NpErrorSignedOut);
+
+    [SysAbiExport(
+        Nid = "Z9Q9LzQDXf0",
+        ExportName = "sceNpSessionSignalingDestroyContext",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpSessionSignaling")]
+    public static int NpSessionSignalingDestroyContext(CpuContext ctx) => ctx.SetReturn(0);
 }

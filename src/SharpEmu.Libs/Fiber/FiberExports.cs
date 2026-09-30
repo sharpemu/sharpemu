@@ -306,13 +306,7 @@ public static class FiberExports
             return SetReturn(ctx, FiberErrorNull);
         }
 
-        var fiberAddress = ResolveCurrentFiberAddress(ctx);
-        if (fiberAddress == 0)
-        {
-            return SetReturn(ctx, FiberErrorPermission);
-        }
-
-        return TryWriteUInt64(ctx, outAddress, fiberAddress)
+        return TryWriteUInt64(ctx, outAddress, ResolveCurrentFiberAddress(ctx))
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, FiberErrorInvalid);
     }

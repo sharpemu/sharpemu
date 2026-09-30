@@ -870,6 +870,28 @@ public static partial class VideoOutExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    #pragma warning disable SHEM006
+    [SysAbiExport(
+        Nid = "kP2L8t3j-aM",
+        ExportName = "VideoOutVrrStatus_kP2L8t3j_aM",
+        Target = Generation.Gen5,
+        LibraryName = "libSceVideoOutVrrStatus")]
+    public static int VideoOutVrrStatus(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
+        Nid = "5tRaBjtdTzY",
+        ExportName = "sceVideoOutVrrPegToFixedRate",
+        Target = Generation.Gen5,
+        LibraryName = "libSceVideoOut")]
+    public static int VideoOutVrrPegToFixedRate(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
+        Nid = "T4ucGB8CsnM",
+        ExportName = "sceVideoOutVrrUnpegFromFixedRate",
+        Target = Generation.Gen5,
+        LibraryName = "libSceVideoOut")]
+    public static int VideoOutVrrUnpegFromFixedRate(CpuContext ctx) => ctx.SetReturn(0);
+
     [SysAbiExport(
         Nid = "Xru92wHJRmg",
         ExportName = "sceVideoOutAddVblankEvent",

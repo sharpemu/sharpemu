@@ -262,6 +262,26 @@ public static class NpManagerExports
     }
 
     [SysAbiExport(
+        Nid = "Oad3rvY-NJQ",
+        ExportName = "sceNpHasSignedUp",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpHasSignedUp(CpuContext ctx)
+    {
+        var resultAddress = ctx[CpuRegister.Rsi];
+        if (resultAddress == 0 || unchecked((int)ctx[CpuRegister.Rdi]) == -1)
+        {
+            return SetReturn(ctx, NpErrorInvalidArgument);
+        }
+
+        Span<byte> signedUp = stackalloc byte[1];
+        signedUp[0] = 0; // No online account is configured in the offline profile.
+        return ctx.Memory.TryWrite(resultAddress, signedUp)
+            ? SetReturn(ctx, 0)
+            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
         Nid = "Ec63y59l9tw",
         ExportName = "sceNpSetNpTitleId",
         Target = Generation.Gen4 | Generation.Gen5,
