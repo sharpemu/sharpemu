@@ -100,6 +100,8 @@ public static partial class Gen5SpirvTranslator
         public CompilationContext(ShaderCompileRequest request)
         {
             _request = request;
+            _hasIndirectControlFlow = request.Program.Instructions.Any(
+                static instruction => instruction.Opcode is "SSetpcB64" or "SSwappcB64");
             _stage = request.Stage switch
             {
                 ShaderStage.Vertex => Gen5SpirvStage.Vertex,

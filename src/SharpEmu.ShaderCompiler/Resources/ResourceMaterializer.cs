@@ -1204,7 +1204,7 @@ public static class ResourceMaterializer
 
         // ApplyTo appends a depth-compare copy of every sampler shared by ordinary and
         // depth-reference sampling, after the point samplers; the snapshot needs the same words there.
-        var compareUsage = new byte[ShaderResourceInfo.MaxSamplers];
+        var compareUsage = new byte[snapshot.Samplers.Length];
         foreach (var pair in info.SampledPairs)
         {
             var image = info.Images[(int)pair.Image];
@@ -1220,11 +1220,6 @@ public static class ResourceMaterializer
         {
             if (compareUsage[index] == 3)
             {
-                if (snapshot.Samplers.Length >= ShaderResourceInfo.MaxSamplers)
-                {
-                    return Fail("specialized sampler layout exceeds its resource limit");
-                }
-
                 Array.Resize(ref snapshot.Samplers, snapshot.Samplers.Length + 1);
                 snapshot.Samplers[^1] = snapshot.Samplers[index];
             }

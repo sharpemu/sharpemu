@@ -152,7 +152,22 @@ public static partial class Gen5SpirvTranslator
                         sourceValue,
                         oldValue);
                     // Writelane writes to a specific lane regardless of exec mask.
-                    StoreV(destination, result, guardWithExec: false);
+                    StoreV(destination, result, guardWithExec: false, preserveSavedLanes: true);
+                    if (_stage == Gen5SpirvStage.Compute && !_hasIndirectControlFlow &&
+                        TryGetFixedLane(instruction.Sources[1], out var savedLane) &&
+                        instruction.Sources[0] is { Kind: Gen5OperandKind.ScalarRegister, Value: < 102 })
+                    {
+                        if (!_savedLaneValues.TryGetValue(destination, out var savedValues))
+                        {
+                            savedValues = new Dictionary<uint, uint>();
+                            _savedLaneValues.Add(destination, savedValues);
+                        }
+                        savedValues[savedLane] = sourceValue;
+                    }
+                    else
+                    {
+                        _savedLaneValues.Remove(destination);
+                    }
                     return true;
                 }
                 case "VCndmaskB32":
@@ -5090,6 +5105,14 @@ public static partial class Gen5SpirvTranslator
             }
 
             var destination = instruction.Destinations[0].Value;
+            if (instruction.Sources[0] is { Kind: Gen5OperandKind.VectorRegister } sourceRegister &&
+                TryGetFixedLane(instruction.Sources[1], out var savedLane) &&
+                _savedLaneValues.TryGetValue(sourceRegister.Value, out var savedValues) &&
+                savedValues.TryGetValue(savedLane, out var savedValue))
+            {
+                StoreS(destination, savedValue);
+                return true;
+            }
             var sourceValue = GetRawSource(instruction, 0);
             var selectedLane = BitwiseAnd(GetRawSource(instruction, 1), UInt(LaneSelectMask));
 
@@ -5118,6 +5141,20 @@ public static partial class Gen5SpirvTranslator
 
             return true;
         }
+
+        private bool TryGetFixedLane(Gen5Operand operand, out uint lane)
+        {
+            lane = operand.Value;
+            if (operand.Kind == Gen5OperandKind.EncodedConstant && operand.Value is >= 128 and <= 192)
+                lane -= 128;
+            else if (operand.Kind == Gen5OperandKind.EncodedConstant && operand.Value is >= 193 and <= 208)
+                lane = unchecked(192u - operand.Value);
+            else if (operand.Kind != Gen5OperandKind.LiteralConstant)
+                return false;
+            lane &= _waveLaneCount - 1;
+            return true;
+        }
+
 
         private uint EmitPermlane16(
             Gen5ShaderInstruction instruction,
