@@ -162,6 +162,34 @@ public static partial class Gen5ShaderTranslator
             out error);
     }
 
+    public static bool TryDecodeFunction(CpuContext context, ulong address,
+        out Gen5ShaderProgram program, out string error)
+    {
+        if ((address & 3) != 0 || address >= (1ul << 48))
+        {
+            program = new Gen5ShaderProgram(address, []);
+            error = "invalid function address";
+            return false;
+        }
+        return TryDecodeProgramSegment(context, address, null, true,
+            out program, out _, out error, coverForwardBranches: true);
+    }
+
+    public static bool TryDecodeFunction(CpuContext context, ulong address, uint maximumBytes,
+        out Gen5ShaderProgram program, out string error)
+    {
+        program = new Gen5ShaderProgram(address, []);
+        if (maximumBytes < sizeof(uint) || (address & 3) != 0 ||
+            address > ulong.MaxValue - maximumBytes)
+        {
+            error = "invalid function address or byte limit";
+            return false;
+        }
+
+        return TryDecodeProgramSegment(context, address, maximumBytes, true,
+            out program, out _, out error, coverForwardBranches: true);
+    }
+
     private enum ProgramTermination
     {
         None,
@@ -296,7 +324,8 @@ public static partial class Gen5ShaderTranslator
         bool stopAtSetProgramCounter,
         out Gen5ShaderProgram program,
         out ProgramTermination termination,
-        out string error)
+        out string error,
+        bool coverForwardBranches = false)
     {
         program = new Gen5ShaderProgram(address, []);
         termination = ProgramTermination.None;
@@ -419,7 +448,8 @@ public static partial class Gen5ShaderTranslator
             }
 
             if (stopAtSetProgramCounter &&
-                string.Equals(name, "SSetpcB64", StringComparison.Ordinal))
+                string.Equals(name, "SSetpcB64", StringComparison.Ordinal) &&
+                (!coverForwardBranches || pc > furthestForwardBranchTarget))
             {
                 program = new Gen5ShaderProgram(address, instructions);
                 termination = ProgramTermination.SetProgramCounter;
