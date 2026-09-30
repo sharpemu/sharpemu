@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.VideoOut;
 
@@ -452,21 +454,22 @@ public sealed partial class GpuCommandInterpreter
                     $"{kind}-candidate", SubmitId, packet), IndexedDrawTrace.ScanIssue);
     }
 
-    internal void WriteDword(ulong address, uint value)
+    internal void WriteDword(ulong address, uint value, [CallerMemberName] string caller = "")
     {
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
-        WriteBytes(address, bytes);
+        WriteBytes(address, bytes, caller);
     }
 
-    internal void WriteQword(ulong address, ulong value)
+    internal void WriteQword(ulong address, ulong value, [CallerMemberName] string caller = "")
     {
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
-        WriteBytes(address, bytes);
+        WriteBytes(address, bytes, caller);
     }
 
-    internal void WriteBytes(ulong address, ReadOnlySpan<byte> source)
+    // The caller name labels the packet handler in the image-clear trace.
+    internal void WriteBytes(ulong address, ReadOnlySpan<byte> source, [CallerMemberName] string caller = "")
     {
         if (!_host.Memory.TryWrite(address, source))
         {
@@ -482,6 +485,7 @@ public sealed partial class GpuCommandInterpreter
             _lastWriteLength = source.Length;
             _lastWritePacket = _packetSerial;
         }
+        if (ImageClearTrace.Enabled) _host.TraceGuestWrite($"command-write-{caller}", address, (ulong)source.Length);
     }
 
     private static ulong Address(uint low, uint high) => low | ((ulong)high << 32);
