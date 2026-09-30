@@ -8,6 +8,29 @@ namespace SharpEmu.Libs.Gpu.Images;
 // Surface metadata (HTile, DCC, CMask, FMask) keyed by its guest address.
 public sealed partial class GuestImageCache
 {
+    private sealed record MetadataWriteBounds(ulong First, ulong Last);
+    private MetadataWriteBounds? _metadataWriteBounds;
+
+    // Publish under the image lock. Retain old bounds so removal cannot hide a concurrent write.
+    private void IncludeMetadataWriteRange(ulong address, ulong size)
+    {
+        var last = address + Math.Min(Math.Max(1UL, size) - 1, ulong.MaxValue - address);
+        var previous = _metadataWriteBounds;
+        if (previous is not null)
+        {
+            if (address >= previous.First && last <= previous.Last) return;
+            address = Math.Min(address, previous.First);
+            last = Math.Max(last, previous.Last);
+        }
+        System.Threading.Volatile.Write(ref _metadataWriteBounds, new MetadataWriteBounds(address, last));
+    }
+
+    private bool MayOverlapMetadata(ulong address, ulong size)
+    {
+        var bounds = System.Threading.Volatile.Read(ref _metadataWriteBounds);
+        return bounds is not null && address <= bounds.Last && address + size > bounds.First;
+    }
+
     private void InvalidateMetadataForCpuWrite(ulong address, ulong size)
     {
         if (_surfaceMetadata.Count == 0) return;
@@ -92,6 +115,7 @@ public sealed partial class GuestImageCache
         using var held = _lock.Hold();
         if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated)
         {
+            IncludeMetadataWriteRange(address, size);
             // The fill may precede color-target discovery; a pending entry stays invisible until then.
             _surfaceMetadata[address] = new SurfaceMetadata { Kind = SurfaceMetadataKind.PendingDcc, ClearMask = dccClearMask, FillValue = fillValue, FillSize = size };
             return false;
@@ -99,6 +123,7 @@ public sealed partial class GuestImageCache
 
         if (found.Kind == SurfaceMetadataKind.PendingDcc)
         {
+            IncludeMetadataWriteRange(address, size);
             found.ClearMask = dccClearMask;
             found.FillValue = fillValue;
             found.FillSize = size;
@@ -107,6 +132,7 @@ public sealed partial class GuestImageCache
 
         if (found.Kind == SurfaceMetadataKind.Dcc)
         {
+            IncludeMetadataWriteRange(address, size);
             found.ClearMask = dccClearMask;
             found.FillValue = fillValue;
             found.FillSize = size;

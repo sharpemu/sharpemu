@@ -94,6 +94,7 @@ public sealed partial class GuestImageCache
             foreach (var association in associations)
             {
                 var associated = _slots[association];
+                ReportImageLifetime(associated, "delete-depth-association", deletion: true);
                 if (associated.IsGpuModified)
                 {
                     associated.ClearGpuModified();
@@ -372,6 +373,12 @@ public sealed partial class GuestImageCache
             return false;
         }
 
+        // Skip the lock only when neither image pages nor metadata can cover the write.
+        if (!MayOwnPages(address, size) && !MayOverlapMetadata(address, size))
+        {
+            return false;
+        }
+
         using var held = _lock.Hold();
         if (!_pageOwners.MayHaveOwners(address, size))
         {
@@ -381,6 +388,27 @@ public sealed partial class GuestImageCache
         }
 
         return InvalidateAliases(address, size);
+    }
+
+    private const ulong MaxLockFreeOwnerPages = 64;
+
+    private bool MayOwnPages(ulong address, ulong size)
+    {
+        if (!ImagePageOwnerTable.TryGetPageRange(address, size, out var first, out var lastExclusive) ||
+            lastExclusive - first > MaxLockFreeOwnerPages)
+        {
+            return true;
+        }
+
+        for (var page = first; page < lastExclusive; page++)
+        {
+            if (_pageOwners.Find(page) is { IsEmpty: false })
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public void InvalidateMemory(ulong address, ulong size)

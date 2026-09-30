@@ -90,6 +90,29 @@ public sealed partial class GuestImageCacheTests
     }
 
     [Fact]
+    public void CpuWriteInvalidatesTheExpandedPendingDccFill()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x300000, ReadWrite);
+        var metadataAddress = address + 0x200000;
+        Assert.False(harness.Images.TryAbsorbDccFill(metadataAddress, 0x100, 0xc0c0c0c0u));
+        Assert.False(harness.Images.TryAbsorbDccFill(metadataAddress, 0x300, 0xc0c0c0c0u));
+        Assert.False(harness.ImageStore.MarkCpuWrite(metadataAddress + 0x200, 8));
+
+        var color = LinearRequest(address, 4, Format.R8G8B8A8Srgb,
+            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        color = AsColorTarget(color);
+        color.Description.Metadata.Kind = MetadataKind.Dcc;
+        color.Description.Metadata.Range = new GuestSpan(metadataAddress, 0x100);
+        color.Description.Metadata.Compression = DisplayCompression.Dcc256_256_0;
+        harness.Acquire(ref color);
+        Assert.True(harness.Images.IsMetadata(metadataAddress));
+        Assert.False(harness.Images.IsMetadataCleared(metadataAddress, 0));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void HtileEntries_ReportRegisteredAndClearedState()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

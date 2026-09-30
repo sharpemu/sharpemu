@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
 
@@ -41,10 +42,13 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
     private uint _queryEpoch;
     private bool _readbackLinearImages;
     private bool _disposed;
+    private readonly Action _reportAllocationFailure;
+    private ulong _createdImageCount;
 
     public GuestImageCache(GpuDeviceInfo device, SubmissionScheduler scheduler, PageGuard pages, GuestBufferCache bufferCache, IGuestBackedSpace backing, bool readbackLinearImages)
     {
         _device = device;
+        _reportAllocationFailure = () => ReportImageMemory("allocation-failure", true);
         _scheduler = scheduler;
         _pages = pages;
         _bufferCache = bufferCache;
@@ -170,6 +174,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         var sameBacking = result.IsValid;
         var viewMip = -1;
         var viewLayer = -1;
+        var exactMatch = result.IsValid;
         if (!result.IsValid)
         {
             foreach (var candidate in candidates)
@@ -220,8 +225,37 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             }
         }
 
+        if (RenderPhaseProfile.Enabled && result.IsValid)
+        {
+            if (exactMatch) _exactImageMatches++;
+            else _overlapImageMatches++;
+        }
         if (!result.IsValid)
         {
+            if (RenderPhaseProfile.Enabled)
+            {
+                if (candidates.Count == 0) _emptyImageSearches++;
+                else _unmatchedImageOverlaps++;
+                if (request.Description.Data.Size >= 64UL * 1024 * 1024 && _largeImageLookupReports < 64)
+                {
+                    _largeImageLookupReports++;
+                    Console.Error.WriteLine($"[GPU][INFO] ImageMemoryLookupLarge address=0x{request.Description.Data.Address:X} " +
+                        $"role={request.Role} candidates={candidates.Count} exact_format={exactFormat} " +
+                        $"view_type={request.View.Type} view_mip={request.View.BaseLevel} view_layer={request.View.BaseLayer}");
+                    var reported = 0;
+                    foreach (var candidate in candidates)
+                    {
+                        if (reported++ == 8) break;
+                        var previous = _slots.TryGet(candidate);
+                        if (previous == null) continue;
+                        Console.Error.WriteLine($"[GPU][INFO] ImageMemoryOverlapLarge address=0x{previous.Description.Data.Address:X} " +
+                            $"guest_bytes={previous.Description.Data.Size} format={previous.Description.PixelFormat} " +
+                            $"extent={previous.Description.Extent.Width}x{previous.Description.Extent.Height}x{previous.Description.Extent.Depth} " +
+                            $"layers={previous.Description.Resources.Layers} levels={previous.Description.Resources.Levels} " +
+                            $"registered={previous.Registered} gpu_modified={previous.IsGpuModified}");
+                    }
+                }
+            }
             result = InsertImage(request.Description);
             var inserted = _slots[result];
             if (_bufferCache.HasGpuDirtyBytes(inserted.Description.Data.Address, inserted.Description.Data.Size))
@@ -358,6 +392,8 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         {
             image.Description.Metadata = request.Description.Metadata;
             var address = request.Description.Metadata.Range.Address;
+            IncludeMetadataWriteRange(address, Math.Max(request.Description.Metadata.Range.Size,
+                request.Description.DccSliceSize * request.Description.TransferLayers));
             if (!_surfaceMetadata.TryGetValue(address, out var metadata) || metadata.Invalidated)
             {
                 metadata = new SurfaceMetadata { Kind = SurfaceMetadataKind.Dcc };
@@ -405,6 +441,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         {
             image.Description.Metadata = request.Description.Metadata;
             var address = request.Description.Metadata.Range.Address;
+            IncludeMetadataWriteRange(address, request.Description.Metadata.Range.Size);
             if (!_surfaceMetadata.TryGetValue(address, out var metadata))
             {
                 metadata = new SurfaceMetadata { Kind = SurfaceMetadataKind.HTile, ClearMask = image.Description.HtileClearMask };
@@ -608,10 +645,19 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         return imageIdentifier;
     }
 
-    private ResourceSlotIdentifier InsertImage(in ImageDescription description)
+    private ResourceSlotIdentifier InsertImage(in ImageDescription description,
+        [System.Runtime.CompilerServices.CallerMemberName] string creationPath = "")
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageCreate);
-        var imageIdentifier = _slots.Insert(new CachedImage(_device, _scheduler, _backing, description, _backingPool));
+        var imageIdentifier = _slots.Insert(new CachedImage(_device, _scheduler, _backing, description, _backingPool, _reportAllocationFailure));
+        _createdImageCount++;
+        ReportLargeImageCreation(_slots[imageIdentifier], creationPath);
+        ReportImageLifetime(_slots[imageIdentifier], "recreate");
+        if (RenderPhaseProfile.Enabled)
+        {
+            _imageCreationTotals.TryGetValue(creationPath, out var totals);
+            _imageCreationTotals[creationPath] = (totals.Count + 1, totals.Bytes + _slots[imageIdentifier].Backing.AllocationSize);
+        }
         if (!ImageDescription.IsEmptyRange(description.Data))
         {
             AddToIndex(imageIdentifier);
