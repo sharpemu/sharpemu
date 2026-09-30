@@ -183,7 +183,8 @@ internal static class ResourceTestProgram
             BindingLayout.UsesGlobalDataShare(program),
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
             BindingLayout.ReadsShaderBase(program),
-            pushDataStartDword);
+            pushDataStartDword,
+            usesMeshDrawParameters: stage == ShaderStage.Mesh);
         return (plan, resources, layout);
     }
 
