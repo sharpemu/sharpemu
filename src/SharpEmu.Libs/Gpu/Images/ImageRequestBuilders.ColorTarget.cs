@@ -355,6 +355,25 @@ public static partial class ImageRequestBuilders
             targetFormat.HostFormat, viewType, ImageAspectFlags.ColorBit, words.MipLevel, 1, view.BaseLayer, view.LayerCount, default, ImageUsageFlags.ColorAttachmentBit);
         var request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
         var (clearSupported, fixedClearSupported, clearValue) = DccClearInfo(targetFormat.HostFormat, hasDcc, words.ClearWord0);
+        if (hasDcc && fixedClearSupported && words.Order == ChannelOrder.Standard &&
+            !volume && !is1D && levels == 1 && samples == 1 && tileMode == GuestTileMode.RenderTarget)
+        {
+            var sliceSize = NativeColorClear.SliceSize(width, height, bytesPerElement);
+            var metadataSize = sliceSize * view.ImageLayers;
+            if (sliceSize != 0 && (words.DccAddress & 4095) == 0 &&
+                metadataSize <= ulong.MaxValue - words.DccAddress)
+            {
+                description.Metadata.Range = new GuestSpan(words.DccAddress, metadataSize);
+                description.Metadata.NativeColorClear = true;
+                description.Metadata.ColorAlphaOnLeastSignificantBits = words.Layout is
+                    ChannelLayout.Bits8 or ChannelLayout.Bits16 or ChannelLayout.Bits32 or
+                    ChannelLayout.Bits2_10_10_10 or ChannelLayout.Bits1_5_5_5;
+                description.Metadata.ColorMetadataBaseLayer = view.BaseLayer;
+                description.Metadata.PackedColorClearSupported = clearSupported;
+                description.Metadata.PackedColorClear = clearValue;
+                request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
+            }
+        }
         return new ColorTargetResolution(
             request, words.BaseAddress, backingSize, viewExtent, words.MipLevel, view.BaseLayer, samples, targetFormat.ExportMapping,
             clearSupported, fixedClearSupported, clearValue);
