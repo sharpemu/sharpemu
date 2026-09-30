@@ -111,6 +111,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
             pixelOutputs = ResolveBoundTargets(context, out var outputModes, out var outputMappings);
             pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount);
+            // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
+            // the vertex program must declare every location the pixel program reads.
+            attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(pixelProgram, pixelInfo));
         }
 
         ShaderProgram vertexProgram;
@@ -202,6 +205,32 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,
             shaderInterface.VertexOutputControl, clipSpace);
+    }
+
+    // One past the highest parameter location the pixel program reads, resolved as its translator does.
+    private static uint ReadVertexOutputCount(Gen5ShaderProgram pixelProgram, PixelInputInfo info)
+    {
+        var attributes = pixelProgram.Instructions
+            .Select(static instruction => instruction.Control)
+            .OfType<Gen5InterpolationControl>()
+            .Select(static control => control.Attribute)
+            .Distinct()
+            .Order()
+            .ToArray();
+        if (attributes.Length == 0)
+        {
+            return 0;
+        }
+
+        var controls = new uint[32];
+        for (var index = 0u; index < (uint)controls.Length; index++)
+        {
+            controls[index] = index < info.InputCount && index < (uint)info.InterpolatorSettings.Length
+                ? info.InterpolatorSettings[index]
+                : index;
+        }
+
+        return Gen5PixelInputMapping.ResolveLocations(controls, attributes).Max() + 1;
     }
 
     private static uint InterpolatedAttributeCount(Gen5ShaderProgram program)
