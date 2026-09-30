@@ -17,6 +17,41 @@ public sealed class DrawImageTypeRejectionTests
     [InlineData(false, ShaderStageKind.Pixel)]
     [InlineData(true, ShaderStageKind.Vertex)]
     [InlineData(true, ShaderStageKind.Pixel)]
+    public void EnabledTrace_ReportsRejectionBeforeTheNextRecordedDraw(bool indexed, ShaderStageKind rejectedStage)
+    {
+        if (!SharpEmu.Libs.Gpu.Images.ImageClearTrace.Enabled) return;
+        using var fatal = new FatalScope();
+        var host = new RecordingRenderHost();
+        var executor = new RenderExecutor(host, new FakePipelineProvider(), strictDrawResources: false);
+        host.PreparationFailure = stage => stage.Program!.Stage == rejectedStage ? Mismatch() : null;
+        var banks = Banks();
+        void Draw()
+        {
+            if (indexed) executor.DrawIndexed(1, banks, Indexed(3));
+            else executor.DrawAuto(1, banks, Auto(3));
+        }
+
+        Draw();
+        Assert.DoesNotContain(host.Calls, call => call.StartsWith("draw"));
+        Assert.Equal(("resource-rejected", ColorBase, banks.Shader.Pixel.Address, banks.Shader.Vertex.ExportAddress),
+            Assert.Single(host.DrawTargets));
+        Assert.Equal(0, host.PreparationDepth);
+
+        host.PreparationFailure = null;
+        Draw();
+        Assert.Single(host.Calls, call => call.StartsWith(indexed ? "draw_indexed " : "draw "));
+        Assert.Equal(2, host.DrawTargets.Count);
+        Assert.Equal(("recorded", ColorBase, banks.Shader.Pixel.Address, banks.Shader.Vertex.ExportAddress),
+            host.DrawTargets[1]);
+        Assert.Equal(0, host.PreparationDepth);
+        Assert.Equal("reset_bindings", host.Calls[^1]);
+    }
+
+    [Theory]
+    [InlineData(false, ShaderStageKind.Vertex)]
+    [InlineData(false, ShaderStageKind.Pixel)]
+    [InlineData(true, ShaderStageKind.Vertex)]
+    [InlineData(true, ShaderStageKind.Pixel)]
     public void SkipMode_ReleasesPreparationAndRecordsOnlyTheNextValidDraw(bool indexed, ShaderStageKind rejectedStage)
     {
         using var fatal = new FatalScope();

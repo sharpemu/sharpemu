@@ -79,6 +79,9 @@ public interface IResourcePreparation : IDisposable
 // Everything the executor needs from the renderer, the caches and the pipeline objects.
 public interface IRenderHost
 {
+    // Records a draw's color-target base for the image-clear trace; see docs/image-clear-tracing.md.
+    void TraceDrawTarget(string disposition, ulong address, ulong pixelShaderAddress, ulong vertexShaderAddress) { }
+
     RenderHostLimits Limits { get; }
 
     IImageFormatSupport FormatSupport { get; }
