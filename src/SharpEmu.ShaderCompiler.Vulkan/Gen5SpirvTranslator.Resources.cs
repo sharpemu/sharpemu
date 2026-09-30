@@ -113,6 +113,7 @@ public static partial class Gen5SpirvTranslator
             {
                 ShaderStage.Vertex => Gen5SpirvStage.Vertex,
                 ShaderStage.Pixel => Gen5SpirvStage.Pixel,
+                ShaderStage.Mesh => Gen5SpirvStage.Mesh,
                 _ => Gen5SpirvStage.Compute,
             };
             _pixelOutputBindings = request.PixelOutputs;
@@ -122,8 +123,10 @@ public static partial class Gen5SpirvTranslator
             _pixelExecExcludesHelpers =
                 _stage == Gen5SpirvStage.Pixel && PixelLiveExec &&
                 request.Program.Instructions.Any(static instruction => instruction.Opcode is "DsAppend" or "DsConsume");
-            _enableGraphicsSubgroupOperations = _stage == Gen5SpirvStage.Compute || request.EnableGraphicsSubgroupOperations;
+            _enableGraphicsSubgroupOperations = _stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh || request.EnableGraphicsSubgroupOperations;
             _waveLaneCount = request.WaveSize == 64 ? 64u : 32u;
+            _pairedMeshLanes = _stage == Gen5SpirvStage.Mesh && _waveLaneCount == 64 &&
+                request.Mesh?.DeviceSubgroupLaneCount == 32;
             _localSizeX = Math.Max(request.LocalSizeX, 1);
             _localSizeY = Math.Max(request.LocalSizeY, 1);
             _localSizeZ = Math.Max(request.LocalSizeZ, 1);
@@ -135,10 +138,15 @@ public static partial class Gen5SpirvTranslator
             {
                 _waveLowering = new NativeWave32Lowering(this);
             }
-            else if (request.HostWave64Supported)
+            else if (request.HostWave64Supported ||
+                     (_stage == Gen5SpirvStage.Mesh && request.Mesh?.DeviceSubgroupLaneCount == 64))
             {
                 _waveLowering = new NativeWave64Lowering(this);
                 _guestLaneFromSubgroup = true;
+            }
+            else if (_pairedMeshLanes)
+            {
+                _waveLowering = new NativeWave32Lowering(this);
             }
             else if (_stage == Gen5SpirvStage.Compute &&
                      request.HostComputeSubgroup32 &&
@@ -155,7 +163,6 @@ public static partial class Gen5SpirvTranslator
             {
                 _waveLowering = new EmulatedWave64Lowering(this);
             }
-
             _requiredVertexOutputCount = request.RequiredVertexOutputCount;
             _pixelInputEnable = request.PixelInputEnable;
             _pixelInputAddress = request.PixelInputAddress;
@@ -245,11 +252,14 @@ public static partial class Gen5SpirvTranslator
                 _interfaces.Add(_runtimeBufferBiases);
             }
 
-            if (info.UsesDeviceAddresses)
+            if (info.UsesDeviceAddresses || _stage == Gen5SpirvStage.Mesh)
             {
                 _module.AddCapability(SpirvCapability.PhysicalStorageBufferAddresses);
                 _module.SetPhysicalStorageBuffer64MemoryModel();
                 _physicalUintPointer = _module.TypePointer(SpirvStorageClass.PhysicalStorageBuffer, _uintType);
+            }
+            if (info.UsesDeviceAddresses)
+            {
                 var privateUlongPointer = _module.TypePointer(SpirvStorageClass.Private, _ulongType);
                 _deviceEntryScratch = _module.AddGlobalVariable(privateUlongPointer, SpirvStorageClass.Private, _module.Constant64(_ulongType, 0));
                 _deviceWordScratch = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
@@ -458,7 +468,7 @@ public static partial class Gen5SpirvTranslator
         // A bounds-checked dword of a storage block; outside the block reads zero.
         private uint LoadBlockWord(uint block, uint dwordIndex)
         {
-            var length = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, block, 0);
+            var length = StorageBlockLength(block);
             var inRange = _module.AddInstruction(SpirvOp.ULessThan, _boolType, dwordIndex, length);
             var safeIndex = _module.AddInstruction(SpirvOp.Select, _uintType, inRange, dwordIndex, UInt(0));
             var pointer = _module.AddInstruction(SpirvOp.AccessChain, _storageUintPointer, block, UInt(0), safeIndex);
@@ -474,7 +484,26 @@ public static partial class Gen5SpirvTranslator
                 SpirvOp.ULessThan,
                 _boolType,
                 dwordIndex,
-                _module.AddInstruction(SpirvOp.ArrayLength, _uintType, block, 0));
+                StorageBlockLength(block));
+
+        private uint _shaderDataLength;
+        private uint _flattenedTableLength;
+
+        private void InitializeStorageBlockLengths()
+        {
+            if (_stage is not (Gen5SpirvStage.Mesh or Gen5SpirvStage.Compute)) return;
+            if (_shaderData != 0)
+                _shaderDataLength = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _shaderData, 0);
+            if (_flattenedTable != 0)
+                _flattenedTableLength = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _flattenedTable, 0);
+        }
+
+        private uint StorageBlockLength(uint block)
+        {
+            if (block == _shaderData && _shaderDataLength != 0) return _shaderDataLength;
+            if (block == _flattenedTable && _flattenedTableLength != 0) return _flattenedTableLength;
+            return _module.AddInstruction(SpirvOp.ArrayLength, _uintType, block, 0);
+        }
 
         private uint LoadFlattenedWord(uint slot) => LoadBlockWord(_flattenedTable, slot);
 

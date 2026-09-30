@@ -44,6 +44,17 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     public bool SupportsDynamicRendering { get; }
     public bool SupportsFragmentShaderBarycentric { get; private init; }
     public bool SupportsFillRectangle { get; private init; }
+    public bool SupportsMeshShaders { get; private init; }
+    public uint SubgroupSize
+    {
+        get
+        {
+            var subgroup = new PhysicalDeviceSubgroupProperties { SType = StructureType.PhysicalDeviceSubgroupProperties };
+            var properties = new PhysicalDeviceProperties2 { SType = StructureType.PhysicalDeviceProperties2, PNext = &subgroup };
+            Vk.GetPhysicalDeviceProperties2(Physical, &properties);
+            return subgroup.SubgroupSize;
+        }
+    }
 
     private static readonly string[] RenderingExtensionNames =
     [
@@ -304,6 +315,13 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             vk.GetPhysicalDeviceFeatures2(physical, &query);
         }
         var barycentric = (bool)barycentricFeatures.FragmentShaderBarycentric;
+        const string meshExtension = "VK_EXT_mesh_shader";
+        var meshFeatures = new PhysicalDeviceMeshShaderFeaturesEXT { SType = StructureType.PhysicalDeviceMeshShaderFeaturesExt };
+        if (HasDeviceExtensions(vk, physical, [meshExtension]))
+        {
+            var query = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &meshFeatures };
+            vk.GetPhysicalDeviceFeatures2(physical, &query);
+        }
 
         var vulkan13Features = new PhysicalDeviceVulkan13Features
         {
@@ -331,6 +349,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         }
 
         vk.GetPhysicalDeviceFeatures(physical, out var baseFeatures);
+        var meshShaders = meshFeatures.MeshShader && vulkan13Features.ComputeFullSubgroups && dynamicRendering;
         var enabledFeatures = new PhysicalDeviceFeatures
         {
             SampleRateShading = baseFeatures.SampleRateShading,
@@ -340,6 +359,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             ShaderClipDistance = baseFeatures.ShaderClipDistance,
             ShaderCullDistance = baseFeatures.ShaderCullDistance,
             RobustBufferAccess = baseFeatures.RobustBufferAccess,
+            VertexPipelineStoresAndAtomics = baseFeatures.VertexPipelineStoresAndAtomics,
         };
         var priority = 1f;
         var queueInfo = new DeviceQueueCreateInfo
@@ -355,6 +375,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             SType = StructureType.PhysicalDeviceVulkan13Features,
             DynamicRendering = dynamicRendering,
             Synchronization2 = true,
+            ComputeFullSubgroups = meshShaders,
         };
         addressFeatures = new PhysicalDeviceBufferDeviceAddressFeatures
         {
@@ -369,6 +390,17 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             vulkan13Features.PNext = &barycentricFeatures;
         }
         var extensionNames = new List<string>();
+        if (meshShaders)
+        {
+            meshFeatures = new PhysicalDeviceMeshShaderFeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceMeshShaderFeaturesExt,
+                MeshShader = true,
+                PNext = vulkan13Features.PNext,
+            };
+            vulkan13Features.PNext = &meshFeatures;
+            extensionNames.Add(meshExtension);
+        }
         if (dynamicRendering) extensionNames.AddRange(RenderingExtensionNames);
         if (barycentric) extensionNames.Add(barycentricExtension);
         const string fillRectangleExtension = "VK_NV_fill_rectangle";
@@ -402,6 +434,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         {
             SupportsFragmentShaderBarycentric = barycentric,
             SupportsFillRectangle = fillRectangle,
+            SupportsMeshShaders = meshShaders,
         };
         if (validation)
         {
