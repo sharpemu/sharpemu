@@ -611,6 +611,48 @@ internal sealed class ShaderProgramCache
         }
 
         ShaderCacheCounters.CountCompile();
+        if (RenderPhaseProfile.Enabled && request.Mesh is not null && compiled.PayloadFileExtension == "spv")
+        {
+            var payload = compiled.Payload;
+            var barriers = 0;
+            var loops = 0;
+            var elections = 0;
+            var atomicOrs = 0;
+            var loads = 0;
+            var stores = 0;
+            var instructions = 0;
+            var functionInstructions = 0;
+            var beforeFirstLoop = 0;
+            var insideFunction = false;
+            for (var offset = 20; offset < payload.Length;)
+            {
+                var instruction = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(payload.AsSpan(offset));
+                var wordCount = (int)(instruction >> 16);
+                if (wordCount == 0 || wordCount > (payload.Length - offset) / 4) break;
+                instructions++;
+                switch ((SharpEmu.ShaderCompiler.Vulkan.SpirvOp)(instruction & 0xffff))
+                {
+                    case SharpEmu.ShaderCompiler.Vulkan.SpirvOp.Function: insideFunction = true; break;
+                    case SharpEmu.ShaderCompiler.Vulkan.SpirvOp.FunctionEnd: insideFunction = false; break;
+                    case SharpEmu.ShaderCompiler.Vulkan.SpirvOp.ControlBarrier: barriers++; break;
+                    case SharpEmu.ShaderCompiler.Vulkan.SpirvOp.LoopMerge:
+                        if (loops == 0) beforeFirstLoop = functionInstructions;
+                        loops++;
+                        break;
+                    case SharpEmu.ShaderCompiler.Vulkan.SpirvOp.GroupNonUniformElect: elections++; break;
+                    case SharpEmu.ShaderCompiler.Vulkan.SpirvOp.AtomicOr: atomicOrs++; break;
+                    case SharpEmu.ShaderCompiler.Vulkan.SpirvOp.Load: loads++; break;
+                    case SharpEmu.ShaderCompiler.Vulkan.SpirvOp.Store: stores++; break;
+                }
+                if (insideFunction) functionInstructions++;
+                offset += wordCount * 4;
+            }
+            Console.Error.WriteLine($"[PERF][MESH_COMPILE] hash=0x{source.Hash:X16} bytes={payload.Length} " +
+                $"static_barriers={barriers} static_loops={loops} static_elections={elections} static_atomic_or={atomicOrs} " +
+                $"static_instructions={instructions} static_loads={loads} static_stores={stores} " +
+                $"static_before_first_loop={beforeFirstLoop} " +
+                $"bound_format_specialization=enabled buffer_formats={string.Join(',', resources.Info.Buffers.Select(buffer => buffer.DescriptorFormat))}");
+        }
         if (resources.Info.UsesDeviceAddresses)
         {
             ShaderCacheCounters.CountDeviceAddressProgram();
