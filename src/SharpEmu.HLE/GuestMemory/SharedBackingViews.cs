@@ -19,6 +19,12 @@ public sealed unsafe class SharedBackingViews : IDisposable
     private readonly HostBackingObject? _backing;
     private readonly object _lock = new();
     private readonly SortedList<ulong, ViewRecord> _views = new();
+    // Readers search this copy of _views without the lock: every HLE call that reads or writes
+    // aliased guest memory comes through here, and one lock across all guest threads made them
+    // queue (Demon's Souls' job threads spent seconds contending on it for 8-byte mutex reads).
+    // Mutations drop it under the lock; the next reader rebuilds it. A reader racing a mutation
+    // uses the copy from before it, as if it ran first.
+    private ViewRecord[]? _snapshot;
     private bool _disposed;
 
     public SharedBackingViews(IHostViewMemory host, ulong size)
@@ -49,6 +55,12 @@ public sealed unsafe class SharedBackingViews : IDisposable
 
     public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data)
     {
+        if (TryResolveSingleView(address, (ulong)data.Length, out var aliasAddress))
+        {
+            data.CopyTo(new Span<byte>((void*)aliasAddress, data.Length));
+            return true;
+        }
+
         lock (_lock)
         {
             if (IsAvailable && TryFindRecord(address, (ulong)data.Length, out var record))
@@ -79,6 +91,12 @@ public sealed unsafe class SharedBackingViews : IDisposable
 
     public bool TryReadBacking(ulong address, Span<byte> data)
     {
+        if (TryResolveSingleView(address, (ulong)data.Length, out var aliasAddress))
+        {
+            new ReadOnlySpan<byte>((void*)aliasAddress, data.Length).CopyTo(data);
+            return true;
+        }
+
         lock (_lock)
         {
             // A read inside one mapping needs no temporary segment list.
@@ -194,6 +212,7 @@ public sealed unsafe class SharedBackingViews : IDisposable
             }
 
             _views[address] = new ViewRecord(address, size, offset, protection) { WasRestored = wasRestored };
+            Volatile.Write(ref _snapshot, null);
         }
 
         failure = HostViewFailure.None;
@@ -268,6 +287,7 @@ public sealed unsafe class SharedBackingViews : IDisposable
                 {
                     old = record;
                     _views.RemoveAt(index);
+                    Volatile.Write(ref _snapshot, null);
                 }
             }
         }
@@ -385,6 +405,7 @@ public sealed unsafe class SharedBackingViews : IDisposable
             _disposed = true;
             views = new List<ViewRecord>(_views.Values);
             _views.Clear();
+            Volatile.Write(ref _snapshot, null);
         }
 
         foreach (var view in views)
@@ -471,6 +492,60 @@ public sealed unsafe class SharedBackingViews : IDisposable
         return false;
     }
 
+    // The alias address of a range that lies inside one view, found without the lock.
+    private bool TryResolveSingleView(ulong address, ulong size, out ulong aliasAddress)
+    {
+        aliasAddress = 0;
+        if (!IsAvailable || size == 0 || ulong.MaxValue - address < size)
+        {
+            return false;
+        }
+
+        var views = Volatile.Read(ref _snapshot);
+        if (views is null)
+        {
+            lock (_lock)
+            {
+                views = _snapshot ??= [.. _views.Values];
+            }
+        }
+
+        int low = 0, high = views.Length - 1, found = -1;
+        while (low <= high)
+        {
+            var middle = (low + high) >>> 1;
+            if (views[middle].Address <= address)
+            {
+                found = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        if (found < 0)
+        {
+            return false;
+        }
+
+        var record = views[found];
+        if (address + size > record.Address + record.Size)
+        {
+            return false;
+        }
+
+        var offset = record.Offset + address - record.Address;
+        if (!IsWithinBacking(offset, size))
+        {
+            return false;
+        }
+
+        aliasAddress = AliasBase + offset;
+        return true;
+    }
+
     private bool TryFindRecord(ulong address, ulong size, out ViewRecord record)
     {
         record = default;
@@ -503,6 +578,7 @@ public sealed unsafe class SharedBackingViews : IDisposable
         lock (_lock)
         {
             _views[record.Address] = record;
+            Volatile.Write(ref _snapshot, null);
         }
     }
 
