@@ -330,7 +330,7 @@ internal sealed class ShaderProgramCache
             }
         }
 
-        var permutation = CompilePermutation(source, options, entry, specialization, pushDataCursor, key ?? BuildProgramKey(source), sourceWasCached);
+        var permutation = CompilePermutation(source, options, entry, specialization, pushDataCursor, key ?? BuildProgramKey(source), sourceWasCached, snapshot);
         entry.Permutations.Add(permutation);
         ShaderCacheCounters.CountPermutation();
         stage = CreateStageResources(permutation.Program, snapshot, source, options);
@@ -542,7 +542,8 @@ internal sealed class ShaderProgramCache
         ResourceSpecialization specialization,
         uint pushDataCursor,
         ProgramKey key,
-        bool sourceWasCached)
+        bool sourceWasCached,
+        ResourceSnapshot snapshot)
     {
         var program = entry.Program;
         var plan = entry.Plan;
@@ -565,6 +566,7 @@ internal sealed class ShaderProgramCache
             specialization, request, pushDataCursor, _nextProgramId + 1);
         if (!_compiler.TryCompileProgram(request, out var compiled, out var error) || compiled is null)
         {
+            ShaderCallDump.Write(permutationDump, program, snapshot, plan.Memory, _host.TryReadCleanGuestWord);
             throw new ShaderProgramRejectedException($"The shader program cannot be compiled: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={error}.");
         }
 
