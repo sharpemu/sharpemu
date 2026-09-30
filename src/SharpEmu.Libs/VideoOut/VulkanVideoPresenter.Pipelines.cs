@@ -583,7 +583,18 @@ internal static unsafe partial class VulkanVideoPresenter
             entry.Id = ++_nextPipelineId;
             _pipelineEntries.Add(entry.Id, entry);
             if (_gpuCommandProfile is not null)
+            {
                 Console.Error.WriteLine($"[PERF][GPU_PIPELINE] pipeline={entry.Id} vertex=0x{entry.ProfileVertexHash:X16} pixel=0x{entry.ProfilePixelHash:X16} compute=0x{entry.ProfileComputeHash:X16}");
+                if (entry.Description is { } description)
+                {
+                    var parameters = description.StaticParameters;
+                    Console.Error.WriteLine($"[PERF][GPU_GRAPHICS_STATE] pipeline={entry.Id} stage={description.VertexStage.Stage} " +
+                        $"topology={parameters.Topology} samples={parameters.Samples} sample_shading={parameters.SampleShadingEnable} " +
+                        $"cull_front={parameters.CullFront} cull_back={parameters.CullBack} depth_clip={parameters.DepthClipEnable} " +
+                        $"color_formats={string.Join(',', description.Rendering.ColorFormats.Take((int)description.Rendering.ColorCount))} " +
+                        $"depth_format={description.Rendering.DepthFormat} stencil_format={description.Rendering.StencilFormat}");
+                }
+            }
             return new PipelineHandle(entry.Id, entry.Layout.Handle, entry.UsesPushDescriptors);
         }
 
