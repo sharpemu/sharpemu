@@ -262,14 +262,18 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public ResourceSlotIdentifier FindImage(ref ImageRequest request, bool exactFormat)
         {
+            _imageCache.SynchronizeColorMetadata(request);
             _ = BeginBatchedGuestCommands();
-            if (request.Role == ImageRole.ColorTarget && request.Description.DccSliceSize is var sliceSize and not 0)
+            if (request.Role == ImageRole.ColorTarget && !request.Description.Metadata.NativeColorClear &&
+                request.Description.DccSliceSize is var sliceSize and not 0)
             {
                 _imageCache.SynchronizeGuestDccMetadata(request.Description.Metadata.Range.Address, sliceSize,
                     request.View.BaseLayer, request.View.LayerCount);
             }
 
-            return _imageCache.FindImage(ref request, exactFormat);
+            var imageIdentifier = _imageCache.FindImage(ref request, exactFormat);
+            _imageCache.ApplyNativeColorClear(imageIdentifier, request);
+            return imageIdentifier;
         }
 
         public void ResetBindings()
