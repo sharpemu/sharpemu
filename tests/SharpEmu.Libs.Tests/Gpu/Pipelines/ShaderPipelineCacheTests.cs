@@ -37,6 +37,140 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         StageStaticKey.Build(new ComputeInputInfo(), ordinary);
         StageStaticKey.Build(new ComputeInputInfo { IeeeMode = true }, ieee);
         Assert.False(ordinary.SequenceEqual(ieee));
+        StageStaticKey.Build(new MeshDrawConfiguration(), 0, ordinary);
+        StageStaticKey.Build(new MeshDrawConfiguration
+        {
+            Geometry = new GuestGeometryConfiguration { IeeeMode = true },
+        }, 0, ieee);
+        Assert.False(ordinary.SequenceEqual(ieee));
+    }
+
+    [Fact]
+    public void FusedMeshPointerUpdatesWithoutCompilingAnotherProgram()
+    {
+        var guest = new PipelineTestGuest();
+        var address = PipelineTestGuest.MemoryBase + 0x1000;
+        var header = PipelineTestGuest.MemoryBase + 0x8000;
+        var continuation = address + 0x100;
+        guest.RegisterProgram(address, header, [0xBE940400, 0xBE960308, 0xBE970303, 0xBF810000]);
+        guest.RegisterProgram(continuation, header + 0x100, PipelineTestGuest.EndProgram);
+        var registry = new ShaderHeaderRegistry(guest.Context, _ => header,
+            _ => new FusedProgramParts(continuation, header + 0x100));
+        guest.Host.MeshShadersSupported = true;
+        guest.Host.MeshLimits = new MeshShaderLimits(128, 256, 256, 32768, 65535, 65535, 65535,
+            128, 32768, 32768, 32, 32, 128);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, registry);
+        var banks = Banks();
+        banks.Shader.Vertex.ExportAddress = address;
+        banks.Shader.Vertex.GeometryUserDataAddress = 0x2012345678;
+        banks.Shader.Vertex.GeometryUserScalars.Set(0, 123, UserScalarKind.Unknown);
+        banks.Context.ShaderStages = 0x00400020;
+        banks.UserConfig.PrimitiveType = 4;
+        banks.Context.ShaderInterface.MaxOutputPerSubgroup = 32;
+        banks.Context.ShaderInterface.GeometryMaxVerticesOut = 3;
+        banks.Context.ShaderInterface.GeometryOutputPrimitiveType = 2;
+        banks.UserConfig.GeometryEngineControl.PrimitiveGroupSize = 8;
+        banks.UserConfig.GeometryEngineControl.VertexGroupSize = 24;
+        GraphicsPrograms Prepare() => cache.GetMeshGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel,
+            banks.Context.ShaderInterface, banks.Context, banks.UserConfig, [], pixelActive: false, depthBound: false);
+
+        var first = Prepare().VertexInput.Stage;
+        Assert.Equal(0u, first.Program!.UserDataBase);
+        Assert.Equal(new uint[] { 0, 1, 8 }, first.Program.Bindings!.UserDataRegisters);
+        Assert.Equal(0x12345678u, first.Resources.UserData[0]);
+        Assert.Equal(0x20u, first.Resources.UserData[1]);
+        Assert.Equal(123u, first.Resources.UserData[8]);
+        banks.Shader.Vertex.GeometryUserDataAddress = 0x3198765432;
+        var second = Prepare().VertexInput.Stage;
+        Assert.Equal(0x98765432u, second.Resources.UserData[0]);
+        Assert.Equal(0x31u, second.Resources.UserData[1]);
+        Assert.Equal(1, guest.Compiler.Compilations);
+    }
+
+    [Fact]
+    public void MeshDescriptorsUseTheMeshPipelineStage()
+    {
+        Assert.Equal(PipelineStageFlags.MeshShaderBitExt,
+            DescriptorWriter.PipelineStageFlag(ShaderStageFlags.MeshBitExt));
+        Assert.Equal(PipelineStageFlags.MeshShaderBitExt | PipelineStageFlags.FragmentShaderBit,
+            DescriptorWriter.PipelineStageFlag(ShaderStageFlags.MeshBitExt | ShaderStageFlags.FragmentBit));
+    }
+
+    [Theory]
+    [InlineData(false, "")]
+    [InlineData(true, "")]
+    [InlineData(false, "workgroup")]
+    [InlineData(false, "output")]
+    [InlineData(false, "payload-output")]
+    [InlineData(false, "exact-output")]
+    [InlineData(false, "components")]
+    [InlineData(false, "", true)]
+    [InlineData(true, "", true)]
+    public void MeshProgramChecksDeviceLimitsAndRetainsPixelStage(bool triangleStrip, string limit, bool depthBound = false)
+    {
+        var guest = new PipelineTestGuest();
+        var vertexAddress = PipelineTestGuest.MemoryBase + 0x1000;
+        var pixelAddress = PipelineTestGuest.MemoryBase + 0x2000;
+        guest.RegisterProgram(vertexAddress, PipelineTestGuest.MemoryBase + 0x8000, PipelineTestGuest.EndProgram);
+        guest.RegisterProgram(pixelAddress, PipelineTestGuest.MemoryBase + 0x8100, PipelineTestGuest.EndProgram);
+        guest.Host.MeshShadersSupported = true;
+        guest.Host.MeshLimits = new MeshShaderLimits(128, 256, 256, 32768, 65535, 65535, 65535,
+            128, 32768, 32768, 32, 32, 128);
+        guest.Host.MeshLimits = limit switch
+        {
+            "workgroup" => guest.Host.MeshLimits with { MaxWorkGroupSizeX = 31 },
+            "components" => guest.Host.MeshLimits with { MaxOutputComponents = 8 },
+            "output" => guest.Host.MeshLimits with { MaxOutputMemoryBytes = 1535 },
+            "payload-output" => guest.Host.MeshLimits with { MaxPayloadAndOutputMemoryBytes = 1535 },
+            "exact-output" => guest.Host.MeshLimits with { MaxOutputMemoryBytes = 1536, MaxPayloadAndOutputMemoryBytes = 1536 },
+            _ => guest.Host.MeshLimits,
+        };
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = Banks();
+        banks.Shader.Vertex.ExportAddress = vertexAddress;
+        banks.Shader.Vertex.GeometryAddress = 0;
+        banks.Shader.Pixel.Address = pixelAddress;
+        banks.Context.ShaderStages = triangleStrip ? 0x20u : 0x00400020u;
+        banks.UserConfig.PrimitiveType = triangleStrip ? 6u : 4u;
+        banks.Context.ShaderInterface.MaxOutputPerSubgroup = triangleStrip ? 192u : 32u;
+        banks.Context.ShaderInterface.GeometryMaxVerticesOut = 3;
+        banks.Context.ShaderInterface.GeometryOutputPrimitiveType = 2;
+        banks.UserConfig.GeometryEngineControl.PrimitiveGroupSize = 8;
+        banks.UserConfig.GeometryEngineControl.VertexGroupSize = 24;
+        var mapping = Enumerable.Repeat(ColorComponentMap.Identity, 8).ToArray();
+
+        GraphicsPrograms Prepare() => cache.GetMeshGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel,
+            banks.Context.ShaderInterface, banks.Context, banks.UserConfig, mapping, pixelActive: true, depthBound);
+        if (limit is "components")
+        {
+            var error = Assert.Throws<SchedulerFatalException>(() => Prepare());
+            Assert.Contains("device component limit", error.Message);
+            return;
+        }
+        if (limit is "output" or "payload-output")
+        {
+            var error = Assert.Throws<SchedulerFatalException>(() => Prepare());
+            Assert.Contains("mesh output exceeds device memory limits", error.Message);
+            return;
+        }
+        var programs = Prepare();
+        if (limit == "workgroup")
+        {
+            Assert.False(programs.Available);
+            Assert.Equal(0, guest.Compiler.Compilations);
+            return;
+        }
+
+        Assert.True(programs.Available);
+        Assert.NotNull(programs.MeshInput);
+        Assert.Equal(triangleStrip ? 192u : 32u, programs.MeshInput.Geometry.ThreadsPerGroup);
+        Assert.Equal(triangleStrip ? 10u : 24u, programs.MeshInput.Geometry.InputVertexCountPerWorkgroup);
+        Assert.Equal(triangleStrip, programs.MeshInput.Geometry.InputTriangleStrip);
+        Assert.Equal(ShaderStageKind.Mesh, programs.VertexInput.Stage.Program!.Stage);
+        Assert.Equal(ShaderStageKind.Pixel, programs.PixelInput.Stage.Program!.Stage);
+        Assert.Equal(2, guest.Compiler.Compilations);
+        Assert.Equal(depthBound ? 0 : 1, guest.Compiler.Requests[0].PixelOutputs.Count);
+        Assert.Null(programs.SolidClear);
     }
 
     // Forwards each pipeline request to the static builder and keeps the description.

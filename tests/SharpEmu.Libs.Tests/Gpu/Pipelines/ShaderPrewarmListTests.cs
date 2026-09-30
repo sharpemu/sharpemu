@@ -78,6 +78,7 @@ public sealed class ShaderPrewarmListTests : IDisposable
                 out var compiled, out var layout, out var error),
             error);
         Assert.NotNull(layout);
+        Assert.False(layout.UsesMeshDrawParameters);
         Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
     }
 

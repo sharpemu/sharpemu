@@ -27,6 +27,7 @@ public sealed record ShaderSource(RegisteredShader Registered, ulong Hash, uint[
     {
         ShaderStage.Vertex => "vertex",
         ShaderStage.Pixel => "pixel",
+        ShaderStage.Mesh => "mesh",
         _ => "compute",
     };
 }
@@ -42,6 +43,7 @@ public sealed class StageCompileOptions
     public uint PixelInputAddress { get; init; }
     public ComputeInputInfo? ComputeInfo { get; init; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
+    public MeshDrawConfiguration? MeshInfo { get; init; }
 }
 
 // The key of a program entry: what the emitter reads besides the resource specialization.
@@ -308,7 +310,8 @@ internal sealed class ShaderProgramCache
                     var plan = ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase,
                         (uint)source.UserData.Length,
                         beforeResourceTracking: captureLinkedImages ? plan => failedLinkedPlan = plan : null,
-                        waveSize: options.ComputeInfo?.WaveSize ?? 32u);
+                        waveSize: source.Stage == ShaderStage.Mesh
+                            ? options.MeshInfo!.Geometry.WaveSize : options.ComputeInfo?.WaveSize ?? 32u);
                     failedLinkedPlan = null;
                     linked = new ProgramSourceEntry { Program = program, Plan = plan,
                         HasBitwiseExclusiveOr = program.Instructions.Any(instruction => instruction.Opcode.Contains("Xor", StringComparison.Ordinal)) };
@@ -382,6 +385,9 @@ internal sealed class ShaderProgramCache
             case ShaderStage.Pixel:
                 StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), _staticState);
                 break;
+            case ShaderStage.Mesh:
+                StageStaticKey.Build(options.MeshInfo ?? throw new ArgumentException("The mesh lookup has no mesh input info."), options.RequiredVertexOutputCount, _staticState);
+                break;
             default:
                 StageStaticKey.Build(options.ComputeInfo ?? throw new ArgumentException("The compute lookup has no compute input info."), _staticState);
                 break;
@@ -414,8 +420,13 @@ internal sealed class ShaderProgramCache
             plan = ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length,
                 fetch?.Loads.Select(load => load.Pc).ToHashSet(),
                 beforeResourceTracking: dumpPlanning ? resourcePlan => ShaderPlanningDump.WriteGraph(source, resourcePlan) : null,
-                // Graphics stages compile as wave32 (see the compile request); compute follows the dispatch.
-                waveSize: source.Stage == ShaderStage.Compute ? options.ComputeInfo?.WaveSize ?? 64u : 32u);
+                // Resource planning must use the guest wave size of shader compilation.
+                waveSize: source.Stage switch
+                {
+                    ShaderStage.Mesh => options.MeshInfo!.Geometry.WaveSize,
+                    ShaderStage.Compute => options.ComputeInfo?.WaveSize ?? 64u,
+                    _ => 32u,
+                });
         }
         catch (ResourcePlanException exception)
         {
@@ -566,7 +577,8 @@ internal sealed class ShaderProgramCache
         {
             resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, source.UserDataBase, (uint)source.UserData.Length, pushDataCursor,
-                source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions);
+                source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions,
+                usesMeshDrawParameters: source.Stage == ShaderStage.Mesh);
         }
         catch (ResourcePlanException exception)
         {
@@ -574,6 +586,21 @@ internal sealed class ShaderProgramCache
         }
 
         var request = BuildRequest(source, options, entry, resources, layout);
+        if (request.Mesh is { } mesh)
+        {
+            var limits = _host.MeshLimits;
+            var parameterLocations = MeshShaderConfiguration.ParameterLocations(request.Program, request.RequiredVertexOutputCount);
+            var parameterCount = parameterLocations.Length;
+            var outputLocations = Math.Max(parameterCount + 3, parameterCount == 0 ? 0 : (int)parameterLocations[^1] + 1);
+            if ((ulong)outputLocations * 4 > limits.MaxOutputComponents)
+                throw new ShaderProgramRejectedException($"The mesh output exceeds the device component limit: " +
+                    $"components={outputLocations * 4} limit={limits.MaxOutputComponents}.");
+            var outputBytes = mesh.OutputMemoryBytes(parameterCount,
+                limits.OutputPerVertexGranularity, limits.OutputPerPrimitiveGranularity);
+            if (outputBytes > limits.MaxOutputMemoryBytes || outputBytes > limits.MaxPayloadAndOutputMemoryBytes)
+                throw new ShaderProgramRejectedException($"The mesh output exceeds device memory limits: bytes={outputBytes} " +
+                    $"output_limit={limits.MaxOutputMemoryBytes} payload_output_limit={limits.MaxPayloadAndOutputMemoryBytes}.");
+        }
         var permutationDump = ShaderPermutationDump.WriteInputs(
             source, key, sourceWasCached, _programs.Keys, entry.Permutations,
             specialization, request, pushDataCursor, _nextProgramId + 1);
@@ -698,6 +725,33 @@ internal sealed class ShaderProgramCache
                 };
             }
 
+            case ShaderStage.Mesh:
+            {
+                var info = options.MeshInfo!;
+                return new ShaderCompileRequest(entry.Plan, resources, layout)
+                {
+                    WaveSize = info.Geometry.WaveSize,
+                    TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
+                    IeeeMode = info.Geometry.IeeeMode,
+                    ScratchDwords = info.Geometry.ScratchDwords,
+                    EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
+                    RequiredVertexOutputCount = options.RequiredVertexOutputCount,
+                    PositionExportControl = info.Geometry.PositionExportControl,
+                    ClipSpace = new ShaderClipSpaceTransform(
+                        info.Geometry.ClipSpace.Enabled,
+                        info.Geometry.ClipSpace.ScaleX,
+                        info.Geometry.ClipSpace.ScaleY,
+                        info.Geometry.ClipSpace.OffsetX,
+                        info.Geometry.ClipSpace.OffsetY,
+                        info.Geometry.ClipSpace.HalfExtentX,
+                        info.Geometry.ClipSpace.HalfExtentY),
+                    LocalSizeX = info.Geometry.ThreadsPerGroup,
+                    Mesh = new MeshShaderConfiguration(info.Geometry.OutputVertexCapacity, info.Geometry.OutputPrimitiveCapacity,
+                        info.Geometry.ProvokingVertex, info.Geometry.InputPrimitiveCountPerWorkgroup, info.Geometry.InputVertexCountPerWorkgroup,
+                        info.Geometry.LocalDataShareDwords, info.Geometry.InputTriangleStrip, info.Execution.DeviceSubgroupLaneCount),
+                };
+            }
+
             default:
                 return BuildComputeRequest(entry.Plan, resources, layout, options.ComputeInfo!, options.ComputeSystemRegisters,
                     sharedInt64Atomics, _host.ExecGuardElisionEnabled);
@@ -705,7 +759,7 @@ internal sealed class ShaderProgramCache
     }
 
     private static BindingLayout AllocateLayout(Gen5ShaderProgram program, ShaderResourcePlan plan, SpecializedResourceInfo resources,
-        uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits) =>
+        uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits, bool usesMeshDrawParameters = false) =>
         BindingLayout.Allocate(
             resources.Info,
             BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount, plan.Graph.ExcludedUserDataRegisters),
@@ -713,7 +767,8 @@ internal sealed class ShaderProgramCache
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
             BindingLayout.ReadsShaderBase(program),
             pushDataCursor,
-            usesDispatchThreadLimits: usesDispatchThreadLimits);
+            usesDispatchThreadLimits: usesDispatchThreadLimits,
+            usesMeshDrawParameters: usesMeshDrawParameters);
 
     private static ShaderCompileRequest BuildComputeRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout layout,
         ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision) =>
@@ -884,6 +939,7 @@ internal sealed class ShaderProgramCache
             {
                 ShaderStage.Vertex => ShaderStageKind.Vertex,
                 ShaderStage.Pixel => ShaderStageKind.Pixel,
+                ShaderStage.Mesh => ShaderStageKind.Mesh,
                 _ => ShaderStageKind.Compute,
             },
             Hash = source.Hash,

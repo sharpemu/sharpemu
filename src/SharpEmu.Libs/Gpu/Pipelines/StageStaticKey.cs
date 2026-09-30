@@ -97,6 +97,35 @@ public static class StageStaticKey
         }
     }
 
+    public static void Build(MeshDrawConfiguration info, int requiredOutputCount, List<uint> key)
+    {
+        key.Clear();
+        key.Add(info.Geometry.ThreadsPerGroup);
+        key.Add(info.Execution.DeviceSubgroupLaneCount);
+        key.Add(Bit(info.Geometry.InputTriangleStrip));
+        key.Add(info.Geometry.InputPrimitiveCountPerWorkgroup);
+        key.Add(info.Geometry.InputVertexCountPerWorkgroup);
+        key.Add(info.Geometry.OutputVertexCapacity);
+        key.Add(info.Geometry.OutputPrimitiveCapacity);
+        key.Add(info.Geometry.ProvokingVertex);
+        key.Add(info.Geometry.WaveSize);
+        key.Add(Bit(info.Geometry.IeeeMode));
+        key.Add(info.Geometry.ScratchDwords);
+        key.Add(info.Geometry.LocalDataShareDwords);
+        key.Add(info.Geometry.PositionExportControl);
+        key.Add((uint)requiredOutputCount);
+        key.Add(Bit(info.Geometry.ClipSpace.Enabled));
+        if (info.Geometry.ClipSpace.Enabled)
+        {
+            key.Add(Bits(info.Geometry.ClipSpace.ScaleX));
+            key.Add(Bits(info.Geometry.ClipSpace.ScaleY));
+            key.Add(Bits(info.Geometry.ClipSpace.OffsetX));
+            key.Add(Bits(info.Geometry.ClipSpace.OffsetY));
+            key.Add(Bits(info.Geometry.ClipSpace.HalfExtentX));
+            key.Add(Bits(info.Geometry.ClipSpace.HalfExtentY));
+        }
+    }
+
     // The dispatch mode is static; exact thread limits arrive with each dispatch.
     public static void Build(ComputeInputInfo info, List<uint> key)
     {
