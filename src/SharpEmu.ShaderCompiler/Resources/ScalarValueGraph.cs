@@ -49,6 +49,8 @@ public sealed partial class ScalarValueGraph
     public IReadOnlyList<ScalarValue> Values => _values;
 
     internal Dictionary<uint, ScalarValue> BranchConditions { get; } = [];
+    internal Dictionary<uint, ScalarValue> ConditionalMaskResults { get; } = [];
+    internal Dictionary<uint, ScalarValue[]> UnsignedMedianSources { get; } = [];
 
     public bool Equivalent(ScalarValue left, ScalarValue right) => ScalarValueEquivalence.Equivalent(Memory, left, right);
 

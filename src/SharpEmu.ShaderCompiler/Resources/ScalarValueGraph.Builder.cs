@@ -1236,6 +1236,9 @@ public sealed partial class ScalarValueGraph
                  sdwa.DestinationSelect == 7 || sdwa.Source0Select == 7 || sdwa.Source1Select == 7 || sdwa.DestinationUnused == 3)) ||
                 instruction.Control is Gen5DppControl or Gen5Dpp8Control or Gen5Vop3pControl;
             var value = hasModifiers ? _graph.Undefined(ScalarValueType.U32) : VectorResult(instruction, state);
+            if (_recording && opcode == "VMed3U32" && !hasModifiers && instruction.Sources.Count == 3)
+                _graph.UnsignedMedianSources[instruction.Pc] = instruction.Sources
+                    .Select(source => ReadVectorOperand(source, state)).ToArray();
             if (instruction.Control is Gen5Vop3Control { ScalarDestination: { } carryDestination } && !hasModifiers &&
                 opcode is "VAddCoU32" or "VSubCoU32" or "VSubrevCoU32" or "VAddCoCiU32" or "VSubCoCiU32" or "VSubrevCoCiU32" or "VMadU64U32")
             {
@@ -1255,6 +1258,8 @@ public sealed partial class ScalarValueGraph
                     var result = instruction.Control is Gen5SdwaControl destinationSdwa
                         ? ApplySdwaDestination(destinationSdwa, value, state.ReadVector(destination.Value))
                         : value;
+                    if (_recording && opcode == "VCndmaskB32" && instruction.Control is Gen5SdwaControl)
+                        _graph.ConditionalMaskResults[instruction.Pc] = result;
                     state.WriteVector(destination.Value, result);
                     // Multi-dword results are not modelled; the second dword is undefined.
                     value = _graph.Undefined(ScalarValueType.U32);
