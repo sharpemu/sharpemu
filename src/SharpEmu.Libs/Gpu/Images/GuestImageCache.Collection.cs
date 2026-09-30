@@ -44,14 +44,10 @@ public sealed partial class GuestImageCache
         var deletions = aggressive ? 40 : pressured ? 20 : 10;
         var candidates = new List<ResourceSlotIdentifier>(deletions);
         // Deleting a depth image also deletes its stencil association, so the recency walk ends first.
-        _recencyQueue.ForEachItemAtOrBeforeTick(tick - age, imageIdentifier =>
-        {
-            candidates.Add(imageIdentifier);
-            return candidates.Count == deletions;
-        });
+        _recencyQueue.CollectNextAtOrBeforeTick(tick - age, deletions, candidates);
         foreach (var imageIdentifier in candidates)
         {
-            if (deletions == 0)
+            if (deletions == 0 || _totalUsedMemory < _collectionStartBytes)
             {
                 break;
             }
