@@ -11,6 +11,42 @@ namespace SharpEmu.ShaderCompiler.Tests;
 public sealed class Gen5SharedMemoryBarrierTests
 {
     [Theory]
+    [InlineData(64u, 64u, false, 2)]
+    [InlineData(64u, 64u, true, 2)]
+    [InlineData(32u, 64u, false, 0)]
+    [InlineData(64u, 128u, false, 0)]
+    public void SharedMemoryPhases_SynchronizeAcrossForwardBlocks(
+        uint waveSize, uint threadCount, bool splitPhases, int expectedBarriers)
+    {
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            ResourceTestProgram.MoveScalar(0, 20, 1),
+            ResourceTestProgram.Sopc(4, "SCmpEqU32", Gen5Operand.Scalar(20), ResourceTestProgram.Operand(1)),
+            ResourceTestProgram.Branch(8, "SCbranchScc0", 0),
+            ResourceTestProgram.DataShare(12, "DsWriteB32", false,
+                [Gen5Operand.Vector(0), Gen5Operand.Vector(1)], []),
+        };
+        if (splitPhases) instructions.Add(ResourceTestProgram.Branch(20, "SBranch", 0));
+        instructions.Add(ResourceTestProgram.DataShare(24, "DsReadB32", false, [Gen5Operand.Vector(0)], [2]));
+        instructions.Add(ResourceTestProgram.EndProgram(32));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(new Gen5ShaderProgram(0, instructions), userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            WaveSize = waveSize,
+            LocalSizeX = threadCount,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var barriers = 0;
+        for (var offset = 20; offset < shader.Spirv.Length;)
+        {
+            var instruction = BinaryPrimitives.ReadUInt32LittleEndian(shader.Spirv.AsSpan(offset));
+            if ((instruction & 0xFFFF) == (uint)SpirvOp.ControlBarrier) barriers++;
+            offset += checked((int)(instruction >> 16) * 4);
+        }
+        Assert.Equal(expectedBarriers, barriers);
+    }
+
+    [Theory]
     [InlineData(64u, 64u, false, false, 2)]
     [InlineData(64u, 64u, true, false, 2)]
     [InlineData(32u, 64u, false, false, 0)]

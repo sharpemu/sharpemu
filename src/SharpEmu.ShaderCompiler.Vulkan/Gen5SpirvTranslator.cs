@@ -1503,10 +1503,11 @@ public static partial class Gen5SpirvTranslator
             var block = blocks[blockIndex];
             var halfMaskPlan = HalfMaskPlan();
             _savedLaneValues.Clear();
-            // One guest wave can span two host subgroups. Keep its shared-memory phases ordered.
-            // The half-mask plan inserts its own barriers; other wave64 programs also
-            // need LDS phase ordering when reads and writes span basic blocks.
-            var synchronizeSharedMemory = _emulateWave64 && halfMaskPlan is null;
+            // Use fallback barriers only when the half-mask plan is not available.
+            // Restrict the fallback to single blocks and forward compute paths.
+            var synchronizeSharedMemory = _emulateWave64 && halfMaskPlan is null && (blocks.Count == 1 ||
+                (_stage == Gen5SpirvStage.Compute && !_hasIndirectControlFlow &&
+                    FindComputeDispatcherStart(blocks) == blocks.Count));
             var sharedMemoryPhase = SharedMemoryPhase.None;
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
