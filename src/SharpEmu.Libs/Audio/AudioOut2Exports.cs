@@ -263,31 +263,13 @@ public static class AudioOut2Exports
             contextMemorySize = checked(0x10000UL + (queueDepth * 0x590UL));
         }
 
-        // Heap: {size, alignment} (16 bytes), matching sceAudioPropagationSystemQueryMemory.
-        // Stack: SIZE ONLY as a full ulong (8 bytes). Writing alignment at +8 is how
-        // [rbp-0x30] became 0x100 on GTA V Enhanced. Do NOT shrink this to uint32 —
-        // Main reads the out as a 64-bit size; a 4-byte write leaves a garbage high
-        // dword (observed 0x7<<32|0x4000) and the allocator aborts with int 0x41.
-        if (IsGuestStackAddress(memoryInfoAddress))
-        {
-            Span<byte> sizeOnly = stackalloc byte[sizeof(ulong)];
-            BinaryPrimitives.WriteUInt64LittleEndian(sizeOnly, contextMemorySize);
-            Console.Error.WriteLine(
-                $"[LOADER][TRACE] audio_out2.context-query-memory stack-size-only " +
-                $"out=0x{memoryInfoAddress:X} size=0x{contextMemorySize:X}");
-            return ctx.Memory.TryWrite(memoryInfoAddress, sizeOnly)
-                ? SetReturn(ctx, 0)
-                : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-        }
-
-        Span<byte> memoryInfo = stackalloc byte[0x10];
-        memoryInfo.Clear();
-        BinaryPrimitives.WriteUInt64LittleEndian(memoryInfo[0x00..], contextMemorySize);
-        BinaryPrimitives.WriteUInt64LittleEndian(memoryInfo[0x08..], AudioOut2ContextMemoryAlignment);
+        // The out parameter is a single size_t wherever it lives. Titles keep other locals right
+        // after it (Octopath Traveler II divides by the dword at +12), so nothing else is written.
+        Span<byte> memorySize = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(memorySize, contextMemorySize);
         Console.Error.WriteLine(
-            $"[LOADER][TRACE] audio_out2.context-query-memory out=0x{memoryInfoAddress:X} " +
-            $"size=0x{contextMemorySize:X} align=0x{AudioOut2ContextMemoryAlignment:X}");
-        return ctx.Memory.TryWrite(memoryInfoAddress, memoryInfo)
+            $"[LOADER][TRACE] audio_out2.context-query-memory out=0x{memoryInfoAddress:X} size=0x{contextMemorySize:X}");
+        return ctx.Memory.TryWrite(memoryInfoAddress, memorySize)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, AudioOut2ErrorInvalidPointer);
     }
