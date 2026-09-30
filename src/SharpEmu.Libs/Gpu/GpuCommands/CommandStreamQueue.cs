@@ -43,12 +43,6 @@ public sealed class CommandStreamQueue
     private ulong _submitId;
     private ulong _lastCompletedGpuTick;
     private int _doneCount;
-    // Submissions ever accepted, for the frame run-ahead.
-    private ulong _enqueuedTotal;
-    // Sequence of the submission being processed; ulong.MaxValue when none is.
-    private ulong _runningSequence = ulong.MaxValue;
-    // _enqueuedTotal at each of the last frame boundaries, oldest first.
-    private readonly Queue<ulong> _frameMarks = new();
     private IdleOutcome _outcome = IdleOutcome.Completed;
     private Thread? _processingThread;
 
@@ -195,7 +189,6 @@ public sealed class CommandStreamQueue
             throw _host.Fatal($"The command stream no longer accepts submissions: queue={submission.QueueId} address=0x{submission.Address:X16}.");
         }
 
-        submission.Sequence = _enqueuedTotal++;
         _queues[submission.QueueId].AddLast(submission);
         _submissionCount++;
         if (submission.Kind != CommandSubmissionKind.FlipPreparation)
@@ -204,83 +197,18 @@ public sealed class CommandStreamQueue
         Monitor.PulseAll(_gate);
     }
 
-    // How many earlier frames may still be waiting for the GPU worker when the guest
-    // reaches a frame boundary. 0 drains the queue at every boundary.
-    // SHARPEMU_FRAME_RUNAHEAD=0 selects that. Two frames hang Astro Bot at startup,
-    // so the setting stops at one.
-    public static readonly int DefaultFrameRunAhead = ParseFrameRunAhead();
-
-    public int FrameRunAhead { get; init; } = DefaultFrameRunAhead;
-
-    private static int ParseFrameRunAhead() =>
-        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_FRAME_RUNAHEAD"), out var frames) && frames >= 0
-            ? Math.Min(frames, 1)
-            : 1;
-
-    // Marks the frame boundary. From another thread it first waits until at most
-    // FrameRunAhead earlier frames are still unprocessed, so the guest can build the next
-    // frame while the worker records this one without running away from it.
+    // Marks the frame boundary and drains all pending GPU work before returning.
     public IdleOutcome Done()
     {
-        var outcome = IdleOutcome.Completed;
-        if (_processingThread != Thread.CurrentThread)
-        {
-            outcome = FrameRunAhead == 0 ? WaitForIdle() : WaitForFrameRunAhead();
-        }
+        var outcome = _processingThread == Thread.CurrentThread ? IdleOutcome.Completed : WaitForIdle();
 
         lock (_gate)
         {
             _graphicsDone = true;
             _doneCount++;
-            if (FrameRunAhead != 0)
-            {
-                _frameMarks.Enqueue(_enqueuedTotal);
-                while (_frameMarks.Count > FrameRunAhead)
-                {
-                    _frameMarks.Dequeue();
-                }
-            }
         }
 
         return outcome;
-    }
-
-    // Returns once the frame FrameRunAhead boundaries back has been processed.
-    private IdleOutcome WaitForFrameRunAhead()
-    {
-        lock (_gate)
-        {
-            if (_frameMarks.Count < FrameRunAhead)
-            {
-                return _outcome;
-            }
-
-            // Queues finish out of order: a compute queue can retire later frames while the
-            // graphics queue is still on this one. Counting finished submissions let the guest
-            // run ahead and reset label slots the lagging queues still waited on (Astro Bot's
-            // space sublevel deadlocked ~4 min after intro_next). Wait for the oldest instead.
-            var mark = _frameMarks.Peek();
-            while (_outcome == IdleOutcome.Completed && OldestUnfinishedLocked() < mark)
-            {
-                Monitor.Wait(_gate);
-            }
-
-            return _outcome;
-        }
-    }
-
-    private ulong OldestUnfinishedLocked()
-    {
-        var oldest = _runningSequence;
-        foreach (var queue in _queues)
-        {
-            if (queue.First is { } head && head.Value.Sequence < oldest)
-            {
-                oldest = head.Value.Sequence;
-            }
-        }
-
-        return oldest;
     }
 
     // Returns once nothing is pending; a cancelled or failed queue reports that instead.
@@ -357,7 +285,6 @@ public sealed class CommandStreamQueue
         _stopping = true;
         DropAllLocked();
         _processing = false;
-        _runningSequence = ulong.MaxValue;
         Monitor.PulseAll(_gate);
     }
 
@@ -416,7 +343,6 @@ public sealed class CommandStreamQueue
             _submissionCount--;
             _nextQueue = (selected + 1) % QueueCount;
             _processing = true;
-            _runningSequence = submission.Sequence;
             _processingThread = Thread.CurrentThread;
             if (!submission.Started && submission.Kind != CommandSubmissionKind.FlipPreparation)
                 SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.ProcessingStarted, submission.QueueId,
@@ -470,7 +396,6 @@ public sealed class CommandStreamQueue
             }
 
             _processing = false;
-            _runningSequence = ulong.MaxValue;
             Monitor.PulseAll(_gate);
             return result;
         }
