@@ -202,6 +202,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     resolution.Request.Description.Data.Address, resolution.Request.Description.Data.Size);
                 _imageCache.TraceTextureBinding(program.Hash, index, words, resolution.Request);
             }
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("image-binding", $"stage={program.Stage} hash=0x{program.Hash:X16} slot={index} storage={storage} address=0x{resolution.Request.Description.Data.Address:X16} size=0x{resolution.Request.Description.Data.Size:X} view={resolution.Request.View} words={string.Join(",", words.Select(value => value.ToString("X8")))}");
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
             BindImage(imageIdentifier, storage);
             var descriptor = new TextureDescriptorWords(words);
@@ -352,6 +353,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public IPreparedBindings PrepareBindings(ShaderStageResources stage)
         {
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("stage-binding", $"stage={stage.Program?.Stage} hash=0x{stage.Program?.Hash:X16} shaderBase=0x{stage.ShaderBase:X16} userData={string.Join(",", stage.Resources.UserData.Select(value => value.ToString("X8")))}");
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DescriptorPreparation);
             var preparation = RequirePreparation();
             var program = RequireProgram(stage);
@@ -613,6 +615,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var size = ClampMappedSize(address, requested);
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("buffer-binding", $"stage={program.Stage} hash=0x{program.Hash:X16} slot={slot} address=0x{address:X16} requested=0x{requested:X} size=0x{size:X} written={resource.Written} formatted={resource.Formatted}");
             var alignment = _minStorageBufferOffsetAlignment;
             var maxRange = _deviceInfo.MaxStorageBufferRange;
             if (alignment == 0 || size > maxRange)
