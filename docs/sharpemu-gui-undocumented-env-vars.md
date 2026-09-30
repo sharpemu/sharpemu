@@ -17,6 +17,17 @@ The GUI shows 14 variables on its **Options** and **Game options** pages. This l
 The list contains 269 variables. The source was examined on 2026-09-19, branch `dev`.
 The descriptions come from the code that reads each variable. The emulator was not started for this list.
 
+## Automatic ray-tracing compute skip
+
+`SHARPEMU_SKIP_RT` is enabled by default. Set it to `0` before launch to disable
+the skip, or set it to `1` to enable it explicitly. Restart after a change.
+Compute shaders with `ImageBvhIntersectRay` or `ImageBvh64IntersectRay` are
+skipped before resource planning and compilation. The entire dispatch is skipped.
+This compatibility workaround applies with either strict-compute setting.
+It does not skip ordinary shader calls or graphics draws.
+A `RAY_TRACING_SKIPPED` warning identifies each skipped shader by hash.
+Ray-traced effects can be missing or incorrect.
+
 ## How to use a variable
 
 1. Set the variable in the shell before you start the emulator or the GUI.
