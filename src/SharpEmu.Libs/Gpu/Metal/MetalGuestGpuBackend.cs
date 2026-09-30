@@ -424,6 +424,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
         }
 
         worker?.Stop();
+        SharpEmu.Libs.Gpu.Pipelines.ImageDescriptorTrace.WriteHistory();
         Console.Error.WriteLine($"[LOADER][PERF] {ShaderCacheCounters.Summary()}");
         MetalVideoPresenter.RequestClose();
     }
