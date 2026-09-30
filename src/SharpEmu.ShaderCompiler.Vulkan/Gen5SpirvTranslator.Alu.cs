@@ -2651,7 +2651,10 @@ public static partial class Gen5SpirvTranslator
                     Gen5Vop3Control { ScalarDestination: { } scalarDestination } => scalarDestination,
                     _ => 106u,
                 };
-                StoreWaveMask(compareDestination, activeCondition);
+                if (_localComparisonPredicates.Contains(instruction.Pc))
+                    Store(_vcc, activeCondition);
+                else
+                    StoreWaveMask(compareDestination, activeCondition);
             }
 
             return true;
