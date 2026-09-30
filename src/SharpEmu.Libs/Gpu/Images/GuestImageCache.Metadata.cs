@@ -8,17 +8,34 @@ namespace SharpEmu.Libs.Gpu.Images;
 // Surface metadata (HTile, DCC, CMask, FMask) keyed by its guest address.
 public sealed partial class GuestImageCache
 {
+    private void InvalidateMetadataForCpuWrite(ulong address, ulong size)
+    {
+        if (_surfaceMetadata.Count == 0) return;
+        var end = address + size;
+        foreach (var (metadataAddress, metadata) in _surfaceMetadata)
+        {
+            if (metadataAddress >= end) break;
+            var metadataSize = Math.Max(1UL, Math.Max(metadata.Size, Math.Max(metadata.RangeSize, metadata.FillSize)));
+            if (metadataAddress >= address || address - metadataAddress < metadataSize)
+            {
+                metadata.ClearMask = 0;
+                metadata.FillSize = 0;
+                metadata.Invalidated = true;
+            }
+        }
+    }
+
     public bool IsMetadata(ulong address)
     {
         using var held = _lock.Hold();
-        return _surfaceMetadata.TryGetValue(address, out var found) && found.Kind != SurfaceMetadataKind.PendingDcc;
+        return _surfaceMetadata.TryGetValue(address, out var found) && !found.Invalidated && found.Kind != SurfaceMetadataKind.PendingDcc;
     }
 
     public bool IsMetadataCleared(ulong address, uint slice, out uint fillValue)
     {
         fillValue = 0;
         using var held = _lock.Hold();
-        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
         {
             return false;
         }
@@ -48,7 +65,7 @@ public sealed partial class GuestImageCache
     public bool ClearMetadata(ulong address)
     {
         using var held = _lock.Hold();
-        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Kind is SurfaceMetadataKind.PendingDcc or SurfaceMetadataKind.Dcc)
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind is SurfaceMetadataKind.PendingDcc or SurfaceMetadataKind.Dcc)
         {
             return false;
         }
@@ -73,10 +90,10 @@ public sealed partial class GuestImageCache
             _ => 0u,
         };
         using var held = _lock.Hold();
-        if (!_surfaceMetadata.TryGetValue(address, out var found))
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated)
         {
             // The fill may precede color-target discovery; a pending entry stays invisible until then.
-            _surfaceMetadata.Add(address, new SurfaceMetadata { Kind = SurfaceMetadataKind.PendingDcc, ClearMask = dccClearMask, FillValue = fillValue, FillSize = size });
+            _surfaceMetadata[address] = new SurfaceMetadata { Kind = SurfaceMetadataKind.PendingDcc, ClearMask = dccClearMask, FillValue = fillValue, FillSize = size };
             return false;
         }
 
@@ -166,7 +183,7 @@ public sealed partial class GuestImageCache
     public bool SetMetadataSlice(ulong address, uint slice, bool isClear)
     {
         using var held = _lock.Hold();
-        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
         {
             return false;
         }

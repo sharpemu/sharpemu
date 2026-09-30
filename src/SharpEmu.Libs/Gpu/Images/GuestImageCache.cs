@@ -358,10 +358,10 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         {
             image.Description.Metadata = request.Description.Metadata;
             var address = request.Description.Metadata.Range.Address;
-            if (!_surfaceMetadata.TryGetValue(address, out var metadata))
+            if (!_surfaceMetadata.TryGetValue(address, out var metadata) || metadata.Invalidated)
             {
                 metadata = new SurfaceMetadata { Kind = SurfaceMetadataKind.Dcc };
-                _surfaceMetadata.Add(address, metadata);
+                _surfaceMetadata[address] = metadata;
             }
             else if (metadata.Kind == SurfaceMetadataKind.PendingDcc)
             {
@@ -373,6 +373,8 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             }
 
             metadata.Size = Math.Max(metadata.Size, request.Description.DccSliceSize * request.Description.TransferLayers);
+            metadata.RangeSize = Math.Max(metadata.RangeSize, request.Description.Metadata.Range.Size);
+            image.MetadataRegistration = metadata;
         }
 
         TakeGpuOwnership(image);
@@ -405,7 +407,13 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             var address = request.Description.Metadata.Range.Address;
             if (!_surfaceMetadata.TryGetValue(address, out var metadata))
             {
-                _surfaceMetadata.Add(address, new SurfaceMetadata { Kind = SurfaceMetadataKind.HTile, ClearMask = image.Description.HtileClearMask });
+                metadata = new SurfaceMetadata { Kind = SurfaceMetadataKind.HTile, ClearMask = image.Description.HtileClearMask };
+                _surfaceMetadata.Add(address, metadata);
+            }
+            else if (metadata.Invalidated)
+            {
+                metadata = new SurfaceMetadata { Kind = SurfaceMetadataKind.HTile };
+                _surfaceMetadata[address] = metadata;
             }
             else if (metadata.Kind == SurfaceMetadataKind.PendingDcc)
             {
@@ -419,6 +427,8 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             {
                 throw SubmissionScheduler.Fatal($"A depth target reuses metadata that is not HTile: address=0x{address:X16} kind={metadata.Kind}.");
             }
+            metadata.RangeSize = Math.Max(metadata.RangeSize, request.Description.Metadata.Range.Size);
+            image.MetadataRegistration = metadata;
         }
 
         if (request.Description.HasStencil)

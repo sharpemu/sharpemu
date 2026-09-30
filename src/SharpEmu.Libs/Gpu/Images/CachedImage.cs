@@ -73,6 +73,7 @@ public sealed unsafe partial class CachedImage : IDisposable
     private bool _bufferHoldsGpuContents;
 
     public ImageDescription Description;
+    internal SurfaceMetadata? MetadataRegistration;
     public readonly ImageBacking Backing = new();
     public readonly List<CachedImageView> Views = new();
     public ImageUses Uses;
