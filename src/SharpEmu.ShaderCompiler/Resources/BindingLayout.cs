@@ -384,10 +384,21 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             }
         }
 
-        var liveIn = new bool[blockCount][];
+        // live-in = uses | (live-out & registers the block does not define), to a fixpoint on bit sets.
+        const int Words = ScalarRegisterCount / 64;
+        var useBits = new ulong[blockCount * Words];
+        var passBits = new ulong[blockCount * Words];
+        var liveIn = new ulong[blockCount * Words];
         for (var block = 0; block < blockCount; block++)
         {
-            liveIn[block] = new bool[ScalarRegisterCount];
+            for (var register = 0; register < ScalarRegisterCount; register++)
+            {
+                var bit = 1UL << (register & 63);
+                if (uses[block][register])
+                    useBits[block * Words + (register >> 6)] |= bit;
+                if (!definitions[block][register])
+                    passBits[block * Words + (register >> 6)] |= bit;
+            }
         }
 
         var changed = blockCount != 0;
@@ -396,18 +407,19 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             changed = false;
             for (var block = blockCount - 1; block >= 0; block--)
             {
-                for (var register = 0; register < ScalarRegisterCount; register++)
+                for (var word = 0; word < Words; word++)
                 {
-                    var liveOut = false;
+                    var liveOut = 0UL;
                     foreach (var successor in controlFlow.Successors[block])
                     {
-                        liveOut |= liveIn[successor][register];
+                        liveOut |= liveIn[successor * Words + word];
                     }
 
-                    var live = uses[block][register] || (liveOut && !definitions[block][register]);
-                    if (live != liveIn[block][register])
+                    var index = block * Words + word;
+                    var live = useBits[index] | (liveOut & passBits[index]);
+                    if (live != liveIn[index])
                     {
-                        liveIn[block][register] = live;
+                        liveIn[index] = live;
                         changed = true;
                     }
                 }
@@ -418,7 +430,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         for (uint index = 0; index < userDataCount && blockCount != 0; index++)
         {
             var register = userDataBase + index;
-            if (register < ScalarRegisterCount && liveIn[0][register])
+            if (register < ScalarRegisterCount && (liveIn[register >> 6] & (1UL << (int)(register & 63))) != 0)
             {
                 registers.Add(register);
             }

@@ -128,6 +128,12 @@ public sealed class ScalarValue
 
     public int Id { get; }
     public ScalarValueKind Kind { get; }
+
+    // Nodes key many graph dictionaries. Equality stays by reference; hashing the unique id
+    // skips the runtime's identity-hash path, which showed up at about a second per load.
+    public override int GetHashCode() => Id;
+
+    public override bool Equals(object? obj) => ReferenceEquals(this, obj);
     public ScalarValueType Type { get; }
     public ScalarOperation Operation { get; }
     public ScalarValue[] Operands { get; private set; }
