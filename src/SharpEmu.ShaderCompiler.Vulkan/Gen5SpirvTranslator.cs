@@ -7231,7 +7231,7 @@ public static partial class Gen5SpirvTranslator
 
         private bool IsExecKnownFull(uint pc)
         {
-            if (!ExecGuardElision)
+            if (!ExecGuardElision || !_request.EnableExecGuardElision)
             {
                 return false;
             }

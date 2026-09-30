@@ -34,6 +34,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private DebugUtilsMessengerEXT _debugMessenger;
         private ExtDebugUtils? _debugUtils;
         private PhysicalDevice _physicalDevice;
+        private uint _physicalDeviceVendorId;
         private uint _maxComputeWorkGroupCountX;
         private uint _maxComputeWorkGroupCountY;
         private uint _maxComputeWorkGroupCountZ;
@@ -557,6 +558,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             LoadComputeDeviceLimits();
             _vk.GetPhysicalDeviceProperties(_physicalDevice, out var selected);
+            _physicalDeviceVendorId = selected.VendorID;
             _maxColorAttachments = selected.Limits.MaxColorAttachments;
             var selectedName = SilkMarshal.PtrToString((nint)selected.DeviceName) ?? "unknown";
             Console.Error.WriteLine(

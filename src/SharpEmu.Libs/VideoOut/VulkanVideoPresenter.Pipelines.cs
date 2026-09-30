@@ -82,6 +82,8 @@ internal static unsafe partial class VulkanVideoPresenter
         bool IShaderPipelineHost.GraphicsSubgroupOperationsEnabled => GraphicsSubgroupOperationsEnabled;
 
         bool IShaderPipelineHost.SharedInt64AtomicsEnabled => SharedInt64AtomicsEnabled;
+        // NVIDIA's compiler rejects the elided-EXEC wave64 compute module with NVVM error 3.
+        bool IShaderPipelineHost.ExecGuardElisionEnabled => _physicalDeviceVendorId != NvidiaVendorId;
         bool IShaderPipelineHost.PerVertexPixelInputsSupported => _supportsPerVertexPixelInputs;
 
         RenderHostLimits IShaderPipelineHost.Limits => _renderHostLimits;
@@ -810,7 +812,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     Stage = stageInfo,
                     Layout = layout,
                 };
-                Check(_vk.CreateComputePipelines(_device, _pipelineCache, 1, &pipelineInfo, null, out pipeline), "vkCreateComputePipelines(rendering)");
+                Check(_vk.CreateComputePipelines(_device, _pipelineCache, 1, &pipelineInfo, null, out pipeline),
+                    $"vkCreateComputePipelines(rendering) hash=0x{description.Stage.Hash:X16}");
                 MarkPipelineCacheDirty();
                 Interlocked.Increment(ref _perfPipelineCreations);
                 SetDebugName(ObjectType.Pipeline, pipeline.Handle, $"SharpEmu compute cs=0x{description.Stage.Hash:X16}");

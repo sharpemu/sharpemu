@@ -593,6 +593,7 @@ internal sealed class ShaderProgramCache
                 return new ShaderCompileRequest(entry.Plan, resources, layout)
                 {
                     WaveSize = info.WaveSize,
+                    EnableExecGuardElision = info.WaveSize != 64 || _host.ExecGuardElisionEnabled,
                     TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
                     ScratchDwords = info.ScratchDwords,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
