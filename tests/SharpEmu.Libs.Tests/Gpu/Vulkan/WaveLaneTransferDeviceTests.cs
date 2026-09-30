@@ -15,6 +15,127 @@ namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 public sealed class WaveLaneTransferDeviceTests(HeadlessVulkanFixture fixture) : IClassFixture<HeadlessVulkanFixture>
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LocalComparisonPreservesBothWaveHalvesAndScalarMaskReads(bool readMask)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            Vopc(0, "VCmpLtU32", Operand(31), 0),
+            Vop2(4, "VCndmaskB32", 3, Operand(10), Operand(20)),
+        };
+        if (readMask) instructions.Add(MoveVectorFromScalar(8, 6, 107));
+        instructions.Add(Vopc(12, "VCmpEqU32", Operand(0), 0));
+        instructions.Add(Vop2(16, "VLshlrevB32", 5, Operand(2), Gen5Operand.Vector(0)));
+        instructions.Add(BufferAccess(24, "BufferStoreDword", 8, vectorData: 3, offsetEnabled: true, vectorAddress: 5));
+        if (readMask)
+            instructions.Add(BufferAccess(32, "BufferStoreDword", 8, offset: 256, vectorData: 6,
+                offsetEnabled: true, vectorAddress: 5));
+        instructions.Add(EndProgram(40));
+        var (plan, resources, layout) = Prepare(Program([.. instructions]));
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = 64, ThreadCountX = 64, WaveSize = 64,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var barriers = 0;
+        for (var offset = 20; offset < shader.Spirv.Length;)
+        {
+            var word = BinaryPrimitives.ReadUInt32LittleEndian(shader.Spirv.AsSpan(offset));
+            if ((word & 0xffff) == 224) barriers++;
+            offset += checked((int)(word >> 16) * 4);
+        }
+        Assert.Equal(readMask ? 8 : 0, barriers);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var output = runner.CreateBuffer(512);
+        var registers = new uint[256];
+        registers[10] = 512;
+        harness.Run(() => runner.Dispatch(registers,
+            new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [output] }, 1));
+        var bytes = runner.ReadBack(output, 0, 512);
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(lane > 31 ? 20u : 10u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(lane * 4)));
+            if (readMask)
+                Assert.Equal(uint.MaxValue, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(256 + lane * 4)));
+        }
+        harness.AssertNoValidationMessages();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void LocalComparisonPreservesModifiedSelectionsAndPartialMaskWrites(bool partialWrite)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var selectionControl = new Gen5SdwaControl(6, 0, 6, 6, false, false, 0, 0, 0, false, null);
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            Vop2(0, "VLshlrevB32", 9, Operand(2), Gen5Operand.Vector(0)),
+            DataShare(0, "DsWriteB32", false, [Gen5Operand.Vector(9), Gen5Operand.Vector(0)], []),
+            Vopc(0, "VCmpLtU32", Operand(31), 0),
+            Vopc(4, "VCmpGtU32", Operand(16), 0) with
+            {
+                Control = selectionControl with { ScalarDestination = 2 },
+                Destinations = [Gen5Operand.Scalar(2)],
+            },
+            Vop3(8, "VAddLshlU32", 7, Gen5Operand.Vector(0), Operand(0), Operand(0)),
+            DataShare(0, "DsReadB32", false, [Gen5Operand.Vector(9)], [7]),
+            Vop2(16, "VCndmaskB32", 3, Gen5Operand.Vector(7), Operand(20)) with { Control = selectionControl },
+            Vop3(24, "VCndmaskB32", 4, Operand(30), Operand(40), Gen5Operand.Scalar(2)),
+        };
+        if (partialWrite)
+        {
+            instructions.Add(MoveScalar(32, 106, 0));
+            instructions.Add(MoveVectorFromScalar(36, 6, 107));
+        }
+        instructions.Add(Sop2(40, "SAndB64", 106, Operand(0), Operand(0)));
+        instructions.Add(Vop2(44, "VLshlrevB32", 5, Operand(2), Gen5Operand.Vector(0)));
+        instructions.Add(BufferAccess(48, "BufferStoreDword", 8, vectorData: 3, offsetEnabled: true, vectorAddress: 5));
+        instructions.Add(BufferAccess(56, "BufferStoreDword", 8, offset: 256, vectorData: 4,
+            offsetEnabled: true, vectorAddress: 5));
+        if (partialWrite)
+            instructions.Add(BufferAccess(64, "BufferStoreDword", 8, offset: 512, vectorData: 6,
+                offsetEnabled: true, vectorAddress: 5));
+        instructions.Add(EndProgram(72));
+        var (plan, resources, layout) = Prepare(Program([.. instructions.Select((instruction, index) =>
+            instruction with { Pc = (uint)index * 8 })]));
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = 64, ThreadCountX = 64, WaveSize = 64,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var barriers = 0;
+        for (var offset = 20; offset < shader.Spirv.Length;)
+        {
+            var word = BinaryPrimitives.ReadUInt32LittleEndian(shader.Spirv.AsSpan(offset));
+            if ((word & 0xffff) == 224) barriers++;
+            offset += checked((int)(word >> 16) * 4);
+        }
+        Assert.Equal(partialWrite ? 10 : 8, barriers);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var output = runner.CreateBuffer(768);
+        var registers = new uint[256];
+        registers[10] = 768;
+        harness.Run(() => runner.Dispatch(registers,
+            new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [output] }, 1));
+        var bytes = runner.ReadBack(output, 0, 768);
+        for (var lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(lane > 31 ? 20u : (uint)lane, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(lane * 4)));
+            Assert.Equal(lane < 16 ? 40u : 30u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(256 + lane * 4)));
+            if (partialWrite)
+                Assert.Equal(uint.MaxValue, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(512 + lane * 4)));
+        }
+        harness.AssertNoValidationMessages();
+    }
+
+    [Theory]
     [InlineData(32u, 31u, false)]
     [InlineData(32u, 63u, true)]
     [InlineData(64u, 31u, false)]
