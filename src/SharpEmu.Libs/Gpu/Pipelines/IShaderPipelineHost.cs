@@ -29,6 +29,21 @@ public sealed class ComputePipelineDescription
     public required ShaderProgramInfo Stage { get; init; }
 }
 
+public readonly record struct MeshShaderLimits(
+    uint MaxInvocations,
+    uint OutputVertexCapacity,
+    uint OutputPrimitiveCapacity,
+    uint MaxSharedMemoryBytes,
+    uint MaxGroupCountX,
+    uint MaxGroupCountY,
+    uint MaxGroupTotalCount,
+    uint MaxWorkGroupSizeX,
+    uint MaxOutputMemoryBytes,
+    uint MaxPayloadAndOutputMemoryBytes,
+    uint OutputPerVertexGranularity,
+    uint OutputPerPrimitiveGranularity,
+    uint MaxOutputComponents);
+
 // The host objects the shader and pipeline caches need: modules, pipelines, limits and guest readers.
 internal interface IShaderPipelineHost
 {
