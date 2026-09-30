@@ -126,6 +126,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"[LOADER][PERF] command_stream submissions={_commandStream.SubmissionsStarted} " +
                     $"slices={_commandStream.SlicesRun} blocked_retries={_commandStream.BlockedRetries} " +
                     $"outcome={outcome} fatal=0");
+                SharpEmu.Libs.Gpu.Pipelines.ImageDescriptorTrace.WriteHistory();
                 Console.Error.WriteLine($"[LOADER][PERF] {ShaderCacheCounters.Summary()}");
                 _relay.StopAcceptingWork();
                 _relay.RunPendingCommands();
