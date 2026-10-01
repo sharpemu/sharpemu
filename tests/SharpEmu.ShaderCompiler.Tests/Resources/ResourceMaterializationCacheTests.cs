@@ -160,6 +160,29 @@ public sealed class ResourceMaterializationCacheTests
         Assert.Equal(0, cache.Hits);
     }
 
+    [Fact]
+    public void AFailedRecordingDoesNotPoisonTheNextReader()
+    {
+        var plan = Plan();
+        var incomplete = new Heap();
+        incomplete.Words.Remove(HeapBase + 0x100 + 5 * 32 + 4);
+        var cache = new ResourceMaterializationCache();
+        Run(cache, plan, incomplete, [0x1000, 0], out _, out _);
+
+        var complete = new Heap();
+        Assert.True(Run(cache, plan, complete, [0x1000, 0], out var first, out _));
+        Assert.True(Run(cache, plan, complete, [0x1000, 0], out var second, out _));
+        Assert.Same(first, second);
+        Assert.Equal(1, cache.Hits);
+
+        // Retained entries must not refer to scratch reads reused for another key.
+        complete.Words[HeapBase + 0x80] = 1u << 1;
+        Assert.True(Run(cache, plan, complete, [0x1000, 0], out _, out _, shaderBase: 0x100));
+        var original = new Heap();
+        Assert.True(Run(cache, plan, original, [0x1000, 0], out var restored, out _));
+        Assert.Same(first, restored);
+    }
+
     // The table pointer in s[0:1]; the rest of the nine user-data registers the program declares.
     private static readonly uint[] TableUserData = [0x1000, 0, 0, 0, 0, 0, 0, 0, 0];
 
