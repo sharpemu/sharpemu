@@ -428,9 +428,14 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
 
         var resource = presenter.Run(() => AcquireTexture(presenter, texture));
         Assert.NotEqual(0UL, ((ImageView)GetFieldValue(resource, "View")).Handle);
-        var resolution = (TextureRequestResolution)GetFieldValue(resource, "Resolution");
-        Assert.Equal(resolution.Request.View.Format, resolution.ViewFormat);
-        Assert.NotEqual(Format.Undefined, resolution.ViewFormat);
+        var request = (ImageRequest)GetFieldValue(resource, "Request");
+        var expected = numericClass switch
+        {
+            TextureNumericClass.Uint => Format.R32Uint,
+            TextureNumericClass.Sint => Format.R32Sint,
+            _ => Format.R32Sfloat,
+        };
+        Assert.Equal(expected, request.View.Format);
         presenter.Run(() => presenter.InvokeMethod("ResetImageBindings"));
         presenter.Harness.Finish();
         presenter.Harness.Shutdown();
@@ -446,8 +451,8 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
 
         var resource = presenter.Run(() => AcquireTexture(presenter, texture));
         Assert.NotEqual(0UL, ((ImageView)GetFieldValue(resource, "View")).Handle);
-        var resolution = (TextureRequestResolution)GetFieldValue(resource, "Resolution");
-        Assert.Equal(Format.D32Sfloat, resolution.ViewFormat);
+        var request = (ImageRequest)GetFieldValue(resource, "Request");
+        Assert.Equal(Format.D32Sfloat, request.View.Format);
         presenter.Run(() => presenter.InvokeMethod("ResetImageBindings"));
         presenter.Harness.Finish();
         presenter.Harness.Shutdown();

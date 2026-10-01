@@ -146,7 +146,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 Address = descriptor.BaseAddress,
                 ImageIdentifier = imageIdentifier,
                 Request = request,
-                Resolution = resolution,
                 IsStorage = storage,
                 DestinationSelect = words[3] & 0xFFFu,
                 Width = descriptor.Width,
