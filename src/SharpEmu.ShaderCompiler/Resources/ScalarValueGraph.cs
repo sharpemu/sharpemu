@@ -386,14 +386,7 @@ public sealed partial class ScalarValueGraph
     private ScalarValue Intern(ScalarValueKind kind, ScalarValueType type, ulong payload = 0,
         ScalarOperation operation = ScalarOperation.None, ReadOnlySpan<ScalarValue> operands = default, ulong identity = 0)
     {
-        var hash = new HashCode();
-        hash.Add(kind);
-        hash.Add(type);
-        hash.Add(payload);
-        hash.Add(operation);
-        hash.Add(identity);
-        foreach (var operand in operands) hash.Add(operand.Id);
-        var key = hash.ToHashCode();
+        var key = InternHash(kind, type, payload, operation, operands, identity);
         var head = _interned.TryGetValue(key, out var first) ? first : -1;
         for (var index = head; index >= 0; index = _internedValues[index].Next)
         {
@@ -410,6 +403,19 @@ public sealed partial class ScalarValueGraph
         _internedValues.Add(new(created, payload, identity, head));
         _values.Add(created);
         return created;
+    }
+
+    private static int InternHash(ScalarValueKind kind, ScalarValueType type, ulong payload,
+        ScalarOperation operation, ReadOnlySpan<ScalarValue> operands, ulong identity)
+    {
+        var hash = new HashCode();
+        hash.Add(kind);
+        hash.Add(type);
+        hash.Add(payload);
+        hash.Add(operation);
+        hash.Add(identity);
+        foreach (var operand in operands) hash.Add(operand.Id);
+        return hash.ToHashCode();
     }
 
     private ScalarValue Track(ScalarValue value)
