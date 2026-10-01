@@ -17,7 +17,9 @@ public sealed record MemoryAccessBinding(ScalarValue? Handle, ScalarValue? Sampl
 // from, symbolic in user data and in the shader base.
 public sealed partial class ScalarValueGraph
 {
-    private readonly Dictionary<string, ScalarValue> _interned = [];
+    private readonly Dictionary<int, int> _interned = [];
+    private readonly List<InternedValue> _internedValues = [];
+    private readonly record struct InternedValue(ScalarValue Value, ulong Payload, ulong Identity, int Next);
     private readonly List<ScalarValue> _values = [];
 
     private ScalarValueGraph(Gen5ShaderProgram program, IrControlFlowGraph controlFlow, MemoryAccessTable memory, uint userDataBase, uint userDataCount,
@@ -69,13 +71,13 @@ public sealed partial class ScalarValueGraph
 
     // Node creation. Equal structure yields the same node, and operations over
     // constants fold, so revisiting a block reproduces its values exactly.
-    internal ScalarValue Constant(uint value) => Intern($"c32:{value}", () => ScalarValue.ConstantOf(value));
+    internal ScalarValue Constant(uint value) => Intern(ScalarValueKind.Constant, ScalarValueType.U32, value);
 
-    internal ScalarValue MemoryAperture(uint operand) => Intern($"aperture:{operand}", () => ScalarValue.MemoryAperture(operand));
+    internal ScalarValue MemoryAperture(uint operand) => Intern(ScalarValueKind.MemoryAperture, ScalarValueType.U32, operand);
 
-    internal ScalarValue Constant(ulong value) => Intern($"c64:{value}", () => ScalarValue.ConstantOf(value));
+    internal ScalarValue Constant(ulong value) => Intern(ScalarValueKind.Constant, ScalarValueType.U64, value);
 
-    internal ScalarValue Constant(bool value) => Intern($"c1:{value}", () => ScalarValue.ConstantOf(value));
+    internal ScalarValue Constant(bool value) => Intern(ScalarValueKind.Constant, ScalarValueType.Bool, value ? 1ul : 0ul);
 
     /// <summary>
     /// The instruction the builder is translating, for diagnostics only.
@@ -105,18 +107,18 @@ public sealed partial class ScalarValueGraph
     {
         if (BuilderInstruction.Opcode is null)
         {
-            return Intern($"undef:{type}", () => ScalarValue.Undefined(type));
+            return Intern(ScalarValueKind.Undefined, type);
         }
 
         var instruction = BuilderInstruction;
-        var value = Intern($"undef:{type}:{instruction.Pc:X}", () => ScalarValue.Undefined(type));
+        var value = Intern(ScalarValueKind.Undefined, type, identity: (1ul << 32) | instruction.Pc);
         _undefinedOrigins.TryAdd(value, instruction);
         return value;
     }
 
-    internal ScalarValue UserData(uint register) => Intern($"ud:{register}", () => ScalarValue.UserData(register));
+    internal ScalarValue UserData(uint register) => Intern(ScalarValueKind.UserData, ScalarValueType.U32, register);
 
-    internal ScalarValue ShaderBase() => Intern("base", ScalarValue.ShaderBase);
+    internal ScalarValue ShaderBase() => Intern(ScalarValueKind.ShaderBase, ScalarValueType.U64);
 
     // Keep the finite result range even when the input cannot be resolved on the host.
     internal ScalarValue FindLowestSetBit(ScalarValue value, uint instructionAddress)
@@ -125,22 +127,22 @@ public sealed partial class ScalarValueGraph
             return Operation(ScalarOperation.FindLowestBit32, ScalarValueType.U32, value);
 
         // Keep each instruction separate because its input guard can differ from another scan's guard.
-        var result = Intern($"lowest-bit:{instructionAddress}:{value.Id}", () =>
-            ScalarValue.MakeOperation(ScalarOperation.FindLowestBit32, ScalarValueType.U32, value));
+        var result = Intern(ScalarValueKind.Operation, ScalarValueType.U32, operation: ScalarOperation.FindLowestBit32,
+            operands: [value], identity: (1ul << 32) | instructionAddress);
         _bitScanInstructions[result] = instructionAddress;
         return result;
     }
 
-    internal ScalarValue ResourceTableWord(uint slot) => Intern($"table:{slot}", () => ScalarValue.ResourceTableWord(slot));
+    internal ScalarValue ResourceTableWord(uint slot) => Intern(ScalarValueKind.ResourceTableWord, ScalarValueType.U32, slot);
 
-    internal ScalarValue Handle(ScalarValueKind kind, params ScalarValue[] dwords) =>
-        Intern($"{kind}:{Ids(dwords)}", () => ScalarValue.Handle(kind, dwords));
+    internal ScalarValue Handle(ScalarValueKind kind, params ReadOnlySpan<ScalarValue> dwords) =>
+        Intern(kind, ScalarValueType.U32, operands: dwords);
 
     internal ScalarValue MemoryRead(ScalarValueKind kind, ScalarValue handle, ScalarValue offset, int memoryIndex) =>
-        Intern($"{kind}:{memoryIndex}:{handle.Id}:{offset.Id}", () => ScalarValue.MemoryRead(kind, handle, offset, memoryIndex));
+        Intern(kind, ScalarValueType.U32, unchecked((ulong)memoryIndex), operands: [handle, offset]);
 
     internal ScalarValue FirstLane(ScalarValue value, ScalarValue activeMask, uint instructionAddress) =>
-        Intern($"first:{instructionAddress}:{value.Id}:{activeMask.Id}", () => ScalarValue.FirstLane(value, activeMask, instructionAddress));
+        Intern(ScalarValueKind.FirstLane, ScalarValueType.U32, instructionAddress, operands: [value, activeMask]);
 
     internal ScalarValue Phi(int block, ScalarValueType type) => Track(ScalarValue.Phi(block, type));
 
@@ -156,10 +158,10 @@ public sealed partial class ScalarValueGraph
             return whenTrue;
         }
 
-        return Intern($"sel:{condition.Id}:{whenTrue.Id}:{whenFalse.Id}", () => ScalarValue.Select(condition, whenTrue, whenFalse));
+        return Intern(ScalarValueKind.Select, whenTrue.Type, operands: [condition, whenTrue, whenFalse]);
     }
 
-    internal ScalarValue Operation(ScalarOperation operation, ScalarValueType type, params ScalarValue[] operands)
+    internal ScalarValue Operation(ScalarOperation operation, ScalarValueType type, params ReadOnlySpan<ScalarValue> operands)
     {
         // Some ALU identities produce a deterministic value even when the other
         // operand has no tracked provenance. This matters for descriptor setup code
@@ -179,7 +181,7 @@ public sealed partial class ScalarValueGraph
                 // preserving the node lets later symbolic identities eliminate
                 // only the bits that are provably independent of that input and
                 // keeps diagnostics attached to the real instruction graph.
-                return Intern($"op:{operation}:{type}:{Ids(operands)}", () => ScalarValue.MakeOperation(operation, type, operands));
+                return Intern(ScalarValueKind.Operation, type, operation: operation, operands: operands);
             }
         }
 
@@ -203,10 +205,10 @@ public sealed partial class ScalarValueGraph
             return folded;
         }
 
-        return Intern($"op:{operation}:{type}:{Ids(operands)}", () => ScalarValue.MakeOperation(operation, type, operands));
+        return Intern(ScalarValueKind.Operation, type, operation: operation, operands: operands);
     }
 
-    private bool TryFoldWithUndefined(ScalarOperation operation, ScalarValueType type, ScalarValue[] operands, out ScalarValue folded)
+    private bool TryFoldWithUndefined(ScalarOperation operation, ScalarValueType type, ReadOnlySpan<ScalarValue> operands, out ScalarValue folded)
     {
         folded = null!;
 
@@ -216,35 +218,40 @@ public sealed partial class ScalarValueGraph
         }
 
         if (operation == ScalarOperation.And32 &&
-            operands.Any(operand => operand.IsConstant && operand.Type == ScalarValueType.U32 && operand.ConstantU32 == 0))
+            ((operands[0].IsConstant && operands[0].Type == ScalarValueType.U32 && operands[0].ConstantU32 == 0) ||
+             (operands[1].IsConstant && operands[1].Type == ScalarValueType.U32 && operands[1].ConstantU32 == 0)))
         {
             folded = Constant(0u);
             return true;
         }
 
         if (operation == ScalarOperation.And64 &&
-            operands.Any(operand => operand.IsConstant && operand.Type == ScalarValueType.U64 && operand.ConstantU64 == 0))
+            ((operands[0].IsConstant && operands[0].Type == ScalarValueType.U64 && operands[0].ConstantU64 == 0) ||
+             (operands[1].IsConstant && operands[1].Type == ScalarValueType.U64 && operands[1].ConstantU64 == 0)))
         {
             folded = Constant(0ul);
             return true;
         }
 
         if (operation == ScalarOperation.Or32 &&
-            operands.Any(operand => operand.IsConstant && operand.Type == ScalarValueType.U32 && operand.ConstantU32 == uint.MaxValue))
+            ((operands[0].IsConstant && operands[0].Type == ScalarValueType.U32 && operands[0].ConstantU32 == uint.MaxValue) ||
+             (operands[1].IsConstant && operands[1].Type == ScalarValueType.U32 && operands[1].ConstantU32 == uint.MaxValue)))
         {
             folded = Constant(uint.MaxValue);
             return true;
         }
 
         if (operation == ScalarOperation.LogicalAnd &&
-            operands.Any(operand => operand.IsConstant && operand.Type == ScalarValueType.Bool && !operand.ConstantBool))
+            ((operands[0].IsConstant && operands[0].Type == ScalarValueType.Bool && !operands[0].ConstantBool) ||
+             (operands[1].IsConstant && operands[1].Type == ScalarValueType.Bool && !operands[1].ConstantBool)))
         {
             folded = Constant(false);
             return true;
         }
 
         if (operation == ScalarOperation.LogicalOr &&
-            operands.Any(operand => operand.IsConstant && operand.Type == ScalarValueType.Bool && operand.ConstantBool))
+            ((operands[0].IsConstant && operands[0].Type == ScalarValueType.Bool && operands[0].ConstantBool) ||
+             (operands[1].IsConstant && operands[1].Type == ScalarValueType.Bool && operands[1].ConstantBool)))
         {
             folded = Constant(true);
             return true;
@@ -253,7 +260,7 @@ public sealed partial class ScalarValueGraph
         return false;
     }
 
-    private bool TryFold(ScalarOperation operation, ScalarValueType type, ScalarValue[] operands, out ScalarValue folded)
+    private bool TryFold(ScalarOperation operation, ScalarValueType type, ReadOnlySpan<ScalarValue> operands, out ScalarValue folded)
     {
         folded = null!;
         Span<ulong> values = stackalloc ulong[operands.Length];
@@ -373,28 +380,36 @@ public sealed partial class ScalarValueGraph
         return uses;
     }
 
-    private static string Ids(ScalarValue[] operands)
+    // Hashes select a chain only. Full metadata and operand identity comparisons
+    // preserve correctness on collisions and avoid allocating anything on a hit.
+    // Keep the original payload in the entry: planning can retarget a memory node.
+    private ScalarValue Intern(ScalarValueKind kind, ScalarValueType type, ulong payload = 0,
+        ScalarOperation operation = ScalarOperation.None, ReadOnlySpan<ScalarValue> operands = default, ulong identity = 0)
     {
-        var text = new System.Text.StringBuilder();
-        foreach (var operand in operands)
+        var hash = new HashCode();
+        hash.Add(kind);
+        hash.Add(type);
+        hash.Add(payload);
+        hash.Add(operation);
+        hash.Add(identity);
+        foreach (var operand in operands) hash.Add(operand.Id);
+        var key = hash.ToHashCode();
+        var head = _interned.TryGetValue(key, out var first) ? first : -1;
+        for (var index = head; index >= 0; index = _internedValues[index].Next)
         {
-            text.Append(operand.Id).Append(',');
+            var entry = _internedValues[index];
+            var value = entry.Value;
+            if (value.Kind == kind && value.Type == type && value.Operation == operation &&
+                entry.Payload == payload && entry.Identity == identity &&
+                operands.SequenceEqual(value.Operands))
+                return value;
         }
 
-        return text.ToString();
-    }
-
-    private ScalarValue Intern(string key, Func<ScalarValue> create)
-    {
-        if (_interned.TryGetValue(key, out var existing))
-        {
-            return existing;
-        }
-
-        var value = create();
-        _interned[key] = value;
-        _values.Add(value);
-        return value;
+        var created = ScalarValue.CreateInterned(kind, type, operation, payload, operands.ToArray());
+        _interned[key] = _internedValues.Count;
+        _internedValues.Add(new(created, payload, identity, head));
+        _values.Add(created);
+        return created;
     }
 
     private ScalarValue Track(ScalarValue value)

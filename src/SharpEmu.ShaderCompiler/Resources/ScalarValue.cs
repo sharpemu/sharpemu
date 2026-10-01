@@ -147,6 +147,10 @@ public sealed class ScalarValue
     public uint UserDataRegister => (uint)Payload;
     public int MemoryIndex => (int)Payload;
 
+    internal static ScalarValue CreateInterned(ScalarValueKind kind, ScalarValueType type,
+        ScalarOperation operation, ulong payload, ScalarValue[] operands) =>
+        new(kind, type, operation, operands) { Payload = payload };
+
     public static ScalarValue ConstantOf(uint value) =>
         new(ScalarValueKind.Constant, ScalarValueType.U32, ScalarOperation.None, []) { Payload = value };
 
