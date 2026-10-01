@@ -82,6 +82,49 @@ public sealed class FiberSwitchLoopTests : IDisposable
     }
 
     [Fact]
+    public void WarmSwitchLoop_BoundsAllocationAndPreservesResumeArguments()
+    {
+        var memory = new FakeCpuMemory(Base, RegionSize);
+        var context = new CpuContext(memory, Generation.Gen5);
+        InitializeFiber(memory, context, FiberA, NameA, EntryA, ArgOnInitializeA, ContextA);
+        InitializeFiber(memory, context, FiberB, NameB, EntryB, ArgOnInitializeB, ContextB);
+        GuestThreadExecution.EnterImportCallFrame(RootReturnRip, RootResumeRsp, RootReturnSlot);
+        context[CpuRegister.Rdi] = FiberA;
+        context[CpuRegister.Rdx] = ArgSlotRoot;
+        Assert.Equal(0, FiberExports.FiberRun(context));
+        Assert.True(GuestThreadExecution.TryConsumeCurrentContextTransfer(out _));
+
+        void SwitchOnce(int index)
+        {
+            var toB = (index & 1) == 0;
+            GuestThreadExecution.EnterImportCallFrame(toB ? ResumeRipA : ResumeRipB,
+                toB ? ResumeRspA : ResumeRspB, toB ? ReturnSlotA : ReturnSlotB);
+            context[CpuRegister.Rdi] = toB ? FiberB : FiberA;
+            context[CpuRegister.Rsi] = (ulong)index;
+            context[CpuRegister.Rdx] = toB ? ArgSlotA : ArgSlotB;
+            if (FiberExports.FiberSwitch(context) != 0 ||
+                !GuestThreadExecution.TryConsumeCurrentContextTransfer(out _))
+                throw new InvalidOperationException("Fiber switch failed.");
+        }
+
+        for (var i = 0; i < 2000; i++) SwitchOnce(i);
+        const int count = 20000;
+        var allocated = GC.GetAllocatedBytesForCurrentThread();
+        var start = System.Diagnostics.Stopwatch.GetTimestamp();
+        for (var i = 0; i < count; i++) SwitchOnce(i);
+        var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(start);
+        allocated = GC.GetAllocatedBytesForCurrentThread() - allocated;
+        Console.WriteLine($"Fiber switches: bytes/call={allocated / (double)count:F1}, us/call={elapsed.TotalMicroseconds / count:F3}");
+        // Previously 912 bytes per switch with tracing disabled. Keep room for
+        // continuation storage, but do not format names or discarded traces.
+        if (Environment.GetEnvironmentVariable("SHARPEMU_LOG_FIBER") != "1")
+            Assert.True(allocated < count * 600L, $"Allocated {allocated} bytes for {count} switches.");
+        Assert.Equal((ulong)(count - 1), ReadUInt64(memory, ArgSlotA));
+        Assert.Equal((ulong)(count - 2), ReadUInt64(memory, ArgSlotB));
+        Assert.Equal(FiberA, GuestThreadExecution.CurrentFiberAddress);
+    }
+
+    [Fact]
     public void RepeatedSwitch_RestoresEachFiberOwnResumePoint()
     {
         var memory = new FakeCpuMemory(Base, RegionSize);
