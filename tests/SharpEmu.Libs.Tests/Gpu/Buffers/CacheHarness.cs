@@ -71,7 +71,7 @@ internal sealed class CacheWorker : IDisposable
         done.Wait();
         if (failure != null)
         {
-            throw failure;
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
         }
     }
 

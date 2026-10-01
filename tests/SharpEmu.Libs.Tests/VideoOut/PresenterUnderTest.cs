@@ -76,7 +76,9 @@ internal sealed class PresenterUnderTest : IDisposable
         {
             "_batchResources", "_batchRetireBuffers", "_pendingGuestSubmissions",
             "_deferredGuestImageVersionDestroys",
-            "_pipelineEntries", "_shaderModules",
+            "_pipelineEntries", "_shaderModules", "_shaderModuleSpirvBytes",
+            "_preparedTextures", "_barriersAfterRendering", "_feedbackSnapshotPool",
+            "_pipelineCacheShards", "_tracedBufferWriters",
         })
         {
             var field = PresenterType.GetField(name, InstanceMembers)!;
@@ -113,7 +115,8 @@ internal sealed class PresenterUnderTest : IDisposable
         }
         catch (TargetInvocationException exception) when (exception.InnerException is not null)
         {
-            throw exception.InnerException;
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(exception.InnerException).Throw();
+            throw;
         }
     }
 
