@@ -9,7 +9,7 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 internal static class ScalarGraphDiskCache
 {
-    private const int Version = 1;
+    private const int Version = 2;
     private const int MaxEntryBytes = 32 * 1024 * 1024;
     private const long MaxCacheBytes = 256L * 1024 * 1024;
     private static readonly string CachePath = Environment.GetEnvironmentVariable("SHARPEMU_SHADER_ANALYSIS_CACHE_PATH") ??
@@ -36,6 +36,7 @@ internal static class ScalarGraphDiskCache
                 if (CryptographicOperations.FixedTimeEquals(digest, SHA256.HashData(bytes)))
                 {
                     using var reader = new BinaryReader(new MemoryStream(bytes, false));
+                    if (reader.ReadString() != key) throw new InvalidDataException("Graph cache key mismatch.");
                     var cached = ScalarValueGraph.ReadSnapshot(reader, program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize);
                     if (Trace) Console.Error.WriteLine($"[SHADER_ANALYSIS_CACHE] hit key={key} bytes={bytes.Length}");
                     return cached;
@@ -48,7 +49,11 @@ internal static class ScalarGraphDiskCache
         try
         {
             using var stream = new MemoryStream();
-            using (var writer = new BinaryWriter(stream, Encoding.UTF8, true)) graph.WriteSnapshot(writer);
+            using (var writer = new BinaryWriter(stream, Encoding.UTF8, true))
+            {
+                writer.Write(key);
+                graph.WriteSnapshot(writer);
+            }
             if (stream.Length <= MaxEntryBytes - 32)
             {
                 var bytes = stream.GetBuffer().AsSpan(0, (int)stream.Length);

@@ -55,6 +55,12 @@ public sealed class ScalarGraphDiskCacheTests
             Assert.Equal(timestamp, File.GetLastWriteTimeUtc(file));
             Assert.NotSame(first, second);
             Assert.Equal(first.Values.Count, second.Values.Count);
+            var different = Program(ScalarLoad(0, 2, 4), EndProgram(8));
+            var differentKey = ScalarGraphDiskCache.Key(different, 0, 4, null, 64);
+            var differentFile = Path.Combine(directory, differentKey + ".graph");
+            File.WriteAllBytes(differentFile, bytes);
+            _ = ScalarGraphDiskCache.Build(different, 0, 4, null, 64, directory);
+            Assert.NotEqual(bytes, File.ReadAllBytes(differentFile));
             foreach (var corrupt in new[] { bytes[..20], bytes.Select((b, i) => i == 40 ? (byte)(b ^ 1) : b).ToArray() })
             {
                 File.WriteAllBytes(file, corrupt);
