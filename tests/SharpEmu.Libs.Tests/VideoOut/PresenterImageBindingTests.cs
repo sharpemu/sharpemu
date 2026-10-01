@@ -149,6 +149,7 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
             var input = new ComputeInputInfo { ThreadsX = 1, ThreadsY = 1, ThreadsZ = 1, Stage = stage };
             var pipelineHost = (IShaderPipelineHost)presenter.Instance;
             var module = pipelineHost.CreateShaderModule(new VulkanCompiledGuestShader(CreateStencilIncrementShader(storageBinding)), ShaderStage.Compute, 0, 1);
+            Array? recycledTextures = null;
             for (var dispatchIndex = 0; dispatchIndex < 2; dispatchIndex++)
             {
                 using (presenter.RenderHost.BeginPreparation())
@@ -156,6 +157,8 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
                     var bindings = presenter.RenderHost.PrepareBindings(stage);
                     presenter.RenderHost.BindResources(bindings);
                     var textures = (Array)bindings.GetType().GetProperty("Textures")!.GetValue(bindings)!;
+                    if (recycledTextures is not null) Assert.Same(recycledTextures, textures);
+                    recycledTextures = textures;
                     var working = (CachedImage)GetFieldValue(textures.GetValue(textures.Length - 1)!, "CachedImage");
                     workingImages.Add(working);
                     Assert.NotSame(attachment, working);
@@ -187,6 +190,9 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
                         _vulkan.Vk.CmdClearColorImage(presenter.Command, working.Backing.Handle, ImageLayout.TransferDstOptimal, &discarded, 1, &colorRange);
                     }
                 }
+                // CPU descriptions are returned immediately; the GPU resources
+                // they described remain live until the submission completes.
+                Assert.All(recycledTextures!.Cast<object?>(), Assert.Null);
                 Assert.NotEqual(0UL, workingImages[^1].Backing.Handle.Handle);
                 presenter.RenderHost.ResetBindings();
             }

@@ -29,6 +29,18 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private readonly record struct BufferView(VkBuffer Buffer, ulong Offset, ulong Range);
 
+        private sealed class DescriptorScratch
+        {
+            public readonly RenderScratchPool<TextureResource> Images = new();
+            public readonly RenderScratchPool<Sampler> Samplers = new();
+            public readonly RenderScratchPool<uint> ShaderData = new();
+            public readonly RenderScratchPool<BufferView> Buffers = new();
+            public readonly RenderScratchPool<(BufferDescriptorWords Descriptor, ResourceSlotIdentifier Buffer)> Sources = new();
+        }
+
+        private DescriptorScratch? _descriptorScratch;
+        private DescriptorScratch Scratch => _descriptorScratch ??= new();
+
         // The host descriptors of one stage in the order its binding layout names them.
         private sealed class StageDescriptors
         {
@@ -231,7 +243,6 @@ internal static unsafe partial class VulkanVideoPresenter
             var layout = program.Bindings!;
             var snapshot = stage.Resources;
             var info = resources.Info;
-            var prepared = new PreparedStageBindings(stage, program);
             if (snapshot.Images.Length != info.Images.Count || snapshot.Samplers.Length != info.Samplers.Count || snapshot.Buffers.Length != info.Buffers.Count)
             {
                 throw SubmissionScheduler.Fatal(
@@ -239,8 +250,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"samplers={snapshot.Samplers.Length}/{info.Samplers.Count} buffers={snapshot.Buffers.Length}/{info.Buffers.Count}.");
             }
 
+            var prepared = new PreparedStageBindings(stage, program);
+            // Register ownership before preparation can fail halfway through.
+            preparation.Stages.Add(prepared);
             var descriptors = prepared.Descriptors;
-            descriptors.Images = new TextureResource[info.Images.Count];
+            descriptors.Images = Scratch.Images.Rent(info.Images.Count);
             var movieCandidates = _hostMovieFramePixels is null ? null : MovieCandidates(resources, snapshot);
             var hostMovie = movieCandidates is null ? HostMovieTextureBindings.None : FindHostMovieTextureBindings(movieCandidates);
             for (var index = 0; index < info.Images.Count; index++)
@@ -252,14 +266,15 @@ internal static unsafe partial class VulkanVideoPresenter
                         : ResolveImageBinding(info.Images[index], snapshot.Images[index], program, index);
             }
 
-            descriptors.Samplers = new Sampler[info.Samplers.Count];
+            descriptors.Samplers = Scratch.Samplers.Rent(info.Samplers.Count);
             for (var index = 0; index < info.Samplers.Count; index++)
             {
                 descriptors.Samplers[index] = ResolveSampler(info.Samplers[index], snapshot.Samplers[index], program, index, stage,
                     SamplesIntegerViews(info, descriptors.Images, index));
             }
 
-            var shaderData = new uint[layout.ShaderDataDwordCount];
+            var shaderData = Scratch.ShaderData.Rent(checked((int)layout.ShaderDataDwordCount));
+            prepared.ShaderData = shaderData;
             for (var index = 0; index < layout.UserDataRegisters.Count; index++)
             {
                 var register = layout.UserDataRegisters[index];
@@ -286,7 +301,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             FindBuffers(prepared);
-            preparation.Stages.Add(prepared);
             ValidateDrawImageTypes(prepared);
             if (RenderTrace.Enabled && RenderTrace.Pipeline())
             {
@@ -327,7 +341,8 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             var program = prepared.Program;
             var snapshot = prepared.Stage.Resources;
-            var sources = new (BufferDescriptorWords Descriptor, ResourceSlotIdentifier Buffer)[prepared.Resources.Info.Buffers.Count];
+            var sources = Scratch.Sources.Rent(prepared.Resources.Info.Buffers.Count);
+            prepared.BufferSources = sources;
             for (var index = 0; index < sources.Length; index++)
             {
                 var words = snapshot.Buffers[index];
@@ -472,7 +487,13 @@ internal static unsafe partial class VulkanVideoPresenter
 
             // Reset only packed buffer offsets; dispatch limits follow them in shader data.
             Array.Clear(shaderData, (int)layout.MemoryOffsetDword, (int)((layout.MemoryOffsetCount + 3) / 4));
-            var views = new BufferView[info.Buffers.Count];
+            var views = prepared.Descriptors.Buffers;
+            if (views.Length != info.Buffers.Count)
+            {
+                Scratch.Buffers.Return(views);
+                views = Scratch.Buffers.Rent(info.Buffers.Count);
+                prepared.Descriptors.Buffers = views;
+            }
             for (var index = 0; index < views.Length; index++)
             {
                 var (descriptor, bufferIdentifier) = prepared.BufferSources[index];
@@ -625,6 +646,22 @@ internal static unsafe partial class VulkanVideoPresenter
                     RecycleHostBuffer(texture.StagingBuffer, texture.StagingMemory);
                 }
             }
+        }
+
+        private void ReturnStageScratch(PreparedStageBindings stage)
+        {
+            // CommitBindings copies texture references into submission-owned
+            // storage. These CPU descriptions are no longer referenced by GPU work.
+            Scratch.Images.Return(stage.Descriptors.Images);
+            Scratch.Samplers.Return(stage.Descriptors.Samplers);
+            Scratch.Buffers.Return(stage.Descriptors.Buffers);
+            Scratch.Sources.Return(stage.BufferSources);
+            Scratch.ShaderData.Return(stage.ShaderData);
+            stage.Descriptors.Images = [];
+            stage.Descriptors.Samplers = [];
+            stage.Descriptors.Buffers = [];
+            stage.BufferSources = [];
+            stage.ShaderData = [];
         }
 
         private static DescriptorImageInfo ImageInfo(TextureResource texture, uint element, ShaderProgramInfo program, int index)

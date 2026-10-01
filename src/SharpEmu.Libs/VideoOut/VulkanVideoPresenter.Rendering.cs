@@ -70,45 +70,54 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 owner._preparation = null;
-                streamRetention.Dispose();
-                if (StencilStorageImages is { } stencilImages)
+                owner._preparedTextures.Clear();
+                try
                 {
-                    foreach (var (attachment, storage) in stencilImages)
+                    streamRetention.Dispose();
+                    if (StencilStorageImages is { } stencilImages)
                     {
-                        try
+                        foreach (var (attachment, storage) in stencilImages)
                         {
-                            if (CommandsRecorded && StencilStorageWriteBackImages is not null &&
-                                StencilStorageWriteBackImages.Contains(attachment))
-                                attachment.CopyStencilStorage(storage, owner._bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: true);
-                        }
-                        finally
-                        {
-                            owner._scheduler.QueueCompletionAction(storage.Dispose);
+                            try
+                            {
+                                if (CommandsRecorded && StencilStorageWriteBackImages is not null &&
+                                    StencilStorageWriteBackImages.Contains(attachment))
+                                    attachment.CopyStencilStorage(storage, owner._bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: true);
+                            }
+                            finally
+                            {
+                                owner._scheduler.QueueCompletionAction(storage.Dispose);
+                            }
                         }
                     }
-                }
 
-                if (!Committed && FeedbackSnapshots is { } feedbackSnapshots)
-                {
-                    foreach (var snapshot in feedbackSnapshots)
+                    if (!Committed && FeedbackSnapshots is { } feedbackSnapshots)
                     {
-                        snapshot.Dispose();
+                        foreach (var snapshot in feedbackSnapshots)
+                        {
+                            snapshot.Dispose();
+                        }
+                    }
+
+                    if (Committed)
+                    {
+                        return;
+                    }
+
+                    foreach (var stage in Stages)
+                    {
+                        owner.DestroyStageBindings(stage);
+                    }
+
+                    foreach (var (buffer, memory) in OverflowBuffers)
+                    {
+                        owner.RecycleHostBuffer(buffer, memory);
                     }
                 }
-
-                if (Committed)
+                finally
                 {
-                    return;
-                }
-
-                foreach (var stage in Stages)
-                {
-                    owner.DestroyStageBindings(stage);
-                }
-
-                foreach (var (buffer, memory) in OverflowBuffers)
-                {
-                    owner.RecycleHostBuffer(buffer, memory);
+                    foreach (var stage in Stages) owner.ReturnStageScratch(stage);
+                    Stages.Clear();
                 }
             }
         }
