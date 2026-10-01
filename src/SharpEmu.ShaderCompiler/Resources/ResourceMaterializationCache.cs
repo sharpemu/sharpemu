@@ -339,40 +339,54 @@ public sealed class ResourceMaterializationCache
             ResourceSpecialization specialization)
         {
             _reads.Sort((left, right) => left.Address.CompareTo(right.Address));
-            var addresses = new List<ulong>();
-            var offsets = new List<int>();
-            var lengths = new List<int>();
-            var clean = new List<bool>();
-            var bytes = new List<byte>(_reads.Count * sizeof(uint));
-            var tableOnly = new List<bool>(_reads.Count);
+            // Count unique words and contiguous ranges first, then fill the
+            // retained arrays directly. Temporary lists previously duplicated
+            // every recorded byte and range on each cache miss.
+            var rangeCount = 0;
+            var wordCount = 0;
             ulong end = 0;
             var previous = ulong.MaxValue;
+            foreach (var read in _reads)
+            {
+                if (read.Address == previous) continue;
+                if (wordCount == 0 || read.Address != end) rangeCount++;
+                wordCount++;
+                previous = read.Address;
+                end = read.Address + sizeof(uint);
+            }
+
+            var addresses = new ulong[rangeCount];
+            var offsets = new int[rangeCount];
+            var lengths = new int[rangeCount];
+            var clean = new bool[rangeCount];
+            var bytes = new byte[wordCount * sizeof(uint)];
+            var tableOnly = new bool[wordCount];
+            var rangeIndex = -1;
+            var wordIndex = -1;
+            end = 0;
+            previous = ulong.MaxValue;
             foreach (var (address, word, wordClean, table) in _reads)
             {
                 if (address == previous)
                 {
-                    clean[^1] |= wordClean;
-                    tableOnly[^1] &= table;
+                    clean[rangeIndex] |= wordClean;
+                    tableOnly[wordIndex] &= table;
                     continue;
                 }
 
-                tableOnly.Add(table);
-
-                previous = address;
-                if (addresses.Count == 0 || address != end)
+                wordIndex++;
+                if (rangeIndex < 0 || address != end)
                 {
-                    addresses.Add(address);
-                    offsets.Add(bytes.Count);
-                    lengths.Add(0);
-                    clean.Add(false);
+                    rangeIndex++;
+                    addresses[rangeIndex] = address;
+                    offsets[rangeIndex] = wordIndex * sizeof(uint);
                 }
-
-                lengths[^1] += sizeof(uint);
-                clean[^1] |= wordClean;
-                bytes.Add((byte)word);
-                bytes.Add((byte)(word >> 8));
-                bytes.Add((byte)(word >> 16));
-                bytes.Add((byte)(word >> 24));
+                lengths[rangeIndex] += sizeof(uint);
+                clean[rangeIndex] |= wordClean;
+                tableOnly[wordIndex] = table;
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(
+                    bytes.AsSpan(wordIndex * sizeof(uint)), word);
+                previous = address;
                 end = address + sizeof(uint);
             }
 
@@ -385,14 +399,14 @@ public sealed class ResourceMaterializationCache
                 UserData = userData,
                 ShaderBase = inputs.ShaderBase,
                 ComputeState = inputs.ComputeState,
-                RangeAddresses = [.. addresses],
-                RangeOffsets = [.. offsets],
-                RangeLengths = [.. lengths],
-                RangeClean = [.. clean],
-                WordTableOnly = [.. tableOnly],
+                RangeAddresses = addresses,
+                RangeOffsets = offsets,
+                RangeLengths = lengths,
+                RangeClean = clean,
+                WordTableOnly = tableOnly,
                 TableRefreshable = snapshot.FlattenedResourceTable.Length ==
                     plan.TableReads.Count + plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount,
-                Bytes = [.. bytes],
+                Bytes = bytes,
                 Snapshot = snapshot,
                 Specialization = specialization,
             };
