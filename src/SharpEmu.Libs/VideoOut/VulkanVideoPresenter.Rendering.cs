@@ -70,7 +70,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 owner._preparation = null;
-                owner._preparedTextures.Clear();
                 try
                 {
                     streamRetention.Dispose();
