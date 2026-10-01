@@ -149,12 +149,20 @@ public static class FontExports
         var layoutAddress = ctx[CpuRegister.Rsi];
         if (layoutAddress == 0)
         {
+            layoutAddress = ctx[CpuRegister.Rdx];
+        }
+        if (layoutAddress == 0)
+        {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        // Baseline, line advance, decoration extent: the same invented geometry
-        // as GetRenderCharGlyphMetrics.
-        var values = new[] { 12.0f, 16.0f, 0.0f };
+        // Baseline, line advance, decoration extent: scaled to the font's
+        // current pixel height, matching the ascent convention (height * 0.75)
+        // used by glyph metrics and the rasterizer. A font never given a
+        // scale falls back to the default height of 16, reproducing the
+        // original fixed geometry.
+        var fontHeight = GetFontHeight(ctx[CpuRegister.Rdi]);
+        var values = new[] { fontHeight * 0.75f, (float)fontHeight, 0.0f };
         for (var index = 0; index < values.Length; index++)
         {
             if (!TryWriteUInt32(
@@ -179,13 +187,20 @@ public static class FontExports
         var layoutAddress = ctx[CpuRegister.Rsi];
         if (layoutAddress == 0)
         {
+            layoutAddress = ctx[CpuRegister.Rdx];
+        }
+        if (layoutAddress == 0)
+        {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
         // Baseline (horizontal offset), line advance, decoration extent.
         // Mirrors the same three-float layout as GetHorizontalLayout, but
         // interpreted for vertical writing (e.g. CJK text rendered top-to-bottom).
-        var values = new[] { 8.0f, 16.0f, 0.0f };
+        // Scaled to the font's current pixel height; the default height of 16
+        // reproduces the original fixed geometry.
+        var fontHeight = GetFontHeight(ctx[CpuRegister.Rdi]);
+        var values = new[] { fontHeight * 0.5f, (float)fontHeight, 0.0f };
         for (var index = 0; index < values.Length; index++)
         {
             if (!TryWriteUInt32(
