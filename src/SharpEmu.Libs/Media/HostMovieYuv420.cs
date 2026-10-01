@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 
 namespace SharpEmu.Libs.Media;
 
@@ -30,7 +31,8 @@ internal static unsafe class HostMovieYuv420
         ReadOnlySpan<byte> bgra,
         uint width,
         uint height,
-        Span<byte> destination)
+        Span<byte> destination,
+        bool useVectorized = true)
     {
         if (width == 0 || height == 0)
         {
@@ -46,9 +48,59 @@ internal static unsafe class HostMovieYuv420
 
         fixed (byte* source = bgra, luma = destination)
         {
-            ConvertRowPairs(source, (int)width, (int)height, luma, luma + lumaLength);
+            if (useVectorized && Vector128.IsHardwareAccelerated && BitConverter.IsLittleEndian &&
+                width % 4 == 0 && height % 2 == 0)
+                ConvertVectorRowPairs(source, (int)width, (int)height, luma, luma + lumaLength);
+            else
+                ConvertRowPairs(source, (int)width, (int)height, luma, luma + lumaLength);
         }
     }
+
+    // Four pixels from each of two rows share one vectorized luma/chroma
+    // calculation. Keep the scalar path for odd edges and hosts without SIMD.
+    private static void ConvertVectorRowPairs(byte* bgra, int width, int height, byte* luma, byte* chroma)
+    {
+        var mask = Vector128.Create(255u);
+        for (var y = 0; y < height; y += 2)
+        {
+            var row0 = bgra + (nint)y * width * 4;
+            var row1 = row0 + (nint)width * 4;
+            var luma0 = luma + (nint)y * width;
+            var luma1 = luma0 + width;
+            var chromaRow = chroma + (nint)(y / 2) * width;
+            for (var x = 0; x < width; x += 4)
+            {
+                var pixels0 = Vector128.Load((uint*)(row0 + x * 4));
+                var pixels1 = Vector128.Load((uint*)(row1 + x * 4));
+                var b0 = pixels0 & mask;
+                var b1 = pixels1 & mask;
+                var g0 = (pixels0 >> 8) & mask;
+                var g1 = (pixels1 >> 8) & mask;
+                var r0 = (pixels0 >> 16) & mask;
+                var r1 = (pixels1 >> 16) & mask;
+                var y0 = (r0 * 54u + g0 * 183u + b0 * 19u + Vector128.Create(128u)) >> 8;
+                var y1 = (r1 * 54u + g1 * 183u + b1 * 19u + Vector128.Create(128u)) >> 8;
+                var packedY = Vector128.Narrow(Vector128.Narrow(y0, y1), Vector128<ushort>.Zero).AsUInt32();
+                Unsafe.WriteUnaligned(luma0 + x, packedY.GetElement(0));
+                Unsafe.WriteUnaligned(luma1 + x, packedY.GetElement(1));
+
+                var red = AveragePairs(r0 + r1).AsInt32();
+                var green = AveragePairs(g0 + g1).AsInt32();
+                var blue = AveragePairs(b0 + b1).AsInt32();
+                var cr = ((red * 128 - green * 116 - blue * 12 + Vector128.Create(128)) >> 8) + Vector128.Create(128);
+                var cb = ((blue * 128 - red * 29 - green * 99 + Vector128.Create(128)) >> 8) + Vector128.Create(128);
+                cr = Vector128.Min(Vector128.Max(cr, Vector128<int>.Zero), Vector128.Create(255));
+                cb = Vector128.Min(Vector128.Max(cb, Vector128<int>.Zero), Vector128.Create(255));
+                var packedChroma = (uint)(cr.GetElement(0) | (cb.GetElement(0) << 8) |
+                    (cr.GetElement(2) << 16) | (cb.GetElement(2) << 24));
+                Unsafe.WriteUnaligned(chromaRow + x, packedChroma);
+            }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<uint> AveragePairs(Vector128<uint> sums) =>
+        (sums + Vector128.Shuffle(sums, Vector128.Create(1u, 0u, 3u, 2u))) >> 2;
 
     private static void ConvertRowPairs(
         byte* bgra,

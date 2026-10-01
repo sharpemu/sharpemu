@@ -14,6 +14,9 @@ public sealed class HostMovieYuv420Tests
     [InlineData(3u, 2u)]
     [InlineData(7u, 5u)]
     [InlineData(64u, 33u)]
+    [InlineData(4u, 2u)]
+    [InlineData(8u, 6u)]
+    [InlineData(1920u, 1080u)]
     public void ConvertFromBgra_MatchesPerPixelReference(uint width, uint height)
     {
         var bgra = new byte[width * height * 4];
@@ -24,6 +27,23 @@ public sealed class HostMovieYuv420Tests
         HostMovieYuv420.ConvertFromBgra(bgra, width, height, actual);
 
         Assert.Equal(expected, actual);
+        var scalar = new byte[actual.Length];
+        HostMovieYuv420.ConvertFromBgra(bgra, width, height, scalar, useVectorized: false);
+        Assert.Equal(scalar, actual);
+    }
+
+    [Fact]
+    public void ConvertFromBgra_VectorStoresRespectUnalignedDestinationBounds()
+    {
+        const uint width = 8, height = 4;
+        var source = new byte[width * height * 4 + 1];
+        new System.Random(731).NextBytes(source);
+        var length = HostMovieYuv420.FrameLength(width, height);
+        var destination = Enumerable.Repeat((byte)0xCD, length + 9).ToArray();
+        HostMovieYuv420.ConvertFromBgra(source.AsSpan(1), width, height, destination.AsSpan(3, length));
+        Assert.Equal(ReferenceConvert(source[1..], (int)width, (int)height), destination.AsSpan(3, length).ToArray());
+        Assert.All(destination[..3], value => Assert.Equal(0xCD, value));
+        Assert.All(destination[(3 + length)..], value => Assert.Equal(0xCD, value));
     }
 
     [Fact]
