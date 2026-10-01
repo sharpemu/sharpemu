@@ -14,10 +14,11 @@ public sealed class Gen5ExecFullAnalysisTests
     private readonly List<Gen5ShaderInstruction> _program = [];
     private uint _pc;
 
-    private uint Add(string opcode, Gen5ShaderEncoding encoding, Gen5Operand[] destinations, Gen5Operand[] sources, uint word = 0)
+    private uint Add(string opcode, Gen5ShaderEncoding encoding, Gen5Operand[] destinations, Gen5Operand[] sources,
+        uint word = 0, Gen5InstructionControl? control = null)
     {
         var pc = _pc;
-        _program.Add(new Gen5ShaderInstruction(pc, encoding, opcode, [word], sources, destinations, null));
+        _program.Add(new Gen5ShaderInstruction(pc, encoding, opcode, [word], sources, destinations, control));
         _pc += 4;
         return pc;
     }
@@ -65,6 +66,57 @@ public sealed class Gen5ExecFullAnalysisTests
         Assert.Contains(before, full);
         Assert.DoesNotContain(after, full);
     }
+
+    [Theory]
+    [InlineData(false, false, 40u)]
+    [InlineData(false, false, 106u)]
+    [InlineData(false, true, 40u)]
+    [InlineData(false, true, 106u)]
+    [InlineData(true, false, 40u)]
+    [InlineData(true, false, 106u)]
+    [InlineData(true, true, 40u)]
+    [InlineData(true, true, 106u)]
+    public void CompareIntoExecWithLegacyDestination_PreservesSavedMask(bool wave32, bool useVop3, uint savedMask)
+    {
+        Scalar("SMovB64", savedMask, Gen5Operand.Scalar(Exec));
+        var before = VectorAdd();
+        Add("VCmpxNltF32", useVop3 ? Gen5ShaderEncoding.Vop3 : Gen5ShaderEncoding.Vopc, [],
+            [Gen5Operand.Vector(20), new Gen5Operand(Gen5OperandKind.EncodedConstant, 244)],
+            control: CompareControl(useVop3, savedMask));
+        var masked = VectorAdd();
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(savedMask));
+        var restored = VectorAdd();
+
+        var full = Gen5ExecFullAnalysis.Analyze(new Gen5ShaderProgram(0x1000, _program), wave32);
+        Assert.Contains(before, full);
+        Assert.DoesNotContain(masked, full);
+        Assert.Contains(restored, full);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void CompareIntoScalarDestination_InvalidatesSavedMask(bool wave32, bool useVop3)
+    {
+        Scalar("SMovB64", 106, Gen5Operand.Scalar(Exec));
+        Add("VCmpNltF32", useVop3 ? Gen5ShaderEncoding.Vop3 : Gen5ShaderEncoding.Vopc, [],
+            [Gen5Operand.Vector(20), new Gen5Operand(Gen5OperandKind.EncodedConstant, 244)],
+            control: CompareControl(useVop3, 106));
+        var beforeRestore = VectorAdd();
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(106));
+        var afterRestore = VectorAdd();
+
+        var full = Gen5ExecFullAnalysis.Analyze(new Gen5ShaderProgram(0x1000, _program), wave32);
+        Assert.Contains(beforeRestore, full);
+        Assert.DoesNotContain(afterRestore, full);
+    }
+
+    private static Gen5InstructionControl CompareControl(bool useVop3, uint scalarDestination) =>
+        useVop3
+            ? new Gen5Vop3Control(0, 0, 0, false, 0, scalarDestination)
+            : new Gen5SdwaControl(6, 0, 6, 6, false, false, 0, 0, 0, false, scalarDestination);
 
     [Fact]
     public void AfterAnSdwaVectorCompareIntoExec_ExecIsUnknown()
