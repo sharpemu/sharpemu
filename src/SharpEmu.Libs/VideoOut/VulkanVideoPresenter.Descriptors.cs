@@ -652,6 +652,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var bufferCount = 0;
             var imageCount = 0;
             var textureCount = 0;
+            var maxStageImages = 0;
             foreach (var prepared in stages)
             {
                 var stage = (PreparedStageBindings)prepared;
@@ -677,6 +678,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 textureCount += stage.Textures.Length;
+                maxStageImages = Math.Max(maxStageImages, stage.Textures.Length);
             }
 
             // All stages that read the same stencil bytes share the shader's working image.
@@ -698,16 +700,25 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
-            var bufferInfos = new DescriptorBufferInfo[Math.Max(bufferCount, 1)];
-            var imageInfos = new DescriptorImageInfo[Math.Max(imageCount, 1)];
-            var writes = new WriteDescriptorSet[Math.Max(writeCount, 1)];
+            // Vulkan consumes these host-side descriptions during the call.
+            // Only the resources themselves remain alive until GPU completion.
+            // Bound stack use for unusually large descriptor layouts.
+            const int StackDescriptorLimit = 128;
+            Span<DescriptorBufferInfo> bufferInfos = bufferCount <= StackDescriptorLimit
+                ? stackalloc DescriptorBufferInfo[bufferCount] : new DescriptorBufferInfo[bufferCount];
+            Span<DescriptorImageInfo> imageInfos = imageCount <= StackDescriptorLimit
+                ? stackalloc DescriptorImageInfo[imageCount] : new DescriptorImageInfo[imageCount];
+            Span<WriteDescriptorSet> writes = writeCount <= StackDescriptorLimit
+                ? stackalloc WriteDescriptorSet[writeCount] : new WriteDescriptorSet[writeCount];
+            Span<uint> occurrenceScratch = maxStageImages <= StackDescriptorLimit
+                ? stackalloc uint[maxStageImages] : new uint[maxStageImages];
             var pushData = stackalloc uint[(int)PushData.DwordCount];
             var hasPushData = false;
             var bufferIndex = 0;
             var imageIndex = 0;
             var writeIndex = 0;
             var uploadStage = bindPoint == PipelineBindPoint.Compute ? PipelineStageFlags.ComputeShaderBit : PipelineStageFlags.FragmentShaderBit;
-            var textures = new TextureResource[textureCount];
+            TextureResource[] textures = textureCount == 0 ? [] : new TextureResource[textureCount];
             var textureIndex = 0;
             fixed (DescriptorBufferInfo* bufferInfoPointer = bufferInfos)
             fixed (DescriptorImageInfo* imageInfoPointer = imageInfos)
@@ -744,7 +755,8 @@ internal static unsafe partial class VulkanVideoPresenter
                         textures[textureIndex++] = texture;
                     }
 
-                    var occurrences = new uint[descriptors.Images.Length];
+                    var occurrences = occurrenceScratch[..descriptors.Images.Length];
+                    occurrences.Clear();
                     foreach (var binding in stage.Layout.Descriptors)
                     {
                         var write = new WriteDescriptorSet
@@ -760,7 +772,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         {
                             foreach (var resource in binding.Resources)
                             {
-                                imageInfos[imageIndex++] = ImageInfo(descriptors.Images[(int)resource], occurrences[resource]++, program, (int)resource);
+                                imageInfos[imageIndex++] = ImageInfo(descriptors.Images[(int)resource], occurrences[(int)resource]++, program, (int)resource);
                             }
                         }
                         else
