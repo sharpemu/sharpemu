@@ -57,6 +57,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _scheduler.Dispose();
                 _deviceInfo.Slabs.Destroy();
+                DestroyGuestPipelineCaches();
                 if (_pipelineCache.Handle != 0)
                 {
                     _vk.DestroyPipelineCache(_device, _pipelineCache, null);

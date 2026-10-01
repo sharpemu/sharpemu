@@ -83,6 +83,9 @@ internal sealed class PresenterUnderTest : IDisposable
             field.SetValue(Instance, Activator.CreateInstance(field.FieldType, nonPublic: true));
         }
 
+        SetField("_shaderModuleCacheIdentities", new Dictionary<ulong, string>());
+        var cacheShards = PresenterType.GetField("_pipelineCacheShards", InstanceMembers)!;
+        cacheShards.SetValue(Instance, Activator.CreateInstance(cacheShards.FieldType, nonPublic: true));
         forwarder.Target = this;
     }
 

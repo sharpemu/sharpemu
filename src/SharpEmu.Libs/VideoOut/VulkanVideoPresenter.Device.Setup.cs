@@ -1198,6 +1198,17 @@ internal static unsafe partial class VulkanVideoPresenter
             var persistentCacheEnabled =
                 !string.Equals(cacheMode, "0", StringComparison.Ordinal);
             _pipelineCachePath = persistentCacheEnabled ? GetPipelineCachePath() : null;
+            // MoltenVK imports compile every cached MSL library. Load shader
+            // groups on demand on macOS so a mature cache cannot hold startup
+            // behind unrelated scenes. Keep explicit overrides for comparison.
+            var shardMode = Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_SHARDS");
+            var useShards = shardMode == "1" || (shardMode is null && OperatingSystem.IsMacOS());
+            if (_pipelineCachePath is not null &&
+                useShards)
+            {
+                _pipelineCacheShardDirectory = _pipelineCachePath + ".shards";
+                _pipelineCachePath = Path.Combine(_pipelineCacheShardDirectory, "present.bin");
+            }
             byte[] initialData = [];
             try
             {
@@ -1333,6 +1344,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void SavePipelineCache(bool force)
         {
+            SaveGuestPipelineCaches();
             if (_pipelineCache.Handle == 0 || string.IsNullOrWhiteSpace(_pipelineCachePath))
             {
                 return;
@@ -1343,19 +1355,28 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            if (SaveDriverPipelineCache(_pipelineCache, _pipelineCachePath))
+            {
+                _pipelineCacheDirty = false;
+                _lastPipelineCacheSaveTick = Environment.TickCount64;
+            }
+        }
+
+        private bool SaveDriverPipelineCache(PipelineCache cache, string path)
+        {
             try
             {
                 nuint size = 0;
                 var result = _vk.GetPipelineCacheData(
                     _device,
-                    _pipelineCache,
+                    cache,
                     &size,
                     null);
                 if (result != Result.Success || size == 0 || size > 256u * 1024u * 1024u)
                 {
                     Console.Error.WriteLine(
                         $"[LOADER][WARN] Vulkan pipeline cache query failed: result={result} size={size}");
-                    return;
+                    return false;
                 }
 
                 var data = new byte[checked((int)size)];
@@ -1363,7 +1384,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     result = _vk.GetPipelineCacheData(
                         _device,
-                        _pipelineCache,
+                        cache,
                         &size,
                         dataPointer);
                 }
@@ -1372,7 +1393,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     Console.Error.WriteLine(
                         $"[LOADER][WARN] Vulkan pipeline cache export failed: {result}");
-                    return;
+                    return false;
                 }
 
                 if (size != (nuint)data.Length)
@@ -1380,24 +1401,24 @@ internal static unsafe partial class VulkanVideoPresenter
                     Array.Resize(ref data, checked((int)size));
                 }
 
-                var directory = Path.GetDirectoryName(_pipelineCachePath);
+                var directory = Path.GetDirectoryName(path);
                 if (!string.IsNullOrWhiteSpace(directory))
                 {
                     Directory.CreateDirectory(directory);
                 }
 
-                var temporaryPath = _pipelineCachePath + $".{Environment.ProcessId}.tmp";
+                var temporaryPath = path + $".{Environment.ProcessId}.tmp";
                 File.WriteAllBytes(temporaryPath, PipelineCacheSignature.Wrap(DriverCacheSignature(), data));
-                File.Move(temporaryPath, _pipelineCachePath, overwrite: true);
-                _pipelineCacheDirty = false;
-                _lastPipelineCacheSaveTick = Environment.TickCount64;
+                File.Move(temporaryPath, path, overwrite: true);
                 Console.Error.WriteLine(
-                    $"[LOADER][INFO] Vulkan pipeline cache saved: path={_pipelineCachePath} bytes={data.Length}");
+                    $"[LOADER][INFO] Vulkan pipeline cache saved: path={path} bytes={data.Length}");
+                return true;
             }
             catch (Exception exception)
             {
                 Console.Error.WriteLine(
                     $"[LOADER][WARN] Vulkan pipeline cache save failed: {exception.Message}");
+                return false;
             }
         }
 

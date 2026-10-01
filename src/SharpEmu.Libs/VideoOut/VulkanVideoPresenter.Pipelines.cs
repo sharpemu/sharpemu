@@ -54,6 +54,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private readonly Dictionary<ulong, ShaderModule> _shaderModules = new();
+        private readonly Dictionary<ulong, string> _shaderModuleCacheIdentities = new();
         private KhrPushDescriptor _pushDescriptorApi = null!;
         private uint _maxPushDescriptors;
         private SampleCountFlags _noAttachmentSampleCounts;
@@ -167,6 +168,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var module = CreateShaderModule(shader.Payload);
             SetDebugName(ObjectType.ShaderModule, module.Handle, $"SharpEmu {stage} 0x{hash:X16}");
             _shaderModules.Add(programId, module);
+            _shaderModuleCacheIdentities[module.Handle] = VulkanPipelineCacheStorage.CompiledShaderIdentity(shader.Payload);
             return module.Handle;
         }
 
@@ -760,7 +762,9 @@ internal static unsafe partial class VulkanVideoPresenter
                         PDynamicState = &dynamicState,
                         Layout = layout,
                     };
-                    Check(_vk.CreateGraphicsPipelines(_device, _pipelineCache, 1, &pipelineInfo, null, out var pipeline), "vkCreateGraphicsPipelines(rendering)");
+                    var cache = GetGuestPipelineCache(GraphicsCacheKey(description.VertexStage.Hash,
+                        description.PixelStage?.Hash ?? 0, vertexModule.Handle, pixelModule.Handle));
+                    Check(_vk.CreateGraphicsPipelines(_device, cache, 1, &pipelineInfo, null, out var pipeline), "vkCreateGraphicsPipelines(rendering)");
                     MarkPipelineCacheDirty();
                     Interlocked.Increment(ref _perfPipelineCreations);
                     SetDebugName(
@@ -812,7 +816,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     Stage = stageInfo,
                     Layout = layout,
                 };
-                Check(_vk.CreateComputePipelines(_device, _pipelineCache, 1, &pipelineInfo, null, out pipeline),
+                var cache = GetGuestPipelineCache(ComputeCacheKey(description.Stage.Hash, computeModule.Handle));
+                Check(_vk.CreateComputePipelines(_device, cache, 1, &pipelineInfo, null, out pipeline),
                     $"vkCreateComputePipelines(rendering) hash=0x{description.Stage.Hash:X16}");
                 MarkPipelineCacheDirty();
                 Interlocked.Increment(ref _perfPipelineCreations);
@@ -858,6 +863,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _shaderModules.Clear();
+            _shaderModuleCacheIdentities.Clear();
         }
     }
 }

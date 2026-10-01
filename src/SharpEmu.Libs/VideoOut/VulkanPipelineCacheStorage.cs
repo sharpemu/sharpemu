@@ -7,6 +7,12 @@ internal static class VulkanPipelineCacheStorage
 {
     private const string CacheFileName = "vulkan-pipeline-cache.bin";
 
+    // A guest shader can produce many different native modules as translation
+    // and specialization change. Importing their shared driver blob recompiles
+    // obsolete MSL on MoltenVK, so native cache buckets identify emitted code.
+    internal static string CompiledShaderIdentity(ReadOnlySpan<byte> spirv) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(spirv));
+
     internal static string ResolvePath(string? titleId, string? configuredPath)
     {
         if (!string.IsNullOrWhiteSpace(configuredPath))
