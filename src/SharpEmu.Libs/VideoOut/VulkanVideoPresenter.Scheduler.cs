@@ -28,6 +28,10 @@ internal static unsafe partial class VulkanVideoPresenter
         private readonly SubmissionContext _submissionContext = new();
         private SubmissionScheduler _scheduler = null!;
         private VulkanCommandProfile? _gpuCommandProfile;
+        private VulkanOcclusionQueries? _occlusionQueries;
+        private bool _supportsPreciseOcclusion;
+        private bool _occlusionCounting;
+        private int _occlusionQueueId;
         private GpuDeviceInfo _deviceInfo = null!;
         private GuestBufferCache _bufferCache = null!;
         private GuestImageCache _imageCache = null!;

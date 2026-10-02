@@ -64,12 +64,20 @@ public static partial class AgcExports
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var eventType = (uint)(ctx[CpuRegister.Rsi] & 0xFF);
         var eventAddress = ctx[CpuRegister.Rdx];
-        if (commandBufferAddress == 0 || eventType > 0x3F || eventAddress != 0)
+        if (commandBufferAddress == 0 || eventType > 0x3F)
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(2, ItEventWrite, 0), eventType))
+        var hasAddress = eventType is 0x38 or 0x39;
+        var packetDwords = hasAddress ? 4u : 2u;
+        var eventIndex = hasAddress ? 1u : eventType is 0x07 or 0x0F or 0x10 ? 4u : 0u;
+        Span<uint> packet = stackalloc uint[4]
+        {
+            Pm4(packetDwords, ItEventWrite, 0), eventType | (eventIndex << 8),
+            (uint)eventAddress & ~7u, (uint)(eventAddress >> 32),
+        };
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, packet[..(int)packetDwords]))
         {
             return ReturnPointer(ctx, 0);
         }
