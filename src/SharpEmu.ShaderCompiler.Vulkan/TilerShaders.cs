@@ -210,30 +210,29 @@ public static class TilerShaders
 
     private static AddressBit[] BXY(byte x, byte y) => [BX(x), BY(y)];
 
-    // PS5 Oberon RB+ R_X addressing. The destination bit index is the array
-    // index. Keep this in lockstep with GnmTiling.RbPlus64KRenderX and
-    // TileGeometry.RenderTargetOffset.
+    // Use the guest single-sample render-target address bits.
+    // Keep this table consistent with GnmTiling and TileGeometry.
     private static readonly AddressBit[][][] RenderTargetAddressBits =
     [
         [
-            [BX(0)], [BX(1)], [BX(2)], [BX(3)], [BY(0)], [BY(1)], [BY(2)], [BY(3)],
-            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BX(6)], [BY(6)], BXY(7, 8), BXY(8, 7),
+            [BX(0)], [BX(1)], [BX(2)], [BY(1)], [BY(0)], [BY(2)], [BX(3)], [BY(4)],
+            BXY(3, 3), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BY(6)], [BX(6)], [BY(7)], [BX(7)],
         ],
         [
             [], [BX(0)], [BX(1)], [BX(2)], [BY(0)], [BY(1)], [BY(2)], [BX(3)],
-            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BY(3)], [BX(6)], BXY(7, 7), BXY(8, 6),
+            BXY(3, 3), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BY(4)], [BX(6)], [BY(6)], [BX(7)],
         ],
         [
-            [], [], [BX(0)], [BX(1)], [BY(0)], [BY(1)], [BX(2)], [BY(2)],
-            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BX(3)], [BY(3)], BXY(6, 7), BXY(7, 6),
+            [], [], [BX(0)], [BX(1)], [BY(0)], [BY(1)], [BY(2)], [BX(2)],
+            BXY(3, 3), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BY(3)], [BX(4)], [BY(6)], [BX(6)],
         ],
         [
             [], [], [], [BX(0)], [BY(0)], [BX(1)], [BX(2)], [BY(1)],
-            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BY(2)], [BX(3)], BXY(7, 3), BXY(6, 6),
+            BXY(3, 3), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BY(2)], [BX(3)], [BY(4)], [BX(6)],
         ],
         [
             [], [], [], [], [BX(0)], [BY(0)], [BX(1)], [BY(1)],
-            BXY(7, 4).Concat([BY(7)]).ToArray(), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BX(2)], [BY(2)], BXY(6, 3), BXY(3, 6),
+            BXY(3, 3), BXY(4, 4), BXY(6, 5), BXY(5, 6), [BY(2)], [BX(2)], [BY(3)], [BX(4)],
         ],
     ];
 

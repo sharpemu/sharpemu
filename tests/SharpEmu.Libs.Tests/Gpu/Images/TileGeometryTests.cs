@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.Images;
 using Xunit;
 
@@ -20,7 +21,7 @@ public sealed class TileGeometryTests
         Assert.True(TileGeometry.TryGetBlockOffset(volume.Block, 4, 0, 0, out var volumeOffset));
         Assert.True(TileGeometry.TryGetBlockOffset(surface.Block, 4, 0, 0, out var surfaceOffset));
         Assert.Equal(128u, volumeOffset);
-        Assert.Equal(64u, surfaceOffset);
+        Assert.Equal(128u, surfaceOffset);
     }
 
     private static uint DepthOffset(uint bytes, uint x, uint y)
@@ -42,6 +43,35 @@ public sealed class TileGeometryTests
         Assert.Equal(0x0010u, DepthOffset(4, 2, 0));
         Assert.Equal(0x0008u, DepthOffset(4, 0, 1));
         Assert.Equal(0x009cu, DepthOffset(4, 3, 5));
+    }
+
+    [Theory]
+    [InlineData(1u, 8u, 0u, 320u)]
+    [InlineData(1u, 0u, 2u, 8u)]
+    [InlineData(1u, 0u, 128u, 16384u)]
+    [InlineData(2u, 8u, 0u, 384u)]
+    [InlineData(2u, 0u, 16u, 4608u)]
+    [InlineData(2u, 0u, 64u, 18432u)]
+    [InlineData(4u, 0u, 4u, 64u)]
+    [InlineData(4u, 4u, 0u, 128u)]
+    [InlineData(4u, 8u, 0u, 256u)]
+    [InlineData(4u, 0u, 8u, 4352u)]
+    [InlineData(4u, 0u, 16u, 512u)]
+    [InlineData(8u, 0u, 4u, 4096u)]
+    [InlineData(8u, 8u, 0u, 8448u)]
+    [InlineData(8u, 0u, 16u, 16896u)]
+    [InlineData(16u, 0u, 4u, 4096u)]
+    [InlineData(16u, 4u, 0u, 8192u)]
+    [InlineData(16u, 0u, 8u, 16640u)]
+    public void RenderTargetBlockOffsets_MatchTheReferenceSpotValues(uint bytes, uint x, uint y, uint expected)
+    {
+        Assert.True(TileGeometry.TryGetBlockLayout(TileBlockKind.RenderTarget64KB, bytes, out var layout));
+        Assert.True(TileGeometry.TryGetBlockOffset(layout, x, y, 0, out var offset));
+        Assert.Equal(expected, offset);
+
+        var detile = GnmTiling.GetDetileParams(27, (int)bytes, (int)layout.BlockWidth, (int)layout.BlockHeight);
+        Assert.True(detile.IsSupported);
+        Assert.Equal(expected, (uint)(detile.XByteTerm[x & detile.XMask] ^ detile.YByteTerm[y & detile.YMask]));
     }
 
     [Theory]

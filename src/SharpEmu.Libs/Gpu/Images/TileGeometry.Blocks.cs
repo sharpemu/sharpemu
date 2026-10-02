@@ -242,57 +242,52 @@ public static partial class TileGeometry
         switch (bytesPerElement)
         {
             case 1:
-                offset ^= Bit(x, 0, 0) ^ Bit(x, 1, 1) ^ Bit(x, 2, 2) ^ Bit(x, 3, 3);
-                offset ^= Bit(y, 0, 4) ^ Bit(y, 1, 5) ^ Bit(y, 2, 6) ^ Bit(y, 3, 7);
-                offset ^= Bit(x, 7, 8) ^ Bit(y, 4, 8) ^ Bit(y, 7, 8);
+                offset ^= Bit(x, 0, 0) ^ Bit(x, 1, 1) ^ Bit(x, 2, 2) ^ Bit(y, 1, 3);
+                offset ^= Bit(y, 0, 4) ^ Bit(y, 2, 5) ^ Bit(x, 3, 6) ^ Bit(y, 4, 7);
+                offset ^= Bit(x, 3, 8) ^ Bit(y, 3, 8);
                 offset ^= Bit(x, 4, 9) ^ Bit(y, 4, 9);
                 offset ^= Bit(x, 6, 10) ^ Bit(y, 5, 10);
                 offset ^= Bit(x, 5, 11) ^ Bit(y, 6, 11);
-                offset ^= Bit(x, 6, 12) ^ Bit(y, 6, 13);
-                offset ^= Bit(x, 7, 14) ^ Bit(y, 8, 14);
-                offset ^= Bit(x, 8, 15) ^ Bit(y, 7, 15);
+                offset ^= Bit(y, 6, 12) ^ Bit(x, 6, 13);
+                offset ^= Bit(y, 7, 14) ^ Bit(x, 7, 15);
                 return offset;
             case 2:
                 offset ^= Bit(x, 0, 1) ^ Bit(x, 1, 2) ^ Bit(x, 2, 3);
                 offset ^= Bit(y, 0, 4) ^ Bit(y, 1, 5) ^ Bit(y, 2, 6) ^ Bit(x, 3, 7);
-                offset ^= Bit(x, 7, 8) ^ Bit(y, 4, 8) ^ Bit(y, 7, 8);
+                offset ^= Bit(x, 3, 8) ^ Bit(y, 3, 8);
                 offset ^= Bit(x, 4, 9) ^ Bit(y, 4, 9);
                 offset ^= Bit(x, 6, 10) ^ Bit(y, 5, 10);
                 offset ^= Bit(x, 5, 11) ^ Bit(y, 6, 11);
-                offset ^= Bit(y, 3, 12) ^ Bit(x, 6, 13);
-                offset ^= Bit(x, 7, 14) ^ Bit(y, 7, 14);
-                offset ^= Bit(x, 8, 15) ^ Bit(y, 6, 15);
+                offset ^= Bit(y, 4, 12) ^ Bit(x, 6, 13);
+                offset ^= Bit(y, 6, 14) ^ Bit(x, 7, 15);
                 return offset;
             case 4:
                 offset ^= Bit(x, 0, 2) ^ Bit(x, 1, 3);
-                offset ^= Bit(y, 0, 4) ^ Bit(y, 1, 5) ^ Bit(x, 2, 6) ^ Bit(y, 2, 7);
-                offset ^= Bit(x, 7, 8) ^ Bit(y, 4, 8) ^ Bit(y, 7, 8);
+                offset ^= Bit(y, 0, 4) ^ Bit(y, 1, 5) ^ Bit(y, 2, 6) ^ Bit(x, 2, 7);
+                offset ^= Bit(x, 3, 8) ^ Bit(y, 3, 8);
                 offset ^= Bit(x, 4, 9) ^ Bit(y, 4, 9);
                 offset ^= Bit(x, 6, 10) ^ Bit(y, 5, 10);
                 offset ^= Bit(x, 5, 11) ^ Bit(y, 6, 11);
-                offset ^= Bit(x, 3, 12) ^ Bit(y, 3, 13);
-                offset ^= Bit(x, 6, 14) ^ Bit(y, 7, 14);
-                offset ^= Bit(x, 7, 15) ^ Bit(y, 6, 15);
+                offset ^= Bit(y, 3, 12) ^ Bit(x, 4, 13);
+                offset ^= Bit(y, 6, 14) ^ Bit(x, 6, 15);
                 return offset;
             case 8:
                 offset ^= Bit(x, 0, 3) ^ Bit(y, 0, 4) ^ Bit(x, 1, 5) ^ Bit(x, 2, 6) ^ Bit(y, 1, 7);
-                offset ^= Bit(x, 7, 8) ^ Bit(y, 4, 8) ^ Bit(y, 7, 8);
+                offset ^= Bit(x, 3, 8) ^ Bit(y, 3, 8);
                 offset ^= Bit(x, 4, 9) ^ Bit(y, 4, 9);
                 offset ^= Bit(x, 6, 10) ^ Bit(y, 5, 10);
                 offset ^= Bit(x, 5, 11) ^ Bit(y, 6, 11);
                 offset ^= Bit(y, 2, 12) ^ Bit(x, 3, 13);
-                offset ^= Bit(x, 7, 14) ^ Bit(y, 3, 14);
-                offset ^= Bit(x, 6, 15) ^ Bit(y, 6, 15);
+                offset ^= Bit(y, 4, 14) ^ Bit(x, 6, 15);
                 return offset;
             case 16:
                 offset ^= Bit(x, 0, 4) ^ Bit(y, 0, 5) ^ Bit(x, 1, 6) ^ Bit(y, 1, 7);
-                offset ^= Bit(x, 7, 8) ^ Bit(y, 4, 8) ^ Bit(y, 7, 8);
+                offset ^= Bit(x, 3, 8) ^ Bit(y, 3, 8);
                 offset ^= Bit(x, 4, 9) ^ Bit(y, 4, 9);
                 offset ^= Bit(x, 6, 10) ^ Bit(y, 5, 10);
                 offset ^= Bit(x, 5, 11) ^ Bit(y, 6, 11);
-                offset ^= Bit(x, 2, 12) ^ Bit(y, 2, 13);
-                offset ^= Bit(x, 6, 14) ^ Bit(y, 3, 14);
-                offset ^= Bit(x, 3, 15) ^ Bit(y, 6, 15);
+                offset ^= Bit(y, 2, 12) ^ Bit(x, 2, 13);
+                offset ^= Bit(y, 3, 14) ^ Bit(x, 4, 15);
                 return offset;
             default:
                 throw SubmissionScheduler.Fatal($"The render-target tile block does not support this element size: bytes={bytesPerElement}.");
