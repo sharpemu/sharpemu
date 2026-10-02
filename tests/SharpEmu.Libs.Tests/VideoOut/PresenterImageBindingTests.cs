@@ -128,6 +128,59 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void RepeatedNativeBindingConsumesNewMetadata(bool gpuWrite, bool alphaMostSignificant)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var metadata = address + 0x10000;
+        harness.Write(address, new byte[0x20000]);
+        var words = RegisterWords.Texture(address, GuestPixelFormat.Bits16_16_16_16Float,
+            1, 1, GuestImageType.Color2D, GuestTileMode.RenderTarget);
+        words[6] = (1u << 21) | (alphaMostSignificant ? 1u << 22 : 0);
+        words[7] = checked((uint)(metadata >> 16));
+        var resource = new ImageResource
+        {
+            ResourceClass = PlanImageResourceClass.Sampled,
+            NumericClass = ImageNumericClass.Float,
+            Dimension = ImageDimension.Dim2D,
+            Read = true,
+        };
+        var program = new ShaderProgramInfo();
+        ResourceSlotIdentifier identifier = default;
+        foreach (var code in new byte[] { 0x40, 0x80 })
+        {
+            if (gpuWrite)
+            {
+                presenter.Run(() =>
+                {
+                    var (buffer, offset) = harness.Cache.ObtainBuffer(metadata, 4096, isWritten: true);
+                    buffer.Fill(offset, 4096, code * 0x01010101u);
+                });
+            }
+            else harness.Write(metadata, Enumerable.Repeat(code, 4096).ToArray());
+            presenter.Run(() =>
+            {
+                var found = (ResourceSlotIdentifier)GetFieldValue(
+                    presenter.InvokeMethod("ResolveImageBinding", resource, words, program, 0)!, "ImageIdentifier");
+                if (identifier.IsValid) Assert.Equal(identifier, found);
+                identifier = found;
+                presenter.RenderHost.ResetBindings();
+            });
+            var pixels = harness.ReadImageBytes(harness.Images.GetImage(identifier));
+            var alpha = code == 0x40;
+            Assert.Equal((ushort)((alphaMostSignificant ? !alpha : alpha) ? 0x3c00 : 0), BitConverter.ToUInt16(pixels, 0));
+            Assert.Equal((ushort)((alphaMostSignificant ? alpha : !alpha) ? 0x3c00 : 0), BitConverter.ToUInt16(pixels, 6));
+        }
+        harness.Shutdown();
+    }
+
+    [Theory]
     [InlineData(true, 1u, false)]
     [InlineData(true, 2u, true)]
     [InlineData(false, 1u, false)]

@@ -80,6 +80,8 @@ public readonly struct TextureDescriptorWords
 
     public bool DccAlphaMsb => ((Fields[6] >> 22) & 0x1) == 1;
 
+    public bool DccAlphaOnMostSignificantBits => DccAlphaMsb;
+
     public ulong MetadataAddress => ((Fields[6] >> 24) & 0xFF) | ((ulong)Fields[7] << 8);
 }
 

@@ -467,6 +467,38 @@ public sealed partial class GuestImageCacheTests
     }
 
     [Theory]
+    [InlineData(64u)]
+    [InlineData(65u)]
+    public void DccVolume_TracksAndConsumesEverySlice(uint depth)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x100000, ReadWrite);
+        var metadata = address + 0x80000;
+        Assert.False(harness.Images.TryAbsorbDccFill(metadata, depth * 4096ul, 0x40404040));
+        var target = AsColorTarget(LinearRequest(address, depth * 4ul, Format.R8G8B8A8Unorm,
+            GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color3D, new Extent3D(1, 1, depth), 1, 4, 1));
+        target.View = target.View with { Type = ImageViewType.Type2DArray, LayerCount = depth };
+        target.Description.Metadata.Kind = MetadataKind.Dcc;
+        target.Description.Metadata.Range = new GuestSpan(metadata, depth * 4096ul);
+        harness.Acquire(ref target);
+        for (uint slice = 0; slice < depth; slice++)
+        {
+            Assert.True(harness.Images.IsMetadataCleared(metadata, slice, out var fill));
+            Assert.Equal(0x40404040u, fill);
+        }
+        Assert.False(harness.Images.IsMetadataCleared(metadata, depth));
+        Assert.False(harness.Images.SetMetadataSlice(metadata, depth, false));
+        for (uint slice = 0; slice < depth; slice++)
+            Assert.True(harness.Images.SetMetadataSlice(metadata, slice, false));
+        for (uint slice = 0; slice < depth; slice++)
+            Assert.False(harness.Images.IsMetadataCleared(metadata, slice));
+        Assert.True(harness.Images.TryAbsorbDccFill(metadata, depth * 4096ul, 0x40404040));
+        Assert.True(harness.Images.IsMetadataCleared(metadata, depth - 1));
+        harness.Shutdown();
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void DccDescriptor_SynchronizesMetadataOnAnImageFoundWithoutIt(bool native)
