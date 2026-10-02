@@ -463,7 +463,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
     // is as current as a locked one would be once the lock were released.
     public bool ContainsWithoutLock(ulong address, ulong size)
     {
-        if (size == 0 || ulong.MaxValue - address < size || Volatile.Read(ref _disposed))
+        if (size == 0 || ulong.MaxValue - address < size || _disposed)
         {
             return false;
         }
@@ -737,7 +737,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
             }
         }
 
-        if (found >= 0 && !Volatile.Read(ref _disposed) && _backing != null)
+        if (found >= 0 && !_disposed && _backing != null)
         {
             var record = snapshot[found];
             if (address + size <= record.Address + record.Size)
