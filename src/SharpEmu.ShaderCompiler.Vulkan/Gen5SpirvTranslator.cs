@@ -2132,8 +2132,15 @@ public static partial class Gen5SpirvTranslator
                 _module.AddStatement(SpirvOp.Branch, loopHeader);
             }
             _module.AddLabel(loopHeader);
+            // Skip inactive loop regions before the body reaches the driver optimizer.
+            // Permit forward branches into any block in the loop, not only its header.
+            var currentBlock = Load(_uintType, _programCounter);
+            var withinLoop = LogicalAnd(
+                _module.AddInstruction(SpirvOp.UGreaterThanEqual, _boolType, currentBlock, UInt((uint)header)),
+                _module.AddInstruction(SpirvOp.ULessThanEqual, _boolType, currentBlock, UInt((uint)latch)));
+            var enterLoop = LogicalAnd(Load(_boolType, _programActive), withinLoop);
             _module.AddStatement(SpirvOp.LoopMerge, loopMerge, loopContinue, 0);
-            _module.AddStatement(SpirvOp.Branch, loopBody);
+            _module.AddStatement(SpirvOp.BranchConditional, enterLoop, loopBody, loopMerge);
             _module.AddLabel(loopBody);
             if (!(singleBlock
                     ? TryEmitBlock(blocks, header, out error)
