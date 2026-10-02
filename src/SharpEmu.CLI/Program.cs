@@ -236,7 +236,7 @@ internal static partial class Program
 
     private static int RunEmulator(string[] args, bool isMitigatedChild)
     {
-        Console.Error.WriteLine($"[DEBUG] SharpEmu starting with {args.Length} args");
+        Log.Debug($"SharpEmu starting with {args.Length} args");
 
         if (!isMitigatedChild && TryRunMitigatedChild(args, out var childExitCode))
         {
@@ -271,7 +271,7 @@ internal static partial class Program
         Log.Info(HostSystemInfo.Summary);
 
         ebootPath = Path.GetFullPath(ebootPath);
-        Console.Error.WriteLine($"[DEBUG] Full path: {ebootPath}");
+        Log.Debug($"Full path: {ebootPath}");
 
         if (!File.Exists(ebootPath))
         {
@@ -305,7 +305,7 @@ internal static partial class Program
             }
         }
 
-        Console.Error.WriteLine("[DEBUG] Creating runtime...");
+        Log.Debug("Creating runtime...");
 
         SharpEmu.Core.Diagnostics.WindowsCrashCapture.StartIfEnabled(logFilePath);
 
@@ -324,13 +324,12 @@ internal static partial class Program
                 };
                 Console.CancelKeyPress += cancelHandler;
 
-                Console.Error.WriteLine($"[DEBUG] Running: {ebootPath}");
+                Log.Debug($"Running: {ebootPath}");
                 result = runtime.Run(ebootPath);
-                Console.Error.WriteLine($"[DEBUG] Result: {result}");
+                Log.Debug($"Result: {result}");
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[DEBUG] Exception: {ex}");
                 Log.Error("SharpEmu failed to run.", ex);
                 return 3;
             }
@@ -635,7 +634,7 @@ internal static partial class Program
                 }
 
                 childExitCode = unchecked((int)exitCode);
-                Console.Error.WriteLine("[DEBUG] Running in mitigated child process (CET/CFG disabled).");
+                Log.Debug("Running in mitigated child process (CET/CFG disabled).");
                 return true;
             }
             finally
@@ -836,11 +835,11 @@ internal static partial class Program
 
                 Console.SetOut(new TeeTextWriter(Console.Out, _consoleMirrorFile));
                 Console.SetError(new TeeTextWriter(Console.Error, _consoleMirrorFile));
-                Console.Error.WriteLine($"[DEBUG] Log file: {Path.GetFullPath(path)}");
+                Log.Debug($"Log file: {Path.GetFullPath(path)}");
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[WARN] Could not open log file '{path}': {ex.Message}");
+                Log.Warn($"Could not open log file '{path}': {ex.Message}");
             }
         }
     }
