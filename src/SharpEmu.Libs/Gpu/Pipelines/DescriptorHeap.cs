@@ -41,9 +41,9 @@ public sealed unsafe class DescriptorHeap : IDisposable
 
     private static readonly DescriptorPoolSize[] PoolSizes =
     [
-        new(DescriptorType.StorageBuffer, 8192),
-        new(DescriptorType.SampledImage, 8192),
-        new(DescriptorType.StorageImage, 1024),
+        new(DescriptorType.StorageBuffer, 65536),
+        new(DescriptorType.SampledImage, 262144),
+        new(DescriptorType.StorageImage, 8192),
         new(DescriptorType.Sampler, 1024),
     ];
 
@@ -56,7 +56,7 @@ public sealed unsafe class DescriptorHeap : IDisposable
 
     private readonly GpuDeviceInfo _device;
     private readonly SubmissionScheduler _scheduler;
-    private static readonly DescriptorSetDemand PoolCapacity = new(8192, 8192, 1024, 1024);
+    private static readonly DescriptorSetDemand PoolCapacity = new(65536, 262144, 8192, 1024);
 
     private readonly Queue<(DescriptorPool Pool, ulong Tick)> _pendingPools = new();
     private readonly Dictionary<ulong, SetBatchState> _sets = new();

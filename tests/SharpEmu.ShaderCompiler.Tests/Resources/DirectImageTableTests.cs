@@ -467,11 +467,11 @@ public sealed class DirectImageTableTests
         bool Read(ulong address, out uint word)
         {
             var success = ReadDescriptor(address, out word);
-            if (address == 0x1000 + 344 + 12)
-            {
-                if (!incompatible) return false;
-                word = (word & 0x0FFFFFFF) | (11u << 28);
-            }
+            // A converted format cannot share a case with a directly sampled one.
+            if (incompatible && address == 0x1000 + 344 + 4)
+                word = (word & ~(0x1FFu << 20)) | (GuestImageFormat.Format11x2x10Uint << 20);
+            if (!incompatible && address == 0x1000 + 344 + 12)
+                return false;
             return success;
         }
         Assert.False(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization,

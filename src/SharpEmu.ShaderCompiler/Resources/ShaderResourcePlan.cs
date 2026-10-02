@@ -112,6 +112,10 @@ public sealed class ShaderResourcePlan
         foreach (var sampler in plan.Info.Samplers)
         {
             materialization.Add(sampler.Source);
+            if (plan.DescriptorSources[(int)sampler.Source].PointerTable is not null)
+            {
+                plan.RequiresSpecializationMemory = true;
+            }
         }
 
         plan.MaterializationSources = materialization;

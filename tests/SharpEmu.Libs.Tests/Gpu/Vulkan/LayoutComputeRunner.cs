@@ -181,7 +181,8 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         uint[]? flattenedTable = null,
         IReadOnlyDictionary<DescriptorBindingKind, DescriptorImageInfo[]>? boundImages = null,
         ulong shaderBase = 0,
-        uint[]? dispatchThreadLimits = null)
+        uint[]? dispatchThreadLimits = null,
+        uint[]? bufferStrides = null)
     {
         var vk = _harness.Vk;
         var device = _harness.Device.Device;
@@ -197,6 +198,15 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         {
             shaderData[layout.ShaderBaseDword] = (uint)shaderBase;
             shaderData[layout.ShaderBaseDword + 1] = (uint)(shaderBase >> 32);
+        }
+
+        if (layout.UsesRuntimeBufferStrides)
+        {
+            // The host packs each buffer's descriptor stride, two per dword.
+            for (var index = 0; index < (bufferStrides?.Length ?? 0); index++)
+            {
+                shaderData[layout.BufferStrideDword + (uint)index / 2] |= (bufferStrides![index] & 0x3FFF) << ((index % 2) * 16);
+            }
         }
 
         if (layout.UsesDispatchThreadLimits)

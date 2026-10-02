@@ -12,6 +12,30 @@ namespace SharpEmu.Libs.Tests.Cpu;
 public sealed class WindowsCrashCaptureTests
 {
     [Fact]
+    public unsafe void OriginalHostAndExecuteFaultsAreTracedBeforeUnwinding()
+    {
+        var fault = new WindowsCrashCapture.DebugEvent { Kind = 1, FirstChance = 1 };
+        fault.Exception.Code = 0xC0000005;
+        fault.Exception.ParameterCount = 2;
+        fault.Exception.Address = unchecked((nint)0x0000000800001000);
+        fault.Exception.Parameters[0] = 1;
+        Assert.False(WindowsCrashCapture.ShouldTraceFirstChance(fault));
+        fault.Exception.Parameters[0] = 8;
+        Assert.True(WindowsCrashCapture.ShouldTraceFirstChance(fault));
+        Assert.True(WindowsCrashCapture.IsFirstNullExecuteFault(fault));
+        fault.Exception.Parameters[1] = 0x1000;
+        Assert.False(WindowsCrashCapture.IsFirstNullExecuteFault(fault));
+        fault.Exception.Parameters[0] = 0;
+        fault.Exception.Address = unchecked((nint)0x00007FF700001000);
+        Assert.True(WindowsCrashCapture.ShouldTraceFirstChance(fault));
+        fault.FirstChance = 0;
+        Assert.False(WindowsCrashCapture.ShouldTraceFirstChance(fault));
+        fault.FirstChance = 1;
+        fault.Exception.Code = 0xC0000409;
+        Assert.True(WindowsCrashCapture.ShouldTraceFirstChance(fault));
+    }
+
+    [Fact]
     public void NativeLayoutsMatchWindowsX64()
     {
         Assert.Equal(176, Marshal.SizeOf<WindowsCrashCapture.DebugEvent>());
@@ -63,6 +87,7 @@ public sealed class WindowsCrashCaptureTests
     [InlineData("clean", false)]
     [InlineData("handled", false)]
     [InlineData("access-violation", true)]
+    [InlineData("null-execute", true)]
     [InlineData("fast-fail", true)]
     [InlineData("dump-failure", false)]
     [InlineData("debugger-breaks", false)]
@@ -126,9 +151,15 @@ public sealed class WindowsCrashCaptureTests
             if (expectDump)
             {
                 Assert.Contains("Dump complete.", report);
+                if (scenario == "null-execute")
+                {
+                    Assert.Contains("First-chance execute dump complete:", report);
+                    VerifyDump(dumpPath + ".first-execute.dmp", 0xC0000005u, nullExecute: true);
+                }
                 Assert.NotEqual(0, target.ExitCode);
                 VerifyDump(dumpPath, scenario == "fast-fail" ? 0xC0000409u :
-                    scenario.StartsWith("application-", StringComparison.Ordinal) ? 0x80000003u : 0xC0000005u);
+                    scenario.StartsWith("application-", StringComparison.Ordinal) ? 0x80000003u : 0xC0000005u,
+                    nullExecute: scenario == "null-execute");
             }
             else if (scenario == "dump-failure")
             {
@@ -175,7 +206,7 @@ public sealed class WindowsCrashCaptureTests
         }
     }
 
-    private static void VerifyDump(string path, uint exceptionCode)
+    private static void VerifyDump(string path, uint exceptionCode, bool nullExecute = false)
     {
         using var input = new BinaryReader(File.OpenRead(path));
         Assert.Equal(0x504D444Du, input.ReadUInt32());
@@ -200,7 +231,8 @@ public sealed class WindowsCrashCaptureTests
         Assert.Equal(exceptionCode, input.ReadUInt32());
         input.BaseStream.Position = streams[6] + 24;
         var exceptionAddress = input.ReadUInt64();
-        Assert.NotEqual(0ul, exceptionAddress);
+        if (nullExecute) Assert.Equal(0ul, exceptionAddress);
+        else Assert.NotEqual(0ul, exceptionAddress);
         input.BaseStream.Position = streams[6] + 164;
         var contextOffset = input.ReadUInt32();
         input.BaseStream.Position = contextOffset + 248;
@@ -209,6 +241,14 @@ public sealed class WindowsCrashCaptureTests
             Assert.InRange(instructionAddress, exceptionAddress, exceptionAddress + 1);
         else
             Assert.Equal(exceptionAddress, instructionAddress);
+
+        if (nullExecute)
+        {
+            input.BaseStream.Position = streams[6] + 40;
+            Assert.Equal(8ul, input.ReadUInt64());
+            Assert.Equal(0ul, input.ReadUInt64());
+            return;
+        }
 
         input.BaseStream.Position = streams[9];
         var rangeCount = input.ReadUInt64();
@@ -252,6 +292,7 @@ public sealed class WindowsCrashCaptureTests
             {
                 SetErrorMode(2);
                 byte[] payload = scenario == "clean" || scenario == "debugger-breaks" ? new byte[] { 0x31,0xC0,0xC3 } :
+                    scenario == "null-execute" ? new byte[] { 0x48,0x83,0xEC,0x28,0x31,0xC0,0xFF,0xD0,0x48,0x83,0xC4,0x28,0xC3 } :
                     scenario == "application-breakpoint" ? new byte[] { 0xCC,0x31,0xC0,0xC3 } :
                     scenario == "fast-fail" ? new byte[] { 0xB9,7,0,0,0,0xCD,0x29 } :
                     new byte[] { 0xB9,0xE8,3,0,0,0x31,0xC0,0x8B,0,0xFF,0xC9,0x75,0xF8,0x31,0xC0,0xC3 };

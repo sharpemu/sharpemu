@@ -9,6 +9,18 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 
 public sealed class VulkanPresentEncodeFormatTests
 {
+    // Ghost of Yotei binds an 11_11_10 target with the UNORM number type; the format holds
+    // unsigned floats whatever the number type, as the image path already maps it.
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(7u)]
+    public void Packed11_11_10Target_UsesTheUnsignedFloatFormat(uint numberType)
+    {
+        Assert.True(VulkanVideoPresenter.TryDecodeRenderTargetFormat(6, numberType, 0, out var decoded));
+        Assert.Equal(Format.B10G11R11UfloatPack32, decoded.Format);
+        Assert.Equal(SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float, decoded.OutputKind);
+    }
+
     [Fact]
     public void UnsignedByteTargetUsesUnsignedPixelOutput()
     {

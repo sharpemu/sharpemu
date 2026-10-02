@@ -42,6 +42,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private readonly IGpuQueueRelay _relay;
     private readonly GuestBufferUploader _uploader;
     private readonly IGuestBackedSpace _backing;
+    private readonly ICpuMemory _guest;
+
+    // False for addresses the guest never mapped. A shader that follows a bad pointer there
+    // reads zeros, as on the console; caching that memory only fills VRAM with junk buffers.
+    internal bool IsGuestMemoryMapped(ulong guestAddress, ulong size) => _guest.CanRead(guestAddress, size);
     private readonly BdaFaultProcessor _faults;
     private readonly GpuBuffer _gds;
     private readonly GpuBuffer _bdaPageTable;
@@ -70,6 +75,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         _scheduler = scheduler;
         _relay = relay;
         _backing = backing;
+        _guest = guest;
         _faults = new BdaFaultProcessor(device, scheduler, this, CachingPageBits, CachingPageCount);
         _gds = new GpuBuffer(device, scheduler, GpuBufferUsage.Stream, 0, GpuBuffer.AllFlags, GdsBufferSize);
         _bdaPageTable = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, BdaPageTableSize);
@@ -97,7 +103,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public GpuBuffer FaultBuffer => _faults.FaultBuffer;
 
-    public ulong TotalUsedMemory => _registry.RegisteredBytes;
+    public ulong TotalUsedMemory => _registry.RegisteredBytes + _registry.RetiredBytes;
+
+    public bool RetirementOverBudget => _registry.RetiredBytes > 256UL * MiB;
 
     public int BufferCount => _registry.RegisteredCount;
 
@@ -246,6 +254,42 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         return (buffer, buffer.Offset(guestAddress));
     }
 
+    // A texture streamed into its address range maps only its resident mips: the mip tail
+    // and small levels sit at the start of the chain and level 0 at its end. The GPU samples
+    // only resident levels, so the unmapped pages of a whole-chain upload read as zero.
+    private bool TryReadResidentImagePages(ulong guestAddress, Span<byte> destination)
+    {
+        const ulong page = 1UL << 12;
+        var size = (ulong)destination.Length;
+        if (size == 0 || !_backing.IsBackedRange(guestAddress, 1))
+        {
+            return false;
+        }
+
+        // Only a resident prefix qualifies: a hole between backed pages is not a mip chain.
+        var resident = true;
+        for (ulong offset = 0; offset < size;)
+        {
+            var chunk = Math.Min(page - ((guestAddress + offset) & (page - 1)), size - offset);
+            var target = destination.Slice((int)offset, (int)chunk);
+            var backed = _backing.IsBackedRange(guestAddress + offset, chunk);
+            if (backed && !resident)
+            {
+                return false;
+            }
+
+            resident = backed && _backing.TryReadBacking(guestAddress + offset, target);
+            if (!resident)
+            {
+                target.Clear();
+            }
+
+            offset += chunk;
+        }
+
+        return true;
+    }
+
     public (GpuBuffer Buffer, ulong Offset) ObtainBufferForImage(ulong guestAddress, ulong size)
     {
         if (!IsValidRange(guestAddress, size))
@@ -269,9 +313,17 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             owner = _registry.GetBuffer(FindBuffer(guestAddress, size));
         }
 
-        if (owner != null && !cpuModified && (!gpuModified || hasDirtyBufferSource))
+        if (owner != null && (!gpuModified || hasDirtyBufferSource))
         {
             TouchBuffer(owner);
+            if (cpuModified)
+            {
+                // Tracking clears complete pages, even for a subpage image. The regular
+                // uploader stages those complete runs; staging only the image would copy
+                // unprepared bytes over neighbouring textures and mark them clean.
+                _ = SynchronizeBuffer(owner, guestAddress, size, isWritten: false, isTexelBuffer: true,
+                    preserveCpuWriteHotPages: false, readImageBacking: true);
+            }
             return (owner, owner.Offset(guestAddress));
         }
 
@@ -287,7 +339,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
         if (!_backing.TryReadBacking(guestAddress, _staging.Mapped.Slice((int)stageOffset, (int)size)) &&
             !KernelMemoryCompatExports.TryReadPrtBacking(_backing, guestAddress,
-                _staging.Mapped.Slice((int)stageOffset, (int)size)))
+                _staging.Mapped.Slice((int)stageOffset, (int)size)) &&
+            !TryReadResidentImagePages(guestAddress, _staging.Mapped.Slice((int)stageOffset, (int)size)))
         {
             throw SubmissionScheduler.Fatal(
                 $"Could not read the mapped guest image backing: address=0x{guestAddress:X16} size=0x{size:X16} range_backed={_backing.IsBackedRange(guestAddress, size)} first_byte_backed={_backing.IsBackedRange(guestAddress, 1)} last_byte_backed={_backing.IsBackedRange(guestAddress + size - 1, 1)} tick={_scheduler.CurrentTick}.");
@@ -307,16 +360,17 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         TouchBuffer(owner);
-        var uploads = new List<(ulong Address, ulong Size)>();
-        _tracker.ForEachUploadRange(guestAddress, size, false, (address, uploadSize) => uploads.Add((address, uploadSize)), () =>
-        {
-            foreach (var (address, uploadSize) in uploads)
-            {
-                owner.CopyFrom(_scheduler.Current, _staging, stageOffset + address - guestAddress, owner.Offset(address), uploadSize, AccessFlags.HostWriteBit);
-            }
-        });
+        _ = SynchronizeBuffer(owner, guestAddress, size, isWritten: false, isTexelBuffer: true,
+            preserveCpuWriteHotPages: false, readImageBacking: true);
         return (owner, owner.Offset(guestAddress));
     }
+
+    // Image acquisition already holds the image-cache lock. Read CPU-owned backing
+    // directly instead of faulting through guest memory and reentering that cache.
+    private bool TryReadImageSource(ulong address, Span<byte> destination) =>
+        _backing.TryReadBacking(address, destination) ||
+        KernelMemoryCompatExports.TryReadPrtBacking(_backing, address, destination) ||
+        TryReadResidentImagePages(address, destination);
 
     public void WriteHostMemory(ulong guestAddress, ReadOnlySpan<byte> data)
     {
@@ -488,6 +542,58 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private ulong _bdaTouchTick = ulong.MaxValue;
     private ulong _bdaTouchMapping;
 
+    // Ranges shaders reached through device addresses outside the GPU mappings: pointers
+    // into ordinary guest memory, which the GPU reads too. Only a fault reveals them, so
+    // they are kept and touched like the mappings. Otherwise their buffers age out while
+    // still in use, fault again, and the cache collects and re-creates them every frame.
+    private readonly SpanSet _deviceAddressFaultSpans = new();
+
+    // Fault ranges inside a known guest mapping; they are forgotten once it is unmapped.
+    private readonly SpanSet _mappedDeviceAddressFaultSpans = new();
+
+    internal void NoteDeviceAddressFault(ulong guestAddress, ulong size, bool insideGuestMapping = false)
+    {
+        _deviceAddressFaultSpans.Add(guestAddress, size);
+        if (insideGuestMapping)
+            _mappedDeviceAddressFaultSpans.Add(guestAddress, size);
+    }
+
+    // A guest buffer the GPU reads through pointers (a per-frame ring, for one) is reached a
+    // page at a time, and every first touch reads zeros for that frame. A fault therefore
+    // brings in the aligned window around it, clipped to the guest mapping that holds it.
+    internal const ulong DeviceAddressFaultWindow = 2UL << 20;
+
+    internal static GuestSpan DeviceAddressFaultSpan(ulong pageAddress, ulong pageSize, ulong mappingStart, ulong mappingLength)
+    {
+        if (mappingLength == 0 || pageAddress < mappingStart || pageAddress - mappingStart >= mappingLength)
+        {
+            return new GuestSpan(pageAddress, pageSize);
+        }
+
+        var mappingEnd = mappingStart + mappingLength;
+        var windowStart = Math.Max(pageAddress & ~(DeviceAddressFaultWindow - 1), mappingStart);
+        var windowEnd = Math.Min((pageAddress & ~(DeviceAddressFaultWindow - 1)) + DeviceAddressFaultWindow, mappingEnd);
+        return new GuestSpan(windowStart, windowEnd - windowStart);
+    }
+
+    // Forgets fault ranges whose guest mapping is gone, so their buffers can age out again.
+    private void PruneUnmappedDeviceAddressFaults()
+    {
+        List<GuestSpan>? unmapped = null;
+        _mappedDeviceAddressFaultSpans.ForEach((start, size) =>
+        {
+            if (!KernelMemoryCompatExports.TryGetMappedRange(start, out var mappingStart, out var mappingLength) ||
+                start + size > mappingStart + mappingLength)
+                (unmapped ??= []).Add(new GuestSpan(start, size));
+        });
+        if (unmapped is null) return;
+        foreach (var span in unmapped)
+        {
+            _mappedDeviceAddressFaultSpans.Remove(span.Address, span.Size);
+            _deviceAddressFaultSpans.Remove(span.Address, span.Size);
+        }
+    }
+
     public void PrepareBda(IEnumerable<GuestSpan> mapped)
     {
         var traceAddress = GuestGpuMemoryHook.TraceAddress;
@@ -511,6 +617,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             {
                 foreach (var span in spans)
                     TouchBuffersInRange(span.Address, span.Size);
+                PruneUnmappedDeviceAddressFaults();
+                _deviceAddressFaultSpans.ForEach(_touchBuffersInRange ??= TouchBuffersInRange);
                 _bdaTouchTick = _retirementPolicy.CurrentTick;
                 _bdaTouchMapping = mapping;
             }
@@ -526,6 +634,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     }
 
     private Action<ulong, ulong>? _uploadDirtyBuffersInRange;
+    private Action<ulong, ulong>? _touchBuffersInRange;
 
     private void TouchBuffersInRange(ulong guestAddress, ulong size)
     {
@@ -597,10 +706,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     {
         using var foreignRead = _device.Slabs.BeginForeignRead();
         ProcessPendingFaultBuffer();
-        if (!_retirementPolicy.TryBeginCollection(_registry.RegisteredBytes, out var retirement))
+        if (!_retirementPolicy.TryBeginCollection(TotalUsedMemory, out var retirement))
         {
             return;
         }
+
 
         var dirtyBuffers = new List<ResourceSlotIdentifier>();
         var copies = new List<DownloadPiece>();
@@ -841,7 +951,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
         _tracker.UntrackMemory(buffer.CpuAddress, buffer.Size);
         Unregister(bufferIdentifier);
-        _registry.CompleteRetirement(bufferIdentifier);
+        CompleteRetirementAfterSubmittedWork(bufferIdentifier);
     }
 
     private void WriteDataBuffer(GpuBuffer buffer, ulong address, ReadOnlySpan<byte> source)
@@ -910,6 +1020,15 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         Unregister(bufferIdentifier);
+        CompleteRetirementAfterSubmittedWork(bufferIdentifier);
+    }
+
+    // Unregistering clears the buffer's page-table entries only for work recorded from now
+    // on. Work already recorded or in flight can still reach it through its device address
+    // (an async readback waits only for its last recorded writer), so it is destroyed once
+    // that work completes.
+    private void CompleteRetirementAfterSubmittedWork(ResourceSlotIdentifier bufferIdentifier)
+    {
         if (_scheduler.Active)
         {
             _scheduler.QueueCompletionAction(() => _registry.CompleteRetirement(bufferIdentifier));
@@ -921,7 +1040,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     }
 
     // Set when a second queue can copy readbacks; null keeps every readback on the main queue.
-    internal VulkanAsyncReadback? AsyncReadback { get; set; }
+    internal IBufferReadback? AsyncReadback { get; set; }
 
     private const ulong AsyncReadbackLimit = 64UL << 20;
 
@@ -1124,7 +1243,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     }
 
     private bool SynchronizeBuffer(GpuBuffer buffer, ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer,
-        bool preserveCpuWriteHotPages = true)
+        bool preserveCpuWriteHotPages = true, bool readImageBacking = false)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferDirtySynchronization);
         var startedAt = BufferUploadProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
@@ -1147,7 +1266,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 copies.Add(new BufferCopy(totalSize, buffer.Offset(address), bytes));
                 totalSize += bytes;
             },
-            () => source = _uploader.PrepareSource(buffer.CpuAddress, CollectionsMarshal.AsSpan(copies), totalSize, guestAddress, size),
+            () => source = _uploader.PrepareSource(buffer.CpuAddress, CollectionsMarshal.AsSpan(copies), totalSize, guestAddress, size,
+                readImageBacking ? TryReadImageSource : null),
             preserveCpuWriteHotPages);
         if (source != null)
         {
@@ -1193,7 +1313,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             BufferUploadProfile.Record(guestAddress, size, copies.Count, totalSize, hotBytes, elapsedTicks);
         }
 
-        if (isTexelBuffer)
+        if (isTexelBuffer && !readImageBacking)
         {
             var copiedFromImage = RequireImageCache().TrySynchronizeBufferFromImage(buffer, guestAddress, size);
             if (copiedFromImage)

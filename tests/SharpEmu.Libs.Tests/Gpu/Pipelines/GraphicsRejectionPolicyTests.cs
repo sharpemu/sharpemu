@@ -74,8 +74,8 @@ public sealed class GraphicsRejectionPolicyTests
              0xF0000108, 0x00010400, 0xBF810000]);
         for (var index = 0; index < 33; index++)
             guest.WriteWords(TableAddress + 312 + (ulong)index * 32,
-                distinctCandidates ? 0x1000u + (uint)index : 0x1000u, 20u << 20, 0,
-                0xFACu | ((!distinctCandidates && index == 1 ? 10u : 9u) << 28), 0, 0, 0, 0);
+                distinctCandidates ? 0x1000u + (uint)index : 0x1000u, (!distinctCandidates && index == 1 ? GuestImageFormat.Format11x2x10Uint : 20u) << 20, 0,
+                0xFACu | (9u << 28), 0, 0, 0, 0);
         var source = guest.Source(PixelAddress, ShaderStage.Pixel, [(uint)(TableAddress & uint.MaxValue), (uint)(TableAddress >> 32)]);
         var options = new StageCompileOptions { PixelInfo = new PixelInputInfo() };
         var cursor = 7u;

@@ -87,8 +87,14 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Equal(state.FrontOperations, state.BackOperations);
         Assert.Equal(state.FrontMasks, state.BackMasks);
 
+        // An ALWAYS test ignores the reference, so it carries the replacement value.
         context.StencilMask.OperationValue = 0x20;
-        Assert.Contains("replacement", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(context, true, Fatal)).Message);
+        Assert.Equal(new StencilMasks(0xFF, 0xFF, 0x20), DepthTargetResolver.ResolveState(context, true, Fatal).FrontMasks);
+
+        // A test that reads the reference cannot also carry a different replacement value.
+        var tested = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x20, DepthControl(CompareOp.Less, CompareOp.Equal));
+        Assert.Contains("replacement", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(tested, true, Fatal)).Message);
+        context.StencilMask.OperationValue = 0x20;
 
         // Without a write mask the operations have no effect, so the mismatch does not matter.
         context.StencilMask.WriteMask = 0;

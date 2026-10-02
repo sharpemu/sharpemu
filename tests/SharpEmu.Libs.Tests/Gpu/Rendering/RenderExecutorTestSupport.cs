@@ -158,6 +158,11 @@ internal sealed class RecordingRenderHost : IRenderHost
         return GuestMemory.TryRead(address, destination);
     }
 
+    public bool CleanGuestMemoryAvailable { get; set; } = true;
+
+    public bool TryReadCleanGuestBytes(ulong address, Span<byte> destination) =>
+        CleanGuestMemoryAvailable && GuestMemory.TryRead(address, destination);
+
     public ulong ClampMappedSize(ulong address, ulong size) => ClampOverride?.Invoke(address, size) ?? size;
 
     public ResourceSlotIdentifier FindImage(ref ImageRequest request, bool exactFormat)

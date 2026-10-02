@@ -32,6 +32,8 @@ public static partial class WindowsCrashCapture
                 ? Path.Combine(AppContext.BaseDirectory, "user", "logs", $"run-{DateTime.UtcNow:yyyyMMdd-HHmmss}.log")
                 : Path.GetFullPath(logFilePath);
             var dumpPath = Path.ChangeExtension(logPath, $"crash-{Environment.ProcessId}.dmp");
+            if (Environment.GetEnvironmentVariable("SHARPEMU_CRASH_CAPTURE_DIRECTORY") is { Length: > 0 } dumpDirectory)
+                dumpPath = Path.Combine(Path.GetFullPath(dumpDirectory), Path.GetFileName(dumpPath));
             Directory.CreateDirectory(Path.GetDirectoryName(dumpPath)!);
             var readyEventName = $"Local\\SharpEmu-Crash-{Guid.NewGuid():N}";
             using var readyEvent = new EventWaitHandle(false, EventResetMode.ManualReset, readyEventName);
@@ -112,6 +114,8 @@ public static partial class WindowsCrashCapture
         var initialBreakpoint = true;
         var captured = false;
         var debuggerBreaks = new DebuggerBreakTracker();
+        var faultTraceCounts = new Dictionary<uint, int>();
+        var firstExecuteCaptured = false;
         while (true)
         {
             if (!WaitForDebugEventEx(out var debugEvent, uint.MaxValue))
@@ -133,6 +137,28 @@ public static partial class WindowsCrashCapture
                 if (debugEvent.Kind == ExceptionEvent)
                 {
                     continuation = DebugExceptionNotHandled;
+                    if (!firstExecuteCaptured && IsFirstNullExecuteFault(debugEvent))
+                    {
+                        firstExecuteCaptured = true;
+                        // The CLR can terminate after first chance without a second-chance
+                        // debug event. Preserve the original state before entering its VEH.
+                        var firstDumpPath = dumpPath + ".first-execute.dmp";
+                        try
+                        {
+                            WriteDump(processId, debugEvent, firstDumpPath);
+                            report.WriteLine($"First-chance execute dump complete: {firstDumpPath}");
+                        }
+                        catch (Exception exception)
+                        {
+                            report.WriteLine($"First-chance execute dump failed: {exception.Message}");
+                        }
+                    }
+                    if (ShouldTraceFirstChance(debugEvent) &&
+                        faultTraceCounts.GetValueOrDefault(debugEvent.ThreadId) < 16)
+                    {
+                        faultTraceCounts[debugEvent.ThreadId] = faultTraceCounts.GetValueOrDefault(debugEvent.ThreadId) + 1;
+                        TraceNativeFault(processId, debugEvent, report);
+                    }
                     if (initialBreakpoint && debugEvent.FirstChance != 0 && debugEvent.Exception.Code == BreakpointException)
                     {
                         initialBreakpoint = false;

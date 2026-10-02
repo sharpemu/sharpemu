@@ -343,6 +343,12 @@ public sealed partial class RenderExecutor
                     throw _host.Fatal($"The primitive type is unknown for an indexed draw: primitiveType={userConfig.PrimitiveType}.");
                 }
 
+                if (IsLegacyRectangleBatch(draw.Count))
+                {
+                    _host.Draw(draw.Count, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);
+                    break;
+                }
+
                 if (draw.Count != 3 || vertexInput.Buffers.Length != 0)
                 {
                     throw _host.Fatal($"A legacy rectangle list needs three vertices and no vertex buffers: count={draw.Count} buffers={vertexInput.Buffers.Length}.");

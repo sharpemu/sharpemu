@@ -111,7 +111,7 @@ public static class Videodec2Exports
         return SetReturn(ctx, Ok);
     }
 
-    // Clearing the picture-ready byte at [rdx] tells the player "no buffered pictures remain".
+    // An output info with isValid clear tells the player "no buffered pictures remain".
     [SysAbiExport(
         Nid = "l1hXwscLuCY",
         ExportName = "sceVideodec2Flush",
@@ -121,7 +121,7 @@ public static class Videodec2Exports
     {
         var handle = ctx[CpuRegister.Rdi];
         var outputInfoAddress = ctx[CpuRegister.Rdx];
-        if (outputInfoAddress == 0 || !ctx.Memory.TryWrite(outputInfoAddress, NoPicture))
+        if (outputInfoAddress == 0 || !WriteOutputInfo(ctx, outputInfoAddress, valid: false, 0, 0))
         {
             return SetReturn(ctx, VideodecErrorInvalidArg);
         }
@@ -131,11 +131,7 @@ public static class Videodec2Exports
             // Drain in order: report an already-finished frame before queuing a new drain request.
             if (decoder.TryConsumeProtocolReadySignal(out var width, out var height))
             {
-                if (ctx.TryWriteUInt64(outputInfoAddress + 0x08, width) &&
-                    ctx.TryWriteUInt64(outputInfoAddress + 0x10, height))
-                {
-                    _ = ctx.Memory.TryWrite(outputInfoAddress, PictureReady);
-                }
+                _ = WriteOutputInfo(ctx, outputInfoAddress, valid: true, width, height);
             }
             else
             {
@@ -173,8 +169,8 @@ public static class Videodec2Exports
         return SetReturn(ctx, Ok);
     }
 
-    // rcx[0] is the picture-ready flag (1 = frame published); it lives in
-    // uninitialized stack and must always be written explicitly.
+    // rcx is the SceVideodec2OutputInfo; its isValid flag lives in uninitialized
+    // stack and must always be written explicitly.
     [SysAbiExport(
         Nid = "852F5+q6+iM",
         ExportName = "sceVideodec2Decode",
@@ -187,7 +183,7 @@ public static class Videodec2Exports
         var outputSlotObj = ctx[CpuRegister.Rdx];
         var outputInfoAddress = ctx[CpuRegister.Rcx];
 
-        if (outputInfoAddress == 0 || !ctx.Memory.TryWrite(outputInfoAddress, NoPicture))
+        if (outputInfoAddress == 0 || !WriteOutputInfo(ctx, outputInfoAddress, valid: false, 0, 0))
         {
             return SetReturn(ctx, VideodecErrorInvalidArg);
         }
@@ -225,18 +221,27 @@ public static class Videodec2Exports
             return SetReturn(ctx, Ok);
         }
 
-        if (!ctx.TryWriteUInt64(outputInfoAddress + 0x08, width) ||
-            !ctx.TryWriteUInt64(outputInfoAddress + 0x10, height) ||
-            !ctx.Memory.TryWrite(outputInfoAddress, PictureReady))
-        {
-            return SetReturn(ctx, Ok);
-        }
-
+        _ = WriteOutputInfo(ctx, outputInfoAddress, valid: true, width, height);
         return SetReturn(ctx, Ok);
     }
 
-    private static readonly byte[] NoPicture = [0];
-    private static readonly byte[] PictureReady = [1];
+    // SceVideodec2OutputInfo after the caller's thisSize: isValid +0x08, isErrorFrame +0x09,
+    // pictureCount +0x0A, codecType +0x0C, frameWidth +0x10, framePitch +0x14, frameHeight +0x18.
+    private static bool WriteOutputInfo(CpuContext ctx, ulong address, bool valid, ulong width, ulong height)
+    {
+        Span<byte> info = stackalloc byte[0x18];
+        info.Clear();
+        if (valid)
+        {
+            info[0] = 1;
+            info[2] = 1;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(info[0x08..], (uint)width);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(info[0x0C..], (uint)width);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(info[0x10..], (uint)height);
+        }
+
+        return ctx.Memory.TryWrite(address + 0x08, info);
+    }
 
     private static int SetReturn(CpuContext ctx, int result)
     {

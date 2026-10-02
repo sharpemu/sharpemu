@@ -841,6 +841,8 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
                 : host.TryReadGuestWord(unmappedAddress, out word);
             Assert.False(success);
             Assert.Equal(0u, word);
+            Span<byte> arguments = stackalloc byte[3 * sizeof(uint)];
+            Assert.False(presenter.RenderHost.TryReadCleanGuestBytes(unmappedAddress, arguments));
         });
     }
 
@@ -859,6 +861,7 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         var address = harness.MapBacked(0x10000, ReadWrite);
         harness.Write(address, BitConverter.GetBytes(0xCAFEF00Du));
         var host = (IShaderPipelineHost)presenter.Instance;
+        var renderHost = presenter.RenderHost;
         GuestGpuMemoryHook.Attach(harness.Gpu);
         try
         {
@@ -868,10 +871,15 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
                 Assert.Equal(0xCAFEF00Du, word);
                 Assert.True(host.TryReadCleanGuestWord(address, out word));
                 Assert.Equal(0xCAFEF00Du, word);
+                Span<byte> arguments = stackalloc byte[3 * sizeof(uint)];
+                Assert.True(renderHost.TryReadCleanGuestBytes(address, arguments));
+                Assert.Equal(0xCAFEF00Du, BitConverter.ToUInt32(arguments));
 
+                // A clean word read brings GPU-owned bytes back first; byte reads still refuse them.
                 _ = harness.Cache.ObtainBuffer(address, 0x1000, isWritten: true);
-                Assert.False(host.TryReadCleanGuestWord(address, out _));
-                Assert.False(host.TryReadCleanGuestWord(address + 0x800, out _));
+                Assert.False(renderHost.TryReadCleanGuestBytes(address, arguments));
+                Assert.True(host.TryReadCleanGuestWord(address, out word));
+                Assert.Equal(0xCAFEF00Du, word);
                 Assert.True(host.TryReadCleanGuestWord(address + 0x2000, out _));
                 Assert.True(host.TryReadGuestWord(address, out word));
                 Assert.Equal(0xCAFEF00Du, word);

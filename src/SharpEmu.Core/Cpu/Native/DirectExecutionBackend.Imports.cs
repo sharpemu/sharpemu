@@ -1639,6 +1639,10 @@ public sealed partial class DirectExecutionBackend
 		var expectedPlayGoChunkEnumerationEnd =
 			string.Equals(nid, "uWIYLFkkwqk", StringComparison.Ordinal) &&
 			resultValue == unchecked((int)0x80B2000C);
+		// NO_ENTITLEMENT: the title asks about add-on content the user does not own.
+		var expectedAddcontNotOwned =
+			string.Equals(nid, "xddD23+8TfQ", StringComparison.Ordinal) &&
+			resultValue == unchecked((int)0x817D0007);
 		if (!expectedFileProbeMiss &&
 			!expectedTimedWaitTimeout &&
 			!expectedEqueueTimeout &&
@@ -1648,7 +1652,8 @@ public sealed partial class DirectExecutionBackend
 			!expectedNetAcceptWouldBlock &&
 			!expectedUserServiceNoEvent &&
 			!expectedPrivacyInvalidParameter &&
-			!expectedPlayGoChunkEnumerationEnd)
+			!expectedPlayGoChunkEnumerationEnd &&
+			!expectedAddcontNotOwned)
 		{
 			return true;
 		}

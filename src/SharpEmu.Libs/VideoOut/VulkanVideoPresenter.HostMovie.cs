@@ -347,6 +347,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 RowLength = width,
                 DestinationSelect = texture.DstSelect,
                 NeedsUpload = needsUpload,
+                IsResident = true,
                 IsHostMovie = true,
                 HostMoviePlane = plane,
                 HostMovieFrameSerial = _hostMovieFrameSerial,

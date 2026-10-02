@@ -53,6 +53,11 @@ public sealed class BufferResource
     public bool Formatted { get; set; }
     public bool Scalar { get; set; }
 
+    // Set when some access addresses whole dwords (raw dword, atomic or scalar), which the
+    // host resolves with the byte address divided by four. Formatted and sub-dword accesses
+    // assemble their bytes, so a buffer used only that way may start at any byte.
+    public bool DwordAddressed { get; set; }
+
     public BufferResource Clone() => (BufferResource)MemberwiseClone();
 }
 
@@ -156,8 +161,14 @@ public sealed class BufferCandidateTableInfo
 // The dense resource tables of a program plus the facts the pipeline layout needs.
 public sealed class ShaderResourceInfo
 {
-    public const int MaxBuffers = 32;
-    public const int MaxImages = 64;
+    // Buffers past this read their V# from registers through the device-address table,
+    // which costs far more shader code than a binding. Stages past 32 descriptors bind
+    // from a descriptor-heap set instead of push descriptors; the device's per-stage limit
+    // is checked when the layout is made.
+    public const int MaxBuffers = 256;
+    // Bindless material tables select among many descriptors; the host binds each
+    // candidate, and the device's per-stage limits are checked when the layout is made.
+    public const int MaxImages = 65536;
     public const int MaxSamplers = 32;
     public const int MaxSampledPairs = 64;
     public const int NoScalarRegister = -1;
@@ -175,6 +186,9 @@ public sealed class ShaderResourceInfo
     public bool HasBitwiseExclusiveOr { get; set; }
     public bool UsesDeviceAddresses { get; set; }
 
+    // Some sampled access reads its descriptors through the runtime descriptor table.
+    public bool UsesRuntimeDescriptors { get; set; }
+
     public ShaderResourceInfo Clone() => new()
     {
         Buffers = Buffers.Select(buffer => buffer.Clone()).ToList(),
@@ -189,6 +203,7 @@ public sealed class ShaderResourceInfo
         InstanceOffsetScalarRegister = InstanceOffsetScalarRegister,
         HasBitwiseExclusiveOr = HasBitwiseExclusiveOr,
         UsesDeviceAddresses = UsesDeviceAddresses,
+        UsesRuntimeDescriptors = UsesRuntimeDescriptors,
     };
 }
 
@@ -208,9 +223,21 @@ public sealed record IndirectImageSelector(
     public uint KeyBound { get; init; }
     public WaveIndexedImageSelector? WaveIndexed { get; init; }
 
+    // Non-zero when the descriptors live in a buffer table of records this many bytes apart:
+    // the shader's scalar buffer offset selects the record, and the table's V# bounds it.
+    public uint BufferTableStride { get; init; }
+
     // The key read's immediate offset. The hardware adds it after the 32-bit selector offset, without wrapping.
     public uint MaterialImmediate { get; init; }
+
+    // Set when each buffer-table record holds a 64-bit pointer (at TableOffset) and the
+    // descriptor lives at this byte offset from it, rather than inside the record.
+    public uint? PointerTargetOffset { get; init; }
 }
+
+// A descriptor reached through a V# table of records that each hold a 64-bit pointer: the
+// record's pointer sits at TableOffset, the descriptor at TargetOffset from that pointer.
+public sealed record PointerTableSelector(uint TableOffset, uint Stride, uint TargetOffset);
 
 public sealed record DirectImageCandidate(uint Offset, uint Source);
 
@@ -226,6 +253,9 @@ public sealed class DescriptorSource
     public ScalarValue[] Dwords { get; init; } = [];
     public uint DwordCount => (uint)Dwords.Length;
     public IndirectImageSelector? IndirectImage { get; init; }
+
+    // For a sampler: Dwords are the table V#, and every record's sampler must be the same.
+    public PointerTableSelector? PointerTable { get; init; }
 }
 
 // One immediate-offset scalar read the host evaluates into the flattened table.
@@ -239,4 +269,20 @@ public readonly record struct DescriptorWords(uint[] Dwords)
     public static DescriptorWords Empty(uint dwordCount) => new(new uint[dwordCount]);
 
     public bool SameAs(DescriptorWords other) => Dwords.AsSpan().SequenceEqual(other.Dwords);
+}
+
+// Equality of descriptor dwords by content.
+public sealed class DescriptorContentComparer : IEqualityComparer<uint[]>
+{
+    public static readonly DescriptorContentComparer Instance = new();
+
+    public bool Equals(uint[]? left, uint[]? right) =>
+        ReferenceEquals(left, right) || (left is not null && right is not null && left.AsSpan().SequenceEqual(right));
+
+    public int GetHashCode(uint[] dwords)
+    {
+        var hash = new HashCode();
+        hash.AddBytes(System.Runtime.InteropServices.MemoryMarshal.AsBytes(dwords.AsSpan()));
+        return hash.ToHashCode();
+    }
 }

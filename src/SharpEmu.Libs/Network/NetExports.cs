@@ -143,6 +143,30 @@ public static class NetExports
         return ctx.SetReturn(0);
     }
 
+    // Formats a 6-byte Ethernet address as "xx:xx:xx:xx:xx:xx" with its terminator.
+    [SysAbiExport(
+        Nid = "v6M4txecCuo",
+        ExportName = "sceNetEtherNtostr",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetEtherNtostr(CpuContext ctx)
+    {
+        var addressPointer = ctx[CpuRegister.Rdi];
+        var destination = ctx[CpuRegister.Rsi];
+        var length = ctx[CpuRegister.Rdx];
+        Span<byte> address = stackalloc byte[6];
+        if (addressPointer == 0 || destination == 0 || length < 18 || !ctx.Memory.TryRead(addressPointer, address))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        var text = System.Text.Encoding.ASCII.GetBytes(
+            $"{address[0]:x2}:{address[1]:x2}:{address[2]:x2}:{address[3]:x2}:{address[4]:x2}:{address[5]:x2}\0");
+        return ctx.Memory.TryWrite(destination, text)
+            ? ctx.SetReturn(0)
+            : SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+    }
+
     [SysAbiExport(
         Nid = "Q4qBuN-c0ZM",
         ExportName = "sceNetSocket",

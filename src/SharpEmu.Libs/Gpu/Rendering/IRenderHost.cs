@@ -92,6 +92,9 @@ public interface IRenderHost
 
     bool TryReadGuest(ulong address, Span<byte> destination);
 
+    // Reads guest bytes only when no pending GPU buffer or image write owns them.
+    bool TryReadCleanGuestBytes(ulong address, Span<byte> destination);
+
     // The part of the range that is mapped from its start; zero when the start is unmapped.
     ulong ClampMappedSize(ulong address, ulong size);
 

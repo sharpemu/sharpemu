@@ -63,7 +63,8 @@ public sealed class ResourceMaterializerTests
         var memory = ResourceTrackerTests.LinearMemory();
         var first = ResourceTrackerTests.ImageDescriptor();
         var second = first.ToArray();
-        second[3] = (second[3] & 0x0FFFFFFF) | (10u << 28);
+        // A converted format cannot share a case with a directly sampled one.
+        second[1] = (second[1] & ~(0x1FFu << 20)) | (GuestImageFormat.Format11x2x10Uint << 20);
         ResourceTrackerTests.WriteImage(memory, 0x2000, first);
         ResourceTrackerTests.WriteImage(memory, 0x2020, second);
         memory.At(0x1000 + 36) = 1;
@@ -93,7 +94,7 @@ public sealed class ResourceMaterializerTests
             Assert.Equal(first, failure.TableDescriptors[0]);
             Assert.Equal(second, failure.TableDescriptors[1]);
             Assert.Equal(second, failure.ImageDescriptors[1]);
-            Assert.NotEqual(failure.ImageSpecializations[0].Dimension, failure.ImageSpecializations[1].Dimension);
+            Assert.NotEqual(failure.ImageSpecializations[0].ConversionFormat, failure.ImageSpecializations[1].ConversionFormat);
             Assert.Equal(userData, failure.UserData);
             var diagnostic = Assert.IsType<IndirectSelectorDiagnostic>(failure.SelectorDiagnostic);
             Assert.Equal("full_domain_no_proof", diagnostic.SelectionMode);
@@ -125,7 +126,8 @@ public sealed class ResourceMaterializerTests
         memory.At(0x1000 + 36) = 1;
         var first = ResourceTrackerTests.ImageDescriptor();
         var second = first.ToArray();
-        second[3] = (second[3] & 0x0FFFFFFF) | (10u << 28);
+        // A converted format cannot share a case with a directly sampled one.
+        second[1] = (second[1] & ~(0x1FFu << 20)) | (GuestImageFormat.Format11x2x10Uint << 20);
         ResourceTrackerTests.WriteImage(memory, 0x2000, first);
         ResourceTrackerTests.WriteImage(memory, 0x2020, second);
         var addresses = new List<ulong>();

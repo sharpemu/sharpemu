@@ -41,6 +41,17 @@ internal interface IShaderPipelineHost
     // The device supports shaderSharedInt64Atomics, so LDS 64-bit atomics can be
     // emitted as real 64-bit atomics instead of a non-atomic 32-bit pair.
     bool SharedInt64AtomicsEnabled { get; }
+
+    // The device converts f16<->f32 natively with the hardware's rounding and denormals
+    // (see VulkanFloat16Support).
+    bool ExactFloat16ConversionsEnabled => false;
+
+    bool NonUniformImageIndexingEnabled => false;
+
+    // The host writes buffer strides into shader data (BindingLayout.UsesRuntimeBufferStrides),
+    // so the stride leaves the permutation key.
+    bool RuntimeBufferStridesEnabled => false;
+    bool UsesBindlessImages => false;
     bool ExecGuardElisionEnabled => true;
     bool PerVertexPixelInputsSupported => true;
 
@@ -56,6 +67,13 @@ internal interface IShaderPipelineHost
 
     // Reads one guest dword only when no GPU work may still own the range.
     bool TryReadCleanGuestWord(ulong address, out uint word);
+
+    bool TryReadCleanGuestWords(ulong address, Span<uint> words)
+    {
+        using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CleanGuestRead);
+        return BitConverter.IsLittleEndian && TryReadResidentGuestBytes(address,
+            System.Runtime.InteropServices.MemoryMarshal.AsBytes(words), clean: true);
+    }
 
     // Copies guest bytes the CPU already holds, without synchronizing. False when the GPU
     // may own the range (or, for a clean read, when a clean word read would be refused);

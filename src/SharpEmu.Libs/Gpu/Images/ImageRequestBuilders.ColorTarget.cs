@@ -50,6 +50,29 @@ public static partial class ImageRequestBuilders
         return (supported, fixedSupported, supported ? value : default);
     }
 
+    // The color a fixed DCC clear code decompresses to; the register code (0x20) is not fixed.
+    public static bool TryFixedDccClearValue(byte code, out ClearColorValue value)
+    {
+        value = default;
+        switch (code)
+        {
+            case 0x00:
+                return true;
+            case 0x40:
+                value.Float32_3 = 1f;
+                return true;
+            case 0x80:
+                value.Float32_0 = value.Float32_1 = value.Float32_2 = 1f;
+                return true;
+            case 0xc0:
+                value.Float32_0 = value.Float32_1 = value.Float32_2 = value.Float32_3 = 1f;
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    // Formats whose DCC encodes the fixed clear colors (0x00, 0x40, 0x80, 0xC0).
     public static bool SupportsDccFixedClear(Format format) => format switch
     {
         Format.R8Unorm or Format.R8G8Unorm or Format.R8G8B8A8Unorm or Format.R8G8B8A8Srgb or Format.B8G8R8A8Unorm or Format.B8G8R8A8Srgb or

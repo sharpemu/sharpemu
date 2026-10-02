@@ -4,6 +4,7 @@
 using System.Runtime.InteropServices;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Kernel;
 using SharpEmu.ShaderCompiler.Vulkan;
 using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
@@ -244,12 +245,21 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
             var count = Math.Min((uint)faults[0], MaxPageFaults - 1);
             for (var index = 1; index <= count; index++)
             {
-                _faultRanges.Add(faults[index], _pageSize);
+                var insideMapping = KernelMemoryCompatExports.TryGetMappedRange(faults[index], out var mappingStart, out var mappingLength);
+                if (!insideMapping && !_cache.IsGuestMemoryMapped(faults[index], _pageSize))
+                {
+                    continue;
+                }
+
+                var window = insideMapping
+                    ? GuestBufferCache.DeviceAddressFaultSpan(faults[index], _pageSize, mappingStart, mappingLength)
+                    : new GuestSpan(faults[index], _pageSize);
+                _faultRanges.Add(window.Address, window.Size);
+                _cache.NoteDeviceAddressFault(window.Address, window.Size, insideMapping);
                 GuestGpuMemoryHook.SelectDeviceFaultTracePage(faults[index]);
                 if (SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Traces(faults[index], _pageSize))
                     SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Trace(faults[index], _pageSize,
                         $"device-address-fault scan_tick={scanTick} callback_tick={_scheduler.CurrentTick} registered={_cache.IsRegionRegistered(faults[index], _pageSize)} reported_count={(uint)faults[0]} retained_count={count}");
-                Console.Error.WriteLine($"[GPU][INFO] Accessed non-GPU cached memory at 0x{faults[index]:X16}");
             }
 
             _faultRanges.ForEach((start, size) =>

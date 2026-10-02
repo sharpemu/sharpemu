@@ -221,8 +221,7 @@ public static partial class AgcExports
                     descriptor[(int)ShaderCodeOffset..]);
                 var continuationSize = BinaryPrimitives.ReadUInt32LittleEndian(
                     descriptor[(int)ShaderSizeOffset..]);
-                if (continuationCodeAddress <= entryCodeAddress ||
-                    continuationCodeAddress - entryCodeAddress > uint.MaxValue ||
+                if (continuationCodeAddress == entryCodeAddress ||
                     !IsValidDeclaredShaderSize(continuationSize) ||
                     !CanReadShaderRange(ctx, continuationCodeAddress, continuationSize))
                 {
@@ -247,7 +246,8 @@ public static partial class AgcExports
                     }
                 }
 
-                var distance = continuationCodeAddress - entryCodeAddress;
+                var distance = continuationCodeAddress > entryCodeAddress
+                    ? continuationCodeAddress - entryCodeAddress : entryCodeAddress - continuationCodeAddress;
                 if (distance >= bestDistance)
                 {
                     continue;

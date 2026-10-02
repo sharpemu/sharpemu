@@ -70,6 +70,7 @@ public static class AudioOut2Exports
     private sealed class ContextState
     {
         private readonly object _paceGate = new();
+        private IHostAudioStream? _backend;
         private long _nextAdvanceTimestamp;
 
         public ContextState(ulong handle, uint frequency, uint grainSamples, uint queueDepth, IHostAudioStream? backend)
@@ -78,14 +79,56 @@ public static class AudioOut2Exports
             Frequency = frequency == 0 ? 48000 : frequency;
             GrainSamples = grainSamples == 0 ? 256 : grainSamples;
             QueueDepth = queueDepth == 0 ? 4 : queueDepth;
-            Backend = backend;
+            _backend = backend;
         }
 
         public ulong Handle { get; }
         public uint Frequency { get; }
         public uint GrainSamples { get; }
         public uint QueueDepth { get; }
-        public IHostAudioStream? Backend { get; }
+        public IHostAudioStream? Backend => Volatile.Read(ref _backend);
+
+        public void AttachBackend(IHostAudioStream? backend) => Volatile.Write(ref _backend, backend);
+
+        public uint QueuedGrains
+        {
+            get
+            {
+                if (Backend is { } backend)
+                {
+                    var queuedMilliseconds = backend.QueuedMilliseconds;
+                    if (queuedMilliseconds >= 0)
+                    {
+                        var grainMilliseconds = (double)GrainSamples * 1000.0 / Frequency;
+                        return Math.Min(
+                            QueueDepth,
+                            checked((uint)Math.Ceiling(queuedMilliseconds / grainMilliseconds)));
+                    }
+                }
+
+                // A context can be intentionally backend-less (headless runs,
+                // unavailable host audio, or before lazy backend binding). In
+                // that case PaceAdvance is the queue: report the portion of
+                // its software clock that has not elapsed yet instead of
+                // claiming that every grain is free.
+                lock (_paceGate)
+                {
+                    var remaining = _nextAdvanceTimestamp - Stopwatch.GetTimestamp();
+                    if (remaining <= 0)
+                    {
+                        return 0;
+                    }
+
+                    var grainTicks = checked(
+                        (long)Math.Ceiling(Stopwatch.Frequency * (double)GrainSamples / Frequency));
+                    return Math.Min(
+                        QueueDepth,
+                        checked((uint)Math.Ceiling((double)remaining / grainTicks)));
+                }
+            }
+        }
+
+        public uint FreeGrains => QueueDepth - Math.Min(QueueDepth, QueuedGrains);
 
         public void PaceAdvance()
         {
@@ -408,7 +451,10 @@ public static class AudioOut2Exports
         Span<byte> level = stackalloc byte[sizeof(uint)];
         if (outLevelAddress != 0)
         {
-            BinaryPrimitives.WriteUInt32LittleEndian(level, 0);
+            var queued = Contexts.TryGetValue(ctx[CpuRegister.Rdi], out var currentContext)
+                ? currentContext.QueuedGrains
+                : 0u;
+            BinaryPrimitives.WriteUInt32LittleEndian(level, queued);
             if (!ctx.Memory.TryWrite(outLevelAddress, level))
             {
                 return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -420,7 +466,7 @@ public static class AudioOut2Exports
             IsWritableOutBuffer(outAvailableAddress))
         {
             var available = Contexts.TryGetValue(ctx[CpuRegister.Rdi], out var context)
-                ? context.QueueDepth
+                ? context.FreeGrains
                 : 4u;
             BinaryPrimitives.WriteUInt32LittleEndian(level, available);
             if (!ctx.Memory.TryWrite(outAvailableAddress, level))
@@ -568,6 +614,10 @@ public static class AudioOut2Exports
     }
 
     // Fixed-size connected stereo state. Do not trust r8/r9 for byte counts.
+    // SceAudioOut2PortState is laid out as u16 output at +0, u8 active at +2,
+    // u8 channel count at +3, and s16 volume at +4. GTA's older trace/comment
+    // that treated +2 as channels is not the SDK layout; keep the active byte
+    // at +2 for Yotei and expose the decoded channel count at +3.
     [SysAbiExport(
         Nid = "gatEUKG+Ea4",
         ExportName = "sceAudioOut2PortGetState",
@@ -597,7 +647,7 @@ public static class AudioOut2Exports
         Span<byte> state = stackalloc byte[PortStateSize];
         state.Clear();
         //   +0x00 u16 output   = CONNECTED_PRIMARY (1)
-        //   +0x02 u8  channels = from port format when known, else 2
+        //   +0x02 u8  active   = 1 (the game waits for output to become active)
         //   +0x04 s16 volume   = -1 (N/A for main)
         byte channels = 2;
         if (Ports.TryGetValue(portHandle, out var port) &&
@@ -607,7 +657,8 @@ public static class AudioOut2Exports
         }
 
         BinaryPrimitives.WriteUInt16LittleEndian(state[0x00..], PortStateOutputConnectedPrimary);
-        state[0x02] = channels;
+        state[0x02] = 1;
+        state[0x03] = channels;
         BinaryPrimitives.WriteInt16LittleEndian(state[0x04..], -1);
 
         if (!ctx.Memory.TryWrite(stateAddress, state))
@@ -870,6 +921,7 @@ public static class AudioOut2Exports
                 }
 
                 backendName = PrimaryBackendName;
+                context.AttachBackend(PrimaryBackend);
                 return PrimaryBackend;
             }
 
@@ -892,6 +944,7 @@ public static class AudioOut2Exports
             }
 
             backendName = SecondaryBackendName;
+            context.AttachBackend(SecondaryBackend);
             return SecondaryBackend;
         }
     }

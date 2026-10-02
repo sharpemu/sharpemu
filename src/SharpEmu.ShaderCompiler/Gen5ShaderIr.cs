@@ -244,7 +244,12 @@ public sealed record Gen5BufferMemoryControl(
     bool Glc,
     bool Slc,
     bool Typed = false,
-    uint TypedFormat = 0) : Gen5InstructionControl;
+    uint TypedFormat = 0,
+    bool PackedD16 = false,
+    uint FormatComponentCount = 0) : Gen5InstructionControl
+{
+    public uint ComponentCount => FormatComponentCount == 0 ? DwordCount : FormatComponentCount;
+}
 
 public sealed record Gen5ExportControl(
     uint Target,
@@ -339,6 +344,13 @@ public sealed record Gen5ShaderProgram(
     public uint PixelColorExportMasks => _pixelColorExportMasks;
 
     public uint ParameterExportMask => _parameterExportMask;
+
+    // Fused objects can put their continuation before the entry in guest memory.
+    // Control-flow PCs remain increasing; S_GETPC still uses the original guest PC.
+    public IReadOnlyDictionary<uint, ulong>? InstructionAddressOffsets { get; init; }
+
+    public ulong InstructionAddressOffset(uint pc) =>
+        InstructionAddressOffsets is { } offsets && offsets.TryGetValue(pc, out var offset) ? offset : pc;
 
     private static uint ComputePixelColorExportMasks(
         IReadOnlyList<Gen5ShaderInstruction> instructions)

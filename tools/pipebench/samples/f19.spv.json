@@ -1,0 +1,154 @@
+{
+    "entryPoints" : [
+        {
+            "name" : "main",
+            "mode" : "comp",
+            "workgroup_size" : [
+                64,
+                1,
+                1
+            ],
+            "workgroup_size_is_spec_constant_id" : [
+                false,
+                false,
+                false
+            ]
+        }
+    ],
+    "types" : {
+        "_41" : {
+            "name" : "_41",
+            "members" : [
+                {
+                    "name" : "_m0",
+                    "type" : "uint",
+                    "array" : [
+                        0
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 0,
+                    "array_stride" : 4
+                }
+            ]
+        },
+        "_48" : {
+            "name" : "_48",
+            "members" : [
+                {
+                    "name" : "_m0",
+                    "type" : "uint64_t",
+                    "array" : [
+                        0
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 0,
+                    "array_stride" : 8
+                }
+            ]
+        },
+        "_51" : {
+            "name" : "_51",
+            "members" : [
+                {
+                    "name" : "_m0",
+                    "type" : "uint",
+                    "array" : [
+                        0
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 0,
+                    "array_stride" : 4
+                }
+            ]
+        },
+        "_54" : {
+            "name" : "_54",
+            "members" : [
+                {
+                    "name" : "_m0",
+                    "type" : "uint",
+                    "array" : [
+                        0
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 0,
+                    "array_stride" : 4
+                }
+            ]
+        },
+        "_59" : {
+            "name" : "_59",
+            "members" : [
+                {
+                    "name" : "_m0",
+                    "type" : "uint",
+                    "array" : [
+                        32
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 0,
+                    "array_stride" : 4
+                }
+            ]
+        },
+        "_4" : {
+            "name" : "uint",
+            "members" : [
+            ]
+        }
+    },
+    "ssbos" : [
+        {
+            "type" : "_41",
+            "name" : "guestBuffers",
+            "array" : [
+                11
+            ],
+            "array_size_is_literal" : [
+                true
+            ],
+            "block_size" : 0,
+            "set" : 1,
+            "binding" : 0
+        },
+        {
+            "type" : "_48",
+            "name" : "deviceAddressPageTable",
+            "readonly" : true,
+            "block_size" : 0,
+            "set" : 1,
+            "binding" : 48
+        },
+        {
+            "type" : "_51",
+            "name" : "faultBuffer",
+            "block_size" : 0,
+            "set" : 1,
+            "binding" : 49
+        },
+        {
+            "type" : "_54",
+            "name" : "flattenedResourceTable",
+            "block_size" : 0,
+            "set" : 1,
+            "binding" : 50
+        }
+    ],
+    "push_constants" : [
+        {
+            "type" : "_59",
+            "name" : "pushData",
+            "push_constant" : true
+        }
+    ]
+}

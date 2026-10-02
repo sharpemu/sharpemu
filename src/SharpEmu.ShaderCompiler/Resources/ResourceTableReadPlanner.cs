@@ -148,6 +148,14 @@ public sealed class ResourceTableReadPlanner
             return;
         }
 
+        // An address carried by a loop phi that changes per iteration is the loop's current
+        // pointer: the host sees one value per draw, the shader one per iteration, so the
+        // shader performs the read. A phi that only merges one value with itself is that value.
+        if (DependsOnVaryingPhi(value.Operands[0]))
+        {
+            return;
+        }
+
         for (var slot = 0; slot < _reads.Count; slot++)
         {
             if (_graph.Equivalent(value, _reads[slot].Value))
@@ -160,6 +168,30 @@ public sealed class ResourceTableReadPlanner
         var newSlot = (uint)_reads.Count;
         _reads.Add(new ResourceTableRead(value, newSlot));
         _patches.Add((value, newSlot));
+    }
+
+    private bool DependsOnVaryingPhi(ScalarValue value)
+    {
+        var pending = new Stack<ScalarValue>();
+        var visited = new HashSet<ScalarValue>();
+        pending.Push(value);
+        while (pending.TryPop(out var current))
+        {
+            if (!visited.Add(current))
+                continue;
+            if (current.Kind == ScalarValueKind.Phi)
+            {
+                if (_graph.ResolveInvariantPhi(current) is not { } invariant || invariant.Kind == ScalarValueKind.Phi)
+                    return true;
+                pending.Push(invariant);
+                continue;
+            }
+
+            foreach (var operand in current.Operands)
+                pending.Push(operand);
+        }
+
+        return false;
     }
 
     // Equivalent reads share one host read, but each instruction must load its destination

@@ -1,0 +1,194 @@
+{
+    "entryPoints" : [
+        {
+            "name" : "main",
+            "mode" : "comp",
+            "workgroup_size" : [
+                64,
+                1,
+                1
+            ],
+            "workgroup_size_is_spec_constant_id" : [
+                false,
+                false,
+                false
+            ]
+        }
+    ],
+    "types" : {
+        "_41" : {
+            "name" : "_41",
+            "members" : [
+                {
+                    "name" : "_m0",
+                    "type" : "uint",
+                    "array" : [
+                        0
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 0,
+                    "array_stride" : 4
+                }
+            ]
+        },
+        "_64" : {
+            "name" : "_64",
+            "members" : [
+                {
+                    "name" : "_m0",
+                    "type" : "uint64_t",
+                    "array" : [
+                        0
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 0,
+                    "array_stride" : 8
+                }
+            ]
+        },
+        "_67" : {
+            "name" : "_67",
+            "members" : [
+                {
+                    "name" : "_m0",
+                    "type" : "uint",
+                    "array" : [
+                        0
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 0,
+                    "array_stride" : 4
+                }
+            ]
+        },
+        "_70" : {
+            "name" : "_70",
+            "members" : [
+                {
+                    "name" : "_m0",
+                    "type" : "uint",
+                    "array" : [
+                        0
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 0,
+                    "array_stride" : 4
+                }
+            ]
+        },
+        "_75" : {
+            "name" : "_75",
+            "members" : [
+                {
+                    "name" : "_m0",
+                    "type" : "uint",
+                    "array" : [
+                        32
+                    ],
+                    "array_size_is_literal" : [
+                        true
+                    ],
+                    "offset" : 0,
+                    "array_stride" : 4
+                }
+            ]
+        },
+        "_4" : {
+            "name" : "uint",
+            "members" : [
+            ]
+        }
+    },
+    "separate_images" : [
+        {
+            "type" : "texture2D",
+            "name" : "3",
+            "array" : [
+                0
+            ],
+            "array_size_is_literal" : [
+                true
+            ],
+            "set" : 0,
+            "binding" : 0
+        },
+        {
+            "type" : "itexture2D",
+            "name" : "17",
+            "array" : [
+                0
+            ],
+            "array_size_is_literal" : [
+                true
+            ],
+            "set" : 0,
+            "binding" : 0
+        }
+    ],
+    "separate_samplers" : [
+        {
+            "type" : "sampler",
+            "name" : "samplers",
+            "array" : [
+                2
+            ],
+            "array_size_is_literal" : [
+                true
+            ],
+            "set" : 1,
+            "binding" : 46
+        }
+    ],
+    "ssbos" : [
+        {
+            "type" : "_41",
+            "name" : "guestBuffers",
+            "array" : [
+                15
+            ],
+            "array_size_is_literal" : [
+                true
+            ],
+            "block_size" : 0,
+            "set" : 1,
+            "binding" : 0
+        },
+        {
+            "type" : "_64",
+            "name" : "deviceAddressPageTable",
+            "readonly" : true,
+            "block_size" : 0,
+            "set" : 1,
+            "binding" : 48
+        },
+        {
+            "type" : "_67",
+            "name" : "faultBuffer",
+            "block_size" : 0,
+            "set" : 1,
+            "binding" : 49
+        },
+        {
+            "type" : "_70",
+            "name" : "flattenedResourceTable",
+            "block_size" : 0,
+            "set" : 1,
+            "binding" : 50
+        }
+    ],
+    "push_constants" : [
+        {
+            "type" : "_75",
+            "name" : "pushData",
+            "push_constant" : true
+        }
+    ]
+}

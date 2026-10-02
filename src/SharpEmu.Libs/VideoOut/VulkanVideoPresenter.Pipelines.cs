@@ -3,6 +3,7 @@
 
 namespace SharpEmu.Libs.VideoOut;
 
+using System.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Images;
@@ -43,6 +44,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public DescriptorSetLayout SetLayout;
             public DescriptorSetDemand Demand;
             public bool UsesPushDescriptors;
+            public bool UsesBindlessImages;
             public GraphicsPipelineDescription? Description;
             public Pipeline StripVariant;
             public Pipeline ListVariant;
@@ -56,8 +58,17 @@ internal static unsafe partial class VulkanVideoPresenter
         private readonly Dictionary<ulong, ShaderModule> _shaderModules = new();
         private KhrPushDescriptor _pushDescriptorApi = null!;
         private uint _maxPushDescriptors;
+        private uint _maxPerStageSampledImages = uint.MaxValue;
+        private uint _maxPerStageStorageImages = uint.MaxValue;
+        private uint _maxPerStageStorageBuffers = uint.MaxValue;
+        private uint _maxPerStageUpdateAfterBindSampledImages = uint.MaxValue;
+        private uint _maxPerStageUpdateAfterBindStorageImages = uint.MaxValue;
+        private uint _maxUpdateAfterBindSampledImages = uint.MaxValue;
+        private uint _maxUpdateAfterBindStorageImages = uint.MaxValue;
+        private uint _maxUpdateAfterBindDescriptors = uint.MaxValue;
         private SampleCountFlags _noAttachmentSampleCounts;
         private DescriptorHeap _descriptorHeap = null!;
+        private BindlessImageHeap? _bindlessImageHeap;
 
         uint IShaderPipelineHost.MaxPushDescriptors => _maxPushDescriptors;
 
@@ -68,6 +79,9 @@ internal static unsafe partial class VulkanVideoPresenter
         // other compute translation maps a guest wave to 32-lane host subgroups, and a 64-lane host
         // subgroup (AMD's default) left lanes 32..63 inactive: a wave64 8x8x8 group lost rows 4..7.
         private const uint RdnaSubgroupSize = 32;
+
+        // Pipeline creations at least this slow are logged; cached ones take well under 1 ms.
+        private const double SlowPipelineMilliseconds = 500;
         private bool _canRequireComputeSubgroup32;
         private uint _maxComputeWorkgroupSubgroups;
 
@@ -82,6 +96,11 @@ internal static unsafe partial class VulkanVideoPresenter
         bool IShaderPipelineHost.GraphicsSubgroupOperationsEnabled => GraphicsSubgroupOperationsEnabled;
 
         bool IShaderPipelineHost.SharedInt64AtomicsEnabled => SharedInt64AtomicsEnabled;
+        bool IShaderPipelineHost.ExactFloat16ConversionsEnabled => ExactFloat16ConversionsEnabled;
+
+        bool IShaderPipelineHost.NonUniformImageIndexingEnabled => NonUniformImageIndexingEnabled;
+        bool IShaderPipelineHost.RuntimeBufferStridesEnabled => true;
+        bool IShaderPipelineHost.UsesBindlessImages => BindlessImageHeapEnabled;
         // NVIDIA's compiler rejects the elided-EXEC wave64 compute module with NVVM error 3.
         bool IShaderPipelineHost.ExecGuardElisionEnabled => _physicalDeviceVendorId != NvidiaVendorId;
         bool IShaderPipelineHost.PerVertexPixelInputsSupported => _supportsPerVertexPixelInputs;
@@ -131,9 +150,22 @@ internal static unsafe partial class VulkanVideoPresenter
                 return false;
             }
 
+            // A word a previous GPU pass wrote is read once that pass's bytes are back in guest
+            // memory, as the command processor would see them: an image's contents go through
+            // its buffer view first, then the buffer comes back to guest memory.
+            foreach (var (imageAddress, imageSize) in _imageCache.UnsynchronizedGpuImageRanges(address, sizeof(uint)))
+            {
+                _ = _bufferCache.ObtainBuffer(imageAddress, imageSize, isWritten: false, isTexelBuffer: true);
+            }
+
+            if (_bufferCache.HasGpuDirtyPages(address, sizeof(uint)) || _bufferCache.HasGpuDirtyBytes(address, sizeof(uint)))
+            {
+                _ = _bufferCache.TrySynchronizeCpuRead(address, sizeof(uint));
+            }
+
             if ((_bufferCache.MayHaveGpuDirtyPages(address, sizeof(uint)) && _bufferCache.HasGpuDirtyPages(address, sizeof(uint))) ||
                 _bufferCache.HasGpuDirtyBytes(address, sizeof(uint)) ||
-                _imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)))
+                _imageCache.UnsynchronizedGpuImageRanges(address, sizeof(uint)).Count != 0)
             {
                 return false;
             }
@@ -152,6 +184,11 @@ internal static unsafe partial class VulkanVideoPresenter
         public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean)
         {
             var size = (ulong)destination.Length;
+            if (!_guestMemory.CanRead(address, size))
+            {
+                return false;
+            }
+
             if (_bufferCache.HasGpuDirtyPages(address, size) ||
                 (clean && (_bufferCache.HasGpuDirtyBytes(address, size) || _imageCache.HasGpuModifiedImageBytes(address, size))))
             {
@@ -160,6 +197,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
             return _guestMemory.TryRead(address, destination);
         }
+
+        bool IRenderHost.TryReadCleanGuestBytes(ulong address, Span<byte> destination) =>
+            TryReadResidentGuestBytes(address, destination, clean: true);
 
         public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
         {
@@ -346,6 +386,11 @@ internal static unsafe partial class VulkanVideoPresenter
             var layout = program.Bindings ?? throw SubmissionScheduler.Fatal($"The program has no binding layout: hash=0x{program.Hash:X16}.");
             foreach (var binding in layout.Descriptors)
             {
+                if (layout.UsesBindlessImages && ImageDescriptorBinding.ResourceClass(binding.Kind) != ShaderCompiler.Resources.ImageResourceClass.None)
+                {
+                    continue;
+                }
+
                 bindings.Add(new DescriptorSetLayoutBinding
                 {
                     Binding = BindingLayout.NativeBindingIndex(stage, binding.Kind),
@@ -354,6 +399,32 @@ internal static unsafe partial class VulkanVideoPresenter
                     StageFlags = DescriptorWriter.ShaderStageFlag(stage),
                 });
             }
+        }
+
+        private void EnsureBindlessImageHeap(params ShaderProgramInfo?[] programs)
+        {
+            if (_bindlessImageHeap is not null)
+            {
+                return;
+            }
+
+            if (!programs.Any(program => program?.Bindings?.UsesBindlessImages == true))
+            {
+                return;
+            }
+
+            _bindlessImageHeap = new BindlessImageHeap(
+                _deviceInfo,
+                _scheduler,
+                _maxPerStageSampledImages,
+                _maxPerStageStorageImages,
+                _maxPerStageUpdateAfterBindSampledImages,
+                _maxPerStageUpdateAfterBindStorageImages,
+                _maxUpdateAfterBindSampledImages,
+                _maxUpdateAfterBindStorageImages,
+                _maxUpdateAfterBindDescriptors);
+            _imageCache.BindlessImageInvalidator = _bindlessImageHeap.InvalidateViews;
+            _bindlessImageHeap.SetDefaultSampler(_samplerStore.GetSampler(new SamplerDescriptorWords(stackalloc uint[4]), integerView: false));
         }
 
         // The set is pushed when its descriptors fit the device limit, else it comes from the heap.
@@ -365,6 +436,21 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 descriptorCount += binding.DescriptorCount;
                 demand = demand.Add(DescriptorSetDemand.Of(binding.DescriptorType, binding.DescriptorCount));
+            }
+
+            // A zero limit is an unreported one.
+            if (_maxPerStageStorageBuffers != 0 && demand.StorageBuffers > _maxPerStageStorageBuffers)
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"The shader stage binds more buffers than the device allows: storage={demand.StorageBuffers}/{_maxPerStageStorageBuffers}.");
+            }
+
+            if ((_maxPerStageSampledImages != 0 && demand.SampledImages > _maxPerStageSampledImages) ||
+                (_maxPerStageStorageImages != 0 && demand.StorageImages > _maxPerStageStorageImages))
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"The shader stage binds more images than the device allows: sampled={demand.SampledImages}/{_maxPerStageSampledImages} " +
+                    $"storage={demand.StorageImages}/{_maxPerStageStorageImages}.");
             }
 
             usesPushDescriptors = descriptorCount <= _maxPushDescriptors;
@@ -383,19 +469,23 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private PipelineLayout CreatePipelineLayout(DescriptorSetLayout setLayout, ShaderStageFlags pushStages)
+        private PipelineLayout CreatePipelineLayout(DescriptorSetLayout setLayout, ShaderStageFlags pushStages, bool usesBindlessImages)
         {
             var pushConstants = new PushConstantRange { StageFlags = pushStages, Offset = 0, Size = PushConstantBytes };
+            var setLayouts = usesBindlessImages ? new[] { _bindlessImageHeap!.Layout, setLayout } : new[] { setLayout };
             var create = new PipelineLayoutCreateInfo
             {
                 SType = StructureType.PipelineLayoutCreateInfo,
-                SetLayoutCount = 1,
-                PSetLayouts = &setLayout,
+                SetLayoutCount = (uint)setLayouts.Length,
                 PushConstantRangeCount = 1,
                 PPushConstantRanges = &pushConstants,
             };
-            Check(_vk.CreatePipelineLayout(_device, &create, null, out var layout), "vkCreatePipelineLayout");
-            return layout;
+            fixed (DescriptorSetLayout* setLayoutPointer = setLayouts)
+            {
+                create.PSetLayouts = setLayoutPointer;
+                Check(_vk.CreatePipelineLayout(_device, &create, null, out var layout), "vkCreatePipelineLayout");
+                return layout;
+            }
         }
 
         private PipelineHandle RegisterPipeline(RenderPipelineEntry entry)
@@ -415,6 +505,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"The draw binds more color attachments than the device supports: count={description.Rendering.ColorCount} max={_maxColorAttachments}.");
             }
 
+            EnsureBindlessImageHeap(description.VertexStage, description.PixelStage);
+            var usesBindlessImages = description.VertexStage.Bindings!.UsesBindlessImages ||
+                description.PixelStage?.Bindings?.UsesBindlessImages == true;
+
             var bindings = new List<DescriptorSetLayoutBinding>();
             CollectLayoutBindings(bindings, description.VertexStage, ShaderStage.Vertex);
             if (description.PixelStage is { } pixelStage)
@@ -427,8 +521,9 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 SetLayout = setLayout,
                 Demand = demand,
-                Layout = CreatePipelineLayout(setLayout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit),
+                Layout = CreatePipelineLayout(setLayout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit, usesBindlessImages),
                 UsesPushDescriptors = usesPushDescriptors,
+                UsesBindlessImages = usesBindlessImages,
                 Description = description,
                 ProfileVertexHash = description.VertexStage.Hash,
                 ProfilePixelHash = description.PixelStage?.Hash ?? 0,
@@ -760,7 +855,16 @@ internal static unsafe partial class VulkanVideoPresenter
                         PDynamicState = &dynamicState,
                         Layout = layout,
                     };
-                    Check(_vk.CreateGraphicsPipelines(_device, _pipelineCache, 1, &pipelineInfo, null, out var pipeline), "vkCreateGraphicsPipelines(rendering)");
+                    var createStart = Stopwatch.GetTimestamp();
+                    Check(_vk.CreateGraphicsPipelines(_device, _pipelineCache, 1, &pipelineInfo, null, out var pipeline),
+                        $"vkCreateGraphicsPipelines(rendering) vs=0x{description.VertexStage.Hash:X16} ps=0x{description.PixelStage?.Hash ?? 0:X16}");
+                    var createMilliseconds = Stopwatch.GetElapsedTime(createStart).TotalMilliseconds;
+                    if (createMilliseconds >= SlowPipelineMilliseconds)
+                    {
+                        Console.Error.WriteLine(
+                            $"[PERF] vkCreateGraphicsPipelines ms={createMilliseconds:F1} " +
+                            $"vs=0x{description.VertexStage.Hash:X16} ps=0x{description.PixelStage?.Hash ?? 0:X16}");
+                    }
                     MarkPipelineCacheDirty();
                     Interlocked.Increment(ref _perfPipelineCreations);
                     SetDebugName(
@@ -779,10 +883,11 @@ internal static unsafe partial class VulkanVideoPresenter
         public PipelineHandle CreateComputePipeline(ComputePipelineDescription description)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineSetup);
+            EnsureBindlessImageHeap(description.Stage);
             var bindings = new List<DescriptorSetLayoutBinding>();
             CollectLayoutBindings(bindings, description.Stage, ShaderStage.Compute);
             var setLayout = CreateDescriptorSetLayout(bindings, out var usesPushDescriptors, out var demand);
-            var layout = CreatePipelineLayout(setLayout, ShaderStageFlags.ComputeBit);
+            var layout = CreatePipelineLayout(setLayout, ShaderStageFlags.ComputeBit, description.Stage.Bindings!.UsesBindlessImages);
             var computeModule = new ShaderModule(description.Program.Module);
             if (computeModule.Handle == 0)
             {
@@ -812,8 +917,14 @@ internal static unsafe partial class VulkanVideoPresenter
                     Stage = stageInfo,
                     Layout = layout,
                 };
-                Check(_vk.CreateComputePipelines(_device, _pipelineCache, 1, &pipelineInfo, null, out pipeline),
-                    $"vkCreateComputePipelines(rendering) hash=0x{description.Stage.Hash:X16}");
+                var createStart = Stopwatch.GetTimestamp();
+                Check(_vk.CreateComputePipelines(_device, _pipelineCache, 1, &pipelineInfo, null, out pipeline), $"vkCreateComputePipelines(rendering) hash=0x{description.Stage.Hash:X16}");
+                var createMilliseconds = Stopwatch.GetElapsedTime(createStart).TotalMilliseconds;
+                if (createMilliseconds >= SlowPipelineMilliseconds)
+                {
+                    Console.Error.WriteLine(
+                        $"[PERF] vkCreateComputePipelines ms={createMilliseconds:F1} cs=0x{description.Stage.Hash:X16}");
+                }
                 MarkPipelineCacheDirty();
                 Interlocked.Increment(ref _perfPipelineCreations);
                 SetDebugName(ObjectType.Pipeline, pipeline.Handle, $"SharpEmu compute cs=0x{description.Stage.Hash:X16}");
@@ -830,6 +941,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SetLayout = setLayout,
                 Demand = demand,
                 UsesPushDescriptors = usesPushDescriptors,
+                UsesBindlessImages = description.Stage.Bindings!.UsesBindlessImages,
                 ProfileComputeHash = description.Stage.Hash,
             };
             return RegisterPipeline(entry);

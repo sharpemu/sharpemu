@@ -112,6 +112,11 @@ public sealed class MemoryAccessInfo
     // through the descriptor in its registers instead of a host-bound buffer.
     public bool DeviceDescriptor { get; set; }
 
+    // A sampled image access whose image and sampler descriptors have no plan-time source
+    // (a waterfall loop, a per-pixel material pointer): the shader looks the words in its
+    // registers up in the host's global table (RuntimeDescriptorTable).
+    public bool RuntimeDescriptor { get; set; }
+
     // The guest V# behind a buffer access, filled in by the resource tracker.
     // Null until then. Its provenance tells the backend which lowering
     // strategy to pick; the access shape (Typed/Formatted/Access) completes
@@ -134,7 +139,8 @@ public sealed class MemoryAccessInfo
         ImageHasMip == other.ImageHasMip && ImageR128 == other.ImageR128 && Glc == other.Glc && Slc == other.Slc &&
         IndexEnabled == other.IndexEnabled && OffsetEnabled == other.OffsetEnabled &&
         Resource == other.Resource && Sampler == other.Sampler && PlanningOnly == other.PlanningOnly &&
-        DeviceDescriptor == other.DeviceDescriptor && AddressSpace == other.AddressSpace;
+        DeviceDescriptor == other.DeviceDescriptor && AddressSpace == other.AddressSpace &&
+        RuntimeDescriptor == other.RuntimeDescriptor;
 }
 
 // Every memory access of a program, indexed by program counter and component.
@@ -247,7 +253,7 @@ public sealed class MemoryAccessTable
             Offset = unchecked((uint)control.OffsetBytes),
             DataDwords = Math.Max(control.DwordCount, 1u),
             DataBits = bits,
-            ComponentCount = Math.Max(control.DwordCount, 1u),
+            ComponentCount = Math.Max(control.ComponentCount, 1u),
             DataFormat = dataFormat,
             NumberFormat = numberFormat,
             DataSigned = signed,

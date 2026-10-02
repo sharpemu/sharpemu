@@ -24,6 +24,25 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     private const ulong Page = GuestBufferCache.CachingPageSize;
 
     [Fact]
+    public void SubpageImageUpload_PreservesTheOtherTexturesInItsTrackerPage()
+    {
+        if (_vulkan is null) return;
+        using var fatal = new FatalScope();
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address + 0x100, Bytes(0xffffffffu));
+        harness.Write(address + 0x400, Bytes(0xff000000u));
+        harness.Worker.Run(() =>
+        {
+            _ = harness.Cache.FindBuffer(address, 0x10000);
+            _ = harness.Cache.ObtainBufferForImage(address + 0x400, 256);
+        });
+        var (source, offset) = harness.Worker.Run(() => harness.Cache.ObtainBufferForImage(address + 0x100, 256));
+        Assert.Equal(Bytes(0xffffffffu), harness.ReadBufferBytes(source, offset, 4));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void ImageUploadFailureIdentifiesAHoleBetweenBackedEndpoints()
     {
         if (_vulkan is null) return;
@@ -226,8 +245,9 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
             Assert.Equal(replacementIdentifier, harness.Cache.FindBuffer(address, Page));
             Assert.Same(original, harness.Cache.GetBuffer(originalIdentifier));
             Assert.NotEqual(0UL, original.Handle.Handle);
-            Assert.Equal(2 * Page, harness.Cache.TotalUsedMemory);
+            Assert.Equal(3 * Page, harness.Cache.TotalUsedMemory);
             harness.Scheduler.Finish();
+            Assert.Equal(2 * Page, harness.Cache.TotalUsedMemory);
             Assert.Equal(0UL, original.Handle.Handle);
             Assert.NotEqual(0UL, harness.Cache.GetBuffer(replacementIdentifier).Handle.Handle);
         });
@@ -749,6 +769,34 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         harness.Shutdown();
     }
 
+    // A shader can follow a pointer into ordinary guest memory outside the GPU mappings.
+    // The fault that reveals it registers the buffer, and preparation must keep touching
+    // it: otherwise it ages out while in use, faults again, and Ghost of Yotei re-created
+    // tens of thousands of such buffers, reading zeros in between.
+    [Fact]
+    public void DeviceAddressPreparationKeepsFaultedBuffersOutsideTheMappingsResident()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var mapped = harness.MapBacked(0x20000, ReadWrite);
+        var pointed = harness.MapBacked(0x20000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.RunGarbageCollector();
+            harness.Cache.NoteDeviceAddressFault(pointed, 0x8000);
+            _ = harness.Cache.FindBuffer(pointed, 0x8000);
+            harness.Cache.SetCollectionThresholds(1, ulong.MaxValue);
+            for (var collection = 0; collection < 170; collection++)
+            {
+                harness.Cache.PrepareBda([new GuestSpan(mapped, 0x20000)]);
+                harness.Cache.RunGarbageCollector();
+                Assert.True(harness.Cache.IsRegionRegistered(pointed, 0x8000));
+                harness.Scheduler.Finish();
+            }
+        });
+        harness.Shutdown();
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -1202,5 +1250,52 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         Assert.True(harness.Cache.IsRegionRegistered(address + 3 * Page, Page));
         Assert.All(harness.ReadBack(harness.Cache.FaultBuffer, word * 4, 4), value => Assert.Equal(0, value));
         harness.Shutdown();
+    }
+
+    // An async readback waits only for the buffer's last recorded writer, and work submitted
+    // after it can still reach the buffer through the device-address page table. Collection
+    // must keep the buffer alive until that work completes: destroying it at once let a
+    // Ghost of Yotei dispatch write into freed memory (VK_ERROR_DEVICE_LOST, WriteInvalid).
+    [Fact]
+    public void GarbageCollector_KeepsAnAsyncDownloadedBufferUntilSubmittedWorkCompletes()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var dirty = harness.MapBacked(0x10000, ReadWrite);
+        var buffer = harness.Worker.Run(() =>
+        {
+            var (written, offset) = harness.Cache.ObtainBuffer(dirty, 0x100, isWritten: true);
+            written.Fill(offset, 0x100, 0x0BADF00D);
+            return written;
+        });
+        harness.Cache.AsyncReadback = new ImmediateReadback();
+        harness.Cache.SetCollectionThresholds(1, 1);
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.RunGarbageCollector();
+            Assert.Equal(0, harness.Cache.BufferCount);
+            Assert.NotEqual(0UL, buffer.Handle.Handle);
+            harness.Scheduler.Finish();
+        });
+        Assert.Equal(0UL, buffer.Handle.Handle);
+        harness.Cache.AsyncReadback = null;
+        harness.Shutdown();
+    }
+
+    // Hands back zeroed bytes at once, without waiting for the main queue.
+    private sealed class ImmediateReadback : SharpEmu.Libs.Gpu.Vulkan.IBufferReadback
+    {
+        public void Read(ReadOnlySpan<SharpEmu.Libs.Gpu.Vulkan.ReadbackPiece> pieces, ulong waitTick,
+            SharpEmu.Libs.Gpu.Vulkan.VulkanAsyncReadback.ReadbackConsumer consume)
+        {
+            for (var index = 0; index < pieces.Length; index++)
+            {
+                consume(index, new byte[pieces[index].Size]);
+            }
+        }
+
+        public void Dispose()
+        {
+        }
     }
 }

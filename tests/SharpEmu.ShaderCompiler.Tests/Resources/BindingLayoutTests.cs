@@ -158,7 +158,9 @@ public sealed class BindingLayoutTests
         Assert.Equal(49u, (uint)DescriptorBindingKind.FaultBuffer);
         Assert.Equal(50u, (uint)DescriptorBindingKind.FlattenedResourceTable);
         Assert.Equal(51u, (uint)DescriptorBindingKind.ShaderData);
-        Assert.Equal(52u, (uint)DescriptorBindingKind.Count);
+        Assert.Equal(52u, (uint)DescriptorBindingKind.RuntimeDescriptorTable);
+        Assert.Equal(53u, (uint)DescriptorBindingKind.RuntimeDescriptorMisses);
+        Assert.Equal(54u, (uint)DescriptorBindingKind.Count);
 
         ImageDimension[] sampledDimensions =
         [

@@ -24,13 +24,14 @@ public sealed class Gen5TypedBufferLoadSpirvTests
     }
 
     [Fact]
-    public void FormattedUntypedLoad_UsesSpecializedFormatAndConversionTable()
+    public void FormattedUntypedLoad_DecodesItsSpecializedFormatWhenTranslated()
     {
+        // The specialized descriptor format is known here, so no run-time format table is emitted.
         var request = CreateCompileRequest("BufferLoadFormatXyzw", typed: false, typedFormat: 0, dwordCount: 4);
         Assert.Equal(77u, Assert.Single(request.Resources.Info.Buffers).DescriptorFormat);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
 
-        Assert.Contains(DescriptorFormatTableName, ModuleNames(shader.Spirv));
+        Assert.DoesNotContain(DescriptorFormatTableName, ModuleNames(shader.Spirv));
     }
 
     [Fact]
@@ -43,12 +44,12 @@ public sealed class Gen5TypedBufferLoadSpirvTests
     }
 
     [Fact]
-    public void TypedD16Load_IsRejected()
+    public void TypedD16Load_Compiles()
     {
+        // Packed D16 loads are translated; PackedD16BufferTests checks their results on the device.
         var request = CreateCompileRequest("TBufferLoadFormatD16Xy", typed: true, typedFormat: 64, dwordCount: 1);
 
-        Assert.False(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error));
-        Assert.Contains("TBufferLoadFormatD16Xy", error, StringComparison.Ordinal);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
     }
 
     [Fact]

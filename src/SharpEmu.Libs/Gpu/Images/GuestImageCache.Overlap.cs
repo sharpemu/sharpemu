@@ -600,13 +600,32 @@ public sealed partial class GuestImageCache
         }
 
         var association = ResourceSlotIdentifier.Invalid;
+        var stale = new List<ResourceSlotIdentifier>();
         foreach (var imageIdentifier in FindImagesInRange(stencil.Address, stencil.Size, pageOverlap: false))
         {
             var owner = _slots.TryGet(imageIdentifier);
-            if (owner != null && owner.Description.Data.Address == stencil.Address)
+            if (owner == null || owner.Description.Data.Address != stencil.Address)
+            {
+                continue;
+            }
+
+            // Only an image of exactly this span can stand for the plane: the stencil upload
+            // detiles the whole depth extent from it. A stencil proxy of another span is left
+            // over from an earlier surface at this address and is replaced; any other image of
+            // another size (a texture reading part of the plane) is a separate resource.
+            if (owner.Description.Data.Size == stencil.Size)
             {
                 association = imageIdentifier;
             }
+            else if (owner.DepthOwner.IsValid)
+            {
+                stale.Add(imageIdentifier);
+            }
+        }
+
+        foreach (var imageIdentifier in stale)
+        {
+            DeleteImage(imageIdentifier);
         }
 
         if (!association.IsValid)
@@ -618,6 +637,7 @@ public sealed partial class GuestImageCache
         }
 
         var record = _slots[association];
+
         TouchImage(record);
         record.AssociateDepth(depthImageIdentifier);
         return association;

@@ -48,6 +48,42 @@ namespace LibAtrac9
             DecodeSuperFrame(pcmOut);
         }
 
+        /// <summary>
+        /// Decodes one frame from the beginning of <paramref name="atrac9Data"/>
+        /// and returns the byte count consumed, including the frame's byte
+        /// alignment. The decoder state is retained so consecutive calls can
+        /// decode frames from the same superframe.
+        /// </summary>
+        public int DecodeFrame(byte[] atrac9Data, short[][] pcmOut, int outputOffset, int frameIndex)
+        {
+            if (!_initialized) throw new InvalidOperationException("Decoder must be initialized before decoding.");
+            if (atrac9Data == null) throw new ArgumentNullException(nameof(atrac9Data));
+            if (pcmOut == null) throw new ArgumentNullException(nameof(pcmOut));
+            if (pcmOut.Length < Config.ChannelCount ||
+                outputOffset < 0 ||
+                outputOffset > Config.FrameSamples * Config.FramesPerSuperframe - Config.FrameSamples ||
+                frameIndex < 0 ||
+                frameIndex >= Config.FramesPerSuperframe)
+            {
+                throw new ArgumentException("Invalid ATRAC9 frame decode buffers or index");
+            }
+
+            for (var i = 0; i < Config.ChannelCount; i++)
+            {
+                if (pcmOut[i] == null || pcmOut[i].Length < outputOffset + Config.FrameSamples)
+                {
+                    throw new ArgumentException("PCM buffer is too small");
+                }
+            }
+
+            Reader.SetBuffer(atrac9Data);
+            Frame.FrameIndex = frameIndex;
+            DecodeFrame(Reader, Frame);
+            PcmFloatToShort(pcmOut, outputOffset);
+            Reader.AlignPosition(8);
+            return (Reader.Position + 7) / 8;
+        }
+
         private void ValidateDecodeBuffers(byte[] atrac9Buffer, short[][] pcmBuffer)
         {
             if (atrac9Buffer == null) throw new ArgumentNullException(nameof(atrac9Buffer));

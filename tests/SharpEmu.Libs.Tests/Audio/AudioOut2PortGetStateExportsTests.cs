@@ -40,7 +40,8 @@ public sealed class AudioOut2PortGetStateExportsTests
         Span<byte> state = stackalloc byte[0x100];
         Assert.True(memory.TryRead(StateAddress, state));
         Assert.Equal(1, BinaryPrimitives.ReadUInt16LittleEndian(state));
-        Assert.Equal(2, state[2]);
+        Assert.Equal(1, state[2]);
+        Assert.Equal(2, state[3]);
         // Bytes past the fixed 0x20 header must remain untouched.
         Assert.Equal(0xAB, state[0x20]);
         Assert.Equal(0xAB, state[0x7F]);

@@ -3151,7 +3151,8 @@ public static partial class KernelMemoryCompatExports
     private static int MapDirectMemoryCore(CpuContext ctx, ulong inOutAddressPointer, ulong length,
         int protection, ulong flags, ulong directMemoryStart, ulong alignment)
         => RunMappingTransaction(() => MapDirectMemoryTransaction(ctx, inOutAddressPointer, length,
-            protection, flags, directMemoryStart, alignment));
+            protection, flags, directMemoryStart, alignment),
+            MapNeedsGpuDrain(ctx, inOutAddressPointer, length, flags));
 
     private static int MapDirectMemoryTransaction(CpuContext ctx, ulong inOutAddressPointer, ulong length,
         int protection, ulong flags, ulong directMemoryStart, ulong alignment)
@@ -3222,7 +3223,8 @@ public static partial class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelMapNamedFlexibleMemory(CpuContext ctx)
-        => RunMappingTransaction(() => MapFlexibleMemoryCore(ctx));
+        => RunMappingTransaction(() => MapFlexibleMemoryCore(ctx),
+            MapNeedsGpuDrain(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi], ctx[CpuRegister.Rcx]));
 
     private static int MapFlexibleMemoryCore(CpuContext ctx)
     {
@@ -6188,6 +6190,25 @@ public static partial class KernelMemoryCompatExports
             : read
                 ? HostPageReadOnly
                 : HostPageNoAccess;
+    }
+
+    // The guest mapping containing the address, for the GPU caches: a device-address fault
+    // inside it registers part of that mapping rather than a single page.
+    internal static bool TryGetMappedRange(ulong address, out ulong start, out ulong length)
+    {
+        lock (_memoryGate)
+        {
+            if (TryFindVirtualQueryRegionLocked(address, findNext: false, out var region) && !region.IsReserved)
+            {
+                start = region.Address;
+                length = region.Length;
+                return true;
+            }
+        }
+
+        start = 0;
+        length = 0;
+        return false;
     }
 
     private static bool TryFindVirtualQueryRegionLocked(ulong queryAddress, bool findNext, out MappedRegion region)

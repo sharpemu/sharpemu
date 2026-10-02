@@ -329,7 +329,8 @@ public static partial class KernelMemoryCompatExports
     internal static int ReserveBackingRange(CpuContext ctx, ulong pointer, ulong length, ulong flags, ulong alignment)
         => RunMappingTransaction(() => ReserveBackingRangeCore(ctx, pointer, length, flags, alignment));
 
-    private static int RunMappingTransaction(Func<int> transaction)
+    // needsDrain: null drains the GPU; a map passes whether its range may already be live.
+    private static int RunMappingTransaction(Func<int> transaction, Func<bool>? needsDrain = null)
     {
         // GPU handoff must precede locks needed by image and buffer reads.
         if (Monitor.IsEntered(_memoryGate))
@@ -338,9 +339,22 @@ public static partial class KernelMemoryCompatExports
             return transaction();
 
         var result = MemoryFault;
-        memory.RunMappingChange(() => result = transaction());
+        memory.RunMappingChange(() => result = transaction(), needsDrain);
         return result;
     }
+
+    // Whether a map request may replace memory the GPU can be using. Without MAP_FIXED the address
+    // is chosen among free or reserved ranges; with it, only a live (non-reserved) mapping in the
+    // range can be in use. An unreadable request pointer keeps the safe answer.
+    private static Func<bool> MapNeedsGpuDrain(CpuContext ctx, ulong addressPointer, ulong length, ulong flags) => () =>
+    {
+        if ((flags & OrbisKernelMapFixed) == 0)
+            return false;
+        if (!ctx.TryReadUInt64(addressPointer, out var requested) || length == 0 || requested > ulong.MaxValue - length)
+            return true;
+        lock (_memoryGate)
+            return GetMappingSlices(requested, length).Any(region => !region.IsReserved);
+    };
 
     private static int ReserveBackingRangeCore(CpuContext ctx, ulong pointer, ulong length, ulong flags, ulong alignment)
     {

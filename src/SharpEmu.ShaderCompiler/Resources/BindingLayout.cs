@@ -18,6 +18,8 @@ public enum DescriptorBindingKind : uint
     FaultBuffer,
     FlattenedResourceTable,
     ShaderData,
+    RuntimeDescriptorTable,
+    RuntimeDescriptorMisses,
     Count,
 }
 
@@ -327,6 +329,13 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public const uint FirstImageBinding = 1;
     public const uint FirstStorageImageBinding = 22;
     public const uint ImageBindingCount = 45;
+    // A bindless shader aliases all sampled image classes through one descriptor
+    // binding and all storage classes through another. The local slot table still
+    // keeps the guest image classes distinct.
+    public const uint BindlessSampledImageBinding = 0;
+    public const uint BindlessStorageImageBinding = 1;
+    // The persistent heap's sampler array, which runtime-descriptor accesses index.
+    public const uint BindlessSamplerBinding = 2;
     public const uint NoShaderBase = uint.MaxValue;
     public const uint ShaderBaseDwordCount = 2;
     private const int ScalarRegisterCount = 256;
@@ -337,12 +346,37 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public uint MemoryOffsetDword { get; init; }
     public uint MemoryOffsetCount { get; init; }
     public bool UsesDispatchThreadLimits { get; init; }
+
+    // The host writes each buffer's descriptor stride into shader data (two 16-bit halves
+    // per dword) and the shader indexes with it, so the stride is not compiled in: one
+    // program serves every stride a title binds instead of one compile per stride.
+    public bool UsesRuntimeBufferStrides { get; init; }
+    // Vulkan can put image arrays in one persistent descriptor set. The per-draw
+    // flattened table then starts with the local-image -> heap-slot mapping.
+    public bool UsesBindlessImages { get; init; }
     public IReadOnlyList<uint> UserDataRegisters { get; init; } = [];
     public IReadOnlyList<DescriptorBinding> Descriptors { get; init; } = [];
 
-    public uint DispatchThreadLimitsDword => MemoryOffsetDword + (MemoryOffsetCount + 3) / 4;
+    public uint BufferStrideDword => MemoryOffsetDword + (MemoryOffsetCount + 3) / 4;
+
+    public uint BufferStrideDwordCount => UsesRuntimeBufferStrides ? (MemoryOffsetCount + 1) / 2 : 0;
+
+    public uint DispatchThreadLimitsDword => BufferStrideDword + BufferStrideDwordCount;
 
     public uint ShaderDataDwordCount => DispatchThreadLimitsDword + (UsesDispatchThreadLimits ? 3u : 0u);
+
+    public static uint ImageSlotTableDwordCount(ShaderResourceInfo info)
+    {
+        var count = 0u;
+        foreach (var image in info.Images)
+        {
+            _ = ImageDescriptorBinding.ForImage(image) ?? throw new ResourcePlanException(
+                "image slot table cannot classify an image without a descriptor binding");
+            count += image.MipMode == ImageMipMode.DynamicStorage ? image.MipCount : 1u;
+        }
+
+        return count;
+    }
 
     public bool UsesPushData => PushDataStartDword != PushData.NoStart;
 
@@ -537,12 +571,16 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         bool usesFlattenedTable,
         bool usesShaderBase,
         uint pushDataStartDword = 0,
-        bool usesDispatchThreadLimits = false)
+        bool usesDispatchThreadLimits = false,
+        bool usesBindlessImages = false,
+        bool usesRuntimeBufferStrides = false)
     {
         var shaderBaseDword = usesShaderBase ? (uint)userDataRegisters.Count : NoShaderBase;
         var memoryOffsetDword = (uint)userDataRegisters.Count + (usesShaderBase ? ShaderBaseDwordCount : 0);
         var memoryOffsetCount = (uint)info.Buffers.Count;
-        var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 + (usesDispatchThreadLimits ? 3u : 0u);
+        usesRuntimeBufferStrides &= memoryOffsetCount != 0;
+        var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 +
+            (usesRuntimeBufferStrides ? (memoryOffsetCount + 1) / 2 : 0u) + (usesDispatchThreadLimits ? 3u : 0u);
         var pushStart = PushData.StartFor(pushDataStartDword, shaderDataDwords);
         var descriptors = new List<DescriptorBinding>();
         if (info.Buffers.Count != 0)
@@ -595,13 +633,25 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             descriptors.Add(new DescriptorBinding(DescriptorBindingKind.GlobalDataShare, []));
         }
 
+        if (info.UsesRuntimeDescriptors)
+        {
+            if (!usesBindlessImages)
+            {
+                throw new ResourcePlanException("runtime image descriptors need the persistent bindless heap");
+            }
+
+            descriptors.Add(new DescriptorBinding(DescriptorBindingKind.RuntimeDescriptorTable, []));
+            descriptors.Add(new DescriptorBinding(DescriptorBindingKind.RuntimeDescriptorMisses, []));
+        }
+
         if (info.UsesDeviceAddresses)
         {
             descriptors.Add(new DescriptorBinding(DescriptorBindingKind.DeviceAddressPageTable, []));
             descriptors.Add(new DescriptorBinding(DescriptorBindingKind.FaultBuffer, []));
         }
 
-        var flattened = usesFlattenedTable || info.Images.Any(image => image.IndirectSearchIterations != 0);
+        var flattened = usesFlattenedTable || info.Images.Any(image => image.IndirectSearchIterations != 0) ||
+                        (usesBindlessImages && info.Images.Count != 0);
         if (flattened)
         {
             descriptors.Add(new DescriptorBinding(DescriptorBindingKind.FlattenedResourceTable, []));
@@ -620,6 +670,11 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             MemoryOffsetDword = memoryOffsetDword,
             MemoryOffsetCount = memoryOffsetCount,
             UsesDispatchThreadLimits = usesDispatchThreadLimits,
+            UsesRuntimeBufferStrides = usesRuntimeBufferStrides,
+            // The set split is a pipeline-wide ABI. A stage without images must
+            // still place its buffers on set 1 when another stage uses set 0 for
+            // the persistent image heap.
+            UsesBindlessImages = usesBindlessImages,
             UserDataRegisters = userDataRegisters,
             Descriptors = descriptors,
         };
@@ -633,6 +688,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         MemoryOffsetDword == other.MemoryOffsetDword &&
         MemoryOffsetCount == other.MemoryOffsetCount &&
         UsesDispatchThreadLimits == other.UsesDispatchThreadLimits &&
+        UsesRuntimeBufferStrides == other.UsesRuntimeBufferStrides &&
+        UsesBindlessImages == other.UsesBindlessImages &&
         UserDataRegisters.SequenceEqual(other.UserDataRegisters) &&
         Descriptors.Count == other.Descriptors.Count &&
         Descriptors.Zip(other.Descriptors).All(pair => pair.First.Kind == pair.Second.Kind && pair.First.Resources.SequenceEqual(pair.Second.Resources));
@@ -661,7 +718,7 @@ public static class BindingLayoutValidator
             throw new ResourcePlanException("Only a compute shader can use dispatch thread limits.");
         }
 
-        var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare, usesFlattenedTable, usesShaderBase, layout.AllocationCursor, layout.UsesDispatchThreadLimits);
+        var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare, usesFlattenedTable, usesShaderBase, layout.AllocationCursor, layout.UsesDispatchThreadLimits, layout.UsesBindlessImages, layout.UsesRuntimeBufferStrides);
         if (!expected.Equals(layout))
         {
             throw new ResourcePlanException(
@@ -672,6 +729,7 @@ public static class BindingLayoutValidator
 
     private static string Describe(BindingLayout layout) =>
         $"push={layout.PushDataStartDword} base={layout.ShaderBaseDword} offsets={layout.MemoryOffsetDword}+{layout.MemoryOffsetCount} " +
+        $"strides={layout.UsesRuntimeBufferStrides} " +
         $"user=[{string.Join(",", layout.UserDataRegisters)}] " +
         string.Join(" ", layout.Descriptors.Select(binding => $"{binding.Kind}:{string.Join(",", binding.Resources)}"));
 }

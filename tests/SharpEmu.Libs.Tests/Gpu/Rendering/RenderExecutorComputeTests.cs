@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
@@ -106,6 +107,34 @@ public sealed class RenderExecutorComputeTests : IDisposable
         AssertNotDispatched();
         Assert.DoesNotContain("end_rendering", _host.Calls);
         Assert.DoesNotContain("reset_bindings", _host.Calls);
+        Assert.Empty(_pipelines.Calls);
+    }
+
+    [Fact]
+    public void IndirectDispatch_WithCleanZeroArguments_SkipsProgramLookup()
+    {
+        var address = RecordingRenderHost.MemoryBase + 0x400;
+        Span<byte> arguments = stackalloc byte[3 * sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(arguments[sizeof(uint)..], 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(arguments[(2 * sizeof(uint))..], 1);
+        _host.WriteGuest(address, arguments);
+
+        _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41, address);
+
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain("end_rendering", _host.Calls);
+    }
+
+    [Fact]
+    public void IndirectDispatch_WithGpuOwnedArguments_StillCompilesAndDispatches()
+    {
+        var address = RecordingRenderHost.MemoryBase + 0x400;
+        _host.WriteGuest(address, new byte[3 * sizeof(uint)]);
+        _host.CleanGuestMemoryAvailable = false;
+
+        _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41, address);
+
+        AssertDispatched(1, 1, 1);
     }
 
     [Fact]

@@ -914,6 +914,8 @@ public static partial class Gen5MslTranslator
                 case "STtraceData":
                 // Wave scheduling priority hint; no effect on results.
                 case "SSetprio":
+                // Sleeps the wave for a number of clocks; no effect on results.
+                case "SSleep":
                 case "SClause":
                 case "VNop":
                 // NGG shaders bracket their exports with s_sendmsg

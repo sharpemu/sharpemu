@@ -166,6 +166,23 @@ public sealed class ShaderCompileRequest
     // 64-bit atomics are emitted as real 64-bit atomics instead of a pair of
     // 32-bit ones, which is not atomic as a pair.
     public bool SupportsSharedInt64Atomics { get; init; }
+
+    // shaderFloat16 with round-to-nearest-even, denormal and signed zero/Inf/NaN
+    // preservation for f16 (float controls). Conversions and packed fused arithmetic
+    // may use native instructions; devices missing any guarantee use the software path.
+    public bool SupportsExactFloat16Conversions { get; init; }
+
+    // Descriptor indexing with a per-invocation index (shader*ArrayNonUniformIndexing): an
+    // indirect image table is then read by index instead of one case per candidate.
+    public bool SupportsNonUniformImageIndexing { get; init; }
+
+    // Emits the program-counter dispatcher even when the block graph can be structured, to
+    // compare the two control-flow forms.
+    public bool ForceDispatcher { get; init; }
+
+    // Formatted buffer accesses whose format is known when the shader is translated still
+    // go through the run-time format decoder. For tests that compare the two.
+    public bool ForceGenericBufferFormats { get; init; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
 
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];

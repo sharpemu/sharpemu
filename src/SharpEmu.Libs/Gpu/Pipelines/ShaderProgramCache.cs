@@ -204,6 +204,7 @@ internal sealed class ShaderProgramCache
             ShaderBase = source.Address,
             ReadMemory = _host.TryReadGuestWord,
             ReadCleanMemory = _host.TryReadCleanGuestWord,
+            ReadCleanWords = _host.TryReadCleanGuestWords,
             ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
                 ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
                     Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,
@@ -234,6 +235,14 @@ internal sealed class ShaderProgramCache
                 if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
                     throw new ShaderProgramRejectedException(message);
                 throw SubmissionScheduler.Fatal(message);
+            }
+
+            if (_host.RuntimeBufferStridesEnabled)
+            {
+                for (var index = 0; index < specialization.Buffers.Count; index++)
+                {
+                    specialization.Buffers[index] = specialization.Buffers[index].WithoutRuntimeStride();
+                }
             }
         }
 
@@ -478,7 +487,9 @@ internal sealed class ShaderProgramCache
                 ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
                 BindingLayout.ReadsShaderBase(program),
                 pushDataCursor,
-                usesDispatchThreadLimits: source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions);
+                usesDispatchThreadLimits: source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions,
+                usesBindlessImages: _host.UsesBindlessImages,
+                usesRuntimeBufferStrides: _host.RuntimeBufferStridesEnabled);
         }
         catch (ResourcePlanException exception)
         {
@@ -540,6 +551,8 @@ internal sealed class ShaderProgramCache
     {
         var enableGraphicsSubgroups = _host.GraphicsSubgroupOperationsEnabled;
         var sharedInt64Atomics = _host.SharedInt64AtomicsEnabled;
+        var exactFloat16Conversions = _host.ExactFloat16ConversionsEnabled;
+        var nonUniformImageIndexing = _host.NonUniformImageIndexingEnabled;
         switch (source.Stage)
         {
             case ShaderStage.Vertex:
@@ -552,6 +565,8 @@ internal sealed class ShaderProgramCache
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
+                    SupportsExactFloat16Conversions = exactFloat16Conversions,
+                    SupportsNonUniformImageIndexing = nonUniformImageIndexing,
                     RequiredVertexOutputCount = options.RequiredVertexOutputCount,
                     VertexInputs = entry.VertexInputs,
                     PositionExportControl = info.PositionExportControl,
@@ -578,6 +593,8 @@ internal sealed class ShaderProgramCache
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
+                    SupportsExactFloat16Conversions = exactFloat16Conversions,
+                    SupportsNonUniformImageIndexing = nonUniformImageIndexing,
                     PixelOutputs = options.PixelOutputs,
                     PixelInputEnable = options.PixelInputEnable,
                     PixelCustomInterpolationMask = info.CustomInterpolationMask,
@@ -597,6 +614,8 @@ internal sealed class ShaderProgramCache
                     TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
                     ScratchDwords = info.ScratchDwords,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
+                    SupportsExactFloat16Conversions = exactFloat16Conversions,
+                    SupportsNonUniformImageIndexing = nonUniformImageIndexing,
                     ComputeSystemRegisters = options.ComputeSystemRegisters,
                     LocalSizeX = Math.Max(info.ThreadsX, 1),
                     LocalSizeY = Math.Max(info.ThreadsY, 1),

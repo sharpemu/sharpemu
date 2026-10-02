@@ -156,8 +156,10 @@ public sealed class ScalarValueGraphTests
         Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(invariant, invariant.Info.Buffers[0].Source, Inputs([]), out var result));
         Assert.Equal(7u, result.Dwords[0]);
 
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(PhiProgram(7, 9)));
-        Assert.Contains("not a valid runtime value", error.Message);
+        // A divergent V# has no single host source; the access reads it from its SGPRs.
+        var divergent = Extract(PhiProgram(7, 9));
+        Assert.Empty(divergent.Info.Buffers);
+        Assert.True(divergent.Info.UsesDeviceAddresses);
     }
 
     [Fact]
@@ -331,8 +333,10 @@ public sealed class ScalarValueGraphTests
         Assert.True(RuntimeValueEvaluator.FlattenResourceTable(plan, Inputs([], memory.Read), out var table));
         Assert.Equal([0xA5A5A5A5u], table);
 
+        // A scalar load past the buffer's records returns zero, as on the hardware.
         var overflow = Extract(Read(16), userDataCount: 0);
-        Assert.False(RuntimeValueEvaluator.FlattenResourceTable(overflow, Inputs([], memory.Read), out _));
+        Assert.True(RuntimeValueEvaluator.FlattenResourceTable(overflow, Inputs([], memory.Read), out var overflowTable));
+        Assert.Equal([0u], overflowTable);
     }
 
     // A loop whose body runs under a divergent mask still reaches a fixpoint: the
@@ -430,6 +434,24 @@ public sealed class ScalarValueGraphTests
         };
         Assert.True(RuntimeValueEvaluator.FlattenResourceTable(plan, Inputs([0x413BA5B0, 4], new GuestWordReader(reader)), out var table));
         Assert.Equal([0x12345678u], table);
+    }
+
+    [Theory]
+    [InlineData(0u, 0u, 2u)]
+    [InlineData(1u, 0u, 2u)]
+    [InlineData(0u, 1u, 40u)]
+    public void InactiveVectorWrite_PreservesSavedLane(uint low, uint high, uint lane)
+    {
+        var program = Program(
+            WriteLane(0, vectorRegister: 18, scalarRegister: 84, lane: lane),
+            MoveScalar(8, 126, low),
+            MoveScalar(16, 127, high),
+            Vop1(24, "VMovB32", 18, Gen5Operand.Scalar(0)),
+            ReadLane(28, scalarRegister: 84, vectorRegister: 18, lane: lane),
+            ScalarLoad(36, 84, destination: 4),
+            EndProgram(44));
+        var plan = Extract(program, userDataBase: 84, userDataCount: 2);
+        Assert.Equal(84u, Assert.Single(plan.TableReads).Value.Operands[0].Operands[0].UserDataRegister);
     }
 
     [Fact]

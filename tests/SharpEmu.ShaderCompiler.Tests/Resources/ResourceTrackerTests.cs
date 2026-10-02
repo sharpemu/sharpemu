@@ -129,7 +129,7 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
-    public void SamplerWithDivergentBits_IsRejected()
+    public void SamplerWithDivergentBits_IsReadAtRuntime()
     {
         var program = Program(
             MoveScalarRegister(0, 16, 0),
@@ -141,9 +141,14 @@ public sealed class ResourceTrackerTests
             Image(0x200, "ImageSample", 8, 16),
             EndProgram(0x208));
 
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(program));
-        Assert.Contains("not a valid runtime value", error.Message);
-        Assert.Contains("pc=0x00000200", error.Message);
+        // The sampler has no plan-time source: the sample reads both descriptors from its
+        // registers through the runtime descriptor table instead of being planned.
+        var plan = Extract(program);
+        Assert.True(plan.Info.UsesRuntimeDescriptors);
+        var access = Assert.Single(plan.Memory.Entries, entry => entry.Pc == 0x200);
+        Assert.True(access.RuntimeDescriptor);
+        Assert.Empty(plan.Info.Images);
+        Assert.Empty(plan.Info.Samplers);
     }
 
     private static uint[] StorageDescriptorUserData(uint mipBase, uint mipLast) =>
@@ -401,9 +406,25 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
-    public void MalformedIndirectImage_IsRejected()
+    public void MalformedIndirectImage_IsReadAtRuntime()
     {
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(IndirectImageProgram(true)));
+        var plan = Extract(IndirectImageProgram(true));
+        Assert.True(plan.Info.UsesRuntimeDescriptors);
+        Assert.Contains(plan.Memory.Entries, entry => entry.RuntimeDescriptor);
+    }
+
+    // A storage access has no runtime view: an unresolvable descriptor still rejects the plan.
+    [Fact]
+    public void UnresolvableStorageImage_IsStillRejected()
+    {
+        var program = Program(
+            Vop2(0, "VLshlrevB32", 1, Operand(12), Gen5Operand.Vector(0)),
+            ReadFirstLane(4, 20, 1),
+            Sop2(8, "SOrB32", 3, Gen5Operand.Scalar(3), Gen5Operand.Scalar(20)),
+            Image(0x200, "ImageStore", 0),
+            EndProgram(0x208));
+
+        var error = Assert.Throws<ResourcePlanException>(() => Extract(program));
         Assert.Contains("not a valid runtime value", error.Message);
     }
 
@@ -553,8 +574,10 @@ public sealed class ResourceTrackerTests
             BufferLoad(32, 8),
             EndProgram(36));
 
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(program));
-        Assert.Contains("not a valid runtime value", error.Message);
+        // The control-dependent V# is read from its SGPRs when the access runs.
+        var plan = Extract(program);
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Info.UsesDeviceAddresses);
     }
 
     [Fact]

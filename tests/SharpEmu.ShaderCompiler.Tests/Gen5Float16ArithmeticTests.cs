@@ -14,6 +14,25 @@ public sealed class Gen5Float16ArithmeticTests
     private const ulong ShaderAddress = 0x1_0000_0000;
     private const uint SEndpgm = 0xBF810000;
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PackedFma_WithExactNativeHalfSupport_DoesNotExpandRoundToOdd(bool fmac)
+    {
+        var program = fmac
+            ? Decode([0x78000501u, SEndpgm])
+            : Decode([0xCC0E4000u, 257u | (258u << 9) | (259u << 18) | (3u << 27), SEndpgm]);
+        var (plan, resources, bindings) = ResourceTestProgram.Prepare(program, userDataCount: 0);
+        var original = new SharpEmu.ShaderCompiler.ShaderCompileRequest(plan, resources, bindings);
+        var request = new SharpEmu.ShaderCompiler.ShaderCompileRequest(plan,
+            resources, bindings) { SupportsExactFloat16Conversions = true };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var native, out var error), error);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(original, out var fallback, out error), error);
+        Gen5LargeDispatcherValidationTests.ValidateWithSpirvToolsWhenAvailable(native.Spirv);
+        Assert.DoesNotContain((ushort)SpirvOp.FSub, ReadOpcodes(native.Spirv));
+        Assert.Contains((ushort)SpirvOp.FSub, ReadOpcodes(fallback.Spirv));
+    }
+
     [Fact]
     public void CompactFloat16ArithmeticDecodesAndCompilesWithoutNativeFloat16()
     {
@@ -138,7 +157,7 @@ public sealed class Gen5Float16ArithmeticTests
             error);
     }
 
-    private static Gen5ShaderProgram Decode(IReadOnlyList<uint> words)
+    public static Gen5ShaderProgram Decode(IReadOnlyList<uint> words)
     {
         var memory = new TestCpuMemory(ShaderAddress, words.Count * sizeof(uint));
         var bytes = new byte[words.Count * sizeof(uint)];

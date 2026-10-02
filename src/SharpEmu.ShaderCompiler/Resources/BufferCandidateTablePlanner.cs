@@ -25,6 +25,7 @@ internal static class BufferCandidateTablePlanner
         // with the component immediates 0,4,8,12 that one dwordx4 read produces.
         ScalarValue? srt = null;
         ScalarValue? dynamicOffset = null;
+        uint descriptorOffset = 0;
         for (var word = 0; word < 4; word++)
         {
             var read = handle.Operands[word];
@@ -35,10 +36,13 @@ internal static class BufferCandidateTablePlanner
 
             var memory = plan.Memory[read.MemoryIndex];
             if (memory.Kind != MemoryResourceKind.ScalarBuffer || memory.DataBits != 32 || memory.DataDwords != 1 ||
-                memory.Offset != (uint)word * sizeof(uint))
+                (word != 0 && memory.Offset != descriptorOffset + (uint)word * sizeof(uint)))
             {
                 return false;
             }
+
+            if (word == 0)
+                descriptorOffset = memory.Offset;
 
             if (srt is null)
             {
@@ -61,17 +65,21 @@ internal static class BufferCandidateTablePlanner
 
         // offset = base + index * stride
         var offset = dynamicOffset!;
-        var baseOffset = 0u;
+        var baseOffset = descriptorOffset;
         if (offset.Kind == ScalarValueKind.Operation && offset.Operation == ScalarOperation.IAdd32)
         {
             if (offset.Operands[0].IsConstant)
             {
-                baseOffset = offset.Operands[0].ConstantU32;
+                if ((ulong)baseOffset + offset.Operands[0].ConstantU32 > uint.MaxValue)
+                    return false;
+                baseOffset += offset.Operands[0].ConstantU32;
                 offset = offset.Operands[1];
             }
             else if (offset.Operands[1].IsConstant)
             {
-                baseOffset = offset.Operands[1].ConstantU32;
+                if ((ulong)baseOffset + offset.Operands[1].ConstantU32 > uint.MaxValue)
+                    return false;
+                baseOffset += offset.Operands[1].ConstantU32;
                 offset = offset.Operands[0];
             }
         }
@@ -114,7 +122,10 @@ internal static class BufferCandidateTablePlanner
         }
 
         var srtExtent = SrtByteExtent(plan, srt!);
-        var minOffset = unchecked(baseOffset + initial.ConstantU32 * stride);
+        var firstOffset = (ulong)baseOffset + (ulong)initial.ConstantU32 * stride;
+        if (firstOffset > uint.MaxValue)
+            return false;
+        var minOffset = (uint)firstOffset;
         var candidate = new BufferCandidateTablePlan
         {
             SrtHandle = srt!,
@@ -145,7 +156,10 @@ internal static class BufferCandidateTablePlanner
                 return false;
             }
 
-            maxOffset = unchecked(candidate.StaticCandidateOffset(count - 1) + BufferCandidateTablePlan.DescriptorByteSize);
+            var endOffset = firstOffset + (ulong)(count - 1) * candidate.CandidateSpacing + BufferCandidateTablePlan.DescriptorByteSize;
+            if (endOffset > uint.MaxValue)
+                return false;
+            maxOffset = (uint)endOffset;
         }
         else
         {

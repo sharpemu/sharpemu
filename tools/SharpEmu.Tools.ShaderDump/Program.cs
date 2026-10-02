@@ -5,6 +5,8 @@
 // Unexpected decode, plan, or emission results fail the run.
 
 using System.Buffers.Binary;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
@@ -12,6 +14,121 @@ using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 
 const ulong ProgramAddress = 0x100000;
+
+// Plans a recorded program (input.ir.txt) and emits it with the default specialization:
+// checks resource planning and SPIR-V emission of a shader the game rejected, offline.
+// --plan-ir <input.ir.txt> <compute|pixel|vertex> <out.spv>
+if (args.Length == 4 && args[0] == "--plan-ir")
+{
+    var lines = File.ReadAllLines(args[1]);
+    var words = new List<uint>();
+    uint userBase = 0, userCount = 0;
+    ulong hash = 0;
+    foreach (var line in lines)
+    {
+        var header = Regex.Match(line, @"user_data_base=(\d+) user_data_count=(\d+)");
+        if (header.Success)
+        {
+            userBase = uint.Parse(header.Groups[1].Value);
+            userCount = uint.Parse(header.Groups[2].Value);
+        }
+
+        var hashMatch = Regex.Match(line, @"hash=0x([0-9A-Fa-f]+)");
+        if (hashMatch.Success && hash == 0) hash = Convert.ToUInt64(hashMatch.Groups[1].Value, 16);
+        var match = Regex.Match(line, @"^0x([0-9A-Fa-f]+) ([0-9A-Fa-f]{8}(?:_[0-9A-Fa-f]{8})*) ");
+        if (!match.Success) continue;
+        var pc = Convert.ToUInt32(match.Groups[1].Value, 16);
+        if (pc != words.Count * sizeof(uint))
+            throw new ArgumentException($"Non-contiguous recorded code at 0x{pc:X}.");
+        words.AddRange(match.Groups[2].Value.Split('_').Select(word => Convert.ToUInt32(word, 16)));
+    }
+
+    var stage = args[2] switch { "pixel" => ShaderStage.Pixel, "vertex" => ShaderStage.Vertex, _ => ShaderStage.Compute };
+    var memory = new FakeMemory();
+    memory.AddRegion(ProgramAddress, words.ToArray());
+    if (!Gen5ShaderTranslator.TryDecodeProgram(new CpuContext(memory, Generation.Gen5), ProgramAddress, out var program, out var decodeError))
+        throw new InvalidOperationException(decodeError);
+    var plan = ShaderResourcePlan.Extract(program!, stage, hash, userBase, userCount);
+    var resources = ResourceMaterializer.ApplyTo(plan, ResourceSpecialization.Default(plan.Info));
+    var layout = BindingLayout.Allocate(resources.Info,
+        BindingLayout.CollectUserDataRegisters(program!, userBase, userCount),
+        BindingLayout.UsesGlobalDataShare(program!),
+        ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
+        BindingLayout.ReadsShaderBase(program!),
+        usesBindlessImages: true,
+        usesRuntimeBufferStrides: true);
+    var request = new ShaderCompileRequest(plan, resources, layout) { ThreadCountX = 1, ThreadCountY = 1, ThreadCountZ = 1 };
+    if (!Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var compileError))
+        throw new InvalidOperationException(compileError);
+    File.WriteAllBytes(args[3], shader.Spirv);
+    var runtime = plan.Memory.Entries.Count(entry => entry.RuntimeDescriptor);
+    Console.WriteLine($"hash=0x{hash:X16} instructions={program!.Instructions.Count} runtime_descriptor_accesses={runtime} images={resources.Info.Images.Count} spirv_bytes={shader.Spirv.Length}");
+    return;
+}
+
+// Recompile recorded compute code and its resource specialization without launching
+// the game. The input IR contains original instruction words, not executable host IR.
+if (args.Length == 4 && args[0] == "--replay-compute")
+{
+    using var capture = JsonDocument.Parse(File.ReadAllText(args[2]));
+    var state = capture.RootElement;
+    if (state.GetProperty("Stage").GetString() != "compute")
+        throw new ArgumentException("Only recorded compute shaders are supported.");
+    var words = new List<uint>();
+    foreach (var line in File.ReadLines(args[1]))
+    {
+        var match = Regex.Match(line, @"^0x([0-9A-Fa-f]+) ([0-9A-Fa-f]{8}(?:_[0-9A-Fa-f]{8})*) ");
+        if (!match.Success) continue;
+        var pc = Convert.ToUInt32(match.Groups[1].Value, 16);
+        if (pc != words.Count * sizeof(uint))
+            throw new ArgumentException($"Non-contiguous recorded code at 0x{pc:X}.");
+        words.AddRange(match.Groups[2].Value.Split('_').Select(word => Convert.ToUInt32(word, 16)));
+    }
+    var memory = new FakeMemory();
+    memory.AddRegion(ProgramAddress, words.ToArray());
+    var context = new CpuContext(memory, Generation.Gen5);
+    if (!Gen5ShaderTranslator.TryDecodeProgram(context, ProgramAddress, out var program, out var error))
+        throw new InvalidOperationException(error);
+    if (program!.Instructions.Count != state.GetProperty("InstructionCount").GetInt32())
+        throw new InvalidOperationException("Recorded and decoded instruction counts differ.");
+    var userCount = state.GetProperty("UserDataCount").GetUInt32();
+    var userBase = state.GetProperty("UserDataBase").GetUInt32();
+    var wave = state.GetProperty("WaveSize").GetUInt32();
+    var hash = Convert.ToUInt64(state.GetProperty("ShaderHash").GetString()![2..], 16);
+    var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, hash, userBase, userCount, waveSize: wave);
+    var specialization = state.GetProperty("Specialization").Deserialize<ResourceSpecialization>()!;
+    var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+    var layout = BindingLayout.Allocate(resources.Info,
+        BindingLayout.CollectUserDataRegisters(program, userBase, userCount),
+        BindingLayout.UsesGlobalDataShare(program),
+        ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
+        BindingLayout.ReadsShaderBase(program),
+        state.GetProperty("PushDataStartDword").GetUInt32(),
+        state.GetProperty("UsesDispatchThreadLimits").GetBoolean(),
+        state.GetProperty("UsesBindlessImages").GetBoolean(),
+        state.TryGetProperty("UsesRuntimeBufferStrides", out var runtimeStrides) && runtimeStrides.GetBoolean());
+    var request = new ShaderCompileRequest(plan, resources, layout)
+    {
+        WaveSize = wave,
+        EnableExecGuardElision = state.GetProperty("EnableExecGuardElision").GetBoolean(),
+        SupportsSharedInt64Atomics = state.GetProperty("SupportsSharedInt64Atomics").GetBoolean(),
+        SupportsExactFloat16Conversions = state.GetProperty("SupportsExactFloat16Conversions").GetBoolean(),
+        SupportsNonUniformImageIndexing = state.GetProperty("SupportsNonUniformImageIndexing").GetBoolean(),
+        ComputeSystemRegisters = state.GetProperty("ComputeSystemRegisters").Deserialize<Gen5ComputeSystemRegisters?>(),
+        ScratchDwords = state.GetProperty("ScratchDwords").GetUInt32(),
+        LocalSizeX = state.GetProperty("LocalSizeX").GetUInt32(),
+        LocalSizeY = state.GetProperty("LocalSizeY").GetUInt32(),
+        LocalSizeZ = state.GetProperty("LocalSizeZ").GetUInt32(),
+        ThreadCountX = state.GetProperty("ThreadCountX").GetUInt32(),
+        ThreadCountY = state.GetProperty("ThreadCountY").GetUInt32(),
+        ThreadCountZ = state.GetProperty("ThreadCountZ").GetUInt32(),
+    };
+    if (!Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out error))
+        throw new InvalidOperationException(error);
+    File.WriteAllBytes(args[3], shader.Spirv);
+    Console.WriteLine($"hash=0x{hash:X16} instructions={program.Instructions.Count} spirv_bytes={shader.Spirv.Length}");
+    return;
+}
 
 if (args.Length >= 1 && string.Equals(args[0], "--inspect", StringComparison.Ordinal))
 {

@@ -39,7 +39,7 @@ public static partial class ImageRequestBuilders
             ? GuestImageType.Color3D
             : shape.OneDimensional ? GuestImageType.Color1D : GuestImageType.Color2D;
         description.Extent = new Extent3D(1, 1, 1);
-        description.Resources = SubresourceCount.Single;
+        description.Resources = new SubresourceCount(1, shape.Cube ? 6u : 1u);
         description.BytesPerBlock = 4;
         description.Samples = shape.Multisampled ? 4u : 1u;
         description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 0, Pitch = 1, Height = 1 };
@@ -48,17 +48,20 @@ public static partial class ImageRequestBuilders
             Format = format,
             Type = shape.Volume
                 ? ImageViewType.Type3D
+                : shape.Cube
+                    ? ImageViewType.TypeCube
                 : shape.OneDimensional
                     ? shape.Arrayed ? ImageViewType.Type1DArray : ImageViewType.Type1D
                     : shape.Arrayed ? ImageViewType.Type2DArray : ImageViewType.Type2D,
             Aspect = depthCompare ? ImageAspectFlags.DepthBit : ImageAspectFlags.ColorBit,
+            LayerCount = shape.Cube ? 6u : 1u,
             Usage = storage ? ImageUsageFlags.StorageBit : ImageUsageFlags.SampledBit,
         };
         return new ImageRequest(description, view, storage ? ImageRole.StorageImage : ImageRole.Texture);
     }
 
     // A depth placeholder reads its value into red, as sampled depth views do.
-    private static TextureRequestResolution NullTextureResolution(in ShaderImageShape shape)
+    public static TextureRequestResolution NullTextureResolution(in ShaderImageShape shape)
     {
         var request = NullTexture(shape);
         var swizzle = request.Description.IsDepth ? ViewFormatRules.PackDestinationSelect(4, 0, 0, 1) : 0u;
@@ -112,13 +115,15 @@ public static partial class ImageRequestBuilders
 
     // The view follows the compiled module: a volume, a layer window to the last layer, or one layer.
     private static ImageViewDescription TextureView(
-        in TextureDescriptorWords descriptor, in ShaderImageShape shape, Format format, bool shaderConversion, uint viewLevels, uint imageLayers)
+        in TextureDescriptorWords descriptor, in ShaderImageShape shape, Format format, bool shaderConversion, uint viewLevels, uint imageLayers,
+        uint firstLevel = 0)
     {
+        var baseLevel = descriptor.BaseLevel - firstLevel;
         var mapping = shape.Storage || shaderConversion ? default : ViewFormatRules.ComponentMapping(DestinationSwizzle(descriptor));
         var usage = shape.Storage ? ImageUsageFlags.StorageBit : ImageUsageFlags.SampledBit;
         if (shape.Volume)
         {
-            return WithMinLod(new ImageViewDescription(format, ImageViewType.Type3D, ImageAspectFlags.ColorBit, descriptor.BaseLevel, viewLevels, 0, 1, mapping, usage), descriptor, shape);
+            return WithMinLod(new ImageViewDescription(format, ImageViewType.Type3D, ImageAspectFlags.ColorBit, baseLevel, viewLevels, 0, 1, mapping, usage), descriptor, shape, firstLevel);
         }
 
         var baseLayer = descriptor.BaseArray;
@@ -131,15 +136,16 @@ public static partial class ImageRequestBuilders
         var type = shape.OneDimensional
             ? shape.Arrayed ? ImageViewType.Type1DArray : ImageViewType.Type1D
             : shape.Arrayed ? ImageViewType.Type2DArray : ImageViewType.Type2D;
-        return WithMinLod(new ImageViewDescription(format, type, ImageAspectFlags.ColorBit, descriptor.BaseLevel, viewLevels, baseLayer, layerCount, mapping, usage), descriptor, shape);
+        return WithMinLod(new ImageViewDescription(format, type, ImageAspectFlags.ColorBit, baseLevel, viewLevels, baseLayer, layerCount, mapping, usage), descriptor, shape, firstLevel);
     }
 
     // MIN_LOD (4.8 fixed point, absolute mip levels) keeps sampling off mips a streamed texture has not
     // loaded yet; ignoring it sampled the unloaded mip 0 of Astro Bot's stadium sky and bloom spread its
     // garbage HDR values over the screen. Storage views address levels explicitly and are not clamped.
-    private static ImageViewDescription WithMinLod(ImageViewDescription view, in TextureDescriptorWords descriptor, in ShaderImageShape shape)
+    private static ImageViewDescription WithMinLod(ImageViewDescription view, in TextureDescriptorWords descriptor, in ShaderImageShape shape, uint firstLevel)
     {
-        var minLod = descriptor.MinLod / 256f;
+        // The host image starts at the first resident guest level; view levels count from there.
+        var minLod = descriptor.MinLod / 256f - firstLevel;
         if (shape.Storage || minLod <= view.BaseLevel)
         {
             return view;
@@ -286,7 +292,11 @@ public static partial class ImageRequestBuilders
             pixelFormat = depthFormat.DepthAttachmentFormat;
         }
         // Atomic storage images are declared as UINT in SPIR-V, including float atomics.
-        var storageViewFormat = storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? Format.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
+        // Write-only SINT storage images are declared as UINT and use the same-size UINT view.
+        var storageViewFormat = !storage ? Format.Undefined
+            : shape.Atomic || format == GuestPixelFormat.Bits32SInt ? Format.R32Uint
+            : shape.NumericClass == TextureNumericClass.Uint && ViewFormatRules.UintStorageFormat(pixelFormat) is var uintView && uintView != Format.Undefined ? uintView
+            : ViewFormatRules.SrgbStorageFormat(pixelFormat);
         var viewFormat = storage && storageViewFormat != Format.Undefined ? storageViewFormat : pixelFormat;
         var blockBytes = GuestPixelFormats.BlockCompressedBytes(format);
         var description = ImageDescription.Create();
@@ -309,7 +319,16 @@ public static partial class ImageRequestBuilders
             PopulateTextureMipLayout(ref description);
         }
 
-        var view = TextureView(descriptor, shape, viewFormat, shaderConversion, viewLevels, description.Resources.Layers);
+        // A sampled texture whose descriptor starts past mip 0 is a streamed texture with only
+        // those mips resident: the host image holds them alone instead of the whole chain.
+        var firstLevel = !storage && !volume && samples == 1 && baseLevel > 0 && baseLevel < levels ? baseLevel : 0u;
+        if (firstLevel != 0)
+        {
+            description.FirstLevel = firstLevel;
+            description.Resources = new SubresourceCount(levels - firstLevel, imageLayers);
+        }
+
+        var view = TextureView(descriptor, shape, viewFormat, shaderConversion, viewLevels, description.Resources.Layers, firstLevel);
         var request = new ImageRequest(description, view, storage ? ImageRole.StorageImage : ImageRole.Texture);
         return new TextureRequestResolution(request, shaderConversion, pixelFormat, DestinationSwizzle(descriptor));
     }

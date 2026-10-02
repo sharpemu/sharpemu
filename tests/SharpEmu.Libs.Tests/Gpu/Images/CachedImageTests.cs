@@ -66,14 +66,16 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         Assert.True(backed.Backing.Exists);
         Assert.Equal(ImageAccessState.Initial, backed.Backing.State);
         Assert.Equal(256UL, backed.Description.Data.Size);
-        Assert.Equal(1024UL, backed.AccountedSize);
+        Assert.Equal(backed.Backing.AllocationSize, backed.AccountedSize);
+        Assert.True(backed.AccountedSize > 0);
 
         var unbacked = Color2D(8, 8);
         unbacked.Data = GuestSpan.Empty;
         unbacked.Pitch = 0;
         var fresh = harness.CreateImage(unbacked);
         Assert.False(fresh.IsCpuDirty);
-        Assert.Equal(0UL, fresh.AccountedSize);
+        Assert.Equal(fresh.Backing.AllocationSize, fresh.AccountedSize);
+        Assert.True(fresh.AccountedSize > 0);
 
         var association = ImageDescription.Create();
         association.Data = new GuestSpan(ArrayBackedSpace.Base, 0x100);

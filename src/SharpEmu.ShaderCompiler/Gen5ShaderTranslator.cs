@@ -160,9 +160,9 @@ public static partial class Gen5ShaderTranslator
             return false;
         }
 
-        if (parts.ContinuationAddress <= entryAddress ||
-            parts.ContinuationAddress - entryAddress > uint.MaxValue ||
-            ((parts.ContinuationAddress - entryAddress) & (sizeof(uint) - 1)) != 0)
+        if (parts.ContinuationAddress == entryAddress ||
+            (parts.ContinuationAddress > entryAddress && parts.ContinuationAddress - entryAddress > uint.MaxValue) ||
+            ((parts.ContinuationAddress | entryAddress) & (sizeof(uint) - 1)) != 0)
         {
             error = $"invalid-fused-layout entry=0x{entryAddress:X} " +
                 $"continuation=0x{parts.ContinuationAddress:X}";
@@ -202,7 +202,11 @@ public static partial class Gen5ShaderTranslator
             return false;
         }
 
-        var continuationPc = checked((uint)(parts.ContinuationAddress - entryAddress));
+        var earlierContinuation = parts.ContinuationAddress < entryAddress;
+        var continuationPc = earlierContinuation
+            ? checked(entryProgram.Instructions[^1].Pc + sizeof(uint))
+            : checked((uint)(parts.ContinuationAddress - entryAddress));
+        var addressOffsets = earlierContinuation ? new Dictionary<uint, ulong>() : null;
         var instructions = new List<Gen5ShaderInstruction>(
             entryProgram.Instructions.Count + continuationProgram.Instructions.Count);
         instructions.AddRange(entryProgram.Instructions.Take(entryProgram.Instructions.Count - 1));
@@ -229,9 +233,11 @@ public static partial class Gen5ShaderTranslator
             }
 
             instructions.Add(instruction with { Pc = (uint)rebasedPc });
+            if (addressOffsets is not null)
+                addressOffsets[(uint)rebasedPc] = unchecked(parts.ContinuationAddress - entryAddress + instruction.Pc);
         }
 
-        program = new Gen5ShaderProgram(entryAddress, instructions);
+        program = new Gen5ShaderProgram(entryAddress, instructions) { InstructionAddressOffsets = addressOffsets };
         error = string.Empty;
         return true;
     }
@@ -369,8 +375,11 @@ public static partial class Gen5ShaderTranslator
                 return true;
             }
 
+            // S_SWAPPC_B64 with NULL as its link destination discards the return
+            // address and is a tail transfer, as used by merged LS/HS programs.
             if (stopAtSetProgramCounter &&
-                string.Equals(name, "SSetpcB64", StringComparison.Ordinal))
+                (string.Equals(name, "SSetpcB64", StringComparison.Ordinal) ||
+                 (string.Equals(name, "SSwappcB64", StringComparison.Ordinal) && ((word >> 16) & 0x7F) == 125)))
             {
                 program = new Gen5ShaderProgram(address, instructions);
                 termination = ProgramTermination.SetProgramCounter;
@@ -772,6 +781,7 @@ public static partial class Gen5ShaderTranslator
             0x09 => "SCbranchExecnz",
             0x0A => "SBarrier",
             0x0C => "SWaitcnt",
+            0x0E => "SSleep",
             0x0F => "SSetprio",
             0x10 => "SSendmsg",
             0x12 => "STrap",
@@ -1502,7 +1512,8 @@ public static partial class Gen5ShaderTranslator
         out uint sizeDwords,
         out string error)
     {
-        var opcode = ((word >> 18) & 0x7F) | ((word & 1) << 7);
+        // GFX10 MUBUF has eight opcode bits at 18..25; bit zero belongs to OFFSET.
+        var opcode = (word >> 18) & 0xFF;
         name = opcode switch
         {
             0x00 => "BufferLoadFormatX",
@@ -1535,6 +1546,7 @@ public static partial class Gen5ShaderTranslator
             0x23 => "BufferLoadSbyteD16Hi",
             0x24 => "BufferLoadShortD16",
             0x25 => "BufferLoadShortD16Hi",
+            0x27 => "BufferStoreFormatD16HiX",
             0x30 => "BufferAtomicSwap",
             0x31 => "BufferAtomicCmpswap",
             0x32 => "BufferAtomicAdd",
@@ -1565,6 +1577,14 @@ public static partial class Gen5ShaderTranslator
             0x4C => "BufferAtomicInc",
             0x50 => "BufferAtomicSwapX2",
             0x5A => "BufferAtomicOrX2",
+            0x80 => "BufferLoadFormatD16X",
+            0x81 => "BufferLoadFormatD16Xy",
+            0x82 => "BufferLoadFormatD16Xyz",
+            0x83 => "BufferLoadFormatD16Xyzw",
+            0x84 => "BufferStoreFormatD16X",
+            0x85 => "BufferStoreFormatD16Xy",
+            0x86 => "BufferStoreFormatD16Xyz",
+            0x87 => "BufferStoreFormatD16Xyzw",
             _ => $"MubufRaw{opcode:X2}",
         };
         sizeDwords = (extra >> 24) == 0xFF ? 3u : 2u;
@@ -1754,7 +1774,9 @@ public static partial class Gen5ShaderTranslator
             0x3F => "ImageSampleCLzO",
             0x40 => "ImageGather4",
             0x47 => "ImageGather4Lz",
+            0x44 => "ImageGather4L",
             0x48 => "ImageGather4C",
+            0x4C => "ImageGather4CL",
             0x4E => "ImageGather4CBCl",
             0x4F => "ImageGather4CLz",
             0x57 => "ImageGather4LzO",
@@ -2660,6 +2682,10 @@ public static partial class Gen5ShaderTranslator
                     "BufferStoreFormatXy" => 2u,
                     "BufferStoreFormatXyz" => 3u,
                     "BufferStoreFormatXyzw" => 4u,
+                    "BufferLoadFormatD16X" or "BufferLoadFormatD16Xy" or
+                    "BufferStoreFormatD16X" or "BufferStoreFormatD16Xy" => 1u,
+                    "BufferLoadFormatD16Xyz" or "BufferLoadFormatD16Xyzw" or
+                    "BufferStoreFormatD16Xyz" or "BufferStoreFormatD16Xyzw" => 2u,
                     "BufferLoadUbyte" or
                     "BufferLoadSbyte" or
                     "BufferLoadUshort" or
@@ -2705,7 +2731,13 @@ public static partial class Gen5ShaderTranslator
                     ((word >> 13) & 1) != 0,
                     ((word >> 12) & 1) != 0,
                     ((word >> 14) & 1) != 0,
-                    ((extra >> 22) & 1) != 0);
+                    ((extra >> 22) & 1) != 0,
+                    PackedD16: opcode.Contains("FormatD16", StringComparison.Ordinal) && !opcode.Contains("Hi", StringComparison.Ordinal),
+                    FormatComponentCount: opcode.Contains("FormatD16", StringComparison.Ordinal) && !opcode.Contains("Hi", StringComparison.Ordinal)
+                        ? opcode.EndsWith("Xyzw", StringComparison.Ordinal) ? 4u
+                            : opcode.EndsWith("Xyz", StringComparison.Ordinal) ? 3u
+                            : opcode.EndsWith("Xy", StringComparison.Ordinal) ? 2u : 1u
+                        : 0u);
                 break;
             }
             case Gen5ShaderEncoding.Mtbuf:
@@ -2748,7 +2780,13 @@ public static partial class Gen5ShaderTranslator
                     ((word >> 14) & 1) != 0,
                     ((extra >> 22) & 1) != 0,
                     Typed: true,
-                    TypedFormat: (word >> 19) & 0x7F);
+                    TypedFormat: (word >> 19) & 0x7F,
+                    PackedD16: opcode.Contains("D16", StringComparison.Ordinal),
+                    FormatComponentCount: opcode.Contains("D16", StringComparison.Ordinal)
+                        ? opcode.EndsWith("Xyzw", StringComparison.Ordinal) ? 4u
+                            : opcode.EndsWith("Xyz", StringComparison.Ordinal) ? 3u
+                            : opcode.EndsWith("Xy", StringComparison.Ordinal) ? 2u : 1u
+                        : 0u);
                 break;
             }
             case Gen5ShaderEncoding.Mimg:

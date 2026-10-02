@@ -300,6 +300,20 @@ public sealed class GuestGpuMemoryTests
     }
 
     [Fact]
+    public void MappingIntoUnmappedAddressesSkipsTheGpuDrain()
+    {
+        var scheduler = new RecordingScheduler { Active = true };
+        var queue = new InlineQueue { IsGpuQueueThread = false };
+        _memory.AttachGpuQueue(queue, scheduler);
+        _memory.RunMappingChange(() => scheduler.Calls.Add("change"), needsDrain: () => false);
+        // Still ordered after the queued GPU work, but no wait for the GPU to finish it.
+        Assert.Equal(new[] { "change" }, scheduler.Calls);
+        Assert.Equal(1, queue.Runs);
+        _memory.AttachGpuQueue(null, null);
+        _memory.Dispose();
+    }
+
+    [Fact]
     public async Task MappingChangeWaitsForDetachWhenTheRelayCloses()
     {
         var queue = new InlineQueue { IsGpuQueueThread = false, Accepting = false };

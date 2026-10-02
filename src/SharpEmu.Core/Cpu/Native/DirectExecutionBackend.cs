@@ -5500,7 +5500,25 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return false;
 	}
 
-	private static bool TryMapGuestThreadRegion(
+	// Finding a free slot and mapping it must be one step: Map reuses a region that
+	// already exists, so two threads claiming at once would both get the same stack.
+	private static readonly object GuestThreadRegionGate = new();
+
+	internal static bool TryMapGuestThreadRegion(
+		IVirtualMemory virtualMemory,
+		ulong baseAddress,
+		ulong size,
+		ProgramHeaderFlags protection,
+		out ulong mappedBase,
+		out string? error)
+	{
+		lock (GuestThreadRegionGate)
+		{
+			return TryMapFreeGuestThreadRegion(virtualMemory, baseAddress, size, protection, out mappedBase, out error);
+		}
+	}
+
+	private static bool TryMapFreeGuestThreadRegion(
 		IVirtualMemory virtualMemory,
 		ulong baseAddress,
 		ulong size,
@@ -5538,6 +5556,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	}
 
 	private static bool TryMapGuestThreadTlsRegion(
+		IVirtualMemory virtualMemory,
+		out ulong tlsBase,
+		out string? error)
+	{
+		lock (GuestThreadRegionGate)
+		{
+			return TryMapFreeGuestThreadTlsRegion(virtualMemory, out tlsBase, out error);
+		}
+	}
+
+	private static bool TryMapFreeGuestThreadTlsRegion(
 		IVirtualMemory virtualMemory,
 		out ulong tlsBase,
 		out string? error)

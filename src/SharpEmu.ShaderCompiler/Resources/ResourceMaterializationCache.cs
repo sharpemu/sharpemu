@@ -83,13 +83,11 @@ public sealed class ResourceMaterializationCache
         Misses++;
         Interlocked.Increment(ref _totalMisses);
         var recorder = new ReadRecorder();
-        var recording = new ResourceRuntimeInputs
+        var recording = inputs with
         {
-            UserData = inputs.UserData,
-            ShaderBase = inputs.ShaderBase,
             ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
             ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
-            ComputeState = inputs.ComputeState,
+            ReadCleanWords = recorder.Wrap(inputs.ReadCleanWords),
             TablePhase = recorder.SetTablePhase,
         };
         if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
@@ -140,13 +138,11 @@ public sealed class ResourceMaterializationCache
             return false;
 
         var recorder = new ReadRecorder();
-        var recording = new ResourceRuntimeInputs
+        var recording = inputs with
         {
-            UserData = inputs.UserData,
-            ShaderBase = inputs.ShaderBase,
             ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
             ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
-            ComputeState = inputs.ComputeState,
+            ReadCleanWords = recorder.Wrap(inputs.ReadCleanWords),
         };
         var cachedTable = cached.Snapshot.FlattenedResourceTable;
         if (!ResourceMaterializer.TryEvaluateTable(plan, recording, out var table) || recorder.Failed || table.Length != cachedTable.Length)
@@ -310,6 +306,7 @@ public sealed class ResourceMaterializationCache
     private sealed class ReadRecorder
     {
         private readonly List<(ulong Address, uint Word, bool Clean, bool Table)> _reads = new();
+        private readonly Dictionary<ulong, int> _readIndex = new();
         private bool _inTable;
 
         public bool Failed { get; private set; }
@@ -330,9 +327,38 @@ public sealed class ResourceMaterializationCache
                     return false;
                 }
 
-                _reads.Add((address, word, clean, _inTable));
+                Record(address, word, clean);
                 return true;
             };
+        }
+
+        public GuestWordsReader? Wrap(GuestWordsReader? inner)
+        {
+            if (inner is null) return null;
+            return (ulong address, Span<uint> words) =>
+            {
+                // A refused range falls back to individual reads; only those
+                // determine whether the materialization is uncacheable.
+                if (!inner(address, words)) return false;
+                for (var index = 0; index < words.Length; index++)
+                    Record(address + (ulong)index * sizeof(uint), words[index], true);
+                return true;
+            };
+        }
+
+        private void Record(ulong address, uint word, bool clean)
+        {
+            if (_readIndex.TryGetValue(address, out var index))
+            {
+                var previous = _reads[index];
+                // A changing input during one materialization cannot be represented
+                // by a cache entry that validates only one value for this address.
+                if (previous.Word != word) Failed = true;
+                _reads[index] = (address, previous.Word, previous.Clean || clean, previous.Table && _inTable);
+                return;
+            }
+            _readIndex.Add(address, _reads.Count);
+            _reads.Add((address, word, clean, _inTable));
         }
 
         public Entry Build(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ResourceSnapshot snapshot,

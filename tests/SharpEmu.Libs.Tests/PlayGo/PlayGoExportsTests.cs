@@ -26,6 +26,9 @@ public sealed class PlayGoExportsTests : IDisposable
     private const ulong HandleAddress = MemoryBase + 0x200;
     private const ulong ChunkIdsAddress = MemoryBase + 0x300;
     private const ulong LociAddress = MemoryBase + 0x400;
+    private const ulong OutEntriesAddress = MemoryBase + 0x500;
+    private const ulong ProgressAddress = MemoryBase + 0x600;
+    private const ulong NextChunkAddress = MemoryBase + 0x700;
 
     private readonly string? _originalApp0Root;
     private readonly string _app0Root;
@@ -55,6 +58,63 @@ public sealed class PlayGoExportsTests : IDisposable
     }
 
     [Fact]
+    public void GetLocus_MetadataFreeApp0_ReportsAllInstalledPakChunks()
+    {
+        for (var chunk = 0; chunk <= 8; chunk++)
+        {
+            File.WriteAllBytes(Path.Combine(_app0Root, $"pakchunk{chunk}-Windows.pak"), []);
+        }
+
+        var handle = InitializeAndOpen();
+
+        Assert.Equal(BadChunkId, GetLocus(handle, [0, 8, 9]));
+        Assert.Equal(
+            new byte[] { LocusLocalFast, LocusLocalFast, LocusNotDownloaded },
+            ReadLoci(3));
+    }
+
+    [Fact]
+    public void PlayGoPgm_ReportsEveryChunkAndProgress()
+    {
+        var cacheDirectory = Directory.CreateDirectory(Path.Combine(_app0Root, "cache_ps5"));
+        var header = new byte[0x14];
+        "DMGP"u8.CopyTo(header);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(0x10), 35);
+        File.WriteAllBytes(Path.Combine(cacheDirectory.FullName, "playgo.pgm"), header);
+
+        var handle = InitializeAndOpen();
+
+        _ctx[CpuRegister.Rdi] = handle;
+        _ctx[CpuRegister.Rsi] = 0;
+        _ctx[CpuRegister.Rdx] = 0;
+        _ctx[CpuRegister.Rcx] = OutEntriesAddress;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, PlayGoExports.PlayGoGetChunkId(_ctx));
+        Assert.Equal(35u, ReadUInt32(OutEntriesAddress));
+
+        var chunkIds = Enumerable.Range(0, 35).Select(static value => (ushort)value).ToArray();
+        WriteChunkIds(chunkIds);
+        _ctx[CpuRegister.Rsi] = ChunkIdsAddress;
+        _ctx[CpuRegister.Rdx] = (ulong)chunkIds.Length;
+        _ctx[CpuRegister.Rcx] = OutEntriesAddress;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, PlayGoExports.PlayGoGetChunkId(_ctx));
+        Assert.Equal(35u, ReadUInt32(OutEntriesAddress));
+        Assert.Equal(chunkIds, ReadChunkIds(chunkIds.Length));
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [34]));
+        Assert.Equal(new byte[] { LocusLocalFast }, ReadLoci(1));
+
+        SetGetProgressArguments(handle, ChunkIdsAddress, (uint)chunkIds.Length, ProgressAddress);
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, PlayGoExports.PlayGoGetProgress(_ctx));
+        Assert.Equal(1ul, ReadUInt64(ProgressAddress));
+        Assert.Equal(1ul, ReadUInt64(ProgressAddress + sizeof(ulong)));
+
+        _ctx[CpuRegister.Rdi] = handle;
+        _ctx[CpuRegister.Rsi] = NextChunkAddress;
+        Assert.Equal(unchecked((int)0x80020002), PlayGoExports.PlayGoRequestNextChunk(_ctx));
+        Assert.Equal(0u, ReadUInt32(NextChunkAddress));
+    }
+
+    [Fact]
     public void GetLocus_ParsedChunkDefinitions_WritesPrefixAndRejectsFirstUnknownChunk()
     {
         File.WriteAllText(
@@ -68,6 +128,7 @@ public sealed class PlayGoExportsTests : IDisposable
 
     [Theory]
     [InlineData(UnusableMetadataKind.DatOnly)]
+    [InlineData(UnusableMetadataKind.ScenarioOnly)]
     [InlineData(UnusableMetadataKind.MalformedChunkDefinitions)]
     [InlineData(UnusableMetadataKind.UnrecognizedChunkDefinitions)]
     public void GetLocus_UnparseableMetadata_RemainsPermissive(UnusableMetadataKind metadataKind)
@@ -77,6 +138,10 @@ public sealed class PlayGoExportsTests : IDisposable
             case UnusableMetadataKind.DatOnly:
                 var sceSys = Directory.CreateDirectory(Path.Combine(_app0Root, "sce_sys"));
                 File.WriteAllBytes(Path.Combine(sceSys.FullName, "playgo-chunk.dat"), [0x70, 0x6C, 0x67, 0x6F]);
+                break;
+            case UnusableMetadataKind.ScenarioOnly:
+                var scenarioDirectory = Directory.CreateDirectory(Path.Combine(_app0Root, "sce_sys"));
+                File.WriteAllText(Path.Combine(scenarioDirectory.FullName, "playgo-scenario.json"), "{}");
                 break;
             case UnusableMetadataKind.MalformedChunkDefinitions:
                 File.WriteAllText(
@@ -192,6 +257,33 @@ public sealed class PlayGoExportsTests : IDisposable
         return loci;
     }
 
+    private ushort[] ReadChunkIds(int count)
+    {
+        var bytes = new byte[count * sizeof(ushort)];
+        Assert.True(_memory.TryRead(ChunkIdsAddress, bytes));
+        var chunkIds = new ushort[count];
+        for (var i = 0; i < count; i++)
+        {
+            chunkIds[i] = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(i * sizeof(ushort)));
+        }
+
+        return chunkIds;
+    }
+
+    private uint ReadUInt32(ulong address)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        Assert.True(_memory.TryRead(address, bytes));
+        return BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+    }
+
+    private ulong ReadUInt64(ulong address)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        Assert.True(_memory.TryRead(address, bytes));
+        return BinaryPrimitives.ReadUInt64LittleEndian(bytes);
+    }
+
     private void SetGetLocusArguments(uint handle, ulong chunkIds, uint count, ulong outLoci)
     {
         _ctx[CpuRegister.Rdi] = handle;
@@ -200,9 +292,18 @@ public sealed class PlayGoExportsTests : IDisposable
         _ctx[CpuRegister.Rcx] = outLoci;
     }
 
+    private void SetGetProgressArguments(uint handle, ulong chunkIds, uint count, ulong outProgress)
+    {
+        _ctx[CpuRegister.Rdi] = handle;
+        _ctx[CpuRegister.Rsi] = chunkIds;
+        _ctx[CpuRegister.Rdx] = count;
+        _ctx[CpuRegister.Rcx] = outProgress;
+    }
+
     public enum UnusableMetadataKind
     {
         DatOnly,
+        ScenarioOnly,
         MalformedChunkDefinitions,
         UnrecognizedChunkDefinitions,
     }

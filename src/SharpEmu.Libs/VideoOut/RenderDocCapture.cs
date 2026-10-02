@@ -37,6 +37,8 @@ public static unsafe class RenderDocCapture
 
     public static bool IsAvailable => _api is not null;
 
+    private static Timer? _timedCapture;
+
     public static bool ApplyVulkanLoaderEnvironment()
     {
         if (!string.Equals(
@@ -105,6 +107,14 @@ public static unsafe class RenderDocCapture
 
         Console.Error.WriteLine(
             "[LOADER][INFO] renderdoc: in-app capture ready. Press F12 to capture the next complete guest frame.");
+
+        // SHARPEMU_RENDERDOC_CAPTURE_AFTER_SECONDS requests one capture after that many seconds,
+        // for unattended runs.
+        if (int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_RENDERDOC_CAPTURE_AFTER_SECONDS"), out var delay) && delay > 0)
+        {
+            _timedCapture = new Timer(_ => RequestCapture(), null, TimeSpan.FromSeconds(delay), Timeout.InfiniteTimeSpan);
+            Console.Error.WriteLine($"[LOADER][INFO] renderdoc: a capture will be requested in {delay} s.");
+        }
     }
 
     public static void SetCaptureDirectory(string titleId)

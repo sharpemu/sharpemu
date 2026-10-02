@@ -236,6 +236,8 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
 
     void IRenderHost.RunPendingOperations() => RunPendingCommands();
 
+    bool IRenderHost.TryReadCleanGuestBytes(ulong address, Span<byte> destination) => false;
+
     void IRenderHost.SetDebugInformation(RecordedOperation operation, ulong submitId, uint argument0, uint argument1, uint argument2, uint argument3, ulong argument4)
     {
         _ = (operation, submitId, argument0, argument1, argument2, argument3, argument4);

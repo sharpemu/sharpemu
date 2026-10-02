@@ -45,6 +45,106 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
 
     public PresenterImageBindingTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
 
+    [Fact]
+    public void PreparationPressure_KeepsStreamDataAndUsesFeedbackFromTheFinalTick()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Images.SetCollectionThresholds(ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, 1);
+        var request = Color32(address);
+        var old = harness.Acquire(ref request);
+        var pool = (OptimalImageMemoryPool)GetFieldValue(harness.Images, "_imageMemoryPool");
+        presenter.Run(() =>
+        {
+            using var preparation = presenter.RenderHost.BeginPreparation();
+            var stream = harness.Cache.GetUtilityBuffer(GpuBufferUsage.Stream);
+            Assert.True(stream.TryMap(16, out var offset));
+            stream.Mapped.Slice((int)offset, 16).Fill(0xA5);
+            stream.Commit();
+            var program = new ShaderProgramInfo { Stage = ShaderStageKind.Pixel, Hash = 99 };
+            var stage = new ShaderStageResources(program, new ResourceSnapshot());
+            var preparedType = PresenterType.GetNestedType("PreparedStageBindings", BindingFlags.NonPublic)!;
+            var prepared = Activator.CreateInstance(preparedType, InstanceMembers, null, [stage, program], null)!;
+            var before = harness.Scheduler.CurrentTick;
+            harness.Images.SetCollectionThresholds(0, 0, pool.AllocatedBytes - 1, 2);
+            var nextRequest = Color32(address + 256);
+            _ = harness.Images.FindImage(ref nextRequest);
+            Assert.True(harness.Scheduler.CurrentTick > before);
+            Assert.False(harness.Images.Contains(old));
+            Assert.All(stream.Mapped.Slice((int)offset, 16).ToArray(), value => Assert.Equal((byte)0xA5, value));
+            presenter.InvokeMethod("CommitRuntimeDescriptorBuffers", prepared);
+            var descriptors = presenter.InvokeMethod("RuntimeDescriptorsFor", program)!;
+            Assert.Equal(harness.Scheduler.CurrentTick, (ulong)GetFieldValue(descriptors, "MissScanTick"));
+            harness.Scheduler.Finish();
+            presenter.InvokeMethod("DestroyRuntimeDescriptors");
+        });
+    }
+
+    [Fact]
+    public void DrawBoundary_ReclaimsImagePressureBeforeAnotherFrameIsPresented()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Images.SetCollectionThresholds(ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, 1);
+        var request = Color32(address);
+        var image = harness.Acquire(ref request);
+        harness.Images.SetCollectionThresholds(0, 0, 1, 2);
+        presenter.Run(() => presenter.RenderHost.RunPendingOperations());
+        Assert.False(harness.Images.Contains(image));
+        Assert.Equal(0UL, harness.Images.TotalUsedMemory);
+        var pool = (OptimalImageMemoryPool)GetFieldValue(harness.Images, "_imageMemoryPool");
+        Assert.Equal(0UL, pool.AllocatedBytes);
+    }
+
+    [Theory]
+    [InlineData(ShaderStageKind.Pixel, 2UL)]
+    [InlineData(ShaderStageKind.Compute, 1UL)]
+    public void RuntimeFeedback_DoesNotAcquireAnotherShadersTextures(ShaderStageKind nextStage, ulong nextHash)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var address = presenter.Harness.MapBacked(0x10000, ReadWrite);
+        var words = RegisterWords.Texture(address, GuestPixelFormat.Bits8_8_8_8UNorm, 4, 4);
+        var first = new ShaderProgramInfo { Stage = ShaderStageKind.Pixel, Hash = 1 };
+        var next = new ShaderProgramInfo { Stage = nextStage, Hash = nextHash };
+        presenter.Harness.Images.SetCollectionThresholds(ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, 1);
+        presenter.Run(() =>
+        {
+            var descriptors = presenter.InvokeMethod("RuntimeDescriptorsFor", first)!;
+            var misses = (System.Collections.Concurrent.ConcurrentQueue<(bool Image, uint[] Key)>)GetFieldValue(descriptors, "Misses");
+            misses.Enqueue((true, [(uint)ImageDimension.Dim2D, .. words]));
+            var preparedType = PresenterType.GetNestedType("PreparedStageBindings", BindingFlags.NonPublic)!;
+            object Prepare(ShaderProgramInfo program)
+            {
+                var stage = new ShaderStageResources(program, new ResourceSnapshot());
+                var prepared = Activator.CreateInstance(preparedType, InstanceMembers, null, [stage, program], null)!;
+                presenter.InvokeMethod("PrepareRuntimeDescriptors", prepared);
+                return prepared;
+            }
+            var firstBindings = Prepare(first);
+            presenter.Harness.Images.SetCollectionThresholds(ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, 2);
+            var nextBindings = Prepare(next);
+            var images = (IList)firstBindings.GetType().GetProperty("RuntimeImages")!.GetValue(firstBindings)!;
+            var unrelatedImages = (IList)nextBindings.GetType().GetProperty("RuntimeImages")!.GetValue(nextBindings)!;
+            Assert.Single(images.Cast<object>());
+            Assert.Empty(unrelatedImages.Cast<object>());
+            var oldImage = (ResourceSlotIdentifier)GetFieldValue(images[0]!, "ImageIdentifier");
+            presenter.Harness.Images.SetCollectionThresholds(0, 0, 1, 2);
+            presenter.RenderHost.RunPendingOperations();
+            Assert.False(presenter.Harness.Images.Contains(oldImage));
+            Assert.Equal(0UL, presenter.Harness.Images.TotalUsedMemory);
+            // Returning to the first program must retain its descriptor knowledge.
+            presenter.Harness.Images.SetCollectionThresholds(ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, 3);
+            var resumed = Prepare(first);
+            Assert.Single(((IList)resumed.GetType().GetProperty("RuntimeImages")!.GetValue(resumed)!).Cast<object>());
+            presenter.InvokeMethod("DestroyRuntimeDescriptors");
+        });
+    }
+
     [Theory]
     [InlineData(GuestPixelFormat.Bits16UNorm, Format.D16Unorm)]
     [InlineData(GuestPixelFormat.Bits32Float, Format.D32Sfloat)]
@@ -193,7 +293,8 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
         });
 
         harness.Finish();
-        Assert.All(workingImages, image => Assert.False(image.Backing.Exists));
+        Assert.Same(workingImages[0], workingImages[1]);
+        Assert.All(workingImages, image => Assert.True(image.Backing.Exists));
         var stencil = harness.ReadImageBytes(attachment, ImageAspectFlags.StencilBit);
         for (var layer = 0; layer < layers; layer++)
             for (var row = 0; row < 64; row++)
@@ -204,7 +305,14 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
             Assert.Equal(0.25f, BitConverter.ToSingle(depthBytes, offset));
         Assert.True(attachment.IsGpuModified);
         Assert.True(harness.ProxyAt(stencilAddress, attachment.Description.Stencil.Size).IsValid);
+        var workingViews = workingImages[0].GetOwnedViews().ToArray();
+        var invalidated = new List<ImageView>();
+        harness.Images.BindlessImageInvalidator = views => invalidated.AddRange(views);
+        presenter.Run(() => ((SharpEmu.HLE.GpuMemory.IGuestImageStore)harness.Images).Unregister(attachment.Description.Data.Address, attachment.Description.Data.Size));
+        Assert.NotEmpty(workingViews);
+        Assert.All(workingViews, view => Assert.Contains(view, invalidated));
         harness.Shutdown();
+        Assert.All(workingImages, image => Assert.False(image.Backing.Exists));
     }
 
     private static byte[] CreateStencilIncrementShader(uint imageBinding)

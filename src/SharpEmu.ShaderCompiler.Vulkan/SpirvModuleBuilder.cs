@@ -195,6 +195,9 @@ public enum SpirvCapability : uint
     Sampled1D = 43,
     Image1D = 44,
     Float16 = 9,
+    DenormPreserve = 4464,
+    SignedZeroInfNanPreserve = 4466,
+    RoundingModeRTE = 4467,
     Float64 = 10,
     Int64 = 11,
     Int64Atomics = 12,
@@ -211,7 +214,10 @@ public enum SpirvCapability : uint
     ShaderLayer = 5253,
     ShaderViewportIndex = 5254,
     ShaderViewportIndexLayerExt = 5254,
+    ShaderNonUniform = 5301,
     RuntimeDescriptorArray = 5302,
+    SampledImageArrayNonUniformIndexing = 5307,
+    StorageImageArrayNonUniformIndexing = 5309,
     PhysicalStorageBufferAddresses = 5347,
 }
 
@@ -242,10 +248,14 @@ public enum SpirvExecutionMode : uint
     OriginUpperLeft = 7,
     DepthReplacing = 12,
     LocalSize = 17,
+    DenormPreserve = 4459,
+    SignedZeroInfNanPreserve = 4461,
+    RoundingModeRTE = 4462,
 }
 
 public enum SpirvDecoration : uint
 {
+    NonUniform = 5300,
     Block = 2,
     ArrayStride = 6,
     BuiltIn = 11,
@@ -353,6 +363,7 @@ public sealed class SpirvModuleBuilder
     private readonly List<uint> _annotations = [];
     private readonly List<uint> _typesConstantsGlobals = [];
     private readonly List<uint> _functions = [];
+
     private readonly Dictionary<(uint Width, bool Signed), uint> _integerTypes = [];
     private readonly Dictionary<uint, uint> _floatTypes = [];
     private readonly Dictionary<(uint Component, uint Count), uint> _vectorTypes = [];
@@ -774,6 +785,13 @@ public sealed class SpirvModuleBuilder
     public uint BeginFunction(uint returnType, uint functionType)
     {
         var id = AllocateId();
+        Emit(_functions, SpirvOp.Function, returnType, id, 0, functionType);
+        return id;
+    }
+
+    // Begins a function whose id was allocated earlier, so it can be called before it is emitted.
+    public uint BeginFunction(uint returnType, uint functionType, uint id)
+    {
         Emit(_functions, SpirvOp.Function, returnType, id, 0, functionType);
         return id;
     }

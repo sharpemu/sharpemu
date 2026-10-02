@@ -171,8 +171,62 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
             var result = _vk.QueueSubmit2(_queue, 1, &submitInfo, default);
             if (result == Result.Success)
                 CommandProfile?.MarkSubmitted(buffer);
-            failure = result.ToString();
+            failure = result == Result.ErrorDeviceLost ? $"{result} {DescribeDeviceFault()}" : result.ToString();
             return result == Result.Success;
+        }
+    }
+
+    // VK_EXT_device_fault: the driver's record of the faulting addresses, when it keeps one.
+    private string DescribeDeviceFault()
+    {
+        var name = System.Text.Encoding.ASCII.GetBytes("vkGetDeviceFaultInfoEXT\0");
+        nint function;
+        fixed (byte* namePointer = name)
+        {
+            function = (nint)_vk.GetDeviceProcAddr(_device, namePointer);
+        }
+
+        if (function == 0)
+        {
+            return "fault=unavailable";
+        }
+
+        var getFaultInfo = (delegate* unmanaged<Device, DeviceFaultCountsEXT*, DeviceFaultInfoEXT*, Result>)function;
+        var counts = new DeviceFaultCountsEXT { SType = StructureType.DeviceFaultCountsExt };
+        if (getFaultInfo(_device, &counts, null) is not (Result.Success or Result.Incomplete))
+        {
+            return "fault=unreadable";
+        }
+
+        var addresses = new DeviceFaultAddressInfoEXT[Math.Max(1u, counts.AddressInfoCount)];
+        var vendors = new DeviceFaultVendorInfoEXT[Math.Max(1u, counts.VendorInfoCount)];
+        counts.VendorBinarySize = 0;
+        fixed (DeviceFaultAddressInfoEXT* addressPointer = addresses)
+        fixed (DeviceFaultVendorInfoEXT* vendorPointer = vendors)
+        {
+            var info = new DeviceFaultInfoEXT
+            {
+                SType = StructureType.DeviceFaultInfoExt,
+                PAddressInfos = addressPointer,
+                PVendorInfos = vendorPointer,
+            };
+            getFaultInfo(_device, &counts, &info);
+            var text = new System.Text.StringBuilder($"fault=\"{System.Runtime.InteropServices.Marshal.PtrToStringUTF8((nint)info.Description)}\"");
+            for (var index = 0; index < counts.AddressInfoCount; index++)
+            {
+                text.Append($" address[{index}]={addresses[index].AddressType}:0x{addresses[index].ReportedAddress:X}/0x{addresses[index].AddressPrecision:X}");
+                text.Append(SharpEmu.Libs.Gpu.Buffers.GpuBufferAddressBook.Describe(addresses[index].ReportedAddress));
+            }
+
+            for (var index = 0; index < counts.VendorInfoCount; index++)
+            {
+                fixed (byte* description = vendors[index].Description)
+                {
+                    text.Append($" vendor[{index}]=0x{vendors[index].VendorFaultCode:X}:0x{vendors[index].VendorFaultData:X} {System.Runtime.InteropServices.Marshal.PtrToStringUTF8((nint)description)}");
+                }
+            }
+
+            return text.ToString();
         }
     }
 

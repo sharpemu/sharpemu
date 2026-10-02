@@ -10,11 +10,17 @@ namespace SharpEmu.Libs.Gpu.Vulkan;
 
 public readonly record struct ReadbackPiece(GpuBuffer Source, ulong SourceOffset, ulong Size);
 
+// A readback that waits only for the main-queue tick that last wrote its sources.
+internal interface IBufferReadback : IDisposable
+{
+    void Read(ReadOnlySpan<ReadbackPiece> pieces, ulong waitTick, VulkanAsyncReadback.ReadbackConsumer consume);
+}
+
 // Copies GPU-written buffer ranges back to the host on a second queue. The copy waits
 // on the main queue's timeline for the tick that last wrote the sources only, so a
 // guest read of one GPU-produced value no longer waits behind every later draw that
 // is still queued on the main queue (a readback there has to go to the queue's tail).
-internal sealed unsafe class VulkanAsyncReadback : IDisposable
+internal sealed unsafe class VulkanAsyncReadback : IBufferReadback
 {
     private const ulong Alignment = 16;
 

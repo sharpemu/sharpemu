@@ -90,6 +90,9 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
 
     public bool ShaderInt64 { get; }
 
+    // Created with shaderFloat16 and f16 float controls (VulkanFloat16Support).
+    public bool ExactFloat16Conversions { get; private init; }
+
     public bool ValidationEnabled => _debugUtils is not null;
 
     // The validation messages collected since the last call; empty when the layer is off.
@@ -363,6 +366,18 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             barycentricFeatures.PNext = vulkan13Features.PNext;
             vulkan13Features.PNext = &barycentricFeatures;
         }
+
+        var exactFloat16 = SharpEmu.Libs.VideoOut.VulkanFloat16Support.SupportsExactConversions(vk, physical);
+        var float16Features = new PhysicalDeviceShaderFloat16Int8Features
+        {
+            SType = StructureType.PhysicalDeviceShaderFloat16Int8Features,
+            ShaderFloat16 = true,
+        };
+        if (exactFloat16)
+        {
+            float16Features.PNext = vulkan13Features.PNext;
+            vulkan13Features.PNext = &float16Features;
+        }
         var extensionNames = new List<string>();
         if (dynamicRendering) extensionNames.AddRange(RenderingExtensionNames);
         if (barycentric) extensionNames.Add(barycentricExtension);
@@ -393,6 +408,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         var result = new HeadlessVulkan(vk, instance, physical, device, queue, family, apiVersion, enabledFeatures, dynamicRendering)
         {
             SupportsFragmentShaderBarycentric = barycentric,
+            ExactFloat16Conversions = exactFloat16,
         };
         if (validation)
         {
