@@ -40,13 +40,28 @@ public sealed class SaveDataStorageTests
 
     [Theory]
     [InlineData("SAVE0000", "SAVE0000")]
-    [InlineData("../../etc/passwd", ".._.._etc_passwd")] // '/' separators -> '_', collapsing to one segment
-    [InlineData("a/b", "a_b")]
+    [InlineData("../../etc/passwd", "..%2F..%2Fetc%2Fpasswd")]
+    [InlineData("a/b", "a%2Fb")]
     [InlineData("", "default")]
     [InlineData("   ", "default")]
     public void SanitizeNeutralizesPathSeparatorsAndEmpties(string input, string expected)
     {
         Assert.Equal(expected, SaveDataStorage.Sanitize(input));
+    }
+
+    [Fact]
+    public void SanitizePercentEncodesColonOnWindows()
+    {
+        const string input = "Arcade Spirits: The New Challengers";
+        var sanitized = SaveDataStorage.Sanitize(input);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal("Arcade Spirits%3A The New Challengers", sanitized);
+        }
+        else
+        {
+            Assert.Equal(input, sanitized);
+        }
     }
 
     [Fact]

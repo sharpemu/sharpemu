@@ -4732,6 +4732,11 @@ public static partial class KernelMemoryCompatExports
             return guestPath;
         }
 
+        if (guestPath.IndexOf('\0') >= 0)
+        {
+            return string.Empty;
+        }
+
         if (TryResolveRegisteredGuestMount(guestPath, out var mountedPath, out var mountPrefixMatched))
         {
             return mountedPath;
@@ -5006,7 +5011,7 @@ public static partial class KernelMemoryCompatExports
                 continue;
             }
 
-            resolved.Add(segment);
+            resolved.Add(HostFsPath.EncodeHostPathSegment(segment));
         }
 
         return string.Join(Path.DirectorySeparatorChar, resolved);
@@ -7003,8 +7008,11 @@ public static partial class KernelMemoryCompatExports
         var written = 0;
         while (currentIndex < directory.Entries.Length)
         {
-            var entryName = directory.Entries[currentIndex];
-            var entryBytes = Encoding.UTF8.GetBytes(entryName);
+            var hostEntryName = directory.Entries[currentIndex];
+            // Host names may be percent-encoded (#683); the guest must see the
+            // original FreeBSD-legal filename, including characters Windows rejects.
+            var guestEntryName = HostFsPath.DecodeHostPathSegment(hostEntryName);
+            var entryBytes = Encoding.UTF8.GetBytes(guestEntryName);
             var nameLength = Math.Min(entryBytes.Length, 255);
             var recordLength = (8 + nameLength + 1 + 3) & ~3;
             if (recordLength > payload.Length - written)
@@ -7020,7 +7028,7 @@ public static partial class KernelMemoryCompatExports
             var record = payload.AsSpan(written, recordLength);
             BinaryPrimitives.WriteUInt32LittleEndian(record, ComputeDirectoryEntryHash(entryBytes.AsSpan(0, nameLength)));
             BinaryPrimitives.WriteUInt16LittleEndian(record[4..], unchecked((ushort)recordLength));
-            record[6] = Directory.Exists(Path.Combine(directory.Path, entryName)) ? (byte)4 : (byte)8;
+            record[6] = Directory.Exists(Path.Combine(directory.Path, hostEntryName)) ? (byte)4 : (byte)8;
             record[7] = unchecked((byte)nameLength);
             entryBytes.AsSpan(0, nameLength).CopyTo(record[8..]);
             written += recordLength;

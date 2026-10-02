@@ -90,18 +90,15 @@ public sealed class KernelSandboxEscapeTests : IDisposable
         Assert.StartsWith(rootWithSep, Path.GetFullPath(resolved));
     }
 
-    // Drive-letter injection: NormalizeMountRelativePath clamps "." / ".." but
-    // splits only on separators, so a "C:" token survives as a segment.
-    // Path.Combine then discards the mount root because the tail is drive-rooted,
-    // yielding a raw host path. A resolved path outside the mount root must be
-    // denied. On non-Windows hosts "C:" is an ordinary directory name and stays
-    // contained, so this specifically pins the Windows escape.
+    // Drive-letter tokens are encoded as ordinary path segments on Windows. The
+    // resolved path must remain under its selected mount even when it contains
+    // a string that resembles a host drive path.
     [Theory]
-    [InlineData("app0/C:/Windows/Temp/evil.dll")]
-    [InlineData("/app0/C:/Windows/Temp/evil.dll")]
-    [InlineData("download0/C:/Windows/Temp/evil.dll")]
-    [InlineData("/temp0/C:/Windows/Temp/evil.dll")]
-    public void ResolveGuestPath_DriveLetterInjectionCannotEscapeMount(string guestPath)
+    [InlineData("app0/C:/Windows/Temp/evil.dll", "/app0")]
+    [InlineData("/app0/C:/Windows/Temp/evil.dll", "/app0")]
+    [InlineData("download0/C:/Windows/Temp/evil.dll", "download0")]
+    [InlineData("/temp0/C:/Windows/Temp/evil.dll", "/temp0")]
+    public void ResolveGuestPath_DriveLetterInjectionCannotEscapeMount(string guestPath, string mountPath)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -109,13 +106,19 @@ public sealed class KernelSandboxEscapeTests : IDisposable
         }
 
         var resolved = KernelMemoryCompatExports.ResolveGuestPath(guestPath);
+        var mountRoot = KernelMemoryCompatExports.ResolveGuestPath(mountPath);
 
-        // Either denied outright, or (defensively) still under a SharpEmu mount
-        // root — never a bare "C:\Windows\..." host path.
-        if (!string.IsNullOrEmpty(resolved))
-        {
-            Assert.DoesNotContain("Windows", Path.GetFullPath(resolved), StringComparison.OrdinalIgnoreCase);
-        }
+        Assert.False(string.IsNullOrEmpty(resolved));
+        Assert.False(string.IsNullOrEmpty(mountRoot));
+
+        var fullResolved = Path.GetFullPath(resolved);
+        var fullMountRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(mountRoot));
+        var rootWithSeparator = fullMountRoot + Path.DirectorySeparatorChar;
+        Assert.True(
+            string.Equals(fullResolved, fullMountRoot, StringComparison.OrdinalIgnoreCase) ||
+            fullResolved.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase),
+            $"Resolved path '{fullResolved}' must stay inside mount '{fullMountRoot}'.");
+        Assert.Contains("C%3A", fullResolved, StringComparison.OrdinalIgnoreCase);
     }
 
     // A "C:"-style token under app0 must resolve inside the app0 root, not to the
