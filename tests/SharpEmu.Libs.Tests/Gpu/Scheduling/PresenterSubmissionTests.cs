@@ -10,6 +10,7 @@ using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Memory.GpuMemory;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using Xunit;
 
@@ -20,6 +21,30 @@ public sealed class PresenterSubmissionTests
 {
     private const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     private static readonly Type PresenterType = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
+
+    [Theory]
+    [InlineData(false, "shaderClipDistance")]
+    [InlineData(true, "fragmentShaderBarycentric")]
+    public void ShaderClipDistance_ChecksDeviceSupportBeforeModuleCreation(bool supported, string missingFeature)
+    {
+        var presenter = RuntimeHelpers.GetUninitializedObject(PresenterType);
+        Set(presenter, "_supportsShaderClipDistance", supported);
+        // Capability declarations are sufficient for this check before the device call.
+        uint[] words =
+        {
+            0x07230203, 0x00010500, 0, 1, 0,
+            (2u << 16) | (uint)SpirvOp.Capability, (uint)SpirvCapability.ClipDistance,
+            (2u << 16) | (uint)SpirvOp.Capability, (uint)SpirvCapability.FragmentBarycentricKhr,
+        };
+        var code = new byte[words.Length * sizeof(uint)];
+        for (var index = 0; index < words.Length; index++)
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(code.AsSpan(index * sizeof(uint)), words[index]);
+
+        var createModule = PresenterType.GetMethod("CreateShaderModule", InstanceMembers, null, new[] { typeof(byte[]) }, null)!;
+        var wrapper = Assert.Throws<TargetInvocationException>(() => createModule.Invoke(presenter, new object[] { code }));
+        var error = Assert.IsType<NotSupportedException>(wrapper.InnerException);
+        Assert.Contains(missingFeature, error.Message);
+    }
 
     [Fact]
     public void FlipCapacity_SuspendsAtTheBoundAndReopensAfterDequeue()
