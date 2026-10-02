@@ -209,7 +209,7 @@ public sealed class WaveLaneTransferDeviceTests(HeadlessVulkanFixture fixture) :
             if ((instruction & 0xffff) == 224) barriers++;
             offset += checked((int)(instruction >> 16) * 4);
         }
-        // This program needs no mask exchange. An unresolved lane read adds one barrier.
+        // Mask setup needs no exchange. An unresolved lane read needs one barrier.
         Assert.Equal(needsBarrier ? 1 : 0, barriers);
     }
 
