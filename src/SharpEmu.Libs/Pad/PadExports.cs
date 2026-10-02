@@ -5,12 +5,15 @@ using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace SharpEmu.Libs.Pad;
 
 public static class PadExports
 {
+    private const int OrbisPadErrorInvalidArgument = unchecked((int)0x80920001);
     private const int OrbisPadErrorInvalidHandle = unchecked((int)0x80920003);
+    private const int OrbisPadErrorInvalidPort = unchecked((int)0x80920002);
     private const int OrbisPadErrorNotInitialized = unchecked((int)0x80920005);
     private const int OrbisPadErrorDeviceNotConnected = unchecked((int)0x80920007);
     private const int OrbisPadErrorDeviceNoHandle = unchecked((int)0x80920008);
@@ -19,23 +22,12 @@ public static class PadExports
     // valid 0x10000000 user to scePadOpen and receive DEVICE_NOT_CONNECTED,
     // leaving every later keyboard/gamepad read on an invalid handle.
     private const int PrimaryUserId = 0x10000000;
-    private const int StandardPortType = 0;
-    private const int PrimaryPadHandle = 1;
     private const int ControllerInformationSize = 0x1C;
+    private const int ExtendedControllerInformationSize = 0x2C;
     private const int PadDataSize = 0x78;
     private const float StandardGravity = 9.80665f;
 
-    // Monster Truck Championship reads pad state with handle 0 before it opens a pad,
-    // and rejecting that leaves its controller/FFB init path polling forever. After a
-    // title opens a pad, handle 0 is a slot it never opened: Unreal Engine polls all four
-    // user slots and treats every valid handle as a connected controller, so accepting
-    // 0 there reports phantom pads that repeat the primary pad's buttons.
-    private static int _padOpened;
-
-    private static bool IsPrimaryPadHandle(int handle) =>
-        handle == PrimaryPadHandle || (handle == 0 && Volatile.Read(ref _padOpened) == 0);
-
-    internal static void ResetOpenedPadForTests() => Volatile.Write(ref _padOpened, 0);
+    private static readonly ConditionalWeakTable<ICpuMemory, PadSessionRegistry> Sessions = new();
     private static readonly long InputSampleIntervalTicks = Math.Max(1, Stopwatch.Frequency / 1000);
 
     [ThreadStatic]
@@ -44,11 +36,21 @@ public static class PadExports
     [ThreadStatic]
     private static PadState _cachedInputState;
 
-    private static bool _initialized;
-    // Motion data is reported until a title turns it off: Astro Bot reads it for
-    // shake/tilt without ever importing scePadSetMotionSensorState.
-    private static int _motionSensorEnabled = 1;
     private static int _controlsAnnouncementLogged;
+
+    private static PadSessionRegistry GetSessions(CpuContext context)
+    {
+        ICpuMemory memory = context.Memory;
+        while (memory is ICpuMemoryWrapper wrapper)
+        {
+            memory = wrapper.Inner;
+        }
+
+        return Sessions.GetValue(memory, static _ => new PadSessionRegistry());
+    }
+
+    private static bool TryGetSession(CpuContext context, int handle, out PadSession session) =>
+        GetSessions(context).TryGet(handle, out session);
 
     [SysAbiExport(
         Nid = "hv1luiJrqQM",
@@ -57,7 +59,7 @@ public static class PadExports
         LibraryName = "libScePad")]
     public static int PadInit(CpuContext ctx)
     {
-        _initialized = true;
+        GetSessions(ctx).Initialize();
         HostPlatform.Current.Input.EnsureStarted();
         return ctx.SetReturn(0);
     }
@@ -76,12 +78,6 @@ public static class PadExports
         LibraryName = "libScePad")]
     public static int PadOpenExt(CpuContext ctx) => PadOpenCore(ctx, extended: true);
 
-    // scePadGetHandle(userId, type, index): returns the handle of an already-open
-    // pad without opening a new one. Dead Cells calls it every frame to poll
-    // input; leaving it unresolved returned a garbage handle so the input path
-    // (and the game loop that drives it) misbehaved. Same validation as
-    // scePadOpen — the one primary pad — returning its handle or a not-connected
-    // error, never opening or logging.
     [SysAbiExport(
         Nid = "u1GRHp+oWoY",
         ExportName = "scePadGetHandle",
@@ -92,41 +88,67 @@ public static class PadExports
         var userId = unchecked((int)ctx[CpuRegister.Rdi]);
         var type = unchecked((int)ctx[CpuRegister.Rsi]);
         var index = unchecked((int)ctx[CpuRegister.Rdx]);
-        if (!_initialized)
+        if (!GetSessions(ctx).IsInitialized)
         {
-            return ctx.SetReturn(OrbisPadErrorNotInitialized);
+            return ReturnPadHandleResult(ctx, "scePadGetHandle", userId, type, index, OrbisPadErrorNotInitialized);
         }
 
-        if (userId != PrimaryUserId || type is not (0 or 1 or 2) || index != 0)
+        if (userId != PrimaryUserId)
         {
-            return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
+            return ReturnPadHandleResult(ctx, "scePadGetHandle", userId, type, index, OrbisPadErrorDeviceNotConnected);
         }
 
-        return ctx.SetReturn(PrimaryPadHandle);
+        if (type is not (0 or 2) || index != 0)
+        {
+            return ReturnPadHandleResult(ctx, "scePadGetHandle", userId, type, index, OrbisPadErrorInvalidPort);
+        }
+
+        var result = GetSessions(ctx).GetHandle(userId, type, index);
+        return ReturnPadHandleResult(ctx, "scePadGetHandle", userId, type, index, result);
     }
 
-    // scePadOpen rejects a non-null 4th arg and non-standard ports; scePadOpenExt accepts a
-    // ScePadOpenExtParam* plus ports 1/2 (racing titles retry scePadOpenExt(type=2) forever if rejected).
     private static int PadOpenCore(CpuContext ctx, bool extended)
     {
+        var exportName = extended ? "scePadOpenExt" : "scePadOpen";
         var userId = unchecked((int)ctx[CpuRegister.Rdi]);
         var type = unchecked((int)ctx[CpuRegister.Rsi]);
         var index = unchecked((int)ctx[CpuRegister.Rdx]);
         var parameterAddress = ctx[CpuRegister.Rcx];
-        if (!_initialized)
+        if (!GetSessions(ctx).IsInitialized)
         {
-            return ctx.SetReturn(OrbisPadErrorNotInitialized);
+            return ReturnPadHandleResult(ctx, exportName, userId, type, index, OrbisPadErrorNotInitialized);
         }
 
         if (userId == -1)
         {
-            return ctx.SetReturn(OrbisPadErrorDeviceNoHandle);
+            return ReturnPadHandleResult(ctx, exportName, userId, type, index, OrbisPadErrorDeviceNoHandle);
         }
 
-        var typeAccepted = extended ? type is 0 or 1 or 2 : type == StandardPortType;
-        if (userId != PrimaryUserId || !typeAccepted || index != 0 || (!extended && parameterAddress != 0))
+        var typeAccepted = extended ? type is 0 or 1 or 2 : type is 0 or 2;
+        if (userId != PrimaryUserId)
         {
-            return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
+            return ReturnPadHandleResult(ctx, exportName, userId, type, index, OrbisPadErrorDeviceNotConnected);
+        }
+
+        if (!typeAccepted || index != 0)
+        {
+            return ReturnPadHandleResult(ctx, exportName, userId, type, index, OrbisPadErrorInvalidPort);
+        }
+
+        if (!extended && parameterAddress != 0)
+        {
+            Span<byte> reservedParameters = stackalloc byte[8];
+            if (!ctx.Memory.TryRead(parameterAddress, reservedParameters))
+            {
+                return ReturnPadHandleResult(ctx, exportName, userId, type, index,
+                    (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        var result = GetSessions(ctx).Open(userId, type, index, allowMultipleOpens: extended && type != 0);
+        if (result < 0)
+        {
+            return ReturnPadHandleResult(ctx, exportName, userId, type, index, result);
         }
 
         var input = HostPlatform.Current.Input;
@@ -138,8 +160,14 @@ public static class PadExports
                 : "[LOADER][INFO] Keyboard controls: Arrow keys = D-pad, WASD = left stick, IJKL = right stick, Z/Enter = Cross, X/Esc = Circle, C = Square, V = Triangle, Q = L1, E = R1, R = L2, F = R2, Tab/Backspace = Options. A DualSense or Xbox controller will be used automatically when plugged in.");
         }
 
-        Volatile.Write(ref _padOpened, 1);
-        return ctx.SetReturn(PrimaryPadHandle);
+        return ReturnPadHandleResult(ctx, exportName, userId, type, index, result);
+    }
+
+    private static int ReturnPadHandleResult(CpuContext context, string exportName, int userId,
+        int portType, int portIndex, int result)
+    {
+        PadInputChangeTrace.RecordHandleResult(exportName, userId, portType, portIndex, result);
+        return context.SetReturn(result);
     }
 
     [SysAbiExport(
@@ -150,9 +178,9 @@ public static class PadExports
     public static int PadClose(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return IsPrimaryPadHandle(handle)
-            ? ctx.SetReturn(0)
-            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        var result = GetSessions(ctx).Close(handle);
+        PadInputChangeTrace.RecordClose(handle, result);
+        return ctx.SetReturn(result);
     }
 
     [SysAbiExport(
@@ -163,12 +191,12 @@ public static class PadExports
     public static int PadSetMotionSensorState(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        if (!IsPrimaryPadHandle(handle))
+        if (!TryGetSession(ctx, handle, out var session))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
 
-        Volatile.Write(ref _motionSensorEnabled, ctx[CpuRegister.Rsi] != 0 ? 1 : 0);
+        Volatile.Write(ref session.MotionSensorEnabled, ctx[CpuRegister.Rsi] != 0 ? 1 : 0);
         return ctx.SetReturn(0);
     }
 
@@ -180,7 +208,7 @@ public static class PadExports
     public static int PadSetTiltCorrectionState(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return IsPrimaryPadHandle(handle)
+        return TryGetSession(ctx, handle, out _)
             ? ctx.SetReturn(0)
             : ctx.SetReturn(OrbisPadErrorInvalidHandle);
     }
@@ -193,7 +221,7 @@ public static class PadExports
     public static int PadSetAngularVelocityDeadbandState(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return IsPrimaryPadHandle(handle)
+        return TryGetSession(ctx, handle, out _)
             ? ctx.SetReturn(0)
             : ctx.SetReturn(OrbisPadErrorInvalidHandle);
     }
@@ -207,7 +235,7 @@ public static class PadExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var informationAddress = ctx[CpuRegister.Rsi];
-        if (!IsPrimaryPadHandle(handle))
+        if (!TryGetSession(ctx, handle, out var session))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
@@ -223,9 +251,9 @@ public static class PadExports
         BinaryPrimitives.WriteUInt16LittleEndian(information[0x06..], 943);
         information[0x08] = 30;
         information[0x09] = 30;
-        information[0x0A] = StandardPortType;
-        information[0x0B] = 1;
-        information[0x0C] = 1;
+        information[0x0A] = (byte)session.PortType;
+        information[0x0B] = session.Connected ? (byte)1 : (byte)0;
+        information[0x0C] = session.Connected ? (byte)1 : (byte)0;
         BinaryPrimitives.WriteInt32LittleEndian(information[0x10..], 0);
 
         return ctx.Memory.TryWrite(informationAddress, information)
@@ -246,8 +274,36 @@ public static class PadExports
         ExportName = "scePadGetExtControllerInformation",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libScePad")]
-    public static int PadGetExtControllerInformation(CpuContext ctx) =>
-        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    public static int PadGetExtControllerInformation(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        var informationAddress = ctx[CpuRegister.Rsi];
+        if (!TryGetSession(ctx, handle, out var session))
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (informationAddress == 0)
+        {
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        Span<byte> information = stackalloc byte[ExtendedControllerInformationSize];
+        information.Clear();
+        BinaryPrimitives.WriteSingleLittleEndian(information[0x00..], 44.86f);
+        BinaryPrimitives.WriteUInt16LittleEndian(information[0x04..], 1920);
+        BinaryPrimitives.WriteUInt16LittleEndian(information[0x06..], 943);
+        information[0x08] = 30;
+        information[0x09] = 30;
+        information[0x0A] = (byte)session.PortType;
+        information[0x0B] = session.Connected ? (byte)1 : (byte)0;
+        information[0x0C] = session.Connected ? (byte)1 : (byte)0;
+        BinaryPrimitives.WriteInt32LittleEndian(information[0x10..], 0);
+
+        return ctx.Memory.TryWrite(informationAddress, information)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
 
     [SysAbiExport(
         Nid = "AcslpN1jHR8",
@@ -258,7 +314,7 @@ public static class PadExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var informationAddress = ctx[CpuRegister.Rsi];
-        if (!IsPrimaryPadHandle(handle))
+        if (!TryGetSession(ctx, handle, out _))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
@@ -290,7 +346,7 @@ public static class PadExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var dataAddress = ctx[CpuRegister.Rsi];
-        if (!IsPrimaryPadHandle(handle))
+        if (!TryGetSession(ctx, handle, out var session))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
@@ -300,7 +356,7 @@ public static class PadExports
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        return WriteNeutralPadData(ctx, dataAddress)
+        return WritePadData(ctx, dataAddress, handle, session, "scePadReadState")
             ? ctx.SetReturn(0)
             : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
@@ -315,7 +371,7 @@ public static class PadExports
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var dataAddress = ctx[CpuRegister.Rsi];
         var count = unchecked((int)ctx[CpuRegister.Rdx]);
-        if (!IsPrimaryPadHandle(handle))
+        if (!TryGetSession(ctx, handle, out var session))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
@@ -325,7 +381,7 @@ public static class PadExports
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        return WriteNeutralPadData(ctx, dataAddress)
+        return WritePadData(ctx, dataAddress, handle, session, "scePadRead")
             ? ctx.SetReturn(1)
             : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
@@ -337,7 +393,13 @@ public static class PadExports
     LibraryName = "libScePad")]
     public static int PadSetVibrationMode(CpuContext ctx)
     {
-        return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK);
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (!TryGetSession(ctx, handle, out var session))
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        return ctx.SetReturn(session.Connected ? 0 : OrbisPadErrorDeviceNotConnected);
     }
 
     [SysAbiExport(
@@ -349,9 +411,14 @@ public static class PadExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var parameterAddress = ctx[CpuRegister.Rsi];
-        if (!IsPrimaryPadHandle(handle))
+        if (!TryGetSession(ctx, handle, out var session))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (!session.Connected)
+        {
+            return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
         }
 
         if (parameterAddress == 0)
@@ -387,7 +454,7 @@ public static class PadExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var stateAddress = ctx[CpuRegister.Rsi];
-        if (!IsPrimaryPadHandle(handle))
+        if (!TryGetSession(ctx, handle, out _))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
@@ -575,9 +642,14 @@ public static class PadExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var parameterAddress = ctx[CpuRegister.Rsi];
-        if (!IsPrimaryPadHandle(handle))
+        if (!TryGetSession(ctx, handle, out var session))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (!session.Connected)
+        {
+            return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
         }
 
         if (parameterAddress == 0)
@@ -605,9 +677,14 @@ public static class PadExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var parameterAddress = ctx[CpuRegister.Rsi];
-        if (!IsPrimaryPadHandle(handle))
+        if (!TryGetSession(ctx, handle, out var session))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (!session.Connected)
+        {
+            return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
         }
 
         if (parameterAddress == 0)
@@ -634,9 +711,14 @@ public static class PadExports
     public static int PadResetLightBar(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        if (!IsPrimaryPadHandle(handle))
+        if (!TryGetSession(ctx, handle, out var session))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (!session.Connected)
+        {
+            return ctx.SetReturn(OrbisPadErrorDeviceNotConnected);
         }
 
         HostPlatform.Current.Input.ResetLightbar();
@@ -651,7 +733,7 @@ public static class PadExports
     public static int PadResetOrientation(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return IsPrimaryPadHandle(handle)
+        return TryGetSession(ctx, handle, out _)
             ? ctx.SetReturn(0)
             : ctx.SetReturn(OrbisPadErrorInvalidHandle);
     }
@@ -664,15 +746,37 @@ public static class PadExports
     public static int PadIsRemoteController(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return IsPrimaryPadHandle(handle)
+        var resultAddress = ctx[CpuRegister.Rsi];
+        if (!TryGetSession(ctx, handle, out _))
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        if (resultAddress == 0)
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidArgument);
+        }
+
+        ReadOnlySpan<byte> isRemote = [0];
+        return ctx.Memory.TryWrite(resultAddress, isRemote)
             ? ctx.SetReturn(0)
-            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
+            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
-    private static bool WriteNeutralPadData(CpuContext ctx, ulong dataAddress)
+    private static bool WritePadData(CpuContext ctx, ulong dataAddress, int handle, PadSession session, string exportName)
     {
         Span<byte> data = stackalloc byte[PadDataSize];
         data.Clear();
+        if (!session.Connected)
+        {
+            data[0x04] = 128;
+            data[0x05] = 128;
+            data[0x06] = 128;
+            data[0x07] = 128;
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], 1.0f);
+            return ctx.Memory.TryWrite(dataAddress, data);
+        }
+
         var input = ReadHostInputState();
         var buttons = input.Buttons;
         var leftX = input.LeftX;
@@ -690,7 +794,7 @@ public static class PadExports
         data[0x08] = l2;
         data[0x09] = r2;
         BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], 1.0f);
-        if (Volatile.Read(ref _motionSensorEnabled) != 0 && input.Motion.Available)
+        if (Volatile.Read(ref session.MotionSensorEnabled) != 0 && input.Motion.Available)
         {
             // Host acceleration is m/s^2 (SDL); ScePadData.acceleration is in G.
             BinaryPrimitives.WriteSingleLittleEndian(data[0x1C..], input.Motion.AccelerationX / StandardGravity);
@@ -712,7 +816,9 @@ public static class PadExports
             timestampMicroseconds);
         data[0x68] = 1;
 
-        return ctx.Memory.TryWrite(dataAddress, data);
+        var guestWriteSucceeded = ctx.Memory.TryWrite(dataAddress, data);
+        PadInputChangeTrace.Record(exportName, handle, input, guestWriteSucceeded);
+        return guestWriteSucceeded;
     }
 
     private static PadState ReadHostInputState()
@@ -725,7 +831,9 @@ public static class PadExports
 
         var input = HostPlatform.Current.Input;
         var acceptsKeyboardInput = input.IsHostWindowFocused();
-        var buttons = acceptsKeyboardInput ? ReadKeyboardButtons(input) : 0;
+        var keyboardButtons = acceptsKeyboardInput ? ReadKeyboardButtons(input) : 0;
+        var controllerButtons = 0u;
+        var buttons = keyboardButtons;
         var leftX = acceptsKeyboardInput ? ReadAnalogStick(input.IsKeyDown(0x41), input.IsKeyDown(0x44)) : (byte)128;
         var leftY = acceptsKeyboardInput ? ReadAnalogStick(input.IsKeyDown(0x57), input.IsKeyDown(0x53)) : (byte)128;
         var rightX = acceptsKeyboardInput ? ReadAnalogStick(input.IsKeyDown(0x4A), input.IsKeyDown(0x4C)) : (byte)128;
@@ -742,7 +850,9 @@ public static class PadExports
         for (var index = 0; index < gamepadCount; index++)
         {
             var pad = gamepads[index];
-            buttons |= ToOrbisButtons(pad.Buttons);
+            var mappedControllerButtons = ToOrbisButtons(pad.Buttons);
+            controllerButtons |= mappedControllerButtons;
+            buttons |= mappedControllerButtons;
             // The controller stick wins whenever it is deflected past a
             // small deadzone; otherwise any keyboard value stays.
             leftX = MergeAxis(pad.LeftX, leftX);
@@ -777,7 +887,12 @@ public static class PadExports
             Type: gamepadType,
             Connection: connection,
             Motion: motion,
-            Touch: touch);
+            Touch: touch)
+        {
+            HostWindowFocused = acceptsKeyboardInput,
+            KeyboardButtons = keyboardButtons,
+            ControllerButtons = controllerButtons,
+        };
         _lastInputSampleTicks = now;
         return _cachedInputState;
     }
