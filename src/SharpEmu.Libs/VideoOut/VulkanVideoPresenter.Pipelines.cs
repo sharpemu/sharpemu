@@ -450,6 +450,10 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private ShaderModule CreateShaderModule(byte[] code)
         {
+            if (!_supportsShaderClipDistance && RequiresCapability(code, SpirvCapability.ClipDistance))
+            {
+                throw new NotSupportedException("The shader requires the shaderClipDistance device feature.");
+            }
             if (!_supportsFragmentShaderBarycentric && RequiresCapability(code, SpirvCapability.FragmentBarycentricKhr))
             {
                 throw new NotSupportedException(
