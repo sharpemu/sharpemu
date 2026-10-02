@@ -212,6 +212,9 @@ internal static unsafe partial class VulkanVideoPresenter
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("image-binding", $"stage={program.Stage} hash=0x{program.Hash:X16} slot={index} storage={storage} address=0x{resolution.Request.Description.Data.Address:X16} size=0x{resolution.Request.Description.Data.Size:X} view={resolution.Request.View} words={string.Join(",", words.Select(value => value.ToString("X8")))}");
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
             _imageCache.ApplyNativeColorClear(imageIdentifier, resolution.Request);
+            if (Gpu.Images.ImageClearTrace.Enabled)
+                _imageCache.TraceVolumeClear("resolved-shader-image", resolution.Request, _imageCache.GetImage(imageIdentifier),
+                    $"stage={program.Stage} hash=0x{program.Hash:X16} slot={index}");
             BindImage(imageIdentifier, storage);
             var descriptor = new TextureDescriptorWords(words);
             if (ShouldTraceTextureBindings() &&
