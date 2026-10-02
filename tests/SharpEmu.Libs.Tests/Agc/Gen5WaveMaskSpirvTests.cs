@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -15,15 +16,17 @@ public sealed class Gen5WaveMaskSpirvTests
 {
     private const ulong ShaderAddress = 0x1_0000_0000;
 
-    [Fact]
-    public void WaveMaskPredicate_IsTestedAtCurrentLaneBit()
+    [Theory]
+    [InlineData(ShaderStage.Compute)]
+    [InlineData(ShaderStage.Pixel)]
+    public void WaveMaskPredicate_IsTestedAtCurrentLaneBit(ShaderStage stage)
     {
         // V_CMP_EQ_F32 vcc, v0, v1 writes VCC at run time, which re-materialises
         // the per-lane _vcc predicate from the wave mask via IsWaveMaskActive.
-        var spirv = Compile([0x7C04_0300u]);
+        var spirv = Compile([0x7C04_0300u], stage);
 
-        // The lane's bit in single-lane emulation is the 64-bit constant 1, so the
-        // predicate is `(mask & 1) != 0`. The whole-word bug emitted `mask != 0`
+        // Graphics single-lane emulation uses 1; compute shifts it by the lane ID. The
+        // predicate is `(mask & lane_bit) != 0`. The whole-word bug emitted `mask != 0`
         // with no such mask. Require the lane-bit AND to be present.
         Assert.True(
             ContainsLaneBitMaskedWaveTest(spirv),
@@ -47,9 +50,7 @@ public sealed class Gen5WaveMaskSpirvTests
         Assert.NotEmpty(spirv);
     }
 
-    // True when the module contains an OpBitwiseAnd whose operand is a 64-bit
-    // constant of value 1 — the current-lane bit that IsCurrentLaneSet masks the
-    // wave mask with before the non-zero test.
+    // True when OpBitwiseAnd consumes a constant or shifted current-lane bit.
     private static bool ContainsLaneBitMaskedWaveTest(byte[] spirv)
     {
         var laneBitConstIds = new HashSet<uint>();
@@ -73,7 +74,23 @@ public sealed class Gen5WaveMaskSpirvTests
             }
         }
 
-        // Pass 2: look for an OpBitwiseAnd that consumes one of those constants.
+        // Compute forms the lane bit with OpShiftLeftLogical, then may select
+        // zero for lanes outside the guest wave. Follow those result IDs too.
+        foreach (var (op, wordCount, offset) in EnumerateInstructions(spirv))
+        {
+            if (op == 196 && wordCount == 5 &&
+                laneBitConstIds.Contains(ReadWord(spirv, offset + 12)))
+            {
+                laneBitConstIds.Add(ReadWord(spirv, offset + 8));
+            }
+            else if (op == 169 && wordCount == 6 &&
+                laneBitConstIds.Contains(ReadWord(spirv, offset + 16)))
+            {
+                laneBitConstIds.Add(ReadWord(spirv, offset + 8));
+            }
+        }
+
+        // Look for an OpBitwiseAnd that consumes a current-lane bit.
         foreach (var (op, wordCount, offset) in EnumerateInstructions(spirv))
         {
             // OpBitwiseAnd = 199 (opcode, resultType, resultId, operand0, operand1).
@@ -114,13 +131,13 @@ public sealed class Gen5WaveMaskSpirvTests
     private static uint ReadWord(byte[] spirv, int offset) =>
         BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset, sizeof(uint)));
 
-    private static byte[] Compile(uint[] programWords)
+    private static byte[] Compile(uint[] programWords, ShaderStage stage = ShaderStage.Compute)
     {
         var memory = new FakeCpuMemory(ShaderAddress, 0x2000);
         var ctx = new CpuContext(memory, Generation.Gen5);
         Gen5ShaderAtomicDecodeTests.WriteProgram(memory, ShaderAddress, programWords);
         Assert.True(Gen5ShaderTranslator.TryDecodeProgram(ctx, ShaderAddress, out var program, out var error), error);
-        var request = ResourceTestProgram.Request(program, userDataCount: 16);
+        var request = ResourceTestProgram.Request(program, stage: stage, userDataCount: 16);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out error), error);
         return shader.Spirv;
     }
