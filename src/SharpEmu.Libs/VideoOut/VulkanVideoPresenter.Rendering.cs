@@ -624,7 +624,7 @@ internal static unsafe partial class VulkanVideoPresenter
             foreach (var binding in bindings)
             {
                 if (binding.IsHostMovie || binding.CachedImage is not { } image || image.Description.Metadata.Kind != MetadataKind.Dcc ||
-                    image.Description.Metadata.Range.Size != 0)
+                    image.Description.Metadata.Range.Size != 0 || image.Description.Metadata.NativeColorClear)
                 {
                     continue;
                 }

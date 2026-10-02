@@ -120,6 +120,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public uint[]? Words;
             public ulong Generation;
             public TextureRequestResolution Resolution;
+            public TextureRequestResolution OriginalResolution;
             public ResourceSlotIdentifier Found;
             public uint MetadataBaseLayer;
             public bool CompletesLookup;
@@ -163,6 +164,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var storage = image.ResourceClass == ShaderCompiler.Resources.ImageResourceClass.Storage;
             _ = BeginBatchedGuestCommands();
+            var originalResolution = memo.Matches(words, _imageCache.LookupGeneration)
+                ? memo.OriginalResolution
+                : ImageRequestBuilders.Texture(words, ShapeOf(image));
+            _imageCache.SynchronizeColorMetadata(originalResolution.Request);
+            _ = BeginBatchedGuestCommands();
             TextureRequestResolution resolution;
             ResourceSlotIdentifier imageIdentifier;
             if (memo.Matches(words, _imageCache.LookupGeneration) && _imageCache.TryTouchRemembered(memo.Found))
@@ -176,7 +182,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             else
             {
-                resolution = ImageRequestBuilders.Texture(words, ShapeOf(image));
+                resolution = originalResolution;
                 var request = resolution.Request;
                 var metadataBaseLayer = request.View.BaseLayer;
                 imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
@@ -187,6 +193,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         Words = (uint[])words.Clone(),
                         Generation = _imageCache.LookupGeneration,
                         Resolution = resolution,
+                        OriginalResolution = originalResolution,
                         Found = imageIdentifier,
                         MetadataBaseLayer = metadataBaseLayer,
                         CompletesLookup = request.Description.Metadata.Kind == MetadataKind.Dcc ||
@@ -204,6 +211,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("image-binding", $"stage={program.Stage} hash=0x{program.Hash:X16} slot={index} storage={storage} address=0x{resolution.Request.Description.Data.Address:X16} size=0x{resolution.Request.Description.Data.Size:X} view={resolution.Request.View} words={string.Join(",", words.Select(value => value.ToString("X8")))}");
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
+            _imageCache.ApplyNativeColorClear(imageIdentifier, resolution.Request);
             BindImage(imageIdentifier, storage);
             var descriptor = new TextureDescriptorWords(words);
             if (ShouldTraceTextureBindings() &&
