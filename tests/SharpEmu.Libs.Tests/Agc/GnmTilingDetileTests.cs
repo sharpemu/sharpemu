@@ -127,15 +127,14 @@ public sealed class GnmTilingDetileTests
         Assert.Equal((4, 8), (placements[5].TailElementX, placements[5].TailElementY));
     }
 
-    // Independent re-derivation of the 64 KiB RB+ R_X equation (swizzle mode 27,
-    // 2 bytes/element) straight from the address-bit table, so the tiled source
-    // layout does not depend on TryDetile's own internal factoring.
+    // Use the two-byte guest R_X equation to build the tiled test input.
+    // Do not use TryDetile to set its own expected addresses.
     private static readonly (uint XMask, uint YMask)[] RbPlus64KRenderX2Bpp =
     [
         (0, 0), (1u << 0, 0), (1u << 1, 0), (1u << 2, 0),
         (0, 1u << 0), (0, 1u << 1), (0, 1u << 2), (1u << 3, 0),
-        (1u << 7, (1u << 4) | (1u << 7)), (1u << 4, 1u << 4), (1u << 6, 1u << 5), (1u << 5, 1u << 6),
-        (0, 1u << 3), (1u << 6, 0), (1u << 7, 1u << 7), (1u << 8, 1u << 6),
+        (1u << 3, 1u << 3), (1u << 4, 1u << 4), (1u << 6, 1u << 5), (1u << 5, 1u << 6),
+        (0, 1u << 4), (1u << 6, 0), (0, 1u << 6), (1u << 7, 0),
     ];
 
     private static uint ReferenceOffset(uint x, uint y, (uint XMask, uint YMask)[] pattern)
