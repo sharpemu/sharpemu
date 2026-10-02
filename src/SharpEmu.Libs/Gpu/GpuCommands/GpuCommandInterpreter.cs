@@ -112,7 +112,13 @@ public sealed partial class GpuCommandInterpreter
 
     public bool ConstantEngineComplete { get; set; }
 
-    public ulong SyntheticOcclusionCounter { get; private set; }
+    private readonly ulong[] _syntheticOcclusionCounters = new ulong[4];
+    private ulong _occlusionCounterStart;
+    private int _selectedOcclusionCounter;
+    private uint _occlusionDumpStrideBytes = 16;
+    private uint _occlusionDumpInstanceMask = 0xFFFF;
+
+    public ulong SyntheticOcclusionCounter => _syntheticOcclusionCounters[_selectedOcclusionCounter];
 
     public ulong AtomicReturnMeData { get; private set; }
 

@@ -796,10 +796,12 @@ internal static unsafe partial class VulkanVideoPresenter
             _supportsDepthBounds = supportedFeatures.DepthBounds;
             _supportsShaderClipDistance = supportedFeatures.ShaderClipDistance;
             _supportsFillRectangle = IsDeviceExtensionAvailable(FillRectangleExtensionName);
+            _supportsPreciseOcclusion = supportedFeatures.OcclusionQueryPrecise;
             _supportsShaderClipDistance = supportedFeatures.ShaderClipDistance;
             var enabledFeatures = new PhysicalDeviceFeatures
             {
                 DepthBounds = supportedFeatures.DepthBounds,
+                OcclusionQueryPrecise = supportedFeatures.OcclusionQueryPrecise,
                 ShaderClipDistance = supportedFeatures.ShaderClipDistance,
                 IndependentBlend = supportedFeatures.IndependentBlend,
                 VertexPipelineStoresAndAtomics = supportedFeatures.VertexPipelineStoresAndAtomics,

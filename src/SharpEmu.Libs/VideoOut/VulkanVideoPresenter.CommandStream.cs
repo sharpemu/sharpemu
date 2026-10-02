@@ -298,6 +298,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots)
         {
+            if (_occlusionQueueId != queueId)
+                EndRendering();
+            _occlusionQueueId = queueId;
             _imageCache.SetMetadataTraceSubmission(queueId, submissionId);
             using var contextScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.QueueContext);
             _activeGuestQueue = new VulkanGuestQueueIdentity(_commandQueueNames[queueId], submissionId);
@@ -476,6 +479,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments)
         {
+            SetOcclusionCounting();
             using var translationScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandDrawTranslation);
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
             try
@@ -490,6 +494,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
         {
+            SetOcclusionCounting();
             using var translationScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandDrawTranslation);
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
             try

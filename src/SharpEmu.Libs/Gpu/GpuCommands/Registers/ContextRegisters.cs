@@ -356,6 +356,7 @@ public sealed class ContextRegisters
 
     public float LineWidth = 1f;
     public uint PrimitiveResetIndex = 0xFFFF_FFFFu;
+    public uint DepthCountControl;
     public BlendRegisters[] BlendControls = NewBlendControls();
     public BlendColorRegisters BlendColor;
     public ColorTargetWords[] ColorTargets = new ColorTargetWords[ColorTargetCount];

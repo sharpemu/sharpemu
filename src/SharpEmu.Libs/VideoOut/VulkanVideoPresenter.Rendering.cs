@@ -889,6 +889,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 PDepthAttachment = depthStencil.HasDepth ? &depth : null,
                 PStencilAttachment = depthStencil.HasStencil ? &stencil : null,
             };
+            if (_occlusionCounting)
+                _occlusionQueries?.Begin(command, _occlusionQueueId);
             _vk.CmdBeginRendering(command, &rendering);
             _renderingScopesBegun++;
             _renderingActive = true;
@@ -906,6 +908,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _renderingState = default;
             var command = new CommandBuffer(_scheduler.Current.Handle);
             _vk.CmdEndRendering(command);
+            _occlusionQueries?.End(command);
             foreach (var (sourceStages, destinationStages, barriers) in _barriersAfterRendering)
             {
                 fixed (ImageMemoryBarrier2* pointer = barriers)

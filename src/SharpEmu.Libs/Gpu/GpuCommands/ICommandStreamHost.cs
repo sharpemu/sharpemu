@@ -112,6 +112,13 @@ public interface ICommandStreamHost
 
     void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount);
 
+    // Return completed samples for counter zero. False keeps the legacy fallback.
+    bool TryReadOcclusionCounter(int queueId, out ulong value)
+    {
+        value = 0;
+        return false;
+    }
+
     void RecordEndOfPipe(in EndOfPipeWrite write);
 
     // Delivers the interrupt now, without waiting for the GPU.
