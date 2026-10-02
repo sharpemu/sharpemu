@@ -127,7 +127,6 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _supportsDepthClipControl;
         private bool _supportsDepthClipEnable;
         private bool _supportsDepthBounds;
-        private bool _supportsShaderClipDistance;
         private bool _supportsFillRectangle;
         private RenderHostLimits _renderHostLimits;
         private IGuestBackedSpace _guestBacking = null!;
@@ -702,6 +701,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void SetDynamicState(in DynamicDrawState state)
         {
+            SetOcclusionCounting(state.DepthCountControl);
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawDynamicStateRecording);
             var command = BeginBatchedGuestCommands();
             if (_gpuCommandProfile is not null)
@@ -977,6 +977,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 PDepthAttachment = depthStencil.HasDepth ? &depth : null,
                 PStencilAttachment = depthStencil.HasStencil ? &stencil : null,
             };
+            if (_occlusionCounting)
+                _occlusionQueries?.Begin(command, _occlusionQueueId);
             _vk.CmdBeginRendering(command, &rendering);
             _renderingScopesBegun++;
             if (GpuSyncProfile.Enabled)
@@ -999,6 +1001,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _renderingState = default;
             var command = new CommandBuffer(_scheduler.Current.Handle);
             _vk.CmdEndRendering(command);
+            _occlusionQueries?.End(command);
             foreach (var (sourceStages, destinationStages, barriers) in _barriersAfterRendering)
             {
                 fixed (ImageMemoryBarrier2* pointer = barriers)

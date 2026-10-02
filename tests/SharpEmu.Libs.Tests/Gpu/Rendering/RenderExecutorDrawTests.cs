@@ -50,6 +50,21 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
+    public void DrawUsesSnapshotOcclusionControlAfterLiveRegistersChange()
+    {
+        var banks = Banks();
+        banks.Context.DepthCountControl = 0x100;
+        var snapshot = banks.Snapshot();
+        banks.PrepareContextWrite();
+        banks.Context.DepthCountControl = 1;
+
+        _executor.DrawAuto(1, snapshot, Auto(3));
+        _executor.DrawAuto(2, banks, Auto(3));
+
+        Assert.Equal(new uint[] { 0x100, 1 }, _host.DynamicStates.Select(state => state.DepthCountControl));
+    }
+
+    [Fact]
     public void IndexedDraw_RecordsTheFullSequenceInOrder()
     {
         _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);

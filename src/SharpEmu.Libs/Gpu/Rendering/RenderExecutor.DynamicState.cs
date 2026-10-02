@@ -136,7 +136,8 @@ public sealed partial class RenderExecutor
             depthState.FrontMasks,
             depthState.BackMasks,
             state.ColorCount,
-            colorWriteMask);
+            colorWriteMask,
+            context.DepthCountControl);
     }
 
     // The screen, window, generic, viewport and clip rectangles intersected and clamped to the extent.

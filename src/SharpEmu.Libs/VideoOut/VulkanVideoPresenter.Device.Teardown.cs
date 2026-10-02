@@ -16,6 +16,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             ShutdownScheduler();
+            _occlusionQueries?.Dispose();
+            _occlusionQueries = null;
             if (_debugUtils is not null && _debugMessenger.Handle != 0)
             {
                 _debugUtils.DestroyDebugUtilsMessenger(_instance, _debugMessenger, null);

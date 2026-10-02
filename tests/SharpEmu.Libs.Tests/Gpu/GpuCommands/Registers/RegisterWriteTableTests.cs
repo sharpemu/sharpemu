@@ -107,7 +107,24 @@ public sealed class RegisterWriteTableTests
 
         Assert.Equal(0u, WriteContext(banks, SpiVsOutConfig));
         Assert.Contains("count=0", Assert.Throws<InvalidOperationException>(() => WriteShader(banks, SpiShaderPgmLoPs)).Message);
-        Assert.Contains("consumed no values", Assert.Throws<InvalidOperationException>(() => WriteContext(banks, DbCountControl)).Message);
+        Assert.Contains("count=0", Assert.Throws<InvalidOperationException>(() => WriteContext(banks, DbCountControl)).Message);
+    }
+
+    [Fact]
+    public void DepthCountControl_PreservesDirectIndirectAndSavedContextValues()
+    {
+        var banks = NewBanks();
+        Assert.Equal(0u, banks.Context.DepthCountControl);
+        WriteContext(banks, DbCountControl, 0x1103);
+        Assert.Equal(0x1103u, banks.Context.DepthCountControl);
+        var copy = banks.Context.Copy();
+        RegisterWriteTable.WriteContextEntry(banks, DbCountControl, 0, PacketAddress);
+        Assert.Equal(0u, banks.Context.DepthCountControl);
+        Assert.Equal(0x1103u, copy.DepthCountControl);
+        banks.ApplyContextState(ContextStateOperation.PushClear);
+        WriteContext(banks, DbCountControl, 1);
+        banks.ApplyContextState(ContextStateOperation.Pop);
+        Assert.Equal(0u, banks.Context.DepthCountControl);
     }
 
     [Fact]

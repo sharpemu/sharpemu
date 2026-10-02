@@ -318,7 +318,7 @@ public sealed class GpuCommandInterpreterLabelTests
     {
         var runner = new StreamRunner();
 
-        runner.Run(StreamRunner.Packet(PacketOpcode.EventWrite, 0x38));
+        runner.Run(StreamRunner.Packet(PacketOpcode.EventWrite, 0x0E));
         Assert.Empty(runner.Host.Calls);
 
         Assert.Contains("event type is unknown", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.EventWrite, 0x16 | (1u << 8))).Message);

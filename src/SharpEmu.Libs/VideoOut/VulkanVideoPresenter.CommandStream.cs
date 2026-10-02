@@ -435,6 +435,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void BeginSubmissionContext(int queueId, ulong submissionId)
         {
+            if (_occlusionQueueId != queueId)
+                EndRendering();
+            _occlusionQueueId = queueId;
             _imageCache.SetMetadataTraceSubmission(queueId, submissionId);
             using var contextScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.QueueContext);
             _activeGuestQueue = new VulkanGuestQueueIdentity(_commandQueueNames[queueId], submissionId);

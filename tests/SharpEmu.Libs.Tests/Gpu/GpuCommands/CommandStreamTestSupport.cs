@@ -27,6 +27,14 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public ICpuMemory Memory => GuestMemory;
 
+    public Func<int, ulong>? ReadOcclusionSamples { get; set; }
+
+    public bool TryReadOcclusionCounter(int queueId, out ulong value)
+    {
+        value = ReadOcclusionSamples?.Invoke(queueId) ?? 0;
+        return ReadOcclusionSamples is not null;
+    }
+
     public List<string> Calls { get; } = new();
 
     public List<(string Operation, ulong Address, ulong Size, byte[] Bytes)> TracedWrites { get; } = new();
