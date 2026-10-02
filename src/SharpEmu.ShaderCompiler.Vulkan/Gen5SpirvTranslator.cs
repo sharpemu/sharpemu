@@ -7610,11 +7610,17 @@ public static partial class Gen5SpirvTranslator
                 _uvec4Type,
                 UInt(3),
                 condition);
-            return _module.AddInstruction(
-                SpirvOp.VectorExtractDynamic,
-                _uintType,
-                ballot,
-                ShiftRightLogical(Load(_uintType, _subgroupInvocationIdInput), UInt(5)));
+            var component = ShiftRightLogical(Load(_uintType, _subgroupInvocationIdInput), UInt(5));
+            // Avoid dynamic extraction of subgroup ballot words: on the NVIDIA
+            // device tests it produced zero masks. Select the same word explicitly.
+            var result = _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, ballot, 0);
+            for (uint index = 1; index < 4; index++)
+            {
+                var word = _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, ballot, index);
+                result = _module.AddInstruction(SpirvOp.Select, _uintType,
+                    _module.AddInstruction(SpirvOp.IEqual, _boolType, component, UInt(index)), word, result);
+            }
+            return result;
         }
 
         private uint BooleanToHalfWaveMask(uint condition)
@@ -7841,7 +7847,7 @@ public static partial class Gen5SpirvTranslator
                 instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) ||
                 instruction.Opcode.StartsWith("SCbranchExec", StringComparison.Ordinal) ||
                 instruction.Opcode.StartsWith("SCbranchVcc", StringComparison.Ordinal) ||
-                instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal) ||
+                instruction.Opcode.StartsWith("VCmp", StringComparison.Ordinal) ||
                 instruction.Sources.Any(IsWaveMaskOperand) ||
                 instruction.Destinations.Any(IsWaveMaskOperand));
 

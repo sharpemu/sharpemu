@@ -77,6 +77,25 @@ public sealed class Wave64HalfMaskDeviceTests(HeadlessVulkanFixture fixture) : I
         return lanes;
     }
 
+    [Fact]
+    public void ExplicitCompareMask_IsCollectedAcrossTheWave()
+    {
+        if (!Ready()) return;
+        Lane();
+        CompareTo("VCmpGeU32", 10, Gen5Operand.Vector(2), Operand(3));
+        Add(MoveVectorFromScalar(0, 4, 10));
+        Assert.All(Run(), x => Assert.Equal(0xFFFF_FFF8u, x));
+    }
+
+    [Fact]
+    public void InitialExecContainsEveryLane()
+    {
+        if (!Ready()) return;
+        Lane();
+        Add(MoveVectorFromScalar(0, 4, 126));
+        Assert.All(Run(), x => Assert.Equal(uint.MaxValue, x));
+    }
+
     private bool Ready() => GatePrerequisites.Ready(fixture.Vulkan, shaderInt64: true);
 
     [Fact]
