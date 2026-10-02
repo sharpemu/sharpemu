@@ -772,6 +772,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _supportsFragmentShaderBarycentric;
         private bool _supportsPerVertexPixelInputs;
         private bool _supportsShaderLayer;
+        private bool _supportsShaderClipDistance;
         private bool _supportsMeshShader;
         private MeshShaderLimits _meshShaderLimits;
         private delegate* unmanaged<CommandBuffer, uint, uint, uint, void> _cmdDrawMeshTasks;
@@ -818,9 +819,11 @@ internal static unsafe partial class VulkanVideoPresenter
             _supportsDepthBounds = supportedFeatures.DepthBounds;
             _supportsShaderClipDistance = supportedFeatures.ShaderClipDistance;
             _supportsFillRectangle = IsDeviceExtensionAvailable(FillRectangleExtensionName);
+            _supportsShaderClipDistance = supportedFeatures.ShaderClipDistance;
             var enabledFeatures = new PhysicalDeviceFeatures
             {
                 DepthBounds = supportedFeatures.DepthBounds,
+                ShaderClipDistance = supportedFeatures.ShaderClipDistance,
                 IndependentBlend = supportedFeatures.IndependentBlend,
                 DualSrcBlend = supportedFeatures.DualSrcBlend,
                 VertexPipelineStoresAndAtomics = supportedFeatures.VertexPipelineStoresAndAtomics,
