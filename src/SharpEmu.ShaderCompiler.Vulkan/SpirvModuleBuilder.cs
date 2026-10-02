@@ -799,9 +799,12 @@ public sealed class SpirvModuleBuilder
     }
 
     public uint BeginFunction(uint returnType, uint functionType)
+        => BeginFunction(returnType, functionType, 0);
+
+    public uint BeginFunction(uint returnType, uint functionType, uint functionControl)
     {
         var id = AllocateId();
-        Emit(_functions, SpirvOp.Function, returnType, id, 0, functionType);
+        Emit(_functions, SpirvOp.Function, returnType, id, functionControl, functionType);
         return id;
     }
 

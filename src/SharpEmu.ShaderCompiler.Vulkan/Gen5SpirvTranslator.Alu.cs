@@ -9,6 +9,26 @@ public static partial class Gen5SpirvTranslator
 {
     private sealed partial class CompilationContext
     {
+        private uint _integerReciprocalFunction;
+
+        private void DeclareIntegerReciprocalFunction()
+        {
+            if (!_request.Program.Instructions.Any(instruction => instruction.Opcode == "VRcpIflagF32"))
+            {
+                return;
+            }
+
+            // Keep integer reciprocal lowering outside the caller's optimization region.
+            const uint dontInline = 2;
+            var functionType = _module.TypeFunction(_floatType, _floatType);
+            _integerReciprocalFunction = _module.BeginFunction(_floatType, functionType, dontInline);
+            var source = _module.AddFunctionParameter(_floatType);
+            _module.AddLabel();
+            var reciprocal = _module.AddInstruction(SpirvOp.FDiv, _floatType, Float(1), source);
+            _module.AddStatement(SpirvOp.ReturnValue, reciprocal);
+            _module.EndFunction();
+        }
+
         private bool TryEmitVectorAlu(
             Gen5ShaderInstruction instruction,
             out string error)
@@ -458,13 +478,21 @@ public static partial class Gen5SpirvTranslator
                     break;
                 }
                 case "VRcpF32":
-                case "VRcpIflagF32":
                     result = EmitFloatResult(
                         instruction,
                         _module.AddInstruction(
                             SpirvOp.FDiv,
                             _floatType,
                             Float(1),
+                            GetFloatSource(instruction, 0)));
+                    break;
+                case "VRcpIflagF32":
+                    result = EmitFloatResult(
+                        instruction,
+                        _module.AddInstruction(
+                            SpirvOp.FunctionCall,
+                            _floatType,
+                            _integerReciprocalFunction,
                             GetFloatSource(instruction, 0)));
                     break;
                 case "VLogF32":

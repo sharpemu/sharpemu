@@ -302,6 +302,7 @@ public static partial class Gen5SpirvTranslator
                 _directMeshBlocks = CanEmitDirectMeshBlocks(blocks);
                 FindLocalComparisonPredicates(blocks);
                 DeclareModule();
+                DeclareIntegerReciprocalFunction();
                 var functionType = _module.TypeFunction(_voidType);
                 var main = _module.BeginFunction(_voidType, functionType);
                 _module.AddName(main, "main");
