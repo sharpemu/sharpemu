@@ -136,6 +136,9 @@ internal static unsafe partial class VulkanVideoPresenter
             resolution = resolution with { Request = request };
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
             _imageCache.ApplyNativeColorClear(imageIdentifier, request);
+            if (Gpu.Images.ImageClearTrace.Enabled)
+                _imageCache.TraceVolumeClear("resolved-shader-image", request, _imageCache.GetImage(imageIdentifier),
+                    $"stage={program.Stage} hash=0x{program.Hash:X16} slot={index}");
             BindImage(imageIdentifier, storage);
             var descriptor = new TextureDescriptorWords(words);
             if (ShouldTraceTextureBindings())

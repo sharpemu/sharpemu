@@ -339,8 +339,13 @@ public static partial class ImageRequestBuilders
             }
         }
         var request = new ImageRequest(description, view, storage ? ImageRole.StorageImage : ImageRole.Texture);
-        if (ImageClearTrace.Enabled && volume && descriptor.MetadataCompress)
+        if (ImageClearTrace.Enabled && volume)
+        {
             request.TraceTextureMetadataAddress = descriptor.MetadataAddress << 8;
+            request.TraceMetadataCompress = descriptor.MetadataCompress;
+            request.TraceWriteCompress = descriptor.WriteCompress;
+            request.TraceTextureDescriptor = string.Join(",", ((ReadOnlySpan<uint>)descriptor.Fields).ToArray().Select(word => word.ToString("X8")));
+        }
         return new TextureRequestResolution(request, shaderConversion, pixelFormat, DestinationSwizzle(descriptor));
     }
 

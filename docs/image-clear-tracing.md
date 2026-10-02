@@ -5,7 +5,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 # Image clear tracing
 
-Set `SHARPEMU_TRACE_IMAGE_CLEARS=1` before launch to inspect color-target clears on Vulkan.
+Set `SHARPEMU_TRACE_IMAGE_CLEARS=1` before launch to inspect Vulkan color-target and volume clear decisions.
 The default is off. Full AGC logging, shader dumps, and RenderDoc are not required.
 
 ```powershell
@@ -13,7 +13,7 @@ $env:SHARPEMU_TRACE_IMAGE_CLEARS = '1'
 ./SharpEmu.exe
 ```
 
-Search the log for `ImageClear`. The trace records these details:
+Search the log for `ImageClear` and `VolumeClear`. The `ImageClear` trace records these details:
 
 - `target`: guest image and metadata addresses, format, extent, clear word, and DCC control.
 - `state`: the tracked metadata fill, layer mask, and fill size before clear resolution.
@@ -21,13 +21,13 @@ Search the log for `ImageClear`. The trace records these details:
 - `decision`: whether the attachment will clear and the four raw clear-value words.
 - `applied`: a native metadata clear, its image, slice, layer, and clear code.
 
-Each distinct message appears once. The trace stops after 8,192 distinct messages and reports
+Each distinct `ImageClear` message appears once. That channel stops after 8,192 distinct messages and reports
 the limit. It is a state summary, not a complete event timeline. Retained history covers the
 last 32 transitions for up to 256 metadata addresses. CPU events include notified writes only.
 Native GPU writes can be absent from the metadata history. An absent event does not prove that
 the guest did not write metadata.
 
-The `native` entries contain a 64-byte prefix of the metadata allocation. GPU-dirty data
+For non-volume images, the `native` entries contain a 64-byte prefix of the metadata allocation. GPU-dirty data
 is synchronized through the buffer cache before the backing bytes are read. This can wait
 for GPU completion and can download a wider range under the existing readback policy.
 The sample is not proof that the full metadata allocation has one value.
@@ -95,12 +95,48 @@ instruction data; do not publish the log without review.
 These records describe resource resolution, not proof that a dispatch executed.
 They contain guest descriptor data; review logs before sharing them.
 
-Compressed volume requests also record `texture-metadata`, `texture-owner-search`, and
-`texture-owner-candidate`. Metadata sampling reads a 256-byte prefix after GPU writes complete.
-It samples at most four times for each image/metadata pair, for up to 128 pairs per cache.
-The prefix does not establish the state of the full allocation. Owner entries list overlapping
-cached images before selection. This metadata sampling can cause a GPU wait; it does not
-enable compression support or change the image request used for rendering.
+Owner entries such as `texture-owner-search` and `texture-owner-candidate` list overlapping
+cached images before selection. Volume metadata now uses `VolumeClear` records instead of
+the diagnostic-only synchronized `texture-metadata` prefix read.
+
+## Volume clear decisions
+
+The same switch enables `VolumeClear` for 3D images. No additional switch is required.
+These records are separate from the `ImageClear` and `VolumeImage` channels.
+Phases identify the point at which each observation was made:
+
+- `before-texture-lookup`: the request before a cached owner is resolved.
+- `resolved-shader-image`: the resolved image, shader stage, shader hash, and image slot.
+- `before-attachment-decision` and `after-attachment-decision`: the attachment clear check and result.
+- `before-sampled-decision` and `sampled-skip`: the sampled-image clear check or skipped clear.
+- `sampled-clear-recorded`: the recorded clear, raw RGBA words, and clear scope.
+- `sampled-consumed` and `sampled-tracked-consumed`: metadata consumption in the sampled-image path.
+
+Each record includes a sequence, scheduler tick, queue, submission, guest image address,
+host image handle, owner-resolution state, image role, extent, format, view, and GPU-modified state.
+Texture requests include descriptor words and compression flags when available. The descriptor
+metadata address and cached metadata address are reported separately. Missing descriptor data
+is reported as `none`.
+
+For each distinct metadata address, the trace reports registration and tracked-fill state.
+It derives a candidate DCC slice size and scans each depth slice in 4 KiB chunks.
+Each slice reports its address, bytes read, first byte, uniformity, readability,
+GPU-dirty state before and after the scan, and tracked clear state. A failed read stops
+that slice's scan. Mixed bytes and unsupported clear codes remain visible in the report.
+
+`candidate=True` means the backing bytes were readable and uniform, the code was recognized,
+and neither dirty-state check found GPU writes. It does not prove that a clear is legal or
+that the bytes form an atomic CPU/GPU snapshot. `synchronization=none` means this diagnostic
+adds no GPU wait or readback. It does not register metadata, change the request, or select
+a rendering clear. Normal rendering synchronization is unchanged.
+
+Zero or invalid ranges, address overflow, and candidate ranges larger than 8 MiB are reported
+as `unavailable-invalid-or-over-8MiB`. The scan bound applies separately to each distinct
+metadata range. Repeated identical state for an image-address/role/phase key is omitted.
+Each image cache retains at most 256 keys and writes at most 2,048 changed records.
+A new key beyond the key limit or the record limit stops this channel and writes a limit message.
+These limits are separate from the `ImageClear` limit. CPU scans and log output can affect
+timing even without GPU waits. Disable tracing for performance comparisons.
 
 ## Binding provenance
 

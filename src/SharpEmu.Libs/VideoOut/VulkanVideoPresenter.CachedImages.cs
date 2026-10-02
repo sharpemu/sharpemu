@@ -284,7 +284,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 _imageCache.TraceColorClearState(target.Request.Description.Metadata.Range.Address);
             }
 
+            if (ImageClearTrace.Enabled) _imageCache.TraceVolumeClear("before-attachment-decision", target.Request, target.Image);
             var clear = TryResolveDccAttachmentClear(target, out clearValue);
+            if (ImageClearTrace.Enabled) _imageCache.TraceVolumeClear("after-attachment-decision", target.Request, target.Image,
+                $"clear={clear} rgbaBits={clearValue.Uint32_0:X8},{clearValue.Uint32_1:X8},{clearValue.Uint32_2:X8},{clearValue.Uint32_3:X8}");
             if (ImageClearTrace.Enabled)
             {
                 ImageClearTrace.Write($"decision image=0x{target.Address:X16} metadata=0x{target.Request.Description.Metadata.Range.Address:X16} " +

@@ -611,6 +611,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var view = binding.Request.View;
                 for (var layer = view.BaseLayer; layer < view.BaseLayer + view.LayerCount; layer++)
                 {
+                    if (ImageClearTrace.Enabled) _imageCache.TraceVolumeClear("before-sampled-decision", binding.Request, image, $"layer={layer}");
                     var tracked = _imageCache.IsMetadataCleared(metadataAddress, layer, out var metadataValue) && (byte)metadataValue == DccClearToZero;
                     var clearValue = default(ClearColorValue);
                     ulong guestSlice = 0;
@@ -618,6 +619,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         (sliceSize == 0 || !_imageCache.TryReadGuestDccClear(metadataAddress, sliceSize, layer, out guestSlice, out var code) ||
                          !TryDecodeDccClear(code, false, fixedClearSupported, default, out clearValue)))
                     {
+                        if (ImageClearTrace.Enabled) _imageCache.TraceVolumeClear("sampled-skip", binding.Request, image, $"layer={layer}");
                         continue;
                     }
 
@@ -627,9 +629,12 @@ internal static unsafe partial class VulkanVideoPresenter
                     image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, range, command);
                     var vkRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, layer, 1);
                     _vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clearValue, 1, &vkRange);
+                    if (ImageClearTrace.Enabled) _imageCache.TraceVolumeClear("sampled-clear-recorded", binding.Request, image,
+                        $"layer={layer} tracked={tracked} rgbaBits={clearValue.Uint32_0:X8},{clearValue.Uint32_1:X8},{clearValue.Uint32_2:X8},{clearValue.Uint32_3:X8} scope=whole-mip-for-volume");
                     if (!tracked)
                     {
                         _bufferCache.FillDccMetadata(guestSlice, sliceSize, uint.MaxValue);
+                        if (ImageClearTrace.Enabled) _imageCache.TraceVolumeClear("sampled-consumed", binding.Request, image, $"address=0x{guestSlice:X} size=0x{sliceSize:X}");
                         if (RenderTrace.Enabled && RenderTrace.MetadataClear())
                         {
                             RenderTrace.Write(
@@ -646,6 +651,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
 
                     ConsumeGuestDccClears(image.Description, layer, 1);
+                    if (ImageClearTrace.Enabled) _imageCache.TraceVolumeClear("sampled-tracked-consumed", binding.Request, image, $"layer={layer}");
                 }
             }
         }

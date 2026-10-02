@@ -15,6 +15,11 @@ public sealed partial class GuestImageCache
 
     internal void TraceTextureMetadata(in ImageRequest request)
     {
+        if (request.Description.IsVolume)
+        {
+            if (ImageClearTrace.Enabled) TraceVolumeClear("before-texture-lookup", request, null);
+            return;
+        }
         var address = request.TraceTextureMetadataAddress;
         const int sampleSize = 256;
         if (!ImageClearTrace.Enabled || address == 0 || address > ulong.MaxValue - sampleSize) return;
@@ -37,6 +42,7 @@ public sealed partial class GuestImageCache
 
     internal void TraceNativeColorMetadata(in ImageRequest request)
     {
+        if (request.Description.IsVolume) return;
         if (!ImageClearTrace.Enabled || request.Role != ImageRole.ColorTarget ||
             request.Description.Metadata.Kind != MetadataKind.Dcc) return;
 
