@@ -435,6 +435,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             metadata.Size = Math.Max(metadata.Size, request.Description.DccSliceSize * request.Description.TransferLayers);
             metadata.RangeSize = Math.Max(metadata.RangeSize, request.Description.Metadata.Range.Size);
             metadata.NativeColorClear = request.Description.Metadata.NativeColorClear;
+            metadata.DccSliceCount = request.Description.TransferLayers;
             image.MetadataRegistration = metadata;
         }
 

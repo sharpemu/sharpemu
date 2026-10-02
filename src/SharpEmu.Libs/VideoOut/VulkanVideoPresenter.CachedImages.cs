@@ -592,10 +592,12 @@ internal static unsafe partial class VulkanVideoPresenter
             _ = BeginBatchedGuestCommands();
             var request = resolution.Request;
             _imageCache.TraceTextureMetadata(request);
+            _imageCache.SynchronizeColorMetadata(request);
             _ = BeginBatchedGuestCommands();
             var imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
             resolution = resolution with { Request = request };
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
+            _imageCache.ApplyNativeColorClear(imageIdentifier, request);
             BindImage(imageIdentifier, texture.IsStorage);
             return new TextureResource
             {

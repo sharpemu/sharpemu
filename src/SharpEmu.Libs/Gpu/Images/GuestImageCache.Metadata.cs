@@ -109,13 +109,14 @@ public sealed partial class GuestImageCache
     {
         fillValue = 0;
         using var held = _lock.Hold();
-        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc ||
+            slice >= (found.Kind == SurfaceMetadataKind.Dcc ? found.DccSliceCount : 32))
         {
             return false;
         }
 
         fillValue = found.FillValue;
-        return (found.ClearMask & (1u << (int)slice)) != 0;
+        return found.IsSliceClear(slice);
     }
 
     public bool IsMetadataCleared(ulong address, uint slice) => IsMetadataCleared(address, slice, out _);
@@ -263,19 +264,13 @@ public sealed partial class GuestImageCache
     public bool SetMetadataSlice(ulong address, uint slice, bool isClear)
     {
         using var held = _lock.Hold();
-        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc ||
+            slice >= (found.Kind == SurfaceMetadataKind.Dcc ? found.DccSliceCount : 32))
         {
             return false;
         }
 
-        if (isClear)
-        {
-            found.ClearMask |= 1u << (int)slice;
-        }
-        else
-        {
-            found.ClearMask &= ~(1u << (int)slice);
-        }
+        found.SetSliceClear(slice, isClear);
 
         return true;
     }

@@ -12,7 +12,7 @@ public sealed unsafe partial class GuestImageCache
     internal void SynchronizeColorMetadata(in ImageRequest request)
     {
         var metadata = request.Description.Metadata;
-        if (request.Role != ImageRole.ColorTarget || !metadata.NativeColorClear) return;
+        if (!metadata.NativeColorClear) return;
         var range = metadata.Range;
         // Native metadata writes must finish before image discovery and final draw uploads.
         if (_bufferCache.HasGpuDirtyBytes(range.Address, range.Size))
@@ -23,11 +23,14 @@ public sealed unsafe partial class GuestImageCache
     {
         var description = request.Description;
         var metadata = description.Metadata;
-        if (request.Role != ImageRole.ColorTarget || !metadata.NativeColorClear) return;
+        if (!metadata.NativeColorClear) return;
         var view = request.View;
-        var sliceSize = metadata.Range.Size / description.Resources.Layers;
-        if (sliceSize == 0 || metadata.ColorMetadataBaseLayer >= description.Resources.Layers ||
-            view.LayerCount > description.Resources.Layers - metadata.ColorMetadataBaseLayer)
+        var layers = description.TransferLayers;
+        var volumeTexture = description.IsVolume && view.Type == ImageViewType.Type3D;
+        var layerCount = volumeTexture ? description.Extent.Depth : view.LayerCount;
+        var sliceSize = metadata.Range.Size / layers;
+        if (sliceSize == 0 || metadata.ColorMetadataBaseLayer >= layers ||
+            layerCount > layers - metadata.ColorMetadataBaseLayer)
             throw SubmissionScheduler.Fatal("The native color metadata view is outside its slices.");
 
         using (var held = _lock.Hold())
@@ -47,13 +50,16 @@ public sealed unsafe partial class GuestImageCache
                 throw SubmissionScheduler.Fatal("The native color target metadata is not DCC.");
             }
             registration.NativeColorClear = true;
+            registration.DccSliceCount = layers;
+            // Native bytes own the clear state. Do not reuse deferred fill flags.
+            registration.ClearMask = 0;
             registration.RangeSize = Math.Max(registration.RangeSize, metadata.Range.Size);
             _slots[imageIdentifier].Description.Metadata = metadata;
             _slots[imageIdentifier].MetadataRegistration = registration;
         }
 
         Span<byte> bytes = stackalloc byte[4096];
-        for (uint slice = 0; slice < view.LayerCount; slice++)
+        for (uint slice = 0; slice < layerCount; slice++)
         {
             var layer = view.BaseLayer + slice;
             var address = metadata.Range.Address + sliceSize * (metadata.ColorMetadataBaseLayer + slice);
@@ -72,7 +78,7 @@ public sealed unsafe partial class GuestImageCache
             throw SubmissionScheduler.Fatal($"The color metadata is unreadable: address=0x{address:X16}.");
         var code = bytes[0];
         ClearColorValue color;
-        if (code == 0x20 && metadata.PackedColorClearSupported)
+        if (code == 0x20 && request.Role == ImageRole.ColorTarget && metadata.PackedColorClearSupported)
             color = metadata.PackedColorClear;
         else if (!NativeColorClear.TryDecode(code, view.Format, metadata.ColorAlphaOnLeastSignificantBits, out color))
             return false;
@@ -108,7 +114,11 @@ public sealed unsafe partial class GuestImageCache
         {
             RefreshFromGuest(imageIdentifier, request);
             var image = _slots[imageIdentifier];
-            var clearView = view with { BaseLayer = layer, LayerCount = 1, Type = ImageViewType.Type2D };
+            var clearView = view with
+            {
+                BaseLayer = layer, LayerCount = 1, Type = ImageViewType.Type2D,
+                Mapping = default, Usage = ImageUsageFlags.ColorAttachmentBit, MinLod = 0,
+            };
             var attachmentView = image.GetOrCreateView(clearView);
             var command = _scheduler.Current;
             command.EndRendering();

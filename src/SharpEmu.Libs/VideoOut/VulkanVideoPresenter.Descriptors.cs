@@ -129,11 +129,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 Gpu.Images.ImageTraceRange.NoteFollowedImage(program.Hash, index, request.Description.Data.Address, request.Description.Data.Size);
                 _imageCache.TraceTextureBinding(program.Hash, index, words, request);
             }
+            _imageCache.SynchronizeColorMetadata(request);
             _ = BeginBatchedGuestCommands();
             var imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("image-binding", $"stage={program.Stage} hash=0x{program.Hash:X16} slot={index} storage={storage} address=0x{request.Description.Data.Address:X16} size=0x{request.Description.Data.Size:X} view={request.View} words={string.Join(",", words.Select(value => value.ToString("X8")))}");
             resolution = resolution with { Request = request };
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
+            _imageCache.ApplyNativeColorClear(imageIdentifier, request);
             BindImage(imageIdentifier, storage);
             var descriptor = new TextureDescriptorWords(words);
             if (ShouldTraceTextureBindings())

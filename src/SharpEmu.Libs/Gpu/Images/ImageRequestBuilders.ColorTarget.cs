@@ -356,10 +356,10 @@ public static partial class ImageRequestBuilders
         var request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
         var (clearSupported, fixedClearSupported, clearValue) = DccClearInfo(targetFormat.HostFormat, hasDcc, words.ClearWord0);
         if (hasDcc && fixedClearSupported && words.Order == ChannelOrder.Standard &&
-            !volume && !is1D && levels == 1 && samples == 1 && tileMode == GuestTileMode.RenderTarget)
+            !is1D && levels == 1 && samples == 1 && tileMode == GuestTileMode.RenderTarget)
         {
             var sliceSize = NativeColorClear.SliceSize(width, height, bytesPerElement);
-            var metadataSize = sliceSize * view.ImageLayers;
+            var metadataSize = sliceSize * description.TransferLayers;
             if (sliceSize != 0 && (words.DccAddress & 4095) == 0 &&
                 metadataSize <= ulong.MaxValue - words.DccAddress)
             {

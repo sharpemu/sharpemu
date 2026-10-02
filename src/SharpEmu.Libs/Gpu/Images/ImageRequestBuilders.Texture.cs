@@ -320,6 +320,24 @@ public static partial class ImageRequestBuilders
         }
 
         var view = TextureView(descriptor, shape, viewFormat, shaderConversion, viewLevels, description.Resources.Layers);
+        if (!shape.R128 && descriptor.MetadataCompress && !description.IsDepth && !shaderConversion &&
+            tile == GuestTileMode.RenderTarget && levels == 1 && samples == 1 &&
+            type is GuestImageType.Color2D or GuestImageType.Color2DArray or GuestImageType.Color3D &&
+            NativeColorClear.TryDecode(0x40, viewFormat, !descriptor.DccAlphaOnMostSignificantBits, out _))
+        {
+            var metadataAddress = descriptor.MetadataAddress << 8;
+            var sliceSize = NativeColorClear.SliceSize(width, height, description.BytesPerBlock);
+            var metadataSize = sliceSize * description.TransferLayers;
+            if (metadataAddress != 0 && (metadataAddress & 4095) == 0 && sliceSize != 0 &&
+                metadataSize <= ulong.MaxValue - metadataAddress)
+            {
+                description.Metadata.Kind = MetadataKind.Dcc;
+                description.Metadata.Range = new GuestSpan(metadataAddress, metadataSize);
+                description.Metadata.NativeColorClear = true;
+                description.Metadata.ColorAlphaOnLeastSignificantBits = !descriptor.DccAlphaOnMostSignificantBits;
+                description.Metadata.ColorMetadataBaseLayer = volume ? 0 : view.BaseLayer;
+            }
+        }
         var request = new ImageRequest(description, view, storage ? ImageRole.StorageImage : ImageRole.Texture);
         if (ImageClearTrace.Enabled && volume && descriptor.MetadataCompress)
             request.TraceTextureMetadataAddress = descriptor.MetadataAddress << 8;
