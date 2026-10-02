@@ -32,6 +32,10 @@ public sealed class LinkedShaderProgramCacheTests
         Assert.True(request.Resources.Info.UsesDeviceAddresses);
         Assert.NotNull(request.Bindings.Find(DescriptorBindingKind.FaultBuffer));
         Assert.Equal(2, guest.Programs.Entries.Count());
+        Assert.True(Assert.Single(guest.Programs.Entries, entry =>
+            entry.Program.Instructions.Any(instruction => instruction.Opcode == "SSwappcB64")).HasShaderCalls);
+        Assert.False(Assert.Single(guest.Programs.Entries, entry =>
+            entry.Program.Instructions.All(instruction => instruction.Opcode != "SSwappcB64")).HasShaderCalls);
         WriteRecord(guest, 0x4000);
         Assert.NotEqual(first, Compile(guest, source));
         guest.WriteWords(FunctionAddress, 0xBF800001, 0xBE80200E);

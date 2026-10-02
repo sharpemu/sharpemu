@@ -96,6 +96,7 @@ internal sealed class ProgramSourceEntry
     public required ShaderResourcePlan Plan { get; init; }
     public required Gen5ShaderProgram Program { get; init; }
     public required bool HasBitwiseExclusiveOr { get; init; }
+    public required bool HasShaderCalls { get; init; }
     public ConstantFill? ConstantFill { get; init; }
     public BoundedFill? BoundedFill { get; init; }
     public BoundedCopy? BoundedCopy { get; init; }
@@ -264,7 +265,7 @@ internal sealed class ShaderProgramCache
             ShaderCacheCounters.CountProgram();
         }
 
-        var hasShaderCalls = entry.Program.Instructions.Any(instruction => instruction.Opcode == "SSwappcB64");
+        var hasShaderCalls = entry.HasShaderCalls;
         if (hasShaderCalls && !_compiler.LinkedShaderCallsSupported)
             throw new ShaderProgramRejectedException(
                 $"The backend does not support linked shader calls: backend={_compiler.BackendName} stage={source.Label} hash=0x{source.Hash:X16}.");
@@ -314,6 +315,7 @@ internal sealed class ShaderProgramCache
                             ? options.MeshInfo!.Geometry.WaveSize : options.ComputeInfo?.WaveSize ?? 32u);
                     failedLinkedPlan = null;
                     linked = new ProgramSourceEntry { Program = program, Plan = plan,
+                        HasShaderCalls = program.Instructions.Any(instruction => instruction.Opcode == "SSwappcB64"),
                         HasBitwiseExclusiveOr = program.Instructions.Any(instruction => instruction.Opcode.Contains("Xor", StringComparison.Ordinal)) };
                     _linkedPrograms.Add(linkedKey, linked);
                 }
@@ -445,6 +447,7 @@ internal sealed class ShaderProgramCache
             Plan = plan,
             Program = program,
             HasBitwiseExclusiveOr = exclusiveOr,
+            HasShaderCalls = program.Instructions.Any(instruction => instruction.Opcode == "SSwappcB64"),
             ConstantFill = source.Stage == ShaderStage.Compute ? ConstantFillDetector.Detect(program) : null,
             BoundedFill = source.Stage == ShaderStage.Compute ? BoundedFillDetector.Detect(program) : null,
             BoundedCopy = source.Stage == ShaderStage.Compute ? BoundedFillDetector.DetectCopy(program) : null,
