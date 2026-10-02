@@ -169,14 +169,20 @@ public sealed class SharedBackingViewsTests
             }
         })).ToArray();
 
-        for (var round = 0; round < 200; round++)
+        try
         {
-            Assert.True(store.TryMapReservedRange(churn, Segment, Segment, HostPageProtection.ReadWrite, out _));
-            Assert.True(store.Unmap(churn, Segment, out _));
+            for (var round = 0; round < 200; round++)
+            {
+                Assert.True(store.TryMapReservedRange(churn, Segment, Segment, HostPageProtection.ReadWrite, out _));
+                Assert.True(store.Unmap(churn, Segment, out _));
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref stop, 1);
+            await Task.WhenAll(workers);
         }
 
-        Volatile.Write(ref stop, 1);
-        await Task.WhenAll(workers);
         Assert.Equal(0, Volatile.Read(ref failures));
 
         Assert.True(store.Unmap(stable, Segment, out _));
