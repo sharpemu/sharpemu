@@ -197,6 +197,57 @@ public sealed class AgcCommandBufferChainTests
         uint targetDwords)
         => WriteJump(ctx, memory, linkAddress, 1, target, targetDwords);
 
+    [Fact]
+    public void PatchedPlaceholderChain_ReachesContinuation()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        var nextDwords = WriteUnsatisfiedWait(ctx, memory, SecondLinkAddress);
+        var rootDwords = WriteChain(ctx, memory, FirstLinkAddress, 0, 0);
+        ctx[CpuRegister.Rdi] = FirstLinkAddress;
+        ctx[CpuRegister.Rsi] = 2;
+        ctx[CpuRegister.Rdx] = SecondLinkAddress;
+        ctx[CpuRegister.Rcx] = nextDwords;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.UnknownIkfdt(ctx));
+        Assert.Equal(0x2F30_0000u | nextDwords, ReadUInt32(memory, FirstLinkAddress + 12));
+        SubmitDcb(ctx, memory, FirstLinkAddress, rootDwords);
+        Assert.Equal(1, StreamOf(memory).BlockedQueueCount);
+        Assert.Equal(SecondLinkAddress, StreamOf(memory).SnapshotBlocked().SampleWaitAddress);
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(1u)]
+    public void JumpPatch_PreservesModeAndEncodesAddress(uint mode)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        WriteJump(ctx, memory, FirstLinkAddress, mode, 0, 0);
+        ctx[CpuRegister.Rdi] = FirstLinkAddress;
+        ctx[CpuRegister.Rsi] = 3;
+        ctx[CpuRegister.Rdx] = 0xABCD_1234_5678;
+        ctx[CpuRegister.Rcx] = 0x123;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.UnknownIkfdt(ctx));
+        Assert.Equal(0x1234_5678u, ReadUInt32(memory, FirstLinkAddress + 4));
+        Assert.Equal(0xABCDu, ReadUInt32(memory, FirstLinkAddress + 8));
+        Assert.Equal(0x3F20_0123u | (mode << 20), ReadUInt32(memory, FirstLinkAddress + 12));
+    }
+
+    [Fact]
+    public void JumpPatch_RejectsOtherPacketWithoutChangingIt()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        WriteUInt32(memory, FirstLinkAddress, 0xC002_1000);
+        WriteUInt64(memory, FirstLinkAddress + 4, 0xDEAD_BEEF);
+        ctx[CpuRegister.Rdi] = FirstLinkAddress;
+        ctx[CpuRegister.Rsi] = 2;
+        ctx[CpuRegister.Rdx] = SecondLinkAddress;
+        ctx[CpuRegister.Rcx] = 7;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, AgcExports.UnknownIkfdt(ctx));
+        Assert.Equal(0xDEAD_BEEFul, ReadUInt64(memory, FirstLinkAddress + 4));
+    }
+
     private static uint WriteJump(
         CpuContext ctx,
         FakeCpuMemory memory,

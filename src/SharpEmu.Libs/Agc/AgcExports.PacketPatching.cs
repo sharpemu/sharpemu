@@ -10,6 +10,36 @@ public static partial class AgcExports
 {
     // This partial patches previously constructed AGC command packets.
 
+    // Uncatalogued name; the NID and import library identify this AGC export.
+    // Observed ABI: packet, cache policy, next-buffer address, length in dwords.
+    // The caller patches the previous DcbJump after allocating its continuation.
+    #pragma warning disable SHEM006
+    [SysAbiExport(Nid = "Ikfdt-rIqCE", ExportName = "sceAgcUnknownIkfdt",
+        Target = Generation.Gen5, LibraryName = "libSceAgc")]
+    public static int UnknownIkfdt(CpuContext ctx)
+    {
+        var packet = ctx[CpuRegister.Rdi];
+        var cachePolicy = (uint)ctx[CpuRegister.Rsi];
+        var target = ctx[CpuRegister.Rdx];
+        var dwords = (uint)ctx[CpuRegister.Rcx];
+        if (cachePolicy > 3 || dwords > 0xFFFFFu ||
+            !TryGetPacketIdentity(ctx, packet, out var opcode, out _) ||
+            opcode != ItIndirectBuffer ||
+            !TryReadUInt32(ctx, packet, out var header) ||
+            ((header >> 16) & 0x3FFFu) != 2 ||
+            !TryReadUInt32(ctx, packet + 12, out var control))
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+
+        // Preserve call/chain mode and every other control bit.
+        control = (control & ~0x300F_FFFFu) | (cachePolicy << 28) | dwords;
+        return TryWriteUInt32(ctx, packet + 4, (uint)target) &&
+               TryWriteUInt32(ctx, packet + 8, (uint)(target >> 32) & 0xFFFFu) &&
+               TryWriteUInt32(ctx, packet + 12, control)
+            ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK)
+            : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+    #pragma warning restore SHEM006
+
     [SysAbiExport(
         Nid = "vcmNN+AAXnY",
         ExportName = "sceAgcSetCxRegIndirectPatchSetAddress",

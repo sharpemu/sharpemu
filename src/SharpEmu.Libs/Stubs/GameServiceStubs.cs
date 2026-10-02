@@ -214,12 +214,4 @@ public static class GameServiceStubs
         Target = Generation.Gen5, LibraryName = "libSceVideoRecording")]
     public static int VideoRecordingSetInfo(CpuContext ctx) => Ok(ctx);
 
-    // Captured from GTA V Enhanced (PPSA04264); not in the public NID catalog.
-    // Side-effect-free success — same as unresolved stub behavior that kept boot
-    // moving; reverse the ABI before writing guest memory.
-    #pragma warning disable SHEM006
-    [SysAbiExport(Nid = "Ikfdt-rIqCE", ExportName = "sceUnknownIkfdt",
-        Target = Generation.Gen5, LibraryName = "libKernel")]
-    public static int UnknownIkfdt(CpuContext ctx) => Ok(ctx);
-    #pragma warning restore SHEM006
 }
