@@ -67,8 +67,16 @@ public sealed record HostVideoOptions
     public PerformanceOverlayCorner OverlayCorner { get; init; } = PerformanceOverlayCorner.TopRight;
     public PerformanceOverlayMode OverlayMode { get; init; } = PerformanceOverlayMode.TitleBar;
 
+    // On macOS, Auto keeps guests on SDR output: reporting HDR moves titles onto render paths
+    // MoltenVK cannot build yet (Silent Hill's HDR switch fails a pipeline compile and then
+    // crashes inside MoltenVK on every run). --hdr=on still opts in.
+    internal static bool AutoHdrAllowed => !OperatingSystem.IsMacOS();
+
     internal bool CanUseHdr(bool displayHdrEnabled, bool surfaceSupportsHdr) =>
-        surfaceSupportsHdr && (HdrMode == HostHdrMode.On || HdrMode == HostHdrMode.Auto && displayHdrEnabled);
+        CanUseHdr(displayHdrEnabled, surfaceSupportsHdr, AutoHdrAllowed);
+
+    internal bool CanUseHdr(bool displayHdrEnabled, bool surfaceSupportsHdr, bool autoAllowed) =>
+        surfaceSupportsHdr && (HdrMode == HostHdrMode.On || HdrMode == HostHdrMode.Auto && autoAllowed && displayHdrEnabled);
 
     public HostVideoOptions Normalize() => this with
     {
