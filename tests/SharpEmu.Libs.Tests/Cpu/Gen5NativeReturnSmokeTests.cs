@@ -99,7 +99,160 @@ public sealed class Gen5NativeReturnSmokeTests
         ExecuteSyntheticGuest(continuation: true);
     }
 
-    private static void ExecuteSyntheticGuest(byte[]? callbackInstructions = null, bool continuation = false)
+    [Fact]
+    public Task RedZoneSentinelWithoutExceptionIsPreserved() =>
+        CheckRedZoneSentinel(nameof(RedZoneSentinelWithoutExceptionIsPreserved), false, false);
+
+    [Fact]
+    public Task RedZoneSentinelWithProtectedExtractIsPreserved() =>
+        CheckRedZoneSentinel(nameof(RedZoneSentinelWithProtectedExtractIsPreserved), true, true);
+
+    [Fact]
+    public Task RedZoneSentinelWithUnprotectedExtractIsPreserved() =>
+        CheckRedZoneSentinel(nameof(RedZoneSentinelWithUnprotectedExtractIsPreserved), true, false);
+
+    [Fact]
+    public Task RedZoneSentinelWithRegisterExtractIsPreserved() =>
+        CheckRedZoneSentinel(nameof(RedZoneSentinelWithRegisterExtractIsPreserved), true, false, true);
+
+    [Fact]
+    public async Task RegisterExtractRecoversAllFieldControlsWithNonzeroUpperLanes()
+    {
+        if (!OperatingSystem.IsWindows() || !IsSupportedHost)
+            return;
+
+        // This probe checks software recovery, not hardware results for undefined fields.
+        if ((X86Base.CpuId(unchecked((int)0x80000001), 0).Ecx & (1 << 6)) != 0)
+            return;
+
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            var result = await RunIsolatedWorker(nameof(RegisterExtractRecoversAllFieldControlsWithNonzeroUpperLanes));
+            Assert.True(result.Completed, result.Output);
+            Assert.True(result.ExitCode == 0, result.Output);
+            return;
+        }
+
+        var instructions = new List<byte>
+        {
+            0xF3, 0x0F, 0x6F, 0x07,                   // movdqu xmm0,[rdi]
+            0xF3, 0x0F, 0x6F, 0x4F, 0x10,             // movdqu xmm1,[rdi+16]
+            0x66, 0x0F, 0x6F, 0xD0,                   // movdqa xmm2,xmm0
+            0x48, 0xB8                                // mov rax,imm64
+        };
+        var returnValue = new byte[8];
+        BinaryPrimitives.WriteUInt64LittleEndian(returnValue, CallbackReturnValue);
+        instructions.AddRange(returnValue);
+        instructions.AddRange([
+            0x48, 0x39, 0xC0,                         // cmp rax,rax
+            0x9C, 0x5E,                               // pushfq; pop rsi
+            0x48, 0x89, 0x77, 0x50,                   // mov [rdi+80],rsi
+            0x66, 0x0F, 0x79, 0xC1,                   // extrq xmm0,xmm1
+            0x9C, 0x5E,
+            0x48, 0x89, 0x77, 0x58,                   // mov [rdi+88],rsi
+            0xF3, 0x0F, 0x7F, 0x47, 0x20,             // movdqu [rdi+32],xmm0
+            0xF3, 0x0F, 0x7F, 0x4F, 0x30,             // movdqu [rdi+48],xmm1
+            0xF3, 0x0F, 0x7F, 0x57, 0x40,             // movdqu [rdi+64],xmm2
+            0xC3
+        ]);
+        ExecuteSyntheticGuest(instructions.ToArray(), checkExtractControls: true);
+    }
+
+    private static void CheckExtractControls(PhysicalVirtualMemory memory, DirectExecutionBackend backend,
+        CpuContext context, ulong entryPoint, ulong dataAddress)
+    {
+        ulong[] values = [0, ulong.MaxValue, 0x8000_0000_0000_0000,
+            0xAAAA_AAAA_AAAA_AAAA, 0x5555_5555_5555_5555, CallbackReturnValue];
+        var input = new byte[96];
+        var output = new byte[96];
+        foreach (var value in values)
+        for (var length = 0; length < 64; length++)
+        for (var index = 0; index < 64; index++)
+        {
+            var upper = value ^ 0x1357_9BDF_2468_ACE0UL;
+            var control = 0xFEDC_BA98_7654_C0C0UL | (uint)length | ((ulong)index << 8);
+            BinaryPrimitives.WriteUInt64LittleEndian(input, value);
+            BinaryPrimitives.WriteUInt64LittleEndian(input.AsSpan(8), upper);
+            BinaryPrimitives.WriteUInt64LittleEndian(input.AsSpan(16), control);
+            BinaryPrimitives.WriteUInt64LittleEndian(input.AsSpan(24), ~upper);
+            Assert.True(memory.TryWrite(dataAddress, input));
+            Assert.True(backend.TryCallGuestFunction(context, entryPoint, dataAddress, 0, 0, 0, 0,
+                "synthetic-extract-controls", out var returned, out var error), error);
+            Assert.True(memory.TryRead(dataAddress, output));
+
+            // Build the oracle from the low quadword only. Bits past bit 63 are zero.
+            ulong expected = 0;
+            var bitCount = length == 0 ? 64 : length;
+            for (var bit = 0; bit < bitCount; bit++)
+            {
+                var position = index + bit;
+                var source = position < 64 ? value >> position : 0UL;
+                expected |= (source & 1UL) << bit;
+            }
+            var actual = BinaryPrimitives.ReadUInt64LittleEndian(output.AsSpan(32));
+            var label = $"value=0x{value:X16}, length={length}, index={index}";
+            Assert.True(expected == actual,
+                $"{label}: expected 0x{expected:X16}, actual 0x{actual:X16}");
+            Assert.True(BinaryPrimitives.ReadUInt64LittleEndian(output.AsSpan(40)) == 0,
+                $"{label}: destination upper half is not zero");
+            Assert.True(input.AsSpan(16, 16).SequenceEqual(output.AsSpan(48, 16)),
+                $"{label}: source XMM1 changed");
+            Assert.True(input.AsSpan(0, 16).SequenceEqual(output.AsSpan(64, 16)),
+                $"{label}: unrelated XMM2 changed");
+            Assert.True(output.AsSpan(80, 8).SequenceEqual(output.AsSpan(88, 8)),
+                $"{label}: RFLAGS changed");
+            Assert.True(returned == CallbackReturnValue, $"{label}: RAX changed");
+        }
+    }
+
+    private static async Task CheckRedZoneSentinel(string method, bool extract, bool protect,
+        bool registerExtract = false)
+    {
+        if (!OperatingSystem.IsWindows() || !IsSupportedHost)
+            return;
+
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            var result = await RunIsolatedWorker(method);
+            Assert.True(result.Completed, result.Output);
+            Assert.True(result.ExitCode == 0, result.Output);
+            return;
+        }
+
+        // Keep the sentinel live below the guest stack pointer across the exception.
+        // The protected control moves the exception frame below that storage.
+        var instructions = new List<byte> { 0x48, 0xB8 };
+        var sentinel = new byte[8];
+        BinaryPrimitives.WriteUInt64LittleEndian(sentinel, CallbackReturnValue);
+        instructions.AddRange(sentinel);
+        for (var offset = 8; offset <= 128; offset += 8)
+            instructions.AddRange([0x48, 0x89, 0x44, 0x24, unchecked((byte)-offset)]);
+        instructions.AddRange([0x66, 0x0F, 0xEF, 0xC0]); // pxor xmm0,xmm0
+        if (registerExtract)
+        {
+            instructions.AddRange([0xB9, 0x08, 0x00, 0x00, 0x00]); // mov ecx,8
+            instructions.AddRange([0x66, 0x48, 0x0F, 0x6E, 0xC9]); // movq xmm1,rcx
+        }
+        if (protect)
+            instructions.AddRange([0x48, 0x8D, 0x64, 0x24, 0x80]); // lea rsp,[rsp-128]
+        if (extract)
+            instructions.AddRange(registerExtract
+                ? [0x66, 0x0F, 0x79, 0xC1]
+                : [0x66, 0x0F, 0x78, 0xC0, 0x08, 0x00]);
+        if (protect)
+            instructions.AddRange([0x48, 0x8D, 0xA4, 0x24, 0x80, 0x00, 0x00, 0x00]);
+        for (var offset = 8; offset <= 128; offset += 8)
+        {
+            instructions.AddRange([0x48, 0x8B, 0x4C, 0x24, unchecked((byte)-offset)]);
+            instructions.AddRange([0x48, 0x89, 0x4F, (byte)(offset - 8)]);
+        }
+        instructions.Add(0xC3);
+        ExecuteSyntheticGuest(instructions.ToArray(), expectedExtracts: extract ? 1 : 0,
+            checkRedZone: true);
+    }
+
+    private static void ExecuteSyntheticGuest(byte[]? callbackInstructions = null, bool continuation = false,
+        int expectedExtracts = 1, bool checkRedZone = false, bool checkExtractControls = false)
     {
         using var memory = new PhysicalVirtualMemory();
         var image = new SelfLoader().Load(BuildSyntheticElf(callbackInstructions), memory);
@@ -164,6 +317,13 @@ public sealed class Gen5NativeReturnSmokeTests
             Assert.True(memory.TryWriteUInt64(dataAddress + 16, CallbackReturnValue));
         }
 
+        if (checkExtractControls)
+        {
+            CheckExtractControls(memory, backend, callerContext, image.EntryPoint + 3, dataAddress);
+            Assert.Equal(6L * 64 * 64, (long)recoveryCounter.GetValue(null)! - recoveriesBefore);
+            return;
+        }
+
         Assert.True(
             backend.TryCallGuestFunction(
                 callerContext,
@@ -177,12 +337,26 @@ public sealed class Gen5NativeReturnSmokeTests
                 out var callbackReturn,
                 out var callbackError),
             callbackError);
-        Assert.Equal(CallbackReturnValue, callbackReturn);
         if (callbackInstructions is not null)
         {
             var recoveriesAfter = (long)recoveryCounter.GetValue(null)!;
             var supportsSse4a = (X86Base.CpuId(unchecked((int)0x80000001), 0).Ecx & (1 << 6)) != 0;
-            Assert.Equal(supportsSse4a ? 0L : 1L, recoveriesAfter - recoveriesBefore);
+            Assert.Equal(supportsSse4a ? 0L : expectedExtracts, recoveriesAfter - recoveriesBefore);
+        }
+        Assert.True(callbackReturn == CallbackReturnValue,
+            $"Guest return value changed: expected 0x{CallbackReturnValue:X16}, actual 0x{callbackReturn:X16}.");
+        if (checkRedZone)
+        {
+            var snapshot = new byte[128];
+            Assert.True(memory.TryRead(dataAddress, snapshot));
+            var changes = new List<string>();
+            for (var index = 0; index < 16; index++)
+            {
+                var actual = BinaryPrimitives.ReadUInt64LittleEndian(snapshot.AsSpan(index * 8));
+                if (actual != CallbackReturnValue)
+                    changes.Add($"RSP-{(index + 1) * 8:X}: 0x{actual:X16}");
+            }
+            Assert.True(changes.Count == 0, $"Red-zone sentinel changed: {string.Join(", ", changes)}");
         }
     }
 
