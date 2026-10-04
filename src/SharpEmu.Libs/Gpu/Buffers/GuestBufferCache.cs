@@ -80,7 +80,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         _staging = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Upload, 512 * MiB);
         _uploader = new GuestBufferUploader(device, scheduler, guest, _staging);
         _stream = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Stream, 64 * MiB);
-        _download = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Download, 32 * MiB);
+        _download = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Download, 64 * MiB);
         _deviceRing = new GpuRingBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 128 * MiB);
         StreamOffsetAlignment = device.MinUniformBufferOffsetAlignment;
         _gds.Mapped.Clear();
