@@ -704,6 +704,27 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains("primitiveType=17", fatal.Message);
     }
 
+    [Theory]
+    [InlineData(3u)]
+    [InlineData(6u)]
+    [InlineData(63u)]
+    public void LegacyRectangleList_NativeFillPreservesGuestDrawArguments(uint count)
+    {
+        _host.SupportsNativeRectangles = true;
+        Assert.True(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: true, out var topology));
+        Assert.Equal(PrimitiveTopology.PatchList, topology);
+        _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(count, instances: 2, firstVertex: 9, firstInstance: 4, source: DrawOffsetSource.IndirectArguments));
+        Assert.Contains($"draw {count} 2 9 4", _host.Calls);
+    }
+
+    [Fact]
+    public void LegacyRectangleList_NativeFillRejectsIncompleteGroups()
+    {
+        _host.SupportsNativeRectangles = true;
+        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(4)));
+        Assert.Contains("count=4", fatal.Message);
+    }
+
     [Fact]
     public void LegacyQuadList_EmitsOneDrawPerQuad()
     {

@@ -95,6 +95,8 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public RenderHostLimits Limits { get; set; } = new(16384, 8192, 16384, 16384);
 
+    public bool SupportsNativeRectangles { get; set; }
+
     public IImageFormatSupport FormatSupport { get; } = new AcceptingFormatSupport();
 
     public bool IsRecording => Recording;
