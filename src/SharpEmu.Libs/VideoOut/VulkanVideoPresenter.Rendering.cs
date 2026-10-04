@@ -896,7 +896,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 PStencilAttachment = depthStencil.HasStencil ? &stencil : null,
             };
             if (_occlusionCounting)
-                _occlusionQueries?.Begin(command, _occlusionQueueId);
+                _occlusionQueries?.Begin(command, _occlusionQueueId,
+                    _commandStream.GetInterpreter(_occlusionQueueId).TypedRegisters.Context.DepthCountControl);
             _vk.CmdBeginRendering(command, &rendering);
             _renderingScopesBegun++;
             _renderingActive = true;
@@ -1028,6 +1029,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
             _vk.CmdDraw(command, count, instanceCount, firstVertex, firstInstance);
+            _occlusionQueries?.TraceDraw();
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Draw,
                 _boundGraphicsPipeline?.Id ?? 0, count, instanceCount);
             CountDraw();
@@ -1057,6 +1059,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
             _vk.CmdDrawIndexed(command, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+            _occlusionQueries?.TraceDraw(indexCount);
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.DrawIndexed,
                 _boundGraphicsPipeline?.Id ?? 0, indexCount, instanceCount);
             CountDraw();
@@ -1080,6 +1083,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
             _vk.CmdDrawIndexedIndirect(command, new VkBuffer(arguments.Handle), arguments.Offset, 1, 20);
+            _occlusionQueries?.TraceDraw();
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.DrawIndexed,
                 _boundGraphicsPipeline?.Id ?? 0, 0, 0);
             CountDraw();
@@ -1096,6 +1100,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var command = BeginBatchedGuestCommands();
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
             _cmdDrawMeshTasks(command, groupCountX, groupCountY, groupCountZ);
+            _occlusionQueries?.TraceDraw();
             if (MeshDrawTrace.Active) MeshDrawTrace.RecordedCommand((ulong)command.Handle);
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.MeshDraw,
                 _boundGraphicsPipeline?.Id ?? 0, groupCountX, groupCountY, groupCountZ,

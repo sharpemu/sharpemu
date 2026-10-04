@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Vulkan;
@@ -13,6 +14,7 @@ internal sealed unsafe class VulkanOcclusionQueries(Vk vulkan, Device device) : 
     {
         public readonly QueryPool Pool = pool;
         public readonly int[] Queues = new int[Capacity];
+        public readonly long[] TraceIds = VisibilityResultTrace.Enabled ? new long[Capacity] : [];
         public uint Count;
     }
 
@@ -22,10 +24,13 @@ internal sealed unsafe class VulkanOcclusionQueries(Vk vulkan, Device device) : 
     private readonly Dictionary<int, ulong> _samples = new();
     private Block? _current;
     private bool _active;
+    private long _traceId;
+    private int _traceDraws;
+    private int _traceSelectedDraws;
 
     public ulong Read(int queueId) => _samples.GetValueOrDefault(queueId);
 
-    public void Begin(CommandBuffer command, int queueId)
+    public void Begin(CommandBuffer command, int queueId, uint depthCountControl = 0)
     {
         if (_active)
             throw SubmissionScheduler.Fatal("An occlusion query is already active.");
@@ -55,11 +60,27 @@ internal sealed unsafe class VulkanOcclusionQueries(Vk vulkan, Device device) : 
         _current.Queues[_current.Count] = queueId;
         vulkan.CmdBeginQuery(command, _current.Pool, _current.Count, QueryControlFlags.PreciseBit);
         _active = true;
+        if (VisibilityResultTrace.Enabled)
+        {
+            _current.TraceIds[_current.Count] = ++_traceId;
+            _traceDraws = 0;
+            _traceSelectedDraws = 0;
+            VisibilityResultTrace.Occlusion($"begin query={_traceId} queue={queueId} control=0x{depthCountControl:X8}");
+        }
+    }
+
+    public void TraceDraw(uint? indexCount = null)
+    {
+        if (!VisibilityResultTrace.Enabled || !_active) return;
+        _traceDraws++;
+        if (IndexedDrawTrace.Enabled && indexCount == IndexedDrawTrace.SelectedCount) _traceSelectedDraws++;
     }
 
     public void End(CommandBuffer command)
     {
         if (!_active) return;
+        if (VisibilityResultTrace.Enabled)
+            VisibilityResultTrace.Occlusion($"end query={_traceId} draws={_traceDraws} selectedIndexCount={IndexedDrawTrace.SelectedCount} selectedDraws={_traceSelectedDraws}");
         vulkan.CmdEndQuery(command, _current!.Pool, _current.Count++);
         _active = false;
     }
@@ -93,6 +114,8 @@ internal sealed unsafe class VulkanOcclusionQueries(Vk vulkan, Device device) : 
         {
             var queueId = block.Queues[index];
             _samples[queueId] = unchecked(_samples.GetValueOrDefault(queueId) + results[index]);
+            if (VisibilityResultTrace.Enabled)
+                VisibilityResultTrace.Occlusion($"complete query={block.TraceIds[index]} queue={queueId} samples={results[index]} cumulative={_samples[queueId]}");
         }
         // The timeline callback runs after all uses of this pool have completed.
         _available.Push(block);
