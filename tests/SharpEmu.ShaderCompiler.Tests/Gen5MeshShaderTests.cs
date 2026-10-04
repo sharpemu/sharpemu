@@ -44,8 +44,12 @@ public sealed class Gen5MeshShaderTests
         ValidateWithInstalledSdk(shader.Spirv);
     }
 
-    [Fact]
-    public void MeshUserPointerAndWaveInputUseSeparateInitialization()
+    [Theory]
+    [InlineData(false, 32u)]
+    [InlineData(false, 64u)]
+    [InlineData(true, 32u)]
+    [InlineData(true, 64u)]
+    public void MeshUserPointerAndWaveInputUseSeparateInitialization(bool pointList, uint waveSize)
     {
         var program = ResourceTestProgram.Program(
             ResourceTestProgram.Sop1(0, "SMovB64", 20, Gen5Operand.Scalar(0)),
@@ -56,8 +60,8 @@ public sealed class Gen5MeshShaderTests
         Assert.Equal(new uint[] { 0, 1, 8 }, layout.UserDataRegisters);
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
-            WaveSize = 32, LocalSizeX = 32,
-            Mesh = new MeshShaderConfiguration(32, 16, 0, 8, 24, 0, true, 32),
+            WaveSize = waveSize, LocalSizeX = waveSize,
+            Mesh = new MeshShaderConfiguration(32, 16, 0, 8, pointList ? 8u : 24u, 0, !pointList, 32, pointList),
         };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         ValidateWithInstalledSdk(shader.Spirv);

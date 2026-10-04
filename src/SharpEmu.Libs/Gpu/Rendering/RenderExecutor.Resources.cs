@@ -223,9 +223,9 @@ public sealed partial class RenderExecutor
             MeshDrawTrace.Write("programs", $"mesh={meshInput is not null} vertexHash=0x{vertexInput.Stage.Program?.Hash:X16} pixelHash=0x{pixelInput.Stage.Program?.Hash:X16} pixelActive={state.PixelActive}");
         if (meshInput is not null)
         {
-            if (topology is not (PrimitiveTopology.TriangleList or PrimitiveTopology.TriangleStrip))
+            if (topology is not (PrimitiveTopology.PointList or PrimitiveTopology.TriangleList or PrimitiveTopology.TriangleStrip))
             {
-                throw _host.Fatal("The mesh draw does not use triangle primitives.");
+                throw _host.Fatal("The mesh draw input topology is not supported.");
             }
 
             ulong indexAddress = 0;
@@ -234,7 +234,9 @@ public sealed partial class RenderExecutor
                 var byteCount = checked((int)indexSource.Size);
                 var elementSize = indexSource.Type == IndexType.Uint16 ? 2u : 4u;
                 var triangleStrip = topology == PrimitiveTopology.TriangleStrip;
-                var capacity = MeshIndexAssembly.GetMaximumCount(byteCount, elementSize, triangleStrip);
+                var pointList = topology == PrimitiveTopology.PointList;
+                var capacity = pointList ? byteCount / (int)elementSize
+                    : MeshIndexAssembly.GetMaximumCount(byteCount, elementSize, triangleStrip);
                 if (capacity == 0) return "no-primitives";
                 byte[]? rentedBytes = null;
                 uint[]? rentedIndices = null;
@@ -245,7 +247,10 @@ public sealed partial class RenderExecutor
                     if (indexSource.HostData is null && !_host.TryReadGuest(indexSource.Address, bytes))
                         throw _host.Fatal("The mesh index buffer cannot be read.");
                     rentedIndices = ArrayPool<uint>.Shared.Rent(capacity);
-                    var written = MeshIndexAssembly.ExpandTriangles(bytes, rentedIndices.AsSpan(0, capacity),
+                    var written = pointList
+                        ? MeshIndexAssembly.ExpandPoints(bytes, rentedIndices.AsSpan(0, capacity), elementSize,
+                            emission.VertexOffset, primitiveRestart, elementSize == 2 ? ushort.MaxValue : uint.MaxValue)
+                        : MeshIndexAssembly.ExpandTriangles(bytes, rentedIndices.AsSpan(0, capacity),
                         elementSize, emission.VertexOffset, triangleStrip, primitiveRestart,
                         elementSize == 2 ? ushort.MaxValue : uint.MaxValue, context.RasterMode.ProvokingVertexLast);
                     meshVertexCount = checked((uint)written);
@@ -372,7 +377,8 @@ public sealed partial class RenderExecutor
 
         if (meshInput is { } mesh)
         {
-            var primitiveCount = mesh.Geometry.InputTriangleStrip ? (meshVertexCount >= 3 ? meshVertexCount - 2 : 0) : meshVertexCount / 3;
+            var primitiveCount = mesh.Geometry.InputPointList ? meshVertexCount
+                : mesh.Geometry.InputTriangleStrip ? (meshVertexCount >= 3 ? meshVertexCount - 2 : 0) : meshVertexCount / 3;
             var groupCount = (uint)(((ulong)primitiveCount + mesh.Geometry.InputPrimitiveCountPerWorkgroup - 1) / mesh.Geometry.InputPrimitiveCountPerWorkgroup);
             var totalGroupCount = (ulong)groupCount * draw.InstanceCount;
             if (groupCount > mesh.Execution.MaxGroupCountX || draw.InstanceCount > mesh.Execution.MaxGroupCountY ||

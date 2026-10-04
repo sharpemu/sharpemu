@@ -152,8 +152,11 @@ public sealed class MeshWaveDeviceTests(HeadlessVulkanFixture fixture) : IClassF
         harness.AssertNoValidationMessages();
     }
 
-    [Fact]
-    public void IndexedMeshReadsDrawIndicesAcrossPartialGroups()
+    [Theory]
+    [InlineData(false, 64u)]
+    [InlineData(true, 32u)]
+    [InlineData(true, 64u)]
+    public void IndexedMeshReadsDrawIndicesAcrossPartialGroups(bool pointList, uint waveSize)
     {
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
@@ -175,8 +178,8 @@ public sealed class MeshWaveDeviceTests(HeadlessVulkanFixture fixture) : IClassF
         var (plan, resources, layout) = Prepare(program, ShaderStage.Mesh);
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
-            WaveSize = 64, LocalSizeX = 64,
-            Mesh = new MeshShaderConfiguration(64, 2, 0, 2, 6, 0, false, 32),
+            WaveSize = waveSize, LocalSizeX = 64,
+            Mesh = new MeshShaderConfiguration(64, 6, 0, pointList ? 6u : 2u, 6, 0, false, 32, pointList),
         };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         using var harness = new ImageTestHarness(vulkan);

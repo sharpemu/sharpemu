@@ -407,10 +407,10 @@ public static partial class Gen5SpirvTranslator
             var primitiveStart = _module.AddInstruction(SpirvOp.IMul, _uintType,
                 groupX, UInt(mesh.InputPrimitiveCountPerWorkgroup));
             var vertexStart = _module.AddInstruction(SpirvOp.IMul, _uintType,
-                primitiveStart, UInt(mesh.InputTriangleStrip ? 1u : 3u));
+                primitiveStart, UInt(mesh.InputPointList || mesh.InputTriangleStrip ? 1u : 3u));
             var remaining = SaturatingSubtract(drawCount, vertexStart);
             var vertices = UnsignedMinimum(remaining, UInt(mesh.InputVertexCountPerWorkgroup));
-            var primitives = mesh.InputTriangleStrip ? SaturatingSubtract(vertices, UInt(2))
+            var primitives = mesh.InputPointList ? vertices : mesh.InputTriangleStrip ? SaturatingSubtract(vertices, UInt(2))
                 : _module.AddInstruction(SpirvOp.UDiv, _uintType, vertices, UInt(3));
             var wave = _module.AddInstruction(SpirvOp.UDiv, _uintType,
                 lane, UInt(_waveLaneCount));
@@ -428,9 +428,9 @@ public static partial class Gen5SpirvTranslator
                 ShiftLeftLogical(wavePrimitives, UInt(8)))));
 
             var first = _module.AddInstruction(SpirvOp.IMul, _uintType, lane,
-                UInt(mesh.InputTriangleStrip ? 1u : 3u));
-            var second = IAdd(first, UInt(1));
-            var third = IAdd(first, UInt(2));
+                UInt(mesh.InputPointList || mesh.InputTriangleStrip ? 1u : 3u));
+            var second = mesh.InputPointList ? UInt(0) : IAdd(first, UInt(1));
+            var third = mesh.InputPointList ? UInt(0) : IAdd(first, UInt(2));
             if (mesh.InputTriangleStrip)
             {
                 var odd = IsNotZero(BitwiseAnd(IAdd(primitiveStart, lane), UInt(1)));

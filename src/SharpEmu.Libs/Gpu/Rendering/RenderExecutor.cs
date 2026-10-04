@@ -776,7 +776,8 @@ public sealed partial class RenderExecutor
 
         var meshUserConfig = banks.UserConfig;
         var usesMesh = UsesMeshExecution(banks);
-        if (indexed && usesMesh)
+        if (indexed && usesMesh && banks.UserConfig.PrimitiveType is
+            (uint)GuestPrimitiveType.TriangleList or (uint)GuestPrimitiveType.TriangleStrip)
         {
             meshUserConfig = meshUserConfig.Copy();
             meshUserConfig.PrimitiveType = (uint)GuestPrimitiveType.TriangleList;
