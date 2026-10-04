@@ -97,7 +97,7 @@ public sealed class TextureTransferLayoutTests
         var target = TextureTransferLayout.Compute(GuestPixelFormat.Bits8_8_8_8UNorm, 128, 128, 1, 2, GuestTileMode.RenderTarget, 0, false, false, "test");
         Assert.True(target.TryBuildTileTransfers(2 * 65536, target.BuildCopies(), 1, out var targetTransfers));
         Assert.Equal(1u, targetTransfers[1].SurfaceZ);
-        Assert.Equal(TileBlockKind.RenderTarget64KB, targetTransfers[1].Kind);
+        Assert.Equal(TileBlockKind.RenderTarget64KBGen5, targetTransfers[1].Kind);
     }
 
     [Fact]
@@ -115,6 +115,46 @@ public sealed class TextureTransferLayoutTests
         Assert.Equal(2 * 65536UL, transfers[2].TiledOffset);
         Assert.Equal(32 * layout.SliceStride, transfers[2].LinearOffset);
         Assert.Equal(layout.SliceStride, transfers[2].LinearSliceStride);
+    }
+
+    [Fact]
+    public void RenderTargets_SelectTheGen5LayoutForFlatAndVolumeSurfaces()
+    {
+        var volume = TextureTransferLayout.Compute(
+            GuestPixelFormat.Bits16_16_16_16Float,
+            480,
+            270,
+            1,
+            128,
+            GuestTileMode.RenderTarget,
+            0xA000000,
+            false,
+            true,
+            "volume");
+
+        Assert.Equal(TileBlockKind.RenderTarget64KBGen5, volume.Surface.Texture.Block.Kind);
+        Assert.Equal(0x140000UL, volume.Surface.BlockSliceSize);
+        Assert.Equal(0xA000000UL, volume.Surface.TotalSize);
+        var copies = volume.BuildCopies();
+        Assert.Equal(128, copies.Count);
+        Assert.True(volume.TryBuildTileTransfers(0xA000000, copies, 1, out var transfers));
+        Assert.Equal(128, transfers.Count);
+        Assert.All(transfers, transfer => Assert.Equal(TileBlockKind.RenderTarget64KBGen5, transfer.Kind));
+        Assert.Equal((0UL, 0u), (transfers[0].TiledOffset, transfers[0].SurfaceZ));
+        Assert.Equal((0x9EC0000UL, 127u), (transfers[^1].TiledOffset, transfers[^1].SurfaceZ));
+
+        var flat = TextureTransferLayout.Compute(
+            GuestPixelFormat.Bits16_16_16_16Float,
+            480,
+            270,
+            1,
+            1,
+            GuestTileMode.RenderTarget,
+            0,
+            false,
+            false,
+            "flat");
+        Assert.Equal(TileBlockKind.RenderTarget64KBGen5, flat.Surface.Texture.Block.Kind);
     }
 
     [Fact]

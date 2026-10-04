@@ -49,6 +49,10 @@ internal static unsafe partial class VulkanVideoPresenter
             var blockedRetryWait = BlockedRetryWaitMilliseconds();
             lock (_gate)
             {
+                var presentationPending =
+                    _pendingGuestImagePresentations.Count > 0 ||
+                    _pendingVideoPresentations.Count > 0 ||
+                    (_latestPresentation is { } latest && latest.Sequence != _presentedSequence);
                 if (_closed ||
                     Volatile.Read(ref _presenterCloseRequested) ||
                     _relay.HasPendingCommands ||
@@ -59,7 +63,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     return;
                 }
 
-                var waitMilliseconds = gpuWorkInFlight ? 1 : 8;
+                var waitMilliseconds = gpuWorkInFlight || presentationPending ? 1 : 8;
                 if (blockedRetryWait is { } retryWait)
                 {
                     waitMilliseconds = Math.Min(waitMilliseconds, retryWait);
@@ -67,8 +71,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 var waitPhase = _commandStream.HasPending
                     ? RenderPhaseProfile.Phase.IdleBlockedCommands
-                    : _pendingGuestImagePresentations.Count > 0 || _pendingVideoPresentations.Count > 0 ||
-                        (_latestPresentation is { } latest && latest.Sequence != _presentedSequence)
+                    : presentationPending
                         ? RenderPhaseProfile.Phase.IdlePendingPresentation
                         : RenderPhaseProfile.Phase.IdleNoQueuedWork;
                 using var waitProfile = RenderPhaseProfile.MeasureDetail(waitPhase);

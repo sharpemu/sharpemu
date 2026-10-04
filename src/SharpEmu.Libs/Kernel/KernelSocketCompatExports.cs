@@ -19,6 +19,7 @@ internal static class KernelSocketCompatExports
         public TcpClient? Client;
         public NetworkStream? Stream;
         public System.Net.Sockets.Socket? DatagramSocket;
+        public System.Net.Sockets.Socket? ListenerSocket;
         public IPAddress BoundAddress = IPAddress.Any;
         public int BoundPort;
         public bool Bound;
@@ -680,6 +681,231 @@ internal static class KernelSocketCompatExports
     }
 
     [SysAbiExport(
+        Nid = "pxnCmagrtao",
+        ExportName = "listen",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int Listen(CpuContext ctx)
+    {
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        var backlog = Math.Max(0, unchecked((int)ctx[CpuRegister.Rsi]));
+
+        lock (Gate)
+        {
+            if (!Sockets.TryGetValue(fd, out var state))
+            {
+                return PosixSocketFailure(ctx, 9);
+            }
+
+            if (state.Family != 2)
+            {
+                return PosixSocketFailure(ctx, 47);
+            }
+
+            if (state.Type != 1 || state.Protocol is not (0 or 6) || state.Connected)
+            {
+                return PosixSocketFailure(ctx, 45);
+            }
+
+            var listener = state.ListenerSocket;
+            var created = false;
+            try
+            {
+                if (listener is null)
+                {
+                    listener = new System.Net.Sockets.Socket(
+                        AddressFamily.InterNetwork,
+                        SocketType.Stream,
+                        ProtocolType.Tcp);
+                    state.ListenerSocket = listener;
+                    created = true;
+                    ApplySocketOptions(state);
+
+                    // POSIX permits listen() on an unbound stream socket. In that case the
+                    // kernel selects a local address and ephemeral port before listening.
+                    listener.Bind(new IPEndPoint(
+                        state.Bound ? state.BoundAddress : IPAddress.Any,
+                        state.Bound ? state.BoundPort : 0));
+                    if (listener.LocalEndPoint is IPEndPoint localEndpoint)
+                    {
+                        state.BoundAddress = localEndpoint.Address;
+                        state.BoundPort = localEndpoint.Port;
+                    }
+                    state.Bound = true;
+                }
+
+                listener.Listen(backlog);
+                LogNet($"listen: fd={fd} ip={state.BoundAddress} port={state.BoundPort} backlog={backlog}");
+                return ctx.SetReturn(0);
+            }
+            catch (SocketException exception)
+            {
+                if (created)
+                {
+                    try { listener?.Dispose(); } catch (SocketException) { }
+                    state.ListenerSocket = null;
+                }
+
+                return PosixSocketFailure(ctx, MapSocketErrorToPosixErrno(exception.SocketErrorCode));
+            }
+            catch (ObjectDisposedException)
+            {
+                state.ListenerSocket = null;
+                return PosixSocketFailure(ctx, 9);
+            }
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "3e+4Iv7IJ8U",
+        ExportName = "accept",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int Accept(CpuContext ctx)
+    {
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        var sockaddrAddress = ctx[CpuRegister.Rsi];
+        var addrlenAddress = ctx[CpuRegister.Rdx];
+
+        // POSIX permits both address arguments to be null, but not only one of them.
+        if ((sockaddrAddress == 0) != (addrlenAddress == 0))
+        {
+            return PosixSocketFailure(ctx, 14);
+        }
+
+        uint callerAddressLength = 0;
+        if (addrlenAddress != 0)
+        {
+            Span<byte> addrlenBytes = stackalloc byte[sizeof(uint)];
+            if (!ctx.Memory.TryRead(addrlenAddress, addrlenBytes))
+            {
+                return PosixSocketFailure(ctx, 14);
+            }
+
+            callerAddressLength = BinaryPrimitives.ReadUInt32LittleEndian(addrlenBytes);
+        }
+
+        System.Net.Sockets.Socket listener;
+        int family;
+        int type;
+        int protocol;
+        bool reuseAddress;
+        bool keepAlive;
+        bool noDelay;
+        int sendBufferSize;
+        int receiveBufferSize;
+        int sendLowWater;
+        int receiveLowWater;
+        lock (Gate)
+        {
+            if (!Sockets.TryGetValue(fd, out var listenerState) ||
+                listenerState.ListenerSocket is null)
+            {
+                return PosixSocketFailure(ctx, 9);
+            }
+
+            listener = listenerState.ListenerSocket;
+            family = listenerState.Family;
+            type = listenerState.Type;
+            protocol = listenerState.Protocol;
+            reuseAddress = listenerState.ReuseAddress;
+            keepAlive = listenerState.KeepAlive;
+            noDelay = listenerState.NoDelay;
+            sendBufferSize = listenerState.SendBufferSize;
+            receiveBufferSize = listenerState.ReceiveBufferSize;
+            sendLowWater = listenerState.SendLowWater;
+            receiveLowWater = listenerState.ReceiveLowWater;
+        }
+
+        System.Net.Sockets.Socket acceptedSocket;
+        try
+        {
+            // accept() is a blocking guest call. Do not hold Gate while the host waits,
+            // so another guest thread can close the listener and wake this call.
+            acceptedSocket = listener.Accept();
+        }
+        catch (SocketException exception)
+        {
+            return PosixSocketFailure(ctx, MapSocketErrorToPosixErrno(exception.SocketErrorCode));
+        }
+        catch (ObjectDisposedException)
+        {
+            return PosixSocketFailure(ctx, 9);
+        }
+
+        var client = new TcpClient { Client = acceptedSocket };
+        NetworkStream stream;
+        try
+        {
+            stream = client.GetStream();
+        }
+        catch (InvalidOperationException)
+        {
+            client.Dispose();
+            return PosixSocketFailure(ctx, 57);
+        }
+
+        var localEndpoint = acceptedSocket.LocalEndPoint as IPEndPoint;
+        var remoteEndpoint = acceptedSocket.RemoteEndPoint as IPEndPoint;
+        var acceptedState = new EmulatedSocketState
+        {
+            Family = family,
+            Type = type,
+            Protocol = protocol,
+            Client = client,
+            Stream = stream,
+            BoundAddress = localEndpoint?.Address ?? IPAddress.Any,
+            BoundPort = localEndpoint?.Port ?? 0,
+            Bound = localEndpoint is not null,
+            Connected = true,
+            ReuseAddress = reuseAddress,
+            KeepAlive = keepAlive,
+            NoDelay = noDelay,
+            SendBufferSize = sendBufferSize,
+            ReceiveBufferSize = receiveBufferSize,
+            SendLowWater = sendLowWater,
+            ReceiveLowWater = receiveLowWater,
+        };
+        ApplySocketOptions(acceptedState);
+
+        var acceptedFd = KernelMemoryCompatExports.AllocateGuestFileDescriptor();
+        lock (Gate)
+        {
+            Sockets[acceptedFd] = acceptedState;
+        }
+
+        if (sockaddrAddress != 0)
+        {
+            Span<byte> sockaddr = stackalloc byte[16];
+            sockaddr[0] = 16;
+            sockaddr[1] = 2;
+            if (remoteEndpoint is not null)
+            {
+                BinaryPrimitives.WriteUInt16BigEndian(
+                    sockaddr.Slice(2, 2),
+                    checked((ushort)remoteEndpoint.Port));
+                var remoteAddress = remoteEndpoint.Address.MapToIPv4().GetAddressBytes();
+                remoteAddress.CopyTo(sockaddr.Slice(4, 4));
+            }
+
+            var writeLength = (int)Math.Min(callerAddressLength, (uint)sockaddr.Length);
+            Span<byte> addrlenBytes = stackalloc byte[sizeof(uint)];
+            BinaryPrimitives.WriteUInt32LittleEndian(addrlenBytes, (uint)sockaddr.Length);
+            if ((writeLength > 0 &&
+                 !ctx.Memory.TryWrite(sockaddrAddress, sockaddr.Slice(0, writeLength))) ||
+                !ctx.Memory.TryWrite(addrlenAddress, addrlenBytes))
+            {
+                TryCloseSocketFd(acceptedFd);
+                return PosixSocketFailure(ctx, 14);
+            }
+        }
+
+        LogNet($"accept: listener_fd={fd} accepted_fd={acceptedFd} remote={remoteEndpoint}");
+        ctx[CpuRegister.Rax] = unchecked((ulong)acceptedFd);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "RenI1lL1WFk",
         ExportName = "getsockname",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -886,7 +1112,7 @@ internal static class KernelSocketCompatExports
 
     private static void ApplySocketOptions(EmulatedSocketState state)
     {
-        var socket = state.DatagramSocket ?? state.Client?.Client;
+        var socket = state.DatagramSocket ?? state.ListenerSocket ?? state.Client?.Client;
         if (socket is null)
         {
             return;
@@ -979,9 +1205,11 @@ internal static class KernelSocketCompatExports
         try { state.Stream?.Dispose(); } catch (IOException) { }
         try { state.Client?.Dispose(); } catch (IOException) { }
         try { state.DatagramSocket?.Dispose(); } catch (SocketException) { }
+        try { state.ListenerSocket?.Dispose(); } catch (SocketException) { }
         state.Stream = null;
         state.Client = null;
         state.DatagramSocket = null;
+        state.ListenerSocket = null;
         state.Connected = false;
     }
 

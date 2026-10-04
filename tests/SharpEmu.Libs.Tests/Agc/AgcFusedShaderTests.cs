@@ -5,6 +5,7 @@ using System.Buffers.Binary;
 using SharpEmu.Core.Cpu;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.ShaderCompiler;
 using Xunit;
 
@@ -13,8 +14,8 @@ namespace SharpEmu.Libs.Tests.Agc;
 // sceAgcGetFusedShaderSize (dolOmWH+huQ) and sceAgcFuseShaderHalves (fd5Bp5tGTgo)
 // join a GS or HS front/back shader half pair into one shader: the fused header
 // is the back half retyped, the back half's SH registers become the fused
-// register image, and the front half contributes its program address
-// (SPI_SHADER_PGM_LO/HI_ES) and checksum registers.
+// register image, and the front half contributes its program address,
+// checksum registers, and resource limits.
 public sealed class AgcFusedShaderTests
 {
     private const ulong BaseAddress = 0x1_0000_0000;
@@ -109,6 +110,32 @@ public sealed class AgcFusedShaderTests
         Assert.Equal(0xAAAA_0001u, ReadUInt32(memory, Scratch + 20));
         Assert.Equal(0xBBBB_0002u, ReadUInt32(memory, Scratch + 28));
         Assert.Equal(0x5555_5555u, ReadUInt32(memory, Scratch + 36));
+    }
+
+    [Fact]
+    public void FuseShaderHalves_GsPair_PreservesFrontUserSgprAbi()
+    {
+        var (memory, ctx) = CreateGsPair();
+        WriteByte(memory, BackShader + ShaderNumShRegistersOffset, 7);
+
+        // These are the resource words from a real fused UE mesh shader.  The
+        // front half declares 28 user SGPRs, whose fused ABI occupies s8..s35.
+        WriteRegister(memory, FrontRegisters, 0, 0x8Au, 0x6000_0007u);
+        WriteRegister(memory, FrontRegisters, 1, 0x8Bu, 0x0003_0038u);
+        WriteRegister(memory, BackRegisters, 5, 0x8Au, 0x0000_0003u);
+        WriteRegister(memory, BackRegisters, 6, 0x8Bu, 0x1004_0010u);
+
+        ctx[CpuRegister.Rdi] = FusedShader;
+        ctx[CpuRegister.Rsi] = FrontShader;
+        ctx[CpuRegister.Rdx] = BackShader;
+        ctx[CpuRegister.Rcx] = Scratch;
+        var result = AgcExports.FuseShaderHalves(ctx);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.Equal(0x6000_0007u, ReadUInt32(memory, Scratch + 5 * 8 + 4));
+        var fusedResource2 = ReadUInt32(memory, Scratch + 6 * 8 + 4);
+        Assert.Equal(0x0003_0038u, fusedResource2);
+        Assert.Equal(28, GeometryResource2.Decode(fusedResource2).UserScalarCount);
     }
 
     [Fact]
@@ -363,6 +390,51 @@ public sealed class AgcFusedShaderTests
             program.Instructions.Select(static instruction => instruction.Opcode));
     }
 
+    [Fact]
+    public void EmbeddedFusedProgram_RegistersContinuationBeyondFourGiB()
+    {
+        const ulong entryCode = 0x0000_0015_C139_B700;
+        const ulong continuationCode = 0x0000_0017_40F7_1400;
+        const ulong entryHeader = entryCode - 0x1000;
+        const ulong continuationHeader = entryCode + 0x80;
+        var memory = new SparseCpuMemory(
+            (entryHeader, 0x100),
+            (entryCode, 0x1000),
+            (continuationCode, 0x1000));
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        WriteUInt32(memory, entryHeader, 0x34333231u);
+        WriteUInt32(memory, entryHeader + sizeof(uint), 0x18u);
+        WriteUInt64(memory, entryHeader + ShaderCodeOffset, entryCode);
+        WriteUInt32(memory, entryHeader + 0x44, 2 * sizeof(uint));
+        WriteByte(memory, entryHeader + ShaderTypeOffset, GsFront);
+        WriteWords(memory, entryCode, 0xBF800000u, 0xBE802000u);
+
+        WriteUInt32(memory, continuationHeader, 0x34333231u);
+        WriteUInt32(memory, continuationHeader + sizeof(uint), 0x18u);
+        WriteUInt64(memory, continuationHeader + ShaderCodeOffset, continuationCode);
+        WriteUInt32(memory, continuationHeader + 0x44, 2 * sizeof(uint));
+        WriteByte(memory, continuationHeader + ShaderTypeOffset, GsBack);
+        WriteWords(memory, continuationCode, 0xBF800000u, 0xBF810000u);
+
+        Assert.True(
+            AgcExports.TryRegisterEmbeddedFusedProgram(ctx, entryCode, entryHeader));
+        Assert.True(
+            Gen5ShaderTranslator.TryGetFusedProgramParts(
+                ctx,
+                entryCode,
+                out var registeredContinuation,
+                out var registeredHeader));
+        Assert.Equal(continuationCode, registeredContinuation);
+        Assert.Equal(continuationHeader, registeredHeader);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(ctx, entryCode, out var program, out var error),
+            error);
+        Assert.Equal(
+            [0u, 4u, 8u, 12u],
+            program.Instructions.Select(static instruction => instruction.Pc));
+    }
+
     private static (FakeCpuMemory Memory, CpuContext Ctx) CreateGsPair()
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
@@ -409,27 +481,27 @@ public sealed class AgcFusedShaderTests
         WriteUInt32(memory, array + (ulong)index * 8 + 4, value);
     }
 
-    private static void WriteByte(FakeCpuMemory memory, ulong address, byte value)
+    private static void WriteByte(ICpuMemory memory, ulong address, byte value)
     {
         Span<byte> buffer = [value];
         Assert.True(memory.TryWrite(address, buffer));
     }
 
-    private static void WriteUInt32(FakeCpuMemory memory, ulong address, uint value)
+    private static void WriteUInt32(ICpuMemory memory, ulong address, uint value)
     {
         Span<byte> buffer = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
         Assert.True(memory.TryWrite(address, buffer));
     }
 
-    private static void WriteUInt64(FakeCpuMemory memory, ulong address, ulong value)
+    private static void WriteUInt64(ICpuMemory memory, ulong address, ulong value)
     {
         Span<byte> buffer = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(buffer, value);
         Assert.True(memory.TryWrite(address, buffer));
     }
 
-    private static void WriteWords(FakeCpuMemory memory, ulong address, params uint[] words)
+    private static void WriteWords(ICpuMemory memory, ulong address, params uint[] words)
     {
         var bytes = new byte[words.Length * sizeof(uint)];
         for (var index = 0; index < words.Length; index++)

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.HLE;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Buffers;
@@ -38,10 +39,24 @@ public sealed class BufferMergeRangeTests
     [Fact]
     public void ExpansionClampsToAddressSpaceAndMinimumBegin()
     {
-        var range = new BufferMergeRange(10 * PageSize, PageOwnerTable.AddressSpaceSize - PageSize);
-        Assert.True(range.IncludeBuffer(9 * PageSize, PageOwnerTable.AddressSpaceSize, 17));
+        var range = new BufferMergeRange(10 * PageSize, PageOwnerTable.LowerAddressSpaceSize - PageSize);
+        Assert.True(range.IncludeBuffer(9 * PageSize, PageOwnerTable.LowerAddressSpaceSize, 17));
         Assert.Equal(2 * PageSize, range.Begin);
-        Assert.Equal(PageOwnerTable.AddressSpaceSize, range.End);
+        Assert.Equal(PageOwnerTable.LowerAddressSpaceSize, range.End);
+    }
+
+    [Fact]
+    public void ExtendedExpansionCannotCrossItsAperture()
+    {
+        var range = new BufferMergeRange(
+            GuestMemoryLayout.GuestExtendedAddressStart + 10 * PageSize,
+            GuestMemoryLayout.GuestExtendedAddressLimit - PageSize);
+        Assert.True(range.IncludeBuffer(
+            GuestMemoryLayout.GuestExtendedAddressStart + 9 * PageSize,
+            GuestMemoryLayout.GuestExtendedAddressLimit,
+            17));
+        Assert.Equal(GuestMemoryLayout.GuestExtendedAddressStart, range.Begin);
+        Assert.Equal(GuestMemoryLayout.GuestExtendedAddressLimit, range.End);
     }
 
     [Fact]

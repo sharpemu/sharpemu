@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Gpu.Scheduling;
@@ -48,11 +49,15 @@ public sealed class EndOfPipe
 
     private readonly IEndOfPipeSink _sink;
     private readonly IFlipSubmitter _flips;
+    private readonly ICpuMemory _memory;
+    private readonly Func<uint, uint, uint[]> _readGds;
 
-    public EndOfPipe(IEndOfPipeSink sink, IFlipSubmitter flips)
+    public EndOfPipe(IEndOfPipeSink sink, IFlipSubmitter flips, ICpuMemory memory, Func<uint, uint, uint[]> readGds)
     {
         _sink = sink;
         _flips = flips;
+        _memory = memory;
+        _readGds = readGds;
     }
 
     public static bool TryScaleReferenceClock(ulong hostTicks, ulong hostFrequency, out ulong value)
@@ -105,55 +110,63 @@ public sealed class EndOfPipe
         gds.Slice((int)offset, (int)size).CopyTo(MemoryMarshal.AsBytes(destination));
     }
 
-    public void RecordEndOfPipeSignal(in EndOfPipeSignal signal)
+    public void RecordEndOfPipeSignal(in EndOfPipeSignal signal) => RecordEndOfPipeSignal(in signal, null);
+
+    private void RecordEndOfPipeSignal(in EndOfPipeSignal signal, Action? publishLabel)
     {
         ValidateSignal(signal);
         signal.Buffer.SetDebugInfo((uint)signal.DebugOperation, signal.SubmitId, signal.Arg0, signal.Arg1, signal.Arg2, signal.Arg3, signal.DebugData);
 
         var scheduler = signal.Buffer.Owner;
-        if (signal.Completion != EndOfPipeCompletion.None && (!scheduler.Active || signal.Buffer != scheduler.Current))
+        if ((publishLabel is not null || signal.Completion != EndOfPipeCompletion.None) &&
+            (!scheduler.Active || signal.Buffer != scheduler.Current))
         {
             throw SubmissionScheduler.Fatal("End-of-pipe completion requires the current command buffer.");
         }
 
-        switch (signal.Completion)
+        if (publishLabel is null && signal.Completion == EndOfPipeCompletion.None)
         {
-            case EndOfPipeCompletion.None:
-                return;
-            case EndOfPipeCompletion.Interrupt:
-            {
-                var contextId = (uint)signal.CompletionData;
-                var eventId = signal.InterruptEventId;
-                scheduler.QueuePriorityCompletionAction(() => _sink.TriggerInterrupt(eventId, contextId));
-                return;
-            }
-
-            case EndOfPipeCompletion.Flip:
-            {
-                var requestId = signal.CompletionData;
-                scheduler.QueuePriorityCompletionAction(() => _flips.CompleteFlip(requestId));
-                return;
-            }
-
-            case EndOfPipeCompletion.FlipAndInterrupt:
-            {
-                var requestId = signal.CompletionData;
-                var eventId = signal.InterruptEventId;
-                scheduler.QueuePriorityCompletionAction(() =>
-                {
-                    _flips.CompleteFlip(requestId);
-                    _sink.TriggerInterrupt(eventId, 0);
-                });
-                return;
-            }
+            return;
         }
+
+        // Ordinary CPU-visible labels are published by the command-stream host while
+        // interpreting the packet.  Only data that must be sampled from the GPU (GDS)
+        // is supplied through publishLabel. Interrupts and flips remain ordered on the
+        // retirement tick, and must not rewrite a label the guest may already consume.
+        var completion = signal.Completion;
+        var completionData = signal.CompletionData;
+        var eventId = signal.InterruptEventId;
+        scheduler.QueuePriorityCompletionAction(() =>
+        {
+            publishLabel?.Invoke();
+            switch (completion)
+            {
+                case EndOfPipeCompletion.None:
+                    return;
+                case EndOfPipeCompletion.Interrupt:
+                    _sink.TriggerInterrupt(eventId, (uint)completionData);
+                    return;
+                case EndOfPipeCompletion.Flip:
+                    _flips.CompleteFlip(completionData);
+                    return;
+                case EndOfPipeCompletion.FlipAndInterrupt:
+                    _flips.CompleteFlip(completionData);
+                    _sink.TriggerInterrupt(eventId, 0);
+                    return;
+                default:
+                    throw SubmissionScheduler.Fatal($"The end-of-pipe completion is unknown: completion={completion}.");
+            }
+        });
     }
 
     public void RecordWrite32(ulong submitId, RecordingBuffer buffer, ulong destination, uint value) =>
         RecordValueWrite(submitId, buffer, destination, value, WriteSize.Dword, WriteAction.Write);
 
     public void RecordGdsWrite32(ulong submitId, RecordingBuffer buffer, ulong destination, uint wordOffset, uint wordCount) =>
-        RecordEndOfPipeSignal(new EndOfPipeSignal(buffer, submitId, RecordedOperation.EopWrite, wordOffset, wordCount, 0, 0, destination, destination));
+        RecordGdsWrite32(submitId, buffer, destination, wordOffset, wordCount, 0, 0, withInterrupt: false);
+
+    public void RecordGdsWrite32WithInterrupt(ulong submitId, RecordingBuffer buffer, ulong destination, uint wordOffset, uint wordCount, int eventId, uint contextId) =>
+        RecordGdsWrite32(submitId, buffer, destination, wordOffset, wordCount, eventId, contextId, withInterrupt: true);
 
     public void RecordWrite64(ulong submitId, RecordingBuffer buffer, ulong destination, ulong value) =>
         RecordValueWrite(submitId, buffer, destination, value, WriteSize.Qword, WriteAction.Write);
@@ -163,6 +176,12 @@ public sealed class EndOfPipe
 
     public void RecordClockWriteWithWriteBack(ulong submitId, RecordingBuffer buffer, ulong destination) =>
         RecordValueWrite(submitId, buffer, destination, 0, WriteSize.Qword, WriteAction.WriteBack);
+
+    public void RecordClockWriteWithInterrupt(ulong submitId, RecordingBuffer buffer, ulong destination, int eventId, uint contextId) =>
+        RecordValueWrite(submitId, buffer, destination, 0, WriteSize.Qword, WriteAction.Interrupt, eventId, contextId);
+
+    public void RecordClockWriteWithInterruptAndWriteBack(ulong submitId, RecordingBuffer buffer, ulong destination, int eventId, uint contextId) =>
+        RecordValueWrite(submitId, buffer, destination, 0, WriteSize.Qword, WriteAction.InterruptWriteBack, eventId, contextId);
 
     public void RecordWrite64WithWriteBack(ulong submitId, RecordingBuffer buffer, ulong destination, ulong value) =>
         RecordValueWrite(submitId, buffer, destination, value, WriteSize.Qword, WriteAction.WriteBack);
@@ -206,15 +225,21 @@ public sealed class EndOfPipe
         }
     }
 
-    public void RecordWrite32WithInterruptWriteBackAndFlip(ulong submitId, RecordingBuffer buffer, ulong destination, uint value, int handle, int index, int flipMode, long flipArg, ulong requestId, int eventId) =>
-        RecordEndOfPipeSignal(new EndOfPipeSignal(
+    public void RecordWrite32WithInterruptWriteBackAndFlip(ulong submitId, RecordingBuffer buffer, ulong destination, uint value, int handle, int index, int flipMode, long flipArg, ulong requestId, int eventId)
+    {
+        var signal = new EndOfPipeSignal(
             buffer, submitId, RecordedOperation.EopWriteBackFlip, (uint)handle, (uint)index, (uint)flipMode, value, (ulong)flipArg,
-            destination, EndOfPipeCompletion.FlipAndInterrupt, requestId, eventId));
+            destination, EndOfPipeCompletion.FlipAndInterrupt, requestId, eventId);
+        RecordEndOfPipeSignal(in signal);
+    }
 
-    public void RecordWrite32WithFlip(ulong submitId, RecordingBuffer buffer, ulong destination, uint value, int handle, int index, int flipMode, long flipArg, ulong requestId) =>
-        RecordEndOfPipeSignal(new EndOfPipeSignal(
+    public void RecordWrite32WithFlip(ulong submitId, RecordingBuffer buffer, ulong destination, uint value, int handle, int index, int flipMode, long flipArg, ulong requestId)
+    {
+        var signal = new EndOfPipeSignal(
             buffer, submitId, RecordedOperation.EopFlip, (uint)handle, (uint)index, (uint)flipMode, value, (ulong)flipArg,
-            destination, EndOfPipeCompletion.Flip, requestId));
+            destination, EndOfPipeCompletion.Flip, requestId);
+        RecordEndOfPipeSignal(in signal);
+    }
 
     public void RecordFlipCompletion(ulong submitId, RecordingBuffer buffer, int handle, int index, int flipMode, long flipArg, ulong requestId) =>
         RecordEndOfPipeSignal(new EndOfPipeSignal(
@@ -251,13 +276,21 @@ public sealed class EndOfPipe
         _ => throw SubmissionScheduler.Fatal("The end-of-pipe write action is not supported."),
     };
 
-    private void RecordValueWrite(ulong submitId, RecordingBuffer buffer, ulong destination, ulong value, WriteSize size, WriteAction action, int eventId = 0, uint contextId = 0)
+    private void RecordValueWrite(
+        ulong submitId,
+        RecordingBuffer buffer,
+        ulong destination,
+        ulong value,
+        WriteSize size,
+        WriteAction action,
+        int eventId = 0,
+        uint contextId = 0)
     {
         var width = (uint)size;
         var valueLow = (uint)value;
         var valueHigh = (uint)(value >> 32);
         var interrupt = action is WriteAction.Interrupt or WriteAction.InterruptWriteBack;
-        RecordEndOfPipeSignal(new EndOfPipeSignal(
+        var signal = new EndOfPipeSignal(
             buffer,
             submitId,
             GetDebugOperation(action),
@@ -269,6 +302,44 @@ public sealed class EndOfPipe
             destination,
             interrupt ? EndOfPipeCompletion.Interrupt : EndOfPipeCompletion.None,
             interrupt ? contextId : value,
-            eventId));
+            eventId);
+        RecordEndOfPipeSignal(in signal);
+    }
+
+    private void RecordGdsWrite32(
+        ulong submitId,
+        RecordingBuffer buffer,
+        ulong destination,
+        uint wordOffset,
+        uint wordCount,
+        int eventId,
+        uint contextId,
+        bool withInterrupt)
+    {
+        var signal = new EndOfPipeSignal(
+            buffer, submitId, withInterrupt ? RecordedOperation.EopInterrupt : RecordedOperation.EopWrite,
+            wordOffset, wordCount, contextId, 0, destination, destination,
+            withInterrupt ? EndOfPipeCompletion.Interrupt : EndOfPipeCompletion.None,
+            contextId, eventId);
+        RecordEndOfPipeSignal(in signal, () =>
+        {
+            var words = _readGds(wordOffset, wordCount);
+            if ((ulong)words.Length < wordCount)
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"The GDS completion returned too few words: requested={wordCount} actual={words.Length}.");
+            }
+
+            WriteBytes(destination, MemoryMarshal.AsBytes(words.AsSpan(0, checked((int)wordCount))));
+        });
+    }
+
+    private void WriteBytes(ulong destination, ReadOnlySpan<byte> bytes)
+    {
+        if (!_memory.TryWrite(destination, bytes))
+        {
+            throw SubmissionScheduler.Fatal(
+                $"Cannot publish an end-of-pipe label: address=0x{destination:X16} size={bytes.Length}.");
+        }
     }
 }

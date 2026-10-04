@@ -16,11 +16,17 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // Batched submissions each carry up to a frame's worth of work, so a cap of
         // 8 made draw preparation wait on the GPU once per frame; 32 keeps the CPU
-        // ahead. SHARPEMU_MAX_INFLIGHT_SUBMISSIONS overrides it.
-        private static readonly int MaxInFlightGuestSubmissions =
-            int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_MAX_INFLIGHT_SUBMISSIONS"), out var inFlight) && inFlight > 0
-                ? inFlight
+        // ahead. Accept the current environment name and the older diagnostic alias.
+        private static readonly int MaxInFlightGuestSubmissions = ParseMaxInFlightGuestSubmissions();
+
+        private static int ParseMaxInFlightGuestSubmissions()
+        {
+            var configured = Environment.GetEnvironmentVariable("SHARPEMU_MAX_INFLIGHT_SUBMISSIONS") ??
+                Environment.GetEnvironmentVariable("SHARPEMU_MAX_IN_FLIGHT_GUEST_SUBMISSIONS");
+            return int.TryParse(configured, out var inFlight)
+                ? Math.Clamp(inFlight, 1, 64)
                 : 32;
+        }
         // Scheduler ticks: the last submitted tick and the highest tick known retired.
         private ulong _submitTimeline;
         private ulong _completedTimeline;

@@ -4,6 +4,7 @@
 namespace SharpEmu.Libs.VideoOut;
 
 using System.Runtime.CompilerServices;
+using SharpEmu.Libs.AvPlayer;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Media;
 using SharpEmu.Libs.Gpu.Images;
@@ -85,6 +86,36 @@ internal static unsafe partial class VulkanVideoPresenter
         return difference * 100 <= Math.Max(guestAspect, hostAspect) * 2;
     }
 
+    internal static bool IsAvPlayerHostMovieLumaCandidateForFrame(
+        GuestDrawTexture texture,
+        uint hostWidth,
+        uint hostHeight,
+        bool rangeRegistered)
+    {
+        if (!rangeRegistered)
+        {
+            return false;
+        }
+        if (IsHostMovieLumaCandidateForFrame(texture, hostWidth, hostHeight))
+        {
+            return true;
+        }
+
+        var maximumWidth = (hostWidth + 255u) & ~255u;
+        var maximumHeight = (hostHeight + 15u) & ~15u;
+        return texture.Address != 0 &&
+            !texture.IsStorage &&
+            !texture.IsFallback &&
+            !texture.ArrayedView &&
+            texture.ArrayLayers <= 1 &&
+            texture.Format == 1 &&
+            texture.NumberType == 0 &&
+            texture.Width >= hostWidth &&
+            texture.Width <= maximumWidth &&
+            texture.Height >= hostHeight &&
+            texture.Height <= maximumHeight;
+    }
+
     private static bool IsHostMovieChromaCandidateForLuma(
         GuestDrawTexture luma,
         GuestDrawTexture chroma) =>
@@ -127,12 +158,35 @@ internal static unsafe partial class VulkanVideoPresenter
         private ulong _hostMovieChromaTextureAddress;
         private uint _hostMovieLumaDstSelect;
         private uint _hostMovieChromaDstSelect;
+        private bool _hostMovieFrameFromAvPlayer;
+        private int _avPlayerFallbackTextureComposited;
         private readonly HashSet<string> _tracedHostMovieTextureBindings =
             new(StringComparer.Ordinal);
+
+        internal bool AvPlayerFallbackTextureComposited =>
+            Volatile.Read(ref _avPlayerFallbackTextureComposited) != 0 &&
+            AvPlayerExports.IsVideoBufferAddress(_hostMovieLumaTextureAddress) &&
+            AvPlayerExports.IsVideoBufferAddress(_hostMovieChromaTextureAddress);
 
         private void PumpHostMovieFrame()
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.MovieFramePolling);
+            if (AvPlayerExports.TryGetFallbackPresentationFrame(
+                    out var avPlayerPixels,
+                    out var avPlayerWidth,
+                    out var avPlayerHeight,
+                    out var avPlayerFrameSerial))
+            {
+                SetHostMovieFrame(
+                    "avplayer-fallback",
+                    avPlayerPixels,
+                    avPlayerWidth,
+                    avPlayerHeight,
+                    avPlayerFrameSerial,
+                    fromAvPlayer: true);
+                return;
+            }
+
             if (!HostMovieBridge.TryDecodeNextFrame(
                     // Once the host bridge owns a movie, advance its clock on
                     // every presenter tick. Texture discovery can lag behind
@@ -154,29 +208,51 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            if (!advanced && _hostMovieFramePixels is not null &&
+                string.Equals(_hostMovieFramePath, hostPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            SetHostMovieFrame(
+                hostPath,
+                pixels,
+                width,
+                height,
+                frameSerial,
+                fromAvPlayer: false);
+        }
+
+        private void SetHostMovieFrame(
+            string source,
+            byte[] pixels,
+            uint width,
+            uint height,
+            long frameSerial,
+            bool fromAvPlayer)
+        {
             if (!string.Equals(
                     _hostMovieFramePath,
-                    hostPath,
-                    StringComparison.OrdinalIgnoreCase))
+                    source,
+                    StringComparison.OrdinalIgnoreCase) ||
+                _hostMovieFrameWidth != width ||
+                _hostMovieFrameHeight != height)
             {
-                _hostMovieFramePath = hostPath;
+                _hostMovieFramePath = source;
                 _hostMovieLumaTextureAddress = 0;
                 _hostMovieChromaTextureAddress = 0;
                 _hostMovieLumaDstSelect = 0;
                 _hostMovieChromaDstSelect = 0;
                 _hostMovieLumaUploadedFrameSerial = -1;
                 _hostMovieChromaUploadedFrameSerial = -1;
-            }
-
-            if (!advanced && _hostMovieFramePixels is not null)
-            {
-                return;
+                Volatile.Write(ref _avPlayerFallbackTextureComposited, 0);
             }
 
             _hostMovieFramePixels = pixels;
             _hostMovieFrameWidth = width;
             _hostMovieFrameHeight = height;
             _hostMovieFrameSerial = frameSerial;
+            _hostMovieFrameFromAvPlayer = fromAvPlayer;
         }
 
         private readonly record struct HostMovieTextureBindings(int Luma, int Chroma)
@@ -262,7 +338,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_tracedHostMovieTextureBindings.Add(traceKey))
             {
                 Console.Error.WriteLine(
-                    $"[LOADER][INFO] Bink2 YUV textures bound: " +
+                    $"[LOADER][INFO] Host movie YUV textures bound: " +
                     $"{Path.GetFileName(_hostMovieFramePath)} " +
                     $"y={bestLumaIndex}:0x{lumaTexture.Address:X16}:" +
                     $"{lumaTexture.Width}x{lumaTexture.Height}:dst=0x{lumaTexture.DstSelect:X} " +
@@ -271,7 +347,10 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"host={_hostMovieFrameWidth}x{_hostMovieFrameHeight}.");
             }
 
-            return new HostMovieTextureBindings(bestLumaIndex, bestChromaIndex);
+            return RememberHostMovieTextureMappings(
+                textures,
+                bestLumaIndex,
+                bestChromaIndex);
         }
 
         private HostMovieTextureBindings RememberHostMovieTextureMappings(
@@ -281,18 +360,39 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             _hostMovieLumaDstSelect = textures[lumaIndex].DstSelect;
             _hostMovieChromaDstSelect = textures[chromaIndex].DstSelect;
+            if (_hostMovieFrameFromAvPlayer)
+            {
+                Volatile.Write(ref _avPlayerFallbackTextureComposited, 1);
+            }
             return new HostMovieTextureBindings(lumaIndex, chromaIndex);
         }
 
         private bool IsHostMovieLumaCandidate(GuestDrawTexture texture)
-            => IsHostMovieLumaCandidateForFrame(
+        {
+            if (!_hostMovieFrameFromAvPlayer)
+            {
+                return IsHostMovieLumaCandidateForFrame(
+                    texture,
+                    _hostMovieFrameWidth,
+                    _hostMovieFrameHeight);
+            }
+
+            // AvPlayer reports the visible width separately from the aligned
+            // NV12 pitch. Accept that padded luma view only for an address the
+            // decoder registered, so ordinary large R8 textures cannot match.
+            return IsAvPlayerHostMovieLumaCandidateForFrame(
                 texture,
                 _hostMovieFrameWidth,
-                _hostMovieFrameHeight);
+                _hostMovieFrameHeight,
+                AvPlayerExports.IsVideoBufferAddress(texture.Address));
+        }
 
-        private static bool IsHostMovieChromaCandidate(
+        private bool IsHostMovieChromaCandidate(
             GuestDrawTexture luma,
             GuestDrawTexture chroma) =>
+            (!_hostMovieFrameFromAvPlayer ||
+             AvPlayerExports.IsVideoBufferAddress(luma.Address) &&
+             AvPlayerExports.IsVideoBufferAddress(chroma.Address)) &&
             IsHostMovieChromaCandidateForLuma(luma, chroma);
 
         private TextureResource CreateHostMovieTextureResource(

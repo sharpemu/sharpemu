@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.Tests.Agc;
@@ -22,7 +23,13 @@ public sealed class EndOfPipeTests
 
         public int SlotWaits { get; private set; }
 
-        public void TriggerInterrupt(int eventId, uint contextId) => Add($"interrupt {eventId} {contextId}");
+        public Action? OnInterrupt { get; set; }
+
+        public void TriggerInterrupt(int eventId, uint contextId)
+        {
+            OnInterrupt?.Invoke();
+            Add($"interrupt {eventId} {contextId}");
+        }
 
         public int SubmitFlipFromGpu(RecordingBuffer buffer, int handle, int index, int flipMode, long flipArg, out ulong requestId)
         {
@@ -56,8 +63,44 @@ public sealed class EndOfPipeTests
 
     private readonly FakeTickDevice _device = new();
     private readonly RecordingCompletion _completion = new();
+    private readonly FakeCpuMemory _memory = new(0x1000, 0x10_000);
+    private readonly byte[] _gds = new byte[ManagedCommandStreamHost.GdsBytes];
 
-    private EndOfPipe NewEndOfPipe() => new(_completion, _completion);
+    private EndOfPipe NewEndOfPipe() => new(_completion, _completion, _memory, ReadGds);
+
+    private uint[] ReadGds(uint wordOffset, uint wordCount)
+    {
+        var words = new uint[checked((int)wordCount)];
+        EndOfPipe.ReadGdsWords(_gds, words, wordOffset, wordCount);
+        return words;
+    }
+
+    [Fact]
+    public void AlreadyPublishedLabelIsNotRewrittenWhenInterruptRetires()
+    {
+        using var scheduler = NewActiveScheduler(_device);
+        var eop = NewEndOfPipe();
+        const ulong destination = 0x7000;
+        const ulong value = 0x1122_3344_5566_7788;
+        const ulong guestReplacement = 0x8877_6655_4433_2211;
+        ulong valueObservedByInterrupt = 0;
+        _completion.OnInterrupt = () => valueObservedByInterrupt = Read64(_memory, destination);
+
+        Assert.True(_memory.TryWrite(destination, BitConverter.GetBytes(value)));
+        eop.RecordWrite64WithInterrupt(1, scheduler.Current, destination, value, 9, 3);
+
+        Assert.Equal(value, Read64(_memory, destination));
+        Assert.Empty(_device.Submits);
+        Assert.Equal(1UL, scheduler.Submit());
+        Assert.Single(_device.Submits);
+        Assert.True(_memory.TryWrite(destination, BitConverter.GetBytes(guestReplacement)));
+
+        _device.Complete(1);
+        Assert.True(WaitUntil(() => _completion.Snapshot().Length == 1));
+        Assert.Equal(guestReplacement, Read64(_memory, destination));
+        Assert.Equal(guestReplacement, valueObservedByInterrupt);
+        Assert.Equal(new[] { "interrupt 9 3" }, _completion.Snapshot());
+    }
 
     [Fact]
     public void WriteVariantsRecordDebugInfoAndDeferTheirCompletionUrgently()
@@ -99,7 +142,31 @@ public sealed class EndOfPipeTests
     }
 
     [Fact]
-    public void CompletionsOutsideTheCurrentBufferOrToAddressZeroAreFatal()
+    public void GdsLabelIsPublishedAtRetirementBeforeItsInterrupt()
+    {
+        using var scheduler = NewActiveScheduler(_device);
+        var eop = NewEndOfPipe();
+        const ulong destination = 0x7100;
+        const uint value = 0xAABB_CCDD;
+        uint valueObservedByInterrupt = 0;
+        BinaryPrimitives.WriteUInt32LittleEndian(_gds.AsSpan(2 * sizeof(uint)), value);
+        _completion.OnInterrupt = () => valueObservedByInterrupt = Read32(_memory, destination);
+
+        eop.RecordGdsWrite32WithInterrupt(1, scheduler.Current, destination, 2, 1, 9, 3);
+
+        Assert.Equal(0u, Read32(_memory, destination));
+        Assert.Equal(1UL, scheduler.Submit());
+        Assert.Equal(0u, Read32(_memory, destination));
+
+        _device.Complete(1);
+        Assert.True(WaitUntil(() => _completion.Snapshot().Length == 1));
+        Assert.Equal(value, Read32(_memory, destination));
+        Assert.Equal(value, valueObservedByInterrupt);
+        Assert.Equal(new[] { "interrupt 9 3" }, _completion.Snapshot());
+    }
+
+    [Fact]
+    public void DeferredSignalsWithoutAnActiveBufferOrToAddressZeroAreFatal()
     {
         using var fatal = new FatalScope();
         var scheduler = new SubmissionScheduler(_device, new RecordingRenderingState());
@@ -164,6 +231,20 @@ public sealed class EndOfPipeTests
 
         Assert.Throws<SchedulerFatalException>(() => EndOfPipe.ReadGdsWords(gds, destination, 3, 2));
         Assert.Throws<SchedulerFatalException>(() => EndOfPipe.ReadGdsWords(ReadOnlySpan<byte>.Empty, destination, 0, 0));
+    }
+
+    private static ulong Read64(FakeCpuMemory memory, ulong address)
+    {
+        Span<byte> buffer = stackalloc byte[sizeof(ulong)];
+        Assert.True(memory.TryRead(address, buffer));
+        return BinaryPrimitives.ReadUInt64LittleEndian(buffer);
+    }
+
+    private static uint Read32(FakeCpuMemory memory, ulong address)
+    {
+        Span<byte> buffer = stackalloc byte[sizeof(uint)];
+        Assert.True(memory.TryRead(address, buffer));
+        return BinaryPrimitives.ReadUInt32LittleEndian(buffer);
     }
 }
 

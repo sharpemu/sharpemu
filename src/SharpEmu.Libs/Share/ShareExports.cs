@@ -9,6 +9,7 @@ namespace SharpEmu.Libs.Share;
 public static class ShareExports
 {
     private const int MaxContentParamBytes = 4096;
+    private const int OrbisShareErrorInvalidParameter = unchecked((int)0x81960002);
 
     private static int _initialized;
     private static string _contentParam = string.Empty;
@@ -20,7 +21,7 @@ public static class ShareExports
         Nid = "nBDD66kiFW8",
         ExportName = "sceShareInitialize",
         Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceShareUtility")]
+        LibraryName = "libSceShare")]
     public static int ShareInitialize(CpuContext ctx)
     {
         var memorySize = ctx[CpuRegister.Rdi];
@@ -41,7 +42,7 @@ public static class ShareExports
         Nid = "7QZtURYnXG4",
         ExportName = "sceShareSetContentParam",
         Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceShareUtility")]
+        LibraryName = "libSceShare")]
     public static int ShareSetContentParam(CpuContext ctx)
     {
         var contentParamAddress = ctx[CpuRegister.Rdi];
@@ -69,7 +70,7 @@ public static class ShareExports
         Nid = "Sygnk9dr5WQ",
         ExportName = "sceShareRegisterContentEventCallback",
         Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceShareUtility")]
+        LibraryName = "libSceShare")]
     public static int ShareRegisterContentEventCallback(CpuContext ctx)
     {
         var callback = ctx[CpuRegister.Rdi];
@@ -93,7 +94,7 @@ public static class ShareExports
         Nid = "KnsfHKmZqFA",
         ExportName = "sceShareUnregisterContentEventCallback",
         Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceShareUtility")]
+        LibraryName = "libSceShare")]
     public static int ShareUnregisterContentEventCallback(CpuContext ctx)
     {
         var callback = ctx[CpuRegister.Rdi];
@@ -119,10 +120,16 @@ public static class ShareExports
         Nid = "5wjxESwX68I",
         ExportName = "sceShareFeatureProhibit",
         Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceShareUtility")]
+        LibraryName = "libSceShare")]
     public static int ShareFeatureProhibit(CpuContext ctx)
     {
-        TraceShare("feature_prohibit");
+        var featureFlags = unchecked((uint)ctx[CpuRegister.Rdi]);
+        if (featureFlags == 0)
+        {
+            return ctx.SetReturn(OrbisShareErrorInvalidParameter);
+        }
+
+        TraceShare($"feature_prohibit flags=0x{featureFlags:X8}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -130,12 +137,14 @@ public static class ShareExports
         Nid = "T64o-315wbg",
         ExportName = "sceShareSetScreenshotOverlayImage",
         Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceShareUtility")]
+        LibraryName = "libSceShare")]
     public static int ShareSetScreenshotOverlayImage(CpuContext ctx)
     {
         TraceShare(
-            $"set_screenshot_overlay_image arg0=0x{ctx[CpuRegister.Rdi]:X16} " +
-            $"arg1=0x{ctx[CpuRegister.Rsi]:X16} arg2=0x{ctx[CpuRegister.Rdx]:X16}");
+            $"set_screenshot_overlay_image path=0x{ctx[CpuRegister.Rdi]:X16} " +
+            $"margin_x={unchecked((int)ctx[CpuRegister.Rsi])} " +
+            $"margin_y={unchecked((int)ctx[CpuRegister.Rdx])} " +
+            $"origin={unchecked((int)ctx[CpuRegister.Rcx])}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
@@ -143,7 +152,7 @@ public static class ShareExports
         Nid = "crFxyW3HdK0",
         ExportName = "sceShareGetRunningStatus",
         Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libSceShareUtility")]
+        LibraryName = "libSceShare")]
     public static int ShareGetRunningStatus(CpuContext ctx)
     {
         var featureFlagsAddress = ctx[CpuRegister.Rdi];

@@ -23,6 +23,8 @@ public static class RenderTrace
     private static int _metadataClears;
     private static int _nullComputeShaders;
     private static int _pipelineLines;
+    private static int _colorPathLines;
+    private static int _mrtExportPrunes;
     private static long _sequence;
 
     public static long NextSequence() => Interlocked.Increment(ref _sequence);
@@ -54,4 +56,10 @@ public static class RenderTrace
 
     // The shader and pipeline cache lines: lookups, hits, compiles, bindings and commits.
     public static bool Pipeline() => Interlocked.Increment(ref _pipelineLines) <= 4096;
+
+    // The pixel-output and attachment format path, kept separate from the broader pipeline trace budget.
+    public static bool ColorPath() => Interlocked.Increment(ref _colorPathLines) <= 4096;
+
+    // Attachment lists changed by the compiled pixel program's actual MRT exports.
+    public static bool MrtExportPrune() => Interlocked.Increment(ref _mrtExportPrunes) <= 128;
 }

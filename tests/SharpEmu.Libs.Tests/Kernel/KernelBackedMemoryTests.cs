@@ -15,6 +15,54 @@ namespace SharpEmu.Libs.Tests.Kernel;
 public sealed class KernelBackedMemoryTests
 {
     [Fact]
+    public void AutomaticBackingReturnsOnlyAfterItsFinalDirectAliasIsUnmapped()
+    {
+        const ulong grantSize = 0x20_0000;
+        using var test = new BackedKernelMemory();
+        const ulong aperture = GuestMemoryLayout.GuestExtendedAddressStart + 0x0400_0000;
+        var firstAlias = test.Reserve(grantSize, aperture);
+        var secondAlias = test.Reserve(grantSize, aperture + grantSize);
+        var automaticMap = test.Reserve(grantSize, aperture + grantSize * 2);
+
+        Assert.Equal(
+            0,
+            KernelMemoryCompatExports.AllocateAutomaticDirectMemory(
+                test.Context,
+                searchStartValue: 0,
+                searchEndValue: grantSize,
+                length: grantSize,
+                alignment: grantSize,
+                memoryType: 0,
+                outAddress: test.Output));
+        Assert.True(test.Context.TryReadUInt64(test.Output, out var physicalStart));
+        Assert.Equal(0UL, physicalStart);
+
+        Assert.Equal(firstAlias, test.Map(physicalStart, grantSize, firstAlias));
+        Assert.Equal(secondAlias, test.Map(physicalStart, grantSize, secondAlias));
+        Assert.Equal(0, test.Unmap(firstAlias, grantSize));
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN,
+            KernelMemoryCompatExports.MapAutomaticMemory(
+                test.Context,
+                automaticMap,
+                grantSize,
+                memoryType: 0x0C,
+                protection: 0x33));
+
+        Assert.Equal(0, test.Unmap(secondAlias, grantSize));
+        Assert.Equal(
+            0,
+            KernelMemoryCompatExports.MapAutomaticMemory(
+                test.Context,
+                automaticMap,
+                grantSize,
+                memoryType: 0x0C,
+                protection: 0x33));
+        Assert.Equal(0, test.Unmap(automaticMap, grantSize));
+        Assert.Equal(0, test.Release(physicalStart, grantSize));
+    }
+
+    [Fact]
     public void BatchRemapCanExtendAnUnmappedReservationWithoutOverwritingMappings()
     {
         using var test = new BackedKernelMemory();
@@ -300,6 +348,21 @@ public sealed class KernelBackedMemoryTests
         Assert.True(second >= first + size);
         Assert.Equal((first, first + size), test.Query(first));
         Assert.Equal((second, second + 0x10000), test.Query(second));
+    }
+
+    [Fact]
+    public void LargeHintlessReservationUsesTheUserAddressClass()
+    {
+        using var test = new BackedKernelMemory();
+        const ulong size = 0x8000000000;
+
+        var address = test.Reserve(size);
+
+        var userAddressStart = OperatingSystem.IsMacOS()
+            ? 0x0000007000000000UL
+            : GuestMemoryLayout.GuestUserAddressStart;
+        Assert.InRange(address, userAddressStart, GuestMemoryLayout.GuestAddressLimit - size);
+        Assert.Equal((address, address + size), test.Query(address));
     }
 
     [Fact]
@@ -687,7 +750,12 @@ public sealed class KernelBackedMemoryTests
         Assert.True(test.Context.TryReadUInt64(test.Output, out start));
         Assert.True(test.Context.TryReadUInt64(test.Output + 8, out end));
         Assert.Equal((0UL, 0x4000UL), (start, end));
-        Assert.Equal(unchecked((int)0x8002000D), Query(0xC000, 1));
+        Assert.Equal(0, Query(0xC000, 1));
+        Assert.True(test.Context.TryReadUInt64(test.Output, out start));
+        Assert.True(test.Context.TryReadUInt64(test.Output + 8, out end));
+        Assert.True(test.Context.TryReadUInt32(test.Output + 16, out var terminalMemoryType));
+        Assert.Equal((GuestMemoryLayout.DirectBytes, GuestMemoryLayout.DirectBytes), (start, end));
+        Assert.Equal(0u, terminalMemoryType);
     }
 
     [Fact]
@@ -792,7 +860,7 @@ internal sealed class BackedKernelMemory : IDisposable
 
     public BackedKernelMemory(ulong bytes = 128UL * 1024 * 1024)
     {
-        Memory = new PhysicalVirtualMemory(viewHost: Host, backingBytes: bytes);
+        Memory = new PhysicalVirtualMemory(null, Host, bytes, reserveGuestAddressSpace: false);
         Context = new CpuContext(Memory, Generation.Gen5);
         ResetOutput();
     }

@@ -183,6 +183,70 @@ public sealed class Gen5Wave64HalfMaskAnalysisTests
     }
 
     [Fact]
+    public void AB32Saveexec_CombinesExecBeforeSavingItsLowWord()
+    {
+        CompareToExec();
+        var save = Scalar1("SAndSaveexecB32", 24, Gen5Operand.Scalar(20));
+        var read = Scalar1("SMovB32", 30, Gen5Operand.Scalar(24));
+        End();
+
+        var plan = Analyze();
+        Assert.Equal(new[] { Exec }, plan.ExactPairsBefore[save]);
+        Assert.False(plan.ExactPairsBefore.ContainsKey(read));
+    }
+
+    [Fact]
+    public void ASubvectorLoop_CombinesExecBeforeChangingItsHalves()
+    {
+        CompareToExec();
+        var loop = Add(
+            "SSubvectorLoopBegin",
+            Gen5ShaderEncoding.Sopk,
+            [Gen5Operand.Scalar(30)],
+            [],
+            word: 0);
+        End();
+
+        Assert.Equal(new[] { Exec }, Analyze().ExactPairsBefore[loop]);
+    }
+
+    [Fact]
+    public void ACmovB64_CombinesItsRetainedDestination()
+    {
+        CompareTo(20);
+        Scalar1("SMovB64", 30, Gen5Operand.Scalar(20));
+        var conditional = Scalar1("SCmovB64", 30, Gen5Operand.Scalar(40));
+        End();
+
+        Assert.Equal(new[] { 30u }, Analyze().ExactPairsBefore[conditional]);
+    }
+
+    [Theory]
+    [InlineData("SBcnt1I32B64")]
+    [InlineData("SFF1I32B64")]
+    [InlineData("SFlbitI32B64")]
+    public void ANarrowResultFromB64_LeavesTheAdjacentRegisterPending(string opcode)
+    {
+        CompareTo(30);
+        Scalar1(opcode, 30, Gen5Operand.Scalar(40));
+        var adjacentRead = Scalar1("SMovB32", 50, Gen5Operand.Scalar(31));
+        End();
+
+        Assert.Equal(new[] { 30u }, Analyze().ExactPairsBefore[adjacentRead]);
+    }
+
+    [Fact]
+    public void ABitreplicateB64B32_OverwritesBothDestinationRegisters()
+    {
+        CompareTo(30);
+        Scalar1("SBitreplicateB64B32", 30, Gen5Operand.Scalar(40));
+        var adjacentRead = Scalar1("SMovB32", 50, Gen5Operand.Scalar(31));
+        End();
+
+        Assert.False(Analyze().ExactPairsBefore.ContainsKey(adjacentRead));
+    }
+
+    [Fact]
     public void ASharedReadAfterAWrite_WaitsForTheOtherHalf()
     {
         var write = DataShare("DsWriteB32");
@@ -214,6 +278,15 @@ public sealed class Gen5Wave64HalfMaskAnalysisTests
     public void ADynamicJump_GivesUp()
     {
         Scalar1("SSetpcB64", 0, Gen5Operand.Scalar(4));
+        End();
+
+        Assert.Null(Gen5Wave64HalfMaskAnalysis.Analyze(new Gen5ShaderProgram(0x1000, _program), new HashSet<uint>()));
+    }
+
+    [Fact]
+    public void ACallWithDynamicReturnState_GivesUp()
+    {
+        Scalar1("SCallB64", 0, Gen5Operand.Scalar(4));
         End();
 
         Assert.Null(Gen5Wave64HalfMaskAnalysis.Analyze(new Gen5ShaderProgram(0x1000, _program), new HashSet<uint>()));

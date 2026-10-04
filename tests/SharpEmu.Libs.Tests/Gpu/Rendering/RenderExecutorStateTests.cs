@@ -52,6 +52,71 @@ public sealed class RenderExecutorStateTests : IDisposable
         Assert.False(state.DepthBiasEnabled);
         Assert.False(state.StencilTestEnabled);
         Assert.Equal((1u, (byte)1), (state.ColorWriteCount, state.ColorWriteEnableMask));
+        var viewports = Assert.Single(_host.DynamicViewports);
+        var slotZero = Assert.Single(viewports);
+        Assert.Equal(
+            (state.ViewportX, state.ViewportY, state.ViewportWidth, state.ViewportHeight,
+                state.ViewportMinDepth, state.ViewportMaxDepth, state.Scissor),
+            (slotZero.X, slotZero.Y, slotZero.Width, slotZero.Height,
+                slotZero.MinDepth, slotZero.MaxDepth, slotZero.Scissor));
+    }
+
+    [Fact]
+    public void DynamicState_ViewportIndexOutputCarriesEveryGuestViewportAndScissorSlot()
+    {
+        var banks = Banks();
+        _host.Limits = _host.Limits with { MaxViewports = ScreenViewportRegisters.ViewportCount };
+        banks.Context.ScanMode = new ScanModeRegisters { ViewportScissorEnable = true };
+        banks.Context.ScreenViewport.Viewports[3] = new ViewportRegisters
+        {
+            XScale = 10f,
+            XOffset = 20f,
+            YScale = 8f,
+            YOffset = 30f,
+            ZScale = 0.25f,
+            ZOffset = 0.5f,
+            ScissorLeft = 4,
+            ScissorTop = 5,
+            ScissorRight = 24,
+            ScissorBottom = 25,
+        };
+        _pipelines.Graphics = Programs(
+            vertexStage: Stage(Program(ShaderStageKind.Vertex, writesViewportIndex: true)));
+
+        var state = DrawAndTakeState(banks);
+
+        var viewports = Assert.Single(_host.DynamicViewports);
+        Assert.Equal(ScreenViewportRegisters.ViewportCount, viewports.Length);
+        Assert.Equal(
+            new DynamicViewportState(
+                10f,
+                22f,
+                20f,
+                16f,
+                0.25f,
+                0.75f,
+                new ScissorRectangle(4, 5, 24, 25)),
+            viewports[3]);
+        Assert.Equal(1f, viewports[1].Width);
+        Assert.Equal(1f, viewports[1].Height);
+        Assert.Equal(new ScissorRectangle(0, 0, 0, 0), viewports[1].Scissor);
+        Assert.Equal(
+            (state.ViewportX, state.ViewportY, state.ViewportWidth, state.ViewportHeight, state.Scissor),
+            (viewports[0].X, viewports[0].Y, viewports[0].Width, viewports[0].Height, viewports[0].Scissor));
+    }
+
+    [Fact]
+    public void DynamicState_ViewportIndexOutputIsRejectedWithoutEveryGuestSlot()
+    {
+        var banks = Banks();
+        _pipelines.Graphics = Programs(
+            vertexStage: Stage(Program(ShaderStageKind.Vertex, writesViewportIndex: true)));
+
+        var error = Assert.Throws<RenderExecutorFatalException>(
+            () => _executor.DrawIndexed(1, banks, Indexed(3)));
+
+        Assert.Contains("exports ViewportIndex", error.Message, StringComparison.Ordinal);
+        Assert.Empty(_host.DynamicViewports);
     }
 
     [Theory]
@@ -159,10 +224,116 @@ public sealed class RenderExecutorStateTests : IDisposable
         var banks = Banks();
         banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.Context.RenderTargetMask = 0xF0;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xF0;
         var state = DrawAndTakeState(banks);
 
         Assert.Equal((1u, (byte)0b1), (state.ColorWriteCount, state.ColorWriteEnableMask));
         Assert.Contains("acquire_color 1 100100000 image=1", _host.Calls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Attachments_KeepAndCompactOnlyColorSlotsExportedByThePixelProgram(bool indexed)
+    {
+        var banks = Banks();
+        banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 32, 32);
+        banks.Context.RenderTargetMask = 0xFF;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xFF;
+        _pipelines.Graphics = Programs(
+            pixelStage: Stage(Program(ShaderStageKind.Pixel, pixelColorExportMasks: 0xF0)));
+
+        if (indexed)
+        {
+            _executor.DrawIndexed(1, banks, Indexed(3));
+        }
+        else
+        {
+            _executor.DrawAuto(1, banks, Auto(3));
+        }
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("acquire_color 0", StringComparison.Ordinal));
+        Assert.Contains("acquire_color 1 100100000 image=2", _host.Calls);
+        Assert.Contains("begin_rendering 32x32x1 colors=1 samples=1", _host.Calls);
+        Assert.Contains("create_graphics_pipeline colors=1 depth=False topology=TriangleList restart=False", _pipelines.Calls);
+        Assert.Equal(1u, Assert.Single(_host.DynamicStates).ColorWriteCount);
+        Assert.Equal(new uint[] { 0b11, 0b10 }, _pipelines.BoundColorSlotMasks);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Attachments_PixelInactiveDrawRemovesEveryColorTarget(bool indexed)
+    {
+        var banks = Banks(withDepth: true, withPixel: false);
+        banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 64, 64);
+        banks.Context.RenderTargetMask = 0xFF;
+
+        if (indexed)
+        {
+            _executor.DrawIndexed(1, banks, Indexed(3));
+        }
+        else
+        {
+            _executor.DrawAuto(1, banks, Auto(3));
+        }
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal(0u, rendering.ColorAttachmentCount);
+        Assert.Equal(Format.D32Sfloat, rendering.DepthFormat);
+        Assert.Contains("create_graphics_pipeline colors=0 depth=True topology=TriangleList restart=False", _pipelines.Calls);
+        Assert.False(Assert.Single(_pipelines.PipelineRequests).PixelActive);
+        Assert.Equal(new uint[] { 0b11, 0 }, _pipelines.BoundColorSlotMasks);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Attachments_ActivePixelProgramWithNoColorExportsContinuesDepthOnly(bool indexed)
+    {
+        var banks = Banks(withDepth: true);
+        _pipelines.Graphics = Programs(
+            pixelStage: Stage(Program(ShaderStageKind.Pixel, pixelColorExportMasks: 0)));
+
+        if (indexed)
+        {
+            _executor.DrawIndexed(1, banks, Indexed(3));
+        }
+        else
+        {
+            _executor.DrawAuto(1, banks, Auto(3));
+        }
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal(0u, rendering.ColorAttachmentCount);
+        Assert.Equal(Format.D32Sfloat, rendering.DepthFormat);
+        Assert.True(Assert.Single(_pipelines.PipelineRequests).PixelActive);
+        Assert.Equal(new uint[] { 0b1, 0 }, _pipelines.BoundColorSlotMasks);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Attachments_PixelInactiveDrawWithOnlyStaleColorTargetsIsSkipped(bool indexed)
+    {
+        var banks = Banks(withPixel: false);
+
+        if (indexed)
+        {
+            _executor.DrawIndexed(1, banks, Indexed(3));
+        }
+        else
+        {
+            _executor.DrawAuto(1, banks, Auto(3));
+        }
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
+        Assert.Empty(_host.BegunRenderings);
+        Assert.Empty(_pipelines.PipelineRequests);
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw ", StringComparison.Ordinal) || call.StartsWith("draw_indexed", StringComparison.Ordinal));
+        Assert.Contains("reset_bindings", _host.Calls);
     }
 
     [Fact]
@@ -510,8 +681,9 @@ public sealed class RenderExecutorStateTests : IDisposable
         { "clip planes", banks => banks.Context.Clip = new ClipControlRegisters { UserClipPlanes = 3 }, "planes=3" },
         { "copy centroid", banks => banks.Context.DepthTarget = banks.Context.DepthTarget with { RenderControl = 1u << 7 }, "renderControl=0x00000080" },
         { "copy sample", banks => banks.Context.DepthTarget = banks.Context.DepthTarget with { RenderControl = 2u << 8 }, "copySample=2" },
-        { "front polygon type", banks => banks.Context.RasterMode = new RasterModeRegisters { FrontPolygonType = 1 }, "type=1" },
-        { "back polygon type", banks => banks.Context.RasterMode = new RasterModeRegisters { BackPolygonType = 3 }, "type=3" },
+        { "polygon mode", banks => banks.Context.RasterMode = new RasterModeRegisters { PolygonMode = 2 }, "mode=2" },
+        { "different polygon types", banks => banks.Context.RasterMode = new RasterModeRegisters { PolygonMode = 1, FrontPolygonType = 0, BackPolygonType = 1 }, "front=0 back=1" },
+        { "invalid polygon type", banks => banks.Context.RasterMode = new RasterModeRegisters { PolygonMode = 1, FrontPolygonType = 3, BackPolygonType = 3 }, "type=3" },
         { "provoking vertex", banks => banks.Context.RasterMode = new RasterModeRegisters { ProvokingVertexLast = true }, "provoking vertex" },
         { "perspective correction", banks => banks.Context.RasterMode = new RasterModeRegisters { PerspectiveCorrectionDisable = true }, "perspective correction" },
         { "inverted slices", banks => banks.Context.ColorTargets[0] = banks.Context.ColorTargets[0] with { View = 2 }, "start=2 last=0" },
@@ -531,6 +703,18 @@ public sealed class RenderExecutorStateTests : IDisposable
         var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, banks, Indexed(3)));
         Assert.True(fatal.Message.Contains(expected, StringComparison.Ordinal), $"{state}: {fatal.Message}");
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("find_image", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void LastProvokingVertex_IsAcceptedWhenTheRenderHostSupportsIt()
+    {
+        _host.ProvokingVertexLastSupported = true;
+        var banks = Banks();
+        banks.Context.RasterMode.ProvokingVertexLast = true;
+
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Contains(_host.Calls, call => call.StartsWith("draw_indexed ", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Diagnostics;
+using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
 using SharpEmu.ShaderCompiler.Resources;
@@ -14,6 +16,16 @@ public sealed class Gen5ImageTests
 {
 
     private const ulong ShaderAddress = 0x1_0000_C000;
+
+    [Theory]
+    [InlineData("ImageSampleCl", ImageSampleFlags.LodClamp)]
+    [InlineData("ImageSampleCD", ImageSampleFlags.Compare | ImageSampleFlags.Derivative)]
+    [InlineData("ImageSampleCL", ImageSampleFlags.Compare | ImageSampleFlags.Lod)]
+    [InlineData("ImageSampleCB", ImageSampleFlags.Compare | ImageSampleFlags.Bias)]
+    [InlineData("ImageSampleCdO", ImageSampleFlags.Derivative | ImageSampleFlags.CoarseDerivative | ImageSampleFlags.Offset)]
+    [InlineData("ImageSampleCBAO", ImageSampleFlags.Compare | ImageSampleFlags.Bias | ImageSampleFlags.Adjust | ImageSampleFlags.Offset)]
+    public void ImageSampleOpcodesHaveExplicitFlags(string opcode, ImageSampleFlags expected) =>
+        Assert.Equal(expected, ImageSampleOpcodeInfo.Decode(opcode));
 
     [Theory]
     [InlineData("ImageStore", SpirvOp.ImageWrite, 1)]
@@ -91,6 +103,30 @@ public sealed class Gen5ImageTests
     [Theory]
     [InlineData(1u)]
     [InlineData(2u)]
+    public void ImageGetResinfoQueriesTheRawImage(uint dimension)
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation("ImageGetResinfo", dimension));
+        var imageType = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.TypeImage);
+        var query = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.ImageQuerySizeLod);
+        var imageLoad = FindResult(
+            instructions,
+            SpirvOp.Load,
+            query.Operands[2]);
+
+        Assert.Equal(imageType.Operands[0], imageLoad.Operands[0]);
+        Assert.DoesNotContain(
+            instructions,
+            item => item.Opcode == SpirvOp.Image);
+    }
+
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(2u)]
     [InlineData(3u)]
     [InlineData(4u)]
     [InlineData(5u)]
@@ -154,6 +190,119 @@ public sealed class Gen5ImageTests
     }
 
     [Theory]
+    [InlineData(22u, true)]
+    [InlineData(71u, false)]
+    public void ImageSampleCompareReplicatesTheComparisonResultIntoAlpha(
+        uint unifiedFormat,
+        bool nativeDepthCompare)
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation(
+                "ImageSampleCLz",
+                dimension: 1,
+                dmask: 0x8,
+                samplerWord0: 1u << 12,
+                unifiedFormat: unifiedFormat));
+        ParsedSpirvInstruction comparison;
+        if (nativeDepthCompare)
+        {
+            comparison = Assert.Single(
+                instructions,
+                item => item.Opcode == SpirvOp.ImageSampleDrefExplicitLod);
+        }
+        else
+        {
+            var predicate = Assert.Single(
+                instructions,
+                item => item.Opcode == SpirvOp.FOrdLessThan);
+            comparison = Assert.Single(instructions, item =>
+                item.Opcode == SpirvOp.Select &&
+                item.Operands.Length == 5 &&
+                item.Operands[2] == predicate.Operands[1]);
+        }
+        var replicated = Assert.Single(instructions, item =>
+            item.Opcode == SpirvOp.CompositeConstruct &&
+            item.Operands.Length == 6 &&
+            item.Operands[2] == comparison.Operands[1]);
+
+        Assert.Equal(
+            [comparison.Operands[1], comparison.Operands[1], comparison.Operands[1], comparison.Operands[1]],
+            replicated.Operands[2..]);
+    }
+
+    [Fact]
+    public void ImageSampleWithoutComparisonPreservesTheSampledComponents()
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation(
+                "ImageSampleLz",
+                dimension: 1,
+                dmask: 0xF));
+        var sample = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.ImageSampleExplicitLod);
+
+        Assert.DoesNotContain(instructions, item =>
+            item.Opcode == SpirvOp.CompositeConstruct &&
+            item.Operands.Length == 6 &&
+            item.Operands[2..].All(operand => operand == sample.Operands[1]));
+    }
+
+    [Theory]
+    [InlineData(0x68u, "ImageSampleCd")]
+    [InlineData(0x69u, "ImageSampleCdCl")]
+    [InlineData(0x6Au, "ImageSampleCCd")]
+    [InlineData(0x6Bu, "ImageSampleCCdCl")]
+    [InlineData(0x6Cu, "ImageSampleCdO")]
+    [InlineData(0x6Du, "ImageSampleCdClO")]
+    [InlineData(0x6Eu, "ImageSampleCCdO")]
+    [InlineData(0x6Fu, "ImageSampleCCdClO")]
+    public void CoarseDerivativeImageOpcodesDecode(uint opcode, string expected)
+    {
+        var context = new CpuContext(new EmptyMemory(), Generation.Gen5);
+        var word = (0x3Cu << 26) | (opcode << 18);
+
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeInstructionForPreflight(
+                context,
+                0,
+                word,
+                out var decoded,
+                out var sizeDwords,
+                out var error),
+            error);
+        Assert.Equal(expected, decoded);
+        Assert.Equal(2u, sizeDwords);
+    }
+
+    [Theory]
+    [InlineData("ImageSampleCd", false)]
+    [InlineData("ImageSampleCCd", true)]
+    public void CoarseDerivativeSamplesUseGradientsNotImplicitDepthCompare(
+        string opcode,
+        bool depthCompare)
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation(
+                opcode,
+                dimension: 1,
+                samplerWord0: depthCompare ? 1u << 12 : 0u,
+                // A native depth format keeps this test focused on the MIMG
+                // opcode's compare/gradient classification. Color formats are
+                // deliberately lowered through the newer shader-emulated
+                // comparison path instead of OpImageSampleDref*.
+                unifiedFormat: depthCompare ? 22u : 71u));
+        var operation = depthCompare
+            ? SpirvOp.ImageSampleDrefExplicitLod
+            : SpirvOp.ImageSampleExplicitLod;
+        var sample = Assert.Single(instructions, item => item.Opcode == operation);
+        Assert.Equal(4u, sample.Operands[depthCompare ? 5 : 4]);
+        Assert.Equal(
+            depthCompare,
+            instructions.Any(item => item.Opcode == SpirvOp.ImageSampleDrefExplicitLod));
+    }
+
+    [Theory]
     [InlineData(0xFACu, 0xFu, 4, 5, 6, 7)]
     [InlineData(0x9F5u, 0xFu, 7, 4, 5, 6)]
     [InlineData(0xF2Eu, 0xFu, 6, 5, 4, 7)]
@@ -214,6 +363,22 @@ public sealed class Gen5ImageTests
         Assert.Equal([6, 5, 4, 7], GetStoredVgprRegisters(spirv));
     }
 
+    [Fact]
+    public void ImageGather4LUsesDocumentedLevelZeroApproximation()
+    {
+        var spirv = CompileImageOperation("ImageGather4L", dimension: 1, dmask: 1);
+        ValidateWhenAvailable(spirv);
+        var instructions = ReadSpirvInstructions(spirv);
+        var gather = Assert.Single(
+            instructions,
+            item => item.Opcode == SpirvOp.ImageGather);
+
+        // OpImageGather has no legal explicit-LOD image operand in Vulkan. The
+        // lowering consumes coordinates and the component only, matching the
+        // explicit, warned mip-zero approximation.
+        Assert.Equal(5, gather.Operands.Length);
+    }
+
     private static byte[] CompileImageOperation(
         string opcode,
         uint dimension,
@@ -226,8 +391,21 @@ public sealed class Gen5ImageTests
         bool arrayed = false)
     {
         var coordinateCount = dimension == 2 || arrayed ? 3 : 2;
+        var sampleFlags = opcode.StartsWith("ImageSample", StringComparison.Ordinal)
+            ? ImageSampleOpcodeInfo.Decode(opcode)
+            : ImageSampleFlags.None;
+        var hasOffset = (sampleFlags & ImageSampleFlags.Offset) != 0;
+        var hasCompare = (sampleFlags & ImageSampleFlags.Compare) != 0;
+        var hasBias = (sampleFlags & ImageSampleFlags.Bias) != 0;
+        var hasLod = (sampleFlags & ImageSampleFlags.Lod) != 0;
+        var hasGradients = (sampleFlags & ImageSampleFlags.Derivative) != 0;
         var addressCount = coordinateCount +
-            (opcode.Contains("SampleC", StringComparison.Ordinal) ? 1 : 0);
+            (opcode == "ImageGather4L" ? 1 : 0) +
+            (hasOffset ? 1 : 0) +
+            (hasCompare ? 1 : 0) +
+            (hasBias ? 1 : 0) +
+            (hasLod ? 1 : 0) +
+            (hasGradients ? 4 : 0);
         var addressRegisters = Enumerable.Range(0, addressCount)
             .Select(static value => (uint)value)
             .ToArray();
@@ -387,6 +565,39 @@ public sealed class Gen5ImageTests
         return instructions;
     }
 
+    private static void ValidateWhenAvailable(byte[] spirv)
+    {
+        var sdk = Environment.GetEnvironmentVariable("VULKAN_SDK");
+        if (string.IsNullOrWhiteSpace(sdk)) return;
+        var executable = Path.Combine(
+            sdk,
+            OperatingSystem.IsWindows() ? "Bin/spirv-val.exe" : "bin/spirv-val");
+        if (!File.Exists(executable)) return;
+
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllBytes(path, spirv);
+            var start = new ProcessStartInfo(executable)
+            {
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            start.ArgumentList.Add("--target-env");
+            start.ArgumentList.Add("vulkan1.2");
+            start.ArgumentList.Add(path);
+            using var process = Process.Start(start)!;
+            var error = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            Assert.True(process.ExitCode == 0, error);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     private static void AssertCoordinateVectorWidth(
         IReadOnlyList<ParsedSpirvInstruction> instructions,
         SpirvOp operation,
@@ -420,6 +631,19 @@ public sealed class Gen5ImageTests
                 item.Opcode == SpirvOp.TypeVector &&
                 item.Operands[0] == vectorTypeId);
         Assert.Equal(expectedComponents, vectorType.Operands[2]);
+    }
+
+    private sealed class EmptyMemory : ICpuMemory
+    {
+        public bool TryRead(ulong virtualAddress, Span<byte> destination)
+        {
+            destination.Clear();
+            return true;
+        }
+
+        public bool TryWrite(
+            ulong virtualAddress,
+            ReadOnlySpan<byte> source) => true;
     }
 
     private readonly record struct ParsedSpirvInstruction(

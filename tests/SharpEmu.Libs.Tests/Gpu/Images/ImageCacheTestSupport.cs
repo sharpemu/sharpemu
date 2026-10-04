@@ -167,6 +167,36 @@ internal static class ImageCacheTestSupport
         return download.Mapped[..(int)size].ToArray();
     });
 
+    // Reads one mip/layer so overlap tests can verify that a native producer
+    // was copied into the correct location of a newly expanded image.
+    public static byte[] ReadImageSubresourceBytes(
+        this CacheHarness harness,
+        CachedImage image,
+        uint mip,
+        uint layer,
+        Extent3D extent,
+        ImageAspectFlags aspect = ImageAspectFlags.ColorBit) => harness.Worker.Run(() =>
+    {
+        var bytesPerTexel = image.Description.BytesPerBlock;
+        if (aspect == ImageAspectFlags.DepthBit)
+        {
+            bytesPerTexel = DepthFormatRule.AspectTransferBytes(image.Backing.Format);
+        }
+
+        var size = (ulong)extent.Width * extent.Height * extent.Depth * bytesPerTexel;
+        var aligned = (size + 3) & ~3UL;
+        using var download = new GpuBuffer(harness.Vulkan.DeviceInfo, harness.Scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, aligned);
+        var copy = new BufferImageCopy
+        {
+            ImageSubresource = new ImageSubresourceLayers(aspect, mip, layer, 1),
+            ImageExtent = extent,
+        };
+        image.DownloadToBuffer(new[] { copy }, download.Handle, 0, aligned);
+        harness.Scheduler.Finish();
+        download.Invalidate(0, aligned);
+        return download.Mapped[..(int)size].ToArray();
+    });
+
     // Reads a range of a device buffer obtained from the buffer cache.
     public static byte[] ReadBufferBytes(this CacheHarness harness, GpuBuffer buffer, ulong offset, ulong size) => harness.ReadBack(buffer, offset, size);
 

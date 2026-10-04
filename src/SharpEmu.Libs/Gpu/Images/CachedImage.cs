@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers;
 using System.IO.Hashing;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
@@ -291,7 +292,13 @@ public sealed unsafe partial class CachedImage : IDisposable
 
         if (DepthFormatRule.AspectTransferFormat(description.PixelFormat) != Format.Undefined)
         {
-            return usage | ImageUsageFlags.DepthStencilAttachmentBit;
+            usage |= ImageUsageFlags.DepthStencilAttachmentBit;
+            if (device.SupportsAttachmentFeedbackLoop && (usage & ImageUsageFlags.SampledBit) != 0)
+            {
+                usage |= ImageUsageFlags.AttachmentFeedbackLoopBitExt;
+            }
+
+            return usage;
         }
 
         if ((features & FormatFeatureFlags.ColorAttachmentBit) != 0)
@@ -466,14 +473,23 @@ public sealed unsafe partial class CachedImage : IDisposable
         var headSize = headEnd - range.Address;
         var tailAddress = tailBegin < headEnd ? headEnd : tailBegin;
         var tailSize = end - tailAddress;
-        var bytes = new byte[headSize + tailSize];
-        if ((headSize != 0 && !_guestBacking.TryReadBacking(range.Address, bytes.AsSpan(0, (int)headSize))) ||
-            (tailSize != 0 && !_guestBacking.TryReadBacking(tailAddress, bytes.AsSpan((int)headSize, (int)tailSize))))
+        var byteCount = checked((int)(headSize + tailSize));
+        var bytes = ArrayPool<byte>.Shared.Rent(byteCount);
+        try
         {
-            throw SubmissionScheduler.Fatal($"The guest backing of the image could not be read for hashing: address=0x{range.Address:X16} size=0x{range.Size:X}.");
-        }
+            var contents = bytes.AsSpan(0, byteCount);
+            if ((headSize != 0 && !_guestBacking.TryReadBacking(range.Address, contents[..(int)headSize])) ||
+                (tailSize != 0 && !_guestBacking.TryReadBacking(tailAddress, contents.Slice((int)headSize, (int)tailSize))))
+            {
+                throw SubmissionScheduler.Fatal($"The guest backing of the image could not be read for hashing: address=0x{range.Address:X16} size=0x{range.Size:X}.");
+            }
 
-        return XxHash3.HashToUInt64(bytes);
+            return XxHash3.HashToUInt64(contents);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(bytes);
+        }
     }
 
     internal bool SupportsViewType(in ImageViewDescription view) => IsValidViewType(Backing, view);
@@ -523,6 +539,13 @@ public sealed unsafe partial class CachedImage : IDisposable
     }
 
     // Returns the cached view for the normalized description, creating it on first use.
+    internal static ImageViewDescription NormalizeMinimumLod(
+        in ImageViewDescription description,
+        bool supportsImageViewMinLod) =>
+        !supportsImageViewMinLod && description.MinLod != 0
+            ? description with { MinLod = 0 }
+            : description;
+
     public ImageView GetOrCreateView(in ImageViewDescription requested)
     {
         var image = Backing;
@@ -539,25 +562,31 @@ public sealed unsafe partial class CachedImage : IDisposable
             normalized = normalized with { Format = image.Format, Aspect = ImageAspectFlags.StencilBit };
         }
 
+        // VK_EXT_image_view_min_lod is optional on hosts supported by SharpEmu.
+        // Keep the exact guest clamp when it is enabled; otherwise normalize it
+        // away so the cached description still reflects the view Vulkan creates.
+        normalized = NormalizeMinimumLod(normalized, _device.SupportsImageViewMinLod);
+
         normalized = normalized with { Usage = isStorage ? ImageUsageFlags.StorageBit : 0 };
         var formatCompatible = normalized.Format != Format.Undefined && ViewFormatRules.AreImageViewFormatsCompatible(image.Format, normalized.Format, image.Flags);
         var usageValid = !isStorage || (image.Usage & ImageUsageFlags.StorageBit) != 0;
         var sliceView = image.ImageType == ImageType.Type3D && normalized.Type is ImageViewType.Type2D or ImageViewType.Type2DArray;
         var levelsValid = normalized.LevelCount != 0 && normalized.BaseLevel < image.MipLevels && normalized.LevelCount <= image.MipLevels - normalized.BaseLevel;
+        var minLodValid = levelsValid && normalized.MinLod <= (normalized.LevelCount - 1) * 256u;
         var viewLayers = sliceView && levelsValid ? Math.Max(image.Extent.Depth >> (int)normalized.BaseLevel, 1) : image.Layers;
         var rangesValid = levelsValid && normalized.LayerCount != 0 && normalized.BaseLayer < viewLayers && normalized.LayerCount <= viewLayers - normalized.BaseLayer;
         var mappingValid = ViewFormatRules.IsComponentSwizzle(normalized.Mapping.R) && ViewFormatRules.IsComponentSwizzle(normalized.Mapping.G) &&
                            ViewFormatRules.IsComponentSwizzle(normalized.Mapping.B) && ViewFormatRules.IsComponentSwizzle(normalized.Mapping.A);
         var typeValid = IsValidViewType(image, normalized);
         var aspectValid = IsValidAspect(image, normalized.Aspect);
-        if (!image.Exists || !formatCompatible || !usageValid || !rangesValid || !mappingValid || !typeValid || !aspectValid)
+        if (!image.Exists || !formatCompatible || !usageValid || !rangesValid || !minLodValid || !mappingValid || !typeValid || !aspectValid)
         {
             throw SubmissionScheduler.Fatal(
                 $"The image view is invalid: imageFormat={(int)image.Format} viewFormat={(int)normalized.Format} type={(int)normalized.Type} aspect=0x{(uint)normalized.Aspect:x} " +
-                $"mip={normalized.BaseLevel}+{normalized.LevelCount} layer={normalized.BaseLayer}+{normalized.LayerCount} usage=0x{(uint)normalized.Usage:x} imageLevels={image.MipLevels} imageLayers={image.Layers} " +
+                $"mip={normalized.BaseLevel}+{normalized.LevelCount} minLod={normalized.MinLod} layer={normalized.BaseLayer}+{normalized.LayerCount} usage=0x{(uint)normalized.Usage:x} imageLevels={image.MipLevels} imageLayers={image.Layers} " +
                 $"address=0x{Description.Data.Address:X16} image=0x{image.Handle.Handle:X16} imageType={(int)image.ImageType} imageFlags=0x{(uint)image.Flags:x} imageUsage=0x{(uint)image.Usage:x} " +
                 $"mapping={(int)normalized.Mapping.R},{(int)normalized.Mapping.G},{(int)normalized.Mapping.B},{(int)normalized.Mapping.A} " +
-                $"exists={image.Exists} formatValid={formatCompatible} usageValid={usageValid} rangesValid={rangesValid} mappingValid={mappingValid} typeValid={typeValid} aspectValid={aspectValid}.");
+                $"exists={image.Exists} formatValid={formatCompatible} usageValid={usageValid} rangesValid={rangesValid} minLodValid={minLodValid} mappingValid={mappingValid} typeValid={typeValid} aspectValid={aspectValid}.");
         }
 
         foreach (var cached in Views)
@@ -568,17 +597,21 @@ public sealed unsafe partial class CachedImage : IDisposable
             }
         }
 
-        var minLod = new ImageViewMinLodCreateInfoEXT
-        {
-            SType = StructureType.ImageViewMinLodCreateInfoExt,
-            MinLod = normalized.MinLod,
-        };
         var usage = new ImageViewUsageCreateInfo
         {
             SType = StructureType.ImageViewUsageCreateInfo,
-            PNext = normalized.MinLod > 0 && _device.ImageViewMinLodSupported ? &minLod : null,
             Usage = isStorage ? image.Usage : image.Usage & ~ImageUsageFlags.StorageBit,
         };
+        var minLod = new ImageViewMinLodCreateInfoEXT
+        {
+            SType = StructureType.ImageViewMinLodCreateInfoExt,
+            MinLod = normalized.BaseLevel + normalized.MinLod / 256.0f,
+        };
+        if (_device.SupportsImageViewMinLod && normalized.MinLod != 0)
+        {
+            usage.PNext = &minLod;
+        }
+
         var create = new ImageViewCreateInfo
         {
             SType = StructureType.ImageViewCreateInfo,

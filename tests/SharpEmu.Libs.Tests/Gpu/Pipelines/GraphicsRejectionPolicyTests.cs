@@ -42,7 +42,7 @@ public sealed class GraphicsRejectionPolicyTests
             var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
             GraphicsPrograms Lookup() => cache.GetGraphicsPrograms(
                 new VertexStageRegisters { ExportAddress = VertexAddress }, new PixelStageRegisters { Address = PixelAddress },
-                new ShaderInterfaceRegisters(), new ContextRegisters(), [], pixelActive, depthBound: false);
+                new ShaderInterfaceRegisters(), new ContextRegisters(), new UserConfigRegisters(), [], pixelActive, depthBound: false);
             if (setting != "0")
                 Assert.Contains("cannot be compiled", Assert.Throws<SchedulerFatalException>(() => Lookup()).Message);
             else Assert.False(Lookup().Available);

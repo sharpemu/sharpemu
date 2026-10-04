@@ -7,10 +7,10 @@ using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
-// The fixed pipeline state packed into 166 bytes; two draws with equal bytes share a pipeline.
+// The fixed pipeline state packed into 168 bytes; two draws with equal bytes share a pipeline.
 public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParameters>
 {
-    public const int ByteSize = 166;
+    public const int ByteSize = 168;
     public const int ColorAttachmentCount = 8;
 
     private const int NegativeOneToOneOffset = 0;
@@ -40,16 +40,14 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
     private const int SeparateAlphaBlendOffset = 142;
     private const int BlendEnableOffset = 150;
     private const int BlendBypassOffset = 158;
+    private const int PolygonModeOffset = 166;
+    private const int ProvokingVertexLastOffset = 167;
 
     private readonly byte[] _bytes = new byte[ByteSize];
 
     public PipelineStaticParameters()
     {
-        DepthClipEnable = true;
-        Samples = 1;
-        ColorCount = 1;
-        StencilFront = StencilOperations.Default;
-        StencilBack = StencilOperations.Default;
+        Reset();
     }
 
     public ReadOnlySpan<byte> Bytes => _bytes;
@@ -104,6 +102,8 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
     public bool CullFront { get => GetBool(CullFrontOffset); set => SetBool(CullFrontOffset, value); }
     public bool CullBack { get => GetBool(CullBackOffset); set => SetBool(CullBackOffset, value); }
     public bool FrontFaceClockwise { get => GetBool(FaceOffset); set => SetBool(FaceOffset, value); }
+    public PolygonMode PolygonMode { get => (PolygonMode)_bytes[PolygonModeOffset]; set => _bytes[PolygonModeOffset] = (byte)value; }
+    public bool ProvokingVertexLast { get => GetBool(ProvokingVertexLastOffset); set => SetBool(ProvokingVertexLastOffset, value); }
 
     public uint GetColorMask(int index) => GetUInt(ColorMaskOffset + index * 4);
     public void SetColorMask(int index, uint value) => SetUInt(ColorMaskOffset + index * 4, value);
@@ -126,6 +126,23 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
     public bool GetBlendBypass(int index) => GetBool(BlendBypassOffset + index);
     public void SetBlendBypass(int index, bool value) => SetBool(BlendBypassOffset + index, value);
 
+    internal void Reset()
+    {
+        Array.Clear(_bytes);
+        DepthClipEnable = true;
+        Samples = 1;
+        ColorCount = 1;
+        StencilFront = StencilOperations.Default;
+        StencilBack = StencilOperations.Default;
+    }
+
+    internal PipelineStaticParameters Clone()
+    {
+        var clone = new PipelineStaticParameters();
+        _bytes.CopyTo(clone._bytes, 0);
+        return clone;
+    }
+
     public bool Equals(PipelineStaticParameters? other) => other is not null && _bytes.AsSpan().SequenceEqual(other._bytes);
 
     public override bool Equals(object? obj) => Equals(obj as PipelineStaticParameters);
@@ -145,6 +162,26 @@ public sealed class PipelineRenderingState : IEquatable<PipelineRenderingState>
     public Format DepthFormat { get; set; } = Format.Undefined;
     public Format StencilFormat { get; set; } = Format.Undefined;
     public uint ColorCount { get; set; }
+
+    internal void Reset()
+    {
+        Array.Clear(ColorFormats);
+        DepthFormat = Format.Undefined;
+        StencilFormat = Format.Undefined;
+        ColorCount = 0;
+    }
+
+    internal PipelineRenderingState Clone()
+    {
+        var clone = new PipelineRenderingState
+        {
+            DepthFormat = DepthFormat,
+            StencilFormat = StencilFormat,
+            ColorCount = ColorCount,
+        };
+        ColorFormats.CopyTo(clone.ColorFormats, 0);
+        return clone;
+    }
 
     public bool Equals(PipelineRenderingState? other) =>
         other is not null && ColorCount == other.ColorCount && DepthFormat == other.DepthFormat && StencilFormat == other.StencilFormat &&
@@ -179,6 +216,26 @@ public sealed class PipelineVertexInputState : IEquatable<PipelineVertexInputSta
     public byte BindingCount { get; set; }
     public byte AttributeCount { get; set; }
 
+    internal void Reset()
+    {
+        Array.Clear(Bindings);
+        Array.Clear(Attributes);
+        BindingCount = 0;
+        AttributeCount = 0;
+    }
+
+    internal PipelineVertexInputState Clone()
+    {
+        var clone = new PipelineVertexInputState
+        {
+            BindingCount = BindingCount,
+            AttributeCount = AttributeCount,
+        };
+        Bindings.CopyTo(clone.Bindings, 0);
+        Attributes.CopyTo(clone.Attributes, 0);
+        return clone;
+    }
+
     public bool Equals(PipelineVertexInputState? other) =>
         other is not null && BindingCount == other.BindingCount && AttributeCount == other.AttributeCount &&
         Bindings.AsSpan().SequenceEqual(other.Bindings) && Attributes.AsSpan().SequenceEqual(other.Attributes);
@@ -206,11 +263,29 @@ public sealed class PipelineVertexInputState : IEquatable<PipelineVertexInputSta
 
 public sealed class GraphicsPipelineKey : IEquatable<GraphicsPipelineKey>
 {
+    private ulong _vertexProgramId;
+    private ulong _pixelProgramId;
+
     public required PipelineRenderingState Rendering { get; init; }
-    public ulong VertexProgramId { get; init; }
-    public ulong PixelProgramId { get; init; }
+    public ulong VertexProgramId { get => _vertexProgramId; init => _vertexProgramId = value; }
+    public ulong PixelProgramId { get => _pixelProgramId; init => _pixelProgramId = value; }
     public required PipelineVertexInputState VertexInput { get; init; }
     public required PipelineStaticParameters StaticParameters { get; init; }
+
+    internal void SetProgramIds(ulong vertexProgramId, ulong pixelProgramId)
+    {
+        _vertexProgramId = vertexProgramId;
+        _pixelProgramId = pixelProgramId;
+    }
+
+    internal GraphicsPipelineKey Clone() => new()
+    {
+        Rendering = Rendering.Clone(),
+        VertexProgramId = VertexProgramId,
+        PixelProgramId = PixelProgramId,
+        VertexInput = VertexInput.Clone(),
+        StaticParameters = StaticParameters.Clone(),
+    };
 
     public bool Equals(GraphicsPipelineKey? other) =>
         other is not null && Rendering.Equals(other.Rendering) && VertexProgramId == other.VertexProgramId && PixelProgramId == other.PixelProgramId &&

@@ -3,6 +3,8 @@
 
 namespace SharpEmu.HLE.GpuMemory;
 
+using SharpEmu.HLE;
+
 public enum FaultKind
 {
     Read,
@@ -414,7 +416,8 @@ public sealed class PageGuard : IDisposable
 
     private void UpdateMask(ulong blockBase, in PageMask pages, bool track, bool isRead)
     {
-        if (blockBase % BlockBytes != 0 || blockBase >= SpaceBytes)
+        if (blockBase % BlockBytes != 0 ||
+            !GuestMemoryLayout.ContainsGpuAddressRange(blockBase, BlockBytes))
         {
             OnFatal($"The tracking region starts at an invalid address: 0x{blockBase:X16}.");
             return;
@@ -448,9 +451,10 @@ public sealed class PageGuard : IDisposable
 
     private static ulong GetPageRangeEnd(ulong address, ulong size)
     {
-        if (address >= SpaceBytes || size == 0 || size > SpaceBytes - address)
+        if (size == 0 || !GuestMemoryLayout.ContainsGpuAddressRange(address, size))
         {
             OnFatal($"The memory range is invalid: vaddr=0x{address:X16}, size=0x{size:X16}.");
+            return 0;
         }
 
         return GetPageStart(address + size - 1) + PageBytes;

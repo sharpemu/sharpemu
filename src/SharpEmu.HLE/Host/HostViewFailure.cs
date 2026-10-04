@@ -13,4 +13,5 @@ public enum HostViewFailure
     ProtectFailed,
     WrongHostAddress,
     AddressUnavailable,
+    BackingCommitFailed,
 }

@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -114,8 +115,38 @@ public sealed class Gen5Float16ArithmeticTests
         Assert.True(
             Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error),
             error);
-        Assert.Contains((ushort)SpirvOp.ExtInst, ReadOpcodes(shader.Spirv));
+        var opcodes = ReadOpcodes(shader.Spirv);
+        Assert.Contains((ushort)SpirvOp.FMul, opcodes);
+        Assert.Contains((ushort)SpirvOp.FAdd, opcodes);
         Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
+    }
+
+    [Fact]
+    public void PackedFloat16MultiplyReplicatesEncodedConstantAcrossLanes()
+    {
+        var program = Decode(
+        [
+            (0x33u << 26) | (0x10u << 16) | 1u,
+            242u | (258u << 9), // inline 1.0, v2
+            SEndpgm,
+        ]);
+
+        Assert.Equal("VPkMulF16", program.Instructions[0].Opcode);
+        Assert.Equal(Gen5OperandKind.EncodedConstant, program.Instructions[0].Sources[0].Kind);
+
+        var encodedLow = CompilePackedFloat16(Gen5Operand.Source(242), selectHigh: false);
+        var encodedHigh = CompilePackedFloat16(Gen5Operand.Source(242), selectHigh: true);
+        Assert.Equal(encodedLow, encodedHigh);
+
+        // A literal is a raw packed value, so selecting its other half must
+        // still change the generated program.
+        var literalLow = CompilePackedFloat16(
+            new Gen5Operand(Gen5OperandKind.LiteralConstant, 0x40003C00),
+            selectHigh: false);
+        var literalHigh = CompilePackedFloat16(
+            new Gen5Operand(Gen5OperandKind.LiteralConstant, 0x40003C00),
+            selectHigh: true);
+        Assert.False(literalLow.AsSpan().SequenceEqual(literalHigh));
     }
 
     [Fact]
@@ -136,6 +167,32 @@ public sealed class Gen5Float16ArithmeticTests
         Assert.True(
             Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error),
             error);
+    }
+
+    [Theory]
+    [InlineData(0x2FFu, "VLshlrevB64", SpirvOp.ShiftLeftLogical)]
+    [InlineData(0x300u, "VLshrrevB64", SpirvOp.ShiftRightLogical)]
+    public void Vop3Reverse64BitShiftsCompileOnBothBackends(
+        uint opcode,
+        string expectedName,
+        SpirvOp expectedOperation)
+    {
+        var program = Decode(
+        [
+            (0x35u << 26) | (opcode << 16) | 4u,
+            129u | (258u << 9), // shift 1, v[2:3]
+            SEndpgm,
+        ]);
+
+        Assert.Equal(expectedName, program.Instructions[0].Opcode);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var spirvError),
+            spirvError);
+        Assert.Contains((ushort)expectedOperation, ReadOpcodes(shader.Spirv));
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError),
+            metalError);
     }
 
     private static Gen5ShaderProgram Decode(IReadOnlyList<uint> words)
@@ -159,6 +216,29 @@ public sealed class Gen5Float16ArithmeticTests
                 out var error),
             error);
         return program;
+    }
+
+    private static byte[] CompilePackedFloat16(Gen5Operand source, bool selectHigh)
+    {
+        var selectMask = selectHigh ? 1u : 0u;
+        var program = new Gen5ShaderProgram(
+            ShaderAddress,
+            [
+                new Gen5ShaderInstruction(
+                    0,
+                    Gen5ShaderEncoding.Vop3p,
+                    "VPkMulF16",
+                    [0u, 0u],
+                    [source, Gen5Operand.Vector(2)],
+                    [Gen5Operand.Vector(1)],
+                    new Gen5Vop3pControl(selectMask, selectMask, 0, 0, false)),
+                ResourceTestProgram.EndProgram(8),
+            ]);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error),
+            error);
+        return shader.Spirv;
     }
 
     private static IReadOnlyList<ushort> ReadOpcodes(byte[] spirv) =>

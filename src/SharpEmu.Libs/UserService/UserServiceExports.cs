@@ -144,6 +144,41 @@ public static class UserServiceExports
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
+    [SysAbiExport(
+        Nid = "qbwy0Ub8b3M",
+        ExportName = "sceUserServiceGetUserNumber",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceUserService")]
+    public static int UserServiceGetUserNumber(CpuContext ctx)
+    {
+        var userId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var numberAddress = ctx[CpuRegister.Rsi];
+        if (numberAddress == 0)
+        {
+            return SetReturn(ctx, OrbisUserServiceErrorInvalidArgument);
+        }
+
+        if (userId != PrimaryUserId && userId != 1)
+        {
+            return SetReturn(ctx, OrbisUserServiceErrorInvalidParameter);
+        }
+
+        return TryWriteInt32(ctx, numberAddress, 1)
+            ? SetReturnWithTrace(ctx, 0, $"get_user_number user={userId} number=1 out=0x{numberAddress:X16}")
+            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
+        Nid = "bwFjS+bX9mA",
+        ExportName = "sceUserServiceTerminate",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceUserService")]
+    public static int UserServiceTerminate(CpuContext ctx)
+    {
+        Interlocked.Exchange(ref _loginEventDelivered, 0);
+        return SetReturnWithTrace(ctx, 0, "terminate");
+    }
+
     // Name not yet in ps5_names.txt and the NID was captured from titles; revisit when the symbol is catalogued.
     #pragma warning disable SHEM006
     [SysAbiExport(

@@ -201,7 +201,7 @@ internal static class Gen5ComputeFixtures
     public static ShaderCompileRequest RequestOrThrow(Gen5ShaderProgram program, ShaderStage stage, uint waveLaneCount = 32, uint localSizeX = 32, int requiredVertexOutputCount = 0,
         IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputs = null, ResourceRuntimeInputs? runtimeInputs = null)
     {
-        var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, 0, UserDataCount);
+        var plan = ShaderResourcePlan.Extract(program, stage, RequestHash, 0, UserDataCount, waveSize: waveLaneCount);
         var specialization = ResourceSpecialization.Default(plan.Info);
         if (runtimeInputs is not null)
         {
@@ -212,7 +212,7 @@ internal static class Gen5ComputeFixtures
         var resources = ResourceMaterializer.ApplyTo(plan, specialization);
         var layout = BindingLayout.Allocate(
             resources.Info,
-            BindingLayout.CollectUserDataRegisters(program, 0, UserDataCount),
+            BindingLayout.CollectUserDataRegisters(program, 0, UserDataCount, waveLaneCount),
             BindingLayout.UsesGlobalDataShare(program),
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
             BindingLayout.ReadsShaderBase(program));

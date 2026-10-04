@@ -56,7 +56,7 @@ public sealed class ImageDescriptionTests
     }
 
     [Fact]
-    public void FindMatchingMipLevel_AcceptsArraySlicesAndVolumeSlices()
+    public void FindMatchingMipLevel_AcceptsArraySlicesAndRejectsVolumes()
     {
         var layered = Color(Base, 32768, 64, 64, layers: 2);
         layered.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 32768, Pitch = 64, Height = 64 };
@@ -76,17 +76,50 @@ public sealed class ImageDescriptionTests
     }
 
     [Fact]
-    public void FindMatchingArraySlice_UsesTheFullMipChainStrideForEachArrayLayer()
+    public void FindMatchingArraySlice_UsesTheContainingLayerStride()
     {
-        const ulong sliceStride = 21504;
-        var container = Color(Base, 2 * sliceStride, 64, 64, levels: 3, layers: 2);
-        container.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 2 * 16384, Pitch = 64, Height = 64 };
-        container.MipLayout[1] = new MipLevelLayout { Offset = 16384, Size = 2 * 4096, Pitch = 32, Height = 32 };
-        container.MipLayout[2] = new MipLevelLayout { Offset = 20480, Size = 2 * 1024, Pitch = 16, Height = 16 };
+        const ulong layerStride = 21504;
+        var container = Color(Base, layerStride * 2, 64, 64, levels: 3, layers: 2);
+        container.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 32768, Pitch = 64, Height = 64 };
+        container.MipLayout[1] = new MipLevelLayout { Offset = 16384, Size = 8192, Pitch = 32, Height = 32 };
+        container.MipLayout[2] = new MipLevelLayout { Offset = 20480, Size = 2048, Pitch = 16, Height = 16 };
 
-        var secondLayerMip = Color(Base + sliceStride + 16384, 4096, 32, 32);
-        Assert.Equal(1, secondLayerMip.FindMatchingMipLevel(container));
-        Assert.Equal(1, secondLayerMip.FindMatchingArraySlice(container, 1));
+        var layerOneMipOne = Color(Base + layerStride + 16384, 4096, 32, 32);
+        Assert.Equal(1, layerOneMipOne.FindMatchingMipLevel(container));
+        Assert.Equal(1, layerOneMipOne.FindMatchingArraySlice(container, 1));
+
+        // Advancing by the child mip size lands on another mip in layer zero,
+        // not on mip one of the next array layer.
+        var childStrideAddress = Color(Base + 16384 + 4096, 4096, 32, 32);
+        Assert.Equal(-1, childStrideAddress.FindMatchingMipLevel(container));
+    }
+
+    [Fact]
+    public void FindMatchingArraySlice_RejectsIncompleteSubresourceDescriptions()
+    {
+        var container = MipContainer();
+        var child = Color(Base + 16384, 4096, 32, 32);
+
+        var wrongPitch = child;
+        wrongPitch.MipLayout[0].Pitch = 31;
+        Assert.Equal(-1, wrongPitch.FindMatchingMipLevel(container));
+
+        var wrongPaddedHeight = child;
+        wrongPaddedHeight.MipLayout[0].Height = 31;
+        Assert.Equal(-1, wrongPaddedHeight.FindMatchingMipLevel(container));
+
+        var wrongSize = child;
+        wrongSize.Data = new GuestSpan(wrongSize.Data.Address, wrongSize.Data.Size - 4);
+        wrongSize.MipLayout[0].Size = wrongSize.Data.Size;
+        Assert.Equal(-1, wrongSize.FindMatchingMipLevel(container));
+
+        var wrongType = child;
+        wrongType.Type = GuestImageType.Color1D;
+        Assert.Equal(-1, wrongType.FindMatchingMipLevel(container));
+
+        var outside = child;
+        outside.Data = new GuestSpan(container.Data.End - 1024, 4096);
+        Assert.Equal(-1, outside.FindMatchingMipLevel(container));
     }
 
     [Fact]

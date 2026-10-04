@@ -43,6 +43,8 @@ internal static class PakDirectoryTracker
 
     private static readonly ConcurrentDictionary<uint, FileState> _state = new();
 
+    internal static void ClearForTests() => _state.Clear();
+
     /// <summary>
     /// Resolves what "read the next sequential chunk of size <paramref name="requestedSize"/>"
     /// really means for this fileId: an unconsumed directory entry whose length matches, if the

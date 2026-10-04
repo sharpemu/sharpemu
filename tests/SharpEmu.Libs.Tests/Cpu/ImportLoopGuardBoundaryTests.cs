@@ -16,6 +16,7 @@ public sealed class ImportLoopGuardBoundaryTests
     [Theory]
     [InlineData(typeof(KernelRuntimeCompatExports), "gettimeofday", "n88vx3C5nW8")]
     [InlineData(typeof(KernelMemoryCompatExports), "clock_gettime", "lLMT9vJAck0")]
+    [InlineData(typeof(KernelRuntimeCompatExports), "sceKernelClockGettime", "QBi7HCK03hw")]
     [InlineData(typeof(KernelRuntimeCompatExports), "sceKernelReadTsc", "-2IRUCO--PM")]
     [InlineData(typeof(KernelRuntimeCompatExports), "sceKernelGetProcessTime", "4J2sUJmuHZQ")]
     [InlineData(typeof(KernelRuntimeCompatExports), "sceKernelGetProcessTimeCounter", "fgxnMeTNUtY")]
@@ -35,6 +36,12 @@ public sealed class ImportLoopGuardBoundaryTests
     [InlineData("BmMjYxmew1w")]
     [InlineData("Op8TBGY5KHg")]
     [InlineData("27bAgiJmOh0")]
+    [InlineData("9UK1vLZQft4")]
+    [InlineData("7H0iTOciTLo")]
+    [InlineData("Ox9i0c7L5w0")]
+    [InlineData("iGjsr1WAtI0")]
+    [InlineData("mqdNorrB+gI")]
+    [InlineData("sIlRvQqsN2Y")]
     [InlineData("Zxa0VhQVTsk")]
     [InlineData("yH17Q6NWtVg")]
     public void ProgressBoundary_ClearsExpiredHistory(string nid)
@@ -105,6 +112,20 @@ public sealed class ImportLoopGuardBoundaryTests
         Assert.True(guard.ObserveImport());
     }
 
+    [Fact]
+    public void ChangingThirdArgument_IsTreatedAsProgress()
+    {
+        var guard = new GuardFixture();
+        for (ulong arg2 = 0; arg2 < 1024; arg2++)
+            Assert.False(guard.ObserveImport(dispatchIndex: 1281, arg2: arg2));
+        guard.ExpireHistory();
+
+        for (ulong arg2 = 1024; arg2 < 1030; arg2++)
+            Assert.False(guard.ObserveImport(arg2: arg2));
+        Assert.Equal(0, guard.ReadField<int>("_importLoopPatternHits"));
+        Assert.Equal(0, guard.ReadField<long>("_importLoopPatternStartTimestamp"));
+    }
+
     [Theory]
     [InlineData(true, 5)]
     [InlineData(false, 0)]
@@ -173,7 +194,7 @@ public sealed class ImportLoopGuardBoundaryTests
             WriteField("_importLoopPatternStartTimestamp", Stopwatch.GetTimestamp() - 6 * Stopwatch.Frequency);
         }
 
-        public bool ObserveImport(string nid = "ordinary-import", long dispatchIndex = 1280)
+        public bool ObserveImport(string nid = "ordinary-import", long dispatchIndex = 1280, ulong arg2 = 0)
         {
             var entryType = typeof(DirectExecutionBackend).GetNestedType("ImportStubEntry", BindingFlags.NonPublic);
             Assert.NotNull(entryType);
@@ -181,7 +202,7 @@ public sealed class ImportLoopGuardBoundaryTests
             var method = typeof(DirectExecutionBackend).GetMethod("ShouldForceGuestExitOnImportLoop",
                 BindingFlags.NonPublic | BindingFlags.Instance);
             Assert.NotNull(method);
-            return Assert.IsType<bool>(method.Invoke(_backend, [entry, 0x1000UL, dispatchIndex, 0UL, 0UL]));
+            return Assert.IsType<bool>(method.Invoke(_backend, [entry, 0x1000UL, dispatchIndex, 0UL, 0UL, arg2]));
         }
 
         public void WriteField(string fieldName, object value) => FindField(fieldName).SetValue(_backend, value);

@@ -172,6 +172,12 @@ public class ManagedCommandStreamHost : ICommandStreamHost
     // Without a GPU tick every completion is due as soon as it is recorded.
     public virtual void RecordEndOfPipe(in EndOfPipeWrite write)
     {
+        PublishEndOfPipeLabel(write);
+        CompleteEndOfPipe(write);
+    }
+
+    protected void CompleteEndOfPipe(in EndOfPipeWrite write)
+    {
         switch (write.Kind)
         {
             case EndOfPipeWriteKind.InterruptOnly:
@@ -179,6 +185,9 @@ public class ManagedCommandStreamHost : ICommandStreamHost
             case EndOfPipeWriteKind.Interrupt64:
             case EndOfPipeWriteKind.InterruptWriteBack32:
             case EndOfPipeWriteKind.InterruptWriteBack64:
+            case EndOfPipeWriteKind.InterruptGdsWrite32:
+            case EndOfPipeWriteKind.InterruptClockWrite:
+            case EndOfPipeWriteKind.InterruptClockWriteBack:
                 _interrupts.TriggerInterrupt(write.EventId, write.ContextId);
                 break;
             case EndOfPipeWriteKind.Flip:
@@ -189,6 +198,68 @@ public class ManagedCommandStreamHost : ICommandStreamHost
                 _flips.Complete(write.FlipRequestId);
                 _interrupts.TriggerInterrupt(write.EventId, 0);
                 break;
+        }
+    }
+
+    protected void PublishEndOfPipeLabel(in EndOfPipeWrite write)
+    {
+        switch (write.Kind)
+        {
+            case EndOfPipeWriteKind.Write32:
+            case EndOfPipeWriteKind.WriteBack32:
+            case EndOfPipeWriteKind.Interrupt32:
+            case EndOfPipeWriteKind.InterruptWriteBack32:
+            case EndOfPipeWriteKind.FlipWithWrite32:
+            case EndOfPipeWriteKind.FlipWithInterruptWriteBack32:
+                WriteEndOfPipeDword(write.Destination, (uint)write.Value);
+                return;
+            case EndOfPipeWriteKind.Write64:
+            case EndOfPipeWriteKind.WriteBack64:
+            case EndOfPipeWriteKind.Interrupt64:
+            case EndOfPipeWriteKind.InterruptWriteBack64:
+                WriteEndOfPipeQword(write.Destination, write.Value);
+                return;
+            case EndOfPipeWriteKind.ClockWrite:
+            case EndOfPipeWriteKind.ClockWriteBack:
+            case EndOfPipeWriteKind.InterruptClockWrite:
+            case EndOfPipeWriteKind.InterruptClockWriteBack:
+                WriteEndOfPipeQword(write.Destination, EndOfPipe.ReadReferenceClock());
+                return;
+            case EndOfPipeWriteKind.GdsWrite32:
+            case EndOfPipeWriteKind.InterruptGdsWrite32:
+            {
+                var words = new uint[checked((int)write.GdsWordCount)];
+                ReadGds(words, write.GdsWordOffset, write.GdsWordCount);
+                if (!Memory.TryWrite(write.Destination, System.Runtime.InteropServices.MemoryMarshal.AsBytes<uint>(words)))
+                {
+                    throw Fatal(
+                        $"The end-of-pipe GDS label cannot be written: address=0x{write.Destination:X16} words={write.GdsWordCount}.");
+                }
+
+                return;
+            }
+        }
+    }
+
+    private void WriteEndOfPipeDword(ulong destination, uint value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        WriteEndOfPipeBytes(destination, bytes);
+    }
+
+    private void WriteEndOfPipeQword(ulong destination, ulong value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
+        WriteEndOfPipeBytes(destination, bytes);
+    }
+
+    private void WriteEndOfPipeBytes(ulong destination, ReadOnlySpan<byte> bytes)
+    {
+        if (!Memory.TryWrite(destination, bytes))
+        {
+            throw Fatal($"The end-of-pipe label cannot be written: address=0x{destination:X16} size={bytes.Length}.");
         }
     }
 

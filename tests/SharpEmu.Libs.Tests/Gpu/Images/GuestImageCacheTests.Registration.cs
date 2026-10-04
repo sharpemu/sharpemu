@@ -88,7 +88,14 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         Assert.True(nullId.IsValid);
         Assert.Equal(nullId, harness.Find(ref nullRepeat));
         Assert.NotEqual(exactId, nullId);
-        Assert.Equal(1, harness.Images.NullImageCount);
+        var nullVolume = nullRequest;
+        nullVolume.Description.Type = GuestImageType.Color3D;
+        nullVolume.View = nullVolume.View with { Type = ImageViewType.Type3D };
+        var nullVolumeId = harness.Find(ref nullVolume);
+        Assert.True(nullVolumeId.IsValid);
+        Assert.NotEqual(nullId, nullVolumeId);
+        Assert.Equal(GuestImageType.Color3D, harness.Image(nullVolumeId).Description.Type);
+        Assert.Equal(2, harness.Images.NullImageCount);
         harness.Shutdown();
     }
 
@@ -196,6 +203,55 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
     }
 
     [Fact]
+    public void EqualAllocationMipTailGrowth_PreservesExistingGpuLevels()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const uint gpuValue = 0xa1b2c3d4;
+        const ulong allocationSize = (4 * 4 + 2 * 2 + 1) * sizeof(uint);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, new byte[(int)allocationSize]);
+
+        var partial = LinearRequest(
+            address,
+            allocationSize,
+            Format.R32Uint,
+            GuestPixelFormat.Bits32UInt,
+            GuestImageType.Color2D,
+            new Extent3D(4, 4, 1),
+            1,
+            sizeof(uint),
+            1);
+        partial.Description.Resources = new SubresourceCount(2, 1);
+        partial.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 64, Pitch = 4, Height = 4 };
+        partial.Description.MipLayout[1] = new MipLevelLayout { Offset = 64, Size = 16, Pitch = 2, Height = 2 };
+        partial.View = partial.View with { LevelCount = 2 };
+        var partialIdentifier = harness.Acquire(ref partial);
+        Assert.True(harness.Worker.Run(() =>
+            harness.Images.TryClearImageFromBuffer(address, allocationSize, gpuValue)));
+
+        var complete = partial;
+        complete.Description.Resources = new SubresourceCount(3, 1);
+        complete.Description.MipLayout[2] = new MipLevelLayout { Offset = 80, Size = 4, Pitch = 1, Height = 1 };
+        complete.View = complete.View with { LevelCount = 3 };
+        var completeIdentifier = harness.Find(ref complete);
+        var expanded = harness.Image(completeIdentifier);
+
+        Assert.True(completeIdentifier.IsValid);
+        Assert.NotEqual(partialIdentifier, completeIdentifier);
+        Assert.False(harness.Images.Contains(partialIdentifier));
+        Assert.Equal(new SubresourceCount(3, 1), expanded.Description.Resources);
+        Assert.True(expanded.IsGpuModified);
+        Assert.Equal(
+            Bytes(Enumerable.Repeat(gpuValue, 16).ToArray()),
+            harness.ReadImageSubresourceBytes(expanded, 0, 0, new Extent3D(4, 4, 1)));
+        Assert.Equal(
+            Bytes(Enumerable.Repeat(gpuValue, 4).ToArray()),
+            harness.ReadImageSubresourceBytes(expanded, 1, 0, new Extent3D(2, 2, 1)));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void RenderTargetGrowth_ReplacesTheEqualAllocation()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
@@ -222,6 +278,66 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         var narrowAgainId = harness.Find(ref narrowAgain);
         Assert.Equal(wideId, narrowAgainId);
         Assert.Equal(9u, harness.Image(narrowAgainId).Backing.Extent.Width);
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void ContainedRenderTargetGrowth_CopiesTheGpuProducerIntoItsMip()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const uint guestMip0 = 0x10203040;
+        const uint guestMip1 = 0x50607080;
+        const uint gpuMip1 = 0xa0b0c0d0;
+        const ulong mip0Size = 4 * 4 * sizeof(uint);
+        const ulong mip1Size = 2 * 2 * sizeof(uint);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Bytes(Enumerable.Repeat(guestMip0, 16).ToArray()));
+        harness.Write(address + mip0Size, Bytes(Enumerable.Repeat(guestMip1, 4).ToArray()));
+
+        var child = LinearRequest(
+            address + mip0Size,
+            mip1Size,
+            Format.R32Uint,
+            GuestPixelFormat.Bits32UInt,
+            GuestImageType.Color2D,
+            new Extent3D(2, 2, 1),
+            1,
+            sizeof(uint),
+            1);
+        child = AsColorTarget(child);
+        var childIdentifier = harness.Acquire(ref child);
+        var childImage = harness.Image(childIdentifier);
+        childImage.Binding.IsTarget = true;
+        Assert.True(harness.Worker.Run(() =>
+            harness.Images.TryClearImageFromBuffer(address + mip0Size, mip1Size, gpuMip1)));
+        Assert.True(childImage.IsGpuModified);
+
+        var container = LinearRequest(
+            address,
+            mip0Size + mip1Size,
+            Format.R32Uint,
+            GuestPixelFormat.Bits32UInt,
+            GuestImageType.Color2D,
+            new Extent3D(4, 4, 1),
+            1,
+            sizeof(uint),
+            1);
+        container.Description.Resources = new SubresourceCount(2, 1);
+        container.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = mip0Size, Pitch = 4, Height = 4 };
+        container.Description.MipLayout[1] = new MipLevelLayout { Offset = mip0Size, Size = mip1Size, Pitch = 2, Height = 2 };
+        container.View = container.View with { LevelCount = 2 };
+
+        var containerIdentifier = harness.Find(ref container);
+        var expanded = harness.Image(containerIdentifier);
+        Assert.True(containerIdentifier.IsValid);
+        Assert.NotEqual(childIdentifier, containerIdentifier);
+        Assert.False(childImage.Registered);
+        Assert.True(childImage.Binding.NeedsRebind);
+        Assert.True(expanded.IsGpuModified);
+        Assert.Equal(
+            Bytes(Enumerable.Repeat(gpuMip1, 4).ToArray()),
+            harness.ReadImageSubresourceBytes(expanded, 1, 0, new Extent3D(2, 2, 1)));
         harness.Shutdown();
     }
 

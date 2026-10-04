@@ -1221,6 +1221,11 @@ public static class KernelPthreadCompatExports
             }
         }
 
+        // The guest ABI stores mutex attributes behind an opaque pointer.  The
+        // destroy operation ends that pointer's lifetime and clears the caller
+        // slot, matching the platform implementation.  Leaving the freed handle
+        // in place lets a later stack-local reuse resolve stale attribute state.
+        _ = KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, attrAddress, 0);
         FreeOpaqueObject(ctx, allocationAddress);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }

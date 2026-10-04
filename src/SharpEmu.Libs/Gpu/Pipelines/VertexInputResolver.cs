@@ -32,7 +32,7 @@ public readonly record struct ShaderInputSemantic(uint Word)
 public static class VertexInputResolver
 {
     public static VertexInputInfo ResolveVertexInputs(CpuContext context, RegisteredShader shader, ReadOnlySpan<uint> userData,
-        uint positionExportControl = 0, ClipSpaceTransform clipSpace = default)
+        uint positionExportControl = 0, ClipSpaceTransform clipSpace = default, int userDataRegisterOffset = 0)
     {
         if (!TryReadTables(context, shader, GpuCommands.Registers.UserScalarRegisters.Capacity, out var metadata, out var error))
         {
@@ -44,8 +44,8 @@ public static class VertexInputResolver
         // A shader without input semantics never reads its vertex tables, which may be null.
         if (metadata.VertexAttributeRegister >= 0 && metadata.InputSemantics.Length != 0)
         {
-            var attributeTable = ReadTablePointer(userData, metadata.VertexAttributeRegister);
-            var bufferTable = ReadTablePointer(userData, metadata.VertexBufferRegister);
+            var attributeTable = ReadTablePointer(userData, metadata.VertexAttributeRegister + userDataRegisterOffset);
+            var bufferTable = ReadTablePointer(userData, metadata.VertexBufferRegister + userDataRegisterOffset);
             if (attributeTable == 0 || bufferTable == 0)
             {
                 throw SubmissionScheduler.Fatal(
@@ -63,9 +63,9 @@ public static class VertexInputResolver
             Buffers = buffers,
             Attributes = attributes.ToArray(),
             FetchEmbedded = metadata.VertexAttributeRegister >= 0,
-            FetchAttributeRegister = Math.Max(metadata.VertexAttributeRegister, 0),
-            FetchBufferRegister = Math.Max(metadata.VertexBufferRegister, 0),
-            ScratchDwords = shader.ScratchDwords,
+            FetchAttributeRegister = Math.Max(metadata.VertexAttributeRegister + userDataRegisterOffset, 0),
+            FetchBufferRegister = Math.Max(metadata.VertexBufferRegister + userDataRegisterOffset, 0),
+            ScratchDwords = shader.MaximumScratchDwords,
             PositionExportControl = positionExportControl,
             ClipSpace = clipSpace,
         };
@@ -266,13 +266,13 @@ public static class VertexInputResolver
             var descriptor = BufferDescriptorWords.From(descriptorWords);
             if (format != 0)
             {
-                var bufferFormat = format >> 2;
-                var channels = (format & 0x3u) + 1u;
+                var bufferFormat = VertexAttributeFormat.ToBufferFormat(format);
+                var channels = (format & 3u) + 1u;
                 descriptor = descriptor with
                 {
                     Word3 = (descriptor.Word3 & ~((0x7Fu << 12) | 0xFFFu)) |
-                            ((bufferFormat & 0x7Fu) << 12) |
-                            DestinationSelectForChannels(channels),
+                        ((bufferFormat & 0x7Fu) << 12) |
+                        DestinationSelectForChannels(channels),
                 };
             }
 
@@ -374,4 +374,31 @@ public static class VertexInputResolver
 
         return result;
     }
+}
+
+// The vertex attribute formats of the guest tables and the buffer formats they select.
+public static class VertexAttributeFormat
+{
+    private static readonly Dictionary<uint, uint> BufferFormats = new()
+    {
+        [0] = 0,
+        [4] = 1, [8] = 2, [12] = 3, [16] = 4, [20] = 5, [24] = 6,
+        [28] = 7, [32] = 8, [36] = 9, [40] = 10, [44] = 11, [48] = 12, [52] = 13,
+        [57] = 14, [61] = 15, [65] = 16, [69] = 17, [73] = 18, [77] = 19,
+        [80] = 20, [84] = 21, [88] = 22,
+        [93] = 23, [97] = 24, [101] = 25, [105] = 26, [109] = 27, [113] = 28, [117] = 29,
+        [122] = 30, [126] = 31, [130] = 32, [134] = 33, [138] = 34, [142] = 35, [146] = 36,
+        [150] = 37, [154] = 38, [158] = 39, [162] = 40, [166] = 41, [170] = 42, [174] = 43,
+        [179] = 44, [183] = 45, [187] = 46, [191] = 47, [195] = 48, [199] = 49,
+        [203] = 50, [207] = 51, [211] = 52, [215] = 53, [219] = 54, [223] = 55,
+        [227] = 56, [231] = 57, [235] = 58, [239] = 59, [243] = 60, [247] = 61,
+        [249] = 62, [253] = 63, [257] = 64,
+        [263] = 65, [267] = 66, [271] = 67, [275] = 68, [279] = 69, [283] = 70, [287] = 71,
+        [290] = 72, [294] = 73, [298] = 74,
+        [303] = 75, [307] = 76, [311] = 77,
+    };
+
+    // An unknown attribute format is kept as the buffer format value it names.
+    public static uint ToBufferFormat(uint attributeFormat) =>
+        BufferFormats.TryGetValue(attributeFormat, out var bufferFormat) ? bufferFormat : attributeFormat;
 }

@@ -50,6 +50,21 @@ public interface IGuestThreadScheduler
     /// </summary>
     void RegisterGuestThreadContext(ulong threadHandle, CpuContext context);
 
+    /// <summary>
+    /// Returns the exact mapped guest stack owned by a scheduler thread. The
+    /// default keeps alternate/test schedulers source-compatible when they do
+    /// not own guest stack mappings.
+    /// </summary>
+    bool TryGetGuestThreadStackBounds(
+        ulong threadHandle,
+        out ulong stackBase,
+        out ulong stackSize)
+    {
+        stackBase = 0;
+        stackSize = 0;
+        return false;
+    }
+
     bool TryStartThread(CpuContext creatorContext, GuestThreadStartRequest request, out string? error);
 
     bool TryJoinThread(

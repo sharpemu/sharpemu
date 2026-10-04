@@ -16,7 +16,7 @@ public sealed class ShaderPermutationDumpTests : IDisposable
     private const ulong CodeAddress = PipelineTestGuest.MemoryBase + 0x1000;
     private const ulong HeaderAddress = PipelineTestGuest.MemoryBase + 0x8000;
     private readonly string _directory = Directory.CreateTempSubdirectory("shader-permutation-test-").FullName;
-    private readonly string[] _names = ["SHARPEMU_DUMP_SPIRV", "SHARPEMU_DUMP_SPIRV_ADDRESS", "SHARPEMU_SHADER_SPIRV_DUMP_DIR"];
+    private readonly string[] _names = ["SHARPEMU_DUMP_SPIRV", "SHARPEMU_DUMP_SPIRV_ADDRESS", "SHARPEMU_DUMP_SPIRV_HASH", "SHARPEMU_SHADER_SPIRV_DUMP_DIR"];
     private readonly string?[] _previous;
     private readonly FatalScope _fatal = new();
 
@@ -25,7 +25,8 @@ public sealed class ShaderPermutationDumpTests : IDisposable
         _previous = _names.Select(Environment.GetEnvironmentVariable).ToArray();
         Environment.SetEnvironmentVariable(_names[0], "1");
         Environment.SetEnvironmentVariable(_names[1], $"0x{CodeAddress:X}");
-        Environment.SetEnvironmentVariable(_names[2], _directory);
+        Environment.SetEnvironmentVariable(_names[2], null);
+        Environment.SetEnvironmentVariable(_names[3], _directory);
     }
 
     public void Dispose()
@@ -50,7 +51,7 @@ public sealed class ShaderPermutationDumpTests : IDisposable
         {
             var blockedPath = Path.Combine(_directory, "blocked");
             File.WriteAllText(blockedPath, "Directory creation is blocked by this file.");
-            Environment.SetEnvironmentVariable(_names[2], blockedPath);
+            Environment.SetEnvironmentVariable(_names[3], blockedPath);
         }
         var guest = new PipelineTestGuest();
         guest.RegisterProgram(CodeAddress, HeaderAddress, PipelineTestGuest.EndProgram);
@@ -195,7 +196,7 @@ public sealed class ShaderPermutationDumpTests : IDisposable
         {
             var blockedPath = Path.Combine(_directory, "blocked");
             File.WriteAllText(blockedPath, "Directory creation is blocked by this file.");
-            Environment.SetEnvironmentVariable(_names[2], blockedPath);
+            Environment.SetEnvironmentVariable(_names[3], blockedPath);
             ShaderPermutationDump.WriteModule(Path.Combine(blockedPath, "variant"), [1], "spv");
         }
 
@@ -205,5 +206,31 @@ public sealed class ShaderPermutationDumpTests : IDisposable
         Assert.Single(guest.Compiler.Requests);
         Assert.Single(guest.Host.Modules);
         Assert.Empty(InputFiles());
+    }
+
+    [Fact]
+    public void HashFilterMatchesTheProgramAcrossGuestAddresses()
+    {
+        var guest = new PipelineTestGuest();
+        guest.RegisterProgram(CodeAddress, HeaderAddress, PipelineTestGuest.EndProgram);
+        var source = guest.Source(CodeAddress, ShaderStage.Compute, []);
+        Environment.SetEnvironmentVariable(_names[1], null);
+        Environment.SetEnvironmentVariable(_names[2], $"0x{source.Hash:X16}");
+
+        Assert.True(CompiledShaderDump.ShouldWrite(CodeAddress, source.Hash));
+        Assert.True(CompiledShaderDump.ShouldWrite(CodeAddress + 0x1000, source.Hash));
+        Assert.False(CompiledShaderDump.ShouldWrite(CodeAddress, source.Hash ^ 1));
+
+        Environment.SetEnvironmentVariable(_names[2], $"0xDEADBEEF, 0x{source.Hash:X16}");
+        Assert.True(CompiledShaderDump.ShouldWrite(CodeAddress + 0x2000, source.Hash));
+
+        Environment.SetEnvironmentVariable(_names[2], "not-a-hash");
+        Assert.False(CompiledShaderDump.ShouldWrite(CodeAddress, source.Hash));
+
+        Environment.SetEnvironmentVariable(_names[2], $"not-a-hash,{source.Hash:X16}");
+        Assert.False(CompiledShaderDump.ShouldWrite(CodeAddress, source.Hash));
+
+        Environment.SetEnvironmentVariable(_names[2], $"{source.Hash:X16},");
+        Assert.False(CompiledShaderDump.ShouldWrite(CodeAddress, source.Hash));
     }
 }

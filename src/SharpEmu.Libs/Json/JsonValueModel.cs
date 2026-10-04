@@ -87,6 +87,13 @@ internal static class JsonObjectHeap
 
     public static ulong GlobalNullAccessCallbackContext;
 
+    // Guest function used by libSceJson when parsing or formatting a non-finite floating-point
+    // value. The current managed JSON paths reject non-standard numeric tokens, so retain the
+    // registration for ABI fidelity without attempting to call guest code from the host parser.
+    public static ulong GlobalSpecialFloatHandler;
+
+    public static ulong GlobalSpecialFloatHandlerContext;
+
     public static void SetValue(ulong address, JsonValueState state) => Values[address] = state;
 
     public static void RemoveValue(ulong address) => Values.TryRemove(address, out _);
@@ -106,5 +113,7 @@ internal static class JsonObjectHeap
         Strings.Clear();
         GlobalNullAccessCallback = 0;
         GlobalNullAccessCallbackContext = 0;
+        GlobalSpecialFloatHandler = 0;
+        GlobalSpecialFloatHandlerContext = 0;
     }
 }

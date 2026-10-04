@@ -54,9 +54,10 @@ public sealed class Gen5WaveMaskSpirvTests
     private static bool ContainsLaneBitMaskedWaveTest(byte[] spirv)
     {
         var laneBitConstIds = new HashSet<uint>();
+        var instructions = EnumerateInstructions(spirv).ToArray();
 
-        // Pass 1: collect OpConstant result-ids whose integer value is 1.
-        foreach (var (op, wordCount, offset) in EnumerateInstructions(spirv))
+        // Pass 1: collect 32- or 64-bit OpConstant result-ids whose value is 1.
+        foreach (var (op, wordCount, offset) in instructions)
         {
             // OpConstant = 43; a 32-bit constant occupies 4 words and a 64-bit one
             // 5 (opcode, resultType, resultId, valueLow[, valueHigh]).
@@ -74,24 +75,30 @@ public sealed class Gen5WaveMaskSpirvTests
             }
         }
 
-        // Compute forms the lane bit with OpShiftLeftLogical, then may select
-        // zero for lanes outside the guest wave. Follow those result IDs too.
-        foreach (var (op, wordCount, offset) in EnumerateInstructions(spirv))
+        // Pass 2: follow the lane-bit construction used by subgroup lowering.
+        // SPIR-V definitions precede their uses, so one forward pass covers the
+        // constant -> OpShiftLeftLogical -> optional OpSelect chain.
+        foreach (var (op, wordCount, offset) in instructions)
         {
+            // OpShiftLeftLogical = 196
             if (op == 196 && wordCount == 5 &&
                 laneBitConstIds.Contains(ReadWord(spirv, offset + 12)))
             {
                 laneBitConstIds.Add(ReadWord(spirv, offset + 8));
+                continue;
             }
-            else if (op == 169 && wordCount == 6 &&
-                laneBitConstIds.Contains(ReadWord(spirv, offset + 16)))
+
+            // OpSelect = 169; operands are condition, true value, false value.
+            if (op == 169 && wordCount == 6 &&
+                (laneBitConstIds.Contains(ReadWord(spirv, offset + 16)) ||
+                 laneBitConstIds.Contains(ReadWord(spirv, offset + 20))))
             {
                 laneBitConstIds.Add(ReadWord(spirv, offset + 8));
             }
         }
 
-        // Look for an OpBitwiseAnd that consumes a current-lane bit.
-        foreach (var (op, wordCount, offset) in EnumerateInstructions(spirv))
+        // Pass 3: look for an OpBitwiseAnd that consumes a current-lane bit.
+        foreach (var (op, wordCount, offset) in instructions)
         {
             // OpBitwiseAnd = 199 (opcode, resultType, resultId, operand0, operand1).
             if (op != 199 || wordCount != 5)

@@ -3,6 +3,8 @@
 
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
@@ -99,8 +101,8 @@ public sealed class PageOwnerList
 public sealed class ImagePageOwnerTable
 {
     public const int PageBits = 20;
-    public const int AddressSpaceBits = 40;
-    public const int FirstLevelBits = 10;
+    public const int AddressSpaceBits = 44;
+    public const int FirstLevelBits = 14;
     public const int SecondLevelBits = AddressSpaceBits - FirstLevelBits - PageBits;
     public const int BucketEntries = 1 << SecondLevelBits;
     public const ulong PageCount = 1UL << (AddressSpaceBits - PageBits);
@@ -111,7 +113,18 @@ public sealed class ImagePageOwnerTable
 
     public int AllocatedBucketCount { get; private set; }
 
-    public static bool IsValidPage(ulong page) => page < PageCount;
+    public static bool IsValidPage(ulong page)
+    {
+        if (page >= PageCount)
+        {
+            return false;
+        }
+
+        var address = page << PageBits;
+        return address < GuestMemoryLayout.GuestGpuLowAddressLimit ||
+            address >= GuestMemoryLayout.GuestExtendedAddressStart &&
+            address < GuestMemoryLayout.GuestExtendedAddressLimit;
+    }
 
     public PageOwnerList? Find(ulong page) =>
         IsValidPage(page) && _firstLevel[page >> SecondLevelBits] is { } bucket ? bucket[page & (BucketEntries - 1)] : null;
@@ -159,7 +172,8 @@ public sealed class ImagePageOwnerTable
     {
         first = 0;
         lastExclusive = 0;
-        if (size == 0 || address >= AddressSpaceSize || size > AddressSpaceSize - address)
+        if (size == 0 || !new GuestSpan(address, size).IsValid ||
+            address >= AddressSpaceSize || size > AddressSpaceSize - address)
         {
             return false;
         }

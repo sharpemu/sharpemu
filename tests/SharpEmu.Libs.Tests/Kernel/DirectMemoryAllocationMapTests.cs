@@ -158,6 +158,50 @@ public sealed class DirectMemoryAllocationMapTests
     }
 
     [Fact]
+    public void AutomaticBackingIsReservedAcrossGrantsAndRecycledAfterUnmap()
+    {
+        var allocations = new DirectMemoryAllocationMap(128);
+        Assert.True(allocations.TryAllocate(0, 128, 32, 1, 1, out var first, isAutomatic: true));
+        Assert.True(allocations.TryAllocate(0, 128, 32, 1, 2, out var second, isAutomatic: true));
+        Assert.Equal(0UL, first);
+        Assert.Equal(32UL, second);
+
+        Assert.True(allocations.TryReserveAutomatic(48, out var ranges));
+        Assert.Equal([new DirectMemoryAllocationMap.PhysicalRange(0, 48)], ranges);
+        Assert.False(allocations.TryReserveAutomatic(17, out _));
+
+        allocations.ReturnAutomatic(0, 32);
+        allocations.ReturnAutomatic(32, 16);
+        Assert.True(allocations.TryReserveAutomatic(64, out ranges));
+        Assert.Single(ranges);
+        Assert.Equal(new DirectMemoryAllocationMap.PhysicalRange(0, 64), ranges[0]);
+    }
+
+    [Fact]
+    public void OrdinaryAliasesRemoveOnlyTheirAutomaticPhysicalSlice()
+    {
+        var allocations = new DirectMemoryAllocationMap(128);
+        Assert.True(allocations.TryAllocate(0, 128, 64, 1, 1, out var start, isAutomatic: true));
+        Assert.Equal(0UL, start);
+
+        allocations.RemoveAutomaticAvailability(16, 16);
+        Assert.True(allocations.TryReserveAutomatic(48, out var ranges));
+        Assert.Equal(
+            [
+                new DirectMemoryAllocationMap.PhysicalRange(0, 16),
+                new DirectMemoryAllocationMap.PhysicalRange(32, 32),
+            ],
+            ranges);
+        Assert.False(allocations.TryReserveAutomatic(1, out _));
+
+        allocations.ReturnAutomatic(0, 16);
+        allocations.ReturnAutomatic(32, 32);
+        allocations.ReturnAutomatic(16, 16);
+        Assert.True(allocations.TryReserveAutomatic(64, out ranges));
+        Assert.Equal([new DirectMemoryAllocationMap.PhysicalRange(0, 64)], ranges);
+    }
+
+    [Fact]
     public void RepeatedQueriesDoNotAllocateManagedStorage()
     {
         var allocations = new DirectMemoryAllocationMap(10000);

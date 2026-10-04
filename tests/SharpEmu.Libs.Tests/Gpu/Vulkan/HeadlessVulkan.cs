@@ -24,7 +24,17 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     private ExtDebugUtils? _debugUtils;
     private DebugUtilsMessengerEXT _debugMessenger;
 
-    private HeadlessVulkan(Vk vk, Instance instance, PhysicalDevice physical, Device device, Queue queue, uint queueFamily, uint apiVersion, in PhysicalDeviceFeatures features, bool dynamicRendering)
+    private HeadlessVulkan(
+        Vk vk,
+        Instance instance,
+        PhysicalDevice physical,
+        Device device,
+        Queue queue,
+        uint queueFamily,
+        uint apiVersion,
+        in PhysicalDeviceFeatures features,
+        bool dynamicRendering,
+        bool imageViewMinLod)
     {
         Vk = vk;
         Instance = instance;
@@ -38,11 +48,13 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         StorageImageExtendedFormats = features.ShaderStorageImageExtendedFormats;
         ShaderInt64 = features.ShaderInt64;
         SupportsDynamicRendering = dynamicRendering;
+        SupportsImageViewMinLod = imageViewMinLod;
     }
 
     // Dynamic rendering support required by the presenter's render host.
     public bool SupportsDynamicRendering { get; }
     public bool SupportsFragmentShaderBarycentric { get; private init; }
+    public bool SupportsImageViewMinLod { get; }
     public bool SupportsFillRectangle { get; private init; }
 
     private static readonly string[] RenderingExtensionNames =
@@ -111,7 +123,11 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     }
 
     // One shared instance so the live allocation counter spans every buffer and image of a test.
-    public GpuDeviceInfo DeviceInfo => _deviceInfo ??= new GpuDeviceInfo(Vk, Physical, Device);
+    public GpuDeviceInfo DeviceInfo => _deviceInfo ??= new GpuDeviceInfo(
+        Vk,
+        Physical,
+        Device,
+        supportsImageViewMinLod: SupportsImageViewMinLod);
 
     public string DeviceName
     {
@@ -304,6 +320,23 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         }
         var barycentric = (bool)barycentricFeatures.FragmentShaderBarycentric;
 
+        const string imageViewMinLodExtension = "VK_EXT_image_view_min_lod";
+        var hasImageViewMinLodExtension = HasDeviceExtensions(vk, physical, [imageViewMinLodExtension]);
+        var imageViewMinLodFeatures = new PhysicalDeviceImageViewMinLodFeaturesEXT
+        {
+            SType = StructureType.PhysicalDeviceImageViewMinLodFeaturesExt,
+        };
+        if (hasImageViewMinLodExtension)
+        {
+            var query = new PhysicalDeviceFeatures2
+            {
+                SType = StructureType.PhysicalDeviceFeatures2,
+                PNext = &imageViewMinLodFeatures,
+            };
+            vk.GetPhysicalDeviceFeatures2(physical, &query);
+        }
+        var imageViewMinLod = hasImageViewMinLodExtension && imageViewMinLodFeatures.MinLod;
+
         var vulkan13Features = new PhysicalDeviceVulkan13Features
         {
             SType = StructureType.PhysicalDeviceVulkan13Features,
@@ -359,6 +392,16 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             PNext = &vulkan13Features,
         };
         timelineFeatures.PNext = &addressFeatures;
+        if (imageViewMinLod)
+        {
+            imageViewMinLodFeatures = new PhysicalDeviceImageViewMinLodFeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceImageViewMinLodFeaturesExt,
+                MinLod = true,
+                PNext = vulkan13Features.PNext,
+            };
+            vulkan13Features.PNext = &imageViewMinLodFeatures;
+        }
         if (barycentric)
         {
             barycentricFeatures.PNext = vulkan13Features.PNext;
@@ -367,6 +410,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         var extensionNames = new List<string>();
         if (dynamicRendering) extensionNames.AddRange(RenderingExtensionNames);
         if (barycentric) extensionNames.Add(barycentricExtension);
+        if (imageViewMinLod) extensionNames.Add(imageViewMinLodExtension);
         const string fillRectangleExtension = "VK_NV_fill_rectangle";
         var fillRectangle = HasDeviceExtensions(vk, physical, [fillRectangleExtension]);
         if (fillRectangle) extensionNames.Add(fillRectangleExtension);
@@ -394,7 +438,17 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         }
 
         vk.GetDeviceQueue(device, family, 0, out var queue);
-        var result = new HeadlessVulkan(vk, instance, physical, device, queue, family, apiVersion, enabledFeatures, dynamicRendering)
+        var result = new HeadlessVulkan(
+            vk,
+            instance,
+            physical,
+            device,
+            queue,
+            family,
+            apiVersion,
+            enabledFeatures,
+            dynamicRendering,
+            imageViewMinLod)
         {
             SupportsFragmentShaderBarycentric = barycentric,
             SupportsFillRectangle = fillRectangle,

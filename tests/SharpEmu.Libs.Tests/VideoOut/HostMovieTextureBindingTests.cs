@@ -33,6 +33,43 @@ public sealed class HostMovieTextureBindingTests
         Assert.Equal(1, selected.Chroma);
     }
 
+    [Fact]
+    public void AvPlayerTextureAcceptsPitchAlignedNv12LumaOnlyWhenRegistered()
+    {
+        var texture = CreateTexture(
+            address: 0x3000,
+            width: 2048,
+            height: 1088,
+            format: 1);
+
+        Assert.True(VulkanVideoPresenter.IsAvPlayerHostMovieLumaCandidateForFrame(
+            texture,
+            hostWidth: 1920,
+            hostHeight: 1080,
+            rangeRegistered: true));
+        Assert.False(VulkanVideoPresenter.IsAvPlayerHostMovieLumaCandidateForFrame(
+            texture,
+            hostWidth: 1920,
+            hostHeight: 1080,
+            rangeRegistered: false));
+    }
+
+    [Fact]
+    public void AvPlayerTextureRejectsUnregisteredOrdinaryTexture()
+    {
+        var texture = CreateTexture(
+            address: 0x4000,
+            width: 1920,
+            height: 1080,
+            format: 1);
+
+        Assert.False(VulkanVideoPresenter.IsAvPlayerHostMovieLumaCandidateForFrame(
+            texture,
+            hostWidth: 1920,
+            hostHeight: 1080,
+            rangeRegistered: false));
+    }
+
     private static GuestDrawTexture CreateTexture(
         ulong address,
         uint width,

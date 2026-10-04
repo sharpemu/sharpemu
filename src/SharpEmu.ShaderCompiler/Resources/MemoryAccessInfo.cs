@@ -65,8 +65,66 @@ public enum ImageResourceClass : byte
 public enum ImageSampleFlags : uint
 {
     None = 0,
+    Lod = 1u << 0,
+    Bias = 1u << 1,
+    Derivative = 1u << 2,
     Compare = 1u << 3,
+    Offset = 1u << 4,
+    LevelZero = 1u << 5,
+    LodClamp = 1u << 6,
+    A16 = 1u << 7,
+    CoarseDerivative = 1u << 8,
+    GatherHorizontal = 1u << 9,
     Adjust = 1u << 10,
+}
+
+// Decoder names are intentionally mapped exactly.  Substring tests confuse
+// SAMPLE_CL (LOD clamp) with SAMPLE_C (depth compare) and miss the combined
+// SAMPLE_CD/CL/CB families, shifting every following address operand.
+public static class ImageSampleOpcodeInfo
+{
+    public static ImageSampleFlags Decode(string opcode)
+    {
+        var flags = ImageSampleFlags.None;
+        if (opcode.EndsWith("O", StringComparison.Ordinal))
+        {
+            flags |= ImageSampleFlags.Offset;
+            opcode = opcode[..^1];
+        }
+
+        return flags | (opcode switch
+        {
+            "ImageSample" => ImageSampleFlags.None,
+            "ImageSampleCl" => ImageSampleFlags.LodClamp,
+            "ImageSampleD" => ImageSampleFlags.Derivative,
+            "ImageSampleDCl" => ImageSampleFlags.Derivative | ImageSampleFlags.LodClamp,
+            "ImageSampleL" => ImageSampleFlags.Lod,
+            "ImageSampleB" => ImageSampleFlags.Bias,
+            "ImageSampleBCl" => ImageSampleFlags.Bias | ImageSampleFlags.LodClamp,
+            "ImageSampleLz" => ImageSampleFlags.LevelZero,
+            "ImageSampleC" => ImageSampleFlags.Compare,
+            "ImageSampleCCl" => ImageSampleFlags.Compare | ImageSampleFlags.LodClamp,
+            "ImageSampleCD" => ImageSampleFlags.Compare | ImageSampleFlags.Derivative,
+            "ImageSampleCDCl" => ImageSampleFlags.Compare | ImageSampleFlags.Derivative | ImageSampleFlags.LodClamp,
+            "ImageSampleCL" => ImageSampleFlags.Compare | ImageSampleFlags.Lod,
+            "ImageSampleCB" => ImageSampleFlags.Compare | ImageSampleFlags.Bias,
+            "ImageSampleCBCl" => ImageSampleFlags.Compare | ImageSampleFlags.Bias | ImageSampleFlags.LodClamp,
+            "ImageSampleCLz" => ImageSampleFlags.Compare | ImageSampleFlags.LevelZero,
+            "ImageSampleCd" => ImageSampleFlags.Derivative | ImageSampleFlags.CoarseDerivative,
+            "ImageSampleCdCl" => ImageSampleFlags.Derivative | ImageSampleFlags.CoarseDerivative | ImageSampleFlags.LodClamp,
+            "ImageSampleCCd" => ImageSampleFlags.Compare | ImageSampleFlags.Derivative | ImageSampleFlags.CoarseDerivative,
+            "ImageSampleCCdCl" => ImageSampleFlags.Compare | ImageSampleFlags.Derivative | ImageSampleFlags.CoarseDerivative | ImageSampleFlags.LodClamp,
+            "ImageSampleA" => ImageSampleFlags.Adjust,
+            "ImageSampleClA" => ImageSampleFlags.LodClamp | ImageSampleFlags.Adjust,
+            "ImageSampleBA" => ImageSampleFlags.Bias | ImageSampleFlags.Adjust,
+            "ImageSampleBClA" => ImageSampleFlags.Bias | ImageSampleFlags.LodClamp | ImageSampleFlags.Adjust,
+            "ImageSampleCA" => ImageSampleFlags.Compare | ImageSampleFlags.Adjust,
+            "ImageSampleCClA" => ImageSampleFlags.Compare | ImageSampleFlags.LodClamp | ImageSampleFlags.Adjust,
+            "ImageSampleCBA" => ImageSampleFlags.Compare | ImageSampleFlags.Bias | ImageSampleFlags.Adjust,
+            "ImageSampleCBClA" => ImageSampleFlags.Compare | ImageSampleFlags.Bias | ImageSampleFlags.LodClamp | ImageSampleFlags.Adjust,
+            _ => throw new ArgumentOutOfRangeException(nameof(opcode), opcode, "Unknown image-sample opcode."),
+        });
+    }
 }
 
 // The decoded facts of one memory access, one entry per accessed dword for scalar
@@ -92,6 +150,7 @@ public sealed class MemoryAccessInfo
     public ImageSampleFlags ImageSampleFlags { get; init; }
     public ImageDimension ImageDimension { get; init; }
     public ImageResourceClass ImageClass { get; init; }
+    public ImageNumericClass ImageNumericClass { get; init; }
     public bool NeedsSampler { get; init; }
     public bool AddressIsFull { get; init; }
     public bool DataSigned { get; init; }
@@ -108,7 +167,7 @@ public sealed class MemoryAccessInfo
     // device-address planner; such an access is routed per lane like the hardware
     // and has no device-address range of its own.
     public FlatAddressSpace AddressSpace { get; set; }
-    // A scalar buffer load whose descriptor only exists on the device: the shader reads
+    // A buffer access whose descriptor only exists on the device: the shader reads
     // through the descriptor in its registers instead of a host-bound buffer.
     public bool DeviceDescriptor { get; set; }
 
@@ -129,7 +188,8 @@ public sealed class MemoryAccessInfo
         DataDwords == other.DataDwords && DataBits == other.DataBits && ComponentIndex == other.ComponentIndex &&
         ComponentCount == other.ComponentCount && DataFormat == other.DataFormat && NumberFormat == other.NumberFormat &&
         ImageSampleFlags == other.ImageSampleFlags && ImageDimension == other.ImageDimension &&
-        ImageClass == other.ImageClass && NeedsSampler == other.NeedsSampler && AddressIsFull == other.AddressIsFull &&
+        ImageClass == other.ImageClass && ImageNumericClass == other.ImageNumericClass &&
+        NeedsSampler == other.NeedsSampler && AddressIsFull == other.AddressIsFull &&
         DataSigned == other.DataSigned && Typed == other.Typed && Formatted == other.Formatted &&
         ImageHasMip == other.ImageHasMip && ImageR128 == other.ImageR128 && Glc == other.Glc && Slc == other.Slc &&
         IndexEnabled == other.IndexEnabled && OffsetEnabled == other.OffsetEnabled &&
@@ -181,6 +241,9 @@ public sealed class MemoryAccessTable
                     break;
                 case Gen5GlobalMemoryControl global:
                     table.Add(FromGlobal(instruction, global));
+                    break;
+                case Gen5ScratchMemoryControl scratch:
+                    table.Add(FromScratch(instruction, scratch));
                     break;
                 case Gen5ImageControl image:
                     table.Add(FromImage(instruction, image));
@@ -290,6 +353,31 @@ public sealed class MemoryAccessTable
         };
     }
 
+    private static MemoryAccessInfo FromScratch(
+        Gen5ShaderInstruction instruction,
+        Gen5ScratchMemoryControl control)
+    {
+        var opcode = instruction.Opcode;
+        var access = opcode.Contains("Store", StringComparison.Ordinal)
+            ? MemoryAccess.Write
+            : MemoryAccess.Read;
+        var (bits, signed) = SubwordBits(opcode);
+        return new MemoryAccessInfo
+        {
+            Pc = instruction.Pc,
+            Opcode = opcode,
+            Kind = MemoryResourceKind.Scratch,
+            Access = access,
+            Offset = unchecked((uint)control.OffsetBytes),
+            DataDwords = Math.Max(control.DwordCount, 1u),
+            DataBits = bits,
+            ComponentCount = Math.Max(control.DwordCount, 1u),
+            DataSigned = signed,
+            Glc = control.Glc,
+            Slc = control.Slc,
+        };
+    }
+
     private static MemoryAccessInfo FromImage(Gen5ShaderInstruction instruction, Gen5ImageControl control)
     {
         var opcode = instruction.Opcode;
@@ -313,14 +401,11 @@ public sealed class MemoryAccessTable
         var sampled = opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
             opcode.StartsWith("ImageGather", StringComparison.Ordinal) ||
             opcode == "ImageGetLod";
-        var compare = (opcode.StartsWith("ImageSampleC", StringComparison.Ordinal) && !opcode.StartsWith("ImageSampleCd", StringComparison.Ordinal)) ||
-            opcode.StartsWith("ImageGather4C", StringComparison.Ordinal);
-        var mimgOpcode = instruction.Words.Count != 0
-            ? ((instruction.Words[0] >> 18) & 0x7F) | ((instruction.Words[0] & 1) << 7)
-            : 0u;
-        var adjust = mimgOpcode is
-            0xA0 or 0xA1 or 0xA5 or 0xA6 or 0xA8 or 0xA9 or 0xAD or 0xAE or
-            0xB0 or 0xB1 or 0xB5 or 0xB6 or 0xB8 or 0xB9 or 0xBD or 0xBE;
+        var sampleFlags = opcode.StartsWith("ImageSample", StringComparison.Ordinal)
+            ? ImageSampleOpcodeInfo.Decode(opcode) & (ImageSampleFlags.Compare | ImageSampleFlags.Adjust)
+            : opcode.StartsWith("ImageGather4C", StringComparison.Ordinal)
+                ? ImageSampleFlags.Compare
+                : ImageSampleFlags.None;
         return new MemoryAccessInfo
         {
             Pc = instruction.Pc,
@@ -328,12 +413,15 @@ public sealed class MemoryAccessTable
             Kind = MemoryResourceKind.Image,
             Access = atomic ? MemoryAccess.Atomic : store ? MemoryAccess.Write : MemoryAccess.Read,
             ImageClass = atomic || store ? ImageResourceClass.Storage : ImageResourceClass.Sampled,
+            ImageNumericClass = atomic
+                ? opcode.StartsWith("ImageAtomicF", StringComparison.Ordinal)
+                    ? ImageNumericClass.Float
+                    : ImageNumericClass.Uint
+                : ImageNumericClass.Unsupported,
             NeedsSampler = sampled,
             Dmask = control.Dmask,
             ImageDimension = DecodeImageDimension(control.Dimension),
-            ImageSampleFlags =
-                (compare ? ImageSampleFlags.Compare : ImageSampleFlags.None) |
-                (adjust ? ImageSampleFlags.Adjust : ImageSampleFlags.None),
+            ImageSampleFlags = sampleFlags,
             ImageHasMip = opcode is "ImageLoadMip" or "ImageStoreMip",
             ImageR128 = instruction.Words.Count != 0 && ((instruction.Words[0] >> 15) & 1) != 0,
             Glc = control.Glc,

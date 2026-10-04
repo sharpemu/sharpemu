@@ -33,17 +33,19 @@ internal sealed class SubmittedVertexData
         // Validate the full allocation before reading any part of the snapshot.
         long byteCount = 0;
         var uniqueRanges = new Dictionary<(ulong Address, ulong Size), byte[]>();
-        foreach (var buffer in input.Buffers)
+        for (var index = 0; index < input.Buffers.Length; index++)
         {
-            if (buffer.Size > int.MaxValue || buffer.Size > ulong.MaxValue - buffer.Address ||
-                (buffer.Size != 0 && buffer.Address == 0))
+            var buffer = input.Buffers[index];
+            var size = input.BufferSize(index);
+            if (size > int.MaxValue || size > ulong.MaxValue - buffer.Address ||
+                (size != 0 && buffer.Address == 0))
             {
                 return false;
             }
 
-            if (!uniqueRanges.TryAdd((buffer.Address, buffer.Size), [])) continue;
-            if (buffer.Size > (ulong)(maximumBytes - byteCount)) return false;
-            byteCount += (long)buffer.Size;
+            if (!uniqueRanges.TryAdd((buffer.Address, size), [])) continue;
+            if (size > (ulong)(maximumBytes - byteCount)) return false;
+            byteCount += (long)size;
         }
 
         if (byteCount == 0) return false;
@@ -51,11 +53,12 @@ internal sealed class SubmittedVertexData
         for (var index = 0; index < input.Buffers.Length; index++)
         {
             var buffer = input.Buffers[index];
-            var key = (buffer.Address, buffer.Size);
+            var size = input.BufferSize(index);
+            var key = (buffer.Address, size);
             var bytes = uniqueRanges[key];
-            if (bytes.Length == 0 && buffer.Size != 0)
+            if (bytes.Length == 0 && size != 0)
             {
-                bytes = new byte[(int)buffer.Size];
+                bytes = new byte[(int)size];
                 if (!memory.TryRead(buffer.Address, bytes)) return false;
                 uniqueRanges[key] = bytes;
             }

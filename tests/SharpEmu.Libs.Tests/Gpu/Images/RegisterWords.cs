@@ -47,7 +47,8 @@ internal static class RegisterWords
         uint samplesLog2 = 0)
     {
         var zInfo = (uint)format | (samplesLog2 << 2);
-        var stencilInfo = stencilBase != 0 ? 1u : 0u;
+        // This helper has no HTile backing, so keep Hi-Stencil disabled when a stencil plane is present.
+        var stencilInfo = stencilBase != 0 ? 1u | (1u << 29) : 0u;
         var size = (width - 1) | ((height - 1) << 16);
         var renderControl = depthClear ? 1u : 0u;
         var depthControl = (depthTest ? 2u : 0u) | (depthWrite ? 4u : 0u) | (7u << 4);
@@ -65,7 +66,8 @@ internal static class RegisterWords
         uint lastLevel = 0,
         uint maxMip = 0,
         uint layers = 1,
-        uint baseArray = 0)
+        uint baseArray = 0,
+        uint minLod = 0)
     {
         var shifted = address >> 8;
         var lastX = width - 1;
@@ -73,7 +75,7 @@ internal static class RegisterWords
         return
         [
             (uint)shifted,
-            ((uint)(shifted >> 32) & 0xFF) | ((uint)format << 20) | ((lastX & 0x3) << 30),
+            ((uint)(shifted >> 32) & 0xFF) | ((minLod & 0xFFF) << 8) | ((uint)format << 20) | ((lastX & 0x3) << 30),
             ((lastX >> 2) & 0xFFF) | (lastY << 14),
             IdentitySelect | (baseLevel << 12) | (lastLevel << 16) | ((uint)tile << 20) | ((uint)type << 28),
             (layers - 1) | (baseArray << 16),

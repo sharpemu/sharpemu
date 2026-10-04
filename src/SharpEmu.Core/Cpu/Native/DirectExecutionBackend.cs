@@ -195,6 +195,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private nint _tlsHandlerAddress;
 
+	private bool _tlsHandlerOwnedByVirtualMemory;
+
 	private nint _tlsBaseAddress;
 
 	private nint _ownedTlsBaseAddress;
@@ -1255,7 +1257,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				return false;
 			}
 			CreateTlsHandler();
-			PatchTlsPatterns();
+			if (!PatchTlsPatterns())
+			{
+				LastError = "One or more native guest TLS instructions could not be patched safely.";
+				Console.Error.WriteLine("[LOADER][ERROR] " + LastError);
+				result = OrbisGen2Result.ORBIS_GEN2_ERROR_CPU_TRAP;
+				return false;
+			}
 			return ExecuteEntry(context, entryPoint, out result);
 		}
 		catch (Exception ex)
@@ -1924,6 +1932,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		if (IsLibcNativeFormattingExport(exportName))
 		{
 			return HasUsableLleLibcExport("tcVi5SivF7Q", "sprintf");
+		}
+		if (IsLibcFileObjectExport(exportName))
+		{
+			// A FILE* created by the guest libc is not compatible with the HLE
+			// stdio handle table. Keep each available FILE-object operation in
+			// the guest libc that owns the object.
+			return HasUsableLleLibcExport(ComputePsNid(exportName), exportName);
 		}
 		if (string.Equals(value, "0", StringComparison.Ordinal))
 		{
@@ -2631,15 +2646,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private unsafe void CreateTlsHandler()
 	{
+		if (_tlsHandlerAddress != 0)
+		{
+			return;
+		}
+
 		Array.Clear(_tlsRegisterLoadHelpers);
 		_tlsHandlerAddress = (nint)TryAllocateNearEntry(TlsHandlerRegionSize);
 		if (_tlsHandlerAddress == 0)
 		{
-			_tlsHandlerAddress = (nint)VirtualAlloc(null, TlsHandlerRegionSize, 12288u, 64u);
-		}
-		if (_tlsHandlerAddress == 0)
-		{
-			throw new OutOfMemoryException("Failed to allocate TLS handler");
+			throw new OutOfMemoryException(
+				"Failed to allocate a TLS handler within rel32 reach of native guest code.");
 		}
 		// The handler runs in place of a patched guest `mov reg, fs:[0]`,
 		// which preserves every register and the flags. TlsGetValue (and the
@@ -3362,7 +3379,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return null;
 	}
 
-	private unsafe static bool TryAllocAt(ulong baseAddress, long signedDelta, nuint size, out void* memory)
+	private unsafe bool TryAllocAt(ulong baseAddress, long signedDelta, nuint size, out void* memory)
 	{
 		memory = null;
 		ulong num;
@@ -3383,6 +3400,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			num = baseAddress - num2;
 		}
+		if (_cpuContext is not null &&
+			TryGetVirtualMemory(_cpuContext, out var virtualMemory) &&
+			virtualMemory is PhysicalVirtualMemory physicalMemory)
+		{
+			if (!physicalMemory.TryAllocateAtExact(num, (ulong)size, executable: true, out var actualAddress) ||
+				actualAddress != num)
+			{
+				return false;
+			}
+
+			_tlsHandlerOwnedByVirtualMemory = true;
+			memory = (void*)actualAddress;
+			return true;
+		}
+
 		void* ptr = VirtualAlloc((void*)num, size, 12288u, 64u);
 		if (ptr == null)
 		{
@@ -3397,7 +3429,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private readonly record struct TlsPatchCounts(
 		int Loads,
 		int Stores,
-		int StackCanaries)
+		int StackCanaries,
+		int Failures)
 	{
 		public int Total => Loads + Stores + StackCanaries;
 
@@ -3405,7 +3438,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			new(
 				left.Loads + right.Loads,
 				left.Stores + right.Stores,
-				left.StackCanaries + right.StackCanaries);
+				left.StackCanaries + right.StackCanaries,
+				left.Failures + right.Failures);
 	}
 
 	internal static IReadOnlyList<TlsPatchScanRange> BuildTlsPatchScanRanges(
@@ -3449,12 +3483,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return ranges;
 	}
 
-	private unsafe void PatchTlsPatterns()
+	private unsafe bool PatchTlsPatterns()
 	{
 		if (_cpuContext is null || !TryGetVirtualMemory(_cpuContext, out var virtualMemory))
 		{
-			Console.Error.WriteLine("[LOADER][WARNING] TLS patch scan skipped: guest memory is unavailable.");
-			return;
+			Console.Error.WriteLine("[LOADER][ERROR] TLS patch scan failed: guest memory is unavailable.");
+			return false;
 		}
 
 		var ranges = BuildTlsPatchScanRanges(virtualMemory.SnapshotRegions());
@@ -3467,13 +3501,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			for (var index = 0; index < ranges.Count; index++)
 			{
 				var range = ranges[index];
-				if (!_scannedTlsPatchRanges.Add(range))
+				if (_scannedTlsPatchRanges.Contains(range))
 				{
 					reusedRanges++;
 					continue;
 				}
 
-				counts += PatchTlsPatternsInRange(range.Start, range.End);
+				var rangeCounts = PatchTlsPatternsInRange(range.Start, range.End);
+				counts += rangeCounts;
+				if (rangeCounts.Failures == 0)
+				{
+					_scannedTlsPatchRanges.Add(range);
+				}
 				scannedRanges++;
 				scannedBytes += range.End - range.Start;
 			}
@@ -3482,7 +3521,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		Console.Error.WriteLine(
 			$"[LOADER][INFO] Patched {counts.Loads} TLS loads, {counts.Stores} TLS stores, " +
 			$"{counts.StackCanaries} stack-canary accesses " +
-			$"across {scannedRanges} executable range(s), bytes=0x{scannedBytes:X}, reused={reusedRanges}");
+			$"across {scannedRanges} executable range(s), bytes=0x{scannedBytes:X}, " +
+			$"reused={reusedRanges}, failures={counts.Failures}");
+		return counts.Failures == 0;
 	}
 
 	private unsafe TlsPatchCounts PatchTlsPatternsInRange(ulong rangeStart, ulong rangeEnd)
@@ -3548,17 +3589,37 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		while (prefixLength < instruction.Length && source[prefixLength] == 0x66)
 			prefixLength++;
 		if (instruction.Code == Code.Mov_r64_rm64 && instruction.MemoryDisplacement64 == 0 &&
-			instruction.Length - prefixLength == 9 &&
-			TryPatchTlsLoadInstruction((nint)(source + prefixLength), source + prefixLength, 9))
-			return new TlsPatchCounts(1, 0, 0);
+			instruction.Length - prefixLength == 9)
+		{
+			var patchAddress = (nint)(source + prefixLength);
+			if (TryPatchTlsLoadInstruction(patchAddress, source + prefixLength, 9))
+				return new TlsPatchCounts(1, 0, 0, 0);
 
-		if (instruction.Code == Code.Mov_rm32_imm32 && instruction.Length == 12 &&
-			TryPatchTlsImmediateStoreInstruction((nint)source, source))
-			return new TlsPatchCounts(0, 1, 0);
+			Console.Error.WriteLine(
+				$"[LOADER][ERROR] Recognized TLS load could not be patched at 0x{patchAddress:X16}.");
+			return new TlsPatchCounts(0, 0, 0, 1);
+		}
 
-		if (instruction.Code is Code.Mov_r32_rm32 or Code.Mov_r64_rm64 or Code.Xor_r32_rm32 or Code.Xor_r64_rm64 &&
-			TryPatchStackCanaryInstruction((nint)source, source, instruction.Length))
-			return new TlsPatchCounts(0, 0, 1);
+		if (instruction.Code == Code.Mov_rm32_imm32 && instruction.Length == 12)
+		{
+			if (TryPatchTlsImmediateStoreInstruction((nint)source, source))
+				return new TlsPatchCounts(0, 1, 0, 0);
+
+			Console.Error.WriteLine(
+				$"[LOADER][ERROR] Recognized TLS store could not be patched at 0x{instruction.IP:X16}.");
+			return new TlsPatchCounts(0, 0, 0, 1);
+		}
+
+		if (instruction.MemoryDisplacement64 == 0x28 &&
+			instruction.Code is Code.Mov_r32_rm32 or Code.Mov_r64_rm64 or Code.Xor_r32_rm32 or Code.Xor_r64_rm64)
+		{
+			if (TryPatchStackCanaryInstruction((nint)source, source, instruction.Length))
+				return new TlsPatchCounts(0, 0, 1, 0);
+
+			Console.Error.WriteLine(
+				$"[LOADER][ERROR] Recognized stack-canary access could not be patched at 0x{instruction.IP:X16}.");
+			return new TlsPatchCounts(0, 0, 0, 1);
+		}
 		return default;
 	}
 
@@ -3977,6 +4038,33 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	}
 
 	public bool SupportsGuestContextTransfer => true;
+
+	public bool TryGetGuestThreadStackBounds(
+		ulong threadHandle,
+		out ulong stackBase,
+		out ulong stackSize)
+	{
+		stackBase = 0;
+		stackSize = 0;
+		if (threadHandle == 0)
+		{
+			return false;
+		}
+
+		lock (_guestThreadGate)
+		{
+			if (!_guestThreads.TryGetValue(threadHandle, out var thread) ||
+				thread.StackBase == 0 ||
+				thread.StackSize == 0)
+			{
+				return false;
+			}
+
+			stackBase = thread.StackBase;
+			stackSize = thread.StackSize;
+			return true;
+		}
+	}
 
 	public void RegisterGuestThreadContext(ulong threadHandle, CpuContext context)
 	{
@@ -5344,7 +5432,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return true;
 	}
 
-	private static bool TryWriteGuestExceptionContext(
+	internal static bool TryWriteGuestExceptionContext(
 		CpuContext context,
 		ulong address,
 		GuestCpuContinuation continuation,
@@ -5355,11 +5443,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			BinaryPrimitives.WriteUInt64LittleEndian(bytes.AsSpan(offset, sizeof(ulong)), value);
 
 		var hasContinuation = continuation.Rip >= 65536 && continuation.Rsp != 0;
-		// Orbis ucontext_t has a 0x10-byte signal mask and 0x30 bytes of
-		// private fields before its amd64 mcontext. These offsets match the
-		// platform ABI used by libScePs5Util and Unity's Boehm GC. Supplying a
-		// bare mcontext here makes the collector miss live register roots.
-		const int mcontext = 0x40;
+		// The exception handler's second argument is a bare FreeBSD amd64
+		// mcontext_t, not a ucontext_t containing one at +0x40. Unity's PS5
+		// suspend callback copies the register ranges directly from this base.
+		// It also expects Sony's saved-stack-pointer alias at +0xF8.
+		const int mcontext = 0;
 		Write64(mcontext + 0x08, hasContinuation ? continuation.Rdi : context[CpuRegister.Rdi]);
 		Write64(mcontext + 0x10, hasContinuation ? continuation.Rsi : context[CpuRegister.Rsi]);
 		Write64(mcontext + 0x18, hasContinuation ? continuation.Rdx : context[CpuRegister.Rdx]);
@@ -5378,9 +5466,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var rip = hasContinuation ? continuation.Rip : context.Rip;
 		var rsp = hasContinuation ? continuation.Rsp : context[CpuRegister.Rsp];
 		Write64(mcontext + 0xA0, rip);
-		Write64(mcontext + 0xB0, hasContinuation ? continuation.Rflags : 0);
+		Write64(mcontext + 0xB0, hasContinuation ? continuation.Rflags : context.Rflags);
 		Write64(mcontext + 0xB8, rsp);
 		Write64(mcontext + 0xC8, 0x480); // sizeof(Orbis mcontext_t)
+		Write64(mcontext + 0xF8, rsp); // Sony exception-context stack pointer
 		Write64(mcontext + 0x440, hasContinuation ? continuation.FsBase : context.FsBase);
 		Write64(mcontext + 0x448, hasContinuation ? continuation.GsBase : context.GsBase);
 		return context.Memory.TryWrite(address, bytes);
@@ -7036,7 +7125,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return nid is
 				"Op8TBGY5KHg" or // pthread_cond_wait
 				"27bAgiJmOh0" or // pthread_cond_timedwait
-				"fzyMKs9kim0";   // sceKernelWaitEqueue
+				"fzyMKs9kim0" or // sceKernelWaitEqueue
+				"Zxa0VhQVTsk";   // sceKernelWaitSema
 		}
 
 		return false;
@@ -7578,8 +7668,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		if (_tlsHandlerAddress != 0)
 		{
-			VirtualFree((void*)_tlsHandlerAddress, 0u, 32768u);
+			if (!_tlsHandlerOwnedByVirtualMemory)
+			{
+				VirtualFree((void*)_tlsHandlerAddress, 0u, 32768u);
+			}
 			_tlsHandlerAddress = 0;
+			_tlsHandlerOwnedByVirtualMemory = false;
 		}
 		if (_hostRspSlotStorage != 0)
 		{

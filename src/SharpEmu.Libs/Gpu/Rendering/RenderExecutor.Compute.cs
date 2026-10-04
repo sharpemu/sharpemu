@@ -1,9 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
-using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
@@ -22,6 +22,45 @@ public sealed partial class RenderExecutor
     private const uint Format32UInt = 20;
     private const uint ImageClearStride = 16;
     private const uint ImageClearUserDataCount = 8;
+
+    private static bool SynchronizeShaderForDiagnostic(ulong hash)
+    {
+        var configured = Environment.GetEnvironmentVariable("SHARPEMU_SYNC_SHADER_HASH");
+        if (string.IsNullOrWhiteSpace(configured))
+        {
+            return false;
+        }
+
+        var value = configured.AsSpan().Trim();
+        if (value.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            value = value[2..];
+        }
+
+        return ulong.TryParse(
+            value,
+            System.Globalization.NumberStyles.HexNumber,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var configuredHash) && configuredHash == hash;
+    }
+
+    private void SynchronizeShaderProbe(
+        string phase,
+        ulong submitId,
+        ulong address,
+        ulong hash,
+        uint groupsX,
+        uint groupsY,
+        uint groupsZ)
+    {
+        Console.Error.WriteLine(
+            $"[GPU][SYNC-PROBE] phase={phase} state=waiting submit={submitId} " +
+            $"shader=0x{address:X16} hash=0x{hash:X16} groups={groupsX}x{groupsY}x{groupsZ}");
+        _host.SynchronizeForDiagnostic();
+        Console.Error.WriteLine(
+            $"[GPU][SYNC-PROBE] phase={phase} state=complete submit={submitId} " +
+            $"shader=0x{address:X16} hash=0x{hash:X16} groups={groupsX}x{groupsY}x{groupsZ}");
+    }
 
     public void Dispatch(ulong submitId, RegisterBanks banks, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
     {
@@ -51,6 +90,19 @@ public sealed partial class RenderExecutor
         }
 
         var useThreadDimensions = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0;
+        if (!_nativeIndirectDispatch)
+        {
+            // The guest-visible semantics resolve the three counts at packet
+            // execution time. Keep that path as the safe default; a backend
+            // may use native indirect dispatch only when explicitly enabled.
+            ResolveDeferredIndirectDispatchCounts(
+                indirectArgumentsAddress,
+                ref groupsX,
+                ref groupsY,
+                ref groupsZ);
+            indirectArgumentsAddress = 0;
+        }
+
         var computeProgram = _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator, groupsX, groupsY, groupsZ);
         if (computeProgram.Consumed)
         {
@@ -68,6 +120,28 @@ public sealed partial class RenderExecutor
         }
 
         var input = computeProgram.Input;
+        var workgroupAxisMapping = input.WorkgroupAxisMapping;
+        if (!workgroupAxisMapping.IsValid)
+        {
+            throw _host.Fatal(
+                $"The compute program has an invalid workgroup-axis mapping: " +
+                $"logicalX={workgroupAxisMapping.LogicalX} logicalY={workgroupAxisMapping.LogicalY} logicalZ={workgroupAxisMapping.LogicalZ}.");
+        }
+
+        var remapWorkgroupAxes = !workgroupAxisMapping.IsIdentity;
+        if (remapWorkgroupAxes)
+        {
+            // A native indirect buffer still stores logical X/Y/Z counts. The
+            // backend-specific shader mapping needs those counts on the CPU so
+            // the direct dispatch can apply the same permutation.
+            ResolveDeferredIndirectDispatchCounts(
+                indirectArgumentsAddress,
+                ref groupsX,
+                ref groupsY,
+                ref groupsZ);
+            indirectArgumentsAddress = 0;
+        }
+
         var program = input.Stage.Program ?? throw _host.Fatal($"The compute program is missing: shader=0x{compute.Address:X16}.");
         if (Diagnostics.DccWriterTrace.Enabled)
         {
@@ -115,7 +189,7 @@ public sealed partial class RenderExecutor
 
         if (useThreadDimensions)
         {
-            // The indirect buffer carries thread counts in this mode, while Vulkan indirect
+            // Indirect arguments carry thread counts in this mode, while Vulkan indirect
             // dispatch consumes workgroup counts. Use the CPU-resolved counts after conversion.
             indirectArgumentsAddress = 0;
             var threadsX = groupsX;
@@ -140,6 +214,12 @@ public sealed partial class RenderExecutor
             }
 
             return;
+        }
+
+        var synchronizeProbe = SynchronizeShaderForDiagnostic(program.Hash);
+        if (synchronizeProbe)
+        {
+            SynchronizeShaderProbe("before", submitId, compute.Address, program.Hash, groupsX, groupsY, groupsZ);
         }
 
         _host.EndRendering();
@@ -179,30 +259,71 @@ public sealed partial class RenderExecutor
             }
 
             _host.BindPipeline(PipelineBindPoint.Compute, in pipeline);
-            // The shader's local workgroup axes may have been remapped at compile time
-            // (see Gen5SpirvTranslator.ComputeWorkgroupAxisOrder) so the largest NUM_THREAD
-            // axis lands on a physical axis Vulkan actually allows it on. The dispatch group
-            // counts must be permuted the same way, or vkCmdDispatch would hand group counts
-            // for the wrong physical axis to the pipeline it built with the remapped sizes.
-            var axisOrder = Gen5SpirvTranslator.ComputeWorkgroupAxisOrder(
-                input.ThreadsX,
-                input.ThreadsY,
-                input.ThreadsZ);
-            var logicalGroups = new[] { groupsX, groupsY, groupsZ };
-            var physicalGroups = new uint[3];
-            for (var logical = 0; logical < 3; logical++)
+            var dispatchedIndirect =
+                indirectArgumentsAddress != 0 &&
+                _host.TryDispatchIndirect(indirectArgumentsAddress);
+            if (!dispatchedIndirect)
             {
-                physicalGroups[axisOrder[logical]] = logicalGroups[logical];
-            }
+                // A backend may decline native indirect dispatch after the
+                // interpreter deferred the counts. Recover them before using
+                // the direct fallback instead of recording a zero dispatch.
+                ResolveDeferredIndirectDispatchCounts(
+                    indirectArgumentsAddress,
+                    ref groupsX,
+                    ref groupsY,
+                    ref groupsZ);
+                if (groupsX != 0 && groupsY != 0 && groupsZ != 0 && remapWorkgroupAxes)
+                {
+                    Span<uint> logicalGroups = [groupsX, groupsY, groupsZ];
+                    Span<uint> physicalGroups = stackalloc uint[3];
+                    for (var logical = 0; logical < 3; logical++)
+                    {
+                        physicalGroups[workgroupAxisMapping.PhysicalAxisOfLogical(logical)] = logicalGroups[logical];
+                    }
 
-            if (indirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(indirectArgumentsAddress))
-            {
-                _host.Dispatch(physicalGroups[0], physicalGroups[1], physicalGroups[2]);
+                    _host.Dispatch(
+                        physicalGroups[0],
+                        physicalGroups[1],
+                        physicalGroups[2]);
+                }
+                else if (groupsX != 0 && groupsY != 0 && groupsZ != 0)
+                {
+                    _host.Dispatch(groupsX, groupsY, groupsZ);
+                }
             }
             _host.ShaderAccessBarrier();
         }
 
         _host.ResetBindings();
+        if (synchronizeProbe)
+        {
+            SynchronizeShaderProbe("after", submitId, compute.Address, program.Hash, groupsX, groupsY, groupsZ);
+        }
+    }
+
+    // The interpreter uses zero XYZ plus a nonzero address when the backend said
+    // it could leave workgroup counts on the GPU. A real all-zero indirect dispatch
+    // is indistinguishable but harmless: reading it again yields the same no-op.
+    private void ResolveDeferredIndirectDispatchCounts(
+        ulong argumentsAddress,
+        ref uint groupsX,
+        ref uint groupsY,
+        ref uint groupsZ)
+    {
+        if (argumentsAddress == 0 || groupsX != 0 || groupsY != 0 || groupsZ != 0)
+        {
+            return;
+        }
+
+        Span<byte> arguments = stackalloc byte[3 * sizeof(uint)];
+        if (!_host.TryReadGuest(argumentsAddress, arguments))
+        {
+            throw _host.Fatal($"The indirect dispatch arguments are unreadable: address=0x{argumentsAddress:X16}.");
+        }
+
+        groupsX = BinaryPrimitives.ReadUInt32LittleEndian(arguments);
+        groupsY = BinaryPrimitives.ReadUInt32LittleEndian(arguments[sizeof(uint)..]);
+        groupsZ = BinaryPrimitives.ReadUInt32LittleEndian(arguments[(2 * sizeof(uint))..]);
     }
 
     // The dispatch counts threads; the host counts groups of the shader's thread size.
@@ -714,7 +835,8 @@ public sealed partial class RenderExecutor
         var hash = input.Stage.Program!.Hash;
         if (!_host.TryClearImageFromBuffer(address, clear.Size, clear.PackedClear))
         {
-            // A metadata fill may run before its target is bound; the store keeps it pending and the dispatch runs.
+            // DCC backing is authoritative. Unless the host performed an equivalent tracked
+            // write, keep the guest dispatch so later materialization can inspect its bytes.
             var registered = _host.TryAbsorbDccFill(address, clear.Size, clear.PackedClear);
             if (RenderTrace.Enabled && RenderTrace.MetadataClear())
             {

@@ -30,6 +30,66 @@ public sealed class MslTranslationTests
     }
 
     [Fact]
+    public void SBitset0B32ClearsSelectedBit()
+    {
+        var bitset = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Sop1,
+            "SBitset0B32",
+            [0xBEEB1B9F],
+            [new Gen5Operand(Gen5OperandKind.EncodedConstant, 0x9F)],
+            [Gen5Operand.Scalar(107)],
+            null);
+        var end = new Gen5ShaderInstruction(
+            4,
+            Gen5ShaderEncoding.Sopp,
+            "SEndpgm",
+            [0xBF810000],
+            [],
+            [],
+            null);
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            new Gen5ShaderProgram(0, [bitset, end]), ShaderStage.Compute, localSizeX: 1);
+
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.Contains("& ~", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("| (1u <<", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SBitreplicateB64B32ExpandsEverySourceBit()
+    {
+        var replicate = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Sop1,
+            "SBitreplicateB64B32",
+            [0xBE143BFF, 0x80010003],
+            [new Gen5Operand(Gen5OperandKind.LiteralConstant, 0x80010003)],
+            [Gen5Operand.Scalar(20)],
+            null);
+        var end = new Gen5ShaderInstruction(
+            8,
+            Gen5ShaderEncoding.Sopp,
+            "SEndpgm",
+            [0xBF810000],
+            [],
+            [],
+            null);
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            new Gen5ShaderProgram(0, [replicate, end]),
+            ShaderStage.Compute,
+            localSizeX: 1);
+
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error),
+            error);
+        Assert.Contains("0x0000FFFF0000FFFFul", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("0x5555555555555555ul", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("s[20] =", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("s[21] =", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void SadU32UsesUnsignedAbsoluteDifferenceAndAccumulator()
     {
         var sad = new Gen5ShaderInstruction(
@@ -121,10 +181,15 @@ public sealed class MslTranslationTests
     }
 
     [Fact]
-    public void DispatcherIsBoundedByDefault()
+    public void ComputeDispatcherIsUnboundedByDefault()
     {
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(Gen5ComputeFixtures.Fmac);
-        Assert.Contains("if (++steps >=", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(
+            "sharpemu_dispatch_guard total_steps=0 backedges=0",
+            shader.Source,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("uint steps", shader.Source, StringComparison.Ordinal);
+        Assert.DoesNotContain("uint backedges", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -194,7 +259,7 @@ public sealed class MslTranslationTests
             shader.Source,
             StringComparison.Ordinal);
         Assert.Contains(
-            "if (!pixel_valid_mask_active)",
+            "if (guard_hit || !pixel_valid_mask_active)",
             shader.Source,
             StringComparison.Ordinal);
     }
@@ -421,6 +486,48 @@ public sealed class MslTranslationTests
         Assert.Contains("atomic_fetch_add_explicit", shader.Source, StringComparison.Ordinal);
         Assert.Contains("atomic_fetch_sub_explicit", shader.Source, StringComparison.Ordinal);
         Assert.Contains("simd_broadcast", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BufferFloatAtomicsUseUintCompareExchangeLoops()
+    {
+        var fixture = new Gen5ComputeFixture(
+            "buffer-float-atomics",
+            [
+                0x7E0202FF, 0x3F800000, // v_mov_b32 v1, 1.0f
+                0xE0FC4000, 0x80000100, // buffer_atomic_fmin v1, off, s[0:3], 0 glc
+                0xE1004004, 0x80000100, // buffer_atomic_fmax v1, off, s[0:3], 0 offset:4 glc
+                0xBF810000,             // s_endpgm
+            ],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 16);
+
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+
+        Assert.Contains("atomic_load_explicit", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("atomic_compare_exchange_weak_explicit", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("as_type<float>", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(" < ", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(" > ", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(0xE1404000u, "buffer-atomic-swap-x2")]
+    [InlineData(0xE1684000u, "buffer-atomic-or-x2")]
+    public void BufferAtomicX2FailsClosedWithoutNativeUint64Atomics(uint word, string name)
+    {
+        var fixture = new Gen5ComputeFixture(
+            name,
+            [
+                word, 0x80000100,
+                0xBF810000, // s_endpgm
+            ],
+            StoreScalarResourceBase: 0,
+            StoreBackingBytes: 16);
+        var request = Gen5ComputeFixtures.CreateComputeRequest(fixture);
+
+        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
+        Assert.Contains("64-bit storage-buffer atomics", error, StringComparison.Ordinal);
     }
 
     [Theory]

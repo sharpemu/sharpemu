@@ -15,6 +15,9 @@ namespace SharpEmu.Libs.Stubs;
 /// </summary>
 public static class GameServiceStubs
 {
+    private const int NpTrophy2GameDetailsSize = 152;
+    private const int NpTrophy2GameDataSize = 24;
+
     private static int Ok(CpuContext ctx)
     {
         ctx[CpuRegister.Rax] = 0;
@@ -43,7 +46,41 @@ public static class GameServiceStubs
 
     [SysAbiExport(Nid = "4IzqhhUQ3nk", ExportName = "sceNpTrophy2GetGameInfo",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpTrophy2")]
-    public static int NpTrophy2GetGameInfo(CpuContext ctx) => Ok(ctx);
+    public static int NpTrophy2GetGameInfo(CpuContext ctx)
+    {
+        // SysV ABI: (context, handle, details, data).  A successful call must
+        // initialize both optional output structures.  Leaving details intact
+        // exposes stale guest stack/heap bytes as trophy counts; callers then
+        // trust those counts when sizing their result arrays.
+        var detailsAddress = ctx[CpuRegister.Rdx];
+        if (detailsAddress != 0)
+        {
+            Span<byte> details = stackalloc byte[NpTrophy2GameDetailsSize];
+            details.Clear();
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(details[4..], 1);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(details[20..], 1);
+            "SharpEmu"u8.CopyTo(details[24..]);
+            if (!ctx.Memory.TryWrite(detailsAddress, details))
+            {
+                ctx[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+        }
+
+        var dataAddress = ctx[CpuRegister.Rcx];
+        if (dataAddress != 0)
+        {
+            Span<byte> data = stackalloc byte[NpTrophy2GameDataSize];
+            data.Clear();
+            if (!ctx.Memory.TryWrite(dataAddress, data))
+            {
+                ctx[CpuRegister.Rax] = unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+        }
+
+        return Ok(ctx);
+    }
 
     // ---- CES: Shift-JIS <-> Unicode conversion setup (Japanese text) ----
 
@@ -63,14 +100,6 @@ public static class GameServiceStubs
     [SysAbiExport(Nid = "0HBYxYAjmf0", ExportName = "sceNpGameIntentTerminate",
         Target = Generation.Gen5, LibraryName = "libSceNpGameIntent")]
     public static int NpGameIntentTerminate(CpuContext ctx) => Ok(ctx);
-
-    [SysAbiExport(Nid = "jqb7HntFQFc", ExportName = "sceWebBrowserDialogInitialize",
-        Target = Generation.Gen5, LibraryName = "libSceWebBrowserDialog")]
-    public static int WebBrowserDialogInitialize(CpuContext ctx) => Ok(ctx);
-
-    [SysAbiExport(Nid = "ocHtyBwHfys", ExportName = "sceWebBrowserDialogTerminate",
-        Target = Generation.Gen5, LibraryName = "libSceWebBrowserDialog")]
-    public static int WebBrowserDialogTerminate(CpuContext ctx) => Ok(ctx);
 
     [SysAbiExport(Nid = "mlYGfmqE3fQ", ExportName = "sceSigninDialogInitialize",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSigninDialog")]
@@ -114,6 +143,30 @@ public static class GameServiceStubs
     public static int TextToSpeech2Open(CpuContext ctx) =>
         ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_IMPLEMENTED);
 
+    [SysAbiExport(Nid = "8ntsRd07EQA", ExportName = "sceTextToSpeech2Speak",
+        Target = Generation.Gen5, LibraryName = "libSceTextToSpeech2")]
+    public static int TextToSpeech2Speak(CpuContext ctx)
+    {
+        // SharpEmu does not currently expose a host text-to-speech backend.
+        // Treat speech as consumed so accessibility narration remains optional
+        // and cannot block the title's UI or game loop.
+        return Ok(ctx);
+    }
+
+    [SysAbiExport(Nid = "2jiIxUmcsGo", ExportName = "sceTextToSpeech2Cancel",
+        Target = Generation.Gen5, LibraryName = "libSceTextToSpeech2")]
+    public static int TextToSpeech2Cancel(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "08JSg9p6bgQ", ExportName = "sceTextToSpeech2GetSpeechStatus",
+        Target = Generation.Gen5, LibraryName = "libSceTextToSpeech2")]
+    public static int TextToSpeech2GetSpeechStatus(CpuContext ctx)
+    {
+        // Preserve caller-owned storage rather than guessing an undocumented
+        // output layout.  Without a speech backend there is no asynchronous
+        // state for SharpEmu to publish.
+        return Ok(ctx);
+    }
+
     [SysAbiExport(Nid = "kvYEw2lBndk", ExportName = "sceGameLiveStreamingInitialize",
         Target = Generation.Gen5, LibraryName = "libSceGameLiveStreaming")]
     public static int GameLiveStreamingInitialize(CpuContext ctx) => Ok(ctx);
@@ -123,11 +176,11 @@ public static class GameServiceStubs
     public static int SharePlayInitialize(CpuContext ctx) => Ok(ctx);
 
     [SysAbiExport(Nid = "0IL1keINExQ", ExportName = "sceShareTerminate",
-        Target = Generation.Gen5, LibraryName = "libSceShareUtility")]
+        Target = Generation.Gen5, LibraryName = "libSceShare")]
     public static int ShareTerminate(CpuContext ctx) => Ok(ctx);
 
     [SysAbiExport(Nid = "YBiIdcDPrxs", ExportName = "sceShareFeaturePermit",
-        Target = Generation.Gen5, LibraryName = "libSceShareUtility")]
+        Target = Generation.Gen5, LibraryName = "libSceShare")]
     public static int ShareFeaturePermit(CpuContext ctx) => Ok(ctx);
 
     [SysAbiExport(Nid = "9TrhuGzberQ", ExportName = "sceVoiceInit",

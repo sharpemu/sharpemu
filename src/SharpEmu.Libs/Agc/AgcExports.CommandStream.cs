@@ -579,7 +579,11 @@ public static partial class AgcExports
             lock (_gate)
             {
                 RunRunnable();
-                return Queue.Done();
+                var outcome = Queue.Done();
+                // A headless host has no worker to retire the newly queued frame marker.
+                // Process it now so a repeated suspend point cannot wait for a future submit.
+                RunRunnable();
+                return outcome;
             }
         }
 

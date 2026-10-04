@@ -397,6 +397,8 @@ public sealed class PthreadMutexSemanticsTests
             Assert.Equal(1, memory.OutstandingAllocations);
             Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexattrDestroy(context));
             Assert.Equal(0, memory.OutstandingAllocations);
+            Assert.True(context.TryReadUInt64(objectAddress, out var destroyedAttrHandle));
+            Assert.Equal(0UL, destroyedAttrHandle);
         }
     }
 

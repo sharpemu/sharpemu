@@ -14,9 +14,19 @@ public interface IHostViewMemory
 
     bool TryCreateBacking(ulong size, out HostBackingObject? backing, out HostViewFailure failure);
 
+    bool TryCommitBacking(HostBackingObject backing, ulong offset, ulong size);
+
+    bool TryReserveFreeRegions(
+        ulong startAddress,
+        ulong endAddress,
+        ulong minimumRegionSize,
+        out IReadOnlyList<HostAddressRange> reservations);
+
     ulong ReserveHole(ulong address, ulong size);
 
     IReadOnlyList<HostAddressRange> ReserveFreeAddressRanges(ulong start, ulong end, ulong minimumSize) => [];
+
+    bool TryAdoptPlaceholder(ulong address, ulong size) => false;
 
     bool SplitHole(ulong address, ulong size);
 

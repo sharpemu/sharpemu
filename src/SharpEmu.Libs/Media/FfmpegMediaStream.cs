@@ -7,7 +7,13 @@ using System.Threading;
 using FFmpeg.AutoGen;
 
 namespace SharpEmu.Libs.Media;
-internal sealed unsafe class FfmpegMediaStream : Stream
+
+internal interface IVideoFrameSource
+{
+    bool TryReadVideoFrame(byte[] buffer, out ulong? timestampMilliseconds);
+}
+
+internal sealed unsafe class FfmpegMediaStream : Stream, IVideoFrameSource
 {
     internal const int AudioSampleRate = 48000;
     internal const int AudioChannels = 2;
@@ -27,6 +33,7 @@ internal sealed unsafe class FfmpegMediaStream : Stream
 
     private byte[] _pending = [];
     private byte[] _videoConversionBuffer = [];
+    private ulong? _pendingVideoTimestampMilliseconds;
     private int _pendingOffset;
     private bool _draining;
     private bool _finished;
@@ -110,6 +117,7 @@ internal sealed unsafe class FfmpegMediaStream : Stream
             }
 
             _pending = [];
+            _pendingVideoTimestampMilliseconds = null;
             _pendingOffset = 0;
             _draining = false;
             _finished = false;
@@ -336,6 +344,48 @@ internal sealed unsafe class FfmpegMediaStream : Stream
         }
     }
 
+    public bool TryReadVideoFrame(byte[] buffer, out ulong? timestampMilliseconds)
+    {
+        timestampMilliseconds = null;
+        if (!_isVideo || buffer.Length == 0)
+        {
+            return false;
+        }
+
+        lock (_decodeGate)
+        {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return false;
+            }
+
+            var written = 0;
+            while (written < buffer.Length)
+            {
+                if (_pendingOffset >= _pending.Length)
+                {
+                    if (_finished || !TryDecodeIntoPending())
+                    {
+                        return false;
+                    }
+                }
+
+                if (written == 0)
+                {
+                    timestampMilliseconds = _pendingVideoTimestampMilliseconds;
+                }
+
+                var available = _pending.Length - _pendingOffset;
+                var take = Math.Min(available, buffer.Length - written);
+                _pending.AsSpan(_pendingOffset, take).CopyTo(buffer.AsSpan(written));
+                _pendingOffset += take;
+                written += take;
+            }
+
+            return true;
+        }
+    }
+
     private bool TryDecodeIntoPending()
     {
         if (!TryReceiveFrame())
@@ -344,6 +394,9 @@ internal sealed unsafe class FfmpegMediaStream : Stream
             return false;
         }
 
+        var videoTimestampMilliseconds = _isVideo
+            ? GetVideoTimestampMilliseconds()
+            : null;
         var produced = _isVideo ? ConvertVideoFrame() : ConvertAudioFrame();
         ffmpeg.av_frame_unref(_frame);
         if (produced is null)
@@ -353,8 +406,33 @@ internal sealed unsafe class FfmpegMediaStream : Stream
         }
 
         _pending = produced;
+        _pendingVideoTimestampMilliseconds = videoTimestampMilliseconds;
         _pendingOffset = 0;
         return true;
+    }
+
+    private ulong? GetVideoTimestampMilliseconds()
+    {
+        if (_frame is null || _formatContext is null || _streamIndex < 0)
+        {
+            return null;
+        }
+
+        var timestamp = _frame->best_effort_timestamp != ffmpeg.AV_NOPTS_VALUE
+            ? _frame->best_effort_timestamp
+            : _frame->pts;
+        var stream = _formatContext->streams[_streamIndex];
+        if (timestamp == ffmpeg.AV_NOPTS_VALUE || stream is null ||
+            stream->time_base.num <= 0 || stream->time_base.den <= 0)
+        {
+            return null;
+        }
+
+        var milliseconds = ffmpeg.av_rescale_q(
+            timestamp,
+            stream->time_base,
+            new AVRational { num = 1, den = 1000 });
+        return checked((ulong)Math.Max(0, milliseconds));
     }
 
     private byte[]? ConvertVideoFrame()
@@ -541,6 +619,7 @@ internal sealed unsafe class FfmpegMediaStream : Stream
         lock (_decodeGate)
         {
             _pending = [];
+            _pendingVideoTimestampMilliseconds = null;
             _videoConversionBuffer = [];
             if (_swsContext is not null)
             {

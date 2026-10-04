@@ -56,6 +56,32 @@ public sealed class Gen5ScalarLaneTransferTests
     }
 
     [Fact]
+    public void ScalarFlbitUsesUnsignedMostSignificantBitSearch()
+    {
+        var program = new Gen5ShaderProgram(
+            0,
+            [
+                ResourceTestProgram.Sop1(
+                    0,
+                    "SFlbitI32B32",
+                    4,
+                    Gen5Operand.Scalar(0)),
+                ResourceTestProgram.EndProgram(4),
+            ]);
+        var request = ResourceTestProgram.Request(program);
+
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileProgram(
+                request,
+                out var compiled,
+                out var error),
+            error);
+        var instructions = ReadExtendedInstructionNumbers(compiled.Spirv);
+        Assert.Contains(75u, instructions); // GLSL.std.450 FindUMsb
+        Assert.DoesNotContain(74u, instructions); // FindSMsb
+    }
+
+    [Fact]
     public void DecoderContinuesPastEndProgramForForwardBranchTarget()
     {
         const ulong shaderAddress = 0x1000;
@@ -141,6 +167,130 @@ public sealed class Gen5ScalarLaneTransferTests
         Assert.Contains((ushort)SpirvOp.Select, opcodes);
         Assert.Contains((ushort)SpirvOp.IMul, opcodes);
         Assert.Contains((ushort)SpirvOp.BitCount, opcodes);
+        Assert.All(ReadBitCountWidths(compiled.Spirv), width => Assert.Equal(32u, width));
+    }
+
+    [Fact]
+    public void ScalarBitset0B32DecodesAndCompiles()
+    {
+        const ulong shaderAddress = 0x1000;
+        var memory = new TestCpuMemory(shaderAddress, 0x100);
+        uint[] words =
+        [
+            0xBEEB1B9F, // s_bitset0_b32 s107, 31 (clear VCC_HI bit 31)
+            0xBF810000, // s_endpgm
+        ];
+        Span<byte> shader = stackalloc byte[words.Length * sizeof(uint)];
+        for (var index = 0; index < words.Length; index++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                shader[(index * sizeof(uint))..],
+                words[index]);
+        }
+
+        Assert.True(memory.TryWrite(shaderAddress, shader));
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                ctx,
+                shaderAddress,
+                out var program,
+                out var decodeError),
+            decodeError);
+        var bitset = Assert.Single(
+            program.Instructions,
+            instruction => instruction.Opcode == "SBitset0B32");
+        Assert.Equal(Gen5Operand.Scalar(107), bitset.Destinations[0]);
+        Assert.Equal(
+            new Gen5Operand(Gen5OperandKind.EncodedConstant, 0x9F),
+            bitset.Sources[0]);
+
+        var request = ResourceTestProgram.Request(program);
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileProgram(
+                request,
+                out var compiled,
+                out var compileError),
+            compileError);
+        Assert.Contains(
+            (ushort)SpirvOp.BitFieldInsert,
+            ReadSpirvOpcodes(compiled.Spirv));
+    }
+
+    [Fact]
+    public void ScalarBitreplicateB64B32DecodesLiteralAndCompiles()
+    {
+        const ulong shaderAddress = 0x1000;
+        var memory = new TestCpuMemory(shaderAddress, 0x100);
+        uint[] words =
+        [
+            0xBEEA3BFF, // s_bitreplicate_b64_b32 s[106:107], literal
+            0x80010003,
+            0xBF810000, // s_endpgm
+        ];
+        Span<byte> shader = stackalloc byte[words.Length * sizeof(uint)];
+        for (var index = 0; index < words.Length; index++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                shader[(index * sizeof(uint))..],
+                words[index]);
+        }
+
+        Assert.True(memory.TryWrite(shaderAddress, shader));
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                ctx,
+                shaderAddress,
+                out var program,
+                out var decodeError),
+            decodeError);
+        var replicate = Assert.Single(
+            program.Instructions,
+            instruction => instruction.Opcode == "SBitreplicateB64B32");
+        Assert.Equal(2, replicate.Words.Count);
+        Assert.Equal(
+            new Gen5Operand(Gen5OperandKind.LiteralConstant, 0x80010003),
+            replicate.Sources[0]);
+        Assert.Equal(Gen5Operand.Scalar(106), replicate.Destinations[0]);
+
+        var request = ResourceTestProgram.Request(program);
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileProgram(
+                request,
+                out var compiled,
+                out var compileError),
+            compileError);
+        var opcodes = ReadSpirvOpcodes(compiled.Spirv);
+        Assert.Contains((ushort)SpirvOp.ShiftLeftLogical, opcodes);
+        Assert.Contains((ushort)SpirvOp.BitwiseAnd, opcodes);
+        Assert.Contains((ushort)SpirvOp.BitwiseOr, opcodes);
+    }
+
+    [Fact]
+    public void ScalarBitreplicateUsesOneSourceRegisterAndDefinesTwoDestinations()
+    {
+        var program = new Gen5ShaderProgram(
+            0,
+            [
+                ScalarInstruction(
+                    0,
+                    Gen5ShaderEncoding.Sop1,
+                    "SBitreplicateB64B32",
+                    [Gen5Operand.Scalar(8)],
+                    Gen5Operand.Scalar(4)),
+                ScalarInstruction(
+                    4,
+                    Gen5ShaderEncoding.Sop1,
+                    "SMovB32",
+                    [Gen5Operand.Scalar(5)],
+                    Gen5Operand.Scalar(10)),
+                ResourceTestProgram.EndProgram(8),
+            ]);
+
+        Assert.Equal(
+            [8u],
+            BindingLayout.CollectUserDataRegisters(program, 0, 16));
     }
 
     [Fact]
@@ -198,17 +348,23 @@ public sealed class Gen5ScalarLaneTransferTests
                     new Gen5Operand(Gen5OperandKind.LiteralConstant, 0),
                 ],
                 Gen5Operand.Scalar(14)),
-            ResourceTestProgram.EndProgram(28),
+            ScalarInstruction(
+                28,
+                Gen5ShaderEncoding.Sop1,
+                "SBitreplicateB64B32",
+                [new Gen5Operand(Gen5OperandKind.LiteralConstant, 0x80010003)],
+                Gen5Operand.Scalar(16)),
+            ResourceTestProgram.EndProgram(32),
         ];
         uint[] userData = [0, 0, 1, 0, 0, 0x100, 0, 0, 0x10, 0, 0, 0xF0F0_F0F0, 0x8000_0000];
-        uint[] resultRegisters = [6, 7, 9, 10, 13, 14];
+        uint[] resultRegisters = [6, 7, 9, 10, 13, 14, 16, 17];
         instructions.RemoveAt(instructions.Count - 1);
         for (var index = 0; index < resultRegisters.Length; index++)
         {
             instructions.Add(ResourceTestProgram.ScalarLoad(
-                28 + (uint)index * 8, resultRegisters[index], destination: 100));
+                32 + (uint)index * 8, resultRegisters[index], destination: 100));
         }
-        instructions.Add(ResourceTestProgram.EndProgram(28 + (uint)resultRegisters.Length * 8));
+        instructions.Add(ResourceTestProgram.EndProgram(32 + (uint)resultRegisters.Length * 8));
         var inputBytes = (uint)userData.Length * 8;
         var initialized = userData.Select((value, index) =>
             ResourceTestProgram.MoveScalar((uint)index * 8, (uint)index, value)).ToList();
@@ -222,7 +378,9 @@ public sealed class Gen5ScalarLaneTransferTests
                 $"Cannot resolve s{resultRegisters[actual.Count]}: {access.Handle.Operands[0].Kind}.");
             actual.Add(value);
         }
-        Assert.Equal([40u, 0xAAu, 0xF0u, 1u, 17u, 1u], actual);
+        Assert.Equal(
+            [40u, 0xAAu, 0xF0u, 1u, 17u, 1u, 0x0000_000Fu, 0xC000_0003u],
+            actual);
     }
 
     [Fact]
@@ -268,7 +426,8 @@ public sealed class Gen5ScalarLaneTransferTests
 
         var opcodes = ReadSpirvOpcodes(compiled.Spirv);
         Assert.Contains((ushort)SpirvOp.IAdd, opcodes);
-        Assert.Contains((ushort)SpirvOp.ULessThan, opcodes);
+        Assert.Contains((ushort)SpirvOp.IEqual, opcodes);
+        Assert.Contains((ushort)SpirvOp.Select, opcodes);
     }
 
     [Theory]
@@ -306,7 +465,11 @@ public sealed class Gen5ScalarLaneTransferTests
                 out var decodeError),
             decodeError);
 
-        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, 0, 64, 0);
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(
+            program,
+            ShaderStage.Pixel,
+            userDataCount: 64,
+            waveSize: 64);
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
             PixelOutputs = [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)],
@@ -351,6 +514,56 @@ public sealed class Gen5ScalarLaneTransferTests
         }
 
         return opcodes;
+    }
+
+    private static IReadOnlyList<uint> ReadBitCountWidths(byte[] spirv)
+    {
+        var integerWidths = new Dictionary<uint, uint>();
+        var bitCountTypes = new List<uint>();
+        for (var offset = 5 * sizeof(uint); offset < spirv.Length;)
+        {
+            var instruction = BinaryPrimitives.ReadUInt32LittleEndian(
+                spirv.AsSpan(offset));
+            var wordCount = checked((int)(instruction >> 16));
+            Assert.True(wordCount > 0);
+            var opcode = (SpirvOp)(instruction & 0xFFFF);
+            uint Operand(int index) => BinaryPrimitives.ReadUInt32LittleEndian(
+                spirv.AsSpan(offset + index * sizeof(uint)));
+
+            if (opcode == SpirvOp.TypeInt)
+            {
+                integerWidths[Operand(1)] = Operand(2);
+            }
+            else if (opcode == SpirvOp.BitCount)
+            {
+                bitCountTypes.Add(Operand(1));
+            }
+
+            offset += wordCount * sizeof(uint);
+        }
+
+        return bitCountTypes.Select(type => integerWidths[type]).ToArray();
+    }
+
+    private static IReadOnlyList<uint> ReadExtendedInstructionNumbers(byte[] spirv)
+    {
+        var instructions = new List<uint>();
+        for (var offset = 5 * sizeof(uint); offset < spirv.Length;)
+        {
+            var instruction = BinaryPrimitives.ReadUInt32LittleEndian(
+                spirv.AsSpan(offset));
+            var wordCount = checked((int)(instruction >> 16));
+            Assert.True(wordCount > 0);
+            if ((SpirvOp)(instruction & 0xFFFF) == SpirvOp.ExtInst && wordCount >= 5)
+            {
+                instructions.Add(BinaryPrimitives.ReadUInt32LittleEndian(
+                    spirv.AsSpan(offset + 4 * sizeof(uint))));
+            }
+
+            offset += wordCount * sizeof(uint);
+        }
+
+        return instructions;
     }
 
     private sealed class TestCpuMemory(ulong baseAddress, int size) : ICpuMemory

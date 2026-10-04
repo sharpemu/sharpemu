@@ -30,10 +30,14 @@ static inline device uint* sharpemu_resolve_device_address(device const Gen5Addr
             return (device uint*)((device uchar*)range.base + byte_offset);
         }
     }
-    uint page_index = (uint)page;
-    uint word = page_index >> 5u;
-    if (word < fault_words)
+    ulong packed = masked >= {{extended_address_base}} ? masked - {{extended_address_bias}} : masked;
+    ulong packed_page = packed >> {{page_bits}}u;
+    bool in_aperture = masked < {{lower_address_size}} ||
+        (masked >= {{extended_address_base}} && masked < {{extended_address_limit}});
+    if (in_aperture && packed_page < ((ulong)fault_words << 5u))
     {
+        uint page_index = (uint)packed_page;
+        uint word = page_index >> 5u;
         atomic_fetch_or_explicit((device atomic_uint*)(faults + word), 1u << (page_index & 31u), memory_order_relaxed);
     }
     return nullptr;

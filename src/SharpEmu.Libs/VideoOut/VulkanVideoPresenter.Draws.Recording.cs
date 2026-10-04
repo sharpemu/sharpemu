@@ -270,12 +270,27 @@ internal static unsafe partial class VulkanVideoPresenter
         private void RecycleSubmissionUploads(SubmissionUploadResources resources)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceDestroy);
-            foreach (var texture in resources.Textures)
+            var textureCount = Math.Clamp(resources.TextureCount, 0, resources.Textures.Length);
+            if (textureCount != resources.TextureCount)
             {
+                Console.Error.WriteLine(
+                    $"[GPU][WARN] Submission texture ownership was invalid: count={resources.TextureCount} capacity={resources.Textures.Length}.");
+            }
+
+            for (var index = 0; index < textureCount; index++)
+            {
+                var texture = resources.Textures[index];
                 if (texture is { StagingBuffer.Handle: not 0 })
                 {
                     RecycleHostBuffer(texture.StagingBuffer, texture.StagingMemory);
                 }
+            }
+
+            if (resources.Textures.Length != 0)
+            {
+                System.Buffers.ArrayPool<TextureResource>.Shared.Return(resources.Textures, clearArray: true);
+                resources.Textures = [];
+                resources.TextureCount = 0;
             }
 
             foreach (var snapshot in resources.FeedbackSnapshots)

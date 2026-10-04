@@ -57,7 +57,9 @@ public sealed class RenderExecutorAdaptationTests : IDisposable
     [Fact]
     public void SolidClearPrograms_ClearTheBoundTargetsInsteadOfDrawing()
     {
-        _pipelines.Graphics = Programs(solidClear: new SolidColorClear(0.25f, 0.5f, 0.75f, 1f));
+        _pipelines.Graphics = Programs(
+            pixelStage: Stage(Program(ShaderStageKind.Pixel, pixelColorExportMasks: 0)),
+            solidClear: new SolidColorClear(0.25f, 0.5f, 0.75f, 1f));
         var banks = Banks();
         banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.Context.RenderTargetMask = 0xFF;

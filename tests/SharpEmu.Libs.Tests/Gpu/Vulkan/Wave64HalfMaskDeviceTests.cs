@@ -51,7 +51,9 @@ public sealed class Wave64HalfMaskDeviceTests(HeadlessVulkanFixture fixture) : I
         Add(Vop2(0, "VLshlrevB32", 5, Operand(2), Gen5Operand.Vector(2)));
         Add(BufferAccess(0, "BufferStoreDword", 4, vectorData: 4, offsetEnabled: true, vectorAddress: 5));
         Add(EndProgram(0));
-        var (plan, resources, layout) = Prepare(Program([.. _instructions]));
+        var (plan, resources, layout) = Prepare(
+            Program([.. _instructions]),
+            waveSize: 64);
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
             LocalSizeX = 8, LocalSizeY = 8, ThreadCountX = 8, ThreadCountY = 8, WaveSize = 64,
@@ -157,7 +159,7 @@ public sealed class Wave64HalfMaskDeviceTests(HeadlessVulkanFixture fixture) : I
     }
 
     [Theory]
-    [InlineData(0u)]
+    [InlineData(32u)]
     [InlineData(64u)]
     public void SharedMemoryWrittenByOneHalf_IsReadByTheOther(uint localDataShareDwords)
     {

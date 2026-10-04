@@ -660,6 +660,20 @@ public static class KernelRuntimeCompatExports
         return address != 0 && TryWriteInt32(ctx, address, value);
     }
 
+    internal static bool TryGetErrno(CpuContext ctx, out int value)
+    {
+        value = 0;
+        var address = GetTlsScratchAddress(ctx, TlsErrnoOffset);
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        if (address == 0 || !ctx.Memory.TryRead(address, bytes))
+        {
+            return false;
+        }
+
+        value = BinaryPrimitives.ReadInt32LittleEndian(bytes);
+        return true;
+    }
+
     [SysAbiExport(
         Nid = "bnZxYgAFeA0",
         ExportName = "sceKernelGetSanitizerNewReplaceExternal",
@@ -1052,7 +1066,7 @@ public static class KernelRuntimeCompatExports
     [SysAbiExport(
         Nid = "cfwBSQyr5Ys",
         ExportName = "sceKernelDebugWriteCppExceptionInfo",
-        Target = Generation.Gen5,
+        Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelDebugWriteCppExceptionInfo(CpuContext ctx)
     {

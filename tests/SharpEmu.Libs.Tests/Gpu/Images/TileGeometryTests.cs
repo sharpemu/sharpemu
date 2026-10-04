@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Images;
@@ -39,6 +40,7 @@ public sealed class TileGeometryTests
     [InlineData(TileBlockKind.Prt64KB3D, 65536u, 16u)]
     [InlineData(TileBlockKind.RenderTarget64KB, 65536u, 16u)]
     [InlineData(TileBlockKind.Depth64KB, 65536u, 8u)]
+    [InlineData(TileBlockKind.RenderTarget64KBGen5, 65536u, 16u)]
     public void BlockLayouts_CoverEveryElementSize(TileBlockKind kind, uint blockSize, uint maxBytes)
     {
         for (uint bytes = 1; bytes <= 16; bytes *= 2)
@@ -104,6 +106,83 @@ public sealed class TileGeometryTests
 
                 Assert.Equal((int)layout.BlockSize / (int)bytes, seen.Count);
             }
+        }
+    }
+
+    [Theory]
+    [InlineData(1u, 0x0B75u, 0x8000u, 0x4000u)]
+    [InlineData(2u, 0x0B7Au, 0x8000u, 0x4100u)]
+    [InlineData(4u, 0x0BF4u, 0x8100u, 0x4100u)]
+    [InlineData(8u, 0x1BD8u, 0x4100u, 0x8800u)]
+    [InlineData(16u, 0x3BB0u, 0x4400u, 0x8800u)]
+    public void RenderTargetBlockOffsets_MatchRbPlusReferenceSpotValues(
+        uint bytes,
+        uint elementOffset,
+        uint xBlockXor,
+        uint yBlockXor)
+    {
+        Assert.True(TileGeometry.TryGetBlockLayout(TileBlockKind.RenderTarget64KB, bytes, out var layout));
+        Assert.True(TileGeometry.TryGetBlockOffset(layout, 37, 23, 0, out var offset));
+        Assert.Equal(elementOffset, offset);
+
+        Assert.True(TileGeometry.TryGetBlockXor(layout, 1, 0, out var blockX));
+        Assert.Equal(xBlockXor, blockX);
+        Assert.True(TileGeometry.TryGetBlockXor(layout, 0, 1, out var blockY));
+        Assert.Equal(yBlockXor, blockY);
+    }
+
+    [Theory]
+    [InlineData(1u, 0x0b75u, 0x0abdu)]
+    [InlineData(2u, 0x0b7au, 0x1a7au)]
+    [InlineData(4u, 0x0bf4u, 0x0af4u)]
+    [InlineData(8u, 0x1bd8u, 0x5ad8u)]
+    [InlineData(16u, 0x3bb0u, 0x3ab0u)]
+    public void Gen5RenderTargetBlockOffsets_MatchReferenceAndDifferFromRbPlus(
+        uint bytes,
+        uint expectedRbPlus,
+        uint expectedGen5)
+    {
+        Assert.True(TileGeometry.TryGetBlockLayout(TileBlockKind.RenderTarget64KB, bytes, out var rbPlus));
+        Assert.True(TileGeometry.TryGetBlockLayout(TileBlockKind.RenderTarget64KBGen5, bytes, out var gen5));
+
+        Assert.True(TileGeometry.TryGetBlockOffset(rbPlus, 37, 23, 0, out var rbPlusOffset));
+        Assert.True(TileGeometry.TryGetBlockOffset(gen5, 37, 23, 0, out var gen5Offset));
+        Assert.Equal(expectedRbPlus, rbPlusOffset);
+        Assert.Equal(expectedGen5, gen5Offset);
+        Assert.NotEqual(rbPlusOffset, gen5Offset);
+    }
+
+    [Fact]
+    public void Gen5RenderTargetGeometry_MatchesTheReferenceVolumeAllocation()
+    {
+        const uint width = 480;
+        const uint height = 270;
+        const uint depth = 128;
+        Assert.True(TileGeometry.TryGetBlockLayout(TileBlockKind.RenderTarget64KBGen5, 8, out var block));
+        Assert.Equal((128u, 64u, 1u), (block.BlockWidth, block.BlockHeight, block.BlockDepth));
+
+        var paddedWidth = (width + block.BlockWidth - 1) / block.BlockWidth * block.BlockWidth;
+        var paddedHeight = (height + block.BlockHeight - 1) / block.BlockHeight * block.BlockHeight;
+        var blocksPerSlice = (ulong)(paddedWidth / block.BlockWidth) * (paddedHeight / block.BlockHeight);
+        var sliceSize = blocksPerSlice * block.BlockSize;
+        var totalSize = sliceSize * depth;
+
+        Assert.Equal((512u, 320u), (paddedWidth, paddedHeight));
+        Assert.Equal(0x140000UL, sliceSize);
+        Assert.Equal(0xA000000UL, totalSize);
+    }
+
+    [Fact]
+    public void CpuAndShaderBlockKindOrdinals_StayAligned()
+    {
+        var cpuKinds = Enum.GetValues<TileBlockKind>();
+        var shaderKinds = Enum.GetValues<TilerBlockShape>();
+        Assert.Equal(cpuKinds.Length, shaderKinds.Length);
+
+        for (var index = 0; index < cpuKinds.Length; index++)
+        {
+            Assert.Equal(cpuKinds[index].ToString(), shaderKinds[index].ToString());
+            Assert.Equal((uint)cpuKinds[index], (uint)shaderKinds[index]);
         }
     }
 

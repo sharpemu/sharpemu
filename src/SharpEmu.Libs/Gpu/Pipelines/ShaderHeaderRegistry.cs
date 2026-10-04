@@ -18,7 +18,15 @@ public sealed record RegisteredShader(
     ulong ContinuationAddress,
     uint ContinuationSizeBytes)
 {
+    public ulong ContinuationHeaderAddress { get; init; }
+
+    public uint ContinuationScratchDwords { get; init; }
+
+    public ulong ContinuationUserDataAddress { get; init; }
+
     public bool IsFused => ContinuationAddress != 0;
+
+    public uint MaximumScratchDwords => Math.Max(ScratchDwords, ContinuationScratchDwords);
 
     // The code ranges the identity covers, in program order.
     public (ulong Address, uint SizeBytes)[] CodeRanges =>
@@ -50,6 +58,20 @@ public sealed class ShaderHeaderRegistry
         _fusedPartsOf = fusedPartsOf;
     }
 
+    public bool IsFused(ulong codeAddress) => _fusedPartsOf(codeAddress).HasValue;
+
+    public bool TryGetFusedContinuation(ulong codeAddress, out ulong continuationAddress)
+    {
+        if (_fusedPartsOf(codeAddress) is { } parts)
+        {
+            continuationAddress = parts.ContinuationAddress;
+            return true;
+        }
+
+        continuationAddress = 0;
+        return false;
+    }
+
     public RegisteredShader Require(ulong codeAddress, string label)
     {
         var headerAddress = _headerOf(codeAddress);
@@ -68,11 +90,22 @@ public sealed class ShaderHeaderRegistry
         }
 
         var continuationAddress = 0ul;
+        var continuationHeaderAddress = 0ul;
         var continuationSize = 0u;
+        ushort continuationScratchDwords = 0;
+        var continuationUserDataAddress = 0ul;
         if (_fusedPartsOf(codeAddress) is { } parts)
         {
             continuationAddress = parts.ContinuationAddress;
+            continuationHeaderAddress = parts.ContinuationHeaderAddress;
             continuationSize = RequireCodeSize(parts.ContinuationHeaderAddress, parts.ContinuationAddress, label);
+            if (!_context.TryReadUInt16(parts.ContinuationHeaderAddress + ScratchDwordsPerThreadOffset, out continuationScratchDwords) ||
+                !_context.TryReadUInt64(parts.ContinuationHeaderAddress + UserDataOffset, out continuationUserDataAddress))
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"The shader continuation header is unreadable: label={label} shader=0x{codeAddress:X16} " +
+                    $"continuation=0x{parts.ContinuationAddress:X16} header=0x{parts.ContinuationHeaderAddress:X16}.");
+            }
         }
 
         return new RegisteredShader(
@@ -84,7 +117,12 @@ public sealed class ShaderHeaderRegistry
             inputSemanticsAddress,
             inputSemanticsCount,
             continuationAddress,
-            continuationSize);
+            continuationSize)
+        {
+            ContinuationHeaderAddress = continuationHeaderAddress,
+            ContinuationScratchDwords = continuationScratchDwords,
+            ContinuationUserDataAddress = continuationUserDataAddress,
+        };
     }
 
     private uint RequireCodeSize(ulong headerAddress, ulong codeAddress, string label)

@@ -7,8 +7,29 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Pad;
 
+[Collection(PadInputStateCollection.Name)]
 public sealed class HostWindowInputTests
 {
+    [Fact]
+    public void KeyDownQueuedWhileUnfocusedDoesNotBecomePressedAfterFocusReturns()
+    {
+        HostWindowInput.Connect();
+        try
+        {
+            var source = Assert.IsAssignableFrom<IHostWindowInputSource>(HostWindowInputSource.Current);
+            HostWindowInput.SetFocused(false);
+
+            HostWindowInput.SetKey(0x28, true);
+            HostWindowInput.SetFocused(true);
+
+            Assert.False(source.IsKeyDown(0x28));
+        }
+        finally
+        {
+            HostWindowInput.Disconnect();
+        }
+    }
+
     [Theory]
     [InlineData(short.MinValue, 0)]
     [InlineData(0, 128)]

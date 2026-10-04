@@ -26,6 +26,7 @@ public static class PushData
 {
     public const uint DwordCount = 32;
     public const uint ByteSize = DwordCount * sizeof(uint);
+    public const uint MeshDrawDwordCount = 6;
     public const uint NoStart = uint.MaxValue;
 
     public static bool CanFit(uint start, uint size) => size != 0 && start <= DwordCount && size <= DwordCount - start;
@@ -55,6 +56,11 @@ public static class ImageDescriptorBinding
     private const uint SampledCompare2DBinding = 43;
     private const uint SampledCompare2DArrayBinding = 44;
     private const uint SampledCompareCubeBinding = 45;
+    // IMAGE_ATOMIC_FMIN/FMAX (MIMG op 0x1E/0x1F) target a 32-bit float-format
+    // storage UAV, not the uint UAV every integer image atomic requires - a
+    // separate binding range so ForImage/Describe can round-trip the numeric
+    // class instead of forcing every atomic image to Uint.
+    private const uint AtomicFloatBinding = 46;
 
     public static DescriptorBindingKind? ForImage(ImageResource image)
     {
@@ -151,12 +157,16 @@ public static class ImageDescriptorBinding
         {
             if (image.Atomic)
             {
-                if (image.NumericClass != ImageNumericClass.Uint)
+                baseBinding = image.NumericClass switch
+                {
+                    ImageNumericClass.Uint => AtomicUintBinding,
+                    ImageNumericClass.Float => AtomicFloatBinding,
+                    _ => uint.MaxValue,
+                };
+                if (baseBinding == uint.MaxValue)
                 {
                     return null;
                 }
-
-                baseBinding = AtomicUintBinding;
             }
             else
             {
@@ -311,9 +321,14 @@ public static class ImageDescriptorBinding
             return (ImageResourceClass.Storage, offset / 5 == 0 ? ImageNumericClass.Float : ImageNumericClass.Uint, StorageDimensions[offset % 5], false);
         }
 
-        if (index >= AtomicUintBinding && index < (uint)DescriptorBindingKind.Samplers)
+        if (index >= AtomicUintBinding && index < SampledCubeFloatBinding)
         {
             return (ImageResourceClass.Storage, ImageNumericClass.Uint, StorageDimensions[index - AtomicUintBinding], true);
+        }
+
+        if (index >= AtomicFloatBinding && index < (uint)DescriptorBindingKind.Samplers)
+        {
+            return (ImageResourceClass.Storage, ImageNumericClass.Float, StorageDimensions[index - AtomicFloatBinding], true);
         }
 
         return (ImageResourceClass.None, ImageNumericClass.Unsupported, ImageDimension.Unknown, false);
@@ -326,7 +341,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 {
     public const uint FirstImageBinding = 1;
     public const uint FirstStorageImageBinding = 22;
-    public const uint ImageBindingCount = 45;
+    public const uint ImageBindingCount = 50;
     public const uint NoShaderBase = uint.MaxValue;
     public const uint ShaderBaseDwordCount = 2;
     private const int ScalarRegisterCount = 256;
@@ -363,8 +378,17 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     // The user-data registers live at program entry: those some path reads before it
     // writes them, found by liveness over the control-flow graph, in ascending order.
-    public static IReadOnlyList<uint> CollectUserDataRegisters(Gen5ShaderProgram program, uint userDataBase, uint userDataCount)
+    public static IReadOnlyList<uint> CollectUserDataRegisters(
+        Gen5ShaderProgram program,
+        uint userDataBase,
+        uint userDataCount,
+        uint waveSize = 32)
     {
+        if (waveSize is not 32 and not 64)
+        {
+            throw new ArgumentOutOfRangeException(nameof(waveSize), waveSize, "Wave size must be 32 or 64.");
+        }
+
         var controlFlow = IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance);
         var blockCount = controlFlow.Blocks.Count;
         var uses = new bool[blockCount][];
@@ -380,7 +404,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             var block = controlFlow.BlockOf(instruction.Pc);
             if (block >= 0)
             {
-                RecordUsesAndDefinitions(instruction, uses[block], definitions[block]);
+                RecordUsesAndDefinitions(instruction, uses[block], definitions[block], waveSize);
             }
         }
 
@@ -441,7 +465,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     // Reads count as uses only before the block defines the register: scalar sources at
     // their width plus the descriptor, address and offset registers of memory instructions.
-    private static void RecordUsesAndDefinitions(Gen5ShaderInstruction instruction, bool[] uses, bool[] definitions)
+    private static void RecordUsesAndDefinitions(Gen5ShaderInstruction instruction, bool[] uses, bool[] definitions, uint waveSize)
     {
         void Use(uint register, uint count)
         {
@@ -455,11 +479,12 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         }
 
         var width = instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
+        var sourceWidth = instruction.Opcode == "SBitreplicateB64B32" ? 1u : width;
         foreach (var source in instruction.Sources)
         {
             if (source.Kind == Gen5OperandKind.ScalarRegister)
             {
-                Use(source.Value, width);
+                Use(source.Value, sourceWidth);
             }
         }
 
@@ -511,6 +536,12 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             case Gen5GlobalMemoryControl global when global.ScalarAddress < 255:
                 Use(global.ScalarAddress, 2);
                 break;
+            case Gen5ScratchMemoryControl
+                {
+                    AddressMode: Gen5ScratchAddressMode.Scalar,
+                } scratch:
+                Use(scratch.ScalarAddress, 1);
+                break;
             case Gen5BufferMemoryControl buffer:
                 Use(buffer.ScalarResource, 4);
                 break;
@@ -519,6 +550,18 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         // A record that lists every written register defines each once; a single listed
         // register of a multiword instruction defines the whole width.
         var scalarDestinations = instruction.Destinations.Where(destination => destination.Kind == Gen5OperandKind.ScalarRegister).ToList();
+        var valuMaskDestination = instruction.Control switch
+        {
+            Gen5Vop3Control { ScalarDestination: { } destination } => destination,
+            Gen5SdwaControl { ScalarDestination: { } destination } => destination,
+            _ => uint.MaxValue,
+        };
+        if (valuMaskDestination != uint.MaxValue &&
+            scalarDestinations.All(destination => destination.Value != valuMaskDestination))
+        {
+            scalarDestinations.Add(Gen5Operand.Scalar(valuMaskDestination));
+        }
+
         if (scalarDestinations.Count == 0)
         {
             return;
@@ -536,7 +579,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             return;
         }
 
-        var perDestination = scalarDestinations.Count > 1 ? 1u : width;
+        var perDestination = valuMaskDestination != uint.MaxValue
+            ? waveSize == 64 ? 2u : 1u
+            : scalarDestinations.Count > 1 ? 1u : width;
         foreach (var destination in scalarDestinations)
         {
             for (uint index = 0; index < perDestination && destination.Value + index < ScalarRegisterCount; index++)

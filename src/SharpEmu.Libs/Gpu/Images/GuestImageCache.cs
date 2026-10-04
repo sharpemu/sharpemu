@@ -29,7 +29,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
     private readonly SlotTable<CachedImage> _slots = new();
     private readonly ImageBackingPool? _backingPool;
     private readonly ImagePageOwnerTable _pageOwners = new();
-    private readonly Dictionary<Format, ResourceSlotIdentifier> _nullImages = new();
+    private readonly Dictionary<(Format Format, GuestImageType Type, uint Samples), ResourceSlotIdentifier> _nullImages = new();
     private RecencyQueue<ResourceSlotIdentifier> _recencyQueue = new();
     private readonly HashSet<ResourceSlotIdentifier> _scheduledReadbacks = new();
     private readonly SortedDictionary<ulong, SurfaceMetadata> _surfaceMetadata = new();
@@ -41,6 +41,64 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
     private uint _queryEpoch;
     private bool _readbackLinearImages;
     private bool _disposed;
+
+    // Opt-in diagnostics for tracing a single sampled image through cache lookup,
+    // ownership refresh, and Vulkan upload.  The address filter keeps normal runs
+    // quiet and makes the probe useful for comparing a known-good texture.
+    // Environment settings are fixed before the emulator child starts. Cache them once so
+    // disabled diagnostics do not query the process environment on every image operation.
+    private static readonly bool TextureTraceEnabled =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TEXTURE_BINDINGS"), "1", StringComparison.Ordinal);
+    private static readonly string? TextureTraceAddressFilter =
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TEXTURE_ADDRESS");
+    private static readonly bool ForceTextureUpload =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_FORCE_TEXTURE_UPLOAD"), "1", StringComparison.Ordinal);
+
+    private static bool TextureTraceAddressMatches(ulong address)
+    {
+        var filter = TextureTraceAddressFilter;
+        if (string.IsNullOrWhiteSpace(filter))
+        {
+            return true;
+        }
+
+        var span = filter.AsSpan();
+        if (span.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            span = span[2..];
+        }
+
+        return ulong.TryParse(span, System.Globalization.NumberStyles.HexNumber,
+            System.Globalization.CultureInfo.InvariantCulture, out var value) && value == address;
+    }
+
+    private void TraceTexture(string phase, CachedImage image, in ImageRequest request, string? detail = null)
+    {
+        if (!TextureTraceEnabled ||
+            (!TextureTraceAddressMatches(image.Description.Data.Address) &&
+             !TextureTraceAddressMatches(request.Description.Data.Address)))
+        {
+            return;
+        }
+
+        var metadataDetail = string.Empty;
+        var metadataAddress = request.Description.Metadata.Range.Address;
+        if (metadataAddress != 0)
+        {
+            metadataDetail = _surfaceMetadata.TryGetValue(metadataAddress, out var metadata)
+                ? $" metadata={metadata.Kind}@0x{metadataAddress:X16} clearMask=0x{metadata.ClearMask:X8} fill=0x{metadata.FillValue:X8}/0x{metadata.FillSize:X}"
+                : $" metadata=unregistered@0x{metadataAddress:X16}";
+        }
+
+        Console.Error.WriteLine(
+            $"[TEXTURE-TRACE] cache={phase} addr=0x{image.Description.Data.Address:X16} " +
+            $"requestAddr=0x{request.Description.Data.Address:X16} " +
+            $"size=0x{image.Description.Data.Size:X} role={request.Role} view={request.View} " +
+            $"registered={image.Registered} cpuDirty={image.IsCpuDirty} definiteCpuDirty={image.IsDefinitelyCpuDirty} " +
+            $"maybeCpuDirty={image.IsMaybeCpuDirty} bufferModified={image.IsBufferModified} gpuModified={image.IsGpuModified} " +
+            $"renderTarget={image.Uses.RenderTarget} texture={image.Uses.Texture} storage={image.Uses.Storage} " +
+            $"backing={image.Backing.Exists}{metadataDetail} " + (detail ?? string.Empty));
+    }
 
     public GuestImageCache(GpuDeviceInfo device, SubmissionScheduler scheduler, PageGuard pages, GuestBufferCache bufferCache, IGuestBackedSpace backing, bool readbackLinearImages)
     {
@@ -123,17 +181,45 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             return GetNullImage(request);
         }
 
-        var found = LookUpImage(ref request, exactFormat);
+        // Overlap resolution can rebase the native view. DCC metadata, however, is laid out
+        // from the base layer in the guest request, so retain it before resolving the image.
+        var metadataBaseLayer = request.View.BaseLayer;
+        var result = LookUpImage(ref request, exactFormat);
+
         if (request.Role is ImageRole.Texture or ImageRole.StorageImage)
         {
-            ref readonly var description = ref _slots[found].Description;
-            if (description.DccSliceSize is var sliceSize and not 0)
+            ulong metadataAddress;
+            ulong sliceSize;
+            using (var held = _lock.Hold())
             {
-                SynchronizeGuestDccMetadata(description.Metadata.Range.Address, sliceSize, request.View.BaseLayer, request.View.LayerCount);
+                ref readonly var description = ref _slots[result].Description;
+                metadataAddress = description.Metadata.Range.Address;
+                sliceSize = description.DccSliceSize;
+            }
+
+            if (sliceSize != 0)
+            {
+                SynchronizeGuestDccMetadata(metadataAddress, sliceSize, request.View.BaseLayer, request.View.LayerCount);
             }
         }
 
-        return found;
+        // DCC readback can submit/wait and metadata consumption re-enters this cache through
+        // the buffer cache. It must therefore run after releasing the image-cache lock.
+        MaterializeDccClear(result, request, metadataBaseLayer);
+        if (request.Role == ImageRole.DisplaySurface && request.Description.Metadata.Compression != DisplayCompression.Uncompressed)
+        {
+            using var held = _lock.Hold();
+            var image = _slots[result];
+            var guestDirty = image.IsBufferModified || image.IsCpuDirty;
+            var nativeCurrent = (image.Uses.RenderTarget || image.IsGpuModified) && !guestDirty;
+            if (!nativeCurrent)
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"A compressed display surface can only be read from clean native GPU contents: address=0x{image.Description.Data.Address:X16} bufferModified={image.IsBufferModified} cpuDirty={image.IsCpuDirty} gpuModified={image.IsGpuModified}.");
+            }
+        }
+
+        return result;
     }
 
     private ResourceSlotIdentifier LookUpImage(ref ImageRequest request, bool exactFormat)
@@ -220,17 +306,6 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         }
 
         var image = _slots[result];
-        if (request.Role == ImageRole.DisplaySurface && request.Description.Metadata.Compression != DisplayCompression.Uncompressed)
-        {
-            var guestDirty = image.IsBufferModified || image.IsCpuDirty;
-            var nativeCurrent = (image.Uses.RenderTarget || image.IsGpuModified) && !guestDirty;
-            if (!nativeCurrent)
-            {
-                throw SubmissionScheduler.Fatal(
-                    $"A compressed display surface can only be read from clean native GPU contents: address=0x{image.Description.Data.Address:X16} bufferModified={image.IsBufferModified} cpuDirty={image.IsCpuDirty} gpuModified={image.IsGpuModified}.");
-            }
-        }
-
         if (viewMip >= 0)
         {
             request.View = request.View with { BaseLevel = (uint)viewMip };
@@ -243,6 +318,15 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
         image.LastAccessTick = _scheduler.CurrentTick;
         TouchImage(image);
+        if (TextureTraceEnabled)
+        {
+            TraceTexture(
+                "find",
+                image,
+                request,
+                $"slot={result.Index}:{result.Generation} exactFormat={exactFormat} imageHandle=0x{image.Backing.Handle.Handle:X16}");
+        }
+
         if (sameBacking && generation == _lookupGeneration)
         {
             RememberLookup(original, exactFormat, request.View, result);
@@ -282,6 +366,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
         TouchImage(image);
+        TraceTexture("acquire-before", image, request);
         var hasData = !ImageDescription.IsEmptyRange(image.Description.Data);
         if (hasData && (!image.Registered || image.DepthOwner.IsValid || image.Binding.NeedsRebind))
         {
@@ -295,6 +380,12 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
         if (hasData)
         {
+            if (request.Role == ImageRole.Texture && ForceTextureUpload && !image.IsBufferModified && !image.IsCpuDirty)
+            {
+                image.MarkBufferModified();
+                TraceTexture("force-upload-mark", image, request);
+            }
+
             RefreshFromGuest(imageIdentifier, request);
             MergeMipTailBlock(image);
         }
@@ -320,6 +411,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                 throw SubmissionScheduler.Fatal($"The texture role is invalid: role={request.Role}.");
         }
 
+        TraceTexture("acquire-after", image, request);
         return image.GetOrCreateView(request.View);
     }
 
@@ -333,6 +425,14 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
         using var held = _lock.Hold();
         var image = _slots[imageIdentifier];
+        if (TextureTraceEnabled)
+        {
+            TraceTexture(
+                "color-acquire-before",
+                image,
+                request,
+                $"slot={imageIdentifier.Index}:{imageIdentifier.Generation} imageHandle=0x{image.Backing.Handle.Handle:X16}");
+        }
         if (!image.Registered || image.DepthOwner.IsValid || image.Binding.NeedsRebind)
         {
             throw SubmissionScheduler.Fatal($"A color target must be found again before its view is acquired: address=0x{image.Description.Data.Address:X16} registered={image.Registered} proxy={image.DepthOwner.IsValid} rebind={image.Binding.NeedsRebind}.");
@@ -342,31 +442,18 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         image.MarkGpuModified();
         image.Uses.RenderTarget = true;
         RefreshFromGuest(imageIdentifier, request);
-        // DCC lives in its own allocation; it is registered at bind time, keeping a pending fill.
-        if (request.Description.Metadata.Kind == MetadataKind.Dcc)
-        {
-            image.Description.Metadata = request.Description.Metadata;
-            var address = request.Description.Metadata.Range.Address;
-            if (!_surfaceMetadata.TryGetValue(address, out var metadata))
-            {
-                metadata = new SurfaceMetadata { Kind = SurfaceMetadataKind.Dcc };
-                _surfaceMetadata.Add(address, metadata);
-            }
-            else if (metadata.Kind == SurfaceMetadataKind.PendingDcc)
-            {
-                metadata.Kind = SurfaceMetadataKind.Dcc;
-            }
-            else if (metadata.Kind != SurfaceMetadataKind.Dcc)
-            {
-                throw SubmissionScheduler.Fatal($"A color target reuses metadata that is not DCC: address=0x{address:X16} kind={metadata.Kind}.");
-            }
-
-            metadata.Size = Math.Max(metadata.Size, request.Description.DccSliceSize * request.Description.TransferLayers);
-        }
-
         TakeGpuOwnership(image);
         ScheduleReadback(imageIdentifier, image);
-        return image.GetOrCreateView(request.View);
+        var view = image.GetOrCreateView(request.View);
+        if (TextureTraceEnabled)
+        {
+            TraceTexture(
+                "color-acquire-after",
+                image,
+                request,
+                $"slot={imageIdentifier.Index}:{imageIdentifier.Generation} imageHandle=0x{image.Backing.Handle.Handle:X16} view=0x{view.Handle:X16}");
+        }
+        return view;
     }
 
     public ImageView AcquireDepthTargetView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
@@ -565,25 +652,26 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
     private ResourceSlotIdentifier GetNullImage(in ImageRequest request)
     {
-        var format = request.Description.PixelFormat;
-        if (_nullImages.TryGetValue(format, out var found))
+        var requested = request.Description;
+        var key = (requested.PixelFormat, requested.Type, requested.Samples);
+        if (_nullImages.TryGetValue(key, out var found))
         {
             return found;
         }
 
         var description = ImageDescription.Create();
-        description.PixelFormat = request.Description.PixelFormat;
-        description.GuestFormat = request.Description.GuestFormat;
-        description.Type = GuestImageType.Color2D;
+        description.PixelFormat = requested.PixelFormat;
+        description.GuestFormat = requested.GuestFormat;
+        description.Type = requested.Type;
         description.Extent = new Extent3D(1, 1, 1);
         description.Resources = SubresourceCount.Single;
         description.Pitch = 1;
-        description.BytesPerBlock = Math.Max(request.Description.BytesPerBlock, 1);
-        description.Samples = 1;
+        description.BytesPerBlock = Math.Max(requested.BytesPerBlock, 1);
+        description.Samples = requested.Samples;
         description.TileMode = GuestTileMode.Linear;
         description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = description.BytesPerBlock, Pitch = 1, Height = 1 };
         var imageIdentifier = InsertImage(description);
-        _nullImages.Add(format, imageIdentifier);
+        _nullImages.Add(key, imageIdentifier);
         return imageIdentifier;
     }
 

@@ -211,6 +211,7 @@ public sealed class GpuCommandInterpreterDrawTests
             StreamRunner.Packet(PacketOpcode.DispatchIndirect, StreamRunner.Low(Arguments), StreamRunner.High(Arguments), 0x43));
 
         Assert.Equal(new[] { "dispatch 0 1 2 3 41", $"dispatch 0 4 5 6 41 @{Arguments:X}", $"dispatch 0 4 5 6 43 @{Arguments:X}" }, runner.Host.Calls);
+        Assert.Equal(new[] { Arguments, Arguments }, runner.Host.IndirectDispatchArguments);
         Assert.Contains("indirect dispatch arguments base is zero", new StreamRunner().RunExpectingFatal(StreamRunner.Packet(PacketOpcode.DispatchIndirect, 0, 0x41)).Message);
         Assert.Contains("set-base packet is not supported", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.SetBase, 2, 0, 0)).Message);
     }

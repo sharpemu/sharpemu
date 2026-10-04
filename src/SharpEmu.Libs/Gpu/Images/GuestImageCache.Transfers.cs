@@ -138,10 +138,20 @@ public sealed unsafe partial class GuestImageCache
         SubmissionScheduler.Fatal(
             $"The color-attachment upload is invalid: address=0x{info.Data.Address:X16} size=0x{info.Data.Size:X} layers={info.Resources.Layers} samples={info.Samples} backingSamples={image.Backing.Samples} compression={info.Metadata.Compression}.");
 
+    // A comparison texture uses a Vulkan depth format, but its guest memory can
+    // still use any ordinary texture tile mode.  Only linear depth data and the
+    // native depth tile use the attachment-specific widening/detiling path.
+    private static ImageRole SelectTransferRole(in ImageDescription info, ImageRole role) =>
+        role == ImageRole.DepthTarget &&
+        info.TileMode is not (GuestTileMode.Linear or GuestTileMode.Depth)
+            ? ImageRole.Texture
+            : role;
+
     private static ImageDownloadPlan PlanDownload(CachedImage image)
     {
         ref readonly var info = ref image.Description;
-        var plan = new ImageDownloadPlan { Depth = info.IsDepth };
+        var role = SelectTransferRole(info, UploadRole(image));
+        var plan = new ImageDownloadPlan { Depth = role == ImageRole.DepthTarget };
         if (info.Samples != 1 || image.Backing.Samples != 1)
         {
             return plan;
@@ -159,7 +169,7 @@ public sealed unsafe partial class GuestImageCache
             return plan;
         }
 
-        plan.Color = PlanColorTransfer(image, UploadRole(image), TransferDirection.Download);
+        plan.Color = PlanColorTransfer(image, role, TransferDirection.Download);
         plan.Valid = plan.Color.Valid;
         return plan;
     }
@@ -269,9 +279,10 @@ public sealed unsafe partial class GuestImageCache
         }
 
         ref readonly var info = ref image.Description;
-        if (request.Role != ImageRole.DepthTarget)
+        var role = SelectTransferRole(info, request.Role);
+        if (role != ImageRole.DepthTarget)
         {
-            var plan = PlanColorTransfer(image, request.Role, TransferDirection.Upload);
+            var plan = PlanColorTransfer(image, role, TransferDirection.Upload);
             if (!plan.Valid)
             {
                 throw SubmissionScheduler.Fatal(
@@ -353,8 +364,10 @@ public sealed unsafe partial class GuestImageCache
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageUpload);
         var image = _slots[imageIdentifier];
+        TraceTexture($"populate-before:{uploadPath}", image, request);
         if (ImageDescription.IsEmptyRange(image.Description.Data))
         {
+            TraceTexture($"populate-empty:{uploadPath}", image, request);
             return;
         }
 
@@ -369,11 +382,13 @@ public sealed unsafe partial class GuestImageCache
                 image.RefreshComplete();
             }
 
+            TraceTexture($"populate-compressed-skip:{uploadPath}", image, request);
             return;
         }
 
         if (image.Description.Samples > 1)
         {
+            TraceTexture($"populate-msaa-skip:{uploadPath}", image, request);
             return;
         }
 
@@ -422,6 +437,8 @@ public sealed unsafe partial class GuestImageCache
         {
             image.RefreshComplete();
         }
+
+        TraceTexture($"populate-after:{uploadPath}", image, request, $"uploaded={upload}");
     }
 
     // A maybe-dirty image resolves through its edge hash first; a dirty one is populated again.
@@ -430,6 +447,7 @@ public sealed unsafe partial class GuestImageCache
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageRefresh);
         WatchImage(imageIdentifier);
         var image = _slots[imageIdentifier];
+        TraceTexture("refresh-before", image, request);
         if (image.IsMaybeCpuDirty)
         {
             var hash = image.HashGuestEdges();
@@ -450,15 +468,18 @@ public sealed unsafe partial class GuestImageCache
                 throw SubmissionScheduler.Fatal($"A compressed guest image cannot be refreshed from guest memory: address=0x{image.Description.Data.Address:X16} bufferModified={image.IsBufferModified} cpuDirty={image.IsDefinitelyCpuDirty}.");
             }
 
+            TraceTexture("refresh-compressed-skip", image, request);
             return;
         }
 
         if (!cpuDirty)
         {
+            TraceTexture("refresh-clean-skip", image, request);
             return;
         }
 
         PopulateFromGuest(imageIdentifier, request, "refresh");
+        TraceTexture("refresh-after", image, request);
     }
 
     private void DownloadDepthToBuffer(CachedImage image, GpuBuffer destination, ulong destinationOffset)
@@ -835,6 +856,14 @@ public sealed unsafe partial class GuestImageCache
                  (aspect == ImageAspectFlags.StencilBit && !PackedClearValue.TryDecodeStencil(packedClear, out stencilClear)))
         {
             return false;
+        }
+
+        if (aspect is ImageAspectFlags.DepthBit or ImageAspectFlags.StencilBit)
+        {
+            // A depth/stencil transfer clear is itself a native depth-target producer. Record
+            // that before refreshing untouched guest bytes so both the upload and a later
+            // readback use the attachment layout even when no target view was acquired first.
+            image.Uses.DepthTarget = true;
         }
 
         if (aspect == ImageAspectFlags.ColorBit)

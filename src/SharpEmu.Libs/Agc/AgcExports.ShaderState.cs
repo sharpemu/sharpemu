@@ -224,7 +224,6 @@ public static partial class AgcExports
                 var continuationSize = BinaryPrimitives.ReadUInt32LittleEndian(
                     descriptor[(int)ShaderSizeOffset..]);
                 if (continuationCodeAddress <= entryCodeAddress ||
-                    continuationCodeAddress - entryCodeAddress > uint.MaxValue ||
                     !IsValidDeclaredShaderSize(continuationSize) ||
                     !CanReadShaderRange(ctx, continuationCodeAddress, continuationSize))
                 {
@@ -449,14 +448,14 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
+        if (!TryReadUInt64(ctx, frontAddress + ShaderShRegistersOffset, out var frontRegistersAddress) ||
+            !TryReadByte(ctx, frontAddress + ShaderNumShRegistersOffset, out var frontRegisterCount))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
         if (isGeometryPair || legacy)
         {
-            if (!TryReadUInt64(ctx, frontAddress + ShaderShRegistersOffset, out var frontRegistersAddress) ||
-                !TryReadByte(ctx, frontAddress + ShaderNumShRegistersOffset, out var frontRegisterCount))
-            {
-                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-            }
-
             var merged = legacy
                 ? MergeLegacyFusedShaderRegisters(ctx, frontRegistersAddress, frontRegisterCount, fusedRegistersAddress, registerCount, isGeometryPair)
                 : MergeFusedUserScalarCount(ctx, frontRegistersAddress, frontRegisterCount, fusedRegistersAddress, registerCount);
@@ -480,6 +479,17 @@ public static partial class AgcExports
                     return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
             }
+        }
+
+        if (!legacy && !MergeFusedShaderResourceRegisters(
+                ctx,
+                fusedRegistersAddress,
+                registerCount,
+                frontRegistersAddress,
+                frontRegisterCount,
+                isGeometryPair))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (!PatchFusedProgramAddress(
@@ -1020,18 +1030,28 @@ public static partial class AgcExports
             return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var permitsMissingProgramRegisters = shaderType is GsFrontShaderType or HsFrontShaderType or FunctionShaderType;
-        if (registerCount == 0)
+        (uint Low, uint High)? programRegisters = shaderType switch
         {
-            return permitsMissingProgramRegisters ? OrbisGen2Result.ORBIS_GEN2_OK : IncompleteShaderRegistersResult;
+            ComputeShaderType => (ComputePgmLo, ComputePgmHi),
+            PsShaderType => (SpiShaderPgmLoPs, SpiShaderPgmHiPs),
+            GsShaderType => (SpiShaderPgmLoEs, SpiShaderPgmHiEs),
+            HsShaderType => (SpiShaderPgmLoLs, SpiShaderPgmHiLs),
+            GsBackShaderType => (SpiShaderPgmLoGs, SpiShaderPgmHiGs),
+            HsBackShaderType => (SpiShaderPgmLoHs, SpiShaderPgmHiHs),
+            _ => null,
+        };
+
+        // Front shader halves and function shaders do not own a program address.
+        if (programRegisters is null)
+        {
+            return OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        if (shaderRegistersAddress == 0)
+        if (registerCount == 0 || shaderRegistersAddress == 0)
         {
             return IncompleteShaderRegistersResult;
         }
 
-        // Read each declared entry before deciding whether the address pair can be absent.
         Span<byte> registerTable = stackalloc byte[registerCount * 2 * sizeof(uint)];
         if (shaderRegistersAddress > ulong.MaxValue - (ulong)registerTable.Length ||
             !context.Memory.TryRead(shaderRegistersAddress, registerTable))
@@ -1039,206 +1059,45 @@ public static partial class AgcExports
             return OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        if (shaderType == FunctionShaderType)
+        var expectedRegisters = programRegisters.Value;
+        for (var registerIndex = 0; registerIndex < registerCount; registerIndex++)
         {
-            return OrbisGen2Result.ORBIS_GEN2_OK;
-        }
-
-        // Select the address registers for the shader stage.
-        var expectedLowRegister = shaderType switch
-        {
-            ComputeShaderType => ComputePgmLo,
-            PsShaderType => SpiShaderPgmLoPs,
-            GsShaderType or GsBackShaderType => SpiShaderPgmLoEs,
-            HsShaderType => SpiShaderPgmLoVs,
-            GsFrontShaderType => SpiShaderPgmLoGs,
-            HsFrontShaderType => SpiShaderPgmLoHs,
-            HsBackShaderType => SpiShaderPgmLoLs,
-            _ => 0u,
-        };
-        var expectedHighRegister = shaderType switch
-        {
-            ComputeShaderType => ComputePgmHi,
-            PsShaderType => SpiShaderPgmHiPs,
-            GsShaderType or GsBackShaderType => SpiShaderPgmHiEs,
-            HsShaderType => SpiShaderPgmHiVs,
-            GsFrontShaderType => SpiShaderPgmHiGs,
-            HsFrontShaderType => SpiShaderPgmHiHs,
-            HsBackShaderType => SpiShaderPgmHiLs,
-            _ => 0u,
-        };
-
-        if (!TryFindShaderProgramRegisterPair(
-                registerTable,
-                shaderRegistersAddress,
-                registerCount,
-                expectedLowRegister,
-                expectedHighRegister,
-                out var lowEntryAddress,
-                out var highEntryAddress,
-                out var foundLowRegister,
-                out var foundHighRegister,
-                out var hasProgramAddressEntries))
-        {
-            var firstRegisterOffset = BinaryPrimitives.ReadUInt32LittleEndian(registerTable);
-            if (permitsMissingProgramRegisters && !hasProgramAddressEntries)
-            {
-                TraceCreateShader(
-                    0,
-                    headerAddress,
-                    codeAddress,
-                    $"skip-pgm-patch type={shaderType} first_lo=0x{firstRegisterOffset:X8}");
-                return OrbisGen2Result.ORBIS_GEN2_OK;
-            }
-
-            TraceCreateShader(
-                0,
-                headerAddress,
-                codeAddress,
-                $"unexpected-registers type={shaderType} expected_lo=0x{expectedLowRegister:X8} first_lo=0x{firstRegisterOffset:X8}");
-            return IncompleteShaderRegistersResult;
-        }
-
-        var lowValue = (uint)((codeAddress >> 8) & 0xFFFF_FFFFUL);
-        var highValue = (uint)((codeAddress >> 40) & 0xFFUL);
-        if (!TryWriteUInt32(context, lowEntryAddress + sizeof(uint), lowValue) ||
-            !TryWriteUInt32(context, highEntryAddress + sizeof(uint), highValue))
-        {
-            return OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        if (foundLowRegister != expectedLowRegister || foundHighRegister != expectedHighRegister)
-        {
-            TraceCreateShader(
-                0,
-                headerAddress,
-                codeAddress,
-                $"patched-alt-registers type={shaderType} lo=0x{foundLowRegister:X8} hi=0x{foundHighRegister:X8}");
-        }
-
-        return OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    private static readonly (uint Low, uint High)[] ShaderProgramRegisterPairs =
-    [
-        (ComputePgmLo, ComputePgmHi),
-        (SpiShaderPgmLoPs, SpiShaderPgmHiPs),
-        (SpiShaderPgmLoVs, SpiShaderPgmHiVs),
-        (SpiShaderPgmLoEs, SpiShaderPgmHiEs),
-        (SpiShaderPgmLoGs, SpiShaderPgmHiGs),
-        (SpiShaderPgmLoHs, SpiShaderPgmHiHs),
-        (SpiShaderPgmLoLs, SpiShaderPgmHiLs),
-    ];
-
-    private static bool TryFindShaderProgramRegisterPair(
-        ReadOnlySpan<byte> registerTable,
-        ulong shaderRegistersAddress,
-        byte registerCount,
-        uint preferredLowRegister,
-        uint preferredHighRegister,
-        out ulong lowEntryAddress,
-        out ulong highEntryAddress,
-        out uint foundLowRegister,
-        out uint foundHighRegister,
-        out bool hasProgramAddressEntries)
-    {
-        lowEntryAddress = 0;
-        highEntryAddress = 0;
-        foundLowRegister = 0;
-        foundHighRegister = 0;
-        hasProgramAddressEntries = false;
-
-        ulong preferredLowAddress = 0;
-        ulong preferredHighAddress = 0;
-        ulong fallbackLowAddress = 0;
-        ulong fallbackHighAddress = 0;
-        uint fallbackLowRegister = 0;
-        uint fallbackHighRegister = 0;
-
-        for (uint registerIndex = 0; registerIndex < registerCount; registerIndex++)
-        {
-            var entryAddress = shaderRegistersAddress + ((ulong)registerIndex * 8);
-            var registerOffset = BinaryPrimitives.ReadUInt32LittleEndian(registerTable[(int)(registerIndex * 8)..]);
-            foreach (var registerPair in ShaderProgramRegisterPairs)
-            {
-                hasProgramAddressEntries |= registerOffset == registerPair.Low || registerOffset == registerPair.High;
-            }
-
-            if (preferredLowRegister != 0 && registerOffset == preferredLowRegister)
-            {
-                preferredLowAddress = entryAddress;
-            }
-            else if (preferredHighRegister != 0 && registerOffset == preferredHighRegister)
-            {
-                preferredHighAddress = entryAddress;
-            }
-
-            if (fallbackLowAddress != 0)
+            var entryOffset = registerIndex * 2 * sizeof(uint);
+            if (BinaryPrimitives.ReadUInt32LittleEndian(registerTable[entryOffset..]) != expectedRegisters.Low)
             {
                 continue;
             }
 
-            foreach (var registerPair in ShaderProgramRegisterPairs)
+            var highRegisterIndex = registerIndex + 1;
+            if (highRegisterIndex >= registerCount)
             {
-                if (registerOffset != registerPair.Low)
-                {
-                    continue;
-                }
-
-                // Prefer a contiguous LO/HI pair when present.
-                if (registerIndex + 1 < registerCount &&
-                    BinaryPrimitives.ReadUInt32LittleEndian(registerTable[(int)((registerIndex + 1) * 8)..]) == registerPair.High)
-                {
-                    fallbackLowAddress = entryAddress;
-                    fallbackHighAddress = entryAddress + 8;
-                    fallbackLowRegister = registerPair.Low;
-                    fallbackHighRegister = registerPair.High;
-                    break;
-                }
-
-                for (uint highRegisterIndex = 0; highRegisterIndex < registerCount; highRegisterIndex++)
-                {
-                    if (highRegisterIndex == registerIndex)
-                    {
-                        continue;
-                    }
-
-                    var highAddress = shaderRegistersAddress + ((ulong)highRegisterIndex * 8);
-                    if (BinaryPrimitives.ReadUInt32LittleEndian(registerTable[(int)(highRegisterIndex * 8)..]) != registerPair.High)
-                    {
-                        continue;
-                    }
-
-                    fallbackLowAddress = entryAddress;
-                    fallbackHighAddress = highAddress;
-                    fallbackLowRegister = registerPair.Low;
-                    fallbackHighRegister = registerPair.High;
-                    break;
-                }
-
-                break;
+                return IncompleteShaderRegistersResult;
             }
+
+            var highEntryOffset = highRegisterIndex * 2 * sizeof(uint);
+            if (BinaryPrimitives.ReadUInt32LittleEndian(registerTable[highEntryOffset..]) != expectedRegisters.High)
+            {
+                return IncompleteShaderRegistersResult;
+            }
+
+            var lowValue = BinaryPrimitives.ReadUInt32LittleEndian(registerTable[(entryOffset + sizeof(uint))..]);
+            var highValue = BinaryPrimitives.ReadUInt32LittleEndian(registerTable[(highEntryOffset + sizeof(uint))..]);
+            var shaderOffset = ((ulong)lowValue << 8) | (((ulong)highValue & 0xFFUL) << 40);
+            var patchedAddress = unchecked(codeAddress + shaderOffset);
+            var patchedLowValue = (uint)((patchedAddress >> 8) & 0xFFFF_FFFFUL);
+            var patchedHighValue = (highValue & 0xFFFF_FF00u) | (uint)((patchedAddress >> 40) & 0xFFUL);
+            var lowEntryAddress = shaderRegistersAddress + (ulong)entryOffset;
+            var highEntryAddress = shaderRegistersAddress + (ulong)highEntryOffset;
+            if (!TryWriteUInt32(context, lowEntryAddress + sizeof(uint), patchedLowValue) ||
+                !TryWriteUInt32(context, highEntryAddress + sizeof(uint), patchedHighValue))
+            {
+                return OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            return OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        if (preferredLowAddress != 0 && preferredHighAddress != 0)
-        {
-            lowEntryAddress = preferredLowAddress;
-            highEntryAddress = preferredHighAddress;
-            foundLowRegister = preferredLowRegister;
-            foundHighRegister = preferredHighRegister;
-            return true;
-        }
-
-        if (fallbackLowAddress != 0 && fallbackHighAddress != 0)
-        {
-            lowEntryAddress = fallbackLowAddress;
-            highEntryAddress = fallbackHighAddress;
-            foundLowRegister = fallbackLowRegister;
-            foundHighRegister = fallbackHighRegister;
-            return true;
-        }
-
-        return false;
+        return IncompleteShaderRegistersResult;
     }
 
     private static bool IsEsGeometryShaderType(byte shaderType) =>
@@ -1351,6 +1210,81 @@ public static partial class AgcExports
 
         entryAddress = 0;
         return false;
+    }
+
+    // The fused register image starts as a copy of the back half, but the front
+    // half executes first and shares the same scalar/vector register file.  Its
+    // resource limits therefore have to be folded into the final GS/HS RSRC
+    // words.  In particular, USER_SGPR comes from the front half: dropping it
+    // truncates the fused ES user-data ABI and leaves otherwise valid handles in
+    // s32 and above undefined.
+    private static bool MergeFusedShaderResourceRegisters(
+        CpuContext ctx,
+        ulong fusedRegistersAddress,
+        int fusedRegisterCount,
+        ulong frontRegistersAddress,
+        int frontRegisterCount,
+        bool isGeometryPair)
+    {
+        var resource1Offset = isGeometryPair ? SpiShaderPgmRsrc1Gs : SpiShaderPgmRsrc1Hs;
+        var resource2Offset = isGeometryPair ? SpiShaderPgmRsrc2Gs : SpiShaderPgmRsrc2Hs;
+        if (!TryFindShaderRegister(ctx, fusedRegistersAddress, fusedRegisterCount, resource1Offset, 0, out var fusedResource1Entry) ||
+            !TryFindShaderRegister(ctx, fusedRegistersAddress, fusedRegisterCount, resource2Offset, 0, out var fusedResource2Entry) ||
+            !TryFindShaderRegister(ctx, frontRegistersAddress, frontRegisterCount, resource1Offset, 0, out var frontResource1Entry) ||
+            !TryFindShaderRegister(ctx, frontRegistersAddress, frontRegisterCount, resource2Offset, 0, out var frontResource2Entry))
+        {
+            TraceAgc(
+                $"agc.fuse_shader_halves.rsrc_absent stage={(isGeometryPair ? "gs" : "hs")} " +
+                $"fused_regs=0x{fusedRegistersAddress:X16} front_regs=0x{frontRegistersAddress:X16}");
+            return true;
+        }
+
+        if (!TryReadUInt32(ctx, fusedResource1Entry + sizeof(uint), out var fusedResource1) ||
+            !TryReadUInt32(ctx, fusedResource2Entry + sizeof(uint), out var fusedResource2) ||
+            !TryReadUInt32(ctx, frontResource1Entry + sizeof(uint), out var frontResource1) ||
+            !TryReadUInt32(ctx, frontResource2Entry + sizeof(uint), out var frontResource2))
+        {
+            return false;
+        }
+
+        // sceAgcFuseShaderHalves reallocates shared VGPRs instead of simply
+        // taking the larger encoded allocation from the two halves.
+        var frontVgprs = ((frontResource1 & 0x3Fu) + 1u) * 4u;
+        var backVgprs = ((fusedResource1 & 0x3Fu) + 1u) * 4u;
+        var frontTotal = frontVgprs + (frontResource2 >> 28) * 8u;
+        var backTotal = backVgprs + (fusedResource2 >> 28) * 8u;
+        var maximumTotal = Math.Max(frontTotal, backTotal);
+        var sharedVgprs = Math.Max(frontVgprs, backVgprs) >= maximumTotal
+            ? 0u
+            : (maximumTotal - Math.Min(frontTotal, backTotal) + 7u) / 64u;
+        fusedResource2 = (fusedResource2 & 0x0FFF_FFFFu) | ((sharedVgprs & 0xFu) << 28);
+
+        fusedResource1 = MergeShaderRegisterMaximumField(fusedResource1, frontResource1, 0, 0x3Fu);
+        if (isGeometryPair)
+        {
+            fusedResource1 = MergeShaderRegisterMaximumField(fusedResource1, frontResource1, 29, 0x3u);
+            fusedResource2 = MergeShaderRegisterMaximumField(fusedResource2, frontResource2, 16, 0x3u);
+            fusedResource2 = (fusedResource2 & 0xFFFB_FFFFu) | (frontResource2 & 0x0004_0000u);
+        }
+        else
+        {
+            fusedResource1 = MergeShaderRegisterMaximumField(fusedResource1, frontResource1, 28, 0x3u);
+        }
+
+        // USER_SGPR[4:0] and USER_SGPR_MSB describe the front-half input ABI.
+        fusedResource2 = (fusedResource2 & 0xF7FF_FFC1u) | (frontResource2 & 0x0800_003Eu);
+        return TryWriteUInt32(ctx, fusedResource1Entry + sizeof(uint), fusedResource1) &&
+               TryWriteUInt32(ctx, fusedResource2Entry + sizeof(uint), fusedResource2);
+    }
+
+    private static uint MergeShaderRegisterMaximumField(
+        uint destination,
+        uint source,
+        int shift,
+        uint mask)
+    {
+        var field = Math.Max((destination >> shift) & mask, (source >> shift) & mask);
+        return (destination & ~(mask << shift)) | (field << shift);
     }
 
     // A missing or unpaired lo/hi register is not an error: the retail library

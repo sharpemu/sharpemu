@@ -224,6 +224,47 @@ public sealed class NpUniversalDataSystemExportsTests : IDisposable
     }
 
     [Fact]
+    public void ContextBootstrapBeforeInitialize_SurvivesLatePoolInitialization()
+    {
+        var context = CreateContext(userId: 0x1000_0000);
+        var serviceHandle = CreateServiceHandle();
+        SetRegisters((ulong)(uint)context, (ulong)(uint)serviceHandle, 0);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemRegisterContext(_context));
+
+        Initialize(poolSize: 0x40_000);
+
+        var eventName = _memory.WriteCString(MemoryBase + 0x1740, "bootstrap-complete");
+        var eventOutput = MemoryBase + 0x1760;
+        SetRegisters(eventName, 0, eventOutput, 0);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemCreateEvent(_context));
+        SetRegisters(
+            (ulong)(uint)context,
+            (ulong)(uint)serviceHandle,
+            ReadUInt64(eventOutput),
+            0);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemPostEvent(_context));
+        Assert.Equal(1, NpUniversalDataSystemState.PostedEventCountForTests);
+
+        var statOutput = MemoryBase + 0x1780;
+        SetRegisters(statOutput);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemGetMemoryStat(_context));
+        Assert.Equal(0x40_000UL, ReadMemoryStat(statOutput).PoolSize);
+    }
+
+    [Fact]
+    public void RuntimeReset_DropsBootstrapStateBeforeTheNextGuestSession()
+    {
+        Assert.Equal(1, CreateContext(userId: 0x1000_0000));
+        Assert.Equal(1, CreateServiceHandle());
+
+        NpUniversalDataSystemExports.ResetRuntimeState();
+
+        SetRegisters(MemoryBase + 0x1790);
+        Assert.Equal(ErrorInvalidArgument, NpUniversalDataSystemExports.NpUniversalDataSystemCreateHandle(_context));
+        Assert.Equal(1, CreateContext(userId: 0x1000_0000));
+    }
+
+    [Fact]
     public void ConcurrentPropertyWrites_AreRetained()
     {
         Assert.True(NpUniversalDataSystemState.Initialize(0x10_0000));

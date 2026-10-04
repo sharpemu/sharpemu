@@ -176,6 +176,54 @@ public static partial class KernelMemoryCompatExports
         return slices?.ToArray() ?? [];
     }
 
+    internal static MappingRangeSnapshot CaptureMappingRangeSnapshot(ulong address, ulong length)
+    {
+        lock (_memoryGate)
+        {
+            return CaptureMappingRangeSnapshotLocked(address, length);
+        }
+    }
+
+    internal static bool[] MatchMappingRangeSnapshots(
+        IReadOnlyList<MappingRangeSnapshot> snapshots)
+    {
+        var matches = new bool[snapshots.Count];
+        lock (_memoryGate)
+        {
+            // Evaluate the whole command buffer against one pre-execution view.
+            // Comparing each record after earlier AMPR records run would falsely
+            // classify valid overlapping map/unmap sequences as stale.
+            for (var index = 0; index < snapshots.Count; index++)
+            {
+                var expected = snapshots[index];
+                var current = CaptureMappingRangeSnapshotLocked(expected.Address, expected.Length);
+                matches[index] = expected.Slices.AsSpan().SequenceEqual(current.Slices);
+            }
+        }
+        return matches;
+    }
+
+    private static MappingRangeSnapshot CaptureMappingRangeSnapshotLocked(ulong address, ulong length)
+    {
+        var regions = GetMappingSlices(address, length);
+        var slices = new MappingRangeSlice[regions.Length];
+        for (var index = 0; index < regions.Length; index++)
+        {
+            var region = regions[index];
+            slices[index] = new MappingRangeSlice(
+                region.Address,
+                region.Length,
+                region.Protection,
+                region.IsFlexible,
+                region.IsDirect,
+                region.DirectStart,
+                region.BackingOffset,
+                region.IsReserved,
+                region.Identity);
+        }
+        return new MappingRangeSnapshot(address, length, slices);
+    }
+
     private static bool MappingsCoverRange(MappedRegion[] regions, ulong address, ulong size)
     {
         var current = address;
@@ -263,6 +311,9 @@ public static partial class KernelMemoryCompatExports
             if (region.IsFlexible)
                 _flexibleBacking.Release(region.Address, region.Length);
         ReplaceMappedRegionRangeLocked(new MappedRegion(address, size, 0, false, false, 0, IsReserved: true));
+        foreach (var region in regions)
+            if (region.IsDirect)
+                ReclaimUnaliasedAutomaticRangeLocked(region.DirectStart, region.Length);
         return true;
     }
 
@@ -297,28 +348,138 @@ public static partial class KernelMemoryCompatExports
             address = requested;
             return true;
         }
-        var desired = requested != 0 ? requested : DefaultMapSearchBase;
-        while (true)
+        if (requested != 0)
         {
-            var hintedRegions = reuseReservation && desired == requested && requested != 0
-                ? GetMappingSlices(requested, length) : [];
+            return TrySelectBackingAddressInRange(
+                space,
+                requested,
+                GuestMemoryLayout.GuestAddressLimit,
+                requested,
+                length,
+                alignment,
+                reuseReservation,
+                out address);
+        }
+
+        const ulong systemManagedStart = 0x0000_0002_0000_0000;
+        const ulong systemManagedEnd = 0x0000_0007_FFFF_C000;
+        var userStart = OperatingSystem.IsMacOS()
+            ? 0x0000_0070_0000_0000UL
+            : GuestMemoryLayout.GuestUserAddressStart;
+
+        // Requests larger than the system-managed window belong to the user address
+        // class even when address-space reservation is otherwise lazy. Starting them
+        // in the low search area can strand a large contiguous pool behind modules
+        // that were loaded there before the application asks for the reservation.
+        if (length > systemManagedEnd - systemManagedStart)
+        {
+            return TrySelectBackingAddressInRange(
+                space,
+                userStart,
+                GuestMemoryLayout.GuestAddressLimit,
+                0,
+                length,
+                alignment,
+                reuseReservation,
+                out address);
+        }
+
+        if (GuestMemoryLayout.VirtualAddressPlacement == GuestVirtualAddressPlacement.Lazy)
+        {
+            // Preserve the original lazy policy for ordinary hint-less maps:
+            // search from the default base and reserve only the selected range.
+            return TrySelectBackingAddressInRange(
+                space,
+                DefaultMapSearchBase,
+                GuestMemoryLayout.GuestAddressLimit,
+                0,
+                length,
+                alignment,
+                reuseReservation,
+                out address);
+        }
+
+        // Match the PS5 address-space classes. Hint-less mappings first use the
+        // system-managed window; if the request cannot fit there, retry in the
+        // user window. In particular, the standard 512-GiB pool reservation must
+        // start at 64 GiB instead of drifting to a later host-dependent hole.
+        return TrySelectBackingAddressInRange(
+                   space,
+                   systemManagedStart,
+                   systemManagedEnd,
+                   0,
+                   length,
+                   alignment,
+                   reuseReservation,
+                   out address) ||
+               TrySelectBackingAddressInRange(
+                   space,
+                   userStart,
+                   GuestMemoryLayout.GuestAddressLimit,
+                   0,
+                   length,
+                   alignment,
+                   reuseReservation,
+                   out address);
+    }
+
+    private static bool TrySelectBackingAddressInRange(
+        IGuestBackedSpace space,
+        ulong searchStart,
+        ulong searchEnd,
+        ulong requested,
+        ulong length,
+        ulong alignment,
+        bool reuseReservation,
+        out ulong address)
+    {
+        address = 0;
+        var desired = searchStart;
+        while (desired < searchEnd && length <= searchEnd - desired)
+        {
+            var hintedRegions = reuseReservation && requested != 0 && desired == requested
+                ? GetMappingSlices(requested, length)
+                : [];
             var reusableHint = hintedRegions.Length != 0 && requested % alignment == 0 &&
-                MappingsCoverRange(hintedRegions, requested, length) && hintedRegions.All(region => region.IsReserved);
+                MappingsCoverRange(hintedRegions, requested, length) &&
+                hintedRegions.All(region => region.IsReserved);
             if (!reusableHint)
+            {
                 desired = FindAvailableMappingAddress(desired, length, alignment);
-            if (desired == 0 || !space.TryHoldRangeAtOrAbove(desired, length, alignment, out address))
+            }
+
+            if (desired == 0 || desired < searchStart || desired >= searchEnd || length > searchEnd - desired ||
+                !space.TryHoldRangeAtOrAbove(desired, length, alignment, out address))
+            {
+                address = 0;
                 return false;
+            }
+
+            if (address < desired || address >= searchEnd || length > searchEnd - address)
+            {
+                address = 0;
+                return false;
+            }
             var overlap = GetMappingSlices(address, length, clip: false);
             if (overlap.Length == 0 || (reuseReservation && address == requested &&
                 MappingsCoverRange(GetMappingSlices(address, length), address, length) && overlap.All(region => region.IsReserved)))
-                break;
+            {
+                UnregisterFreeRange(address, length);
+                return true;
+            }
+
             // Skip the complete reservation, not only the requested slice.
-            desired = overlap[^1].Address + overlap[^1].Length;
+            var overlapEnd = overlap[^1].Address + overlap[^1].Length;
+            if (overlapEnd <= desired)
+            {
+                address = 0;
+                return false;
+            }
+
+            desired = overlapEnd;
         }
-        if (address == 0)
-            return false;
-        UnregisterFreeRange(address, length);
-        return true;
+        address = 0;
+        return false;
     }
 
     // Skip kernel reservations before asking the host to reserve a candidate.
@@ -531,6 +692,36 @@ public static partial class KernelMemoryCompatExports
 
     private static bool HasPhysicalSpan(ulong start, ulong length)
         => _directAllocations.ContainsAllocatedRange(start, length);
+
+    private static void ReclaimUnaliasedAutomaticRangeLocked(ulong start, ulong length)
+    {
+        foreach (var automaticRange in _directAllocations.GetAutomaticRanges(start, length))
+        {
+            var automaticEnd = automaticRange.Start + automaticRange.Length;
+            var occupied = _mappedRegions.Values
+                .Where(region => region.IsDirect &&
+                    region.DirectStart < automaticEnd &&
+                    automaticRange.Start < region.DirectStart + region.Length)
+                .Select(region => new DirectMemoryAllocationMap.PhysicalRange(
+                    Math.Max(automaticRange.Start, region.DirectStart),
+                    Math.Min(automaticEnd, region.DirectStart + region.Length) -
+                    Math.Max(automaticRange.Start, region.DirectStart)))
+                .OrderBy(range => range.Start)
+                .ToArray();
+
+            var cursor = automaticRange.Start;
+            foreach (var alias in occupied)
+            {
+                if (alias.Start > cursor)
+                    _directAllocations.ReturnAutomatic(cursor, alias.Start - cursor);
+                cursor = Math.Max(cursor, alias.Start + alias.Length);
+                if (cursor >= automaticEnd)
+                    break;
+            }
+            if (cursor < automaticEnd)
+                _directAllocations.ReturnAutomatic(cursor, automaticEnd - cursor);
+        }
+    }
 
     private static bool TryReleaseDirectMemoryRangeLocked(CpuContext ctx, ulong start, ulong length)
     {

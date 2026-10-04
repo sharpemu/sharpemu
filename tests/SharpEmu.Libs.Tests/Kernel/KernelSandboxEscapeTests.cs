@@ -101,6 +101,7 @@ public sealed class KernelSandboxEscapeTests : IDisposable
     [InlineData("/app0/C:/Windows/Temp/evil.dll")]
     [InlineData("download0/C:/Windows/Temp/evil.dll")]
     [InlineData("/temp0/C:/Windows/Temp/evil.dll")]
+    [InlineData("/temp/C:/Windows/Temp/evil.dll")]
     public void ResolveGuestPath_DriveLetterInjectionCannotEscapeMount(string guestPath)
     {
         if (!OperatingSystem.IsWindows())

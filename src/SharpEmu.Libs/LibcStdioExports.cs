@@ -69,6 +69,26 @@ public static class LibcStdioExports
     private static readonly object _ctypeTableGate = new();
     private static nint _ctypeTableBase;
 
+    // The HLE FILE implementation serializes every operation on StdioFile.Gate.
+    // These Dinkumware helpers bracket calls such as fgetpos, so taking another
+    // host lock here would be both redundant and unsafe when a guest lock/unlock
+    // pair crosses managed calls or host threads. Their observable ABI is the
+    // lifetime of the FILE lock, not a return value; the called stdio operation
+    // still performs the required synchronization.
+    [SysAbiExport(
+        Nid = "vZkmJmvqueY",
+        ExportName = "_Lockfilelock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int LockFileLock(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
+        Nid = "0x7rx8TKy2Y",
+        ExportName = "_Unlockfilelock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int UnlockFileLock(CpuContext ctx) => ctx.SetReturn(0);
+
     [SysAbiExport(
         Nid = "xeYO4u7uyJ0",
         ExportName = "fopen",
@@ -133,7 +153,11 @@ public static class LibcStdioExports
                 }
             }
 
-            var stream = new FileStream(hostPath, fileMode, fileAccess, FileShare.ReadWrite);
+            var stream = new FileStream(
+                hostPath,
+                fileMode,
+                fileAccess,
+                KernelMemoryCompatExports.GuestFileShare);
             if (mode.StartsWith('a') && fileAccess == FileAccess.ReadWrite)
             {
                 stream.Seek(0, SeekOrigin.End);
@@ -1049,7 +1073,11 @@ public static class LibcStdioExports
                 }
             }
 
-            var replacement = new FileStream(hostPath, fileMode, fileAccess, FileShare.ReadWrite);
+            var replacement = new FileStream(
+                hostPath,
+                fileMode,
+                fileAccess,
+                KernelMemoryCompatExports.GuestFileShare);
             lock (file.Gate)
             {
                 if (file.IsClosed)

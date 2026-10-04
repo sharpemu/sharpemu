@@ -81,7 +81,10 @@ public sealed unsafe partial class RenderHostDeviceTests
         if (!Ready()) return;
         using var presenter = new PresenterUnderTest(_vulkan);
         presenter.SetField("_supportsFragmentShaderBarycentric", false);
-        var shader = new VulkanCompiledGuestShader(CompileInterpolationFragment(2, true, false));
+        // A flat P0 move (selector 2) is supplied directly by the fixed-function
+        // interface and intentionally does not require fragment barycentrics.
+        // P10 (selector 0) still reads per-vertex data and must be feature-gated.
+        var shader = new VulkanCompiledGuestShader(CompileInterpolationFragment(0, true, false));
         presenter.Run(() =>
         {
             var error = Assert.Throws<NotSupportedException>(() =>

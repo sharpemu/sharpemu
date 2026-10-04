@@ -28,7 +28,7 @@ internal struct BufferMergeRange(ulong begin, ulong end)
         const ulong expansionSize = GuestBufferCache.CachingPageSize * 128;
         if (expandsRight)
         {
-            End += Math.Min(expansionSize, PageOwnerTable.AddressSpaceSize - End);
+            End += Math.Min(expansionSize, PageOwnerTable.ApertureLimit(End - 1) - End);
         }
 
         if (!expandsLeft)
@@ -36,7 +36,11 @@ internal struct BufferMergeRange(ulong begin, ulong end)
             return false;
         }
 
-        const ulong minimumBegin = GuestBufferCache.CachingPageSize * 2;
+        var minimumBegin = PageOwnerTable.ApertureStart(Begin);
+        if (minimumBegin == 0)
+        {
+            minimumBegin = GuestBufferCache.CachingPageSize * 2;
+        }
         if (Begin > minimumBegin)
         {
             Begin -= Math.Min(expansionSize, Begin - minimumBegin);

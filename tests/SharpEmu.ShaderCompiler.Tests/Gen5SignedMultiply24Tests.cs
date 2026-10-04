@@ -60,6 +60,30 @@ public sealed class Gen5SignedMultiply24Tests
         Assert.Contains(">> 8", metalShader.Source);
     }
 
+    [Fact]
+    public void UnsignedMultiplyMasksBothOperandsToLow24BitsOnBothBackends()
+    {
+        var multiply = Decode(0x160C0702) with { Pc = 0 };
+        Assert.Equal("VMulU32U24", multiply.Opcode);
+        var program = Program(multiply, EndProgram(sizeof(uint)));
+        var (plan, resources, layout) = Prepare(program);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = 1,
+            ThreadCountX = 1,
+        };
+
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileProgram(request, out var spirv, out var spirvError),
+            spirvError);
+        Assert.Equal(2, CountSpirvMaskUses(spirv.Spirv, 0x00FF_FFFF));
+
+        Assert.True(
+            Gen5MslTranslator.TryCompileProgram(request, out var metal, out var metalError),
+            metalError);
+        Assert.Equal(2, CountOccurrences(metal.Source, "& 0xFFFFFFu"));
+    }
+
     [Theory]
     [MemberData(nameof(Products))]
     public void ResourceEvaluationUsesSignedLow24Bits(uint left, uint right, uint expected)
@@ -98,6 +122,45 @@ public sealed class Gen5SignedMultiply24Tests
         var context = new CpuContext(new InstructionMemory(bytes), Generation.Gen5);
         Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, 0x1000, out var program, out var error), error);
         return program.Instructions[0];
+    }
+
+    private static int CountSpirvMaskUses(byte[] spirv, uint mask)
+    {
+        var words = new uint[spirv.Length / sizeof(uint)];
+        Buffer.BlockCopy(spirv, 0, words, 0, spirv.Length);
+        var maskIds = new HashSet<uint>();
+        var uses = 0;
+        for (var offset = 5; offset < words.Length;)
+        {
+            var wordCount = checked((int)(words[offset] >> 16));
+            var opcode = (SpirvOp)(words[offset] & 0xFFFFu);
+            if (opcode == SpirvOp.Constant && wordCount == 4 && words[offset + 3] == mask)
+            {
+                maskIds.Add(words[offset + 2]);
+            }
+            else if (opcode == SpirvOp.BitwiseAnd && wordCount == 5 &&
+                     (maskIds.Contains(words[offset + 3]) || maskIds.Contains(words[offset + 4])))
+            {
+                uses++;
+            }
+
+            offset += Math.Max(wordCount, 1);
+        }
+
+        return uses;
+    }
+
+    private static int CountOccurrences(string text, string value)
+    {
+        var count = 0;
+        for (var index = 0;
+             (index = text.IndexOf(value, index, StringComparison.Ordinal)) >= 0;
+             index += value.Length)
+        {
+            count++;
+        }
+
+        return count;
     }
 
     private sealed class InstructionMemory(byte[] bytes) : ICpuMemory

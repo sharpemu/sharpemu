@@ -21,7 +21,9 @@ internal static partial class Program
     private static StreamWriter? _consoleMirrorFile;
     private const int DefaultImportTraceLimit = 32;
     private const string MitigatedChildFlag = "--sharpemu-mitigated-child";
+    private const string PreReservedPrimaryUserWindowFlag = "--sharpemu-pre-reserved-primary-user-window";
     private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+    private const uint CREATE_SUSPENDED = 0x00000004;
     private const uint INFINITE = 0xFFFFFFFF;
     private const int PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY = 0x00020007;
     private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
@@ -29,6 +31,7 @@ internal static partial class Program
     private const int STARTF_USESTDHANDLES = 0x00000100;
     private const uint HANDLE_FLAG_INHERIT = 0x00000001;
     private const string MitigatedChildEnvironment = "SHARPEMU_MITIGATED_CHILD";
+    private const ulong PROCESS_CREATION_MITIGATION_POLICY_HIGH_ENTROPY_ASLR_ALWAYS_OFF = 0x00000002UL << 20;
     private const ulong PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF = 0x00000002UL << 40;
     private const ulong PROCESS_CREATION_MITIGATION_POLICY2_CET_USER_SHADOW_STACKS_ALWAYS_OFF = 0x00000002UL << 28;
     private const ulong PROCESS_CREATION_MITIGATION_POLICY2_USER_CET_SET_CONTEXT_IP_VALIDATION_ALWAYS_OFF = 0x00000002UL << 32;
@@ -41,6 +44,11 @@ internal static partial class Program
     private const uint FILE_SHARE_READ = 0x00000001;
     private const uint FILE_SHARE_WRITE = 0x00000002;
     private const uint OPEN_EXISTING = 3;
+    private const uint MEM_RESERVE = 0x00002000;
+    private const uint MEM_RELEASE = 0x00008000;
+    private const uint MEM_RESERVE_PLACEHOLDER = 0x00040000;
+    private const uint PAGE_NOACCESS = 0x00000001;
+    private const int ERROR_INVALID_ADDRESS = 487;
 
     [STAThread]
     private static int Main(string[] args)
@@ -501,17 +509,43 @@ internal static partial class Program
             return args;
         }
 
+        var sawMitigatedChildFlag = false;
+        var sawPreReservedPrimaryUserWindowFlag = false;
         var list = new List<string>(args.Length);
         foreach (var arg in args)
         {
             if (string.Equals(arg, MitigatedChildFlag, StringComparison.Ordinal))
             {
-                isMitigatedChild = trustedMitigatedChild;
+                sawMitigatedChildFlag = true;
+                continue;
+            }
+
+            if (string.Equals(arg, PreReservedPrimaryUserWindowFlag, StringComparison.Ordinal))
+            {
+                sawPreReservedPrimaryUserWindowFlag = true;
                 continue;
             }
 
             list.Add(arg);
         }
+
+        isMitigatedChild = trustedMitigatedChild && sawMitigatedChildFlag;
+        var trustedPreReservation =
+            isMitigatedChild &&
+            sawPreReservedPrimaryUserWindowFlag &&
+            string.Equals(
+                Environment.GetEnvironmentVariable(
+                    GuestMemoryLayout.PreReservedPrimaryUserWindowVariable),
+                GuestMemoryLayout.PreReservedPrimaryUserWindowMarker,
+                StringComparison.Ordinal);
+        Environment.SetEnvironmentVariable(
+            GuestMemoryLayout.TrustedPreReservedPrimaryUserWindowVariable,
+            trustedPreReservation
+                ? GuestMemoryLayout.PreReservedPrimaryUserWindowMarker
+                : null);
+        Environment.SetEnvironmentVariable(
+            GuestMemoryLayout.PreReservedPrimaryUserWindowVariable,
+            null);
 
         return list.ToArray();
     }
@@ -540,8 +574,8 @@ internal static partial class Program
         string[] childArguments =
             Path.GetFileNameWithoutExtension(processPath).Equals("dotnet", StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(entryAssemblyPath)
-                ? [entryAssemblyPath, MitigatedChildFlag, .. args]
-                : [MitigatedChildFlag, .. args];
+                ? [entryAssemblyPath, MitigatedChildFlag, PreReservedPrimaryUserWindowFlag, .. args]
+                : [MitigatedChildFlag, PreReservedPrimaryUserWindowFlag, .. args];
 
         var commandLine = BuildCommandLine(processPath, childArguments);
         var startupInfoEx = new STARTUPINFOEX();
@@ -551,6 +585,8 @@ internal static partial class Program
         nint attributeList = 0;
         nint mitigationPolicies = 0;
         var previousChildEnvironment = Environment.GetEnvironmentVariable(MitigatedChildEnvironment);
+        var previousPreReservationEnvironment = Environment.GetEnvironmentVariable(
+            GuestMemoryLayout.PreReservedPrimaryUserWindowVariable);
         try
         {
             nuint attributeListSize = 0;
@@ -565,7 +601,9 @@ internal static partial class Program
 
             startupInfoEx.lpAttributeList = attributeList;
 
-            var policy1 = PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF;
+            var policy1 =
+                PROCESS_CREATION_MITIGATION_POLICY_HIGH_ENTROPY_ASLR_ALWAYS_OFF |
+                PROCESS_CREATION_MITIGATION_POLICY_CONTROL_FLOW_GUARD_ALWAYS_OFF;
             var policy2 =
                 PROCESS_CREATION_MITIGATION_POLICY2_CET_USER_SHADOW_STACKS_ALWAYS_OFF |
                 PROCESS_CREATION_MITIGATION_POLICY2_USER_CET_SET_CONTEXT_IP_VALIDATION_ALWAYS_OFF;
@@ -591,18 +629,24 @@ internal static partial class Program
             var cmdLineBuilder = new StringBuilder(commandLine);
             nint jobHandle = 0;
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, "1");
+            Environment.SetEnvironmentVariable(
+                GuestMemoryLayout.PreReservedPrimaryUserWindowVariable,
+                GuestMemoryLayout.PreReservedPrimaryUserWindowMarker);
             var created = CreateProcessW(
                 null,
                 cmdLineBuilder,
                 0,
                 0,
                 true,
-                EXTENDED_STARTUPINFO_PRESENT,
+                EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
                 0,
                 Environment.CurrentDirectory,
                 ref startupInfoEx,
                 out var processInfo);
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousChildEnvironment);
+            Environment.SetEnvironmentVariable(
+                GuestMemoryLayout.PreReservedPrimaryUserWindowVariable,
+                previousPreReservationEnvironment);
             if (!created)
             {
                 childExitCode = 5;
@@ -612,6 +656,22 @@ internal static partial class Program
 
             try
             {
+                if (!TryPreReservePrimaryUserWindow(processInfo.hProcess, out var reservationError))
+                {
+                    childExitCode = 5;
+                    Console.Error.WriteLine(
+                        $"[ERROR] Failed to pre-reserve the primary guest user window in the suspended child: " +
+                        $"Win32 error {reservationError}.");
+                    _ = TerminateProcess(processInfo.hProcess, unchecked((uint)childExitCode));
+                    _ = WaitForSingleObject(processInfo.hProcess, INFINITE);
+                    return true;
+                }
+
+                Console.Error.WriteLine(
+                    $"[DEBUG] Pre-reserved primary guest user window " +
+                    $"0x{GuestMemoryLayout.GuestUserAddressStart:X16}-" +
+                    $"0x{GuestMemoryLayout.GuestPrimaryUserAddressLimit:X16} in suspended child.");
+
                 jobHandle = CreateJobObjectW(0, null);
                 if (jobHandle != 0 &&
                     TryEnableKillOnJobClose(jobHandle) &&
@@ -619,6 +679,21 @@ internal static partial class Program
                 {
                     CloseHandle(jobHandle);
                     jobHandle = 0;
+                }
+
+                var previousSuspendCount = ResumeThread(processInfo.hThread);
+                if (previousSuspendCount != 1)
+                {
+                    childExitCode = 5;
+                    var resumeError = previousSuspendCount == uint.MaxValue
+                        ? Marshal.GetLastWin32Error()
+                        : 87;
+                    Console.Error.WriteLine(
+                        $"[ERROR] Failed to resume the pre-reserved child process: " +
+                        $"suspend count {previousSuspendCount}, Win32 error {resumeError}.");
+                    _ = TerminateProcess(processInfo.hProcess, unchecked((uint)childExitCode));
+                    _ = WaitForSingleObject(processInfo.hProcess, INFINITE);
+                    return true;
                 }
 
                 ConsoleCancelEventHandler? cancelHandler = null;
@@ -662,6 +737,9 @@ internal static partial class Program
         finally
         {
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousChildEnvironment);
+            Environment.SetEnvironmentVariable(
+                GuestMemoryLayout.PreReservedPrimaryUserWindowVariable,
+                previousPreReservationEnvironment);
 
             if (attributeList != 0)
             {
@@ -674,6 +752,54 @@ internal static partial class Program
                 Marshal.FreeHGlobal(mitigationPolicies);
             }
         }
+    }
+
+    private static bool TryPreReservePrimaryUserWindow(nint process, out int error)
+    {
+        var expectedAddress = unchecked((nint)(long)GuestMemoryLayout.GuestUserAddressStart);
+        var expectedSize = unchecked((nuint)GuestMemoryLayout.GuestPrimaryUserAddressSize);
+        var address = VirtualAlloc2(
+            process,
+            expectedAddress,
+            expectedSize,
+            MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+            PAGE_NOACCESS,
+            0,
+            0);
+        if (address != expectedAddress)
+        {
+            error = Marshal.GetLastWin32Error();
+            if (address != 0)
+            {
+                _ = VirtualFreeEx(process, address, 0, MEM_RELEASE);
+            }
+            return false;
+        }
+
+        if (VirtualQueryEx(
+                process,
+                address,
+                out var info,
+                (nuint)Marshal.SizeOf<MEMORY_BASIC_INFORMATION>()) == 0)
+        {
+            error = Marshal.GetLastWin32Error();
+            _ = VirtualFreeEx(process, address, 0, MEM_RELEASE);
+            return false;
+        }
+
+        if (info.BaseAddress != expectedAddress ||
+            info.AllocationBase != expectedAddress ||
+            info.AllocationProtect != PAGE_NOACCESS ||
+            info.RegionSize != expectedSize ||
+            info.State != MEM_RESERVE)
+        {
+            error = ERROR_INVALID_ADDRESS;
+            _ = VirtualFreeEx(process, address, 0, MEM_RELEASE);
+            return false;
+        }
+
+        error = 0;
+        return true;
     }
 
     private static bool TryGetLogFileArgument(IReadOnlyList<string> args, out string path)
@@ -1628,6 +1754,20 @@ internal static partial class Program
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct MEMORY_BASIC_INFORMATION
+    {
+        public nint BaseAddress;
+        public nint AllocationBase;
+        public uint AllocationProtect;
+        public uint Alignment1;
+        public nuint RegionSize;
+        public uint State;
+        public uint Protect;
+        public uint Type;
+        public uint Alignment2;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
     {
         public long PerProcessUserTimeLimit;
@@ -1763,6 +1903,34 @@ internal static partial class Program
         string currentDirectory,
         ref STARTUPINFOEX startupInfo,
         out PROCESS_INFORMATION processInformation);
+
+    [DllImport("kernelbase.dll", EntryPoint = "VirtualAlloc2", SetLastError = true)]
+    private static extern nint VirtualAlloc2(
+        nint process,
+        nint baseAddress,
+        nuint size,
+        uint allocationType,
+        uint pageProtection,
+        nint extendedParameters,
+        uint parameterCount);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool VirtualFreeEx(
+        nint process,
+        nint baseAddress,
+        nuint size,
+        uint freeType);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nuint VirtualQueryEx(
+        nint process,
+        nint address,
+        out MEMORY_BASIC_INFORMATION information,
+        nuint informationLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint ResumeThread(nint thread);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WaitForSingleObject(nint handle, uint milliseconds);

@@ -56,6 +56,15 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
     }
 
     [Fact]
+    public void NormalizeMinimumLod_PreservesSupportedClampsAndDropsUnsupportedClamps()
+    {
+        var clamped = ImageViewDescription.Default with { MinLod = 0x180 };
+
+        Assert.Equal(0x180u, CachedImage.NormalizeMinimumLod(clamped, supportsImageViewMinLod: true).MinLod);
+        Assert.Equal(0u, CachedImage.NormalizeMinimumLod(clamped, supportsImageViewMinLod: false).MinLod);
+    }
+
+    [Fact]
     public void Constructor_SeedsDirtyStateFromTheDescription()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
@@ -261,6 +270,39 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         var slice = volume.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R8G8B8A8Unorm, Type = ImageViewType.Type2DArray, BaseLayer = 2, LayerCount = 4 });
         Assert.NotEqual(0UL, slice.Handle);
         Assert.Throws<SchedulerFatalException>(() => volume.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R8G8B8A8Unorm, Type = ImageViewType.Type2DArray, BaseLayer = 2, LayerCount = 8 }));
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
+    public void GetOrCreateView_MinimumLodUsesTheOptionalFeatureOrFallsBack()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(64, 64, levels: 4));
+        var plain = ImageViewDescription.Default with
+        {
+            Format = Format.R8G8B8A8Unorm,
+            LevelCount = 4,
+        };
+        var clamped = plain with { MinLod = 0x180 };
+
+        var plainView = image.GetOrCreateView(plain);
+        var clampedView = image.GetOrCreateView(clamped);
+        Assert.Equal(clampedView, image.GetOrCreateView(clamped));
+
+        if (_vulkan.SupportsImageViewMinLod)
+        {
+            Assert.NotEqual(plainView, clampedView);
+            Assert.Equal(2, image.Views.Count);
+            Assert.Contains(image.Views, cached => cached.Description.MinLod == 0x180);
+        }
+        else
+        {
+            Assert.Equal(plainView, clampedView);
+            var cached = Assert.Single(image.Views);
+            Assert.Equal(0u, cached.Description.MinLod);
+        }
+
         harness.AssertNoValidationMessages();
     }
 

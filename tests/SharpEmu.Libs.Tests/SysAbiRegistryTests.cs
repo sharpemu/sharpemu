@@ -50,6 +50,19 @@ public sealed class SysAbiRegistryTests
         Assert.Equal("libKernel", export.LibraryName);
     }
 
+    [Theory]
+    [InlineData(Generation.Gen4)]
+    [InlineData(Generation.Gen5)]
+    public void RegistryResolvesSchedYieldForBothGenerations(Generation generation)
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(generation));
+
+        Assert.True(manager.TryGetExport("6XG4B33N09g", out var export));
+        Assert.Equal("sched_yield", export.Name);
+        Assert.Equal("libKernel", export.LibraryName);
+    }
+
     [Fact]
     public void RegistryResolvesStorageCompatibilityExports()
     {
@@ -63,5 +76,23 @@ public sealed class SysAbiRegistryTests
         Assert.True(manager.TryGetExport("X4MYzukPc3g", out var saveSearch));
         Assert.Equal("sceSaveDataDirNameSearchPs4", saveSearch.Name);
         Assert.Equal("libSceSaveData", saveSearch.LibraryName);
+
+        Assert.True(manager.TryGetExport("PHnuI4LhuRk", out var saveSearch2));
+        Assert.Equal("sceSaveDataDirNameSearch2", saveSearch2.Name);
+        Assert.Equal("libSceSaveData", saveSearch2.LibraryName);
+    }
+
+    [Theory]
+    [InlineData(Generation.Gen4)]
+    [InlineData(Generation.Gen5)]
+    public void RegistryResolvesSaveDataDirNameSearch2ForBothGenerations(Generation generation)
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(generation));
+
+        Assert.True(manager.TryGetExport("PHnuI4LhuRk", out var export));
+        Assert.Equal("sceSaveDataDirNameSearch2", export.Name);
+        Assert.Equal("libSceSaveData", export.LibraryName);
+        Assert.Equal(Generation.Gen4 | Generation.Gen5, export.Target);
     }
 }

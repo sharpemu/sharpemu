@@ -68,6 +68,46 @@ public sealed class SharedBackingViewsTests
     }
 
     [Fact]
+    public unsafe void ClearCommitsBackingBeforeTheFirstViewIsMapped()
+    {
+        if (!Supported)
+        {
+            return;
+        }
+
+        var host = HostViewMemory.Create();
+        using var store = new SharedBackingViews(host, BackingSize);
+        Assert.True(store.Clear(Segment, Segment));
+
+        var hole = HoleSize(host);
+        var baseAddress = ReserveFreeHole(host, hole);
+        Assert.True(host.SplitHole(baseAddress, Segment));
+        Assert.True(store.TryMapReservedRange(baseAddress, Segment, Segment, HostPageProtection.ReadWrite, out _));
+        Assert.Equal(0UL, *(ulong*)baseAddress);
+
+        Assert.True(store.Unmap(baseAddress, Segment, out _));
+        Assert.True(host.JoinHoles(baseAddress, hole));
+        Assert.True(host.FreeHole(baseAddress, hole));
+    }
+
+    [Fact]
+    public void ClearDoesNotDereferenceBackingWhenCommitFails()
+    {
+        if (!Supported)
+        {
+            return;
+        }
+
+        var host = new FailingHostViews(HostViewMemory.Create());
+        using var store = new SharedBackingViews(host, BackingSize);
+        host.Log.Clear();
+        host.FailNext(Op.CommitBacking);
+
+        Assert.False(store.Clear(0, Segment));
+        Assert.Equal(new[] { Op.CommitBacking }, host.Log);
+    }
+
+    [Fact]
     public unsafe void CopyInAndOut_ShareBytesWithTheView()
     {
         if (!Supported)

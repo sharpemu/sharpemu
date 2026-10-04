@@ -135,6 +135,10 @@ internal sealed class ComputePrewarmRecord
     public Gen5ComputeSystemRegisters? SystemRegisters { get; init; }
     public required ResourceSpecialization Specialization { get; init; }
 
+    // Records written before host subgroup and axis mapping were persisted remain usable.
+    // Their prewarm compile substitutes the current host subgroup instead of the old default.
+    public bool HasHostComputeInfo { get; init; } = true;
+
     public (ulong Hash, uint CodeSize, ulong Address) CodeKey => (Hash, CodeSize, Address);
 }
 
@@ -148,6 +152,7 @@ internal sealed class ShaderPrewarmList : IDisposable
     private const uint FormatVersion = 1;
     private const byte CodeKind = 1;
     private const byte ComputeKind = 2;
+    private const byte ComputeHostInfoVersion = 1;
     private const int RecordHeaderBytes = sizeof(uint) + sizeof(ulong);
 
     private readonly object _gate = new();
@@ -377,10 +382,13 @@ internal sealed class ShaderPrewarmList : IDisposable
         _file.Position = 0;
         _file.ReadExactly(content);
         var validEnd = 0L;
+        var schemaFingerprint = content.Length >= 3 * sizeof(uint)
+            ? BitConverter.ToUInt32(content, 2 * sizeof(uint))
+            : 0;
         if (content.Length >= 3 * sizeof(uint) &&
             BitConverter.ToUInt32(content, 0) == Magic &&
             BitConverter.ToUInt32(content, sizeof(uint)) == FormatVersion &&
-            BitConverter.ToUInt32(content, 2 * sizeof(uint)) == SchemaFingerprint)
+            (schemaFingerprint == SchemaFingerprint || schemaFingerprint == LegacySchemaFingerprint))
         {
             validEnd = 3 * sizeof(uint);
             var offset = (int)validEnd;
@@ -453,9 +461,10 @@ internal sealed class ShaderPrewarmList : IDisposable
         }
     }
 
-    private static readonly uint SchemaFingerprint = ComputeSchemaFingerprint();
+    private static readonly uint SchemaFingerprint = ComputeSchemaFingerprint(legacyComputeInfo: false);
+    private static readonly uint LegacySchemaFingerprint = ComputeSchemaFingerprint(legacyComputeInfo: true);
 
-    private static uint ComputeSchemaFingerprint()
+    private static uint ComputeSchemaFingerprint(bool legacyComputeInfo)
     {
         var builder = new StringBuilder();
         foreach (var type in new[]
@@ -467,6 +476,13 @@ internal sealed class ShaderPrewarmList : IDisposable
             builder.Append(type.FullName).Append('{');
             foreach (var property in type.GetProperties().OrderBy(static property => property.Name, StringComparer.Ordinal))
             {
+                if (legacyComputeInfo &&
+                    type == typeof(ComputeInputInfo) &&
+                    property.Name is nameof(ComputeInputInfo.HostSubgroupSize) or nameof(ComputeInputInfo.WorkgroupAxisMapping))
+                {
+                    continue;
+                }
+
                 builder.Append(property.PropertyType.FullName).Append(' ').Append(property.Name).Append(';');
             }
 
@@ -603,6 +619,17 @@ internal sealed class ShaderPrewarmList : IDisposable
             writer.Write(table.SearchIterations);
         }
 
+        // Append new static compute inputs so the original v1 payload remains a valid prefix.
+        // Omitting this tail for a loaded legacy record also preserves its original identity.
+        if (record.HasHostComputeInfo)
+        {
+            writer.Write(ComputeHostInfoVersion);
+            writer.Write(info.HostSubgroupSize);
+            writer.Write(info.WorkgroupAxisMapping.LogicalX);
+            writer.Write(info.WorkgroupAxisMapping.LogicalY);
+            writer.Write(info.WorkgroupAxisMapping.LogicalZ);
+        }
+
         writer.Flush();
         return stream.ToArray();
     }
@@ -616,23 +643,20 @@ internal sealed class ShaderPrewarmList : IDisposable
         var userDataBase = reader.ReadUInt32();
         var userDataCount = reader.ReadUInt32();
         var pushDataCursor = reader.ReadUInt32();
-        var info = new ComputeInputInfo
-        {
-            ThreadsX = reader.ReadUInt32(),
-            ThreadsY = reader.ReadUInt32(),
-            ThreadsZ = reader.ReadUInt32(),
-            DispatchThreadDimensions = reader.ReadBoolean(),
-            GroupIdX = reader.ReadBoolean(),
-            GroupIdY = reader.ReadBoolean(),
-            GroupIdZ = reader.ReadBoolean(),
-            ThreadIdCount = reader.ReadInt32(),
-            ThreadGroupSizeEnabled = reader.ReadBoolean(),
-            WaveSize = reader.ReadUInt32(),
-            LocalDataShareDwords = reader.ReadUInt32(),
-            ScratchDwords = reader.ReadUInt32(),
-            NeedsLocalDataShareBarriers = reader.ReadBoolean(),
-            WorkgroupRegister = reader.ReadInt32(),
-        };
+        var threadsX = reader.ReadUInt32();
+        var threadsY = reader.ReadUInt32();
+        var threadsZ = reader.ReadUInt32();
+        var dispatchThreadDimensions = reader.ReadBoolean();
+        var groupIdX = reader.ReadBoolean();
+        var groupIdY = reader.ReadBoolean();
+        var groupIdZ = reader.ReadBoolean();
+        var threadIdCount = reader.ReadInt32();
+        var threadGroupSizeEnabled = reader.ReadBoolean();
+        var waveSize = reader.ReadUInt32();
+        var localDataShareDwords = reader.ReadUInt32();
+        var scratchDwords = reader.ReadUInt32();
+        var needsLocalDataShareBarriers = reader.ReadBoolean();
+        var workgroupRegister = reader.ReadInt32();
 
         Gen5ComputeSystemRegisters? registers = reader.ReadBoolean()
             ? new Gen5ComputeSystemRegisters(ReadOptional(reader), ReadOptional(reader), ReadOptional(reader), ReadOptional(reader))
@@ -665,6 +689,47 @@ internal sealed class ShaderPrewarmList : IDisposable
                 reader.ReadUInt32(), reader.ReadUInt32(), reader.ReadUInt32(), reader.ReadUInt32()));
         }
 
+        var hostSubgroupSize = 64u;
+        var workgroupAxisMapping = ComputeWorkgroupAxisMapping.Identity;
+        var hasHostComputeInfo = false;
+        if (reader.BaseStream.Position < reader.BaseStream.Length)
+        {
+            if (reader.ReadByte() != ComputeHostInfoVersion)
+            {
+                throw new ArgumentException("The prewarm compute host-info version is unsupported.");
+            }
+
+            hostSubgroupSize = reader.ReadUInt32();
+            workgroupAxisMapping = new ComputeWorkgroupAxisMapping(
+                reader.ReadInt32(), reader.ReadInt32(), reader.ReadInt32());
+            if (hostSubgroupSize == 0 || !workgroupAxisMapping.IsValid || reader.BaseStream.Position != reader.BaseStream.Length)
+            {
+                throw new ArgumentException("The prewarm compute host info is invalid.");
+            }
+
+            hasHostComputeInfo = true;
+        }
+
+        var info = new ComputeInputInfo
+        {
+            ThreadsX = threadsX,
+            ThreadsY = threadsY,
+            ThreadsZ = threadsZ,
+            DispatchThreadDimensions = dispatchThreadDimensions,
+            GroupIdX = groupIdX,
+            GroupIdY = groupIdY,
+            GroupIdZ = groupIdZ,
+            ThreadIdCount = threadIdCount,
+            ThreadGroupSizeEnabled = threadGroupSizeEnabled,
+            WaveSize = waveSize,
+            LocalDataShareDwords = localDataShareDwords,
+            ScratchDwords = scratchDwords,
+            NeedsLocalDataShareBarriers = needsLocalDataShareBarriers,
+            HostSubgroupSize = hostSubgroupSize,
+            WorkgroupRegister = workgroupRegister,
+            WorkgroupAxisMapping = workgroupAxisMapping,
+        };
+
         return new ComputePrewarmRecord
         {
             Hash = hash,
@@ -676,6 +741,7 @@ internal sealed class ShaderPrewarmList : IDisposable
             Info = info,
             SystemRegisters = registers,
             Specialization = specialization,
+            HasHostComputeInfo = hasHostComputeInfo,
         };
     }
 

@@ -11,10 +11,17 @@ public static class KernelExports
     private static readonly object _cxaGate = new();
     private static readonly List<CxaDestructorEntry> _cxaDestructors = new();
     private static readonly object _coredumpGate = new();
-    private const string RepeatedGuestAssertion = "Assertion failed: 0";
-    private static int _repeatedGuestAssertionCount;
     private static ulong _coredumpHandler;
     private static ulong _coredumpHandlerContext;
+    private static readonly object _guestPrintfGate = new();
+    private static readonly long _guestPrintfRepeatTicks = System.Diagnostics.Stopwatch.Frequency;
+    private static readonly bool _verboseGuestPrintf = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_PRINTF_VERBOSE"),
+        "1",
+        StringComparison.Ordinal);
+    private static string? _lastGuestPrintf;
+    private static long _lastGuestPrintfTicks;
+    private static long _suppressedGuestPrintfCount;
 
     private readonly record struct CxaDestructorEntry(
         ulong Function,
@@ -32,8 +39,8 @@ public static class KernelExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    // KytyPS5 libKernel.cpp KernelGetOperationMode: *mode = 2 (PS5 base console, not Pro),
-    // *submode = 0 (none). Games poll this at high frequency.
+    // Report PS5 base-console mode rather than Pro mode, with no submode.
+    // Games poll this at high frequency.
     [SysAbiExport(
         Nid = "NH6xARDOVv8",
         ExportName = "sceKernelGetOperationMode",
@@ -399,7 +406,7 @@ public static class KernelExports
         ExportName = "sceKernelOpen",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelOpen(CpuContext ctx) => KernelMemoryCompatExports.KernelOpenUnderscore(ctx);
+    public static int KernelOpen(CpuContext ctx) => KernelMemoryCompatExports.KernelOpenCore(ctx);
 
     [SysAbiExport(
         Nid = "mqQMh1zPPT8",
@@ -419,39 +426,57 @@ public static class KernelExports
         string fmt = ReadCString(ctx, fmtPtr, 4096);
         string outStr = KernelMemoryCompatExports.FormatStringFromVarArgs(ctx, fmt, firstGpArgIndex: 1);
         var byteCount = System.Text.Encoding.UTF8.GetByteCount(outStr);
-        if (ShouldWriteGuestPrintf(outStr))
-        {
-            if (outStr.EndsWith('\n') || outStr.EndsWith('\r'))
-            {
-                Console.Write($"[DEBUG][PRINF] {outStr}");
-            }
-            else
-            {
-                Console.WriteLine($"[DEBUG][PRINF] {outStr}");
-            }
-        }
+        WriteGuestPrintf(outStr);
 
         ctx[CpuRegister.Rax] = (ulong)byteCount;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    // Demon\'s Souls can print this same guest-side diagnostic thousands of times during
-    // bootstrap. Printing it does not convey new state and serializes the emulation threads,
-    // but printf must still report its original byte count to the guest.
-    private static bool ShouldWriteGuestPrintf(string text)
+    // Some engines emit the same watchdog diagnostic hundreds of times per second.
+    // Preserve the first message and a periodic count without allowing synchronous
+    // console I/O to become the frame limiter. The guest-visible printf result is
+    // unchanged, and verbose output remains available for focused debugging.
+    private static void WriteGuestPrintf(string output)
     {
-        if (!string.Equals(text.TrimEnd('\r', '\n'), RepeatedGuestAssertion, StringComparison.Ordinal))
+        if (_verboseGuestPrintf)
         {
-            return true;
+            WriteGuestPrintfCore(output);
+            return;
         }
 
-        var count = Interlocked.Increment(ref _repeatedGuestAssertionCount);
-        if (count == 2)
+        lock (_guestPrintfGate)
         {
-            Console.WriteLine("[DEBUG][PRINF] Further repeated 'Assertion failed: 0' messages are suppressed.");
-        }
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            var repeated = string.Equals(output, _lastGuestPrintf, StringComparison.Ordinal);
+            if (repeated && now - _lastGuestPrintfTicks < _guestPrintfRepeatTicks)
+            {
+                _suppressedGuestPrintfCount++;
+                return;
+            }
 
-        return count == 1;
+            if (_suppressedGuestPrintfCount != 0)
+            {
+                Console.WriteLine(
+                    $"[DEBUG][PRINF] Previous message repeated {_suppressedGuestPrintfCount} time(s).");
+                _suppressedGuestPrintfCount = 0;
+            }
+
+            _lastGuestPrintf = output;
+            _lastGuestPrintfTicks = now;
+            WriteGuestPrintfCore(output);
+        }
+    }
+
+    private static void WriteGuestPrintfCore(string output)
+    {
+        if (output.EndsWith('\n') || output.EndsWith('\r'))
+        {
+            Console.Write($"[DEBUG][PRINF] {output}");
+        }
+        else
+        {
+            Console.WriteLine($"[DEBUG][PRINF] {output}");
+        }
     }
 
     [SysAbiExport(

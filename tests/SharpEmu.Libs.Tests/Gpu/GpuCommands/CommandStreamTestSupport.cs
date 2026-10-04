@@ -43,6 +43,8 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public int PendingCommandRuns { get; private set; }
 
+    public Action? OnSynchronizeGpu { get; set; }
+
     public bool FlipSlot { get; set; } = true;
 
     public bool FlipDone { get; set; } = true;
@@ -81,7 +83,11 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public void FlushAndWait() => Calls.Add("flush_and_wait");
 
-    public void SynchronizeGpu() => Calls.Add("synchronize");
+    public void SynchronizeGpu()
+    {
+        Calls.Add("synchronize");
+        OnSynchronizeGpu?.Invoke();
+    }
 
     public void RunGarbageCollector() => Calls.Add("gc");
 
@@ -137,8 +143,44 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public void RecordEndOfPipe(in EndOfPipeWrite write)
     {
+        PublishEndOfPipeLabel(write);
         EndOfPipeWrites.Add(write);
         Calls.Add($"eop {write.Kind}");
+    }
+
+    private void PublishEndOfPipeLabel(in EndOfPipeWrite write)
+    {
+        switch (write.Kind)
+        {
+            case EndOfPipeWriteKind.Write32:
+            case EndOfPipeWriteKind.WriteBack32:
+            case EndOfPipeWriteKind.Interrupt32:
+            case EndOfPipeWriteKind.InterruptWriteBack32:
+            case EndOfPipeWriteKind.FlipWithWrite32:
+            case EndOfPipeWriteKind.FlipWithInterruptWriteBack32:
+                WriteDword(write.Destination, (uint)write.Value);
+                return;
+            case EndOfPipeWriteKind.Write64:
+            case EndOfPipeWriteKind.WriteBack64:
+            case EndOfPipeWriteKind.Interrupt64:
+            case EndOfPipeWriteKind.InterruptWriteBack64:
+                WriteQword(write.Destination, write.Value);
+                return;
+            case EndOfPipeWriteKind.ClockWrite:
+            case EndOfPipeWriteKind.ClockWriteBack:
+            case EndOfPipeWriteKind.InterruptClockWrite:
+            case EndOfPipeWriteKind.InterruptClockWriteBack:
+                WriteQword(write.Destination, EndOfPipe.ReadReferenceClock());
+                return;
+            case EndOfPipeWriteKind.GdsWrite32:
+            case EndOfPipeWriteKind.InterruptGdsWrite32:
+            {
+                var words = new uint[checked((int)write.GdsWordCount)];
+                EndOfPipe.ReadGdsWords(Gds, words, write.GdsWordOffset, write.GdsWordCount);
+                WriteWords(write.Destination, words);
+                return;
+            }
+        }
     }
 
     public void TriggerInterrupt(int eventId, uint contextId) => Calls.Add($"interrupt {eventId} {contextId}");
@@ -171,14 +213,22 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
         Calls.Add($"draw_auto {submitId} {arguments.VertexCount}");
     }
 
-    public void DispatchDirect(ulong submitId, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0) =>
+    public void DispatchDirect(ulong submitId, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
+    {
         Calls.Add(indirectArgumentsAddress == 0
             ? $"dispatch {submitId} {groupsX} {groupsY} {groupsZ} {dispatchInitiator:X}"
             : $"dispatch {submitId} {groupsX} {groupsY} {groupsZ} {dispatchInitiator:X} @{indirectArgumentsAddress:X}");
+        if (indirectArgumentsAddress != 0)
+        {
+            IndirectDispatchArguments.Add(indirectArgumentsAddress);
+        }
+    }
 
     public bool ResolvesIndirectDispatchOnGpu { get; set; }
 
     public bool ResolvesIndirectDrawOnGpu { get; set; }
+
+    public List<ulong> IndirectDispatchArguments { get; } = new();
 
     public void OnQueueReset(int queueId) => Calls.Add($"queue_reset {queueId}");
 

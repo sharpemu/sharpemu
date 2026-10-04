@@ -27,10 +27,15 @@ public sealed class DataShareThreadWriteDeviceTests(HeadlessVulkanFixture fixtur
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
         var program = Gen5DataShareThreadWriteTests.CreateReadbackProgram(scalarBase, byteOffset, maskOddLanes);
-        var (plan, resources, layout) = Prepare(program);
+        var (plan, resources, layout) = Prepare(program, waveSize: waveSize);
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
             LocalSizeX = waveSize, ThreadCountX = waveSize, WaveSize = waveSize,
+            // The synthetic program addresses at most 0x400 bytes of LDS.  Keep
+            // the declared guest allocation explicit so wave64 translation can
+            // reserve its private cross-half exchange tail without treating an
+            // unknown zero-sized allocation as the full 32 KiB hardware range.
+            LocalDataShareDwords = 256,
         };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         using var harness = new ImageTestHarness(vulkan);

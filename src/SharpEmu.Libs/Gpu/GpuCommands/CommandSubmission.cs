@@ -101,6 +101,9 @@ public sealed class CommandSubmission
     // The submitter's own sequence number, kept for diagnostics and the translation state.
     public ulong SubmissionId { get; }
 
+    // Global queue admission order; control barriers use it across graphics and compute queues.
+    internal ulong AdmissionOrdinal { get; set; }
+
     // Snapshots captured at submit time; the processor never reads them.
     public object? GeometrySnapshots { get; }
 

@@ -87,6 +87,56 @@ public sealed class Gen5ShaderAtomicDecodeTests
     }
 
     [Fact]
+    public void BufferAtomicOrX2_UsesOneLittleEndianRegisterPair()
+    {
+        // BUFFER_ATOMIC_OR_X2 v[1:2], off, s[0:3], 128 glc
+        var instruction = DecodeSingle(0xE1684000, 0x80000100);
+
+        Assert.Equal("BufferAtomicOrX2", instruction.Opcode);
+        var control = Assert.IsType<Gen5BufferMemoryControl>(instruction.Control);
+        Assert.Equal(2u, control.DwordCount);
+        Assert.Equal(1u, control.VectorData);
+        Assert.Equal(0u, control.ScalarResource);
+        Assert.True(control.Glc);
+        Assert.Equal(
+            new[] { Gen5Operand.Vector(1), Gen5Operand.Vector(2) },
+            instruction.Destinations);
+    }
+
+    [Fact]
+    public void BufferAtomicSwapX2_UsesOneLittleEndianRegisterPair()
+    {
+        // BUFFER_ATOMIC_SWAP_X2 v[1:2], off, s[0:3], 128 glc
+        var instruction = DecodeSingle(0xE1404000, 0x80000100);
+
+        Assert.Equal("BufferAtomicSwapX2", instruction.Opcode);
+        var control = Assert.IsType<Gen5BufferMemoryControl>(instruction.Control);
+        Assert.Equal(2u, control.DwordCount);
+        Assert.Equal(1u, control.VectorData);
+        Assert.Equal(0u, control.ScalarResource);
+        Assert.True(control.Glc);
+        Assert.Equal(
+            new[] { Gen5Operand.Vector(1), Gen5Operand.Vector(2) },
+            instruction.Destinations);
+    }
+
+    [Theory]
+    [InlineData(0xE0FC4000u, "BufferAtomicFmin")]
+    [InlineData(0xE1004000u, "BufferAtomicFmax")]
+    public void BufferFloatAtomic_DecodesAsOneDword(uint word, string opcode)
+    {
+        var instruction = DecodeSingle(word, 0x80000100);
+
+        Assert.Equal(opcode, instruction.Opcode);
+        var control = Assert.IsType<Gen5BufferMemoryControl>(instruction.Control);
+        Assert.Equal(1u, control.DwordCount);
+        Assert.Equal(1u, control.VectorData);
+        Assert.Equal(0u, control.ScalarResource);
+        Assert.True(control.Glc);
+        Assert.Equal(new[] { Gen5Operand.Vector(1) }, instruction.Destinations);
+    }
+
+    [Fact]
     public void ImageAtomicAdd_KeepsDataRegisterAsDestination()
     {
         // IMAGE_ATOMIC_ADD v2, v[0:1], s[4:11] dmask:0x1 dim:2D glc
@@ -107,14 +157,15 @@ public sealed class Gen5ShaderAtomicDecodeTests
         var instruction = DecodeSingle(0xF1980F01, 0x00010C00);
 
         Assert.Equal("ImageBvhIntersectRay", instruction.Opcode);
-        var control = Assert.IsType<Gen5RayIntersectControl>(instruction.Control);
+        var control = Assert.IsType<Gen5BvhRayControl>(instruction.Control);
         Assert.Equal(12u, control.VectorData);
         Assert.Equal(4u, control.ScalarResource);
         Assert.Equal(
             Enumerable.Range(12, 4).Select(index => Gen5Operand.Vector((uint)index)),
             instruction.Destinations);
         Assert.Equal(
-            Enumerable.Range(0, 11).Select(index => Gen5Operand.Vector((uint)index)).Append(Gen5Operand.Scalar(4)),
+            Enumerable.Range(0, 11).Select(index => Gen5Operand.Vector((uint)index))
+                .Concat(Enumerable.Range(4, 4).Select(index => Gen5Operand.Scalar((uint)index))),
             instruction.Sources);
     }
 

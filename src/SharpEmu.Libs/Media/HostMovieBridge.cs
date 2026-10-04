@@ -354,7 +354,8 @@ internal static class HostMovieBridge
             Timeout.InfiniteTimeSpan);
     }
 
-    // Must outlast the whole movie: Demon's Souls ships a 171 s intro and 756 s credits.
+    // The watchdog only exists to release a stalled host decoder, so derive its
+    // deadline from the complete movie duration rather than a fixed short bound.
     internal static TimeSpan GetPlaybackWatchdogTimeout(Bink2MovieInfo info)
     {
         if (info.FrameCount == 0 ||

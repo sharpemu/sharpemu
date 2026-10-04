@@ -30,7 +30,16 @@ public struct TileTransfer
 
 public readonly record struct RenderTargetFormatInfo(Format HostFormat, uint BytesPerElement, ColorComponentMap ExportMapping);
 
-public readonly record struct SurfaceFormatInfo(Format HostFormat, GuestPixelFormat ConversionFormat);
+public readonly record struct SurfaceFormatInfo(
+    Format HostFormat,
+    GuestPixelFormat ConversionFormat,
+    ColorComponentMap HostToStorage)
+{
+    public SurfaceFormatInfo(Format hostFormat, GuestPixelFormat conversionFormat)
+        : this(hostFormat, conversionFormat, ColorComponentMap.Identity)
+    {
+    }
+}
 
 public struct TransferMipLayout
 {
@@ -57,7 +66,7 @@ public sealed class TextureTransferLayout
         [ColorComponentMap.Agba, ColorComponentMap.Arbg, ColorComponentMap.Agbr, ColorComponentMap.Argb],
     ];
 
-    private static (Format Format, ColorComponentMap HostToStorage) RenderTargetHostFormat(GuestPixelFormat guestFormat, ChannelOrder order)
+    private static (Format Format, ColorComponentMap HostToStorage) ResolveHostFormat(GuestPixelFormat guestFormat, ChannelOrder order)
     {
         if (order == ChannelOrder.Alternate)
         {
@@ -84,7 +93,7 @@ public sealed class TextureTransferLayout
         var encoding = GuestPixelFormats.ResolveRenderTargetEncoding(layout, type);
         if (encoding.IsValid && encoding.SupportsOrder(order))
         {
-            var host = RenderTargetHostFormat(encoding.Format, order);
+            var host = ResolveHostFormat(encoding.Format, order);
             var bytes = GuestPixelFormats.RenderTargetBytesPerElement(encoding.Format);
             if (host.Format != Format.Undefined && bytes != 0)
             {
@@ -99,13 +108,16 @@ public sealed class TextureTransferLayout
     public static SurfaceFormatInfo SurfaceFormat(GuestPixelFormat format)
     {
         var backingFormat = GuestPixelFormats.RemapTextureFormat(format);
-        var hostFormat = GuestPixelFormats.HostFormat(backingFormat);
-        if (hostFormat == Format.Undefined)
+        var host = ResolveHostFormat(backingFormat, ChannelOrder.Standard);
+        if (host.Format == Format.Undefined)
         {
             throw SubmissionScheduler.Fatal($"The guest texture format has no host format: format={(uint)format}.");
         }
 
-        return new SurfaceFormatInfo(hostFormat, backingFormat != format ? format : GuestPixelFormat.Invalid);
+        return new SurfaceFormatInfo(
+            host.Format,
+            backingFormat != format ? format : GuestPixelFormat.Invalid,
+            host.HostToStorage);
     }
 
     private static uint LevelDepth(uint depth, uint level, bool volume) => volume ? Math.Max(depth >> (int)level, 1) : depth;
@@ -452,7 +464,9 @@ public sealed class TextureTransferLayout
                     transfer.Width = Math.Max((region.ImageExtent.Width + texture.TexelWidth - 1) / texture.TexelWidth, 1);
                     transfer.Height = Math.Max((logicalHeight + texture.TexelHeight - 1) / texture.TexelHeight, 1);
                     transfer.Depth = 1;
-                    transfer.SurfaceZ = block.Kind is TileBlockKind.RenderTarget64KB or TileBlockKind.Depth64KB ? region.ImageSubresource.BaseArrayLayer : 0;
+                    transfer.SurfaceZ = block.Kind is TileBlockKind.RenderTarget64KB or TileBlockKind.RenderTarget64KBGen5 or TileBlockKind.Depth64KB
+                        ? region.ImageSubresource.BaseArrayLayer
+                        : 0;
                     transfer.Pitch = Math.Max((pitch + texture.TexelWidth - 1) / texture.TexelWidth, 1);
                     transfer.Tail = tail;
                     transfer.TailX = tail ? mip.TailX : 0;

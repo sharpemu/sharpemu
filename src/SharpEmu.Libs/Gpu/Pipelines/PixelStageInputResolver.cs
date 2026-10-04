@@ -103,6 +103,7 @@ public static class PixelStageInputResolver
         return new PixelInputInfo
         {
             InputCount = inputCount,
+            WaveSize = GraphicsWaveSizeResolver.Pixel(shaderInterface.PixelInputControl),
             SystemInputBase = CountSystemInputRegisters(shaderInterface, shader.CodeAddress),
             CustomInterpolationMask = customMask,
             PerspectiveCenterRegister = (activeInputs & InputPerspectiveCenter) != 0
@@ -117,6 +118,7 @@ public static class PixelStageInputResolver
             PositionZ = (activeInputs & InputPositionZ) != 0,
             PositionW = (activeInputs & InputPositionW) != 0,
             FrontFace = (activeInputs & InputFrontFace) != 0,
+            Ancillary = (activeInputs & InputAncillary) != 0,
             SampleShading = (activeInputs & (InputPerspectiveSample | InputLinearSample)) != 0,
             NoPerspective = (activeInputs & InputLinearCenter) != 0,
             KillEnable = control.KillEnable,

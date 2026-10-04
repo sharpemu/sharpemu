@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Text;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
@@ -16,13 +17,35 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
     private readonly Queue _queue;
     private readonly CommandPool _pool;
     private readonly VkSemaphore _timeline;
+    private readonly bool _deviceFaultEnabled;
+    private readonly delegate* unmanaged<Device, DeviceFaultCountsEXT*, DeviceFaultInfoEXT*, Result> _getDeviceFaultInfo;
 
-    public VulkanTickDevice(Vk vk, Device device, Queue queue, uint queueFamilyIndex, object queueGate, PhysicalDevice profilePhysicalDevice = default)
+    public VulkanTickDevice(
+        Vk vk,
+        Device device,
+        Queue queue,
+        uint queueFamilyIndex,
+        object queueGate,
+        PhysicalDevice profilePhysicalDevice = default,
+        bool deviceFaultEnabled = false)
     {
         _vk = vk;
         _device = device;
         _queue = queue;
         QueueGate = queueGate;
+        _deviceFaultEnabled = deviceFaultEnabled;
+        if (deviceFaultEnabled)
+        {
+            var getDeviceFaultInfo = _vk.GetDeviceProcAddr(_device, "vkGetDeviceFaultInfoEXT");
+            _getDeviceFaultInfo =
+                (delegate* unmanaged<Device, DeviceFaultCountsEXT*, DeviceFaultInfoEXT*, Result>)getDeviceFaultInfo.Handle;
+            if (_getDeviceFaultInfo == null)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] VK_EXT_device_fault was enabled but vkGetDeviceFaultInfoEXT is unavailable.");
+            }
+        }
+
         var poolInfo = new CommandPoolCreateInfo
         {
             SType = StructureType.CommandPoolCreateInfo,
@@ -224,7 +247,9 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
         {
             result = _vk.WaitSemaphores(_device, &waitInfo, ulong.MaxValue);
         }
-        failure = result.ToString();
+        failure = result == Result.ErrorDeviceLost
+            ? result + ReadDeviceFaultDetails()
+            : result.ToString();
         return result == Result.Success && WaitRetired(tick);
     }
 
@@ -360,8 +385,92 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
 
             if (result == Result.Success)
                 CommandProfile?.MarkSubmitted(buffer);
-            failure = result.ToString();
+            failure = result == Result.ErrorDeviceLost
+                ? result + ReadDeviceFaultDetails()
+                : result.ToString();
             return result == Result.Success;
+        }
+    }
+
+    private string ReadDeviceFaultDetails()
+    {
+        if (!_deviceFaultEnabled)
+        {
+            return string.Empty;
+        }
+
+        if (_getDeviceFaultInfo == null)
+        {
+            return "; device_fault=proc_unavailable";
+        }
+
+        try
+        {
+            var counts = new DeviceFaultCountsEXT
+            {
+                SType = StructureType.DeviceFaultCountsExt,
+            };
+            var countResult = _getDeviceFaultInfo(_device, &counts, null);
+            if (countResult != Result.Success)
+            {
+                return $"; device_fault_counts={countResult}";
+            }
+
+            const uint maxRecords = 256;
+            var reportedAddressCount = counts.AddressInfoCount;
+            var reportedVendorCount = counts.VendorInfoCount;
+            var reportedVendorBinarySize = counts.VendorBinarySize;
+            var addresses = new DeviceFaultAddressInfoEXT[checked((int)Math.Min(reportedAddressCount, maxRecords))];
+            var vendors = new DeviceFaultVendorInfoEXT[checked((int)Math.Min(reportedVendorCount, maxRecords))];
+            fixed (DeviceFaultAddressInfoEXT* addressPointer = addresses)
+            fixed (DeviceFaultVendorInfoEXT* vendorPointer = vendors)
+            {
+                counts.AddressInfoCount = (uint)addresses.Length;
+                counts.VendorInfoCount = (uint)vendors.Length;
+                counts.VendorBinarySize = 0;
+                var info = new DeviceFaultInfoEXT
+                {
+                    SType = StructureType.DeviceFaultInfoExt,
+                    PAddressInfos = addressPointer,
+                    PVendorInfos = vendorPointer,
+                    PVendorBinaryData = null,
+                };
+                var infoResult = _getDeviceFaultInfo(_device, &counts, &info);
+                var hasDetails = infoResult is Result.Success or Result.Incomplete;
+                var addressCount = hasDetails
+                    ? (int)Math.Min((uint)addresses.Length, counts.AddressInfoCount)
+                    : 0;
+                var vendorCount = hasDetails
+                    ? (int)Math.Min((uint)vendors.Length, counts.VendorInfoCount)
+                    : 0;
+                var details = new StringBuilder(192);
+                details.Append("; device_fault=").Append(infoResult)
+                    .Append(" addresses=").Append(addressCount).Append('/').Append(reportedAddressCount)
+                    .Append(" vendors=").Append(vendorCount).Append('/').Append(reportedVendorCount)
+                    .Append(" vendor_binary=").Append(reportedVendorBinarySize);
+                for (var index = 0; index < addressCount; index++)
+                {
+                    var address = addresses[index];
+                    details.Append(" address[").Append(index).Append("]=")
+                        .Append(address.AddressType)
+                        .Append("@0x").Append(address.ReportedAddress.ToString("X16"))
+                        .Append("+/-0x").Append(address.AddressPrecision.ToString("X"));
+                }
+
+                for (var index = 0; index < vendorCount; index++)
+                {
+                    var vendor = vendors[index];
+                    details.Append(" vendor[").Append(index).Append("]=code:0x")
+                        .Append(vendor.VendorFaultCode.ToString("X"))
+                        .Append(",data:0x").Append(vendor.VendorFaultData.ToString("X"));
+                }
+
+                return details.ToString();
+            }
+        }
+        catch (Exception exception)
+        {
+            return $"; device_fault_query_exception={exception.GetType().Name}";
         }
     }
 

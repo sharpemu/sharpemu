@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Threading;
-using Iced.Intel;
 using SharpEmu.Core.Cpu.Emulation;
 
 namespace SharpEmu.Core.Cpu.Native;
@@ -26,7 +25,22 @@ public sealed partial class DirectExecutionBackend
 
     private unsafe bool TryRecoverAmdCompatInstruction(void* contextRecord, ulong rip)
     {
-        if (TryRecoverMonitorxMwaitx(contextRecord, rip))
+        // Read the faulting bytes once. Both AMD compatibility families are short and fixed;
+        // sharing this probe avoids a second VirtualQuery/kernel read on every recovered #UD.
+        Span<byte> bytes = stackalloc byte[7];
+        var byteCount = bytes.Length;
+        while (byteCount >= 3 && !TryReadExecutableBytes(rip, bytes[..byteCount]))
+        {
+            byteCount--;
+        }
+
+        if (byteCount < 3)
+        {
+            return false;
+        }
+
+        var instructionBytes = bytes[..byteCount];
+        if (TryRecoverMonitorxMwaitx(contextRecord, rip, instructionBytes))
         {
             return true;
         }
@@ -34,15 +48,17 @@ public sealed partial class DirectExecutionBackend
         // EXTRQ and INSERTQ need the current vector register values.
         // Use recovery only when the signal context contains these values.
         return (OperatingSystem.IsWindows() || _posixXmmContextBridged) &&
-            TryRecoverSse4aExtractInsert(contextRecord, rip);
+            TryRecoverSse4aExtractInsert(contextRecord, rip, instructionBytes);
     }
 
-    private unsafe bool TryRecoverMonitorxMwaitx(void* contextRecord, ulong rip)
+    private unsafe bool TryRecoverMonitorxMwaitx(
+        void* contextRecord,
+        ulong rip,
+        ReadOnlySpan<byte> opcode)
     {
         // MONITORX (0F 01 FA) and MWAITX (0F 01 FB) are fixed 3-byte encodings with no
         // ModRM/SIB/displacement/immediate, so a raw byte compare is sufficient and unambiguous.
-        var opcode = new byte[3];
-        if (!TryReadExecutableBytes(rip, opcode) ||
+        if (opcode.Length < 3 ||
             opcode[0] != 0x0F || opcode[1] != 0x01 || (opcode[2] != 0xFA && opcode[2] != 0xFB))
         {
             return false;
@@ -73,58 +89,40 @@ public sealed partial class DirectExecutionBackend
         return true;
     }
 
-    private unsafe bool TryRecoverSse4aExtractInsert(void* contextRecord, ulong rip)
+    private unsafe bool TryRecoverSse4aExtractInsert(
+        void* contextRecord,
+        ulong rip,
+        ReadOnlySpan<byte> bytes)
     {
-        if (!OperatingSystem.IsWindows() && !_posixXmmContextBridged ||
-            !TryReadFaultingInstruction(rip, out var instruction))
+        if (!OperatingSystem.IsWindows() && !_posixXmmContextBridged)
         {
             return false;
         }
 
-        var isExtrq = instruction.Mnemonic == Mnemonic.Extrq;
-        var isInsertq = instruction.Mnemonic == Mnemonic.Insertq;
-        if (!isExtrq && !isInsertq)
+        // This path runs in an illegal-instruction handler and can execute many times at a
+        // hot guest site on Intel hosts. Iced decoding allocated a byte array and decoder for
+        // every #UD. Decode the three fixed SSE4a encodings directly, as the architecture
+        // defines them, so recovery itself is allocation-free. The staged reads retain the
+        // old page-boundary behaviour for a short register-form EXTRQ.
+        if (!TryDecodeSse4aInstruction(bytes, out var decoded))
         {
             return false;
         }
 
-        var isImmediateExtrq = isExtrq && instruction.OpCount == 3;
-        var isRegisterExtrq = isExtrq && instruction.OpCount == 2;
-        var isImmediateInsertq = isInsertq && instruction.OpCount == 4;
-        if (!isImmediateExtrq && !isRegisterExtrq && !isImmediateInsertq)
-        {
-            return false;
-        }
-
-        if (instruction.GetOpKind(0) != OpKind.Register ||
-            !TryGetXmmOffset(instruction.GetOpRegister(0), out var destOffset))
-        {
-            return false;
-        }
-
+        var destOffset = Win64ContextXmm0Offset + decoded.DestinationRegister * 16;
         var destLow = ReadCtxU64(contextRecord, destOffset);
-        if (isExtrq)
+        if (!decoded.IsInsert)
         {
-            int length;
-            int index;
-            if (isRegisterExtrq)
+            var length = decoded.Length;
+            var index = decoded.Index;
+            if (decoded.UsesRegisterControl)
             {
-                if (instruction.GetOpKind(1) != OpKind.Register ||
-                    !TryGetXmmOffset(instruction.GetOpRegister(1), out var controlOffset))
-                {
-                    return false;
-                }
-
                 // AMD defines the register form's field length in xmm2[5:0] and its start
                 // index in xmm2[13:8]. Other control bits do not affect the instruction.
+                var controlOffset = Win64ContextXmm0Offset + decoded.SourceRegister * 16;
                 var control = ReadCtxU64(contextRecord, controlOffset);
                 length = (int)(control & 0x3F);
                 index = (int)((control >> 8) & 0x3F);
-            }
-            else
-            {
-                length = (int)instruction.GetImmediate(1);
-                index = (int)instruction.GetImmediate(2);
             }
 
             WriteCtxU64(contextRecord, destOffset, Sse4aBitFieldEmulator.ExtractBitField(destLow, length, index));
@@ -132,20 +130,14 @@ public sealed partial class DirectExecutionBackend
         }
         else
         {
-            if (instruction.GetOpKind(1) != OpKind.Register ||
-                !TryGetXmmOffset(instruction.GetOpRegister(1), out var srcOffset))
-            {
-                return false;
-            }
-
-            var length = (int)instruction.GetImmediate(2);
-            var index = (int)instruction.GetImmediate(3);
+            var srcOffset = Win64ContextXmm0Offset + decoded.SourceRegister * 16;
             WriteCtxU64(contextRecord, destOffset, Sse4aBitFieldEmulator.InsertBitField(
-                destLow, ReadCtxU64(contextRecord, srcOffset), length, index));
-            WriteCtxU64(contextRecord, destOffset + 8, 0);
+                destLow, ReadCtxU64(contextRecord, srcOffset), decoded.Length, decoded.Index));
+            // Unlike EXTRQ, INSERTQ modifies only the low 64-bit quadword. Preserve the
+            // destination's upper quadword exactly as the hardware instruction does.
         }
 
-        WriteCtxU64(contextRecord, CTX_RIP, rip + (ulong)instruction.Length);
+        WriteCtxU64(contextRecord, CTX_RIP, rip + (ulong)decoded.InstructionLength);
 
         Interlocked.Increment(ref _sse4aInstructionsEmulated);
         if (Interlocked.Exchange(ref _sse4aSoftwareFallbackAnnounced, 1) == 0)
@@ -158,32 +150,76 @@ public sealed partial class DirectExecutionBackend
         return true;
     }
 
-    // Maps an Iced XMM register to its byte offset in the Win64 CONTEXT record. Written as an
-    // explicit switch (rather than arithmetic on the Register enum) to match the style already
-    // used by TryGetGprSlot/TryGetGpr64Offset in DirectExecutionBackend.IllegalInstruction.cs.
-    private static bool TryGetXmmOffset(Register register, out int offset)
+    internal static bool TryDecodeSse4aInstruction(
+        ReadOnlySpan<byte> bytes,
+        out Sse4aDecodedInstruction instruction)
     {
-        switch (register)
+        instruction = default;
+        if (bytes.Length < 4 || (bytes[0] != 0x66 && bytes[0] != 0xF2))
         {
-            case Register.XMM0: offset = Win64ContextXmm0Offset + 16 * 0; return true;
-            case Register.XMM1: offset = Win64ContextXmm0Offset + 16 * 1; return true;
-            case Register.XMM2: offset = Win64ContextXmm0Offset + 16 * 2; return true;
-            case Register.XMM3: offset = Win64ContextXmm0Offset + 16 * 3; return true;
-            case Register.XMM4: offset = Win64ContextXmm0Offset + 16 * 4; return true;
-            case Register.XMM5: offset = Win64ContextXmm0Offset + 16 * 5; return true;
-            case Register.XMM6: offset = Win64ContextXmm0Offset + 16 * 6; return true;
-            case Register.XMM7: offset = Win64ContextXmm0Offset + 16 * 7; return true;
-            case Register.XMM8: offset = Win64ContextXmm0Offset + 16 * 8; return true;
-            case Register.XMM9: offset = Win64ContextXmm0Offset + 16 * 9; return true;
-            case Register.XMM10: offset = Win64ContextXmm0Offset + 16 * 10; return true;
-            case Register.XMM11: offset = Win64ContextXmm0Offset + 16 * 11; return true;
-            case Register.XMM12: offset = Win64ContextXmm0Offset + 16 * 12; return true;
-            case Register.XMM13: offset = Win64ContextXmm0Offset + 16 * 13; return true;
-            case Register.XMM14: offset = Win64ContextXmm0Offset + 16 * 14; return true;
-            case Register.XMM15: offset = Win64ContextXmm0Offset + 16 * 15; return true;
-            default:
-                offset = 0;
-                return false;
+            return false;
         }
+
+        var prefix = bytes[0];
+        var offset = 1;
+        byte rex = 0;
+        if (offset < bytes.Length && (bytes[offset] & 0xF0) == 0x40)
+        {
+            rex = bytes[offset++];
+        }
+
+        if (bytes.Length < offset + 3 || bytes[offset] != 0x0F)
+        {
+            return false;
+        }
+
+        var opcode = bytes[offset + 1];
+        var modRm = bytes[offset + 2];
+        if ((modRm & 0xC0) != 0xC0)
+        {
+            // EXTRQ/INSERTQ have register operands only. Refuse memory-looking encodings so
+            // exception recovery cannot reinterpret an unrelated opcode.
+            return false;
+        }
+
+        var reg = ((modRm >> 3) & 7) | ((rex & 0x04) << 1);
+        var rm = (modRm & 7) | ((rex & 0x01) << 3);
+        if (prefix == 0x66 && opcode == 0x79)
+        {
+            instruction = new Sse4aDecodedInstruction(
+                IsInsert: false,
+                UsesRegisterControl: true,
+                DestinationRegister: reg,
+                SourceRegister: rm,
+                Length: 0,
+                Index: 0,
+                InstructionLength: offset + 3);
+            return true;
+        }
+
+        if (opcode != 0x78 || bytes.Length < offset + 5)
+        {
+            return false;
+        }
+
+        var isInsert = prefix == 0xF2;
+        instruction = new Sse4aDecodedInstruction(
+            IsInsert: isInsert,
+            UsesRegisterControl: false,
+            DestinationRegister: isInsert ? reg : rm,
+            SourceRegister: rm,
+            Length: bytes[offset + 3],
+            Index: bytes[offset + 4],
+            InstructionLength: offset + 5);
+        return true;
     }
+
+    internal readonly record struct Sse4aDecodedInstruction(
+        bool IsInsert,
+        bool UsesRegisterControl,
+        int DestinationRegister,
+        int SourceRegister,
+        int Length,
+        int Index,
+        int InstructionLength);
 }

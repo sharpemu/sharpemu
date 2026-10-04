@@ -274,10 +274,12 @@ public static class NpManagerExports
             return SetReturn(ctx, NpErrorInvalidArgument);
         }
 
+        // The local profile has no online NP enrollment. The ABI result is a
+        // one-byte C++ bool, not the 32-bit state returned by sceNpGetState.
         Span<byte> signedUp = stackalloc byte[1];
-        signedUp[0] = 0; // No online account is configured in the offline profile.
+        signedUp[0] = 0;
         return ctx.Memory.TryWrite(resultAddress, signedUp)
-            ? SetReturn(ctx, 0)
+            ? SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_OK)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 

@@ -57,6 +57,12 @@ internal interface IGuestGpuBackend
     // Marks the frame boundary; off the worker it first waits for the accepted submissions.
     IdleOutcome SubmitDone(ICpuMemory memory);
 
+    // Runs a state change after command streams already accepted by the backend have been parsed.
+    void RunAfterPendingCommandStreams(Action work)
+    {
+        work();
+    }
+
     /// <summary>Registers a display buffer with its guest texture format tag.</summary>
     void RegisterKnownDisplayBuffer(ulong address, uint guestFormat);
 

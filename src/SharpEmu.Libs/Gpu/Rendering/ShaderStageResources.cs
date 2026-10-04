@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
@@ -14,6 +15,7 @@ public enum ShaderStageKind
     Vertex,
     Pixel,
     Compute,
+    Mesh,
 }
 
 public enum ImageResourceClass : byte
@@ -46,6 +48,12 @@ public class ShaderProgramInfo
     public uint UserDataBase { get; init; }
     public uint UserDataCount { get; init; }
     public uint ParameterExportMask { get; init; }
+    // Pixel interpolation attributes referenced by the decoded program. Fixed
+    // pre-raster stages use these exact slots to keep location remapping equal
+    // to the fragment module's interface.
+    public uint[] PixelParameterInputs { get; init; } = [];
+    // The final pre-raster stage declares and can write gl_ViewportIndex.
+    public bool WritesViewportIndex { get; init; }
     // Four component bits per color target (MRT0 in the low nibble) the pixel program exports.
     public uint PixelColorExportMasks { get; init; } = uint.MaxValue;
     public int VertexOffsetScalarRegister { get; init; } = NoScalarRegister;
@@ -123,6 +131,48 @@ public readonly record struct ClipSpaceTransform(
     float HalfExtentX,
     float HalfExtentY);
 
+// The workgroup and output shape of one merged ES+GS program lowered to a host mesh shader.
+// The guest schedules logical wave64 lanes; HostSubgroupSize describes the physical subgroup
+// width used to represent them on the host.
+public sealed class MeshInputInfo
+{
+    public GuestPrimitiveType InputPrimitive { get; init; }
+    public uint PrimitivesPerGroup { get; init; }
+    public uint VerticesPerGroup { get; init; }
+    public uint MaxVertices { get; init; }
+    public uint MaxPrimitives { get; init; }
+    public uint OutputPrimitive { get; init; }
+    public uint ProvokingVertex { get; init; }
+    public uint ThreadsX { get; init; }
+    public uint ThreadsY { get; init; } = 1;
+    public uint ThreadsZ { get; init; } = 1;
+    public uint LocalDataShareDwords { get; init; }
+    public uint ScratchDwords { get; init; }
+    public uint HostSubgroupSize { get; set; } = 64;
+    public uint WaveSize { get; init; } = 64;
+
+    public bool IsActive => ThreadsX != 0;
+
+    public uint InputPrimitiveSize() => InputPrimitive switch
+    {
+        GuestPrimitiveType.PointList => 1,
+        GuestPrimitiveType.LineList => 2,
+        _ => 3,
+    };
+
+    public uint InputPrimitiveStep() =>
+        InputPrimitive == GuestPrimitiveType.TriangleStrip ? 1u : InputPrimitiveSize();
+
+    public uint InputPrimitiveCount(uint vertices)
+    {
+        var size = InputPrimitiveSize();
+        return vertices < size ? 0u : ((vertices - size) / InputPrimitiveStep()) + 1u;
+    }
+
+    public uint InputVertexCount(uint primitives) =>
+        primitives == 0 ? 0u : ((primitives - 1u) * InputPrimitiveStep()) + InputPrimitiveSize();
+}
+
 public sealed class VertexInputInfo
 {
     public const int MaxBuffers = 32;
@@ -132,10 +182,58 @@ public sealed class VertexInputInfo
     public bool FetchEmbedded { get; init; }
     public int FetchAttributeRegister { get; init; }
     public int FetchBufferRegister { get; init; }
+    public uint WaveSize { get; set; } = 64;
     public uint ScratchDwords { get; init; }
     public uint PositionExportControl { get; init; }
     public ClipSpaceTransform ClipSpace { get; init; }
+    public MeshInputInfo Mesh { get; set; } = new();
     public ShaderStageResources Stage { get; set; }
+
+    // The byte range one fetch slot can address. With a zero stride,
+    // OOB_SELECT=2 treats NumRecords as an enable bit rather than a byte count,
+    // so constant attributes still need their complete format in host memory.
+    public ulong BufferSize(int bufferIndex)
+    {
+        if ((uint)bufferIndex >= (uint)Buffers.Length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(bufferIndex));
+        }
+
+        ref readonly var buffer = ref Buffers[bufferIndex];
+        if (buffer.Stride != 0 || buffer.RecordCount == 0)
+        {
+            return buffer.Size;
+        }
+
+        var found = false;
+        var size = 0ul;
+        foreach (ref readonly var attribute in Attributes.AsSpan())
+        {
+            if (attribute.BufferIndex != bufferIndex)
+            {
+                continue;
+            }
+
+            found = true;
+            var extent = (ulong)buffer.RecordCount;
+            if (attribute.Descriptor.OutOfBounds == 2)
+            {
+                var formatSize = attribute.Descriptor.FormatByteSize;
+                if (formatSize == 0)
+                {
+                    throw SubmissionScheduler.Fatal(
+                        $"A zero-stride OOB_SELECT=2 vertex attribute has an unknown format: " +
+                        $"buffer={bufferIndex} format={attribute.Descriptor.Format}.");
+                }
+
+                extent = (ulong)attribute.OffsetBytes + formatSize;
+            }
+
+            size = Math.Max(size, extent);
+        }
+
+        return found ? size : buffer.Size;
+    }
 }
 
 public sealed class PixelInputInfo
@@ -151,12 +249,14 @@ public sealed class PixelInputInfo
     public uint[] InterpolatorSettings { get; init; } = new uint[InterpolatorCount];
     public byte[] TargetOutputModes { get; init; } = new byte[TargetCount];
     public ColorComponentMap[] TargetExportMappings { get; init; } = new ColorComponentMap[TargetCount];
+    public uint WaveSize { get; set; } = 64;
     public uint ScratchDwords { get; init; }
     public bool PositionX { get; init; }
     public bool PositionY { get; init; }
     public bool PositionZ { get; init; }
     public bool PositionW { get; init; }
     public bool FrontFace { get; init; }
+    public bool Ancillary { get; init; }
     public bool NoPerspective { get; init; }
     public bool KillEnable { get; init; }
     public bool DepthExportEnable { get; init; }
@@ -167,6 +267,29 @@ public sealed class PixelInputInfo
     public ShaderStageResources Stage { get; set; }
 
     public bool PositionXY => PositionX && PositionY;
+}
+
+// Maps each guest logical workgroup axis to the physical axis used by the
+// compiled host shader. Identity is the default for backends that preserve XYZ.
+public readonly record struct ComputeWorkgroupAxisMapping(int LogicalX, int LogicalY, int LogicalZ)
+{
+    public static ComputeWorkgroupAxisMapping Identity { get; } = new(0, 1, 2);
+
+    public bool IsIdentity => this == Identity;
+
+    public bool IsValid =>
+        LogicalX is >= 0 and < 3 &&
+        LogicalY is >= 0 and < 3 &&
+        LogicalZ is >= 0 and < 3 &&
+        LogicalX != LogicalY && LogicalX != LogicalZ && LogicalY != LogicalZ;
+
+    public int PhysicalAxisOfLogical(int logicalAxis) => logicalAxis switch
+    {
+        0 => LogicalX,
+        1 => LogicalY,
+        2 => LogicalZ,
+        _ => throw new ArgumentOutOfRangeException(nameof(logicalAxis)),
+    };
 }
 
 public sealed class ComputeInputInfo
@@ -187,7 +310,9 @@ public sealed class ComputeInputInfo
     public uint LocalDataShareDwords { get; init; }
     public uint ScratchDwords { get; init; }
     public bool NeedsLocalDataShareBarriers { get; init; }
+    public uint HostSubgroupSize { get; init; } = 64;
     public int WorkgroupRegister { get; init; }
+    public ComputeWorkgroupAxisMapping WorkgroupAxisMapping { get; set; } = ComputeWorkgroupAxisMapping.Identity;
     public ShaderStageResources Stage { get; set; }
 }
 
@@ -215,6 +340,28 @@ public readonly record struct BufferDescriptorWords(uint Word0, uint Word1, uint
     public uint Format => (Word3 >> 12) & 0x7F;
     public uint OutOfBounds => (Word3 >> 28) & 0x3;
     public uint Type => (Word3 >> 30) & 0x3;
+
+    // The complete guest element width selected by FORMAT. The two extended
+    // values mirror the formats already accepted by both graphics backends.
+    public uint FormatByteSize
+    {
+        get
+        {
+            if (Format == 113)
+            {
+                return 16;
+            }
+
+            if (Format == 121)
+            {
+                return 4;
+            }
+
+            return Gfx10UnifiedFormat.TryDecode(Format, out var dataFormat, out _)
+                ? Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, Gfx10UnifiedFormat.ComponentCount(dataFormat))
+                : 0;
+        }
+    }
 
     public uint PackedStride =>
         Stride | ((SwizzleEnabled ? 1u : 0u) << 14) | (IndexStride << 16) | ((AddThreadId ? 1u : 0u) << 20);

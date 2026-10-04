@@ -3,7 +3,9 @@
 
 namespace SharpEmu.Libs.VideoOut;
 
+using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
@@ -17,6 +19,7 @@ internal static unsafe partial class VulkanVideoPresenter
 {
     // The presenter whose render thread runs the command stream; null while no window runs.
     private static Presenter? _activePresenter;
+    private static int _reportedComputeSkip;
     private static Exception? _presenterStartupFailure;
     internal static Func<ICpuMemory, AgcExports.HeadlessCommandStream>? TestCommandStreamFactory { get; set; }
 
@@ -71,6 +74,25 @@ internal static unsafe partial class VulkanVideoPresenter
             : TestCommandStreamFactory?.Invoke(memory) is { } testStream
                 ? testStream.Done()
                 : IdleOutcome.Completed;
+
+    public static void RunAfterPendingCommandStreams(Action work)
+    {
+        ArgumentNullException.ThrowIfNull(work);
+        if (TryGetActivePresenter(out var presenter))
+        {
+            if (presenter.Relay.TryRunAfterAcceptedCommandStreams(work))
+            {
+                return;
+            }
+
+            if (!HostSessionControl.IsShutdownRequested && !Volatile.Read(ref _closed) &&
+                !Volatile.Read(ref _presenterCloseRequested))
+            {
+                throw SubmissionScheduler.Fatal("The GPU worker rejected an ordered video-out state change.");
+            }
+        }
+        work();
+    }
 
     // The blocked heads of the stream this memory submits to; null when no stream exists for it.
     internal static BlockedSnapshot? SnapshotBlockedCommandStream(ICpuMemory? memory)
@@ -166,7 +188,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             var (_, guest, _) = RequireGuestMemory("command stream");
             _guestMemory = guest;
-            _endOfPipe = new EndOfPipe(_endOfPipeEvents, this);
+            _endOfPipe = new EndOfPipe(_endOfPipeEvents, this, guest, ReadGdsWordsAtCompletion);
             _translation = AgcExports.CreateCommandStreamTranslation(guest, this);
             _lastCommandStreamProgressTicks = System.Diagnostics.Stopwatch.GetTimestamp();
         }
@@ -184,7 +206,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        // Runs slices until the budget ends or nothing is runnable; blocked heads retry every 100 ms.
+        // Runs slices until the budget ends or nothing is runnable; blocked heads use the
+        // shared bounded fallback when no completion or presentation event wakes them.
         private void RunCommandStreamSlices(long renderWorkDeadline)
         {
             var slices = 0;
@@ -379,9 +402,76 @@ internal static unsafe partial class VulkanVideoPresenter
         public void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount) =>
             EndOfPipe.ReadGdsWords(_bufferCache.GdsBuffer.Mapped, destination, wordOffset, wordCount);
 
+        private uint[] ReadGdsWordsAtCompletion(uint wordOffset, uint wordCount)
+        {
+            var words = new uint[checked((int)wordCount)];
+            EndOfPipe.ReadGdsWords(_bufferCache.GdsBuffer.Mapped, words, wordOffset, wordCount);
+            return words;
+        }
+
+        private static void PrepareEndOfPipeLabelWrite(in EndOfPipeWrite write)
+        {
+            var byteCount = write.LabelByteCount;
+            if (byteCount == 0)
+            {
+                return;
+            }
+
+            // Do the potentially blocking invalidation on the GPU worker: a label can alias a
+            // tracked buffer or image. Ordinary labels are written immediately below; deferred
+            // GDS publication repeats only the fast overlap checks on the retirement callback.
+            GuestImageWriteTracker.NotifyManagedWrite(write.Destination, byteCount);
+            GuestGpuMemoryHook.MarkCpuWrite(write.Destination, byteCount);
+        }
+
+        private void PublishImmediateEndOfPipeLabel(in EndOfPipeWrite write)
+        {
+            Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+            var byteCount = 0;
+            switch (write.Kind)
+            {
+                case EndOfPipeWriteKind.Write32:
+                case EndOfPipeWriteKind.WriteBack32:
+                case EndOfPipeWriteKind.Interrupt32:
+                case EndOfPipeWriteKind.InterruptWriteBack32:
+                case EndOfPipeWriteKind.FlipWithWrite32:
+                case EndOfPipeWriteKind.FlipWithInterruptWriteBack32:
+                    BinaryPrimitives.WriteUInt32LittleEndian(bytes, (uint)write.Value);
+                    byteCount = sizeof(uint);
+                    break;
+                case EndOfPipeWriteKind.Write64:
+                case EndOfPipeWriteKind.WriteBack64:
+                case EndOfPipeWriteKind.Interrupt64:
+                case EndOfPipeWriteKind.InterruptWriteBack64:
+                    BinaryPrimitives.WriteUInt64LittleEndian(bytes, write.Value);
+                    byteCount = sizeof(ulong);
+                    break;
+                case EndOfPipeWriteKind.ClockWrite:
+                case EndOfPipeWriteKind.ClockWriteBack:
+                case EndOfPipeWriteKind.InterruptClockWrite:
+                case EndOfPipeWriteKind.InterruptClockWriteBack:
+                    BinaryPrimitives.WriteUInt64LittleEndian(bytes, EndOfPipe.ReadReferenceClock());
+                    byteCount = sizeof(ulong);
+                    break;
+                case EndOfPipeWriteKind.GdsWrite32:
+                case EndOfPipeWriteKind.InterruptGdsWrite32:
+                case EndOfPipeWriteKind.InterruptOnly:
+                case EndOfPipeWriteKind.Flip:
+                    return;
+            }
+
+            if (!_guestMemory.TryWrite(write.Destination, bytes[..byteCount]))
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"Cannot publish an end-of-pipe label: address=0x{write.Destination:X16} size={byteCount}.");
+            }
+        }
+
         public void RecordEndOfPipe(in EndOfPipeWrite write)
         {
             using var completionScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandEndOfPipe);
+            PrepareEndOfPipeLabelWrite(in write);
+            PublishImmediateEndOfPipeLabel(in write);
             _ = BeginBatchedGuestCommands();
             var buffer = _scheduler.Current;
             switch (write.Kind)
@@ -416,11 +506,21 @@ internal static unsafe partial class VulkanVideoPresenter
                 case EndOfPipeWriteKind.GdsWrite32:
                     _endOfPipe.RecordGdsWrite32(write.SubmitId, buffer, write.Destination, write.GdsWordOffset, write.GdsWordCount);
                     break;
+                case EndOfPipeWriteKind.InterruptGdsWrite32:
+                    _endOfPipe.RecordGdsWrite32WithInterrupt(
+                        write.SubmitId, buffer, write.Destination, write.GdsWordOffset, write.GdsWordCount, write.EventId, write.ContextId);
+                    break;
                 case EndOfPipeWriteKind.ClockWrite:
                     _endOfPipe.RecordClockWrite(write.SubmitId, buffer, write.Destination);
                     break;
                 case EndOfPipeWriteKind.ClockWriteBack:
                     _endOfPipe.RecordClockWriteWithWriteBack(write.SubmitId, buffer, write.Destination);
+                    break;
+                case EndOfPipeWriteKind.InterruptClockWrite:
+                    _endOfPipe.RecordClockWriteWithInterrupt(write.SubmitId, buffer, write.Destination, write.EventId, write.ContextId);
+                    break;
+                case EndOfPipeWriteKind.InterruptClockWriteBack:
+                    _endOfPipe.RecordClockWriteWithInterruptAndWriteBack(write.SubmitId, buffer, write.Destination, write.EventId, write.ContextId);
                     break;
                 case EndOfPipeWriteKind.Flip:
                     _endOfPipe.RecordFlipCompletion(write.SubmitId, buffer, write.FlipHandle, write.FlipIndex, write.FlipMode, write.FlipArgument, write.FlipRequestId);
@@ -505,6 +605,18 @@ internal static unsafe partial class VulkanVideoPresenter
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
             try
             {
+                if (_skipAllCompute || (_skipTallComputeZ != 0 && groupsZ >= _skipTallComputeZ))
+                {
+                    if (Interlocked.CompareExchange(ref _reportedComputeSkip, 1, 0) == 0)
+                    {
+                        Console.Error.WriteLine(
+                            $"[GPU][WARN][COMPUTE_SKIPPED] Vulkan compute dispatches are being skipped: " +
+                            $"all={_skipAllCompute} tall_z={_skipTallComputeZ} first_groups={groupsX},{groupsY},{groupsZ}.");
+                    }
+
+                    return;
+                }
+
                 _translation.Dispatch(submitId, groupsX, groupsY, groupsZ, dispatchInitiator, indirectArgumentsAddress);
             }
             finally
@@ -588,7 +700,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 // The refresh can end the tick; the copy records into the buffer that is current now.
                 var commandBuffer = BeginBatchedGuestCommands();
                 var extent = source.Backing.Extent;
-                snapshot = CreateGuestFlipSnapshot(GetPresentationSnapshotFormat(source.Backing.Format),
+                snapshot = AcquireGuestFlipSnapshot(GetPresentationSnapshotFormat(source.Backing.Format),
                     extent.Width, extent.Height, displayBuffer.Address, version);
                 source.Transition(ImageLayout.TransferSrcOptimal, AccessFlags.TransferReadBit, null, commandBuffer);
                 var toTransferDst = new ImageMemoryBarrier2

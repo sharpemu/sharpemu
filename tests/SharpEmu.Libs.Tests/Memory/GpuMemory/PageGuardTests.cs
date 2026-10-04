@@ -92,6 +92,17 @@ public sealed class PageGuardTests : IDisposable
     }
 
     [Fact]
+    public void AddWatch_RejectsTheGapBetweenGuestGpuApertures()
+    {
+        using var guard = new PageGuard(_space);
+
+        guard.AddWatch(GuestMemoryLayout.GuestGpuLowAddressLimit, 0x1000, blockReads: false);
+
+        Assert.Contains(_fatals, message => message.StartsWith("The memory range is invalid", StringComparison.Ordinal));
+        Assert.Empty(_space.Protects);
+    }
+
+    [Fact]
     public void MaskedRestorationRecordsOnlyThePagesWhoseWriteAccessChanged()
     {
         using var guard = new PageGuard(_space);

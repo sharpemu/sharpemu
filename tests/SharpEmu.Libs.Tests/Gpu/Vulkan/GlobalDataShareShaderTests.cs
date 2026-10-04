@@ -134,7 +134,7 @@ public sealed class GlobalDataShareShaderTests(HeadlessVulkanFixture fixture, IT
             MoveVector(8, 5, 1),
             DataShare(16, "DsAddU32", gds: true, [Gen5Operand.Vector(3), Gen5Operand.Vector(5)], []),
             EndProgram(24));
-        var (plan, resources, _) = Prepare(program);
+        var (plan, resources, _) = Prepare(program, waveSize: waveSize);
         var layout = BindingLayout.Allocate(resources.Info, [], true, false, false, pushCursor, usesDispatchThreadLimits: true);
         var request = new ShaderCompileRequest(plan, resources, layout)
         {

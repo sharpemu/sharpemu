@@ -19,11 +19,11 @@ public sealed class AvPlayerPlaybackTests
     [InlineData(false, true)]
     [InlineData(true, false)]
     [InlineData(true, true)]
-    public void CatchUpReachesVideoEndAfterAudioStops(bool looping, bool extended)
+    public void SequentialDeliveryReachesVideoEndAfterAudioStops(bool looping, bool extended)
     {
         using var playback = new DecodedPlayback(178, 10, 288, 6, looping);
         Assert.Equal(1, playback.ReadVideo(extended));
-        Assert.Equal(181L, playback.GetState<long>("NextFrameIndex"));
+        Assert.Equal(179L, playback.GetState<long>("NextFrameIndex"));
         Assert.Equal(6144, playback.CurrentTime());
 
         for (var audioBlock = 0; audioBlock < 5; audioBlock++)
@@ -48,15 +48,17 @@ public sealed class AvPlayerPlaybackTests
             Assert.Equal(0L, playback.GetState<long>("NextFrameIndex"));
             Assert.Equal(0L, playback.GetState<long>("NextAudioFrameIndex"));
             Assert.Null(playback.GetState<object?>("VideoDecoder"));
-            Assert.Null(playback.GetState<object?>("AudioDecoderOutput"));
+            Assert.Null(playback.GetState<object?>("AudioDecoder"));
         }
     }
 
     [Fact]
     public void VideoWaitsForAudioUnlessSynchronizationIsDisabled()
     {
-        using var playback = new DecodedPlayback(0, 4, 0, 2);
+        using var playback = new DecodedPlayback(0, 4, 0, 3);
         Assert.Equal(1, playback.ReadVideo());
+        Assert.Equal(0, playback.ReadVideo());
+        Assert.Equal(1, playback.ReadAudio());
         Assert.Equal(0, playback.ReadVideo());
         Assert.Equal(1, playback.ReadAudio());
         Assert.Equal(0, playback.ReadVideo());
@@ -92,8 +94,18 @@ public sealed class AvPlayerPlaybackTests
         Assert.Equal(1, playback.ReadVideo());
         Assert.Equal(0, playback.ReadAudio());
         Assert.Equal(0, playback.ReadVideo());
-        Assert.Equal(2L, playback.GetState<long>("NextFrameIndex"));
+        Assert.Equal(1L, playback.GetState<long>("NextFrameIndex"));
         Assert.Equal(1, playback.IsActive());
+    }
+
+    [Fact]
+    public void LargeSyncClockJumpDoesNotDropDecodedFrames()
+    {
+        using var playback = new DecodedPlayback(0, 12, 1_000, 0, framesPerSecond: 60);
+
+        Assert.Equal(1, playback.ReadVideo());
+        Assert.Equal(1, playback.ReadVideo());
+        Assert.Equal(2L, playback.GetState<long>("NextFrameIndex"));
     }
 
     [Fact]
@@ -118,17 +130,27 @@ public sealed class AvPlayerPlaybackTests
         private readonly FakeCpuMemory _memory = new(MemoryAddress, 0x10000);
         private readonly CpuContext _context;
         private readonly object _player;
-        private readonly Thread _decoderWorker;
+        private readonly double _framesPerSecond;
+        private readonly Thread _videoDecoderWorker;
+        private readonly Thread _audioDecoderWorker;
 
         public DecodedPlayback(
             int firstVideoFrame,
             int videoFrameCount,
             int deliveredAudioBlocks,
             int remainingAudioBlocks,
-            bool looping = false)
+            bool looping = false,
+            double framesPerSecond = 30)
         {
+            _framesPerSecond = framesPerSecond;
             _context = new CpuContext(_memory, Generation.Gen5);
-            AvPlayerExports.RegisterPlayerForTest(Handle, 16, 16, 6267, hasAudio: true);
+            AvPlayerExports.RegisterPlayerForTest(
+                Handle,
+                16,
+                16,
+                6267,
+                hasAudio: true,
+                framesPerSecond: framesPerSecond);
             var players = (IDictionary)typeof(AvPlayerExports)
                 .GetField("Players", PrivateStatic)!.GetValue(null)!;
             var stateGate = typeof(AvPlayerExports).GetField("StateGate", PrivateStatic)!.GetValue(null)!;
@@ -141,9 +163,8 @@ public sealed class AvPlayerPlaybackTests
             SetState("Looping", looping);
             SetState("NextFrameIndex", (long)firstVideoFrame);
             SetState("NextAudioFrameIndex", (long)deliveredAudioBlocks);
+            SetState("VideoReadyCount", firstVideoFrame > 0 ? 1L : 0L);
             SetState("AudioBufferBase", MemoryAddress + 0x6000);
-            SetState("RawAudioFrame", new byte[4096]);
-            SetState("AudioDecoderOutput", new MemoryStream(new byte[remainingAudioBlocks * 4096]));
             var buffers = GetState<ulong[]>("GuestBuffers");
             for (var bufferIndex = 0; bufferIndex < buffers.Length; bufferIndex++)
             {
@@ -159,8 +180,21 @@ public sealed class AvPlayerPlaybackTests
             var queueType = typeof(AvPlayerExports).GetNestedType("VideoFrameQueue", BindingFlags.NonPublic)!;
             var decoder = Activator.CreateInstance(queueType, new MemoryStream(videoBytes), FrameByteCount, 16)!;
             SetState("VideoDecoder", decoder);
-            _decoderWorker = (Thread)queueType.GetField("_worker", PrivateInstance)!.GetValue(decoder)!;
-            Assert.True(_decoderWorker.Join(TimeSpan.FromSeconds(5)), "The test decoder did not finish.");
+            _videoDecoderWorker = (Thread)queueType.GetField("_worker", PrivateInstance)!.GetValue(decoder)!;
+            Assert.True(_videoDecoderWorker.Join(TimeSpan.FromSeconds(5)), "The test video decoder did not finish.");
+
+            var audioQueueType = typeof(AvPlayerExports).GetNestedType("AudioFrameQueue", BindingFlags.NonPublic)!;
+            var audioDecoder = Activator.CreateInstance(
+                audioQueueType,
+                new MemoryStream(new byte[remainingAudioBlocks * 4096]),
+                4096,
+                8)!;
+            SetState("AudioDecoder", audioDecoder);
+            _audioDecoderWorker = (Thread)audioQueueType
+                .GetField("_worker", PrivateInstance)!.GetValue(audioDecoder)!;
+            Assert.True(
+                _audioDecoderWorker.Join(TimeSpan.FromSeconds(5)),
+                "The test audio decoder did not finish.");
         }
 
         public bool ReachedVideoEnd =>
@@ -181,7 +215,9 @@ public sealed class AvPlayerPlaybackTests
                 Span<byte> firstPixel = stackalloc byte[1];
                 Assert.True(_memory.TryRead(address, firstPixel));
                 Assert.Equal((byte)(GetState<long>("NextFrameIndex") - 1), firstPixel[0]);
-                Assert.Equal((ulong)Math.Round(firstPixel[0] * 1000.0 / 30), timestamp);
+                Assert.Equal(
+                    (ulong)Math.Round(firstPixel[0] * 1000.0 / _framesPerSecond),
+                    timestamp);
             }
             return result;
         }
@@ -238,7 +274,8 @@ public sealed class AvPlayerPlaybackTests
         public void Dispose()
         {
             AvPlayerExports.RemovePlayerForTest(Handle);
-            Assert.True(_decoderWorker.Join(TimeSpan.FromSeconds(5)));
+            Assert.True(_videoDecoderWorker.Join(TimeSpan.FromSeconds(5)));
+            Assert.True(_audioDecoderWorker.Join(TimeSpan.FromSeconds(5)));
         }
     }
 }

@@ -123,6 +123,43 @@ public sealed class ScalarValueGraphTests
     }
 
     [Fact]
+    public void FusedContinuationGetpcUsesItsGuestOffsetNotItsLogicalPc()
+    {
+        const ulong shaderBase = 0x0000_0015_C139_B700;
+        const ulong continuationOffset = 0x0000_0001_7FBD_5D00;
+        var getpc = new Gen5ShaderInstruction(
+            8,
+            Gen5ShaderEncoding.Sop1,
+            "SGetpcB64",
+            [0u],
+            [],
+            [Gen5Operand.Scalar(4)],
+            null)
+        {
+            GuestProgramCounterOffset = continuationOffset,
+        };
+        var program = Program(
+            getpc,
+            MoveScalar(12, 6, 16),
+            MoveScalar(16, 7, 0),
+            BufferLoad(20, 4),
+            EndProgram(28));
+        var plan = Extract(program);
+
+        Assert.True(
+            RuntimeValueEvaluator.EvaluateDescriptorSource(
+                plan,
+                plan.Info.Buffers[0].Source,
+                Inputs([], shaderBase: shaderBase),
+                out var result));
+        var expectedAddress = shaderBase + continuationOffset + sizeof(uint);
+        Assert.Equal((uint)expectedAddress, result.Dwords[0]);
+        Assert.Equal((uint)(expectedAddress >> 32), result.Dwords[1]);
+        Assert.Equal(16u, result.Dwords[2]);
+        Assert.Equal(0u, result.Dwords[3]);
+    }
+
+    [Fact]
     public void CarryAndBitFields()
     {
         var program = Program(
@@ -393,7 +430,7 @@ public sealed class ScalarValueGraphTests
             Branch(4, "SCbranchExecz", 0),
             EndProgram(8));
 
-        var graph = ScalarValueGraph.Build(program, 0, 0);
+        var graph = ScalarValueGraph.Build(program, 0, 0, waveSize: 32);
 
         Assert.True(graph.BranchConditions.TryGetValue(4, out var condition));
         Assert.False(condition.IsUndefined);
@@ -516,7 +553,7 @@ public sealed class ScalarValueGraphTests
     public void DivergentVectorValue_IsRejected()
     {
         var perLane = Program(
-            BufferLoad(0, 0, dwords: 1),
+            BufferAccess(0, "BufferLoadDword", 0, dwords: 1, indexEnabled: true),
             ReadFirstLane(8, 8, 4),
             MoveScalar(12, 9, 0),
             MoveScalar(16, 10, 16),

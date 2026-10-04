@@ -17,10 +17,32 @@ public sealed partial class GuestImageCache
 
     private static bool SameExtent(in Extent3D left, in Extent3D right) => left.Width == right.Width && left.Height == right.Height && left.Depth == right.Depth;
 
+    private static bool SameActiveMipLayout(in ImageDescription left, in ImageDescription right)
+    {
+        if (left.Resources.Levels != right.Resources.Levels)
+        {
+            return false;
+        }
+
+        for (var level = 0; level < left.Resources.Levels; level++)
+        {
+            var leftMip = left.MipLayout[level];
+            var rightMip = right.MipLayout[level];
+            if (leftMip.Offset != rightMip.Offset || leftMip.Size != rightMip.Size ||
+                leftMip.Pitch != rightMip.Pitch || leftMip.Height != rightMip.Height)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static bool HasSameBacking(in ImageDescription cached, in ImageDescription requested, bool exactFormat)
     {
         if (cached.Data.Address != requested.Data.Address || cached.Data.Size != requested.Data.Size ||
             !SameExtent(cached.Extent, requested.Extent) || cached.Samples != requested.Samples ||
+            cached.Resources.Levels < requested.Resources.Levels || cached.Resources.Layers < requested.Resources.Layers ||
             cached.BytesPerBlock != requested.BytesPerBlock || cached.TileMode != requested.TileMode ||
             !ViewFormatRules.AreCompatible(cached.PixelFormat, requested.PixelFormat))
         {
@@ -37,7 +59,11 @@ public sealed partial class GuestImageCache
 
     private static ImageRole UploadRole(CachedImage image)
     {
-        if (image.Description.IsDepth)
+        // A comparison texture can use a host depth format without ever being a
+        // depth attachment. Keep those images on the ordinary texture transfer
+        // path so every mip is refreshed; the attachment path is intentionally
+        // limited to depth surfaces and copies only their target subresources.
+        if (image.Uses.DepthTarget)
         {
             return ImageRole.DepthTarget;
         }
@@ -254,6 +280,8 @@ public sealed partial class GuestImageCache
         }
     }
 
+    // Extend a single-level layered description when an overlapping image
+    // requires more array layers than the requested view advertises.
     private static bool GrowImageToLayers(ref ImageDescription info, uint layers)
     {
         var current = info.Resources.Layers;
@@ -290,21 +318,6 @@ public sealed partial class GuestImageCache
         grown.MipLayout[0].Size = grown.Data.Size;
         grown.Resources = grown.Resources with { Layers = layers };
         info = grown;
-        return true;
-    }
-
-    private static bool SameMipLayout(in ImageDescription left, in ImageDescription right)
-    {
-        for (var level = 0; level < ImageDescription.MaxLevels; level++)
-        {
-            var a = left.MipLayout[level];
-            var b = right.MipLayout[level];
-            if (a.Offset != b.Offset || a.Size != b.Size || a.Pitch != b.Pitch || a.Height != b.Height)
-            {
-                return false;
-            }
-        }
-
         return true;
     }
 
@@ -471,7 +484,7 @@ public sealed partial class GuestImageCache
             }
 
             if (requested.TileMode != cachedInfo.TileMode ||
-                (requested.Resources == cachedInfo.Resources && !SameMipLayout(requested, cachedInfo)))
+                (requested.Resources == cachedInfo.Resources && !SameActiveMipLayout(requested, cachedInfo)))
             {
                 if (safeToDelete)
                 {
@@ -488,16 +501,21 @@ public sealed partial class GuestImageCache
                 return new OverlapResolution(GrowImage(requested, cachedImageIdentifier));
             }
 
+            // PS5 mip tails can expose more levels without increasing the guest allocation.
+            if (requested.PixelFormat == cachedInfo.PixelFormat && requested.Type == cachedInfo.Type &&
+                requested.Resources > cachedInfo.Resources &&
+                (requested.Data.Size > cachedInfo.Data.Size ||
+                 (requested.Data.Size == cachedInfo.Data.Size && SameExtent(requested.Extent, cachedInfo.Extent) &&
+                  cachedInfo.Resources.Levels > 1 && requested.Resources.Layers == cachedInfo.Resources.Layers)))
+            {
+                return new OverlapResolution(GrowImage(requested, cachedImageIdentifier));
+            }
+
             if (requested.PixelFormat != cachedInfo.PixelFormat || requested.Data.Size <= cachedInfo.Data.Size)
             {
                 var resultImageIdentifier = mergedImageIdentifier.IsValid ? mergedImageIdentifier : cachedImageIdentifier;
                 var result = _slots.TryGet(resultImageIdentifier);
                 return new OverlapResolution(result != null && ViewFormatRules.AreCompatible(result.Description.PixelFormat, requested.PixelFormat) ? resultImageIdentifier : ResourceSlotIdentifier.Invalid);
-            }
-
-            if (requested.Type == cachedInfo.Type && requested.Resources > cachedInfo.Resources)
-            {
-                return new OverlapResolution(GrowImage(requested, cachedImageIdentifier));
             }
 
             throw SubmissionScheduler.Fatal(
@@ -561,7 +579,6 @@ public sealed partial class GuestImageCache
         {
             CopyWholeImage(expandedImageIdentifier, sourceImageIdentifier);
         }
-
         ReleaseImage(sourceImageIdentifier);
         return expandedImageIdentifier;
     }
@@ -603,7 +620,8 @@ public sealed partial class GuestImageCache
         foreach (var imageIdentifier in FindImagesInRange(stencil.Address, stencil.Size, pageOverlap: false))
         {
             var owner = _slots.TryGet(imageIdentifier);
-            if (owner != null && owner.Description.Data.Address == stencil.Address)
+            if (owner != null && owner.Description.Data == stencil &&
+                SameExtent(owner.Description.Extent, depth.Description.Extent))
             {
                 association = imageIdentifier;
             }

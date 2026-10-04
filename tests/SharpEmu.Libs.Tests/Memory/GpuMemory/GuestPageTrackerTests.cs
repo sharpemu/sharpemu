@@ -843,7 +843,7 @@ public sealed class GuestPageTrackerTests : IDisposable
     private ulong AllocateAligned(ulong size, ulong alignment)
     {
         Assert.True(_memory.TryAllocateAtOrAbove(0x2_0000_0000, size, executable: false, alignment, out var address));
-        Assert.True(address % alignment == 0 && address + size < TrackerLayout.SpaceBytes);
+        Assert.True(address % alignment == 0 && address + size < GuestMemoryLayout.GuestGpuLowAddressLimit);
         _gpu.Register(address, size, ReadWrite);
         return address;
     }

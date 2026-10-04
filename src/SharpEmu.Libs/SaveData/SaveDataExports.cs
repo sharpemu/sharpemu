@@ -74,8 +74,10 @@ public static class SaveDataExports
     private const int OrbisSaveDataErrorNoEvent = unchecked((int)0x809F0008); // NOT_FOUND: no pending event
     private const int OrbisSaveDataErrorBadMounted = unchecked((int)0x809F0013);
     // SceSaveDataEventType
+    private const uint EventTypeBackupEnd = 2;
     private const uint EventTypeSaveDataMemorySyncEnd = 3;
-    private const int SaveDataEventSize = 0x60;
+    private const int SaveDataTitleIdStructSize = 0x10;
+    private const int SaveDataEventSize = 0x68;
     private const int MountInfoSize = 0x40;
     private const uint SaveDataBlockSize = 65536;
     private const ulong SaveDataBlocksMax = 16384;
@@ -86,16 +88,81 @@ public static class SaveDataExports
     // mountPoint -> live mount, for umount/IsMounted/GetMountInfo.
     private static readonly Dictionary<string, MountEntry> _mounts = new(StringComparer.Ordinal);
 
-    private readonly record struct SaveDataEvent(uint Type, int ErrorCode, int UserId, string DirName);
+    private readonly record struct SaveDataEvent(
+        uint Type,
+        int ErrorCode,
+        int UserId,
+        string TitleId,
+        string DirName);
     private sealed record MountEntry(string SlotDir, string DirName, int UserId);
 
-    private static void EnqueueEvent(uint type, int userId, string dirName, int errorCode = 0)
+    private static void EnqueueEvent(
+        uint type,
+        int userId,
+        string titleId,
+        string dirName,
+        int errorCode = 0)
     {
         lock (_eventGate)
         {
-            _events.Enqueue(new SaveDataEvent(type, errorCode, userId, dirName));
+            _events.Enqueue(new SaveDataEvent(type, errorCode, userId, titleId, dirName));
         }
-        TraceSaveData($"event.enqueue type={type} user={userId} dir='{dirName}' err=0x{errorCode:X}");
+        TraceSaveData($"event.enqueue type={type} user={userId} title='{titleId}' dir='{dirName}' err=0x{errorCode:X}");
+    }
+
+    [SysAbiExport(
+        Nid = "z1JA8-iJt3k",
+        ExportName = "sceSaveDataBackup",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSaveData")]
+    public static int SaveDataBackup(CpuContext ctx)
+    {
+        // SceSaveDataBackup: userId +0x00, titleId* +0x08,
+        // dirName* +0x10, fingerprint* +0x18, reserved[32] +0x20.
+        var backupAddress = ctx[CpuRegister.Rdi];
+        if (backupAddress == 0)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        if (!TryReadInt32(ctx, backupAddress, out var userId) ||
+            !ctx.TryReadUInt64(backupAddress + 0x08, out var titleIdAddress) ||
+            !ctx.TryReadUInt64(backupAddress + 0x10, out var dirNameAddress))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (userId < 0 || dirNameAddress == 0)
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        if (!TryReadFixedAscii(ctx, dirNameAddress, SaveDataDirNameSize, out var dirName))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (string.IsNullOrWhiteSpace(dirName))
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        string titleId;
+        if (titleIdAddress == 0)
+        {
+            titleId = ResolveConfiguredTitleId();
+        }
+        else if (!TryReadFixedAscii(ctx, titleIdAddress, SaveDataTitleIdSize, out titleId))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+        else if (string.IsNullOrWhiteSpace(titleId))
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        EnqueueEvent(EventTypeBackupEnd, userId, titleId, dirName);
+        return SetReturn(ctx, 0);
     }
 
     [SysAbiExport(
@@ -131,7 +198,14 @@ public static class SaveDataExports
         BinaryPrimitives.WriteUInt32LittleEndian(ev[0x00..], pending.Type);
         BinaryPrimitives.WriteInt32LittleEndian(ev[0x04..], pending.ErrorCode);
         BinaryPrimitives.WriteInt32LittleEndian(ev[0x08..], pending.UserId);
-        WriteAscii(ev.Slice(0x10, SaveDataDirNameSize), pending.DirName);
+        WriteFixedAscii(
+            ev.Slice(0x10, SaveDataTitleIdStructSize),
+            pending.TitleId,
+            SaveDataTitleIdSize);
+        WriteFixedAscii(
+            ev.Slice(0x20, SaveDataDirNameSize),
+            pending.DirName,
+            SaveDataDirNameSize);
         if (!ctx.Memory.TryWrite(eventAddress, ev))
         {
             return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -615,6 +689,11 @@ public static class SaveDataExports
     [SysAbiExport(
         Nid = "X4MYzukPc3g",
         ExportName = "sceSaveDataDirNameSearchPs4",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSaveData")]
+    [SysAbiExport(
+        Nid = "PHnuI4LhuRk",
+        ExportName = "sceSaveDataDirNameSearch2",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceSaveData")]
     public static int SaveDataDirNameSearch(CpuContext ctx)
@@ -1241,6 +1320,19 @@ public static class SaveDataExports
         }
     }
 
+    private static void WriteFixedAscii(
+        Span<byte> destination,
+        string value,
+        int maxContentLength)
+    {
+        var count = Math.Min(value.Length, Math.Min(destination.Length, maxContentLength));
+        for (var i = 0; i < count; i++)
+        {
+            var ch = value[i];
+            destination[i] = ch <= 0x7F ? (byte)ch : (byte)'?';
+        }
+    }
+
     private static bool TryReadInt32(CpuContext ctx, ulong address, out int value)
     {
         Span<byte> bytes = stackalloc byte[sizeof(int)];
@@ -1486,7 +1578,11 @@ public static class SaveDataExports
         // sync as asynchronous and blocks a worker on sceSaveDataGetEventResult
         // until the SAVE_DATA_MEMORY_SYNC_END event arrives. Post it so that
         // poll completes (this is what wedged Dead Cells at FLIP 0 in-level).
-        EnqueueEvent(EventTypeSaveDataMemorySyncEnd, userId, string.Empty);
+        EnqueueEvent(
+            EventTypeSaveDataMemorySyncEnd,
+            userId,
+            ResolveConfiguredTitleId(),
+            "sce_sdmemory");
         return ctx.SetReturn(0);
     }
 

@@ -28,8 +28,11 @@ public struct MetadataDescription
     public GuestSpan Range;
     public MetadataKind Kind;
     public uint Control;
+    public uint DccClearWord;
     public DisplayCompression Compression;
     public bool StencilCompressed;
+    public bool DccClearRegisterValid;
+    public bool DccAlphaMsb;
 }
 
 public readonly record struct SubresourceCount(uint Levels, uint Layers) : IComparable<SubresourceCount>
@@ -150,10 +153,11 @@ public struct ImageDescription
     // Return the matching slice in the containing mip level, or -1 if none matches.
     public readonly int FindMatchingArraySlice(in ImageDescription container, int mip)
     {
-        if (!IsCompatible(container) || TileMode != container.TileMode || Type != container.Type || IsVolume ||
-            Resources.Levels != 1 || Resources.Layers == 0 || container.Resources.Layers == 0 || mip < 0 ||
-            (uint)mip >= container.Resources.Levels || container.Resources.Levels > MaxLevels ||
-            !IsValidRange(Data) || !IsValidRange(container.Data) || Data.Address < container.Data.Address || Data.End > container.Data.End)
+        if (!IsCompatible(container) || TileMode != container.TileMode || Type != container.Type ||
+            IsVolume || Resources.Levels != 1 || Resources.Layers == 0 ||
+            container.Resources.Layers == 0 || mip < 0 || (uint)mip >= container.Resources.Levels ||
+            container.Resources.Levels > MaxLevels || !IsValidRange(Data) || !IsValidRange(container.Data) ||
+            Data.Address < container.Data.Address || Data.End > container.Data.End)
         {
             return -1;
         }
@@ -164,21 +168,28 @@ public struct ImageDescription
             return -1;
         }
 
+        var level = (uint)mip;
         var layout = container.MipLayout[mip];
-        if (Extent.Width != Math.Max(container.Extent.Width >> mip, 1) || Extent.Height != Math.Max(container.Extent.Height >> mip, 1) ||
-            Extent.Depth != container.Extent.Depth || MipLayout[0].Pitch != layout.Pitch || MipLayout[0].Height != layout.Height ||
-            layout.Size == 0 || layout.Size % container.Resources.Layers != 0 ||
-            container.Data.Size % container.Resources.Layers != 0 || Data.Size % Resources.Layers != 0)
+        var childLayout = MipLayout[0];
+        if (Extent.Width != Math.Max(container.Extent.Width >> (int)level, 1) ||
+            Extent.Height != Math.Max(container.Extent.Height >> (int)level, 1) ||
+            Extent.Depth != container.Extent.Depth || childLayout.Pitch != layout.Pitch ||
+            childLayout.Height != layout.Height || layout.Size == 0 ||
+            layout.Size % container.Resources.Layers != 0 ||
+            container.Data.Size % container.Resources.Layers != 0 ||
+            Data.Size % Resources.Layers != 0)
         {
             return -1;
         }
 
-        // PS5 array slices contain the whole reversed mip chain, rather than
-        // storing all slices of one mip contiguously.
+        // PS5 block slices contain the complete reversed mip chain, so array
+        // layers advance by the container's full per-layer allocation rather
+        // than by the size of the child mip.
         var sliceStride = container.Data.Size / container.Resources.Layers;
         var childStride = Data.Size / Resources.Layers;
-        if (childStride != layout.Size / container.Resources.Layers || layout.Offset >= sliceStride ||
-            childStride > sliceStride - layout.Offset || (Resources.Layers > 1 && childStride != sliceStride))
+        if (childStride != layout.Size / container.Resources.Layers ||
+            layout.Offset >= sliceStride || childStride > sliceStride - layout.Offset ||
+            (Resources.Layers > 1 && childStride != sliceStride))
         {
             return -1;
         }
@@ -190,7 +201,8 @@ public struct ImageDescription
         }
 
         var layer = (addressDelta - layout.Offset) / sliceStride;
-        if (layer > int.MaxValue || layer >= container.Resources.Layers || Resources.Layers > container.Resources.Layers - layer)
+        if (layer > int.MaxValue || layer >= container.Resources.Layers ||
+            Resources.Layers > container.Resources.Layers - layer)
         {
             return -1;
         }
@@ -366,7 +378,8 @@ public struct ImageDescription
         {
             case MetadataKind.None:
                 if (!IsEmptyRange(Metadata.Range) || Metadata.Control != 0 ||
-                    Metadata.Compression != DisplayCompression.Uncompressed || Metadata.StencilCompressed)
+                    Metadata.DccClearWord != 0 || Metadata.Compression != DisplayCompression.Uncompressed || Metadata.StencilCompressed ||
+                    Metadata.DccClearRegisterValid || Metadata.DccAlphaMsb)
                 {
                     throw SubmissionScheduler.Fatal("An image without metadata carries metadata state.");
                 }
@@ -378,10 +391,14 @@ public struct ImageDescription
                     throw SubmissionScheduler.Fatal($"The HTile metadata is invalid: address=0x{Metadata.Range.Address:X16} size=0x{Metadata.Range.Size:X16}.");
                 }
 
+                if (Metadata.DccClearWord != 0 || Metadata.DccClearRegisterValid || Metadata.DccAlphaMsb)
+                {
+                    throw SubmissionScheduler.Fatal("HTile metadata carries DCC clear state.");
+                }
+
                 break;
             case MetadataKind.Dcc:
-                if (Metadata.Range.Address == 0 || Metadata.Range.Address >= TrackerLayout.SpaceBytes ||
-                    Metadata.Range.Size > TrackerLayout.SpaceBytes - Metadata.Range.Address ||
+                if (!IsValidRange(Metadata.Range) ||
                     Metadata.Compression == DisplayCompression.Unsupported)
                 {
                     throw SubmissionScheduler.Fatal($"The DCC metadata is invalid: address=0x{Metadata.Range.Address:X16} size=0x{Metadata.Range.Size:X16} compression={Metadata.Compression}.");
@@ -507,6 +524,87 @@ public static class DisplayFormatRule
 // Decoders for the packed 32-bit clear values guest compute fills carry.
 public static class PackedClearValue
 {
+    public static bool SupportsDccFixedColor(Format format) => DccComponentCount(format) != 0;
+
+    public static bool TryDecodeDccColor(
+        Format format,
+        uint metadataFill,
+        in MetadataDescription metadata,
+        bool allowClearToRegister,
+        out ClearColorValue clear)
+    {
+        clear = default;
+        var code = (byte)metadataFill;
+        if (metadataFill != code * 0x01010101u)
+        {
+            return false;
+        }
+
+        if (code == 0x20)
+        {
+            return allowClearToRegister && metadata.DccClearRegisterValid &&
+                   TryDecodeColor(format, metadata.DccClearWord, out clear);
+        }
+
+        if (code == 0x00)
+        {
+            return true;
+        }
+
+        var components = DccComponentCount(format);
+        if (components == 0 || code is not (0x40 or 0x80 or 0xc0))
+        {
+            return false;
+        }
+
+        var rgb = (code & 0x80) != 0 ? 1.0f : 0.0f;
+        var alpha = (code & 0x40) != 0 ? 1.0f : 0.0f;
+        Span<float> channels = stackalloc float[4] { rgb, rgb, rgb, alpha };
+        if (!metadata.DccAlphaMsb)
+        {
+            (channels[0], channels[3]) = (channels[3], channels[0]);
+        }
+
+        if (components == 1)
+        {
+            channels[0] = channels[3];
+        }
+        else if (components == 2)
+        {
+            channels[1] = channels[3];
+        }
+
+        switch (format)
+        {
+            case Format.B8G8R8A8Unorm:
+            case Format.B8G8R8A8Srgb:
+            case Format.A2R10G10B10UnormPack32:
+            case Format.A1R5G5B5UnormPack16:
+            case Format.R5G6B5UnormPack16:
+                (channels[0], channels[2]) = (channels[2], channels[0]);
+                break;
+            case Format.R4G4B4A4UnormPack16:
+                (channels[0], channels[3]) = (channels[3], channels[0]);
+                (channels[1], channels[2]) = (channels[2], channels[1]);
+                break;
+        }
+
+        clear = new ClearColorValue(channels[0], channels[1], channels[2], channels[3]);
+        return true;
+    }
+
+    private static uint DccComponentCount(Format format) => format switch
+    {
+        Format.R8Unorm or Format.R16Unorm or Format.R16Sfloat or Format.R32Sfloat => 1,
+        Format.R8G8Unorm or Format.R16G16Unorm or Format.R16G16Sfloat or Format.R32G32Sfloat => 2,
+        Format.R5G6B5UnormPack16 or Format.B10G11R11UfloatPack32 => 3,
+        Format.R8G8B8A8Unorm or Format.R8G8B8A8Srgb or Format.B8G8R8A8Unorm or Format.B8G8R8A8Srgb or
+        Format.A2B10G10R10UnormPack32 or Format.A2R10G10B10UnormPack32 or Format.A1R5G5B5UnormPack16 or
+        Format.R4G4B4A4UnormPack16 or Format.R16G16B16A16Unorm or Format.R16G16B16A16Sfloat or
+        Format.R32G32B32A32Sfloat => 4,
+        _ => 0,
+    };
+
     public static bool TryDecodeColor(Format format, uint packed, out ClearColorValue clear)
     {
         static float Unorm8(uint value) => (value & 0xff) / 255.0f;

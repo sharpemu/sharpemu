@@ -78,7 +78,7 @@ internal static class TilerCases
                 transfer.Tail = true;
                 break;
             case Shape.Layered:
-                if (kind is not (TileBlockKind.RenderTarget64KB or TileBlockKind.Depth64KB))
+                if (kind is not (TileBlockKind.RenderTarget64KB or TileBlockKind.Depth64KB or TileBlockKind.RenderTarget64KBGen5))
                 {
                     return null;
                 }
@@ -203,7 +203,7 @@ public sealed class GpuTilerTests : IClassFixture<HeadlessVulkanFixture>
     public void CpuTwinCases_CoverEveryKindAndElementSize()
     {
         var cases = TilerCases.All().ToList();
-        Assert.Equal(44 + 39 + 9, cases.Count);
+        Assert.Equal((44 + 39 + 9) + 15, cases.Count);
         Assert.All(cases, tilerCase => Assert.True(tilerCase.Transfer.SurfaceZ != 0 || tilerCase.Tiled.Length == (int)tilerCase.Transfer.TiledSize));
     }
 

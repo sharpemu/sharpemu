@@ -117,9 +117,11 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
         try
         {
             const ulong destination = 0x1111_2222_3333_4444UL;
+            const ulong destinationHigh = 0x5555_6666_7777_8888UL;
             const ulong source = 0xAAAA_BBBB_CCCC_DDDDUL;
             var frame = new FakeSignalFrame((ulong)code);
             frame.SetXmmLow(FxsaveXmm0Offset, destination);
+            frame.SetXmmLow(FxsaveXmm0Offset + 8, destinationHigh);
             frame.SetXmmLow(FxsaveXmm1Offset, source);
 
             Assert.True(frame.Dispatch());
@@ -127,6 +129,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
             Assert.Equal(
                 Sse4aBitFieldEmulator.InsertBitField(destination, source, length: 0x10, index: 0x08),
                 frame.XmmLow(FxsaveXmm0Offset));
+            Assert.Equal(destinationHigh, frame.XmmHigh(FxsaveXmm0Offset));
             Assert.Equal((ulong)code + 6, frame.Rip);
         }
         finally
@@ -199,7 +202,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
             Assert.True(frame.Dispatch());
 
             Assert.Equal(0x1010UL, frame.XmmLow(FxsaveXmm0Offset));
-            Assert.Equal(0UL, frame.XmmHigh(FxsaveXmm0Offset));
+            Assert.Equal(ulong.MaxValue, frame.XmmHigh(FxsaveXmm0Offset));
             Assert.Equal((ulong)code + 6, frame.Rip);
             for (int registerIndex = 1; registerIndex < 16; registerIndex++)
             {

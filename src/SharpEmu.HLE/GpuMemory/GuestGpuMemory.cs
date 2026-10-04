@@ -65,7 +65,9 @@ public sealed class GuestGpuMemory : IDisposable
     public bool TryResolveFault(FaultKind kind, ulong address)
     {
         using var profile = GpuMemoryAccessProfile.MeasureFault(kind);
-        const ulong faultSize = 8;
+        // The host reports the byte that faulted, not the instruction's access width.
+        // Guessing a wider span can cross the end of an otherwise valid guest mapping.
+        const ulong faultSize = 1;
         if (!Covers(address, faultSize))
         {
             TraceFault("unregistered");

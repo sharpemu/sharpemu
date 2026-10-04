@@ -88,6 +88,27 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     };
 }
 
+// Reusable module-affecting state for one shader stage. The materializer may fill this
+// object for cache probes; callers must clone the specialization before storing it in a
+// permutation cache. Keeping one scratch object per stage avoids cross-stage aliasing while
+// letting the common permutation-hit path reuse both lists and their backing storage.
+public sealed class ResourceSpecializationScratch
+{
+    internal List<BufferSpecialization> Buffers { get; } = [];
+    internal List<ImageSpecialization> Images { get; } = [];
+
+    internal ResourceSpecialization Specialization { get; }
+
+    public ResourceSpecializationScratch()
+    {
+        Specialization = new ResourceSpecialization
+        {
+            Buffers = Buffers,
+            Images = Images,
+        };
+    }
+}
+
 // A plan's resource tables with one draw's specialization applied, which the emitter
 // compiles against. Sampler overrides name the point-filtering duplicate an access uses.
 public sealed class SpecializedResourceInfo

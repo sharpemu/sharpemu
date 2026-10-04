@@ -126,9 +126,9 @@ public sealed partial class ResourceTracker
                 overwritten = instruction.Destinations.Any(target => target.Kind == Gen5OperandKind.ScalarRegister &&
                     (target == destination || (instruction.Opcode.Contains("64", StringComparison.Ordinal) && target.Value + 1 == destination.Value))) ||
                     instruction.Control is Gen5Vop3Control { ScalarDestination: { } scalarDestination } &&
-                        destination.Value >= scalarDestination && destination.Value - scalarDestination < 2 ||
+                        WritesValuMaskRegister(scalarDestination, destination.Value) ||
                     instruction.Control is Gen5SdwaControl { ScalarDestination: { } compareDestination } &&
-                        destination.Value >= compareDestination && destination.Value - compareDestination < 2;
+                        WritesValuMaskRegister(compareDestination, destination.Value);
                 if (overwritten) break;
             }
             if (!overwritten)
@@ -138,10 +138,18 @@ public sealed partial class ResourceTracker
         return true;
     }
 
+    private bool WritesValuMaskRegister(uint destination, uint register)
+    {
+        var width = _graph.WaveSize == 64 ? 2u : 1u;
+        return register >= destination && register - destination < width;
+    }
+
     private static bool ReadsScalar(Gen5ShaderInstruction instruction, uint register)
     {
         bool InRange(uint first, uint width) => register >= first && register - first < width;
-        var width = instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
+        var width = instruction.Opcode == "SBitreplicateB64B32"
+            ? 1u
+            : instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
         if (instruction.Sources.Any(source => source.Kind == Gen5OperandKind.ScalarRegister && InRange(source.Value, width)))
             return true;
         return instruction.Control switch

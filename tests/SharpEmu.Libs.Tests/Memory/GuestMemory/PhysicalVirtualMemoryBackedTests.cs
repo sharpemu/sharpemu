@@ -38,25 +38,73 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
     }
 
     [Fact]
+    public void FixedPrivateAllocationReplacesAnEarlyOwnedPlaceholderOnWindows()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var host = HostViewMemory.Create();
+        var platform = PlatformMemory;
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+
+        Assert.True(memory.TryHoldRangeAtOrAbove(
+            GuestMemoryLayout.GuestAddressStart,
+            host.Granularity,
+            host.Granularity,
+            out var address));
+        Assert.True(platform.Query(address, out var reserved));
+        Assert.Equal(HostRegionState.Reserved, reserved.State);
+
+        Assert.True(memory.TryAllocateAtExact(address, host.Granularity, executable: false, out var allocated));
+        Assert.Equal(address, allocated);
+        *(ulong*)allocated = Marker;
+        Assert.Equal(Marker, *(ulong*)allocated);
+        Assert.True(platform.Query(address, out var committed));
+        Assert.Equal(HostRegionState.Committed, committed.State);
+
+        memory.Clear();
+        Assert.True(platform.Query(address, out var reset));
+        Assert.Equal(HostRegionState.Reserved, reset.State);
+
+        memory.Dispose();
+        Assert.True(platform.Query(address, out var released));
+        Assert.Equal(HostRegionState.Free, released.State);
+    }
+
+    [Fact]
+    public void EarlyOwnerKeepsThePrimaryUserWindowContiguousOnWindows()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var host = new FailingHostViews(HostViewMemory.Create());
+        using var memory = new PhysicalVirtualMemory(
+            viewHost: host,
+            backingBytes: BackingSize,
+            preReserveGuestAddressSpace: true);
+        var size = GuestMemoryLayout.GuestPrimaryUserAddressLimit -
+            GuestMemoryLayout.GuestUserAddressStart;
+
+        Assert.True(memory.TryHoldRangeAtOrAbove(
+            GuestMemoryLayout.GuestUserAddressStart,
+            size,
+            0x20_0000,
+            out var address));
+        Assert.Equal(GuestMemoryLayout.GuestUserAddressStart, address);
+        var primaryReservation = host.Log.IndexOf(FailingHostViews.Op.ReserveHole);
+        var freeRegionReservation = host.Log.IndexOf(FailingHostViews.Op.ReserveFreeRegions);
+        Assert.True(primaryReservation >= 0);
+        Assert.True(freeRegionReservation < 0 || primaryReservation < freeRegionReservation);
+    }
+
+    [Fact]
     public void SearchSkipsAFreeGapThatCannotFitTheAllocation()
     {
         if (!OperatingSystem.IsWindows()) return;
         var host = HostViewMemory.Create();
         var memoryHost = new QueryCountingHostMemory(PlatformMemory);
-        using var memory = new PhysicalVirtualMemory(memoryHost, host, BackingSize);
         const ulong gapSize = 0x100000;
-        var start = 0UL;
-        for (var candidate = 0x3_0000_0000UL; candidate < 0x4_0000_0000UL; candidate += 0x1000000)
-        {
-            if (host.ReserveHole(candidate, 4 * gapSize) != candidate) continue;
-            Assert.True(host.FreeHole(candidate, 4 * gapSize));
-            start = candidate;
-            break;
-        }
-        Assert.NotEqual(0UL, start);
+        var start = ProbeGuestAddress(host, 4 * gapSize);
         Assert.Equal(start + gapSize, host.ReserveHole(start + gapSize, gapSize));
         try
         {
+            using var memory = new PhysicalVirtualMemory(memoryHost, host, BackingSize);
             memoryHost.QueryCount = 0;
             Assert.True(memory.TryHoldRangeAtOrAbove(start, 2 * gapSize, host.Granularity, out var address));
             Assert.Equal(start + 2 * gapSize, address);
@@ -83,27 +131,44 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         Assert.Equal(0, memoryHost.QueryCount);
     }
 
-    private static ulong Hold(PhysicalVirtualMemory memory, IHostViewMemory host)
+    private static ulong Hold(
+        PhysicalVirtualMemory memory,
+        IHostViewMemory host,
+        ulong searchStart = 0x70_0000_0000UL)
     {
-        for (var attempt = 0; attempt < 8; attempt++)
+        if (memory.TryHoldRangeAtOrAbove(searchStart, HoleSize(host), host.Granularity, out var address))
         {
-            var address = ProbeGuestAddress(host, HoleSize(host));
-            if (memory.TryHoldRange(address, HoleSize(host)))
-            {
-                return address;
-            }
+            return address;
         }
 
-        Assert.Fail("could not hold a test range");
+        Assert.Fail("could not find an owned test range");
         return 0;
     }
 
     // A probed address can be taken before Map runs; retry like the hole helpers do.
     private static ulong MapPrivate(PhysicalVirtualMemory memory, IHostViewMemory host, ulong size, ProgramHeaderFlags flags)
     {
+        var searchStart = 0x70_0000_0000UL;
         for (var attempt = 0; attempt < 8; attempt++)
         {
-            var address = ProbeGuestAddress(host, size);
+            // Windows private mappings can replace an owner-controlled placeholder.
+            // The POSIX IHostMemory and IHostViewMemory backends deliberately keep
+            // separate ownership tables, so probe and release the address before
+            // asking the private-memory backend to map it, as production does for
+            // an ordinary private range.
+            ulong address;
+            if (OperatingSystem.IsWindows())
+            {
+                if (!memory.TryHoldRangeAtOrAbove(searchStart, size, host.Granularity, out address))
+                {
+                    break;
+                }
+            }
+            else
+            {
+                address = ProbeGuestAddress(host, size);
+            }
+
             try
             {
                 memory.Map(address, size, 0, ReadOnlySpan<byte>.Empty, flags);
@@ -111,6 +176,7 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
             }
             catch (InvalidOperationException)
             {
+                searchStart = address + host.Granularity;
             }
         }
 
@@ -125,7 +191,7 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         var host = HostViewMemory.Create();
         using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
         var sourceViewAddress = Hold(memory, host);
-        var destinationViewAddress = Hold(memory, host);
+        var destinationViewAddress = Hold(memory, host, sourceViewAddress + HoleSize(host));
         Assert.True(memory.TryMapBacked(sourceViewAddress, Segment, 0, GuestPageProtection.Read, out _));
         Assert.True(memory.TryMapBacked(sourceViewAddress + Segment, Segment, 2 * Segment, GuestPageProtection.Read, out _));
         Assert.True(memory.TryMapBacked(destinationViewAddress, Segment, 4 * Segment, GuestPageProtection.Read, out _));
@@ -160,7 +226,7 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         var host = HostViewMemory.Create();
         using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
         var first = Hold(memory, host);
-        var second = Hold(memory, host);
+        var second = Hold(memory, host, first + HoleSize(host));
         Assert.True(memory.TryMapBacked(first, Segment, 0, GuestPageProtection.Read, out _), "map first");
         Assert.True(memory.TryMapBacked(second, Segment, 0, GuestPageProtection.Read, out _), "map second");
         *(ulong*)first = Marker;
@@ -190,7 +256,9 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         *(ulong*)address = Marker;
         memory.Clear();
         Assert.False(memory.IsBackedView(address));
-        Assert.True(memory.TryMapBacked(address, Segment, 0, GuestPageProtection.Read, out _));
+        Assert.True(memory.TryHoldRange(address, Segment), $"hold failed; host calls: {string.Join(", ", host.Log)}");
+        Assert.True(memory.TryMapBacked(address, Segment, 0, GuestPageProtection.Read, out var remapFailure),
+            $"remap failed: {remapFailure}; host calls: {string.Join(", ", host.Log)}");
         Assert.Equal(Marker, *(ulong*)address);
         Assert.Equal(1, host.Log.Count(op => op == FailingHostViews.Op.CreateBacking));
         memory.Dispose();
@@ -205,7 +273,7 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         var host = HostViewMemory.Create();
         using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
         var first = Hold(memory, host);
-        var second = Hold(memory, host);
+        var second = Hold(memory, host, first + HoleSize(host));
         Assert.True(memory.TryMapBacked(first, Segment, 0, GuestPageProtection.Read, out _));
         Assert.True(memory.TryMapBacked(second, Segment, 0, GuestPageProtection.Read, out _));
         for (var i = 0; i < 0x100; i++)
@@ -266,7 +334,7 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         var host = HostViewMemory.Create();
         using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
         var a = Hold(memory, host);
-        var b = Hold(memory, host);
+        var b = Hold(memory, host, a + HoleSize(host));
         Assert.True(memory.TryMapBacked(a, 2 * Segment, 0, GuestPageProtection.Read, out _));
         Assert.True(memory.TryMapBacked(b, Segment, Segment, GuestPageProtection.Read, out _));
         Assert.True(memory.TryMapBacked(b + Segment, Segment, 0, GuestPageProtection.Read, out _));
@@ -301,7 +369,7 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         var host = HostViewMemory.Create();
         var size = HoleSize(host);
         using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
-        var lowerAddress = ProbeGuestAddress(host, 3 * size);
+        Assert.True(memory.TryHoldRangeAtOrAbove(0x70_0000_0000UL, 3 * size, size, out var lowerAddress));
         var higherAddress = lowerAddress + 2 * size;
         Assert.True(memory.TryHoldRange(higherAddress, size));
         Assert.True(memory.TryHoldRangeAtOrAbove(lowerAddress, size, size, out var selectedAddress));
@@ -360,7 +428,11 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         ulong address = 0;
         for (var attempt = 0; attempt < 8; attempt++)
         {
-            var candidate = ProbeGuestAddress(host, 2 * size);
+            Assert.True(memory.TryHoldRangeAtOrAbove(
+                0x70_0000_0000UL + (ulong)attempt * 0x100_0000UL,
+                2 * size,
+                size,
+                out var candidate));
             if (memory.TryHoldRange(candidate, size) && memory.TryHoldRange(candidate + size, size))
             {
                 address = candidate;

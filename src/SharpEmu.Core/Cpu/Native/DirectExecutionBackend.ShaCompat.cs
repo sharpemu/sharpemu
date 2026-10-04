@@ -102,6 +102,34 @@ public sealed partial class DirectExecutionBackend
         }
     }
 
+    // Map an Iced XMM register to its byte offset in the synthetic Win64 CONTEXT
+    // record used by both Windows recovery and the POSIX signal bridge.
+    private static bool TryGetXmmOffset(Register register, out int offset)
+    {
+        switch (register)
+        {
+            case Register.XMM0: offset = Win64ContextXmm0Offset + 16 * 0; return true;
+            case Register.XMM1: offset = Win64ContextXmm0Offset + 16 * 1; return true;
+            case Register.XMM2: offset = Win64ContextXmm0Offset + 16 * 2; return true;
+            case Register.XMM3: offset = Win64ContextXmm0Offset + 16 * 3; return true;
+            case Register.XMM4: offset = Win64ContextXmm0Offset + 16 * 4; return true;
+            case Register.XMM5: offset = Win64ContextXmm0Offset + 16 * 5; return true;
+            case Register.XMM6: offset = Win64ContextXmm0Offset + 16 * 6; return true;
+            case Register.XMM7: offset = Win64ContextXmm0Offset + 16 * 7; return true;
+            case Register.XMM8: offset = Win64ContextXmm0Offset + 16 * 8; return true;
+            case Register.XMM9: offset = Win64ContextXmm0Offset + 16 * 9; return true;
+            case Register.XMM10: offset = Win64ContextXmm0Offset + 16 * 10; return true;
+            case Register.XMM11: offset = Win64ContextXmm0Offset + 16 * 11; return true;
+            case Register.XMM12: offset = Win64ContextXmm0Offset + 16 * 12; return true;
+            case Register.XMM13: offset = Win64ContextXmm0Offset + 16 * 13; return true;
+            case Register.XMM14: offset = Win64ContextXmm0Offset + 16 * 14; return true;
+            case Register.XMM15: offset = Win64ContextXmm0Offset + 16 * 15; return true;
+            default:
+                offset = 0;
+                return false;
+        }
+    }
+
     private static unsafe UInt128 ReadCtxXmm(void* contextRecord, int offset) =>
         new(ReadCtxU64(contextRecord, offset + 8), ReadCtxU64(contextRecord, offset));
 }

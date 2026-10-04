@@ -58,7 +58,10 @@ public static partial class ImageRequestBuilders
         return Format.Undefined;
     }
 
-    private static bool HtileStencilCompatible(bool hasStencil, bool hasHtile, bool htileStencilDisabled) => !hasStencil || !hasHtile || htileStencilDisabled;
+    // Hi-Stencil fields are inactive without a stencil plane. With a stencil plane,
+    // compression is valid when it is disabled or backed by HTile metadata.
+    private static bool HtileStencilCompatible(bool hasStencil, bool hasHtile, bool htileStencilDisabled) =>
+        !hasStencil || htileStencilDisabled || hasHtile;
 
     // Builds the request for the bound depth target. Null when no depth or stencil state is active.
     public static DepthTargetResolution? DepthTarget(in DepthTargetWords depthWords, IImageFormatSupport device) =>
@@ -220,7 +223,7 @@ public static partial class ImageRequestBuilders
         description.Metadata.StencilCompressed = hasStencil && hasHtile && !depthWords.HtileStencilDisabled;
         var viewDescription = new ImageViewDescription(
             format, view.LayerCount == 1 ? ImageViewType.Type2D : ImageViewType.Type2DArray, ViewFormatRules.DepthAspects(format),
-            0, 1, view.BaseLayer, view.LayerCount, default, ImageUsageFlags.DepthStencilAttachmentBit);
+            0, 1, 0, view.BaseLayer, view.LayerCount, default, ImageUsageFlags.DepthStencilAttachmentBit);
         var request = new ImageRequest(description, viewDescription, ImageRole.DepthTarget);
         return new DepthTargetResolution(
             request, format, width, height, samples, hasStencil, hasHtile,
@@ -283,7 +286,7 @@ public static partial class ImageRequestBuilders
         }
 
         var view = new ImageViewDescription(
-            description.PixelFormat, ImageViewType.Type2D, ImageAspectFlags.ColorBit, 0, 1, 0, 1, default, ImageUsageFlags.TransferSrcBit);
+            description.PixelFormat, ImageViewType.Type2D, ImageAspectFlags.ColorBit, 0, 1, 0, 0, 1, default, ImageUsageFlags.TransferSrcBit);
         return new ImageRequest(description, view, ImageRole.DisplaySurface);
     }
 }

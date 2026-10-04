@@ -26,6 +26,12 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
     public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)
     {
         shader = null;
+        if (TryLoadSpirvOverride(request, out var overrideSpirv, out error))
+        {
+            shader = new VulkanCompiledGuestShader(overrideSpirv);
+            return true;
+        }
+
         if (!Gen5SpirvTranslator.TryCompileProgram(request, out var compiled, out error))
         {
             return false;
@@ -33,6 +39,69 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 
         shader = new VulkanCompiledGuestShader(compiled.Spirv);
         return true;
+    }
+
+    private static bool TryLoadSpirvOverride(
+        ShaderCompileRequest request,
+        out byte[] spirv,
+        out string error)
+    {
+        spirv = [];
+        error = string.Empty;
+        var path = Environment.GetEnvironmentVariable("SHARPEMU_SPIRV_OVERRIDE_PATH");
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return false;
+        }
+
+        var addressText = Environment.GetEnvironmentVariable("SHARPEMU_SPIRV_OVERRIDE_ADDRESS");
+        var hashText = Environment.GetEnvironmentVariable("SHARPEMU_SPIRV_OVERRIDE_HASH");
+        if (!TryParseHex(addressText, out var address) ||
+            !TryParseHex(hashText, out var hash) ||
+            request.Program.Address != address ||
+            request.Hash != hash)
+        {
+            return false;
+        }
+
+        try
+        {
+            spirv = File.ReadAllBytes(path);
+            if (spirv.Length < sizeof(uint) ||
+                (spirv.Length & (sizeof(uint) - 1)) != 0 ||
+                BitConverter.ToUInt32(spirv, 0) != 0x07230203u)
+            {
+                error = $"SPIR-V override is not a valid word-aligned module: {path}";
+                spirv = [];
+                return false;
+            }
+
+            Console.Error.WriteLine(
+                $"[GPU][SPIRV-OVERRIDE] address=0x{address:X16} hash=0x{hash:X16} " +
+                $"bytes={spirv.Length} path={path}");
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = $"Could not load SPIR-V override '{path}': {exception.Message}";
+            spirv = [];
+            return false;
+        }
+    }
+
+    private static bool TryParseHex(string? text, out ulong value)
+    {
+        var span = text.AsSpan().Trim();
+        if (span.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            span = span[2..];
+        }
+
+        return ulong.TryParse(
+            span,
+            System.Globalization.NumberStyles.HexNumber,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out value);
     }
 
     public IGuestCompiledShader GetDepthOnlyFragmentShader() =>
@@ -65,6 +134,9 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 
     public IdleOutcome SubmitDone(ICpuMemory memory) =>
         VulkanVideoPresenter.SubmitDone(memory);
+
+    public void RunAfterPendingCommandStreams(Action work) =>
+        VulkanVideoPresenter.RunAfterPendingCommandStreams(work);
 
     public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat) =>
         VulkanVideoPresenter.RegisterKnownDisplayBuffer(address, guestFormat);

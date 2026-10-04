@@ -11,6 +11,8 @@ internal sealed class FailingHostViews : IHostViewMemory
     public enum Op
     {
         CreateBacking,
+        CommitBacking,
+        ReserveFreeRegions,
         ReserveHole,
         SplitHole,
         JoinHoles,
@@ -66,6 +68,24 @@ internal sealed class FailingHostViews : IHostViewMemory
         }
 
         return _inner.TryCreateBacking(size, out backing, out failure);
+    }
+
+    public bool TryCommitBacking(HostBackingObject backing, ulong offset, ulong size) =>
+        !ShouldFail(Op.CommitBacking) && _inner.TryCommitBacking(backing, offset, size);
+
+    public bool TryReserveFreeRegions(
+        ulong startAddress,
+        ulong endAddress,
+        ulong minimumRegionSize,
+        out IReadOnlyList<HostAddressRange> reservations)
+    {
+        if (ShouldFail(Op.ReserveFreeRegions))
+        {
+            reservations = Array.Empty<HostAddressRange>();
+            return false;
+        }
+
+        return _inner.TryReserveFreeRegions(startAddress, endAddress, minimumRegionSize, out reservations);
     }
 
     public ulong ReserveHole(ulong address, ulong size)

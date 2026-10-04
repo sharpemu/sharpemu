@@ -304,42 +304,50 @@ public static class CodecExports
             return AudiodecErrorInvalidBsiInfoPointer;
         }
 
-        if (auInfoAddress == 0)
+        if (decode && auInfoAddress == 0)
         {
             return AudiodecErrorInvalidAuInfoPointer;
         }
 
-        if (pcmItemAddress == 0)
+        if (decode && pcmItemAddress == 0)
         {
             return AudiodecErrorInvalidPcmItemPointer;
         }
 
-        Span<byte> auInfo = stackalloc byte[24];
-        if (!ctx.Memory.TryRead(auInfoAddress, auInfo))
+        ulong auAddress = 0;
+        uint auSize = 0;
+        ulong pcmAddress = 0;
+        uint pcmSize = 0;
+        if (decode)
         {
-            return AudiodecErrorInvalidAuInfoPointer;
+            Span<byte> auInfo = stackalloc byte[24];
+            if (!ctx.Memory.TryRead(auInfoAddress, auInfo))
+            {
+                return AudiodecErrorInvalidAuInfoPointer;
+            }
+
+            if (BinaryPrimitives.ReadUInt32LittleEndian(auInfo) != auInfo.Length)
+            {
+                return AudiodecErrorInvalidAuInfoSize;
+            }
+
+            Span<byte> pcmItem = stackalloc byte[24];
+            if (!ctx.Memory.TryRead(pcmItemAddress, pcmItem))
+            {
+                return AudiodecErrorInvalidPcmItemPointer;
+            }
+
+            if (BinaryPrimitives.ReadUInt32LittleEndian(pcmItem) != pcmItem.Length)
+            {
+                return AudiodecErrorInvalidPcmItemSize;
+            }
+
+            auAddress = BinaryPrimitives.ReadUInt64LittleEndian(auInfo[8..]);
+            auSize = BinaryPrimitives.ReadUInt32LittleEndian(auInfo[16..]);
+            pcmAddress = BinaryPrimitives.ReadUInt64LittleEndian(pcmItem[8..]);
+            pcmSize = BinaryPrimitives.ReadUInt32LittleEndian(pcmItem[16..]);
         }
 
-        if (BinaryPrimitives.ReadUInt32LittleEndian(auInfo) != auInfo.Length)
-        {
-            return AudiodecErrorInvalidAuInfoSize;
-        }
-
-        Span<byte> pcmItem = stackalloc byte[24];
-        if (!ctx.Memory.TryRead(pcmItemAddress, pcmItem))
-        {
-            return AudiodecErrorInvalidPcmItemPointer;
-        }
-
-        if (BinaryPrimitives.ReadUInt32LittleEndian(pcmItem) != pcmItem.Length)
-        {
-            return AudiodecErrorInvalidPcmItemSize;
-        }
-
-        var auAddress = BinaryPrimitives.ReadUInt64LittleEndian(auInfo[8..]);
-        var auSize = BinaryPrimitives.ReadUInt32LittleEndian(auInfo[16..]);
-        var pcmAddress = BinaryPrimitives.ReadUInt64LittleEndian(pcmItem[8..]);
-        var pcmSize = BinaryPrimitives.ReadUInt32LittleEndian(pcmItem[16..]);
         if (decode && auAddress == 0)
         {
             return AudiodecErrorInvalidAuPointer;

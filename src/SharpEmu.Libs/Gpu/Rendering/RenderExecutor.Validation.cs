@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -50,19 +51,20 @@ public sealed partial class RenderExecutor
         }
 
         var mode = context.RasterMode;
-        if (mode.FrontPolygonType is not (0 or 2))
+        // The current host path lowers both rectangle-list encodings through PatchList;
+        // use the same cull override here so validation and pipeline creation agree.
+        var primitiveType = (GuestPrimitiveType)banks.UserConfig.PrimitiveType;
+        var rectangleList = primitiveType is GuestPrimitiveType.RectangleList or GuestPrimitiveType.RectangleListLegacy;
+        var cullFront = !rectangleList && mode.CullFront;
+        var cullBack = !rectangleList && mode.CullBack;
+        if (!PolygonModeResolver.TryResolve(in mode, cullFront, cullBack, out _, out var polygonModeError))
         {
-            throw _host.Fatal($"The front polygon type is not supported: type={mode.FrontPolygonType}.");
+            throw _host.Fatal(polygonModeError);
         }
 
-        if (mode.BackPolygonType is not (0 or 2))
+        if (mode.ProvokingVertexLast && !_host.ProvokingVertexLastSupported)
         {
-            throw _host.Fatal($"The back polygon type is not supported: type={mode.BackPolygonType}.");
-        }
-
-        if (mode.ProvokingVertexLast)
-        {
-            throw _host.Fatal("The last provoking vertex is not supported.");
+            throw _host.Fatal("The last provoking vertex is not supported by the render host.");
         }
 
         if (mode.PerspectiveCorrectionDisable)

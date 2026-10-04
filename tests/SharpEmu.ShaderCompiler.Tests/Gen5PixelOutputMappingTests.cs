@@ -78,6 +78,105 @@ public sealed class Gen5PixelOutputMappingTests
     }
 
     [Fact]
+    public void CompressedUnorm16OutputUsesNormalizedUnpack()
+    {
+        var instructions = ReadInstructions(
+            CompilePixelProgram(
+                Gen5ColorComponentMapping.Identity,
+                compressed: true,
+                outputs:
+                [
+                    new Gen5PixelOutputBinding(
+                        0,
+                        0,
+                        Gen5PixelOutputKind.Float,
+                        Gen5ColorComponentMapping.Identity,
+                        5),
+                ]));
+
+        Assert.Equal(2, CountGlslExtendedInstruction(instructions, 61));
+        Assert.Equal(0, CountGlslExtendedInstruction(instructions, 62));
+    }
+
+    [Theory]
+    [InlineData(0x1u, 1)]
+    [InlineData(0x3u, 1)]
+    [InlineData(0x5u, 2)]
+    public void CompressedUnorm16OutputUnpacksOnlyEnabledPairs(
+        uint enableMask,
+        int expectedPairs)
+    {
+        var instructions = ReadInstructions(
+            CompilePixelProgram(
+                Gen5ColorComponentMapping.Identity,
+                enableMask,
+                compressed: true,
+                outputs:
+                [
+                    new Gen5PixelOutputBinding(
+                        0,
+                        0,
+                        Gen5PixelOutputKind.Float,
+                        Gen5ColorComponentMapping.Identity,
+                        5),
+                ]));
+
+        Assert.Equal(
+            expectedPairs,
+            CountGlslExtendedInstruction(instructions, 61));
+    }
+
+    [Fact]
+    public void CompressedUint16OutputExtractsUnsignedLanes()
+    {
+        var instructions = ReadInstructions(
+            CompilePixelProgram(
+                Gen5ColorComponentMapping.Identity,
+                compressed: true,
+                outputs:
+                [
+                    new Gen5PixelOutputBinding(
+                        0,
+                        0,
+                        Gen5PixelOutputKind.Float,
+                        Gen5ColorComponentMapping.Identity,
+                        7),
+                ]));
+
+        AssertUnsignedVectorOutput(instructions, "mrt0");
+        Assert.Equal(
+            4,
+            instructions.Count(instruction =>
+                instruction.Opcode == SpirvOp.BitFieldUExtract));
+        Assert.Equal(0, CountGlslExtendedInstruction(instructions, 62));
+    }
+
+    [Fact]
+    public void CompressedUint16OutputExtractsOnlyEnabledComponents()
+    {
+        var instructions = ReadInstructions(
+            CompilePixelProgram(
+                Gen5ColorComponentMapping.Identity,
+                enableMask: 0x5,
+                compressed: true,
+                outputs:
+                [
+                    new Gen5PixelOutputBinding(
+                        0,
+                        0,
+                        Gen5PixelOutputKind.Float,
+                        Gen5ColorComponentMapping.Identity,
+                        7),
+                ]));
+
+        AssertUnsignedVectorOutput(instructions, "mrt0");
+        Assert.Equal(
+            2,
+            instructions.Count(instruction =>
+                instruction.Opcode == SpirvOp.BitFieldUExtract));
+    }
+
+    [Fact]
     public void NullValidMaskExportControlsFragmentValidity()
     {
         var instructions = ReadInstructions(
@@ -186,7 +285,8 @@ public sealed class Gen5PixelOutputMappingTests
         uint target = 0,
         IReadOnlyList<Gen5PixelOutputBinding>? outputs = null,
         IReadOnlyList<Gen5ShaderInstruction>? prefix = null,
-        bool enableGraphicsSubgroupOperations = true)
+        bool enableGraphicsSubgroupOperations = true,
+        bool compressed = false)
     {
         var prefixInstructions = prefix ?? [];
         var export = new Gen5ShaderInstruction(
@@ -201,7 +301,7 @@ public sealed class Gen5PixelOutputMappingTests
                 Gen5Operand.Vector(3),
             ],
             [],
-            new Gen5ExportControl(target, enableMask, false, true, true));
+            new Gen5ExportControl(target, enableMask, compressed, true, true));
         var end = new Gen5ShaderInstruction(
             (uint)((prefixInstructions.Count + 2) * sizeof(uint)),
             Gen5ShaderEncoding.Sopp,
@@ -264,6 +364,53 @@ public sealed class Gen5PixelOutputMappingTests
         }
 
         return instructions;
+    }
+
+    private static int CountGlslExtendedInstruction(
+        IEnumerable<ParsedInstruction> instructions,
+        uint operation) =>
+        instructions.Count(instruction =>
+            instruction.Opcode == SpirvOp.ExtInst &&
+            instruction.Operands.Length >= 4 &&
+            instruction.Operands[3] == operation);
+
+    private static void AssertUnsignedVectorOutput(
+        IReadOnlyList<ParsedInstruction> instructions,
+        string name)
+    {
+        var outputName = Assert.Single(
+            instructions,
+            instruction =>
+                instruction.Opcode == SpirvOp.Name &&
+                DecodeString(instruction.Operands[1..]) == name);
+        var outputVariable = Assert.Single(
+            instructions,
+            instruction =>
+                instruction.Opcode == SpirvOp.Variable &&
+                instruction.Operands.Length >= 3 &&
+                instruction.Operands[1] == outputName.Operands[0]);
+        var outputPointer = Assert.Single(
+            instructions,
+            instruction =>
+                instruction.Opcode == SpirvOp.TypePointer &&
+                instruction.Operands.Length >= 3 &&
+                instruction.Operands[0] == outputVariable.Operands[0] &&
+                instruction.Operands[1] == (uint)SpirvStorageClass.Output);
+        var outputVector = Assert.Single(
+            instructions,
+            instruction =>
+                instruction.Opcode == SpirvOp.TypeVector &&
+                instruction.Operands.Length >= 3 &&
+                instruction.Operands[0] == outputPointer.Operands[2] &&
+                instruction.Operands[2] == 4);
+        Assert.Contains(
+            instructions,
+            instruction =>
+                instruction.Opcode == SpirvOp.TypeInt &&
+                instruction.Operands.Length >= 3 &&
+                instruction.Operands[0] == outputVector.Operands[1] &&
+                instruction.Operands[1] == 32 &&
+                instruction.Operands[2] == 0);
     }
 
     private readonly record struct ParsedInstruction(

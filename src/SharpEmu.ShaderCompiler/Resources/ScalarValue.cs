@@ -79,6 +79,7 @@ public enum ScalarOperation : byte
     FGreaterThanEqual,
     FIsNan,
     FMul,
+    FDiv,
     FTrunc,
     UMax32,
     SMin32,

@@ -173,13 +173,13 @@ internal static class ResourceTestProgram
 
     // The plan, its default specialization applied, and the layout of one program.
     public static (ShaderResourcePlan Plan, SpecializedResourceInfo Resources, BindingLayout Layout) Prepare(
-        Gen5ShaderProgram program, ShaderStage stage = ShaderStage.Compute, uint userDataBase = 0, uint userDataCount = 64, uint pushDataStartDword = 0)
+        Gen5ShaderProgram program, ShaderStage stage = ShaderStage.Compute, uint userDataBase = 0, uint userDataCount = 64, uint pushDataStartDword = 0, uint waveSize = 32)
     {
-        var plan = ShaderResourcePlan.Extract(program, stage, Hash, userDataBase, userDataCount);
+        var plan = ShaderResourcePlan.Extract(program, stage, Hash, userDataBase, userDataCount, waveSize: waveSize);
         var resources = ResourceMaterializer.ApplyTo(plan, ResourceSpecialization.Default(plan.Info));
         var layout = BindingLayout.Allocate(
             resources.Info,
-            BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount),
+            BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount, waveSize),
             BindingLayout.UsesGlobalDataShare(program),
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
             BindingLayout.ReadsShaderBase(program),
@@ -187,11 +187,13 @@ internal static class ResourceTestProgram
         return (plan, resources, layout);
     }
 
-    public static ShaderCompileRequest Request(Gen5ShaderProgram program, ShaderStage stage = ShaderStage.Compute, uint userDataBase = 0, uint userDataCount = 64, uint pushDataStartDword = 0)
+    public static ShaderCompileRequest Request(Gen5ShaderProgram program, ShaderStage stage = ShaderStage.Compute, uint userDataBase = 0, uint userDataCount = 64, uint pushDataStartDword = 0, uint waveSize = 32, bool shaderFloat64Supported = false)
     {
-        var (plan, resources, layout) = Prepare(program, stage, userDataBase, userDataCount, pushDataStartDword);
+        var (plan, resources, layout) = Prepare(program, stage, userDataBase, userDataCount, pushDataStartDword, waveSize);
         return new ShaderCompileRequest(plan, resources, layout)
         {
+            WaveSize = waveSize,
+            ShaderFloat64Supported = shaderFloat64Supported,
             PixelOutputs = stage == ShaderStage.Pixel ? [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)] : [],
         };
     }

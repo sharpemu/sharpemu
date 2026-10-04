@@ -3,6 +3,7 @@
 
 using System.Text;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.ShaderCompiler.Metal;
 
@@ -14,6 +15,44 @@ public static partial class Gen5MslTranslator
         private static bool UsesSampler(string opcode) =>
             opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
             opcode.StartsWith("ImageGather", StringComparison.Ordinal);
+
+        private bool TryEmitBvhMissFallback(
+            Gen5BvhRayControl bvh,
+            out string error)
+        {
+            error = string.Empty;
+
+            // AMD's raw BVH format is not a Metal acceleration structure.
+            // Preserve control flow with a deterministic no-hit result until
+            // the raw node formats are traversed in software.
+            var nodeType = Temp(
+                "uint",
+                $"v[{bvh.GetAddressRegister(0)}] & 7u");
+            var triangle = Temp("bool", $"{nodeType} < 4u");
+            var barycentricMode = Temp(
+                "bool",
+                $"(s[{bvh.ScalarResource + 3}] & 0x01000000u) != 0u");
+            var triangleT = Temp(
+                "uint",
+                $"{barycentricMode} ? 0x7F800000u : 0u");
+            var triangleDenominator = Temp(
+                "uint",
+                $"{barycentricMode} ? 0x3F800000u : 0u");
+
+            StoreVector(
+                bvh.VectorData,
+                $"{triangle} ? {triangleT} : 0xFFFFFFFFu");
+            StoreVector(
+                bvh.VectorData + 1,
+                $"{triangle} ? {triangleDenominator} : 0xFFFFFFFFu");
+            StoreVector(
+                bvh.VectorData + 2,
+                $"{triangle} ? 0u : 0xFFFFFFFFu");
+            StoreVector(
+                bvh.VectorData + 3,
+                $"{triangle} ? 0u : 0xFFFFFFFFu");
+            return true;
+        }
 
         // ---- image instruction emission ----
 
@@ -246,13 +285,13 @@ public static partial class Gen5MslTranslator
         {
             sampled = string.Empty;
             error = string.Empty;
-            var opcode = instruction.Opcode;
-            var hasOffset = opcode.EndsWith("O", StringComparison.Ordinal);
-            var hasCompare = opcode.Contains("SampleC", StringComparison.Ordinal);
-            var hasGradients = opcode.Contains("SampleD", StringComparison.Ordinal);
-            var hasZeroLod = opcode.Contains("Lz", StringComparison.Ordinal);
-            var hasLod = !hasZeroLod && opcode.Contains("SampleL", StringComparison.Ordinal);
-            var hasBias = opcode.Contains("SampleB", StringComparison.Ordinal);
+            var sampleFlags = ImageSampleOpcodeInfo.Decode(instruction.Opcode);
+            var hasOffset = (sampleFlags & ImageSampleFlags.Offset) != 0;
+            var hasCompare = (sampleFlags & ImageSampleFlags.Compare) != 0;
+            var hasGradients = (sampleFlags & ImageSampleFlags.Derivative) != 0;
+            var hasZeroLod = (sampleFlags & ImageSampleFlags.LevelZero) != 0;
+            var hasLod = (sampleFlags & ImageSampleFlags.Lod) != 0;
+            var hasBias = (sampleFlags & ImageSampleFlags.Bias) != 0;
 
             // RDNA MIMG address operands are ordered
             // {offset}{bias}{z-compare}{derivatives}{body}; SAMPLE_L carries LOD

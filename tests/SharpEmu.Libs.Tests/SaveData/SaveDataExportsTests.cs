@@ -44,11 +44,18 @@ public sealed class SaveDataExportsTests : IDisposable
     private const ulong SearchResult = Base + 0x1140;
     private const ulong SearchDirNames = Base + 0x1180;
     private const ulong SearchInfos = Base + 0x1200;
+    private const ulong BackupParam = Base + 0x1300;
+    private const ulong BackupTitleId = Base + 0x1380;
+    private const ulong BackupDirName = Base + 0x13C0;
+    private const ulong Unmapped = Base + 0x2_0000;
 
     private const int NoEvent = unchecked((int)0x809F0008);
     private const int ParameterError = unchecked((int)0x809F0000);
+    private const int MemoryFault = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
     private const int ResourceBusy = unchecked((int)0x809F001B);
     private const uint MountModeCreate = 1u << 2;
+    private const string BackupTitle = "PPSA10067";
+    private const string BackupDirectory = "SLOT_WITH_32_CHARACTERS_12345678";
 
     private readonly FakeCpuMemory _memory = new(Base, 0x10000);
     private readonly CpuContext _ctx;
@@ -122,6 +129,65 @@ public sealed class SaveDataExportsTests : IDisposable
     }
 
     [Fact]
+    public void Backup_QueuesCompleteBackupEndEvent_ThenDrains()
+    {
+        WriteAscii(BackupTitleId, BackupTitle);
+        WriteAscii(BackupDirName, BackupDirectory);
+        WriteBackupParam(BackupTitleId, BackupDirName);
+
+        Assert.Equal(0, SaveDataExports.SaveDataBackup(Reg(rdi: BackupParam)));
+
+        var initialized = new byte[0x70];
+        Array.Fill(initialized, (byte)0xCC);
+        Assert.True(_memory.TryWrite(EventOut, initialized));
+        Assert.Equal(0, SaveDataExports.SaveDataGetEventResult(Reg(rsi: EventOut)));
+
+        var ev = new byte[0x70];
+        Assert.True(_memory.TryRead(EventOut, ev));
+        Assert.Equal(2u, BinaryPrimitives.ReadUInt32LittleEndian(ev));
+        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(ev.AsSpan(0x04)));
+        Assert.Equal(UserId, BinaryPrimitives.ReadInt32LittleEndian(ev.AsSpan(0x08)));
+        Assert.Equal(BackupTitle, Encoding.ASCII.GetString(ev, 0x10, 0x10).TrimEnd('\0'));
+        Assert.Equal(BackupDirectory, Encoding.ASCII.GetString(ev, 0x20, 0x20).TrimEnd('\0'));
+        Assert.All(ev[0x1A..0x20], value => Assert.Equal((byte)0, value));
+        Assert.All(ev[0x40..0x68], value => Assert.Equal((byte)0, value));
+        Assert.All(ev[0x68..0x70], value => Assert.Equal((byte)0xCC, value));
+        Assert.Equal(NoEvent, SaveDataExports.SaveDataGetEventResult(Reg(rsi: EventOut)));
+    }
+
+    [Fact]
+    public void Backup_NullParameterOrDirectory_ReturnsParameterWithoutEvent()
+    {
+        Assert.Equal(ParameterError, SaveDataExports.SaveDataBackup(Reg(rdi: 0)));
+
+        WriteBackupParam(titleIdAddress: 0, dirNameAddress: 0);
+        Assert.Equal(ParameterError, SaveDataExports.SaveDataBackup(Reg(rdi: BackupParam)));
+        Assert.Equal(NoEvent, SaveDataExports.SaveDataGetEventResult(Reg(rsi: EventOut)));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Backup_InvalidNestedPointer_ReturnsMemoryFaultWithoutEvent(bool invalidTitle)
+    {
+        WriteAscii(BackupTitleId, BackupTitle);
+        WriteAscii(BackupDirName, BackupDirectory);
+        WriteBackupParam(
+            invalidTitle ? Unmapped : BackupTitleId,
+            invalidTitle ? BackupDirName : Unmapped);
+
+        Assert.Equal(MemoryFault, SaveDataExports.SaveDataBackup(Reg(rdi: BackupParam)));
+        Assert.Equal(NoEvent, SaveDataExports.SaveDataGetEventResult(Reg(rsi: EventOut)));
+    }
+
+    [Fact]
+    public void Backup_InvalidStructurePointer_ReturnsMemoryFaultWithoutEvent()
+    {
+        Assert.Equal(MemoryFault, SaveDataExports.SaveDataBackup(Reg(rdi: Unmapped)));
+        Assert.Equal(NoEvent, SaveDataExports.SaveDataGetEventResult(Reg(rsi: EventOut)));
+    }
+
+    [Fact]
     public void SyncSaveDataMemory_PostsSyncEndEvent_DrainedOnce()
     {
         // Setup the memory blob so sync succeeds.
@@ -144,6 +210,11 @@ public sealed class SaveDataExportsTests : IDisposable
         Assert.Equal(3u, type);
         Assert.True(_ctx.TryReadInt32(EventOut + 0x04, out var errorCode));
         Assert.Equal(0, errorCode);
+
+        var ev = new byte[0x68];
+        Assert.True(_memory.TryRead(EventOut, ev));
+        Assert.Equal(TitleId[..10], Encoding.ASCII.GetString(ev, 0x10, 0x10).TrimEnd('\0'));
+        Assert.Equal("sce_sdmemory", Encoding.ASCII.GetString(ev, 0x20, 0x20).TrimEnd('\0'));
 
         Assert.Equal(NoEvent, SaveDataExports.SaveDataGetEventResult(Reg(rsi: EventOut)));
     }
@@ -396,5 +467,15 @@ public sealed class SaveDataExportsTests : IDisposable
         Assert.Equal(
             0,
             SaveDataExports.SaveDataPrepare(Reg(rdi: MountPointStr, rsi: PrepareParam)));
+    }
+
+    private void WriteBackupParam(ulong titleIdAddress, ulong dirNameAddress)
+    {
+        Span<byte> backup = stackalloc byte[0x40];
+        backup.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(backup, UserId);
+        BinaryPrimitives.WriteUInt64LittleEndian(backup[0x08..], titleIdAddress);
+        BinaryPrimitives.WriteUInt64LittleEndian(backup[0x10..], dirNameAddress);
+        Assert.True(_memory.TryWrite(BackupParam, backup));
     }
 }

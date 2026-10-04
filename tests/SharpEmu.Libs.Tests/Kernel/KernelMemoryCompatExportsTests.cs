@@ -217,6 +217,103 @@ public sealed class KernelMemoryCompatExportsTests
     }
 
     [Fact]
+    public void UnderscoreOpen_MissingFileUsesPosixFailureAbi()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong pathAddress = memoryBase + 0x100;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context.FsBase = memoryBase + 0x800;
+        memory.WriteCString(pathAddress, "/__sharpemu_test_missing__/resource_level_high.bin");
+        context[CpuRegister.Rdi] = pathAddress;
+        context[CpuRegister.Rsi] = 0; // O_RDONLY
+
+        var result = KernelMemoryCompatExports.KernelOpenUnderscore(context);
+
+        Assert.Equal(-1, result);
+        Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
+        Assert.True(context.TryReadUInt32(context.FsBase + 0x40, out var errno));
+        Assert.Equal(2u, errno); // ENOENT
+    }
+
+    [Theory]
+    [InlineData("/dev/random")]
+    [InlineData("/dev/urandom")]
+    public void PosixRandomDevice_OpenReadFstatAndClose(string path)
+    {
+        const ulong pathAddress = GuestMemoryBase + 0x100;
+        const ulong bufferAddress = GuestMemoryBase + 0x200;
+        const ulong statAddress = GuestMemoryBase + 0x400;
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        memory.WriteCString(pathAddress, path);
+        context[CpuRegister.Rdi] = pathAddress;
+        context[CpuRegister.Rsi] = 0; // O_RDONLY
+
+        Assert.Equal(0, KernelMemoryCompatExports.PosixOpen(context));
+        var fd = unchecked((int)context[CpuRegister.Rax]);
+        Assert.True(fd >= 3);
+
+        context[CpuRegister.Rdi] = unchecked((ulong)fd);
+        context[CpuRegister.Rsi] = bufferAddress;
+        context[CpuRegister.Rdx] = 32;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixRead(context));
+        Assert.Equal(32UL, context[CpuRegister.Rax]);
+        var randomBytes = new byte[32];
+        Assert.True(memory.TryRead(bufferAddress, randomBytes));
+        Assert.Contains(randomBytes, value => value != 0);
+
+        context[CpuRegister.Rdi] = unchecked((ulong)fd);
+        context[CpuRegister.Rsi] = statAddress;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixFstat(context));
+
+        context[CpuRegister.Rdi] = unchecked((ulong)fd);
+        Assert.Equal(0, KernelMemoryCompatExports.PosixClose(context));
+
+        context[CpuRegister.Rdi] = unchecked((ulong)fd);
+        context[CpuRegister.Rsi] = bufferAddress;
+        context[CpuRegister.Rdx] = 1;
+        Assert.Equal(-1, KernelMemoryCompatExports.PosixRead(context));
+    }
+
+    [Fact]
+    public void KernelOpen_MissingFileKeepsRawKernelFailureAbi()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong pathAddress = memoryBase + 0x100;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        memory.WriteCString(pathAddress, "/__sharpemu_test_missing__/resource_level_high.bin");
+        context[CpuRegister.Rdi] = pathAddress;
+        context[CpuRegister.Rsi] = 0; // O_RDONLY
+
+        var result = KernelExports.KernelOpen(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, result);
+    }
+
+    [Fact]
+    public void PosixUnlink_MissingFileReturnsMinusOneAndRegisters()
+    {
+        const ulong pathAddress = GuestMemoryBase + 0x100;
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        memory.WriteCString(pathAddress, "/__sharpemu_test_missing__/temporary.cache");
+        context[CpuRegister.Rdi] = pathAddress;
+
+        var result = KernelMemoryCompatExports.PosixUnlink(context);
+
+        Assert.Equal(-1, result);
+        Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
+
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+        Assert.True(manager.TryGetExport("VAzswvTOCzI", out var export));
+        Assert.Equal("unlink", export.Name);
+        Assert.Equal("libKernel", export.LibraryName);
+    }
+
+    [Fact]
     public void KernelMkdir_GuestRootReturnsAlreadyExists()
     {
         const ulong memoryBase = 0x1_0000_0000;
@@ -229,6 +326,75 @@ public sealed class KernelMemoryCompatExportsTests
         var result = KernelMemoryCompatExports.KernelMkdir(context);
 
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_ALREADY_EXISTS, result);
+    }
+
+    [Fact]
+    public void KernelMkdir_TempMountExistsAndTempAliasSharesIt()
+    {
+        const ulong pathAddress = GuestMemoryBase + 0x100;
+        var originalTemp0 = Environment.GetEnvironmentVariable("SHARPEMU_TEMP0_DIR");
+        var tempRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"sharpemu-temp-mount-{Guid.NewGuid():N}");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("SHARPEMU_TEMP0_DIR", tempRoot);
+            var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+            var context = new CpuContext(memory, Generation.Gen5);
+            context[CpuRegister.Rdi] = pathAddress;
+
+            memory.WriteCString(pathAddress, "/temp0/first");
+            Assert.Equal(
+                (int)OrbisGen2Result.ORBIS_GEN2_OK,
+                KernelMemoryCompatExports.KernelMkdir(context));
+
+            memory.WriteCString(pathAddress, "/temp/second");
+            Assert.Equal(
+                (int)OrbisGen2Result.ORBIS_GEN2_OK,
+                KernelMemoryCompatExports.KernelMkdir(context));
+
+            Assert.True(Directory.Exists(Path.Combine(tempRoot, "first")));
+            Assert.True(Directory.Exists(Path.Combine(tempRoot, "second")));
+            Assert.Equal(
+                KernelMemoryCompatExports.ResolveGuestPath("/temp0/shared.bin"),
+                KernelMemoryCompatExports.ResolveGuestPath("/temp/shared.bin"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SHARPEMU_TEMP0_DIR", originalTemp0);
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void PosixMkdir_MapsExistingDirectoryToEexistAndRegisters()
+    {
+        const ulong pathAddress = GuestMemoryBase + 0x100;
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5)
+        {
+            FsBase = GuestMemoryBase + 0x800,
+        };
+        memory.WriteCString(pathAddress, "/");
+        context[CpuRegister.Rdi] = pathAddress;
+        context[CpuRegister.Rsi] = 0x1FF; // mode_t is accepted by the POSIX ABI.
+
+        var result = KernelMemoryCompatExports.PosixMkdir(context);
+
+        Assert.Equal(-1, result);
+        Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
+        Assert.True(context.TryReadUInt32(context.FsBase + 0x40, out var errno));
+        Assert.Equal(17u, errno); // EEXIST
+
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+        Assert.True(manager.TryGetExport("JGMio+21L4c", out var export));
+        Assert.Equal("mkdir", export.Name);
+        Assert.Equal("libKernel", export.LibraryName);
     }
 
     [Fact]
@@ -381,6 +547,102 @@ public sealed class KernelMemoryCompatExportsTests
         {
             ReleaseDirectMemory(context, allocationStart, allocationLength);
         }
+    }
+
+    [Fact]
+    public void AvailableDirectMemorySize_FullRangeClearsOutputsAndReturnsNoMemory()
+    {
+        const ulong allocationStart = 0;
+        const ulong allocationLength = 0x0100_0000;
+        var context = new CpuContext(new FakeCpuMemory(GuestMemoryBase, 0x1000), Generation.Gen5);
+
+        try
+        {
+            AllocateDirectMemory(context, allocationStart, allocationLength);
+            Assert.True(context.TryWriteUInt64(SpanStartOutAddress, ulong.MaxValue));
+            Assert.True(context.TryWriteUInt64(SpanSizeOutAddress, ulong.MaxValue));
+            context[CpuRegister.Rdi] = allocationStart;
+            context[CpuRegister.Rsi] = allocationStart + allocationLength;
+            context[CpuRegister.Rdx] = 0;
+            context[CpuRegister.Rcx] = SpanStartOutAddress;
+            context[CpuRegister.R8] = SpanSizeOutAddress;
+
+            var result = KernelMemoryCompatExports.KernelAvailableDirectMemorySize(context);
+
+            Assert.Equal(unchecked((int)0x8002000C), result);
+            Assert.True(context.TryReadUInt64(SpanStartOutAddress, out var spanStart));
+            Assert.True(context.TryReadUInt64(SpanSizeOutAddress, out var spanSize));
+            Assert.Equal(0UL, spanStart);
+            Assert.Equal(0UL, spanSize);
+        }
+        finally
+        {
+            ReleaseDirectMemory(context, allocationStart, allocationLength);
+        }
+    }
+
+    [Fact]
+    public void AvailableDirectMemorySize_EmptyRangeAtPoolEndReturnsNoMemory()
+    {
+        const ulong directMemorySize = 0x4_0000_0000;
+        var context = new CpuContext(new FakeCpuMemory(GuestMemoryBase, 0x1000), Generation.Gen5);
+        Assert.True(context.TryWriteUInt64(SpanStartOutAddress, ulong.MaxValue));
+        Assert.True(context.TryWriteUInt64(SpanSizeOutAddress, ulong.MaxValue));
+        context[CpuRegister.Rdi] = directMemorySize;
+        context[CpuRegister.Rsi] = 0;
+        context[CpuRegister.Rdx] = 0;
+        context[CpuRegister.Rcx] = SpanStartOutAddress;
+        context[CpuRegister.R8] = SpanSizeOutAddress;
+
+        var result = KernelMemoryCompatExports.KernelAvailableDirectMemorySize(context);
+
+        Assert.Equal(unchecked((int)0x8002000C), result);
+        Assert.True(context.TryReadUInt64(SpanStartOutAddress, out var spanStart));
+        Assert.True(context.TryReadUInt64(SpanSizeOutAddress, out var spanSize));
+        Assert.Equal(0UL, spanStart);
+        Assert.Equal(0UL, spanSize);
+    }
+
+    [Fact]
+    public void AvailableDirectMemorySize_EndBeforeStartReturnsNoMemory()
+    {
+        var context = new CpuContext(new FakeCpuMemory(GuestMemoryBase, 0x1000), Generation.Gen5);
+        Assert.True(context.TryWriteUInt64(SpanStartOutAddress, ulong.MaxValue));
+        Assert.True(context.TryWriteUInt64(SpanSizeOutAddress, ulong.MaxValue));
+        context[CpuRegister.Rdi] = 1;
+        context[CpuRegister.Rsi] = 0;
+        context[CpuRegister.Rdx] = 0x1000;
+        context[CpuRegister.Rcx] = SpanStartOutAddress;
+        context[CpuRegister.R8] = SpanSizeOutAddress;
+
+        var result = KernelMemoryCompatExports.KernelAvailableDirectMemorySize(context);
+
+        Assert.Equal(unchecked((int)0x8002000C), result);
+        Assert.True(context.TryReadUInt64(SpanStartOutAddress, out var spanStart));
+        Assert.True(context.TryReadUInt64(SpanSizeOutAddress, out var spanSize));
+        Assert.Equal(0UL, spanStart);
+        Assert.Equal(0UL, spanSize);
+    }
+
+    [Fact]
+    public void AvailableDirectMemorySize_NegativeEndpointReturnsInvalidArgument()
+    {
+        var context = new CpuContext(new FakeCpuMemory(GuestMemoryBase, 0x1000), Generation.Gen5);
+        Assert.True(context.TryWriteUInt64(SpanStartOutAddress, ulong.MaxValue));
+        Assert.True(context.TryWriteUInt64(SpanSizeOutAddress, ulong.MaxValue));
+        context[CpuRegister.Rdi] = ulong.MaxValue;
+        context[CpuRegister.Rsi] = 0x1000;
+        context[CpuRegister.Rdx] = 0x1000;
+        context[CpuRegister.Rcx] = SpanStartOutAddress;
+        context[CpuRegister.R8] = SpanSizeOutAddress;
+
+        var result = KernelMemoryCompatExports.KernelAvailableDirectMemorySize(context);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+        Assert.True(context.TryReadUInt64(SpanStartOutAddress, out var spanStart));
+        Assert.True(context.TryReadUInt64(SpanSizeOutAddress, out var spanSize));
+        Assert.Equal(0UL, spanStart);
+        Assert.Equal(0UL, spanSize);
     }
 
     private static void AllocateDirectMemory(CpuContext context, ulong start, ulong length, ulong outputAddress = AllocationOutAddress)

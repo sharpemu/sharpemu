@@ -52,15 +52,20 @@ public enum EndOfPipeWriteKind
     InterruptWriteBack32,
     InterruptWriteBack64,
     GdsWrite32,
+    InterruptGdsWrite32,
     ClockWrite,
     ClockWriteBack,
+    InterruptClockWrite,
+    InterruptClockWriteBack,
     Flip,
     FlipWithWrite32,
     FlipWithInterruptWriteBack32,
 }
 
-// A completion the host records on the current command buffer. The label itself is
-// already in guest memory when this is recorded.
+// A completion the host records on the current command buffer. Ordinary and clock
+// labels become CPU-visible while the packet is interpreted; the interrupt or flip
+// notification remains ordered behind the preceding GPU work. GDS labels are the
+// exception because their value must be sampled from GPU-owned state.
 public readonly record struct EndOfPipeWrite(
     EndOfPipeWriteKind Kind,
     ulong SubmitId,
@@ -74,7 +79,29 @@ public readonly record struct EndOfPipeWrite(
     int FlipIndex = 0,
     int FlipMode = 0,
     long FlipArgument = 0,
-    ulong FlipRequestId = 0);
+    ulong FlipRequestId = 0)
+{
+    internal ulong LabelByteCount => Kind switch
+    {
+        EndOfPipeWriteKind.Write32 or
+        EndOfPipeWriteKind.WriteBack32 or
+        EndOfPipeWriteKind.Interrupt32 or
+        EndOfPipeWriteKind.InterruptWriteBack32 or
+        EndOfPipeWriteKind.FlipWithWrite32 or
+        EndOfPipeWriteKind.FlipWithInterruptWriteBack32 => sizeof(uint),
+        EndOfPipeWriteKind.Write64 or
+        EndOfPipeWriteKind.WriteBack64 or
+        EndOfPipeWriteKind.Interrupt64 or
+        EndOfPipeWriteKind.InterruptWriteBack64 or
+        EndOfPipeWriteKind.ClockWrite or
+        EndOfPipeWriteKind.ClockWriteBack or
+        EndOfPipeWriteKind.InterruptClockWrite or
+        EndOfPipeWriteKind.InterruptClockWriteBack => sizeof(ulong),
+        EndOfPipeWriteKind.GdsWrite32 or
+        EndOfPipeWriteKind.InterruptGdsWrite32 => (ulong)GdsWordCount * sizeof(uint),
+        _ => 0,
+    };
+}
 
 // Everything a packet handler needs from the renderer, the caches, the scheduler and video out.
 public interface ICommandStreamHost

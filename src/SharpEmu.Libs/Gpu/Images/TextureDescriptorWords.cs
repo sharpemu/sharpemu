@@ -74,6 +74,8 @@ public readonly struct TextureDescriptorWords
 
     public bool MetadataCompress => ((Fields[6] >> 21) & 0x1) == 1;
 
+    public bool DccAlphaMsb => ((Fields[6] >> 22) & 0x1) == 1;
+
     public ulong MetadataAddress => ((Fields[6] >> 24) & 0xFF) | ((ulong)Fields[7] << 8);
 }
 

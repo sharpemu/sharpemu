@@ -72,8 +72,47 @@ public sealed class ResourceMaterializationCache
         ResidentGuestBytesReader residentReader,
         ref ResourceSnapshot snapshot,
         ref ResourceSpecialization specialization,
-        out ResourceMaterializationFailure failure)
+        out ResourceMaterializationFailure failure) =>
+        MaterializeCore(
+            plan,
+            inputs,
+            residentReader,
+            specializationScratch: null,
+            ref snapshot,
+            ref specialization,
+            out failure,
+            out _);
+
+    public bool Materialize(
+        ShaderResourcePlan plan,
+        ResourceRuntimeInputs inputs,
+        ResidentGuestBytesReader residentReader,
+        ResourceSpecializationScratch specializationScratch,
+        ref ResourceSnapshot snapshot,
+        ref ResourceSpecialization specialization,
+        out ResourceMaterializationFailure failure,
+        out string? failureDetail) =>
+        MaterializeCore(
+            plan,
+            inputs,
+            residentReader,
+            specializationScratch,
+            ref snapshot,
+            ref specialization,
+            out failure,
+            out failureDetail);
+
+    private bool MaterializeCore(
+        ShaderResourcePlan plan,
+        ResourceRuntimeInputs inputs,
+        ResidentGuestBytesReader residentReader,
+        ResourceSpecializationScratch? specializationScratch,
+        ref ResourceSnapshot snapshot,
+        ref ResourceSpecialization specialization,
+        out ResourceMaterializationFailure failure,
+        out string? failureDetail)
     {
+        failureDetail = null;
         var key = KeyOf(plan, inputs);
         var found = TryFind(key, plan, inputs, out var cached);
         if (found)
@@ -135,7 +174,23 @@ public sealed class ResourceMaterializationCache
                 ComputeState = inputs.ComputeState,
                 TablePhase = recorder.TablePhase,
             };
-            if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
+            var materialized = specializationScratch is null
+                ? ResourceMaterializer.Materialize(
+                    plan,
+                    recording,
+                    ref snapshot,
+                    ref specialization,
+                    out failure,
+                    out failureDetail)
+                : ResourceMaterializer.Materialize(
+                    plan,
+                    recording,
+                    specializationScratch,
+                    ref snapshot,
+                    ref specialization,
+                    out failure,
+                    out failureDetail);
+            if (!materialized)
                 return false;
 
             if (recorder.Failed)
@@ -145,7 +200,12 @@ public sealed class ResourceMaterializationCache
                 return true;
             }
 
-            var built = recorder.Build(plan, inputs, snapshot, specialization);
+            // Scratch specializations reuse their lists on the next draw. The
+            // cache must retain an immutable snapshot, not those live lists.
+            var retainedSpecialization = specializationScratch is null
+                ? specialization
+                : specialization.Clone();
+            var built = recorder.Build(plan, inputs, snapshot, retainedSpecialization);
             if (found)
             {
                 built.Next = cached;

@@ -269,145 +269,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit,
                 new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount),
                 command);
-            target.Clear = ResolveDccAttachmentClear(target, out target.ClearValue);
-        }
-
-        // A DCC fast clear may leave the color allocation stale; the deferred value lands when the surface binds.
-        private bool ResolveDccAttachmentClear(ColorAttachment target, out ClearColorValue clearValue)
-        {
-            clearValue = default;
-            if (target.Request.Description.Metadata.Kind != MetadataKind.Dcc)
-            {
-                return false;
-            }
-
-            var view = target.Request.View;
-            var metadataAddress = target.Request.Description.Metadata.Range.Address;
-            if (!_imageCache.IsMetadataCleared(metadataAddress, view.BaseLayer, out var metadataValue))
-            {
-                return ResolveGuestDccAttachmentClear(target, out clearValue);
-            }
-
-            var resolution = target.Resolution;
-            if (!TryDecodeDccClear((byte)metadataValue, resolution.MetadataClearSupported, resolution.MetadataFixedClearSupported,
-                resolution.ColorClearValue, out clearValue))
-            {
-                return false;
-            }
-
-            for (uint layer = 1; layer < view.LayerCount; layer++)
-            {
-                if (!_imageCache.IsMetadataCleared(metadataAddress, view.BaseLayer + layer))
-                {
-                    return false;
-                }
-            }
-
-            // Consume only after every layer of the view can be materialized together.
-            for (uint layer = 0; layer < view.LayerCount; layer++)
-            {
-                if (!_imageCache.SetMetadataSlice(metadataAddress, view.BaseLayer + layer, false))
-                {
-                    throw SubmissionScheduler.Fatal($"The DCC clear state could not be consumed: metadata=0x{metadataAddress:X16} layer={view.BaseLayer + layer}.");
-                }
-            }
-
-            ConsumeGuestDccClears(target.Request.Description, view.BaseLayer, view.LayerCount);
-            return true;
-        }
-
-        private bool ResolveGuestDccAttachmentClear(ColorAttachment target, out ClearColorValue clearValue)
-        {
-            clearValue = default;
-            var description = target.Request.Description;
-            var sliceSize = description.DccSliceSize;
-            var view = target.Request.View;
-            if (sliceSize == 0 || view.LayerCount == 0)
-            {
-                return false;
-            }
-
-            var metadataAddress = description.Metadata.Range.Address;
-            var slices = new ulong[view.LayerCount];
-            byte clearCode = 0;
-            for (uint layer = 0; layer < view.LayerCount; layer++)
-            {
-                if (!_imageCache.TryReadGuestDccClear(metadataAddress, sliceSize, view.BaseLayer + layer, out slices[layer], out var code) ||
-                    (layer != 0 && code != clearCode))
-                {
-                    return false;
-                }
-
-                clearCode = code;
-            }
-
-            var resolution = target.Resolution;
-            if (!TryDecodeDccClear(clearCode, resolution.MetadataClearSupported, resolution.MetadataFixedClearSupported,
-                resolution.ColorClearValue, out clearValue))
-            {
-                return false;
-            }
-
-            foreach (var slice in slices)
-            {
-                _bufferCache.FillDccMetadata(slice, sliceSize, uint.MaxValue);
-            }
-
-            if (RenderTrace.Enabled && RenderTrace.MetadataClear())
-            {
-                RenderTrace.Write(
-                    $"Materialized a guest DCC clear on a color target: metadata=0x{metadataAddress:X16} code=0x{clearCode:X2} " +
-                    $"layers={view.BaseLayer}+{view.LayerCount} slice=0x{sliceSize:X} format={description.PixelFormat}");
-            }
-
-            return true;
-        }
-
-        private void ConsumeGuestDccClears(in ImageDescription description, uint baseLayer, uint layerCount)
-        {
-            var sliceSize = description.DccSliceSize;
-            if (sliceSize == 0)
-            {
-                return;
-            }
-
-            for (uint layer = 0; layer < layerCount; layer++)
-            {
-                if (_imageCache.TryReadGuestDccClear(description.Metadata.Range.Address, sliceSize, baseLayer + layer, out var slice, out _))
-                {
-                    _bufferCache.FillDccMetadata(slice, sliceSize, uint.MaxValue);
-                }
-            }
-        }
-
-        private static bool TryDecodeDccClear(byte code, bool registerClearSupported, bool fixedClearSupported, ClearColorValue registerClear,
-            out ClearColorValue clearValue)
-        {
-            clearValue = default;
-            switch (code)
-            {
-                case 0x00:
-                    return true;
-                case 0x20:
-                    clearValue = registerClear;
-                    return registerClearSupported;
-                case 0x40:
-                    clearValue.Float32_3 = 1f;
-                    return fixedClearSupported;
-                case 0x80:
-                    clearValue.Float32_0 = 1f;
-                    clearValue.Float32_1 = 1f;
-                    clearValue.Float32_2 = 1f;
-                    return fixedClearSupported;
-                case 0xc0:
-                    clearValue.Float32_0 = 1f;
-                    clearValue.Float32_1 = 1f;
-                    clearValue.Float32_2 = 1f;
-                    clearValue.Float32_3 = 1f;
-                    return fixedClearSupported;
-                default:
-                    return false;
-            }
+            // FindImage expands uniform DCC metadata into the native image before attachment
+            // acquisition. No fixed-width deferred-clear mask remains to consume here.
+            target.Clear = false;
+            target.ClearValue = default;
         }
 
         private DepthAttachment? DiscoverDepthTarget(GuestDepthTarget target)
@@ -1164,11 +1029,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void DestroyGuestImage(GuestImageResource resource)
         {
-            if (TryPoolFlipSnapshot(resource))
-            {
-                return;
-            }
-
             if (resource.Image.Handle != 0)
             {
                 _vk.DestroyImage(_device, resource.Image, null);

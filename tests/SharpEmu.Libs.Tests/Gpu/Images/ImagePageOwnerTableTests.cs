@@ -4,6 +4,7 @@
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
+using SharpEmu.HLE;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Images;
@@ -72,18 +73,25 @@ public sealed class ImagePageOwnerTableTests
     [Fact]
     public void AddressSpaceBoundaries_AreEnforced()
     {
-        Assert.True(ImagePageOwnerTable.TryGetPageRange(ImagePageOwnerTable.AddressSpaceSize - 1, 1, out var first, out var lastExclusive));
-        Assert.Equal(ImagePageOwnerTable.PageCount - 1, first);
-        Assert.Equal(ImagePageOwnerTable.PageCount, lastExclusive);
+        var lastAddress = GuestMemoryLayout.GuestExtendedAddressLimit - 1;
+        Assert.True(ImagePageOwnerTable.TryGetPageRange(lastAddress, 1, out var first, out var lastExclusive));
+        Assert.Equal(lastAddress >> ImagePageOwnerTable.PageBits, first);
+        Assert.Equal(first + 1, lastExclusive);
         Assert.False(ImagePageOwnerTable.TryGetPageRange(0, 0, out _, out _));
+        Assert.False(ImagePageOwnerTable.TryGetPageRange(GuestMemoryLayout.GuestGpuLowAddressLimit, 1, out _, out _));
+        Assert.False(ImagePageOwnerTable.TryGetPageRange(GuestMemoryLayout.GuestExtendedAddressStart - 1, 2, out _, out _));
+        Assert.False(ImagePageOwnerTable.TryGetPageRange(GuestMemoryLayout.GuestExtendedAddressLimit - 1, 2, out _, out _));
         Assert.False(ImagePageOwnerTable.TryGetPageRange(ImagePageOwnerTable.AddressSpaceSize, 1, out _, out _));
         Assert.False(ImagePageOwnerTable.TryGetPageRange(ImagePageOwnerTable.AddressSpaceSize - 1, 2, out _, out _));
         Assert.False(ImagePageOwnerTable.TryGetPageRange(ulong.MaxValue - 1, 4, out _, out _));
 
         var table = new ImagePageOwnerTable();
-        table.GetOrCreate(ImagePageOwnerTable.PageCount - 1).Add(Owner(99));
-        Assert.Equal(Owner(99), table.Find(ImagePageOwnerTable.PageCount - 1)![0]);
+        var lastExtendedPage = (GuestMemoryLayout.GuestExtendedAddressLimit - 1) >> ImagePageOwnerTable.PageBits;
+        table.GetOrCreate(lastExtendedPage).Add(Owner(99));
+        Assert.Equal(Owner(99), table.Find(lastExtendedPage)![0]);
         using var fatal = new FatalScope();
+        Assert.Throws<SchedulerFatalException>(() =>
+            table.GetOrCreate(GuestMemoryLayout.GuestGpuLowAddressLimit >> ImagePageOwnerTable.PageBits));
         Assert.Throws<SchedulerFatalException>(() => table.GetOrCreate(ImagePageOwnerTable.PageCount));
         Assert.Contains(fatal.Messages, message => message.Contains("outside the guest address space"));
     }
@@ -167,9 +175,31 @@ public sealed class ImagePageOwnerTableTests
         Assert.True(ImagePageOwnerTable.TryGetPageRange(0x0fffff, 2, out var first, out var lastExclusive));
         Assert.Equal(0UL, first);
         Assert.Equal(2UL, lastExclusive);
-        Assert.True(ImagePageOwnerTable.TryGetPageRange(ImagePageOwnerTable.AddressSpaceSize - 1, 1, out first, out lastExclusive));
-        Assert.Equal(ImagePageOwnerTable.PageCount - 1, first);
-        Assert.Equal(ImagePageOwnerTable.PageCount, lastExclusive);
+        var lastAddress = GuestMemoryLayout.GuestExtendedAddressLimit - 1;
+        Assert.True(ImagePageOwnerTable.TryGetPageRange(lastAddress, 1, out first, out lastExclusive));
+        Assert.Equal(lastAddress >> ImagePageOwnerTable.PageBits, first);
+        Assert.Equal(first + 1, lastExclusive);
+    }
+
+    [Fact]
+    public void WolverineExtendedImageRange_UsesRaw44BitPagesWithoutAliasingLowMemory()
+    {
+        const ulong address = 0x0000_0800_059A_4000;
+        const ulong size = 0x7E9000;
+        Assert.True(ImagePageOwnerTable.TryGetPageRange(address, size, out var first, out var lastExclusive));
+        Assert.Equal(0x800059UL, first);
+        Assert.Equal(0x800062UL, lastExclusive);
+        Assert.NotEqual(address & (GuestMemoryLayout.GuestGpuLowAddressLimit - 1), address);
+
+        var table = new ImagePageOwnerTable();
+        var lowPage = (address & (GuestMemoryLayout.GuestGpuLowAddressLimit - 1)) >> ImagePageOwnerTable.PageBits;
+        table.GetOrCreate(lowPage).Add(Owner(40));
+        table.GetOrCreate(first).Add(Owner(41));
+        table.GetOrCreate(lastExclusive - 1).Add(Owner(42));
+        Assert.Equal(Owner(40), table.Find(lowPage)![0]);
+        Assert.Equal(Owner(41), table.Find(first)![0]);
+        Assert.Equal(Owner(42), table.Find(lastExclusive - 1)![0]);
+        Assert.True(table.MayHaveOwners(address, size));
     }
 
     [Fact]

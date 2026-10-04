@@ -1,12 +1,16 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
 using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Rendering.RenderExecutorFixtures;
@@ -18,6 +22,7 @@ namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 public sealed class ShaderPipelineCacheTests : IDisposable
 {
     private const uint Format32x4Float = 77;
+    private const uint LegacyFusedGeometryStageMask = 0x0000_2030;
 
     private readonly FatalScope _fatal = new();
 
@@ -30,7 +35,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
 
         public List<GraphicsPipelineDescription> Descriptions { get; } = new();
 
-        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound) => Graphics;
+        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, UserConfigRegisters userConfig, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound) => Graphics;
 
         public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, PrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram)
         {
@@ -47,9 +52,17 @@ public sealed class ShaderPipelineCacheTests : IDisposable
             throw new InvalidOperationException("The describing provider has no compute pipeline.");
     }
 
-    private static GraphicsPipelineDescription Describe(Action<RegisterBanks>? configure = null, GraphicsPrograms? programs = null, uint primitiveType = PrimitiveTriangleList, bool withDepth = false)
+    private static GraphicsPipelineDescription Describe(
+        Action<RegisterBanks>? configure = null,
+        GraphicsPrograms? programs = null,
+        uint primitiveType = PrimitiveTriangleList,
+        bool withDepth = false,
+        bool provokingVertexLastSupported = false)
     {
-        var host = new RecordingRenderHost();
+        var host = new RecordingRenderHost
+        {
+            ProvokingVertexLastSupported = provokingVertexLastSupported,
+        };
         var provider = new DescribingProvider();
         if (programs is not null)
         {
@@ -104,11 +117,36 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.True(parameters.CullBack);
         Assert.False(parameters.CullFront);
         Assert.True(parameters.FrontFaceClockwise);
+        Assert.Equal(PolygonMode.Fill, parameters.PolygonMode);
+        Assert.False(parameters.ProvokingVertexLast);
         Assert.False(parameters.WithDepth);
         Assert.False(parameters.StencilTestEnable);
         Assert.Equal(Format.Undefined, description.Rendering.DepthFormat);
         Assert.NotEqual(Format.Undefined, description.Rendering.ColorFormats[0]);
         Assert.Equal(1u, description.Rendering.ColorCount);
+    }
+
+    [Fact]
+    public void StaticParameters_FoldTheGuestProvokingVertexMode()
+    {
+        var description = Describe(
+            banks => banks.Context.RasterMode.ProvokingVertexLast = true,
+            provokingVertexLastSupported: true);
+
+        Assert.True(description.StaticParameters.ProvokingVertexLast);
+    }
+
+    [Fact]
+    public void GraphicsPipelineKey_DistinguishesFirstAndLastProvokingVertex()
+    {
+        var first = Describe();
+        var last = Describe(
+            banks => banks.Context.RasterMode.ProvokingVertexLast = true,
+            provokingVertexLastSupported: true);
+
+        Assert.NotEqual(
+            ShaderPipelineCache.KeyOf(first),
+            ShaderPipelineCache.KeyOf(last));
     }
 
     [Fact]
@@ -123,13 +161,78 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.Equal(4, description.StaticParameters.GetColorSourceBlend(0));
     }
 
-    [Fact]
-    public void RectangleList_DisablesCullingAndKeepsThePatchTopology()
+    [Theory]
+    [InlineData(7u)]
+    [InlineData(17u)]
+    public void RectangleListEncodings_DisableCullingAndKeepThePatchTopology(uint primitiveType)
     {
-        var description = Describe(banks => banks.Context.RasterMode.CullBack = true, primitiveType: 7);
+        var description = Describe(banks =>
+        {
+            banks.Context.RasterMode.CullFront = true;
+            banks.Context.RasterMode.CullBack = true;
+        }, primitiveType: primitiveType);
 
         Assert.Equal(PrimitiveTopology.PatchList, description.StaticParameters.Topology);
+        Assert.False(description.StaticParameters.CullFront);
         Assert.False(description.StaticParameters.CullBack);
+    }
+
+    [Theory]
+    [InlineData(0, PolygonMode.Point)]
+    [InlineData(1, PolygonMode.Line)]
+    [InlineData(2, PolygonMode.Fill)]
+    public void EnabledPolygonMode_MapsTheGuestPolygonType(byte polygonType, PolygonMode expected)
+    {
+        var description = Describe(banks => banks.Context.RasterMode = new RasterModeRegisters
+        {
+            PolygonMode = 1,
+            FrontPolygonType = polygonType,
+            BackPolygonType = polygonType,
+        });
+
+        Assert.Equal(expected, description.StaticParameters.PolygonMode);
+    }
+
+    [Fact]
+    public void DisabledPolygonMode_IgnoresBothPerFaceTypes()
+    {
+        var description = Describe(banks => banks.Context.RasterMode = new RasterModeRegisters
+        {
+            PolygonMode = 0,
+            FrontPolygonType = 7,
+            BackPolygonType = 6,
+        });
+
+        Assert.Equal(PolygonMode.Fill, description.StaticParameters.PolygonMode);
+    }
+
+    [Fact]
+    public void EnabledPolygonMode_UsesOnlyTheVisibleFace()
+    {
+        var description = Describe(banks => banks.Context.RasterMode = new RasterModeRegisters
+        {
+            PolygonMode = 1,
+            FrontPolygonType = 0,
+            BackPolygonType = 1,
+            CullFront = true,
+        });
+
+        Assert.Equal(PolygonMode.Line, description.StaticParameters.PolygonMode);
+    }
+
+    [Fact]
+    public void EnabledPolygonMode_WithBothFacesCulledUsesFill()
+    {
+        var description = Describe(banks => banks.Context.RasterMode = new RasterModeRegisters
+        {
+            PolygonMode = 1,
+            FrontPolygonType = 7,
+            BackPolygonType = 6,
+            CullFront = true,
+            CullBack = true,
+        });
+
+        Assert.Equal(PolygonMode.Fill, description.StaticParameters.PolygonMode);
     }
 
     [Fact]
@@ -170,12 +273,12 @@ public sealed class ShaderPipelineCacheTests : IDisposable
     }
 
     [Fact]
-    public void GraphicsPipelineKey_FoldsAll166StaticBytes()
+    public void GraphicsPipelineKey_FoldsAll168StaticBytes()
     {
         var description = Describe();
         var key = ShaderPipelineCache.KeyOf(description);
         Assert.Equal(key, ShaderPipelineCache.KeyOf(With(description, PipelineStaticParameters.FromBytes(description.StaticParameters.Bytes))));
-        Assert.Equal(166, description.StaticParameters.Bytes.Length);
+        Assert.Equal(168, description.StaticParameters.Bytes.Length);
 
         for (var index = 0; index < description.StaticParameters.Bytes.Length; index++)
         {
@@ -271,12 +374,240 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.Equal(2, cache.GraphicsPipelineCount);
     }
 
+    [Fact]
+    public void GraphicsPrograms_UseTheResolvedAttachmentExportMapping()
+    {
+        const ulong vertexAddress = PipelineTestGuest.MemoryBase + 0x1000;
+        const ulong pixelAddress = PipelineTestGuest.MemoryBase + 0x2000;
+        var guest = new PipelineTestGuest();
+        guest.RegisterProgram(
+            vertexAddress,
+            PipelineTestGuest.MemoryBase + 0x8000,
+            PipelineTestGuest.EndProgram,
+            userDataAddress: PipelineTestGuest.MemoryBase + 0x9000);
+        guest.RegisterProgram(
+            pixelAddress,
+            PipelineTestGuest.MemoryBase + 0x8100,
+            PipelineTestGuest.EndProgram,
+            userDataAddress: PipelineTestGuest.MemoryBase + 0xA000);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = Banks();
+        banks.Shader.Vertex.ExportAddress = vertexAddress;
+        banks.Shader.Pixel.Address = pixelAddress;
+        banks.Context.ShaderInterface.TargetOutputModes[0] = 4;
+        var mappings = Enumerable.Repeat(ColorComponentMap.Identity, PixelInputInfo.TargetCount).ToArray();
+        mappings[0] = ColorComponentMap.Argb;
+
+        var programs = cache.GetGraphicsPrograms(
+            banks.Shader.Vertex,
+            banks.Shader.Pixel,
+            banks.Context.ShaderInterface,
+            banks.Context,
+            banks.UserConfig,
+            mappings,
+            pixelActive: true,
+            depthBound: false);
+
+        Assert.True(programs.Available);
+        var request = Assert.Single(
+            guest.Compiler.Requests,
+            request => request.Stage == ShaderStage.Pixel);
+        var output = Assert.Single(request.PixelOutputs);
+        Assert.Equal(ColorComponentMap.Argb.Packed, output.ComponentMapping.Packed);
+        Assert.Equal(4, output.TargetOutputMode);
+        Assert.Equal(ColorComponentMap.Argb, programs.PixelInput.TargetExportMappings[0]);
+    }
+
+    [Fact]
+    public void GraphicsPrograms_CompactTheHostLocationAcrossUnboundGuestSlots()
+    {
+        const ulong vertexAddress = PipelineTestGuest.MemoryBase + 0x1000;
+        const ulong pixelAddress = PipelineTestGuest.MemoryBase + 0x2000;
+        var guest = new PipelineTestGuest();
+        guest.RegisterProgram(
+            vertexAddress,
+            PipelineTestGuest.MemoryBase + 0x8000,
+            PipelineTestGuest.EndProgram,
+            userDataAddress: PipelineTestGuest.MemoryBase + 0x9000);
+        guest.RegisterProgram(
+            pixelAddress,
+            PipelineTestGuest.MemoryBase + 0x8100,
+            PipelineTestGuest.EndProgram,
+            userDataAddress: PipelineTestGuest.MemoryBase + 0xA000);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = Banks();
+        banks.Shader.Vertex.ExportAddress = vertexAddress;
+        banks.Shader.Pixel.Address = pixelAddress;
+        banks.Context.ColorTargets[1] = RegisterWords.Color(SecondColorBase, 64, 64);
+        banks.Context.RenderTargetMask = 0xFF;
+        var mappings = Enumerable.Repeat(ColorComponentMap.Identity, PixelInputInfo.TargetCount).ToArray();
+
+        var programs = cache.GetGraphicsPrograms(
+            banks.Shader.Vertex,
+            banks.Shader.Pixel,
+            banks.Context.ShaderInterface,
+            banks.Context,
+            banks.UserConfig,
+            mappings,
+            boundColorSlots: 0b10,
+            pixelActive: true,
+            depthBound: false);
+
+        Assert.True(programs.Available);
+        var request = Assert.Single(
+            guest.Compiler.Requests,
+            request => request.Stage == ShaderStage.Pixel);
+        var output = Assert.Single(request.PixelOutputs);
+        Assert.Equal(1u, output.GuestSlot);
+        Assert.Equal(0u, output.HostLocation);
+    }
+
+    [Fact]
+    public void MeshGraphicsPrograms_SkipFixedFunctionVertexTablesAndKeepClipTransform()
+    {
+        const ulong entryCode = PipelineTestGuest.MemoryBase + 0x1000;
+        const ulong continuationCode = PipelineTestGuest.MemoryBase + 0x2000;
+        const ulong entryHeader = PipelineTestGuest.MemoryBase + 0x8000;
+        const ulong continuationHeader = PipelineTestGuest.MemoryBase + 0x8100;
+        const ulong userData = PipelineTestGuest.MemoryBase + 0x9000;
+        const ulong directOffsets = PipelineTestGuest.MemoryBase + 0x9100;
+        const ulong semantics = PipelineTestGuest.MemoryBase + 0x9200;
+        var guest = new PipelineTestGuest();
+        guest.Host.MeshShadersSupported = true;
+        guest.RegisterProgram(
+            entryCode,
+            entryHeader,
+            [0xBF800000u, 0xBE802000u],
+            userDataAddress: userData,
+            inputSemanticsAddress: semantics,
+            inputSemanticsCount: 1,
+            scratchDwords: 5);
+        guest.RegisterProgram(
+            continuationCode,
+            continuationHeader,
+            [0xBF800000u, 0xBF810000u],
+            scratchDwords: 13);
+        guest.RegisterFusedProgram(entryCode, continuationCode);
+        WriteVertexTableMetadata(guest, userData, directOffsets, semantics);
+
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = Banks(withPixel: false);
+        banks.Shader.Vertex.ExportAddress = entryCode;
+        banks.Shader.Vertex.GeometryAddress = continuationCode;
+        banks.Shader.Vertex.GeometryResource1 = new GeometryResource1 { GeometryVectorComponentCount = 3 };
+        banks.Shader.Vertex.GeometryResource2 = new GeometryResource2 { ExportVectorComponentCount = 3 };
+        banks.Context.ShaderStages = LegacyFusedGeometryStageMask | 0x0040_0000;
+        banks.Context.ShaderInterface.VertexOutputControl = 0x1234;
+        banks.Context.ShaderInterface.MaxOutputPerSubgroup = 192;
+        banks.Context.ShaderInterface.GeometryMaxVerticesOut = 3;
+        banks.Context.ShaderInterface.GeometryOutputPrimitiveType = 2;
+        banks.Context.Clip = new ClipControlRegisters { ClipDisable = true };
+        banks.Context.ScreenViewport.Viewports[0] = new ViewportRegisters
+        {
+            XScale = 3,
+            YScale = 4,
+            XOffset = 5,
+            YOffset = 6,
+        };
+        banks.UserConfig.GeometryEngineControl = new GeometryEngineControlRegisters
+        {
+            PrimitiveGroupSize = 64,
+            VertexGroupSize = 64,
+        };
+
+        var programs = cache.GetGraphicsPrograms(
+            banks.Shader.Vertex,
+            banks.Shader.Pixel,
+            banks.Context.ShaderInterface,
+            banks.Context,
+            banks.UserConfig,
+            [],
+            pixelActive: false,
+            depthBound: false);
+
+        Assert.True(programs.Available);
+        Assert.Empty(programs.VertexInput.Buffers);
+        Assert.Empty(programs.VertexInput.Attributes);
+        Assert.False(programs.VertexInput.FetchEmbedded);
+        Assert.Equal(0u, programs.VertexInput.ScratchDwords);
+        Assert.Equal(0x1234u, programs.VertexInput.PositionExportControl);
+        Assert.Equal(
+            new ClipSpaceTransform(true, 3, 4, 5, 6, 8192, 8192),
+            programs.VertexInput.ClipSpace);
+        Assert.True(programs.VertexInput.Mesh.IsActive);
+        Assert.Equal(13u, programs.VertexInput.Mesh.ScratchDwords);
+        Assert.Null(programs.PositionStream);
+        var meshRequest = Assert.Single(
+            guest.Compiler.Requests,
+            request => request.Stage == ShaderStage.Mesh);
+        Assert.Equal(0x1234u, meshRequest.PositionExportControl);
+        Assert.Equal(
+            new ShaderClipSpaceTransform(true, 3, 4, 5, 6, 8192, 8192),
+            meshRequest.ClipSpace);
+    }
+
+    [Fact]
+    public void ConventionalVertexProgram_StillRejectsNullDeclaredVertexTables()
+    {
+        const ulong code = PipelineTestGuest.MemoryBase + 0x1000;
+        const ulong header = PipelineTestGuest.MemoryBase + 0x8000;
+        const ulong userData = PipelineTestGuest.MemoryBase + 0x9000;
+        const ulong directOffsets = PipelineTestGuest.MemoryBase + 0x9100;
+        const ulong semantics = PipelineTestGuest.MemoryBase + 0x9200;
+        var guest = new PipelineTestGuest();
+        guest.RegisterProgram(
+            code,
+            header,
+            PipelineTestGuest.EndProgram,
+            userDataAddress: userData,
+            inputSemanticsAddress: semantics,
+            inputSemanticsCount: 1);
+        WriteVertexTableMetadata(guest, userData, directOffsets, semantics);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = Banks(withPixel: false);
+        banks.Shader.Vertex.ExportAddress = code;
+
+        var fatal = Assert.Throws<SchedulerFatalException>(() => cache.GetGraphicsPrograms(
+            banks.Shader.Vertex,
+            banks.Shader.Pixel,
+            banks.Context.ShaderInterface,
+            banks.Context,
+            banks.UserConfig,
+            [],
+            pixelActive: false,
+            depthBound: false));
+
+        Assert.Contains("vertex table pointer is null", fatal.Message);
+    }
+
+    private static void WriteVertexTableMetadata(
+        PipelineTestGuest guest,
+        ulong userDataAddress,
+        ulong directOffsetsAddress,
+        ulong semanticsAddress)
+    {
+        var userData = new byte[0x30];
+        BinaryPrimitives.WriteUInt64LittleEndian(userData, directOffsetsAddress);
+        BinaryPrimitives.WriteUInt16LittleEndian(userData.AsSpan(0x2C), 11);
+        guest.Write(userDataAddress, userData);
+
+        var offsets = new byte[11 * sizeof(ushort)];
+        for (var index = 0; index < 11; index++)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(offsets.AsSpan(index * sizeof(ushort)), 0xFFFF);
+        }
+        BinaryPrimitives.WriteUInt16LittleEndian(offsets.AsSpan(8 * sizeof(ushort)), 0);
+        BinaryPrimitives.WriteUInt16LittleEndian(offsets.AsSpan(10 * sizeof(ushort)), 2);
+        guest.Write(directOffsetsAddress, offsets);
+        guest.WriteWords(semanticsAddress, 4u << 16);
+    }
+
     // Programs from the fixtures, pipelines from the real cache over the fake host.
     private sealed class CachingProvider(ShaderPipelineCache cache) : IShaderPipelineProvider
     {
         private readonly GraphicsPrograms _programs = Programs();
 
-        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound) => _programs;
+        public GraphicsPrograms GetGraphicsPrograms(VertexStageRegisters vertex, PixelStageRegisters pixel, ShaderInterfaceRegisters shaderInterface, ContextRegisters context, UserConfigRegisters userConfig, ReadOnlySpan<ColorComponentMap> targetExportMapping, bool pixelActive, bool depthBound) => _programs;
 
         public PipelineHandle CreateGraphicsPipeline(ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth, VertexInputInfo vertexInput, PixelInputInfo? pixelInput, ContextRegisters context, in RenderingState rendering, PrimitiveTopology topology, bool primitiveRestartEnabled, bool disableBlending, ShaderProgram vertexProgram, ShaderProgram pixelProgram) =>
             cache.CreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram);

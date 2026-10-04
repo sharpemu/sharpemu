@@ -15,15 +15,59 @@ public static partial class Gen5SpirvTranslator
 
     private const ulong DeviceAddressMask = DeviceAddressPaging.AddressMask;
 
+    private static bool IsBufferInt64Atomic(string opcode) =>
+        opcode is "BufferAtomicSwapX2" or "BufferAtomicOrX2";
+
+    private static bool RequiresShaderFloat64(string opcode) =>
+        opcode is "VCvtF64I32" or "VCvtF32F64" or "VRcpF64";
+
     public static bool TryCompileProgram(ShaderCompileRequest request, out Gen5SpirvShader shader, out string error)
     {
         shader = default!;
+        if (request.FixedLaneWaveSize != request.WaveSize &&
+            (request.FixedLaneReads.Count != 0 || request.FixedLaneWrites.Count != 0))
+        {
+            error =
+                $"fixed-lane analysis used wave{request.FixedLaneWaveSize}, but the compile request uses wave{request.WaveSize}";
+            return false;
+        }
+
+        if (!request.BufferInt64AtomicsSupported &&
+            request.Program.Instructions.Any(static instruction =>
+                IsBufferInt64Atomic(instruction.Opcode)))
+        {
+            error = "the host does not support the 64-bit storage-buffer atomics required by BUFFER_ATOMIC_*_X2";
+            return false;
+        }
+
+        if (!request.ShaderFloat64Supported &&
+            request.Program.Instructions.Any(static instruction =>
+                RequiresShaderFloat64(instruction.Opcode)))
+        {
+            error = "the host does not support the shaderFloat64 feature required by the shader's FP64 instructions";
+            return false;
+        }
+
+        if (!TryValidateMeshRequest(request, out error))
+        {
+            return false;
+        }
+
+        if (!TryValidateWave64FallbackRequest(request, out error))
+        {
+            return false;
+        }
+
         try
         {
             BindingLayoutValidator.Validate(
                 request.Bindings,
                 request.Resources.Info,
-                BindingLayout.CollectUserDataRegisters(request.Program, request.UserDataBase, request.UserDataCount),
+                BindingLayout.CollectUserDataRegisters(
+                    request.Program,
+                    request.UserDataBase,
+                    request.UserDataCount,
+                    request.WaveSize),
                 request.UsesGlobalDataShare,
                 request.UsesFlattenedTable,
                 request.ReadsShaderBase,
@@ -59,6 +103,258 @@ public static partial class Gen5SpirvTranslator
         }
 
         return new CompilationContext(request).TryCompile(out shader, out error);
+    }
+
+    private static bool TryValidateWave64FallbackRequest(
+        ShaderCompileRequest request,
+        out string error)
+    {
+        error = string.Empty;
+        if (request.Stage is not (ShaderStage.Compute or ShaderStage.Mesh) ||
+            request.WaveSize != 64)
+        {
+            return true;
+        }
+
+        if (request.HostSubgroupSize is not (32u or 64u))
+        {
+            error =
+                $"unsupported wave64 host subgroup size {request.HostSubgroupSize}; expected 32 or 64";
+            return false;
+        }
+
+        var blockers = CompilationContext.GetWave64PairingBlockers(
+            request.Program.Instructions);
+        var localInvocationCount = checked(
+            (ulong)Math.Max(request.LocalSizeX, 1) *
+            Math.Max(request.LocalSizeY, 1) *
+            Math.Max(request.LocalSizeZ, 1));
+        // A partial guest wave that fits in one physical subgroup never needs
+        // cross-half exchange. This includes one-lane GDS producer kernels.
+        var fitsOneHostSubgroup = localInvocationCount <= request.HostSubgroupSize;
+        if (request.HostSubgroupSize == 32 &&
+            blockers.Count != 0 &&
+            !fitsOneHostSubgroup &&
+            localInvocationCount != 64)
+        {
+            error =
+                $"wave64 contains operations that cannot be paired across subgroup32 " +
+                $"and requires exactly one 64-lane guest wave; received {localInvocationCount} lanes " +
+                $"with blockers=[{string.Join(", ", blockers)}]";
+            return false;
+        }
+
+        var usesExchange = localInvocationCount == 64 &&
+            (request.HostSubgroupSize == 64 || blockers.Count != 0) &&
+            request.Program.Instructions.Any(RequiresWave64Exchange);
+        if (!usesExchange)
+        {
+            return true;
+        }
+
+        var usesGuestLdsStorage = request.Program.Instructions.Any(static instruction =>
+            instruction.Control is Gen5DataShareControl { Gds: false } &&
+            instruction.Opcode is not (
+                "DsSwizzleB32" or
+                "DsBpermuteB32" or
+                "DsPermuteB32" or
+                "DsNop"));
+        if (usesGuestLdsStorage &&
+            (request.LocalDataShareDwords == 0 ||
+             request.LocalDataShareDwords > LdsDwordCount - Wave64ExchangeDwordCount))
+        {
+            error =
+                $"wave64 exchange fallback needs {Wave64ExchangeDwordCount} private exchange dwords, " +
+                $"but guest LDS declares {request.LocalDataShareDwords}/{LdsDwordCount} dwords";
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool RequiresWave64Exchange(Gen5ShaderInstruction instruction) =>
+        instruction.Control is Gen5DppControl or Gen5Dpp8Control ||
+        instruction.Opcode is
+            "VPermlane16B32" or
+            "VPermlanex16B32" or
+            "VReadlaneB32" or
+            "VReadfirstlaneB32" or
+            "DsAppend" or
+            "DsConsume" or
+            "DsSwizzleB32" or
+            "DsBpermuteB32" or
+            "DsPermuteB32" or
+            "VMbcntLoU32B32" or
+            "VMbcntHiU32B32" or
+            "DsWriteAddtidB32" or
+            "DsReadAddtidB32" or
+            "SSubvectorLoopBegin" or
+            "SSubvectorLoopEnd" or
+            "VAddcU32" or
+            "VAddCoU32" or
+            "VAddCoCiU32" or
+            "VSubbU32" or
+            "VSubbrevU32" or
+            "VSubCoU32" or
+            "VSubrevCoU32" or
+            "VMadU64U32" ||
+        instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) ||
+        instruction.Opcode.StartsWith("SCbranchExec", StringComparison.Ordinal) ||
+        instruction.Opcode.StartsWith("SCbranchVcc", StringComparison.Ordinal) ||
+        instruction.Encoding == Gen5ShaderEncoding.Vopc ||
+        instruction.Control is Gen5Vop3Control { ScalarDestination: not null } ||
+        instruction.Sources.Any(IsWaveMaskOperandForValidation) ||
+        instruction.Destinations.Any(IsWaveMaskOperandForValidation);
+
+    private static bool IsWaveMaskOperandForValidation(Gen5Operand operand) =>
+        operand.Kind == Gen5OperandKind.ScalarRegister &&
+        operand.Value is 106 or 107 or 126 or 127;
+
+    private static bool TryValidateMeshRequest(
+        ShaderCompileRequest request,
+        out string error)
+    {
+        error = string.Empty;
+        if (request.Stage != ShaderStage.Mesh)
+        {
+            if (request.Mesh is not null)
+            {
+                error = "mesh assembly parameters require ShaderStage.Mesh";
+                return false;
+            }
+
+            return true;
+        }
+
+        if (request.Mesh is not { } mesh)
+        {
+            error = "mesh stage is missing geometry assembly parameters";
+            return false;
+        }
+
+        if (mesh.InputPrimitive is not (1u or 2u or 4u or 6u))
+        {
+            error = $"unsupported mesh input primitive {mesh.InputPrimitive}";
+            return false;
+        }
+
+        // The PS5 legacy GS path exercised here emits triangle strips. Vulkan
+        // mesh shaders expose those as independent triangle primitive indices.
+        if (mesh.OutputPrimitive != 2)
+        {
+            error = $"unsupported mesh output primitive {mesh.OutputPrimitive}; expected triangles (2)";
+            return false;
+        }
+
+        if (mesh.PrimitivesPerGroup == 0 ||
+            mesh.VerticesPerGroup == 0 ||
+            mesh.MaxVertices == 0 ||
+            mesh.MaxPrimitives == 0)
+        {
+            error = "mesh group and output limits must be non-zero";
+            return false;
+        }
+
+        if (mesh.VerticesPerGroup > 64 || mesh.ProvokingVertex > 2)
+        {
+            error = "mesh input group exceeds the supported wave64 geometry ABI";
+            return false;
+        }
+
+        if (request.WaveSize != 64)
+        {
+            error = $"unsupported mesh wave size {request.WaveSize}; merged ES+GS currently requires wave64";
+            return false;
+        }
+
+        if (request.HostSubgroupSize is not (32u or 64u))
+        {
+            error =
+                $"unsupported mesh host subgroup size {request.HostSubgroupSize}; expected 32 or 64";
+            return false;
+        }
+
+        if (request.LocalDataShareDwords > LdsDwordCount)
+        {
+            error =
+                $"mesh LDS allocation {request.LocalDataShareDwords} exceeds {LdsDwordCount} dwords";
+            return false;
+        }
+
+        if (request.LocalDataShareDwords == 0 &&
+            request.Program.Instructions.Any(static instruction =>
+                instruction.Control is Gen5DataShareControl { Gds: false }))
+        {
+            error = "mesh program uses LDS but declares a zero-dword allocation";
+            return false;
+        }
+
+        var localInvocationCount =
+            checked((ulong)Math.Max(request.LocalSizeX, 1) *
+                    Math.Max(request.LocalSizeY, 1) *
+                    Math.Max(request.LocalSizeZ, 1));
+        if (localInvocationCount < mesh.MaxVertices || localInvocationCount > 15 * 64)
+        {
+            error =
+                $"mesh local invocation count {localInvocationCount} cannot cover " +
+                $"{mesh.MaxVertices} outputs (maximum {15 * 64})";
+            return false;
+        }
+
+        var pairingBlockers = CompilationContext.GetWave64PairingBlockers(
+            request.Program.Instructions);
+        if (request.HostSubgroupSize == 32 &&
+            pairingBlockers.Count != 0 &&
+            localInvocationCount != 64)
+        {
+            error =
+                "mesh wave64 contains operations that cannot be paired across subgroup32 " +
+                "and its workgroup contains more than one guest wave: " +
+                $"blockers=[{string.Join(", ", pairingBlockers)}]";
+            return false;
+        }
+
+        if (request.HostSubgroupSize == 32 &&
+            pairingBlockers.Count == 0 &&
+            localInvocationCount % 64 != 0)
+        {
+            // Paired translation executes both 32-lane guest banks from every
+            // physical subgroup invocation.  Until every vector-memory read is
+            // fully predicated by guest EXEC, rounding a partial final wave up
+            // could issue observable accesses for nonexistent guest lanes.
+            error =
+                $"paired mesh wave64 requires a local invocation count that is a multiple of 64; " +
+                $"received {localInvocationCount}";
+            return false;
+        }
+
+        if (request.Bindings.UsesPushData &&
+            request.Bindings.PushDataStartDword < ShaderMeshInfo.DrawDwordCount)
+        {
+            error = "mesh shader data overlaps the six draw-parameter push dwords";
+            return false;
+        }
+
+        if (!request.Resources.Info.UsesDeviceAddresses ||
+            request.Bindings.Find(DescriptorBindingKind.DeviceAddressPageTable) is null ||
+            request.Bindings.Find(DescriptorBindingKind.FaultBuffer) is null)
+        {
+            error =
+                "mesh entry ABI requires device-address page-table and fault-buffer bindings for indexed draws";
+            return false;
+        }
+
+        var allocation = request.Program.Instructions.Any(static instruction =>
+            instruction.Opcode == "SSendmsg" &&
+            instruction.Words.Count != 0 &&
+            (instruction.Words[0] & 0xFFFFu) == 9u);
+        if (!allocation)
+        {
+            error = "mesh program has no S_SENDMSG MSG_GS_ALLOC_REQ (9)";
+            return false;
+        }
+
+        return true;
     }
 
     private sealed partial class CompilationContext
@@ -100,23 +396,78 @@ public static partial class Gen5SpirvTranslator
         public CompilationContext(ShaderCompileRequest request)
         {
             _request = request;
+            _mesh = request.Mesh;
             _stage = request.Stage switch
             {
                 ShaderStage.Vertex => Gen5SpirvStage.Vertex,
+                ShaderStage.Mesh => Gen5SpirvStage.Mesh,
                 ShaderStage.Pixel => Gen5SpirvStage.Pixel,
                 _ => Gen5SpirvStage.Compute,
             };
+            // SHARPEMU_SHADER_MAX_STEPS remains an opt-in diagnostic that
+            // limits all dispatched blocks. The default guard below counts
+            // only actual cycle-closing edges and therefore preserves long
+            // forward-only control-flow paths.
+            _maxDispatcherSteps = ReadDispatcherLimit(
+                "SHARPEMU_SHADER_MAX_STEPS",
+                defaultValue: 0);
+            _maxDispatcherBackedges = ReadDispatcherLimit(
+                "SHARPEMU_SHADER_MAX_BACKEDGES",
+                _stage == Gen5SpirvStage.Compute
+                    ? 0
+                    : DefaultGraphicsDispatcherBackedges);
             _pixelOutputBindings = request.PixelOutputs;
             _usesPixelValidMask =
                 _stage == Gen5SpirvStage.Pixel &&
                 request.Program.Instructions.Any(static instruction => instruction.Control is Gen5ExportControl { ValidMask: true });
-            _enableGraphicsSubgroupOperations = _stage == Gen5SpirvStage.Compute || request.EnableGraphicsSubgroupOperations;
+            _enableGraphicsSubgroupOperations =
+                _stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh ||
+                request.EnableGraphicsSubgroupOperations;
             _waveLaneCount = request.WaveSize == 64 ? 64u : 32u;
             _localSizeX = Math.Max(request.LocalSizeX, 1);
             _localSizeY = Math.Max(request.LocalSizeY, 1);
             _localSizeZ = Math.Max(request.LocalSizeZ, 1);
-            _physicalAxisOfLogical = ComputeWorkgroupAxisOrder(_localSizeX, _localSizeY, _localSizeZ);
-            _emulateWave64 = _stage == Gen5SpirvStage.Compute && _waveLaneCount == 64 && (ulong)_localSizeX * _localSizeY * _localSizeZ == 64;
+            var localInvocationCount = checked((ulong)_localSizeX * _localSizeY * _localSizeZ);
+            _pairWave64 =
+                (_stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh) &&
+                _waveLaneCount == 64 &&
+                request.HostSubgroupSize == 32 &&
+                CanPairWave64(request.Program.Instructions);
+            _physicalAxisOfLogical = _stage == Gen5SpirvStage.Compute
+                ? ComputeWorkgroupAxisOrder(_localSizeX, _localSizeY, _localSizeZ)
+                : [0, 1, 2];
+            _guestWaveCount = checked((uint)((localInvocationCount + 63) / 64));
+            _usesBarrierPhases =
+                (_stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh) &&
+                _waveLaneCount == 64 &&
+                _guestWaveCount > 1 &&
+                (_pairWave64 || request.HostSubgroupSize == 64) &&
+                request.Program.Instructions.Any(static instruction =>
+                    instruction.Opcode == "SBarrier");
+            _emulateWave64 =
+                !_pairWave64 &&
+                (_stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh) &&
+                _waveLaneCount == 64 &&
+                localInvocationCount == 64;
+            if (_pairWave64)
+            {
+                _hostLocalSizeX = checked((uint)(((localInvocationCount + 63) / 64) * 32));
+                _hostLocalSizeY = 1;
+                _hostLocalSizeZ = 1;
+            }
+            else
+            {
+                var logicalSizes = new[] { _localSizeX, _localSizeY, _localSizeZ };
+                var physicalSizes = new uint[3];
+                for (var logical = 0; logical < 3; logical++)
+                {
+                    physicalSizes[_physicalAxisOfLogical[logical]] = logicalSizes[logical];
+                }
+
+                _hostLocalSizeX = physicalSizes[0];
+                _hostLocalSizeY = physicalSizes[1];
+                _hostLocalSizeZ = physicalSizes[2];
+            }
             _requiredVertexOutputCount = request.RequiredVertexOutputCount;
             _pixelInputEnable = request.PixelInputEnable;
             _pixelInputAddress = request.PixelInputAddress;
@@ -180,7 +531,7 @@ public static partial class Gen5SpirvTranslator
                 }
             }
 
-            if (layout.UsesPushData)
+            if (layout.UsesPushData || _stage == Gen5SpirvStage.Mesh)
             {
                 var arrayType = _module.TypeArray(_uintType, PushData.DwordCount);
                 _module.AddDecoration(arrayType, SpirvDecoration.ArrayStride, sizeof(uint));
@@ -269,6 +620,34 @@ public static partial class Gen5SpirvTranslator
             _module.AddDecoration(_globalBuffers, SpirvDecoration.DescriptorSet, 0);
             _module.AddDecoration(_globalBuffers, SpirvDecoration.Binding, bindingNumber);
             _interfaces.Add(_globalBuffers);
+
+            if (_request.Program.Instructions.Any(static instruction =>
+                    IsBufferInt64Atomic(instruction.Opcode)))
+            {
+                // Vulkan descriptors are untyped storage buffers. A second aliased
+                // view supplies a correctly typed uint64 pointer for one indivisible
+                // BUFFER_ATOMIC_*_X2 operation while retaining the normal uint view.
+                var runtimeArray64 = AddressRuntimeArray();
+                var block64 = _module.TypeStruct(runtimeArray64);
+                _module.AddDecoration(block64, SpirvDecoration.Block);
+                _module.AddMemberDecoration(block64, 0, SpirvDecoration.Offset, 0);
+                _storageUlongBlockPointer = _module.TypePointer(
+                    SpirvStorageClass.StorageBuffer,
+                    block64);
+                var descriptors64 = _module.TypeArray(block64, count);
+                var descriptorsPointer64 = _module.TypePointer(
+                    SpirvStorageClass.StorageBuffer,
+                    descriptors64);
+                _globalBuffers64 = _module.AddGlobalVariable(
+                    descriptorsPointer64,
+                    SpirvStorageClass.StorageBuffer);
+                _module.AddName(_globalBuffers64, "guestBuffers64");
+                _module.AddDecoration(_globalBuffers64, SpirvDecoration.DescriptorSet, 0);
+                _module.AddDecoration(_globalBuffers64, SpirvDecoration.Binding, bindingNumber);
+                _module.AddDecoration(_globalBuffers, SpirvDecoration.Aliased);
+                _module.AddDecoration(_globalBuffers64, SpirvDecoration.Aliased);
+                _interfaces.Add(_globalBuffers64);
+            }
         }
 
         // One storage block holding a runtime array of dwords.
@@ -499,6 +878,8 @@ public static partial class Gen5SpirvTranslator
 
         private uint LogicalAnd(uint left, uint right) => _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, left, right);
 
+        private uint LogicalOr(uint left, uint right) => _module.AddInstruction(SpirvOp.LogicalOr, _boolType, left, right);
+
         // A signed immediate widened to the address width.
         private uint SignedOffset64(int offset) => ULong(unchecked((ulong)(long)offset));
 
@@ -511,9 +892,23 @@ public static partial class Gen5SpirvTranslator
         private (uint Pointer, uint Valid) ResolveDeviceAddress(uint address64)
         {
             var masked = And64(address64, ULong(DeviceAddressMask));
-            var pageIndex64 = _module.AddInstruction(SpirvOp.ShiftRightLogical, _ulongType, masked, ULong(DeviceAddressPageBits));
+            var extended = _module.AddInstruction(
+                SpirvOp.UGreaterThanEqual,
+                _boolType,
+                masked,
+                ULong(DeviceAddressPaging.ExtendedAddressBase));
+            var inLowAperture = ULessThan64(masked, ULong(DeviceAddressPaging.LowerAddressSize));
+            var belowExtendedLimit = ULessThan64(masked, ULong(DeviceAddressPaging.ExtendedAddressLimit));
+            var inAperture = LogicalOr(inLowAperture, LogicalAnd(extended, belowExtendedLimit));
+            var packed = _module.AddInstruction(
+                SpirvOp.Select,
+                _ulongType,
+                extended,
+                ISub64(masked, ULong(DeviceAddressPaging.ExtendedAddressBias)),
+                masked);
+            var pageIndex64 = _module.AddInstruction(SpirvOp.ShiftRightLogical, _ulongType, packed, ULong(DeviceAddressPageBits));
             var tableLength = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _pageTable, 0);
-            var inTable = ULessThan64(pageIndex64, Widen(tableLength));
+            var inTable = LogicalAnd(inAperture, ULessThan64(pageIndex64, Widen(tableLength)));
             var pageIndex = Narrow(pageIndex64);
             Store(_deviceEntryScratch, ULong(0));
             EmitConditional(inTable, () =>
@@ -725,6 +1120,179 @@ public static partial class Gen5SpirvTranslator
             return Load(_uintType, _deviceBufferWordScratch);
         }
 
+        // BUFFER_* instructions can consume a descriptor that was itself loaded by the
+        // shader. Such a descriptor cannot be turned into a host binding before dispatch,
+        // so use its live SGPR words and the device-address page table instead.
+        // Kept as a narrow reference implementation while the upstream implementation
+        // in Gen5SpirvTranslator handles the broader formatted and atomic cases.
+        private bool TryEmitLegacyDeviceDescriptorBufferMemory(
+            Gen5ShaderInstruction instruction,
+            Gen5BufferMemoryControl control,
+            out string error)
+        {
+            _deviceAddressInstructionPc = instruction.Pc;
+            error = string.Empty;
+            if (control.Typed || instruction.Opcode.Contains("Format", StringComparison.Ordinal))
+            {
+                error = $"unsupported device-descriptor buffer format {instruction.Opcode}";
+                return false;
+            }
+
+            if (instruction.Opcode.StartsWith("BufferAtomic", StringComparison.Ordinal))
+            {
+                error = $"unsupported device-descriptor buffer atomic {instruction.Opcode}";
+                return false;
+            }
+
+            var descriptor = control.ScalarResource;
+            var descriptorWord1 = LoadS(descriptor + 1);
+            var stride = BitwiseAnd(ShiftRightLogical(descriptorWord1, UInt(16)), UInt(0x3FFF));
+            var scalarOffset = instruction.Sources.Count > 2
+                ? GetRawSource(instruction, 2)
+                : UInt(0);
+            var vectorIndex = control.IndexEnabled
+                ? LoadV(control.VectorAddress)
+                : UInt(0);
+            var vectorOffset = control.OffsetEnabled
+                ? LoadV(control.VectorAddress + (control.IndexEnabled ? 1u : 0u))
+                : UInt(0);
+            var byteOffset = IAdd(UInt(unchecked((uint)control.OffsetBytes)), scalarOffset);
+            byteOffset = IAdd(byteOffset, vectorOffset);
+            byteOffset = IAdd(
+                byteOffset,
+                _module.AddInstruction(SpirvOp.IMul, _uintType, vectorIndex, stride));
+
+            if (instruction.Opcode.StartsWith("BufferStoreDword", StringComparison.Ordinal))
+            {
+                EmitExecConditional(() =>
+                {
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        StoreDeviceDescriptorBufferWord(
+                            descriptor,
+                            index == 0 ? byteOffset : IAdd(byteOffset, UInt(index * sizeof(uint))),
+                            LoadV(control.VectorData + index));
+                    }
+                });
+                return true;
+            }
+
+            if (instruction.Opcode.StartsWith("BufferStoreByte", StringComparison.Ordinal) ||
+                instruction.Opcode.StartsWith("BufferStoreShort", StringComparison.Ordinal))
+            {
+                if (!TryGetSubdwordStoreInfo(instruction.Opcode, out var byteCount, out var sourceShift))
+                {
+                    error = $"unsupported device-descriptor buffer store {instruction.Opcode}";
+                    return false;
+                }
+
+                EmitExecConditional(() => StoreDeviceDescriptorBufferBytes(
+                    descriptor,
+                    byteOffset,
+                    LoadV(control.VectorData),
+                    byteCount,
+                    sourceShift));
+                return true;
+            }
+
+            if (!instruction.Opcode.StartsWith("BufferLoad", StringComparison.Ordinal) &&
+                !instruction.Opcode.StartsWith("TBufferLoad", StringComparison.Ordinal))
+            {
+                error = $"unsupported device-descriptor buffer opcode {instruction.Opcode}";
+                return false;
+            }
+
+            EmitExecConditional(() =>
+            {
+                if (TryGetSubdwordLoadInfo(
+                        instruction.Opcode,
+                        out var byteCount,
+                        out var signExtend,
+                        out var d16,
+                        out var d16High))
+                {
+                    StoreV(
+                        control.VectorData,
+                        LoadDeviceDescriptorBufferSubdword(
+                            descriptor,
+                            byteOffset,
+                            LoadV(control.VectorData),
+                            byteCount,
+                            signExtend,
+                            d16,
+                            d16High));
+                    return;
+                }
+
+                for (uint index = 0; index < control.DwordCount; index++)
+                {
+                    StoreV(
+                        control.VectorData + index,
+                        LoadDeviceDescriptorBufferWord(
+                            descriptor,
+                            index == 0 ? byteOffset : IAdd(byteOffset, UInt(index * sizeof(uint)))));
+                }
+            });
+            return true;
+        }
+
+        private (uint Address, uint Size) DeviceDescriptorBufferAddress(uint descriptor, uint byteOffset)
+        {
+            var word1 = LoadS(descriptor + 1);
+            var baseAddress = Pair64(LoadS(descriptor), BitwiseAnd(word1, UInt(0xFFFF)));
+            var stride = BitwiseAnd(ShiftRightLogical(word1, UInt(16)), UInt(0x3FFF));
+            var records = Widen(LoadS(descriptor + 2));
+            var size = _module.AddInstruction(
+                SpirvOp.Select,
+                _ulongType,
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, stride, UInt(0)),
+                records,
+                _module.AddInstruction(SpirvOp.IMul, _ulongType, records, Widen(stride)));
+            return (IAdd64(baseAddress, Widen(byteOffset)), size);
+        }
+
+        private uint IsDeviceDescriptorBufferAccessInRange(uint size, uint byteOffset, uint byteCount) =>
+            ULessThan64(IAdd64(Widen(byteOffset), ULong(byteCount - 1)), size);
+
+        private void StoreDeviceDescriptorBufferWord(uint descriptor, uint byteOffset, uint value)
+        {
+            var (address, size) = DeviceDescriptorBufferAddress(descriptor, byteOffset);
+            var inRange = IsDeviceDescriptorBufferAccessInRange(size, byteOffset, sizeof(uint));
+            EmitConditional(inRange, () =>
+                StoreDeviceDword(And64(address, ULong(DeviceAddressMask & ~3ul)), value, _module.ConstantBool(true)));
+        }
+
+        private void StoreDeviceDescriptorBufferBytes(uint descriptor, uint byteOffset, uint value, uint byteCount, uint sourceShift)
+        {
+            var (address, size) = DeviceDescriptorBufferAddress(descriptor, byteOffset);
+            var inRange = IsDeviceDescriptorBufferAccessInRange(size, byteOffset, byteCount);
+            EmitConditional(inRange, () =>
+                StoreDeviceBytes(address, value, byteCount, sourceShift, _module.ConstantBool(true)));
+        }
+
+        private uint LoadDeviceDescriptorBufferSubdword(
+            uint descriptor,
+            uint byteOffset,
+            uint previous,
+            uint byteCount,
+            bool signExtend,
+            bool d16,
+            bool d16High)
+        {
+            var (address, size) = DeviceDescriptorBufferAddress(descriptor, byteOffset);
+            var preserved = !d16
+                ? UInt(0)
+                : d16High
+                    ? BitwiseAnd(previous, UInt(0x0000_FFFF))
+                    : BitwiseAnd(previous, UInt(0xFFFF_0000));
+            Store(_deviceBufferWordScratch, preserved);
+            EmitConditional(IsDeviceDescriptorBufferAccessInRange(size, byteOffset, byteCount), () =>
+                Store(
+                    _deviceBufferWordScratch,
+                    LoadSubdwordDeviceValue(address, previous, byteCount, signExtend, d16, d16High)));
+            return Load(_uintType, _deviceBufferWordScratch);
+        }
+
         private void StoreDeviceBufferWord(uint baseAddress, uint size64, uint byteOffset, uint value)
         {
             var alignedOffset = BitwiseAnd(byteOffset, UInt(~3u));
@@ -868,11 +1436,6 @@ public static partial class Gen5SpirvTranslator
         {
             _deviceAddressInstructionPc = instruction.Pc;
             error = string.Empty;
-            if (instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal))
-            {
-                return TryEmitScratchMemory(instruction, control, out error);
-            }
-
             var request = _request;
             if (!request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex))
             {
@@ -1663,6 +2226,11 @@ public static partial class Gen5SpirvTranslator
                 case "DsWriteB32":
                     EmitExecConditional(() => StoreGlobalDataShareWord(GlobalDataShareIndex(GetRawSource(instruction, 0), control.SingleOffsetBytes), GetRawSource(instruction, 1)));
                     return true;
+                case "DsWriteB8":
+                case "DsWriteB16":
+                case "DsWriteB8D16Hi":
+                case "DsWriteB16D16Hi":
+                    return TryEmitDataShareSubwordWrite(instruction, control, out error);
                 case "DsWriteB64":
                     EmitExecConditional(() =>
                     {
@@ -1686,23 +2254,12 @@ public static partial class Gen5SpirvTranslator
                     StoreV(instruction.Destinations[0].Value, LoadBlockWord(_globalDataShare, GlobalDataShareIndex(GetRawSource(instruction, 0), control.SingleOffsetBytes)));
                     return true;
                 case "DsReadI8":
-                {
-                    var address = GetRawSource(instruction, 0);
-                    var byteAddress = control.SingleOffsetBytes == 0
-                        ? address
-                        : IAdd(address, UInt(control.SingleOffsetBytes));
-                    var word = LoadBlockWord(_globalDataShare, GlobalDataShareIndex(address, control.SingleOffsetBytes));
-                    var shift = ShiftLeftLogical(BitwiseAnd(byteAddress, UInt(3)), UInt(3));
-                    var packed = ShiftRightLogical(word, shift);
-                    var signedByte = _module.AddInstruction(
-                        SpirvOp.BitFieldSExtract,
-                        _intType,
-                        Bitcast(_intType, packed),
-                        UInt(0),
-                        UInt(8));
-                    StoreV(instruction.Destinations[0].Value, Bitcast(_uintType, signedByte));
-                    return true;
-                }
+                case "DsReadU8":
+                case "DsReadI16":
+                case "DsReadU16":
+                case "DsReadU16D16":
+                case "DsReadU16D16Hi":
+                    return TryEmitDataShareSubwordRead(instruction, control, out error);
                 case "DsReadB64":
                 {
                     var index = GlobalDataShareIndex(GetRawSource(instruction, 0), control.SingleOffsetBytes);
@@ -1711,6 +2268,7 @@ public static partial class Gen5SpirvTranslator
                     return true;
                 }
                 case "DsRead2B64":
+                case "DsRead2St64B64":
                     return TryEmitDataShareReadPair64(instruction, control, out error);
                 case "DsRead2B32":
                 {
@@ -1772,11 +2330,12 @@ public static partial class Gen5SpirvTranslator
             {
                 var address = GetRawSource(instruction, 0);
                 var values = new uint[4];
+                var offsetStride = instruction.Opcode == "DsRead2St64B64" ? 512u : 8u;
                 // Capture both values before an overlapping destination changes the address.
                 for (var component = 0; component < values.Length; component++)
                 {
                     var pairOffset = component < 2 ? control.Offset0 : control.Offset1;
-                    var byteOffset = pairOffset * sizeof(ulong) + (uint)(component % 2) * sizeof(uint);
+                    var byteOffset = pairOffset * offsetStride + (uint)(component % 2) * sizeof(uint);
                     values[component] = control.Gds
                         ? LoadBlockWord(_globalDataShare, GlobalDataShareIndex(address, byteOffset))
                         : Load(_uintType, LdsPointer(address, byteOffset));

@@ -14,12 +14,18 @@ using System.Threading;
 using System.Runtime.InteropServices;
 using System.Linq;
 using System.Globalization;
+using System.Security.Cryptography;
 
 namespace SharpEmu.Libs.Kernel;
 
 public static partial class KernelMemoryCompatExports
 {
     private const int MaxGuestStringLength = 4096;
+    // POSIX file names are directory entries, not locks on an open file
+    // description. Windows requires delete sharing for rename/unlink to keep
+    // an existing guest descriptor usable after the directory entry changes.
+    internal const FileShare GuestFileShare =
+        FileShare.ReadWrite | FileShare.Delete;
     private const int WideCharSize = sizeof(ushort);
     private const int MemsetChunkSize = 16 * 1024;
     private static readonly byte[] _zeroChunk = new byte[MemsetChunkSize];
@@ -69,6 +75,7 @@ public static partial class KernelMemoryCompatExports
     private const int Enomem = 12;
     private const int Eacces = 13;
     private const int Efault = 14;
+    private const int Eexist = 17;
     private const int Einval = 22;
     private const int Erange = 34;
     private const int Struncate = 80;
@@ -96,6 +103,7 @@ public static partial class KernelMemoryCompatExports
 
     private static readonly object _fdGate = new();
     private static readonly Dictionary<int, FileStream> _openFiles = new();
+    private static readonly HashSet<int> _randomDeviceDescriptors = new();
     private static readonly Dictionary<int, HostMovieBridge.BinkGuestCompletionShim>
         _binkGuestCompletionShims = new();
     private static readonly Dictionary<int, string> _observedBinkGuestFiles = new();
@@ -212,7 +220,39 @@ public static partial class KernelMemoryCompatExports
 
     private readonly record struct LibcHeapAllocation(nint BaseAddress, nuint Size, nuint Alignment);
     private readonly record struct MappedRegion(ulong Address, ulong Length, int Protection, bool IsFlexible,
-        bool IsDirect, ulong DirectStart, ulong BackingOffset = 0, bool IsReserved = false);
+        bool IsDirect, ulong DirectStart, ulong BackingOffset = 0, bool IsReserved = false,
+        ulong Identity = 0);
+    private static long _nextMappedRegionIdentity;
+
+    /// <summary>
+    /// Opaque snapshot of the mappings which owned one guest range at a point in time.
+    /// AMPR uses this to keep delayed command buffers from replacing a newer owner of
+    /// the same virtual addresses.
+    /// </summary>
+    internal sealed class MappingRangeSnapshot
+    {
+        internal MappingRangeSnapshot(ulong address, ulong length, MappingRangeSlice[] slices)
+        {
+            Address = address;
+            Length = length;
+            Slices = slices;
+        }
+
+        internal ulong Address { get; }
+        internal ulong Length { get; }
+        internal MappingRangeSlice[] Slices { get; }
+    }
+
+    internal readonly record struct MappingRangeSlice(
+        ulong Address,
+        ulong Length,
+        int Protection,
+        bool IsFlexible,
+        bool IsDirect,
+        ulong DirectStart,
+        ulong BackingOffset,
+        bool IsReserved,
+        ulong Identity);
     private readonly record struct BatchMapEntry(ulong Start, ulong Offset, ulong Length, byte Protection, byte Type, int Operation);
 
     public static void RegisterGuestPathMount(string guestMountPoint, string hostRoot)
@@ -1439,7 +1479,9 @@ public static partial class KernelMemoryCompatExports
         ExportName = "_open",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelOpenUnderscore(CpuContext ctx)
+    public static int KernelOpenUnderscore(CpuContext ctx) => PosixOpen(ctx);
+
+    internal static int KernelOpenCore(CpuContext ctx)
     {
         var pathAddress = ctx[CpuRegister.Rdi];
         var flags = unchecked((int)ctx[CpuRegister.Rsi]);
@@ -1448,6 +1490,23 @@ public static partial class KernelMemoryCompatExports
         if (!TryReadNullTerminatedUtf8(ctx, pathAddress, MaxGuestStringLength, out var guestPath))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        // The console exposes both random devices without a filesystem mount.
+        // Native middleware opens /dev/urandom during initialization, so route
+        // these descriptors directly to the host CSPRNG just as the console and
+        // Kyty do instead of resolving them beneath app0.
+        if (IsRandomDevicePath(guestPath) && (flags & O_DIRECTORY) == 0)
+        {
+            var randomFd = (int)Interlocked.Increment(ref _nextFileDescriptor);
+            lock (_fdGate)
+            {
+                _randomDeviceDescriptors.Add(randomFd);
+            }
+
+            LogOpenTrace($"_open random-device path='{guestPath}' flags=0x{flags:X8} fd={randomFd}");
+            ctx[CpuRegister.Rax] = unchecked((ulong)randomFd);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
         var hostPath = ResolveGuestPath(guestPath);
@@ -1519,7 +1578,7 @@ public static partial class KernelMemoryCompatExports
             }
 
             EnsureOpenParentDirectoryExists(guestPath, hostPath, flags);
-            var stream = new FileStream(hostPath, mode, access, FileShare.ReadWrite);
+            var stream = new FileStream(hostPath, mode, access, GuestFileShare);
             if ((flags & O_APPEND) != 0)
             {
                 stream.Seek(0, SeekOrigin.End);
@@ -1656,6 +1715,7 @@ public static partial class KernelMemoryCompatExports
             (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT => Einval,
             (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT => Efault,
             (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED => Eacces,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_ALREADY_EXISTS => Eexist,
             _ => notFoundErrno,
         };
         KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
@@ -1677,11 +1737,11 @@ public static partial class KernelMemoryCompatExports
     }
 
     // POSIX open(2): translates a failed raw open into -1/errno. On success
-    // KernelOpenUnderscore already writes the fd into RAX (the import bridge
+    // KernelOpenCore already writes the fd into RAX (the import bridge
     // prefers a written RAX over the return value), so returning 0 is correct.
     public static int PosixOpen(CpuContext ctx)
     {
-        var result = KernelOpenUnderscore(ctx);
+        var result = KernelOpenCore(ctx);
         return result == (int)OrbisGen2Result.ORBIS_GEN2_OK
             ? 0
             : PosixFailure(ctx, result);
@@ -2119,7 +2179,13 @@ public static partial class KernelMemoryCompatExports
         ExportName = "unlink",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixUnlink(CpuContext ctx) => KernelUnlink(ctx);
+    public static int PosixUnlink(CpuContext ctx)
+    {
+        var result = KernelUnlink(ctx);
+        return result == (int)OrbisGen2Result.ORBIS_GEN2_OK
+            ? ctx.SetReturn(0)
+            : PosixFailure(ctx, result);
+    }
 
     [SysAbiExport(
         Nid = "1-LFLmRFxxM",
@@ -2183,6 +2249,21 @@ public static partial class KernelMemoryCompatExports
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
+    }
+
+    [SysAbiExport(
+        Nid = "JGMio+21L4c",
+        ExportName = "mkdir",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixMkdir(CpuContext ctx)
+    {
+        // The host sandbox controls effective permissions; the guest mode is
+        // nevertheless accepted through RSI as required by the POSIX ABI.
+        var result = KernelMkdir(ctx);
+        return result == (int)OrbisGen2Result.ORBIS_GEN2_OK
+            ? ctx.SetReturn(0)
+            : PosixFailure(ctx, result);
     }
 
     [SysAbiExport(
@@ -2254,7 +2335,12 @@ public static partial class KernelMemoryCompatExports
         string? observedBinkPath = null;
         lock (_fdGate)
         {
-            if (_openFiles.Remove(fd, out stream))
+            if (_randomDeviceDescriptors.Remove(fd))
+            {
+                ctx[CpuRegister.Rax] = 0;
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+            else if (_openFiles.Remove(fd, out stream))
             {
                 _binkGuestCompletionShims.Remove(fd);
                 if (_observedBinkGuestFiles.Remove(fd, out observedBinkPath))
@@ -2304,6 +2390,25 @@ public static partial class KernelMemoryCompatExports
         if (requested == 0 || fd == 0)
         {
             ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        bool isRandomDevice;
+        lock (_fdGate)
+        {
+            isRandomDevice = _randomDeviceDescriptors.Contains(fd);
+        }
+
+        if (isRandomDevice)
+        {
+            var randomBytes = GC.AllocateUninitializedArray<byte>(requested);
+            RandomNumberGenerator.Fill(randomBytes);
+            if (!ctx.Memory.TryWrite(bufferAddress, randomBytes))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)requested);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
@@ -2842,13 +2947,22 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
             }
 
-            var searchStart = searchStartRaw < 0 ? 0UL : (ulong)searchStartRaw;
-            var searchEnd = searchEndRaw <= 0
-                ? GuestMemoryLayout.DirectBytes
-                : Math.Min((ulong)searchEndRaw, GuestMemoryLayout.DirectBytes);
-            if (searchStart >= searchEnd)
+            // Initialize both outputs even when the interval has no free span.
+            if (!ctx.TryWriteUInt64(outAddress, 0) || !ctx.TryWriteUInt64(outSize, 0))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            if (searchStartRaw < 0 || searchEndRaw < 0)
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            }
+
+            var searchStart = (ulong)searchStartRaw;
+            var searchEnd = Math.Min((ulong)searchEndRaw, GuestMemoryLayout.DirectBytes);
+            if (searchStart >= searchEnd)
+            {
+                return MemoryNoSpace;
             }
 
             bool foundSpan;
@@ -2866,7 +2980,7 @@ public static partial class KernelMemoryCompatExports
 
             if (!foundSpan)
             {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+                return MemoryNoSpace;
             }
 
             if (!ctx.TryWriteUInt64(outAddress, candidate) || !ctx.TryWriteUInt64(outSize, rangeAvailable))
@@ -3022,6 +3136,11 @@ public static partial class KernelMemoryCompatExports
 
         if (!ctx.TryWriteUInt64(outAddress, selectedAddress))
         {
+            lock (_memoryGate)
+            {
+                if (_directAllocations.ContainsAllocatedRange(selectedAddress, length))
+                    _directAllocations.ReleaseRange(selectedAddress, length);
+            }
             TraceDirectMemoryCall(
                 ctx,
                 "allocate_direct",
@@ -3045,6 +3164,56 @@ public static partial class KernelMemoryCompatExports
             OrbisGen2Result.ORBIS_GEN2_OK);
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    internal static int AllocateAutomaticDirectMemory(
+        CpuContext ctx,
+        ulong searchStartValue,
+        ulong searchEndValue,
+        ulong length,
+        ulong alignment,
+        int memoryType,
+        ulong outAddress)
+    {
+        if (length == 0 || outAddress == 0)
+            return MemoryInvalidArgument;
+
+        var limit = GuestMemoryLayout.DirectBytes;
+        var searchStartRaw = unchecked((long)searchStartValue);
+        var searchEndRaw = unchecked((long)searchEndValue);
+        var searchStart = searchStartRaw < 0 ? 0UL : (ulong)searchStartRaw;
+        var searchEnd = searchEndRaw <= 0 ? limit : Math.Min((ulong)searchEndRaw, limit);
+        if (searchStart >= searchEnd)
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+
+        var effectiveAlignment = alignment == 0 ? OrbisPageSize : alignment;
+        lock (_memoryGate)
+        {
+            _ = ResolveBackingSpace(ctx);
+            if (!TryAllocateDirectMemoryLocked(
+                    searchStart,
+                    searchEnd,
+                    length,
+                    effectiveAlignment,
+                    memoryType,
+                    limit,
+                    out var selectedAddress,
+                    isAutomatic: true))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+            }
+
+            // Keep publication and rollback inside the ownership lock. A
+            // concurrent AMM map must not reserve this donation before a failed
+            // output write releases it.
+            if (!ctx.TryWriteUInt64(outAddress, selectedAddress))
+            {
+                _directAllocations.ReleaseRange(selectedAddress, length);
+                return MemoryFault;
+            }
+
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
     }
 
     [SysAbiExport(
@@ -3083,6 +3252,11 @@ public static partial class KernelMemoryCompatExports
 
         if (!ctx.TryWriteUInt64(outAddress, aligned))
         {
+            lock (_memoryGate)
+            {
+                if (_directAllocations.ContainsAllocatedRange(aligned, length))
+                    _directAllocations.ReleaseRange(aligned, length);
+            }
             TraceDirectMemoryCall(
                 ctx,
                 "allocate_main_direct",
@@ -3214,6 +3388,54 @@ public static partial class KernelMemoryCompatExports
     {
         if (inOutAddressPointer == 0)
             return MemoryFault;
+        if (!ctx.TryReadUInt64(inOutAddressPointer, out var requested))
+            return MemoryFault;
+
+        var result = MapDirectMemoryAtTransaction(
+            ctx,
+            requested,
+            length,
+            protection,
+            flags,
+            directMemoryStart,
+            alignment,
+            out var address);
+        if (result != 0)
+            return result;
+        return ctx.TryWriteUInt64(inOutAddressPointer, address) ? 0 : MemoryFault;
+    }
+
+    internal static int MapDirectMemoryAt(
+        CpuContext ctx,
+        ulong address,
+        ulong length,
+        int memoryType,
+        int protection,
+        ulong directMemoryStart)
+    {
+        _ = memoryType;
+        return RunMappingTransaction(() => MapDirectMemoryAtTransaction(
+            ctx,
+            address,
+            length,
+            protection,
+            OrbisKernelMapFixed,
+            directMemoryStart,
+            OrbisPageSize,
+            out _));
+    }
+
+    private static int MapDirectMemoryAtTransaction(
+        CpuContext ctx,
+        ulong requested,
+        ulong length,
+        int protection,
+        ulong flags,
+        ulong directMemoryStart,
+        ulong alignment,
+        out ulong mappedAddress)
+    {
+        mappedAddress = 0;
         if (!IsValidMapRange(length, alignment) || (long)directMemoryStart < 0 ||
             !IsAligned(directMemoryStart, OrbisPageSize))
             return MemoryInvalidArgument;
@@ -3221,8 +3443,6 @@ public static partial class KernelMemoryCompatExports
             return MemoryAccessDenied;
         if (!TryDecodeMappedProtection(protection, out var mode))
             return MemoryInvalidArgument;
-        if (!ctx.TryReadUInt64(inOutAddressPointer, out var requested))
-            return MemoryFault;
         alignment = alignment == 0 ? OrbisPageSize : alignment;
         if ((flags & OrbisKernelMapFixed) != 0 &&
             (requested == 0 || !IsAligned(requested, OrbisPageSize) ||
@@ -3250,12 +3470,12 @@ public static partial class KernelMemoryCompatExports
                     Console.Error.WriteLine($"[LOADER][TRACE] map_direct failed=host-view reason={failure} address=0x{address:X} size=0x{length:X} offset=0x{directMemoryStart:X} protection=0x{protection:X}");
                 return MemoryNoSpace;
             }
+            _directAllocations.RemoveAutomaticAvailability(directMemoryStart, length);
             ReplaceMappedRegionRangeLocked(new MappedRegion(address, length, protection,
                 false, true, directMemoryStart, directMemoryStart));
             GuestGpuMemoryHook.NoteMapped(address, length, mode);
-            if (!ctx.TryWriteUInt64(inOutAddressPointer, address))
-                return MemoryFault;
             GuestWriteWatch.OnDirectMapping(address, length, protection);
+            mappedAddress = address;
             if (ShouldTraceDirectMemory())
                 Console.Error.WriteLine($"[LOADER][TRACE] map_direct applied address=0x{address:X} requested=0x{requested:X} size=0x{length:X} offset=0x{directMemoryStart:X} flags=0x{flags:X}");
             return 0;
@@ -3300,7 +3520,7 @@ public static partial class KernelMemoryCompatExports
         lock (_memoryGate)
         {
             if (length > _flexibleBacking.Available)
-                return MemoryNoSpace;
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
             var space = ResolveBackingSpace(ctx);
             if (space is null || !TrySelectBackingAddress(space, requested, length, alignment, flags, out var address))
                 return MemoryNoSpace;
@@ -3322,6 +3542,130 @@ public static partial class KernelMemoryCompatExports
     public static int KernelMapFlexibleMemory(CpuContext ctx)
     {
         return KernelMapNamedFlexibleMemory(ctx);
+    }
+
+    /// <summary>
+    /// Maps automatically-backed memory at an exact guest address for AMPR.
+    /// AMPR records these requests in a command buffer and applies them only
+    /// when that buffer is submitted, so this entry point deliberately accepts
+    /// raw arguments instead of borrowing guest stack storage for the public
+    /// pointer-based kernel ABI.
+    /// </summary>
+    internal static int MapAutomaticMemory(
+        CpuContext ctx,
+        ulong address,
+        ulong length,
+        int memoryType,
+        int protection)
+        => RunMappingTransaction(() => MapAutomaticMemoryCore(
+            ctx,
+            address,
+            length,
+            memoryType,
+            protection));
+
+    private static int MapAutomaticMemoryCore(
+        CpuContext ctx,
+        ulong address,
+        ulong length,
+        int memoryType,
+        int protection)
+    {
+        if (address < GuestMemoryLayout.GuestExtendedAddressStart ||
+            address >= GuestMemoryLayout.GuestExtendedAddressLimit ||
+            !IsAligned(address, OrbisPageSize) ||
+            !IsValidMapRange(length, OrbisPageSize) ||
+            length > GuestMemoryLayout.GuestExtendedAddressLimit - address ||
+            !TryDecodeMappedProtection(protection, out var mode))
+        {
+            return MemoryInvalidArgument;
+        }
+        if ((protection & OrbisProtCpuExec) != 0)
+            return MemoryAccessDenied;
+
+        lock (_memoryGate)
+        {
+            var space = ResolveBackingSpace(ctx);
+            if (space is null)
+                return MemoryNoSpace;
+
+            if (!_directAllocations.TryReserveAutomatic(length, out var physicalRanges))
+            {
+                // Automatic AMM maps may only consume physical memory that
+                // sceAmprAmmGiveDirectMemory granted with automatic usage.
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+            }
+
+            if (!TrySelectBackingAddress(
+                    space,
+                    address,
+                    length,
+                    OrbisPageSize,
+                    OrbisKernelMapFixed,
+                    out var mappedAddress) ||
+                mappedAddress != address)
+            {
+                ReturnAutomaticRangesLocked(physicalRanges);
+                return MemoryNoSpace;
+            }
+
+            var mapPlan = new List<(ulong Address, ulong Length, ulong BackingOffset)>(physicalRanges.Length);
+            var nextAddress = mappedAddress;
+            foreach (var physicalRange in physicalRanges)
+            {
+                mapPlan.Add((nextAddress, physicalRange.Length, physicalRange.Start));
+                nextAddress += physicalRange.Length;
+            }
+
+            var mappedSegmentCount = 0;
+            foreach (var segment in mapPlan)
+            {
+                if (!space.TryMapBacked(
+                        segment.Address,
+                        segment.Length,
+                        segment.BackingOffset,
+                        mode,
+                        out _))
+                {
+                    for (var index = mappedSegmentCount - 1; index >= 0; index--)
+                    {
+                        var mappedSegment = mapPlan[index];
+                        if (!space.TryUnmapBacked(mappedSegment.Address, mappedSegment.Length))
+                        {
+                            throw new InvalidOperationException(
+                                "Failed to roll back a partially mapped automatic-memory range.");
+                        }
+                    }
+                    ReturnAutomaticRangesLocked(physicalRanges);
+                    return MemoryNoSpace;
+                }
+
+                mappedSegmentCount++;
+            }
+
+            foreach (var segment in mapPlan)
+            {
+                ReplaceMappedRegionRangeLocked(new MappedRegion(
+                    segment.Address,
+                    segment.Length,
+                    protection,
+                    false,
+                    true,
+                    segment.BackingOffset,
+                    segment.BackingOffset));
+                GuestGpuMemoryHook.NoteMapped(segment.Address, segment.Length, mode);
+                GuestWriteWatch.OnDirectMapping(segment.Address, segment.Length, protection);
+            }
+
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+    }
+
+    private static void ReturnAutomaticRangesLocked(
+        IEnumerable<DirectMemoryAllocationMap.PhysicalRange> ranges)
+    {
+        foreach (var range in ranges)
+            _directAllocations.ReturnAutomatic(range.Start, range.Length);
     }
 
     [SysAbiExport(
@@ -3385,12 +3729,13 @@ public static partial class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelMunmap(CpuContext ctx)
-        => RunMappingTransaction(() => UnmapMemoryCore(ctx));
+        => UnmapMemoryAt(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi]);
 
-    private static int UnmapMemoryCore(CpuContext ctx)
+    internal static int UnmapMemoryAt(CpuContext ctx, ulong address, ulong length)
+        => RunMappingTransaction(() => UnmapMemoryCore(ctx, address, length));
+
+    private static int UnmapMemoryCore(CpuContext ctx, ulong address, ulong length)
     {
-        var address = ctx[CpuRegister.Rdi];
-        var length = ctx[CpuRegister.Rsi];
         if (length == 0 || address > ulong.MaxValue - length)
             return MemoryInvalidArgument;
         lock (_memoryGate)
@@ -3415,6 +3760,8 @@ public static partial class KernelMemoryCompatExports
                 if (region.IsFlexible)
                     _flexibleBacking.Release(region.Address, region.Length);
                 RemoveMappingLocked(region.Address, region.Length);
+                if (region.IsDirect)
+                    ReclaimUnaliasedAutomaticRangeLocked(region.DirectStart, region.Length);
             }
             return 0;
         }
@@ -3655,6 +4002,22 @@ public static partial class KernelMemoryCompatExports
 
         if (!found)
         {
+            // A find-next walk terminates with a successful zero-length range
+            // at the end of physical memory. Returning EACCES here makes
+            // allocator enumerators treat a normal end marker as a hard query
+            // failure and can leave their worker/bootstrap state incomplete.
+            if (findNext && offset < GuestMemoryLayout.DirectBytes)
+            {
+                if (!ctx.TryWriteUInt64(infoAddress, GuestMemoryLayout.DirectBytes) ||
+                    !ctx.TryWriteUInt64(infoAddress + sizeof(ulong), GuestMemoryLayout.DirectBytes) ||
+                    !TryWriteInt32(ctx, infoAddress + (sizeof(ulong) * 2), 0))
+                {
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                }
+
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
+
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DELETED;
         }
 
@@ -4887,6 +5250,19 @@ public static partial class KernelMemoryCompatExports
             return ResolveTemp0Root();
         }
 
+        // Some Gen5 SDK/runtime paths use /temp while others use /temp0.
+        // They name the same per-title scratch mount on hardware.
+        if (guestPath.StartsWith("/temp/", StringComparison.OrdinalIgnoreCase))
+        {
+            var relative = NormalizeMountRelativePath(guestPath["/temp/".Length..]);
+            return CombineWithinMount(ResolveTemp0Root(), relative);
+        }
+
+        if (string.Equals(guestPath, "/temp", StringComparison.OrdinalIgnoreCase))
+        {
+            return ResolveTemp0Root();
+        }
+
         if (guestPath.StartsWith("/download0/", StringComparison.OrdinalIgnoreCase))
         {
             var relative = NormalizeMountRelativePath(guestPath["/download0/".Length..]);
@@ -5284,24 +5660,45 @@ public static partial class KernelMemoryCompatExports
     {
         const string temp0VariableName = "SHARPEMU_TEMP0_DIR";
         var configuredRoot = Environment.GetEnvironmentVariable(temp0VariableName);
+        string root;
         if (!string.IsNullOrWhiteSpace(configuredRoot))
         {
-            return Path.GetFullPath(configuredRoot);
+            root = Path.GetFullPath(configuredRoot);
         }
-
-        var app0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
-        var appName = string.IsNullOrWhiteSpace(app0Root)
-            ? "default"
-            : Path.GetFileName(Path.TrimEndingDirectorySeparator(app0Root));
-        if (string.IsNullOrWhiteSpace(appName))
+        else
         {
-            appName = "default";
+            var app0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
+            var appName = string.IsNullOrWhiteSpace(app0Root)
+                ? "default"
+                : Path.GetFileName(Path.TrimEndingDirectorySeparator(app0Root));
+            if (string.IsNullOrWhiteSpace(appName))
+            {
+                appName = "default";
+            }
+
+            var invalidChars = Path.GetInvalidFileNameChars();
+            appName = new string(appName.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray());
+            root = Path.Combine(Path.GetTempPath(), "SharpEmu", "temp0", appName, Path.GetRandomFileName());
+            Environment.SetEnvironmentVariable(temp0VariableName, root);
         }
 
-        var invalidChars = Path.GetInvalidFileNameChars();
-        appName = new string(appName.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray());
-        var root = Path.Combine(Path.GetTempPath(), "SharpEmu", "temp0", appName, Path.GetRandomFileName());
-        Environment.SetEnvironmentVariable(temp0VariableName, root);
+        // A mount root exists before guest code can create children within it.
+        // Without this, a first mkdir("/temp0/...") incorrectly returns ENOENT.
+        // Mount resolution runs outside several syscall try/catch blocks, so a bad
+        // configured host root must remain a guest-visible I/O failure rather than
+        // escaping through the HLE boundary as a host exception.
+        try
+        {
+            Directory.CreateDirectory(root);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            LogOpenTrace($"temp mount root is not writable: '{root}'");
+        }
+        catch (IOException)
+        {
+            LogOpenTrace($"temp mount root could not be created: '{root}'");
+        }
         return root;
     }
 
@@ -6133,6 +6530,14 @@ public static partial class KernelMemoryCompatExports
     /// </remarks>
     private static void ReplaceMappedRegionRangeLocked(MappedRegion replacement)
     {
+        if (replacement.Identity == 0)
+        {
+            replacement = replacement with
+            {
+                Identity = unchecked((ulong)Interlocked.Increment(ref _nextMappedRegionIdentity)),
+            };
+        }
+
         if (replacement.Length == 0 ||
             !TryAddU64(replacement.Address, replacement.Length, out var replacementEnd))
         {
@@ -6411,9 +6816,10 @@ public static partial class KernelMemoryCompatExports
         ulong alignment,
         int memoryType,
         ulong allocationLimit,
-        out ulong selectedAddress)
+        out ulong selectedAddress,
+        bool isAutomatic = false)
         => _directAllocations.TryAllocate(searchStart, Math.Min(searchEnd, allocationLimit), length,
-            alignment == 0 ? OrbisPageSize : alignment, memoryType, out selectedAddress);
+            alignment == 0 ? OrbisPageSize : alignment, memoryType, out selectedAddress, isAutomatic);
 
     private static bool TryFindAvailableDirectMemorySpanLocked(
         ulong searchStart,
@@ -6901,9 +7307,14 @@ public static partial class KernelMemoryCompatExports
 
         string? hostPath = null;
         bool isDirectory = false;
+        bool isRandomDevice = false;
         lock (_fdGate)
         {
-            if (_openDirectories.TryGetValue(fd, out var directory))
+            if (_randomDeviceDescriptors.Contains(fd))
+            {
+                isRandomDevice = true;
+            }
+            else if (_openDirectories.TryGetValue(fd, out var directory))
             {
                 hostPath = directory.Path;
                 isDirectory = true;
@@ -6912,6 +7323,21 @@ public static partial class KernelMemoryCompatExports
             {
                 hostPath = stream.Name;
             }
+        }
+
+        if (isRandomDevice)
+        {
+            var now = DateTime.UtcNow;
+            LogIoTrace("fstat", "/dev/urandom", $"fd={fd} size=0 device=random");
+            return TryWriteKernelStat(
+                ctx,
+                statAddress,
+                isDirectory: false,
+                size: 0,
+                now,
+                now,
+                now,
+                "/dev/urandom");
         }
 
         if (!string.IsNullOrWhiteSpace(hostPath))
@@ -6934,6 +7360,10 @@ public static partial class KernelMemoryCompatExports
 
         return !string.IsNullOrWhiteSpace(hostPath) && TryWriteHostPathStat(ctx, statAddress, hostPath!, isDirectory);
     }
+
+    private static bool IsRandomDevicePath(string path) =>
+        string.Equals(path, "/dev/random", StringComparison.Ordinal) ||
+        string.Equals(path, "/dev/urandom", StringComparison.Ordinal);
 
     private static bool TryWriteHostPathStat(CpuContext ctx, ulong statAddress, string hostPath)
     {
@@ -7262,6 +7692,17 @@ public static partial class KernelMemoryCompatExports
         if (normalized[0] != '/')
         {
             normalized = "/" + normalized;
+        }
+
+        // Canonicalize the SDK's two names for the same scratch mount so
+        // negative-stat caching and explicit mount registration cannot disagree.
+        if (string.Equals(normalized, "/temp", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = "/temp0";
+        }
+        else if (normalized.StartsWith("/temp/", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = "/temp0" + normalized[5..];
         }
 
         return normalized;

@@ -80,6 +80,23 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         });
     }
 
+    [Fact]
+    public void ImageUploadReadsMappedPrivateGuestMemory()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapPrivate(0x10000);
+        var expected = Enumerable.Range(0, 0x100).Select(index => (byte)index).ToArray();
+        Assert.False(harness.Memory.IsBackedRange(address, (ulong)expected.Length));
+        Assert.True(harness.Memory.TryWrite(address, expected));
+
+        var (source, offset) = harness.Worker.Run(() =>
+            harness.Cache.ObtainBufferForImage(address, (ulong)expected.Length));
+
+        Assert.Equal(expected, harness.ReadBufferBytes(source, offset, (ulong)expected.Length));
+        harness.Shutdown();
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -389,7 +406,7 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(address + 0x6000));
 
         // The BDA table maps every 16 KiB page of the buffer to its device address.
-        var slice = harness.ReadBack(harness.Cache.BdaPageTableBuffer, (address >> GuestBufferCache.CachingPageBits) * 8, 24);
+        var slice = harness.ReadBack(harness.Cache.BdaPageTableBuffer, PageOwnerTable.PageIndex(address) * 8, 24);
         Assert.Equal(buffer.DeviceAddress, BitConverter.ToUInt64(slice, 0));
         Assert.Equal(buffer.DeviceAddress + Page, BitConverter.ToUInt64(slice, 8));
         Assert.Equal(0UL, BitConverter.ToUInt64(slice, 16));

@@ -16,9 +16,32 @@ internal static unsafe partial class VulkanVideoPresenter
         !isHdrOutput ? PipelineStageFlags.TransferBit : isImageInitialized
             ? PipelineStageFlags.FragmentShaderBit : PipelineStageFlags.TopOfPipeBit;
 
+    internal static bool IsCompatibleGuestFlipSnapshot(
+        Format existingFormat,
+        uint existingWidth,
+        uint existingHeight,
+        Format requestedFormat,
+        uint requestedWidth,
+        uint requestedHeight) =>
+        existingFormat == requestedFormat &&
+        existingWidth == requestedWidth &&
+        existingHeight == requestedHeight;
+
     private sealed partial class Presenter
     {
         // This partial records presentation frame transfers.
+
+        // The other image properties are invariant for every flip snapshot: 2D, one mip/layer,
+        // one sample, optimal tiling, and transfer-source/destination plus sampled usage.
+        // Keep enough retired images for the bounded presentation queue and frame slots, without
+        // retaining an unbounded amount of device-local memory for 4K display surfaces.
+        private const int MaximumReusableGuestFlipSnapshots =
+            MaxFramesInFlight + MaxPendingGuestFlipVersions;
+        private readonly Stack<GuestImageResource> _guestFlipSnapshotPool = new();
+        private readonly object _guestFlipSnapshotPoolGate = new();
+        private GuestFlipSnapshotKey? _guestFlipSnapshotPoolKey;
+
+        private readonly record struct GuestFlipSnapshotKey(Format Format, uint Width, uint Height);
 
         private VkBuffer _stagingBuffer;
         private DeviceMemory _stagingMemory;
@@ -794,109 +817,45 @@ internal static unsafe partial class VulkanVideoPresenter
 
             return destination;
         }
-        // Captures the display surface through the store in queue order; presentation reads the copy.
-        // A flip snapshot is created and retired for every flip; on macOS that is a
-        // vkCreateImage plus a vkAllocateMemory (and a Metal texture) about twenty
-        // times a second for the same 1920x1080 target. Keep the retired ones and
-        // hand them back: a snapshot is fully overwritten by the copy that follows
-        // (its barrier takes it from Undefined), so its old contents and layout do
-        // not matter.
-        // The command-stream thread takes snapshots and the render thread retires
-        // them, so the pool is guarded.
-        private readonly Dictionary<(Format Format, uint Width, uint Height), Stack<GuestImageResource>>
-            _flipSnapshotPool = new();
-        private readonly object _flipSnapshotPoolGate = new();
-        private int _pooledFlipSnapshots;
-        // SHARPEMU_FLIP_SNAPSHOT_POOL=0 turns the pool off; it is on otherwise.
-        private bool _flipSnapshotPoolOpen =
-            !string.Equals(
-                Environment.GetEnvironmentVariable("SHARPEMU_FLIP_SNAPSHOT_POOL"),
-                "0",
-                StringComparison.Ordinal);
-        private const int MaxPooledFlipSnapshots = 8;
-
-        private bool TryTakePooledFlipSnapshot(
+        private GuestImageResource AcquireGuestFlipSnapshot(
             Format format,
             uint width,
             uint height,
             ulong address,
-            long version,
-            out GuestImageResource snapshot)
+            long version)
         {
-            lock (_flipSnapshotPoolGate)
+            var requestedKey = new GuestFlipSnapshotKey(format, width, height);
+            lock (_guestFlipSnapshotPoolGate)
             {
-                snapshot = null!;
-                if (!_flipSnapshotPoolOpen ||
-                    !_flipSnapshotPool.TryGetValue((format, width, height), out var available) ||
-                    available.Count == 0)
+                if (_guestFlipSnapshotPoolKey is not { } poolKey ||
+                    !IsCompatibleGuestFlipSnapshot(
+                        poolKey.Format,
+                        poolKey.Width,
+                        poolKey.Height,
+                        format,
+                        width,
+                        height))
                 {
-                    return false;
+                    // Resolution/format changes are uncommon and can otherwise strand large 4K
+                    // allocations in the free pool. The monitor is reentrant while the pool drains.
+                    DestroyGuestFlipSnapshotPool();
+                    _guestFlipSnapshotPoolKey = requestedKey;
                 }
 
-                snapshot = available.Pop();
-                _pooledFlipSnapshots--;
+                if (_guestFlipSnapshotPool.TryPop(out var snapshot))
+                {
+                    snapshot.Address = address;
+                    snapshot.FlipVersion = version;
+                    return snapshot;
+                }
             }
 
-            snapshot.Address = address;
-            snapshot.FlipVersion = version;
-            return true;
+            return CreateGuestFlipSnapshot(format, width, height, address, version);
         }
 
-        private bool TryPoolFlipSnapshot(GuestImageResource resource)
-        {
-            lock (_flipSnapshotPoolGate)
-            {
-                if (!_flipSnapshotPoolOpen || resource.Image.Handle == 0 || resource.Memory.Handle == 0 ||
-                    _pooledFlipSnapshots >= MaxPooledFlipSnapshots)
-                {
-                    return false;
-                }
-
-                var key = (resource.Format, resource.Width, resource.Height);
-                if (!_flipSnapshotPool.TryGetValue(key, out var available))
-                {
-                    available = new Stack<GuestImageResource>();
-                    _flipSnapshotPool[key] = available;
-                }
-
-                resource.Address = 0;
-                resource.FlipVersion = 0;
-                available.Push(resource);
-                _pooledFlipSnapshots++;
-                return true;
-            }
-        }
-
-        // Closes the pool and hands every kept snapshot back for a real destroy.
-        private void DrainFlipSnapshotPool()
-        {
-            List<GuestImageResource> kept = [];
-            lock (_flipSnapshotPoolGate)
-            {
-                _flipSnapshotPoolOpen = false;
-                foreach (var available in _flipSnapshotPool.Values)
-                {
-                    kept.AddRange(available);
-                }
-
-                _flipSnapshotPool.Clear();
-                _pooledFlipSnapshots = 0;
-            }
-
-            foreach (var resource in kept)
-            {
-                DestroyGuestImage(resource);
-            }
-        }
-
+        // Captures the display surface through the store in queue order; presentation reads the copy.
         private GuestImageResource CreateGuestFlipSnapshot(Format format, uint width, uint height, ulong address, long version)
         {
-            if (TryTakePooledFlipSnapshot(format, width, height, address, version, out var pooled))
-            {
-                SetDebugName(ObjectType.Image, pooled.Image.Handle, $"guest flip v{version} source 0x{address:X16}");
-                return pooled;
-            }
-
             var imageInfo = new ImageCreateInfo
             {
                 SType = StructureType.ImageCreateInfo,
@@ -932,7 +891,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw;
             }
 
-            SetDebugName(ObjectType.Image, image.Handle, $"guest flip v{version} source 0x{address:X16}");
+            SetDebugName(ObjectType.Image, image.Handle, $"guest flip snapshot {width}x{height} {format}");
             return new GuestImageResource
             {
                 Address = address,
@@ -945,6 +904,41 @@ internal static unsafe partial class VulkanVideoPresenter
             };
         }
 
+        private void RecycleGuestFlipSnapshot(GuestImageResource snapshot)
+        {
+            lock (_guestFlipSnapshotPoolGate)
+            {
+                if (_guestFlipSnapshotPoolKey is { } poolKey &&
+                    IsCompatibleGuestFlipSnapshot(
+                        snapshot.Format,
+                        snapshot.Width,
+                        snapshot.Height,
+                        poolKey.Format,
+                        poolKey.Width,
+                        poolKey.Height) &&
+                    _guestFlipSnapshotPool.Count < MaximumReusableGuestFlipSnapshots)
+                {
+                    _guestFlipSnapshotPool.Push(snapshot);
+                    return;
+                }
+            }
+
+            DestroyGuestImage(snapshot);
+        }
+
+        private void DestroyGuestFlipSnapshotPool()
+        {
+            lock (_guestFlipSnapshotPoolGate)
+            {
+                while (_guestFlipSnapshotPool.TryPop(out var snapshot))
+                {
+                    DestroyGuestImage(snapshot);
+                }
+
+                _guestFlipSnapshotPoolKey = null;
+            }
+        }
+
         // Wait for the GPU to complete the slot's last frame before reuse.
         private void WaitFrameSlot(int slot)
         {
@@ -954,7 +948,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _frameGuestImageVersions[slot] is { } unsubmittedVersion)
                 {
                     _frameGuestImageVersions[slot] = null;
-                    DestroyGuestImage(unsubmittedVersion);
+                    RecycleGuestFlipSnapshot(unsubmittedVersion);
                     FlipProgressTracker.RecordFlip(unsubmittedVersion.FlipVersion);
                     TraceVulkanShader(
                         $"vk.flip_retired version={unsubmittedVersion.FlipVersion} " +
@@ -973,7 +967,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_frameGuestImageVersions[slot] is { } guestImageVersion)
             {
                 _frameGuestImageVersions[slot] = null;
-                DestroyGuestImage(guestImageVersion);
+                RecycleGuestFlipSnapshot(guestImageVersion);
                 FlipProgressTracker.RecordFlip(guestImageVersion.FlipVersion);
                 TraceVulkanShader(
                     $"vk.flip_retired version={guestImageVersion.FlipVersion} " +

@@ -49,6 +49,17 @@ public sealed class ShaderProgramCacheTests : IDisposable
         Assert.Equal("SNop", request.Program.Instructions[0].Opcode);
     }
 
+    [Fact]
+    public void HostShaderFloat64SupportPropagatesToCompileRequest()
+    {
+        _guest.Host.ShaderFloat64Supported = true;
+        _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.EndProgram);
+
+        _ = Compile(CodeA);
+
+        Assert.True(Assert.Single(_guest.Compiler.Requests).ShaderFloat64Supported);
+    }
+
     private readonly FatalScope _fatal = new();
     private readonly PipelineTestGuest _guest = new();
 
@@ -91,6 +102,85 @@ public sealed class ShaderProgramCacheTests : IDisposable
         Assert.Equal(0xBEEF0002_C0DE0001UL, declared);
         var source = _guest.Source(CodeA, ShaderStage.Compute, []);
         Assert.Equal(0xBEEF0002_C0DE0001UL, source.Hash);
+    }
+
+    [Fact]
+    public void FusedIdentityIncludesBothHalvesInOrderEvenWhenTheyDeclareHashes()
+    {
+        var entry = DeclaredHashProgram(0xC0DE0001, 0xBEEF0002);
+        var firstContinuation = DeclaredHashProgram(0x11112222, 0x33334444);
+        var secondContinuation = DeclaredHashProgram(0x55556666, 0x77778888);
+        _guest.RegisterProgram(CodeA, HeaderA, entry);
+        _guest.RegisterProgram(CodeB, HeaderB, firstContinuation);
+        var ranges = new (ulong Address, uint SizeBytes)[]
+        {
+            (CodeA, (uint)(entry.Length * sizeof(uint))),
+            (CodeB, (uint)(firstContinuation.Length * sizeof(uint))),
+        };
+
+        var first = ShaderIdentity.Compute(_guest.Memory, CodeA, ranges, "mesh");
+        var reversed = ShaderIdentity.Compute(_guest.Memory, CodeB, ranges.Reverse().ToArray(), "mesh");
+        _guest.RegisterProgram(CodeB, HeaderB, secondContinuation);
+        var second = ShaderIdentity.Compute(_guest.Memory, CodeA, ranges, "mesh");
+
+        Assert.NotEqual(0xBEEF0002_C0DE0001UL, first);
+        Assert.NotEqual(first, reversed);
+        Assert.NotEqual(first, second);
+    }
+
+    [Fact]
+    public void FusedRelativeLayoutParticipatesInDecodedAndCompiledIdentity()
+    {
+        var registeredA = new RegisteredShader(
+            CodeA,
+            HeaderA,
+            8,
+            0,
+            0,
+            0,
+            0,
+            CodeA + 0x100,
+            8);
+        var registeredB = registeredA with
+        {
+            CodeAddress = CodeB,
+            HeaderAddress = HeaderB,
+            ContinuationAddress = CodeB + 0x100,
+        };
+        var registeredOtherLayout = registeredB with
+        {
+            ContinuationAddress = CodeB + 0x200,
+        };
+        var sourceA = new ShaderSource(registeredA, 0x1234, [], 0, ShaderStage.Mesh);
+        var sourceB = new ShaderSource(registeredB, 0x1234, [], 0, ShaderStage.Mesh);
+        var otherSource = new ShaderSource(registeredOtherLayout, 0x1234, [], 0, ShaderStage.Mesh);
+
+        Assert.Equal(sourceA.FusedLayout, sourceB.FusedLayout);
+        Assert.NotEqual(sourceA.FusedLayout, otherSource.FusedLayout);
+        var first = new ProgramKey(ShaderStage.Mesh, 0x1234, 0, 16, sourceA.FusedLayout, [7]);
+        var relocated = new ProgramKey(ShaderStage.Mesh, 0x1234, 0, 16, sourceB.FusedLayout, [7]);
+        var otherLayout = new ProgramKey(ShaderStage.Mesh, 0x1234, 0, 16, otherSource.FusedLayout, [7]);
+        Assert.Equal(first, relocated);
+        Assert.NotEqual(first, otherLayout);
+    }
+
+    [Fact]
+    public void ReusableProgramLookupKeyUsesLogicalStateWithoutMutatingStoredKey()
+    {
+        var lookup = ProgramKey.CreateLookup(4);
+        lookup.ResetLookup(ShaderStage.Compute, 0x1234, 8, 16, 0, [7u, 9u]);
+        var stored = lookup.CloneImmutable();
+        var programs = new Dictionary<ProgramKey, string> { [stored] = "compiled" };
+
+        // Leave a non-zero tail in the reusable buffer, then shorten its logical state.
+        lookup.ResetLookup(ShaderStage.Compute, 0x1234, 8, 16, 0, [7u, 99u, 123u]);
+        Assert.False(programs.ContainsKey(lookup));
+        lookup.ResetLookup(ShaderStage.Compute, 0x1234, 8, 16, 0, [7u, 9u]);
+
+        Assert.True(programs.TryGetValue(lookup, out var value));
+        Assert.Equal("compiled", value);
+        Assert.Equal(stored.GetHashCode(), lookup.GetHashCode());
+        Assert.Equal(new uint[] { 7u, 9u }, stored.StaticState);
     }
 
     [Fact]

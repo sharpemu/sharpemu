@@ -187,6 +187,7 @@ public sealed class VertexStageRegisters
     public ulong GeometryAddress;
     public GeometryResource1 GeometryResource1;
     public GeometryResource2 GeometryResource2;
+    public ulong GeometryUserDataAddress;
     public UserScalarRegisters HullUserScalars = new();
     public UserScalarRegisters GeometryUserScalars = new();
     // The legacy vertex block and the export resources and user scalars are stored, not
@@ -212,6 +213,9 @@ public sealed class VertexStageRegisters
 
 public sealed class PixelStageRegisters
 {
+    // SPI_SHADER_TMA_{LO,HI}_PS carries a 40-bit byte address: the low
+    // register supplies bits 0..31 and the high register supplies bits 32..39.
+    public ulong TrapMemoryAddress;
     public ulong Address;
     public PixelResource1 Resource1;
     public PixelResource2 Resource2;

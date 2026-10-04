@@ -47,7 +47,14 @@ public sealed partial class GpuCommandInterpreter
 
         if (atomic.Command == 1 && !comparePassed)
         {
-            Suspend();
+            if (LogGpuWaits)
+            {
+                Suspend($"atomic_compare_swap target=0x{atomic.Address:X16} observed=0x{priorValue:X16}");
+            }
+            else
+            {
+                Suspend();
+            }
         }
 
         return 8;
@@ -84,7 +91,14 @@ public sealed partial class GpuCommandInterpreter
 
         if (priorValue == 0)
         {
-            Suspend();
+            if (LogGpuWaits)
+            {
+                Suspend($"semaphore target=0x{semaphore.Address:X16} observed=0x{priorValue:X16}");
+            }
+            else
+            {
+                Suspend();
+            }
         }
 
         return 3;

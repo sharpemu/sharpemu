@@ -12,6 +12,18 @@ public static partial class AgcExports
 {
     // This partial initializes AGC through versioned register-default structures.
 
+    [SysAbiExport(
+        Nid = "T6xuVw0KUJo",
+        ExportName = "sceAgcDebugRaiseException",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DebugRaiseException(CpuContext ctx)
+    {
+        TraceAgc($"agc.debug_raise_exception id=0x{(uint)ctx[CpuRegister.Rdi]:X8}");
+        ctx[CpuRegister.Rax] = 0;
+        return 0;
+    }
+
     private const uint RegisterDefaultsVersion7 = 7;
     private const uint RegisterDefaultsVersion8 = 8;
     private const uint RegisterDefaultsVersion9 = 9;

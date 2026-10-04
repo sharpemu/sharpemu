@@ -129,6 +129,47 @@ public sealed class GuestRedZoneEnclosingSpanTests
     }
 
     [Fact]
+    public void RefusesNeighborRelocationWhenFunctionHasIndirectControlFlow()
+    {
+        // jmp rax makes every instruction boundary in the function a possible
+        // unresolved entry. Even though the bytes directly before the faulting
+        // instruction look safe, an enclosing span must not relocate them.
+        byte[] code =
+        [
+            0xFF, 0xE0,
+            0x49, 0xC1, 0xEB, 0x0C,
+            0x44, 0x23, 0x51, 0x08,
+            0xC3,
+        ];
+
+        Assert.False(GuestRedZonePatcher.TryBuildEnclosingSpan(
+            code, Base, Base + 6, out _, out _, out _, out _));
+    }
+
+    [Fact]
+    public void AllowsNeighborRelocationWhenFunctionOnlyHasAnIndirectCall()
+    {
+        // call rax has a statically known continuation and cannot jump into an
+        // undiscovered boundary in this function. It must not make an otherwise
+        // safe enclosing span look like an unresolved indirect jump table.
+        byte[] code =
+        [
+            0xFF, 0xD0,
+            0x49, 0xC1, 0xEB, 0x0C,
+            0x44, 0x23, 0x51, 0x08,
+            0xC3,
+        ];
+
+        Assert.True(GuestRedZonePatcher.TryBuildEnclosingSpan(
+            code, Base, Base + 6, out var address, out var length, out var coreStart, out var coreCount));
+
+        Assert.Equal(Base + 2, address);
+        Assert.Equal(8, length);
+        Assert.Equal(1, coreStart);
+        Assert.Equal(1, coreCount);
+    }
+
+    [Fact]
     public void BuildsASpanOverRegisterOnlyShaInstructions()
     {
         // sha256msg1 xmm1, xmm2 -> 4 bytes, no memory operand: the rewrite site

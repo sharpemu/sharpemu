@@ -86,6 +86,82 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "03RZmELWWzw",
+        ExportName = "sceAgcCbSetUcRegistersDirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int CbSetUcRegistersDirect(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var registersAddress = ctx[CpuRegister.Rsi];
+        var registerCount = (uint)ctx[CpuRegister.Rdx];
+        if (registerCount == 0)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (commandBufferAddress == 0 || registersAddress == 0 || registerCount > 4096)
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        // Preserve the caller's order. Unlike the SH helper, the platform UC
+        // emitter splits runs where they appear rather than sorting them first.
+        var registers = new RegisterDefaultValue[registerCount];
+        for (uint index = 0; index < registerCount; index++)
+        {
+            var entryAddress = registersAddress + ((ulong)index * 8);
+            if (!TryReadUInt32(ctx, entryAddress, out var offset) ||
+                !TryReadUInt32(ctx, entryAddress + sizeof(uint), out var value))
+            {
+                return ReturnPointer(ctx, 0);
+            }
+
+            registers[index] = new RegisterDefaultValue(offset, value);
+        }
+
+        ulong firstCommandAddress = 0;
+        var startIndex = 0;
+        while (startIndex < registers.Length)
+        {
+            var endIndex = startIndex + 1;
+            while (endIndex < registers.Length &&
+                   registers[endIndex].Offset == registers[endIndex - 1].Offset + 1)
+            {
+                endIndex++;
+            }
+
+            var valueCount = (uint)(endIndex - startIndex);
+            var packetDwords = valueCount + 2;
+            if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
+                !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItSetUconfigReg, 0)) ||
+                !TryWriteUInt32(ctx, commandAddress + 4, registers[startIndex].Offset & 0xFFFFu))
+            {
+                return ReturnPointer(ctx, 0);
+            }
+
+            firstCommandAddress = firstCommandAddress == 0 ? commandAddress : firstCommandAddress;
+            for (var index = startIndex; index < endIndex; index++)
+            {
+                if (!TryWriteUInt32(
+                        ctx,
+                        commandAddress + 8 + ((ulong)(index - startIndex) * sizeof(uint)),
+                        registers[index].Value))
+                {
+                    return ReturnPointer(ctx, 0);
+                }
+            }
+
+            startIndex = endIndex;
+        }
+
+        TraceAgc(
+            $"agc.cb_set_uc_direct buf=0x{commandBufferAddress:X16} " +
+            $"first=0x{firstCommandAddress:X16} count={registerCount}");
+        return ReturnPointer(ctx, firstCommandAddress);
+    }
+
+    [SysAbiExport(
         Nid = "n2fD4A+pb+g",
         ExportName = "sceAgcCbSetShRegisterRangeDirect",
         Target = Generation.Gen5,

@@ -154,7 +154,7 @@ public sealed class IndirectSelectorValues
             if (instruction.Control is Gen5Vop3Control { AbsoluteMask: not 0 } or Gen5Vop3Control { NegateMask: not 0 } or
                 Gen5Vop3Control { Clamp: true } or Gen5Vop3Control { OutputModifier: not 0 } or Gen5Vop3Control { OperandSelect: not 0 } or
                 Gen5SdwaControl or Gen5DppControl or Gen5Dpp8Control or Gen5Vop3pControl) return null;
-            if (instruction.Opcode is "SFF1I32B32" or "VFfblB32")
+            if (instruction.Opcode is "SFF1I32B32" or "VFfbhU32" or "VFfblB32")
             {
                 HasBitScan = true;
                 return new(Values: Enumerable.Range(0, 32).Select(value => (uint)value).Append(uint.MaxValue).ToArray());
@@ -170,6 +170,7 @@ public sealed class IndirectSelectorValues
             var operation = instruction.Opcode switch
             {
                 "SAddU32" or "SAddI32" or "VAddU32" or "VAddI32" or "VAdd3U32" => ScalarOperation.IAdd32,
+                "VXorB32" or "VXor3B32" => ScalarOperation.Xor32,
                 "SLshlB32" => ScalarOperation.ShiftLeft32,
                 _ => ScalarOperation.None,
             };
@@ -178,26 +179,40 @@ public sealed class IndirectSelectorValues
             var right = Read(instruction.Sources[1], instruction.Pc);
             if (left is null || right is null) return null;
             var result = new Expression(Operation: operation, Inputs: [left, right]);
-            if (instruction.Opcode != "VAdd3U32") return result;
+            if (instruction.Opcode is not ("VAdd3U32" or "VXor3B32")) return result;
+            if (instruction.Sources.Count < 3) return null;
             var third = Read(instruction.Sources[2], instruction.Pc);
-            return third is null ? null : new(Operation: ScalarOperation.IAdd32, Inputs: [result, third]);
+            return third is null ? null : new(Operation: operation, Inputs: [result, third]);
         }
 
-        private static bool MayExpandExecution(Gen5ShaderInstruction instruction)
+        private bool MayExpandExecution(Gen5ShaderInstruction instruction)
         {
             if (instruction.Opcode is "SAndSaveexecB64" or "SAndSaveexecB32") return false;
             return instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) ||
                 instruction.Opcode.Contains("Wrexec", StringComparison.Ordinal) ||
                 instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal) ||
-                WritesRegister(instruction, Gen5Operand.Scalar(126)) || WritesRegister(instruction, Gen5Operand.Scalar(127));
+                WritesRegister(instruction, Gen5Operand.Scalar(126)) ||
+                plan.Graph.WaveSize == 64 && WritesRegister(instruction, Gen5Operand.Scalar(127));
         }
 
-        private static bool WritesRegister(Gen5ShaderInstruction instruction, Gen5Operand register)
+        private bool WritesRegister(Gen5ShaderInstruction instruction, Gen5Operand register)
         {
-            if (register.Kind == Gen5OperandKind.ScalarRegister && register.Value is 106 or 107 &&
+            if (register.Kind == Gen5OperandKind.ScalarRegister &&
+                (register.Value == 106 || plan.Graph.WaveSize == 64 && register.Value == 107) &&
                 instruction.Opcode.StartsWith('V')) return true;
             if (instruction.Control is Gen5Vop3Control { ScalarDestination: { } scalarDestination } &&
-                register.Kind == Gen5OperandKind.ScalarRegister && register.Value >= scalarDestination && register.Value - scalarDestination < 2) return true;
+                register.Kind == Gen5OperandKind.ScalarRegister)
+            {
+                var width = plan.Graph.WaveSize == 64 ? 2u : 1u;
+                if (register.Value >= scalarDestination && register.Value - scalarDestination < width) return true;
+            }
+            if (instruction.Control is Gen5SdwaControl { ScalarDestination: { } compareDestination } &&
+                register.Kind == Gen5OperandKind.ScalarRegister)
+            {
+                var width = plan.Graph.WaveSize == 64 ? 2u : 1u;
+                if (register.Value >= compareDestination && register.Value - compareDestination < width) return true;
+            }
+
             return instruction.Destinations.Any(destination => destination == register ||
                 (destination.Kind == register.Kind && instruction.Opcode.Contains("64", StringComparison.Ordinal) &&
                     register.Value > destination.Value && register.Value - destination.Value == 1));

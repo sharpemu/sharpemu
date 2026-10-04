@@ -164,6 +164,18 @@ public sealed partial class GuestImageCache
             return;
         }
 
+        // Decoded video surfaces are continuously written by managed AvPlayer
+        // code, which explicitly notifies the GPU memory hook for every copy.
+        // Re-arming a page watch between that notification and the managed
+        // copy can otherwise turn the copy into a fatal access violation.
+        if (SharpEmu.Libs.AvPlayer.AvPlayerExports.IsVideoBufferRange(
+                image.Description.Data.Address,
+                image.Description.Data.Size))
+        {
+            UnwatchImage(imageIdentifier);
+            return;
+        }
+
         var imageBegin = image.Description.Data.Address;
         var imageEnd = image.Description.Data.End;
         if (imageBegin == image.WatchBegin && imageEnd == image.WatchEnd)
@@ -458,7 +470,15 @@ public sealed partial class GuestImageCache
         return covered;
     }
 
-    public void InvalidateMemoryFromGpu(ulong address, ulong size)
+    public void InvalidateMemoryFromGpu(ulong address, ulong size) =>
+        InvalidateMemoryFromGpu(address, size, keepUnsynchronizedGpuImages: false);
+
+    // A bound writable view hands the buffer ownership, except of an image whose only
+    // current copy is still on the GPU: refreshing it from the buffer would lose it.
+    public void InvalidateMemoryForBoundWrite(ulong address, ulong size) =>
+        InvalidateMemoryFromGpu(address, size, keepUnsynchronizedGpuImages: true);
+
+    private void InvalidateMemoryFromGpu(ulong address, ulong size, bool keepUnsynchronizedGpuImages)
     {
         if (!IsValidRange(address, size))
         {
@@ -469,7 +489,8 @@ public sealed partial class GuestImageCache
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
         {
             var image = _slots[imageIdentifier];
-            if (!image.Overlaps(address, size))
+            if (!image.Overlaps(address, size) ||
+                (keepUnsynchronizedGpuImages && image.IsGpuModified && !image.BufferHoldsGpuContents))
             {
                 continue;
             }

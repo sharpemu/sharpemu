@@ -23,6 +23,16 @@ public static partial class Gen5SpirvTranslator
         private const uint InterpolateAtSample = 77;
         private const uint InterpolateAtOffset = 78;
 
+        private bool IsFlatInterpolationParameter(uint attribute)
+        {
+            var control = attribute < (uint)_pixelInputCntl.Length
+                ? _pixelInputCntl[attribute]
+                : attribute;
+            var custom = attribute < 32 &&
+                (_request.PixelCustomInterpolationMask & (1u << (int)attribute)) != 0;
+            return (control & 0x400u) != 0 && !custom;
+        }
+
         private void DeclareInterpolationParameters()
         {
             foreach (var instruction in _request.Program.Instructions)
@@ -30,7 +40,20 @@ public static partial class Gen5SpirvTranslator
                 if (instruction.Opcode == "VInterpMovF32" &&
                     instruction.Control is Gen5InterpolationControl interpolation)
                 {
-                    _perVertexAttributes.Add(interpolation.Attribute);
+                    // P0 (selector 2) of a flat input is already the provoking
+                    // vertex value supplied by the fixed-function interface.
+                    // Requiring PerVertexKHR here changes it into vertex zero
+                    // and unnecessarily enables the barycentric extension.
+                    // P10/P20, and every non-flat input, still need the raw
+                    // per-vertex values to reconstruct the guest parameters.
+                    var selector = instruction.Words[0] & 0xFFu;
+                    var flat = IsFlatInterpolationParameter(interpolation.Attribute);
+                    // Reserved selectors still enter the interpolation path so
+                    // TryEmitInterpolationParameter can reject them.
+                    if (selector != 2 || !flat)
+                    {
+                        _perVertexAttributes.Add(interpolation.Attribute);
+                    }
                 }
             }
 

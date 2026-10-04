@@ -161,20 +161,43 @@ public static class KernelEventQueueCompatExports
         }
 
         public bool Remove(ulong ident, short filter)
+            => RemoveAll(ident, filter) != 0;
+
+        public int RemoveAll(ulong ident, short filter)
         {
-            var index = FindIndex(ident, filter);
-            if (index < 0)
+            var originalCount = Count;
+            var writeIndex = 0;
+            for (var readIndex = 0; readIndex < originalCount; readIndex++)
             {
-                return false;
+                var candidate = this[readIndex];
+                if (candidate.Ident == ident && candidate.Filter == filter)
+                {
+                    continue;
+                }
+
+                this[writeIndex++] = candidate;
             }
 
-            for (var i = index; i + 1 < Count; i++)
+            Count = writeIndex;
+            return originalCount - writeIndex;
+        }
+
+        public int UpdateUserData(ulong ident, short filter, ulong userData)
+        {
+            var updatedCount = 0;
+            for (var index = 0; index < Count; index++)
             {
-                this[i] = this[i + 1];
+                var candidate = this[index];
+                if (candidate.Ident != ident || candidate.Filter != filter)
+                {
+                    continue;
+                }
+
+                this[index] = candidate with { UserData = userData };
+                updatedCount++;
             }
 
-            Count--;
-            return true;
+            return updatedCount;
         }
     }
 
@@ -824,54 +847,59 @@ public static class KernelEventQueueCompatExports
         }
 
         var waiterId = Interlocked.Increment(ref _nextEventQueueWaiterId);
-        if (timeoutAddress == 0)
-        {
-            var requestedBlock = GuestThreadExecution.RequestCurrentThreadBlock(
-                ctx,
-                "sceKernelWaitEqueue",
-                state.WakeKey,
-                new EqueueWaiter
-                {
-                    Ctx = ctx,
-                    State = state,
-                    EventsAddress = eventsAddress,
-                    EventCapacity = eventCapacity,
-                    OutCountAddress = outCountAddress,
-                    WaiterId = waiterId,
-                });
-            if (requestedBlock)
+        var blockDeadlineTimestamp = timeoutAddress == 0
+            ? 0
+            : GuestThreadExecution.ComputeDeadlineTimestamp(
+                TimeSpan.FromMicroseconds(timeoutUsec));
+        var requestedBlock = GuestThreadExecution.RequestCurrentThreadBlock(
+            ctx,
+            "sceKernelWaitEqueue",
+            state.WakeKey,
+            new EqueueWaiter
             {
-                var wakeAfterRegistration = false;
-                lock (_eventQueueGate)
-                {
-                    wakeAfterRegistration =
-                        !IsLiveEventQueueLocked(state) ||
-                        HasPendingEventsLocked(state.Handle);
-                }
-
-                if (wakeAfterRegistration)
-                {
-                    WakeEventQueue(
-                        state,
-                        _logEqueue
-                            ? "source=post-registration-state-check"
-                            : null);
-                }
-
-                if (_logEqueue)
-                {
-                    TraceEventQueue(
-                        ctx,
-                        "wait-block",
-                        handle,
-                        $"generation={state.Generation} waiter={waiterId} " +
-                        $"capacity={eventCapacity} timeout=infinite " +
-                        $"events=0x{eventsAddress:X16} out_count=0x{outCountAddress:X16}");
-                }
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                Ctx = ctx,
+                State = state,
+                EventsAddress = eventsAddress,
+                EventCapacity = eventCapacity,
+                OutCountAddress = outCountAddress,
+                WaiterId = waiterId,
+            },
+            blockDeadlineTimestamp);
+        if (requestedBlock)
+        {
+            var wakeAfterRegistration = false;
+            lock (_eventQueueGate)
+            {
+                wakeAfterRegistration =
+                    !IsLiveEventQueueLocked(state) ||
+                    HasPendingEventsLocked(state.Handle);
             }
+
+            if (wakeAfterRegistration)
+            {
+                WakeEventQueue(
+                    state,
+                    _logEqueue
+                        ? "source=post-registration-state-check"
+                        : null);
+            }
+
+            if (_logEqueue)
+            {
+                TraceEventQueue(
+                    ctx,
+                    "wait-block",
+                    handle,
+                    $"generation={state.Generation} waiter={waiterId} " +
+                    $"capacity={eventCapacity} timeout=" +
+                    (timeoutAddress == 0 ? "infinite " : $"{timeoutUsec}_usec ") +
+                    $"events=0x{eventsAddress:X16} out_count=0x{outCountAddress:X16}");
+            }
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
+        // Non-guest callers cannot yield through the cooperative scheduler.
+        // Keep the host wait only as their compatibility fallback.
         if (timeoutAddress != 0)
         {
             var deadline = Environment.TickCount64 +
@@ -1141,9 +1169,10 @@ public static class KernelEventQueueCompatExports
             }
 
             var key = (ident, filter);
+            var isExistingRegistration = events.ContainsKey(key);
             var isNewReadRegistration =
                 filter == KernelEventFilterRead &&
-                !events.ContainsKey(key);
+                !isExistingRegistration;
             events[(ident, filter)] = new KernelEventRegistration(
                 ident,
                 filter,
@@ -1152,6 +1181,11 @@ public static class KernelEventQueueCompatExports
                 lowWater,
                 unchecked((ulong)Interlocked.Increment(
                     ref _nextEventRegistrationGeneration)));
+            if (isExistingRegistration &&
+                _pendingEvents.TryGetValue(handle, out var pending))
+            {
+                _ = pending.UpdateUserData(ident, filter, userData);
+            }
             if (isNewReadRegistration)
             {
                 _readEventRegistrationCount++;
@@ -1296,7 +1330,7 @@ public static class KernelEventQueueCompatExports
 
             if (_pendingEvents.TryGetValue(handle, out var pending))
             {
-                _ = pending.Remove(ident, filter);
+                _ = pending.RemoveAll(ident, filter);
             }
 
             return true;
@@ -1387,22 +1421,16 @@ public static class KernelEventQueueCompatExports
                         _pendingEvents[handle] = queue;
                     }
 
-                    // Keep each interrupt as a separate event. Limit growth when the queue is not read.
-                    var queuedEvent = new KernelQueuedEvent(
+                    // End-of-pipe interrupts are edge notifications. Preserve
+                    // every occurrence and its data in arrival order; merging
+                    // or capping these can strand a guest graphics waiter.
+                    queue.AddLast(new KernelQueuedEvent(
                         registration.Ident,
                         registration.Filter,
                         registration.Flags,
                         1,
                         data,
-                        registration.UserData);
-                    if (CountPendingEvents(queue, registration.Ident, registration.Filter) < 256)
-                    {
-                        queue.AddLast(queuedEvent);
-                    }
-                    else
-                    {
-                        QueueOrUpdateEvent(queue, queuedEvent);
-                    }
+                        registration.UserData));
 
                     (wakeQueues ??= []).Add(state);
                     triggeredCount++;
@@ -1628,24 +1656,6 @@ public static class KernelEventQueueCompatExports
         {
             ArrayPool<KernelQueuedEvent>.Shared.Return(events);
         }
-    }
-
-    private static int CountPendingEvents(
-        KernelEventDeque queue,
-        ulong ident,
-        short filter)
-    {
-        var count = 0;
-        for (var i = 0; i < queue.Count; i++)
-        {
-            var pending = queue[i];
-            if (pending.Ident == ident && pending.Filter == filter)
-            {
-                count++;
-            }
-        }
-
-        return count;
     }
 
     private static void PollReadEvents(object? state)

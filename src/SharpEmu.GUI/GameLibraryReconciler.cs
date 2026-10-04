@@ -6,6 +6,7 @@ namespace SharpEmu.GUI;
 internal sealed record GameLibraryReconciliation(
     IReadOnlyList<GameEntry> Games,
     IReadOnlyList<GameEntry> CoversToLoad,
+    IReadOnlyList<GameEntry> SizesToMeasure,
     IReadOnlySet<GameEntry> BackgroundsChanged);
 
 /// <summary>
@@ -21,6 +22,7 @@ internal static class GameLibraryReconciler
         var existingByPath = current.ToDictionary(game => game.Path, GameLibraryPath.Comparer);
         var merged = new List<GameEntry>(scanned.Count);
         var coversToLoad = new List<GameEntry>();
+        var sizesToMeasure = new List<GameEntry>();
         var backgroundsChanged = new HashSet<GameEntry>();
 
         foreach (var scannedGame in scanned)
@@ -28,6 +30,7 @@ internal static class GameLibraryReconciler
             if (!existingByPath.TryGetValue(scannedGame.Path, out var existing))
             {
                 merged.Add(scannedGame);
+                sizesToMeasure.Add(scannedGame);
                 if (scannedGame.CoverPath is not null)
                 {
                     coversToLoad.Add(scannedGame);
@@ -38,7 +41,17 @@ internal static class GameLibraryReconciler
 
             var changes = existing.UpdateFrom(scannedGame);
             merged.Add(existing);
-            if ((changes & GameEntryChanges.Cover) != 0 && existing.CoverPath is not null)
+            if ((changes & GameEntryChanges.Metadata) != 0)
+            {
+                // A changed installed version can have a different footprint.
+                // Unchanged entries keep the full size restored from the
+                // library cache instead of recursively walking every file at
+                // each frontend startup.
+                sizesToMeasure.Add(existing);
+            }
+
+            if (existing.CoverPath is not null
+                && ((changes & GameEntryChanges.Cover) != 0 || existing.Cover is null))
             {
                 coversToLoad.Add(existing);
             }
@@ -49,7 +62,11 @@ internal static class GameLibraryReconciler
             }
         }
 
-        return new GameLibraryReconciliation(merged, coversToLoad, backgroundsChanged);
+        return new GameLibraryReconciliation(
+            merged,
+            coversToLoad,
+            sizesToMeasure,
+            backgroundsChanged);
     }
 
     /// <summary>

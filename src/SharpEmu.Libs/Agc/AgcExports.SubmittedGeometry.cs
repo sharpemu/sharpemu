@@ -7,7 +7,6 @@ using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
-using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Agc;
@@ -16,12 +15,15 @@ public static partial class AgcExports
 {
     // This partial preserves submitted guest geometry until translated draws execute.
 
-    // Keep submitted geometry stable after the guest reuses its memory.
-    // Set either variable to 0 only for a comparison test.
-    private static readonly bool _retainSubmittedIndexData = !string.Equals(
+    // Keep the index identity and capture fingerprint used by execution-time validation.
+    // The payload itself is consumed from the guest buffer cache and is not copied here.
+    // Retain the old environment switch as a comparison/debugging control.
+    private static readonly bool _captureSubmittedIndexState = !string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_RETAIN_SUBMITTED_INDEX_DATA"),
         "0",
         StringComparison.Ordinal);
+    // Metal needs stable submitted vertex bytes after the guest reuses source memory.
+    // Set the corresponding variable to 0 only for an explicit comparison test.
     private static readonly bool _retainSubmittedVertexData = !string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_RETAIN_SUBMITTED_VERTEX_DATA"),
         "0",
@@ -40,7 +42,6 @@ public static partial class AgcExports
         ulong SourceAddress,
         uint IndexCount,
         int IndexStride,
-        byte[] Data,
         GeometryCaptureFingerprint Capture);
 
     private sealed record SubmittedVertexSnapshot(
@@ -98,6 +99,17 @@ public static partial class AgcExports
         ulong commandAddress,
         uint dwordCount)
     {
+        // Stable submitted bytes are consumed only by snapshot-capable backends
+        // (currently Metal, plus the explicit headless command-stream test seam).
+        // Production Vulkan reparses the DCB on its render thread and has no
+        // consumer for these retained snapshots, so walking and fingerprinting
+        // the entire command stream here only duplicates hot submit-time work.
+        if (GuestGpu.Current is not IGuestImageSnapshotBackend &&
+            VulkanVideoPresenter.TestCommandStreamFactory is null)
+        {
+            return null;
+        }
+
         var indexSnapshots = CaptureSubmittedIndexPackets(
             ctx,
             gpuState.GeometryCapture,
@@ -117,14 +129,14 @@ public static partial class AgcExports
         out Dictionary<ulong, SubmittedVertexSnapshot>? vertexSnapshots)
     {
         vertexSnapshots = null;
-        if (!_retainSubmittedIndexData &&
+        if (!_captureSubmittedIndexState &&
             !_retainSubmittedVertexData)
         {
             return null;
         }
 
         var visited = new HashSet<(ulong Address, uint Dwords)>();
-        var indexSnapshots = _retainSubmittedIndexData
+        var indexSnapshots = _captureSubmittedIndexState
             ? new Dictionary<ulong, SubmittedIndexSnapshot>()
             : null;
         vertexSnapshots = _retainSubmittedVertexData
@@ -238,19 +250,13 @@ public static partial class AgcExports
                         MaximumRetainedIndexBytesPerSubmission)
                 {
                     using var captureProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.IndexCapture);
-                    var data = new byte[(int)byteCount64];
-                    if (ctx.Memory.TryRead(indexAddress, data) ||
-                        KernelMemoryCompatExports.TryReadTrackedLibcHeap(indexAddress, data))
-                    {
-                        indexSnapshot = new SubmittedIndexSnapshot(
-                            indexAddress,
-                            indexCount,
-                            indexStride,
-                            data,
-                            capture);
-                        indexSnapshots[packetAddress] = indexSnapshot;
-                        retainedIndexBytes += data.Length;
-                    }
+                    indexSnapshot = new SubmittedIndexSnapshot(
+                        indexAddress,
+                        indexCount,
+                        indexStride,
+                        capture);
+                    indexSnapshots[packetAddress] = indexSnapshot;
+                    retainedIndexBytes += (long)byteCount64;
                 }
 
                 captureState.IndexBufferAddress = indexAddress;
@@ -379,7 +385,11 @@ public static partial class AgcExports
         state.ShRegisters.TryGetValue(GsUserDataRegister - 1, out var resourceWord);
         var declaredCount = GeometryResource2.Decode(resourceWord).UserScalarCount;
         var writtenCount = 0;
-        var userData = new uint[UserScalarRegisters.Capacity];
+        // This is transient resolver input, never retained by the snapshot. Keep it on the
+        // submitter's stack: allocating one array for every captured draw becomes significant
+        // for DCB-heavy titles while providing no ownership benefit.
+        Span<uint> userData = stackalloc uint[UserScalarRegisters.Capacity];
+        userData.Clear();
         // The executor resolves export fetches from the geometry user-data bank.
         for (var index = 0; index < userData.Length; index++)
         {
@@ -398,7 +408,7 @@ public static partial class AgcExports
         VertexInputInfo input;
         using (new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.Evaluation))
         {
-            input = VertexInputResolver.ResolveVertexInputs(ctx, shader, userData.AsSpan(0, userDataCount));
+            input = VertexInputResolver.ResolveVertexInputs(ctx, shader, userData[..userDataCount]);
         }
 
         using var copyProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.RetainedCopy);

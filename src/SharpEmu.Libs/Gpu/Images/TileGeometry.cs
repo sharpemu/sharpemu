@@ -32,6 +32,7 @@ public enum TileBlockKind : uint
     Prt64KB3D,
     RenderTarget64KB,
     Depth64KB,
+    RenderTarget64KBGen5,
 }
 
 public readonly record struct TileBlockLayout(TileBlockKind Kind, uint BytesPerElement, uint BlockSize, uint BlockWidth, uint BlockHeight, uint BlockDepth)
@@ -109,6 +110,7 @@ public static partial class TileGeometry
         new(65536, Thick64KB, 16),
         new(65536, Thin64KB, 16),
         new(65536, Thin64KB, 8),
+        new(65536, Thin64KB, 16),
     ];
 
     private static readonly Log2BlockDimensions[][] MsaaBlocks =
@@ -247,6 +249,7 @@ public static partial class TileGeometry
             case TileBlockKind.Standard64KB:
             case TileBlockKind.Prt64KB:
             case TileBlockKind.RenderTarget64KB:
+            case TileBlockKind.RenderTarget64KBGen5:
                 rule = new MipTailRule(TailThin64KB[index], block.BlockWidth >> 1, block.BlockHeight);
                 return true;
             default:
@@ -297,7 +300,10 @@ public static partial class TileGeometry
                 kind = TileBlockKind.Depth64KB;
                 break;
             case GuestTileMode.RenderTarget:
-                kind = TileBlockKind.RenderTarget64KB;
+                // Guest render-target surfaces use the Gen5 address equation.
+                // Keep the RB+ R_X shape separate for descriptors that identify
+                // that layout explicitly rather than applying it to every target.
+                kind = TileBlockKind.RenderTarget64KBGen5;
                 break;
             default:
                 return false;
@@ -308,7 +314,7 @@ public static partial class TileGeometry
             return false;
         }
 
-        if (kind is TileBlockKind.Depth64KB or TileBlockKind.RenderTarget64KB &&
+        if (kind is TileBlockKind.Depth64KB or TileBlockKind.RenderTarget64KB or TileBlockKind.RenderTarget64KBGen5 &&
             GuestPixelFormats.RenderTargetBytesPerElement(format) != element.Bytes)
         {
             return false;
@@ -602,6 +608,39 @@ public static partial class TileGeometry
         }
 
         totalSize = new TileSizeAndAlignment((uint)size, 65536);
+        return true;
+    }
+
+    public static bool TryGetDccSize(
+        uint width,
+        uint height,
+        uint slices,
+        uint bytesPerElement,
+        uint levels,
+        GuestTileMode tile,
+        out TileSizeAndAlignment totalSize,
+        uint fragmentsLog2 = 0)
+    {
+        totalSize = default;
+        if (width == 0 || height == 0 || slices == 0 || levels != 1 || fragmentsLog2 != 0 ||
+            !BitOperations.IsPow2(bytesPerElement) || bytesPerElement > 16 ||
+            tile is not (GuestTileMode.RenderTarget or GuestTileMode.Depth))
+        {
+            return false;
+        }
+
+        var coverageBits = 20 - BitOperations.TrailingZeroCount(bytesPerElement);
+        var blockWidth = 1u << ((coverageBits + 1) / 2);
+        var blockHeight = 1u << (coverageBits / 2);
+        var blocksX = ((ulong)width + blockWidth - 1) / blockWidth;
+        var blocksY = ((ulong)height + blockHeight - 1) / blockHeight;
+        var blocks = blocksX * blocksY;
+        if (blocks == 0 || blocks > uint.MaxValue / 4096u / slices)
+        {
+            return false;
+        }
+
+        totalSize = new TileSizeAndAlignment((uint)(blocks * slices * 4096u), 4096);
         return true;
     }
 

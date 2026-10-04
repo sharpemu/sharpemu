@@ -11,10 +11,13 @@ using SharpEmu.Core.Cpu.Native;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.Libs.PlayGo;
+using SharpEmu.Libs.Tests.PlayGo;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Cpu;
 
+[Collection(PlayGoStateCollection.Name)]
 public sealed class Gen5NativeReturnSmokeTests
 {
     private const ulong CallbackReturnValue = 0xFEDC_BA98_7654_3210UL;
@@ -97,6 +100,201 @@ public sealed class Gen5NativeReturnSmokeTests
         }
 
         ExecuteSyntheticGuest(continuation: true);
+    }
+
+    [Fact]
+    public async Task PlayGoSequence_PreservesNativeImportArgumentsAndOutputs()
+    {
+        if (!IsSupportedHost)
+        {
+            return;
+        }
+
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            var result = await RunIsolatedWorker(nameof(PlayGoSequence_PreservesNativeImportArgumentsAndOutputs));
+            Assert.True(result.Completed, result.Output);
+            Assert.True(result.ExitCode == 0, result.Output);
+            return;
+        }
+
+        ExecuteNativePlayGoSequence();
+    }
+
+    private static void ExecuteNativePlayGoSequence()
+    {
+        const string app0VariableName = "SHARPEMU_APP0_DIR";
+        const ulong initializeStubOffset = 0x10;
+        const ulong openStubOffset = 0x20;
+        const ulong installChunkStubOffset = 0x30;
+        const ulong locusStubOffset = 0x40;
+
+        var originalApp0Root = Environment.GetEnvironmentVariable(app0VariableName);
+        var app0Root = Path.Combine(Path.GetTempPath(), $"sharpemu-playgo-native-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(app0Root);
+        Environment.SetEnvironmentVariable(app0VariableName, app0Root);
+        PlayGoExports.ResetRuntimeState();
+
+        try
+        {
+            using var memory = new PhysicalVirtualMemory();
+            var image = new SelfLoader().Load(BuildSyntheticElf(new byte[0x80]), memory);
+            var importStubs = new Dictionary<ulong, string>
+            {
+                [image.EntryPoint + initializeStubOffset] = "ts6GlZOKRrE",
+                [image.EntryPoint + openStubOffset] = "M1Gma1ocrGE",
+                [image.EntryPoint + installChunkStubOffset] = "8-e7E989rCU",
+                [image.EntryPoint + locusStubOffset] = "uWIYLFkkwqk",
+            };
+
+            var moduleManager = new ModuleManager();
+            moduleManager.RegisterExports(
+                SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+            moduleManager.Freeze();
+
+            var backend = new DirectExecutionBackend(moduleManager);
+            using var dispatcher = new CpuDispatcher(memory, moduleManager, backend);
+            var dispatchResult = dispatcher.DispatchEntry(
+                image.EntryPoint,
+                Generation.Gen5,
+                importStubs,
+                image.RuntimeSymbols,
+                "synthetic-native-playgo",
+                new CpuExecutionOptions
+                {
+                    CpuEngine = CpuExecutionEngine.NativeOnly,
+                    EnableDisasmDiagnostics = false,
+                    StrictDynlibResolution = true,
+                    ImportTraceLimit = 0,
+                    DebugHook = null
+                });
+            Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, dispatchResult);
+
+            Assert.True(memory.TryAllocateAtOrAbove(
+                0x1_0000_0000,
+                0x4000,
+                false,
+                0x4000,
+                out var dataAddress));
+            var initParamsAddress = dataAddress;
+            var initBufferAddress = dataAddress + 0x1000;
+            var handleAddress = dataAddress + 0x20;
+            var entriesAddress = dataAddress + 0x28;
+            var chunkIdsAddress = dataAddress + 0x30;
+            var lociAddress = dataAddress + 0x40;
+
+            Span<byte> initParams = stackalloc byte[16];
+            BinaryPrimitives.WriteUInt64LittleEndian(initParams, initBufferAddress);
+            BinaryPrimitives.WriteUInt32LittleEndian(initParams[8..], 0x20_0000);
+            Assert.True(memory.TryWrite(initParamsAddress, initParams));
+
+            var callerContext = new CpuContext(new TrackedCpuMemory(memory), Generation.Gen5);
+            Assert.Equal(
+                0UL,
+                CallNativeImport(
+                    backend,
+                    callerContext,
+                    image.EntryPoint + initializeStubOffset,
+                    initParamsAddress,
+                    0,
+                    0,
+                    0,
+                    "playgo-initialize"));
+            Assert.Equal(
+                0UL,
+                CallNativeImport(
+                    backend,
+                    callerContext,
+                    image.EntryPoint + openStubOffset,
+                    handleAddress,
+                    0,
+                    0,
+                    0,
+                    "playgo-open"));
+
+            Span<byte> scalar = stackalloc byte[sizeof(uint)];
+            Assert.True(memory.TryRead(handleAddress, scalar));
+            var handle = BinaryPrimitives.ReadUInt32LittleEndian(scalar);
+            Assert.Equal(1u, handle);
+
+            Assert.Equal(
+                0UL,
+                CallNativeImport(
+                    backend,
+                    callerContext,
+                    image.EntryPoint + installChunkStubOffset,
+                    handle,
+                    0,
+                    0,
+                    entriesAddress,
+                    "playgo-count-installed-chunks"));
+            Assert.True(memory.TryRead(entriesAddress, scalar));
+            var count = BinaryPrimitives.ReadUInt32LittleEndian(scalar);
+            Assert.Equal(1u, count);
+
+            Assert.Equal(
+                0UL,
+                CallNativeImport(
+                    backend,
+                    callerContext,
+                    image.EntryPoint + installChunkStubOffset,
+                    handle,
+                    chunkIdsAddress,
+                    count,
+                    entriesAddress,
+                    "playgo-read-installed-chunks"));
+            Span<byte> chunkIdBytes = stackalloc byte[sizeof(ushort)];
+            Assert.True(memory.TryRead(chunkIdsAddress, chunkIdBytes));
+            Assert.Equal((ushort)0, BinaryPrimitives.ReadUInt16LittleEndian(chunkIdBytes));
+
+            Assert.Equal(
+                0UL,
+                CallNativeImport(
+                    backend,
+                    callerContext,
+                    image.EntryPoint + locusStubOffset,
+                    handle,
+                    chunkIdsAddress,
+                    count,
+                    lociAddress,
+                    "playgo-read-chunk-locus"));
+            Span<byte> locus = stackalloc byte[1];
+            Assert.True(memory.TryRead(lociAddress, locus));
+            Assert.Equal((byte)3, locus[0]);
+        }
+        finally
+        {
+            PlayGoExports.ResetRuntimeState();
+            Environment.SetEnvironmentVariable(app0VariableName, originalApp0Root);
+            Directory.Delete(app0Root, recursive: true);
+        }
+    }
+
+    private static ulong CallNativeImport(
+        DirectExecutionBackend backend,
+        CpuContext callerContext,
+        ulong entryPoint,
+        ulong arg0,
+        ulong arg1,
+        ulong arg2,
+        ulong arg3,
+        string reason)
+    {
+        Assert.True(
+            backend.TryCallGuestFunction(
+                callerContext,
+                entryPoint,
+                arg0,
+                arg1,
+                arg2,
+                arg3,
+                0,
+                0,
+                reason,
+                out var returnValue,
+                out var error),
+            error);
+        return returnValue;
     }
 
     private static void ExecuteSyntheticGuest(byte[]? callbackInstructions = null, bool continuation = false)

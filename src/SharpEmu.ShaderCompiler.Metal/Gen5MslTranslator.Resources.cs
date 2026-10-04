@@ -16,15 +16,30 @@ public static partial class Gen5MslTranslator
     public const uint AddressRangeSearchSteps = 7;
     public const uint MaxAddressRangeCount = 64;
 
+    private static bool IsBufferInt64Atomic(string opcode) =>
+        opcode is "BufferAtomicSwapX2" or "BufferAtomicOrX2";
+
     public static bool TryCompileProgram(ShaderCompileRequest request, out Gen5MslShader shader, out string error)
     {
         shader = default!;
+        if (!request.BufferInt64AtomicsSupported &&
+            request.Program.Instructions.Any(static instruction =>
+                IsBufferInt64Atomic(instruction.Opcode)))
+        {
+            error = "the host does not support the 64-bit storage-buffer atomics required by BUFFER_ATOMIC_*_X2";
+            return false;
+        }
+
         try
         {
             BindingLayoutValidator.Validate(
                 request.Bindings,
                 request.Resources.Info,
-                BindingLayout.CollectUserDataRegisters(request.Program, request.UserDataBase, request.UserDataCount),
+                BindingLayout.CollectUserDataRegisters(
+                    request.Program,
+                    request.UserDataBase,
+                    request.UserDataCount,
+                    request.WaveSize),
                 request.UsesGlobalDataShare,
                 request.UsesFlattenedTable,
                 request.ReadsShaderBase,
@@ -81,6 +96,18 @@ public static partial class Gen5MslTranslator
                 ShaderStage.Pixel => Gen5MslStage.Pixel,
                 _ => Gen5MslStage.Compute,
             };
+            // SHARPEMU_SHADER_MAX_STEPS remains an opt-in diagnostic that
+            // limits all dispatched blocks. The default guard below counts
+            // only actual cycle-closing edges and therefore preserves long
+            // forward-only control-flow paths.
+            _maxDispatcherSteps = ReadDispatcherLimit(
+                "SHARPEMU_SHADER_MAX_STEPS",
+                defaultValue: 0);
+            _maxDispatcherBackedges = ReadDispatcherLimit(
+                "SHARPEMU_SHADER_MAX_BACKEDGES",
+                _stage == Gen5MslStage.Compute
+                    ? 0
+                    : DefaultGraphicsDispatcherBackedges);
             _pixelOutputBindings = request.PixelOutputs;
             _usesPixelValidMask =
                 _stage == Gen5MslStage.Pixel &&
@@ -190,9 +217,60 @@ public static partial class Gen5MslTranslator
             source.Append(MslTemplates.Render(
                 "resource_prelude",
                 ("address_mask", FormatULong(DeviceAddressPaging.AddressMask)),
+                ("lower_address_size", FormatULong(DeviceAddressPaging.LowerAddressSize)),
+                ("extended_address_base", FormatULong(DeviceAddressPaging.ExtendedAddressBase)),
+                ("extended_address_limit", FormatULong(DeviceAddressPaging.ExtendedAddressLimit)),
+                ("extended_address_bias", FormatULong(DeviceAddressPaging.ExtendedAddressBias)),
                 ("page_bits", DeviceAddressPaging.PageBits.ToString(CultureInfo.InvariantCulture)),
                 ("page_offset_mask", FormatULong(DeviceAddressPaging.PageOffsetMask)),
                 ("search_steps", AddressRangeSearchSteps.ToString(CultureInfo.InvariantCulture))));
+
+        private static void EmitScratchPrelude(StringBuilder source)
+        {
+            source.AppendLine();
+            source.AppendLine("static inline uint sharpemu_load_scratch_bytes(");
+            source.AppendLine("    thread const uint* scratch,");
+            source.AppendLine("    uint dword_count,");
+            source.AppendLine("    ulong byte_address,");
+            source.AppendLine("    uint byte_count)");
+            source.AppendLine("{");
+            source.AppendLine("    ulong byte_size = (ulong)dword_count * 4ul;");
+            source.AppendLine("    if (byte_address > byte_size || (ulong)byte_count > byte_size - byte_address)");
+            source.AppendLine("    {");
+            source.AppendLine("        return 0u;");
+            source.AppendLine("    }");
+            source.AppendLine("    uint value = 0u;");
+            source.AppendLine("    for (uint index = 0u; index < byte_count; ++index)");
+            source.AppendLine("    {");
+            source.AppendLine("        ulong current = byte_address + (ulong)index;");
+            source.AppendLine("        uint packed = scratch[(uint)(current >> 2)];");
+            source.AppendLine("        value |= ((packed >> ((uint)(current & 3ul) * 8u)) & 0xFFu) << (index * 8u);");
+            source.AppendLine("    }");
+            source.AppendLine("    return value;");
+            source.AppendLine("}");
+            source.AppendLine();
+            source.AppendLine("static inline void sharpemu_store_scratch_bytes(");
+            source.AppendLine("    thread uint* scratch,");
+            source.AppendLine("    uint dword_count,");
+            source.AppendLine("    ulong byte_address,");
+            source.AppendLine("    uint value,");
+            source.AppendLine("    uint byte_count)");
+            source.AppendLine("{");
+            source.AppendLine("    ulong byte_size = (ulong)dword_count * 4ul;");
+            source.AppendLine("    if (byte_address > byte_size || (ulong)byte_count > byte_size - byte_address)");
+            source.AppendLine("    {");
+            source.AppendLine("        return;");
+            source.AppendLine("    }");
+            source.AppendLine("    for (uint index = 0u; index < byte_count; ++index)");
+            source.AppendLine("    {");
+            source.AppendLine("        ulong current = byte_address + (ulong)index;");
+            source.AppendLine("        uint word = (uint)(current >> 2);");
+            source.AppendLine("        uint shift = (uint)(current & 3ul) * 8u;");
+            source.AppendLine("        uint mask = 0xFFu << shift;");
+            source.AppendLine("        scratch[word] = (scratch[word] & ~mask) | (((value >> (index * 8u)) & 0xFFu) << shift);");
+            source.AppendLine("    }");
+            source.AppendLine("}");
+        }
 
         // The argument buffer struct: one field per layout descriptor in layout order.
         private void EmitResourceStruct(StringBuilder source)
@@ -602,6 +680,111 @@ public static partial class Gen5MslTranslator
                 StoreVector(
                     control.DestinationVectorRegister + index,
                     $"sharpemu_load_device_dword({DeviceArguments}, {componentAddress})");
+            }
+
+            return true;
+        }
+
+        // ---- scratch memory ----
+
+        private bool TryEmitScratchMemory(
+            Gen5ShaderInstruction instruction,
+            Gen5ScratchMemoryControl control,
+            out string error)
+        {
+            error = string.Empty;
+            string baseOffset;
+            switch (control.AddressMode)
+            {
+                case Gen5ScratchAddressMode.Vector:
+                    baseOffset = $"v[{control.VectorAddress}]";
+                    break;
+                case Gen5ScratchAddressMode.Scalar:
+                    baseOffset = $"s[{control.ScalarAddress}]";
+                    break;
+                case Gen5ScratchAddressMode.Immediate:
+                    baseOffset = "0u";
+                    break;
+                default:
+                    error = "invalid scratch address mode";
+                    return false;
+            }
+
+            var wrappedAddress = Temp(
+                "uint",
+                $"{baseOffset} + {FormatUInt(unchecked((uint)control.OffsetBytes))}");
+            var address = Temp("ulong", $"(ulong){wrappedAddress}");
+            var logicalDwords = FormatUInt(_request.ScratchDwords);
+
+            if (instruction.Opcode.StartsWith("ScratchStore", StringComparison.Ordinal))
+            {
+                Line("if (exec)");
+                Line("{");
+                _indent++;
+                if (TryGetSubdwordStoreInfo(
+                        instruction.Opcode,
+                        out var byteCount,
+                        out var sourceShift))
+                {
+                    var source = sourceShift == 0
+                        ? $"v[{control.SourceVectorRegister}]"
+                        : $"(v[{control.SourceVectorRegister}] >> {sourceShift})";
+                    Line(
+                        $"sharpemu_store_scratch_bytes(sharpemu_scratch, {logicalDwords}, {address}, {source}, {byteCount}u);");
+                }
+                else
+                {
+                    for (uint index = 0; index < control.DwordCount; index++)
+                    {
+                        Line(
+                            $"sharpemu_store_scratch_bytes(sharpemu_scratch, {logicalDwords}, {address} + {index * sizeof(uint)}ul, v[{control.SourceVectorRegister + index}], 4u);");
+                    }
+                }
+
+                _indent--;
+                Line("}");
+                return true;
+            }
+
+            if (TryGetSubdwordLoadInfo(
+                    instruction.Opcode,
+                    out var loadBytes,
+                    out var signExtend,
+                    out var d16,
+                    out var d16High))
+            {
+                var loaded = Temp(
+                    "uint",
+                    $"sharpemu_load_scratch_bytes(sharpemu_scratch, {logicalDwords}, {address}, {loadBytes}u)");
+                if (signExtend)
+                {
+                    loaded = Temp(
+                        "uint",
+                        $"(uint)extract_bits(as_type<int>({loaded}), 0u, {loadBytes * 8}u)");
+                }
+
+                var destination = control.DestinationVectorRegister;
+                StoreVector(
+                    destination,
+                    !d16
+                        ? loaded
+                        : d16High
+                            ? $"(v[{destination}] & 0x0000FFFFu) | (({loaded} & 0xFFFFu) << 16)"
+                            : $"(v[{destination}] & 0xFFFF0000u) | ({loaded} & 0xFFFFu)");
+                return true;
+            }
+
+            if (!instruction.Opcode.StartsWith("ScratchLoad", StringComparison.Ordinal))
+            {
+                error = $"unsupported scratch opcode {instruction.Opcode}";
+                return false;
+            }
+
+            for (uint index = 0; index < control.DwordCount; index++)
+            {
+                StoreVector(
+                    control.DestinationVectorRegister + index,
+                    $"sharpemu_load_scratch_bytes(sharpemu_scratch, {logicalDwords}, {address} + {index * sizeof(uint)}ul, 4u)");
             }
 
             return true;

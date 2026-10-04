@@ -26,12 +26,14 @@ public sealed partial class RenderExecutor
                 RenderTrace.Write($"Skipping a draw without programs: name={draw.Name} export=0x{banks.Shader.Vertex.ExportAddress:X16} pixel=0x{banks.Shader.Pixel.Address:X16}");
             }
 
+            TraceLegacyFusedDisposition(banks, draw.Name, draw.Count, draw.InstanceCount, "program-unavailable");
             return false;
         }
 
         if (programs.SolidClear is { } clear && state.ColorCount != 0)
         {
             TraceDrawDisposition(banks, in draw, "color-clear");
+            TraceLegacyFusedDisposition(banks, draw.Name, draw.Count, draw.InstanceCount, "color-clear");
             _host.ClearColorTargets(BoundColors(ref state), clear);
             return false;
         }
@@ -39,6 +41,7 @@ public sealed partial class RenderExecutor
         if (IsMetadataClearQuad(banks, in draw, ref state))
         {
             TraceDrawDisposition(banks, in draw, "metadata-clear-quad");
+            TraceLegacyFusedDisposition(banks, draw.Name, draw.Count, draw.InstanceCount, "metadata-clear-quad");
             return false;
         }
 
@@ -48,9 +51,17 @@ public sealed partial class RenderExecutor
         {
             TraceTargetlessAttachments(banks, arguments.SubmitId);
             TraceDrawDisposition(banks, in draw, "retained-targetless-draw");
+            TraceLegacyFusedDisposition(banks, draw.Name, draw.Count, draw.InstanceCount, "retained-targetless-draw");
             return false;
         }
 
+        TraceLegacyFusedDisposition(
+            banks,
+            draw.Name,
+            draw.Count,
+            draw.InstanceCount,
+            "adaptation-passed",
+            $"meshActive={programs.VertexInput.Mesh.IsActive} pixelActive={state.PixelActive}");
         return true;
     }
 

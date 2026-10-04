@@ -169,8 +169,14 @@ public sealed unsafe partial class CachedImage
         var images = imageBarriers.ToArray();
         fixed (ImageMemoryBarrier2* imagePointer = images)
         {
+            // Guest render targets are frequently sampled at coordinates which
+            // do not match the producing framebuffer location (for example,
+            // render-to-volume passes). BY_REGION would only make matching
+            // (x,y,layer,sample) regions visible between framebuffer stages.
+            // Use a framebuffer-global image dependency, matching the guest's
+            // full render-target-to-texture ordering requirement.
             VulkanSynchronization.PipelineBarrier(_device.Vk,
-                command, sourceStages == 0 ? PipelineStageFlags.TopOfPipeBit : sourceStages, destinationStages, DependencyFlags.ByRegionBit,
+                command, sourceStages == 0 ? PipelineStageFlags.TopOfPipeBit : sourceStages, destinationStages, default,
                 0, null, bufferBarrier == null ? 0u : 1u, bufferBarrier, (uint)images.Length, imagePointer);
         }
     }

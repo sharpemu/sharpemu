@@ -198,6 +198,83 @@ public sealed class AgcDrawIndex2Tests
         }
     }
 
+    [Theory]
+    [InlineData(0UL, 0u)]
+    [InlineData(0x100UL, 0x20u)]
+    [InlineData(0x1_0000_0100UL, 0u)]
+    public void DirectIndexedDrawAcceptsGeneralModifiersAndDecodesInitiator(
+        ulong modifier,
+        uint expectedInitiator)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var commandBufferAddress = BaseAddress + 0x80;
+        const ulong indexAddress = BaseAddress + 0x700;
+        WriteUInt64(memory, commandBufferAddress + 0x10, CommandAddress);
+        WriteUInt64(memory, commandBufferAddress + 0x18, CommandAddress + 44);
+        context[CpuRegister.Rdi] = commandBufferAddress;
+        context[CpuRegister.Rsi] = 6;
+        context[CpuRegister.Rdx] = indexAddress;
+        context[CpuRegister.Rcx] = modifier;
+
+        AgcExports.DcbDrawIndex(context);
+
+        Assert.Equal(CommandAddress + 20, context[CpuRegister.Rax]);
+        Span<byte> packetBytes = stackalloc byte[24];
+        Assert.True(memory.TryRead(CommandAddress + 20, packetBytes));
+        var packet = new uint[6];
+        for (var index = 0; index < packet.Length; index++)
+        {
+            packet[index] = BinaryPrimitives.ReadUInt32LittleEndian(packetBytes[(index * sizeof(uint))..]);
+        }
+
+        Assert.Equal(new uint[]
+        {
+            PacketHeader.Make(6, PacketOpcode.DrawIndex2),
+            6,
+            unchecked((uint)indexAddress),
+            (uint)(indexAddress >> 32),
+            6,
+            expectedInitiator,
+        }, packet);
+    }
+
+    [Theory]
+    [InlineData(0UL, 2u)]
+    [InlineData(0x100UL, 0x22u)]
+    [InlineData(0x1_0000_0100UL, 2u)]
+    public void AutoDrawAcceptsGeneralModifiersAndDecodesInitiator(
+        ulong modifier,
+        uint expectedInitiator)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var commandBufferAddress = BaseAddress + 0x80;
+        WriteUInt64(memory, commandBufferAddress + 0x10, CommandAddress);
+        WriteUInt64(memory, commandBufferAddress + 0x18, CommandAddress + 12);
+        context[CpuRegister.Rdi] = commandBufferAddress;
+        context[CpuRegister.Rsi] = 6;
+        context[CpuRegister.Rdx] = modifier;
+
+        AgcExports.DcbDrawIndexAuto(context);
+
+        Assert.Equal(CommandAddress, context[CpuRegister.Rax]);
+        Span<byte> packetBytes = stackalloc byte[12];
+        Assert.True(memory.TryRead(CommandAddress, packetBytes));
+        var packet = new uint[3];
+        for (var index = 0; index < packet.Length; index++)
+        {
+            packet[index] = BinaryPrimitives.ReadUInt32LittleEndian(packetBytes[(index * sizeof(uint))..]);
+        }
+
+        Assert.Equal(new uint[]
+        {
+            PacketHeader.Make(3, PacketOpcode.DrawIndexAuto),
+            6,
+            expectedInitiator,
+        }, packet);
+    }
+
     [Fact]
     public void DrawIndex2UsesItsEmbeddedIndexBuffer()
     {

@@ -16,7 +16,8 @@ public sealed record ShaderVertexInput(
     uint NumberFormat,
     uint DestinationSelect,
     bool PerInstance,
-    IReadOnlyList<uint> AliasPcs)
+    IReadOnlyList<uint> AliasPcs,
+    uint FormatComponentCount = 0)
 {
     public ShaderVertexInput(
         uint pc,
@@ -40,8 +41,54 @@ public sealed record ShaderVertexInput(
                 _ => 0u,
             },
             perInstance,
-            aliasPcs)
+            aliasPcs,
+            0)
     {
+    }
+
+    // The fixed-function input only needs the highest source component selected
+    // by the guest descriptor. Zero format components retain the upstream direct mapping.
+    public uint InputComponentCount
+    {
+        get
+        {
+            if (FormatComponentCount is < 1 or > 4)
+            {
+                return ComponentCount;
+            }
+
+            var required = 0u;
+            for (uint destination = 0; destination < FetchComponentCount; destination++)
+            {
+                var source = ResolveSourceComponent(destination);
+                if (source >= 0)
+                {
+                    required = Math.Max(required, (uint)source + 1);
+                }
+            }
+
+            // Keep one declared attribute even when every destination is a constant.
+            return Math.Max(required, 1u);
+        }
+    }
+
+    // Non-negative values name a source component; -1/-2 are zero/one constants.
+    // -3 marks a reserved selector or an invalid format description.
+    public int ResolveSourceComponent(uint destination)
+    {
+        if (FormatComponentCount is < 1 or > 4)
+        {
+            return destination < ComponentCount ? (int)destination : -1;
+        }
+
+        var selector = (DestinationSelect >> (int)(destination * 3)) & 0x7u;
+        return selector switch
+        {
+            0 => -1,
+            1 => -2,
+            >= 4 and <= 7 => (int)((selector - 4) % FormatComponentCount),
+            _ => -3,
+        };
     }
 }
 
@@ -53,6 +100,44 @@ public readonly record struct ShaderClipSpaceTransform(
     float OffsetY,
     float HalfExtentX,
     float HalfExtentY);
+
+// Static geometry-assembly parameters for a merged ES+GS program lowered to a
+// Vulkan mesh shader. Primitive type values follow the guest VGT primitive enum:
+// point-list=1, line-list=2, triangle-list=4 and triangle-strip=6.
+public sealed record ShaderMeshInfo(
+    uint InputPrimitive,
+    uint PrimitivesPerGroup,
+    uint VerticesPerGroup,
+    uint MaxVertices,
+    uint MaxPrimitives,
+    uint OutputPrimitive,
+    uint ProvokingVertex)
+{
+    public const uint DrawDwordCount = 6;
+
+    public uint InputPrimitiveSize => InputPrimitive switch
+    {
+        1 => 1,
+        2 => 2,
+        _ => 3,
+    };
+
+    public uint InputPrimitiveStep => InputPrimitive == 6
+        ? 1
+        : InputPrimitiveSize;
+
+    public uint InputPrimitiveCount(uint vertices)
+    {
+        var size = InputPrimitiveSize;
+        return vertices < size
+            ? 0
+            : (vertices - size) / InputPrimitiveStep + 1;
+    }
+
+    public uint InputVertexCount(uint primitives) => primitives == 0
+        ? 0
+        : (primitives - 1) * InputPrimitiveStep + InputPrimitiveSize;
+}
 
 // One bounded runtime V# table as the emitter sees it: a contiguous run of native buffer
 // candidates plus the flattened key mapping that selects among them.
@@ -69,6 +154,7 @@ public sealed class ShaderCompileRequest
     public const uint UnboundedThreadCount = uint.MaxValue;
     public const int WrittenRangeDwordCount = 3;
     public bool TraceDeviceAddressFaults { get; init; }
+    public bool TraceMeshOutputs { get; init; }
 
     public ShaderCompileRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout bindings)
     {
@@ -83,6 +169,11 @@ public sealed class ShaderCompileRequest
         UsesFlattenedTable = RequiresFlattenedTable(plan, resources);
         UsesGlobalDataShare = BindingLayout.UsesGlobalDataShare(Program);
         ReadsShaderBase = BindingLayout.ReadsShaderBase(Program);
+        FixedLaneWaveSize = plan.Graph.WaveSize;
+        FixedLaneReads = new Dictionary<uint, FixedLaneReadBinding>(
+            plan.Graph.FixedLaneReads);
+        FixedLaneWrites = new Dictionary<uint, FixedLaneWriteBinding>(
+            plan.Graph.FixedLaneWrites);
 
         FlattenedSlotByMemoryIndex = new Dictionary<int, uint>(plan.FlattenedSlotByMemoryIndex);
         FlattenedTableReservedWords = (uint)plan.FlattenedTableReservedCount;
@@ -139,6 +230,9 @@ public sealed class ShaderCompileRequest
     public bool UsesFlattenedTable { get; }
     public bool UsesGlobalDataShare { get; }
     public bool ReadsShaderBase { get; }
+    public uint FixedLaneWaveSize { get; }
+    public IReadOnlyDictionary<uint, FixedLaneReadBinding> FixedLaneReads { get; }
+    public IReadOnlyDictionary<uint, FixedLaneWriteBinding> FixedLaneWrites { get; }
 
     // Host-flattened scalar reads: memory index → flattened table slot.
     public IReadOnlyDictionary<int, uint> FlattenedSlotByMemoryIndex { get; }
@@ -162,9 +256,15 @@ public sealed class ShaderCompileRequest
     public IReadOnlyDictionary<int, uint> WrittenRangeSlotByMemoryIndex { get; }
 
     public uint WaveSize { get; init; } = 32;
+    public uint HostSubgroupSize { get; init; } = 64;
     public bool EnableExecGuardElision { get; init; } = true;
     public uint ScratchDwords { get; init; }
     public bool EnableGraphicsSubgroupOperations { get; init; } = true;
+    public bool BufferInt64AtomicsSupported { get; init; }
+    public bool ShaderFloat64Supported { get; init; }
+    public bool ShaderSignedZeroInfNanPreserveFloat32Supported { get; init; }
+    public bool ShaderDeviceClockSupported { get; init; }
+    public uint ShaderDeviceClockShift { get; init; }
 
     // The device supports 64-bit integer atomics on workgroup memory
     // (VkPhysicalDeviceFeatures.shaderSharedInt64Atomics). When set, the LDS
@@ -172,6 +272,7 @@ public sealed class ShaderCompileRequest
     // 32-bit ones, which is not atomic as a pair.
     public bool SupportsSharedInt64Atomics { get; init; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
+    public ShaderMeshInfo? Mesh { get; init; }
 
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];
     public uint PixelInputEnable { get; init; }
@@ -182,6 +283,7 @@ public sealed class ShaderCompileRequest
     public bool SupportsPerVertexPixelInputs { get; init; } = true;
     public uint PixelInputAddress { get; init; }
     public IReadOnlyList<uint>? PixelInputCntl { get; init; }
+    public bool PixelEarlyDepth { get; init; }
 
     public int RequiredVertexOutputCount { get; init; }
     public IReadOnlyList<ShaderVertexInput> VertexInputs { get; init; } = [];

@@ -94,6 +94,7 @@ public enum SpirvOp : ushort
     SMod = 139,
     FRem = 140,
     FMod = 141,
+    VectorTimesScalar = 142,
     IAddCarry = 149,
     ISubBorrow = 150,
     UMulExtended = 151,
@@ -180,11 +181,14 @@ public enum SpirvOp : ushort
     GroupNonUniformShuffleXor = 346,
     GroupNonUniformShuffleUp = 347,
     GroupNonUniformShuffleDown = 348,
+    ReadClockKhr = 5056,
+    SetMeshOutputsEXT = 5295,
 }
 
 public enum SpirvCapability : uint
 {
     Shader = 1,
+    Tessellation = 3,
     InterpolationFunction = 52,
     FragmentBarycentricKhr = 5284,
     ClipDistance = 32,
@@ -208,11 +212,14 @@ public enum SpirvCapability : uint
     GroupNonUniformVote = 62,
     GroupNonUniformBallot = 64,
     GroupNonUniformShuffle = 65,
-    ShaderLayer = 5253,
-    ShaderViewportIndex = 5254,
+    ShaderLayer = 69,
+    ShaderViewportIndex = 70,
+    SignedZeroInfNanPreserve = 4466,
     ShaderViewportIndexLayerExt = 5254,
+    ShaderClockKhr = 5055,
     RuntimeDescriptorArray = 5302,
     PhysicalStorageBufferAddresses = 5347,
+    MeshShadingEXT = 5283,
 }
 
 public enum SpirvStorageClass : uint
@@ -233,15 +240,28 @@ public enum SpirvStorageClass : uint
 public enum SpirvExecutionModel : uint
 {
     Vertex = 0,
+    TessellationControl = 1,
+    TessellationEvaluation = 2,
     Fragment = 4,
     GLCompute = 5,
+    MeshEXT = 5365,
 }
 
 public enum SpirvExecutionMode : uint
 {
+    SpacingEqual = 1,
+    VertexOrderCw = 4,
     OriginUpperLeft = 7,
+    EarlyFragmentTests = 9,
     DepthReplacing = 12,
     LocalSize = 17,
+    Quads = 24,
+    OutputVertices = 26,
+    OutputPoints = 27,
+    SignedZeroInfNanPreserve = 4461,
+    OutputLinesEXT = 5269,
+    OutputPrimitivesEXT = 5270,
+    OutputTrianglesEXT = 5298,
 }
 
 public enum SpirvDecoration : uint
@@ -251,13 +271,16 @@ public enum SpirvDecoration : uint
     BuiltIn = 11,
     NoPerspective = 13,
     Flat = 14,
+    Patch = 15,
     PerVertexKhr = 5285,
+    Aliased = 20,
     Location = 30,
     Binding = 33,
     DescriptorSet = 34,
     Offset = 35,
     NoContraction = 42,
     NonWritable = 24,
+    PerPrimitiveEXT = 5271,
 }
 
 public enum SpirvBuiltIn : uint
@@ -266,8 +289,12 @@ public enum SpirvBuiltIn : uint
     PointSize = 1,
     ClipDistance = 3,
     CullDistance = 4,
+    InvocationId = 8,
     Layer = 9,
     ViewportIndex = 10,
+    TessLevelOuter = 11,
+    TessLevelInner = 12,
+    TessCoord = 13,
     VertexIndex = 42,
     InstanceIndex = 43,
     FragCoord = 15,
@@ -279,10 +306,15 @@ public enum SpirvBuiltIn : uint
     GlobalInvocationId = 28,
     LocalInvocationIndex = 29,
     SubgroupSize = 36,
+    SubgroupId = 40,
     SubgroupLocalInvocationId = 41,
     SampleId = 18,
     SampleMask = 20,
     FragDepth = 22,
+    PrimitivePointIndicesEXT = 5294,
+    PrimitiveLineIndicesEXT = 5295,
+    PrimitiveTriangleIndicesEXT = 5296,
+    CullPrimitiveEXT = 5299,
 }
 
 public enum SpirvImageDim : uint

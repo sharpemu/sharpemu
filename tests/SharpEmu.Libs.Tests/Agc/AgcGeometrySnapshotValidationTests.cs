@@ -111,6 +111,8 @@ public sealed class AgcGeometrySnapshotValidationTests
         if (endFrame)
         {
             Assert.Equal(0, AgcExports.SuspendPoint(context));
+            // The headless path must retire its inline marker without waiting for another submit.
+            Assert.Equal(0, AgcExports.SuspendPoint(context));
         }
 
         var nextPacket = SetShaderRegister(0xC8, 5);

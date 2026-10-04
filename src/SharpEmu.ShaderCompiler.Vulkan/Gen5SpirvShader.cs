@@ -11,6 +11,7 @@ namespace SharpEmu.ShaderCompiler.Vulkan;
 public enum Gen5SpirvStage
 {
     Vertex,
+    Mesh,
     Pixel,
     Compute,
 }

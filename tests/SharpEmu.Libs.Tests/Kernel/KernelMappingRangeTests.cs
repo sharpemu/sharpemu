@@ -132,7 +132,7 @@ public sealed class KernelMappingRangeTests
 
         private static object CreateNativeRecord(MappingRecord record) => RegionConstructor.Invoke(
             [record.Address, record.Length, record.Protection, record.IsFlexible,
-                record.IsDirect, record.DirectStart, record.BackingOffset, record.IsReserved]);
+                record.IsDirect, record.DirectStart, record.BackingOffset, record.IsReserved, 0UL]);
 
         public void Dispose()
         {

@@ -46,19 +46,32 @@ public sealed class CommandStreamWorkerTests
     }
 
     [Fact]
-    public void Worker_RetriesABlockedHeadAfterTheTimedWait()
+    public void Worker_RetriesABlockedHeadWithoutHundredMillisecondStalls()
     {
-        var (host, queue, worker) = NewWorker(cancelBlockedAtStop: false);
+        var (host, queue, worker) = NewWorker(cancelBlockedAtStop: true);
         host.WriteDword(Label, 0);
 
-        Enqueue(host, queue, 1, WaitEqual(Label, 1), CreateInstanceCountPacket(6));
-        Thread.Sleep(50);
-        host.WriteDword(Label, 1);
+        try
+        {
+            Enqueue(host, queue, 1, WaitEqual(Label, 1), CreateInstanceCountPacket(6));
+            Assert.True(SpinWait.SpinUntil(
+                () => queue.BlockedRetries >= 1 && queue.SnapshotBlocked().Outstanding == 1,
+                TimeSpan.FromSeconds(2)));
 
-        Assert.Equal(IdleOutcome.Completed, queue.WaitForIdle());
-        Assert.Equal(6u, queue.GetInterpreter(0).InstanceCount);
-        Assert.True(queue.BlockedRetries >= 1);
-        worker.Stop();
+            var retryLatency = System.Diagnostics.Stopwatch.StartNew();
+            host.WriteDword(Label, 1);
+            Assert.Equal(IdleOutcome.Completed, queue.WaitForIdle());
+            retryLatency.Stop();
+
+            Assert.True(
+                retryLatency.Elapsed < TimeSpan.FromMilliseconds(75),
+                $"Blocked command head took {retryLatency.Elapsed.TotalMilliseconds:F1} ms to retry.");
+            Assert.Equal(6u, queue.GetInterpreter(0).InstanceCount);
+        }
+        finally
+        {
+            worker.Stop();
+        }
     }
 
     [Fact]

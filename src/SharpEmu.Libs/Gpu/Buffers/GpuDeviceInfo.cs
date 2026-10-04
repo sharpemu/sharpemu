@@ -17,14 +17,18 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
     private int _liveAllocations;
     private int _peakAllocations;
 
-    // VK_EXT_image_view_min_lod is enabled, so a view can clamp to a texture descriptor's MIN_LOD.
-    public bool ImageViewMinLodSupported { get; init; }
-
-    public GpuDeviceInfo(Vk vk, PhysicalDevice physicalDevice, Device device)
+    public GpuDeviceInfo(
+        Vk vk,
+        PhysicalDevice physicalDevice,
+        Device device,
+        bool supportsAttachmentFeedbackLoop = false,
+        bool supportsImageViewMinLod = false)
     {
         Vk = vk;
         PhysicalDevice = physicalDevice;
         Device = device;
+        SupportsAttachmentFeedbackLoop = supportsAttachmentFeedbackLoop;
+        SupportsImageViewMinLod = supportsImageViewMinLod;
         vk.GetPhysicalDeviceMemoryProperties(physicalDevice, out _memoryProperties);
         vk.GetPhysicalDeviceProperties(physicalDevice, out var properties);
         MinUniformBufferOffsetAlignment = Math.Max(properties.Limits.MinUniformBufferOffsetAlignment, 1);
@@ -48,6 +52,10 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
     public PhysicalDevice PhysicalDevice { get; }
 
     public Device Device { get; }
+
+    public bool SupportsAttachmentFeedbackLoop { get; }
+
+    public bool SupportsImageViewMinLod { get; }
 
     public ulong MinUniformBufferOffsetAlignment { get; }
 

@@ -29,24 +29,17 @@ public static partial class AgcExports
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var eventType = (uint)(ctx[CpuRegister.Rsi] & 0xFF);
-        var eventAddress = ctx[CpuRegister.Rdx];
-        if (commandBufferAddress == 0 || eventType >= 0x40)
+        if (commandBufferAddress == 0)
         {
             return ReturnPointer(ctx, 0);
         }
 
-        var hasAddress = (eventType & ~1u) == 0x38;
-        var packetDwords = hasAddress ? 4u : 2u;
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItEventWrite, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, hasAddress ? eventType | 0x100u : eventType & 0x3Fu))
-        {
-            return ReturnPointer(ctx, 0);
-        }
-
-        if (hasAddress &&
-            (!TryWriteUInt32(ctx, commandAddress + 8, (uint)eventAddress & ~7u) ||
-             !TryWriteUInt32(ctx, commandAddress + 12, (uint)(eventAddress >> 32))))
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(2, ItEventWrite, 0)) ||
+            !TryWriteUInt32(
+                ctx,
+                commandAddress + 4,
+                (eventType & 0x3Fu) | (eventType == 7 ? 0x400u : 0u)))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -64,20 +57,50 @@ public static partial class AgcExports
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var eventType = (uint)(ctx[CpuRegister.Rsi] & 0xFF);
         var eventAddress = ctx[CpuRegister.Rdx];
-        if (commandBufferAddress == 0 || eventType > 0x3F || eventAddress != 0)
+        if (commandBufferAddress == 0 || eventType > 0x3F)
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(2, ItEventWrite, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, eventType))
+        var hasAddress = (eventType & ~1u) == 0x38;
+        var packetDwords = hasAddress ? 4u : 2u;
+        var eventControl = eventType is 7 or 15 or 16
+            ? 0x400u | eventType
+            : hasAddress
+                ? 0x100u | eventType
+                : eventType & 0x3Fu;
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItEventWrite, 0)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, eventControl))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        TraceAgc($"agc.dcb_event_write buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} type={eventType}");
+        if (hasAddress &&
+            (!TryWriteUInt32(ctx, commandAddress + 8, (uint)eventAddress & ~7u) ||
+             !TryWriteUInt32(ctx, commandAddress + 12, (uint)(eventAddress >> 32))))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.dcb_event_write buf=0x{commandBufferAddress:X16} " +
+            $"cmd=0x{commandAddress:X16} type={eventType} address=0x{eventAddress:X16}");
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "C4l9fB17t8w",
+        ExportName = "sceAgcDcbEventWriteGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbEventWriteGetSize(CpuContext ctx)
+    {
+        var eventType = (uint)(ctx[CpuRegister.Rdi] & 0xFF);
+        ctx[CpuRegister.Rax] = (eventType & ~1u) == 0x38
+            ? 4u * sizeof(uint)
+            : 2u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
     }
 
     [SysAbiExport(

@@ -23,11 +23,12 @@ public sealed class DirectImageTableTests
             Sop1(32, "SBitset0B32", 16, Gen5Operand.Scalar(18)),
             Vop2(36, "VAddI32", 15, new Gen5Operand(Gen5OperandKind.LiteralConstant, 0x40), Gen5Operand.Vector(16)),
             GlobalMemory(40, "GlobalLoadDword", 0, 15, 22, 0),
-            ReadFirstLane(48, 106, 22),
-            Sop2(52, "SLshlB32", 106, Gen5Operand.Scalar(106), Operand(5)),
-            ScalarLoad(56, 0, 4, 8, immediateOffset: 0x100, dynamicOffsetRegister: 106),
-            Image(64, "ImageLoad", 4, dmask: 1, vectorAddress: 1),
-            EndProgram(72));
+            Vopc(48, "VCmpxLeI32", Operand(0), 22),
+            ReadFirstLane(52, 106, 22),
+            Sop2(56, "SLshlB32", 106, Gen5Operand.Scalar(106), Operand(5)),
+            ScalarLoad(60, 0, 4, 8, immediateOffset: 0x100, dynamicOffsetRegister: 106),
+            Image(68, "ImageLoad", 4, dmask: 1, vectorAddress: 1),
+            EndProgram(76));
     }
 
     internal static Gen5ShaderProgram CreateWaveIndexedReadLaneProgram(bool selfAddressed, bool restoreExec = true)
@@ -65,7 +66,7 @@ public sealed class DirectImageTableTests
         return Program([.. instructions]);
     }
 
-    public static Gen5ShaderProgram CreateProgram(uint mask = 1, bool split = true, bool bitScan = true)
+    public static Gen5ShaderProgram CreateProgram(uint mask = 1, bool split = true, bool bitScan = true, bool r128 = false)
     {
         var instructions = new List<Gen5ShaderInstruction>
         {
@@ -81,7 +82,7 @@ public sealed class DirectImageTableTests
         instructions.AddRange([
             MoveScalar(40, 106, 999),
             MoveVector(44, 1, 0), MoveVector(48, 2, 0),
-            Image(52, "ImageLoad", 4, dmask: 1, vectorAddress: 1),
+            Image(52, "ImageLoad", 4, dmask: 1, vectorAddress: 1, r128: r128),
             MoveScalar(60, 20, 0), MoveScalar(64, 21, 0), MoveScalar(68, 22, 64), MoveScalar(72, 23, 0),
             BufferAccess(76, "BufferStoreDword", 20, vectorData: 4), EndProgram(84),
         ]);
@@ -105,9 +106,9 @@ public sealed class DirectImageTableTests
         return true;
     }
 
-    public static Gen5ShaderProgram CreateGuardedProgram(uint mask = 1, bool split = true)
+    public static Gen5ShaderProgram CreateGuardedProgram(uint mask = 1, bool split = true, bool r128 = false)
     {
-        var program = CreateProgram(mask, split);
+        var program = CreateProgram(mask, split, r128: r128);
         return program with
         {
             Instructions = program.Instructions.Where(instruction => instruction.Pc < 8)
@@ -140,7 +141,12 @@ public sealed class DirectImageTableTests
         var selector = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!;
         Assert.True(selector.Dense);
         Assert.Equal(0u, selector.KeyBound);
-        Assert.Equal(new WaveIndexedImageSelector(0x80, 0x40, 0x90), selector.WaveIndexed);
+        Assert.Equal(
+            new WaveIndexedImageSelector(0x80, 0x40, 0x90)
+            {
+                RejectNegativeKeys = true,
+            },
+            selector.WaveIndexed);
 
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
@@ -337,6 +343,52 @@ public sealed class DirectImageTableTests
             Assert.Equal(ResourceMaterializationFailure.ImageCapacityExceeded, failure);
             Assert.Same(previousSnapshot, snapshot);
             Assert.Same(previousSpecialization, specialization);
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false, 2, 0x80000000u, true)]
+    [InlineData(false, false, 2, 0x40000000u, false)]
+    [InlineData(false, false, 4, 0x20000000u, false)]
+    [InlineData(false, true, 4, 0x20000000u, true)]
+    [InlineData(true, false, 2, 0x80000000u, true)]
+    [InlineData(true, false, 2, 0x40000000u, false)]
+    [InlineData(true, false, 4, 0x20000000u, false)]
+    [InlineData(true, true, 4, 0x20000000u, true)]
+    public void DirectAndDenseCandidatesMatchReservedFields(
+        bool dense,
+        bool r128,
+        int word,
+        uint bit,
+        bool expectedValid)
+    {
+        var program = dense ? CreateGuardedProgram(r128: r128) : CreateProgram(r128: r128);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2);
+        bool Read(ulong address, out uint value)
+        {
+            var success = ReadDescriptor(address, out value);
+            if (success && ((address - 0x1000 - 312) % 32) / 4 == (ulong)word)
+            {
+                value |= bit;
+            }
+            return success;
+        }
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(
+            plan,
+            Inputs([0x1000, 0], readCleanMemory: Read),
+            ref snapshot,
+            ref specialization));
+        if (expectedValid)
+        {
+            Assert.Contains(snapshot.Images, descriptor => (descriptor[word] & bit) != 0);
+        }
+        else
+        {
+            var descriptor = Assert.Single(snapshot.Images);
+            Assert.All(descriptor, value => Assert.Equal(0u, value));
         }
     }
 

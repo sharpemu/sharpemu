@@ -26,7 +26,14 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 {
     private const SDL_InitFlags InitFlags = SDL_InitFlags.SDL_INIT_VIDEO | SDL_InitFlags.SDL_INIT_GAMEPAD;
     private static readonly long CursorHideDelayTicks = 2 * Stopwatch.Frequency;
+    private static readonly long GamepadOpenRetryTicks = Stopwatch.Frequency;
     private const uint OutputDurationMs = 5_000;
+    private static readonly bool LogPadButtons =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_LOG_PAD_BUTTONS"),
+            "1",
+            StringComparison.OrdinalIgnoreCase);
+    private static long _keyboardEventSequence;
 
     private readonly HostVideoOptions _options;
     private readonly SdlGraphicsApi _graphicsApi;
@@ -35,6 +42,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
     private SDL_Window* _window;
     private nint _metalView;
     private SDL_Gamepad* _gamepad;
+    private long _nextGamepadOpenAttemptTicks;
     private HostGamepadType _gamepadType;
     private byte _leftTriggerRumble;
     private byte _rightTriggerRumble;
@@ -458,6 +466,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                     _focused = true;
                     UpdateCursorVisibility();
                     HostWindowInput.SetFocused(true);
+                    OpenFirstGamepad(force: true);
                     break;
                 case SDL_EventType.SDL_EVENT_WINDOW_FOCUS_LOST:
                     _focused = false;
@@ -500,14 +509,14 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                 case SDL_EventType.SDL_EVENT_GAMEPAD_ADDED:
                     if (_gamepad is null)
                     {
-                        OpenFirstGamepad();
+                        OpenFirstGamepad(force: true);
                     }
                     break;
                 case SDL_EventType.SDL_EVENT_GAMEPAD_REMOVED:
                     if (_gamepad is not null && !SDL_GamepadConnected(_gamepad))
                     {
                         CloseGamepad();
-                        OpenFirstGamepad();
+                        OpenFirstGamepad(force: true);
                     }
                     break;
             }
@@ -556,6 +565,15 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 
         if (TryMapVirtualKey(keyEvent.key, out var virtualKey))
         {
+            if (LogPadButtons)
+            {
+                var sequence = Interlocked.Increment(ref _keyboardEventSequence);
+                Console.Error.WriteLine(
+                    $"[LOADER][INFO] SDL key#{sequence}: type={keyEvent.type} " +
+                    $"key={keyEvent.key} vk=0x{virtualKey:X2} down={down} repeat={keyEvent.repeat} " +
+                    $"host_ticks={Stopwatch.GetTimestamp()}");
+            }
+
             HostWindowInput.SetKey(virtualKey, down);
         }
     }
@@ -699,25 +717,43 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         return displays[Math.Clamp(_options.DisplayIndex, 0, displays.Count - 1)];
     }
 
-    private void OpenFirstGamepad()
+    private void OpenFirstGamepad(bool force = false)
     {
+        string? description = null;
+        HostGamepadType type = HostGamepadType.Generic;
+        HostGamepadConnection connection = HostGamepadConnection.Unknown;
         lock (_gamepadGate)
         {
-            _gamepad = SdlGamepadStateReader.OpenPreferredGamepad();
-            if (_gamepad is null)
+            if (_gamepad is not null)
             {
                 return;
             }
 
+            var now = Stopwatch.GetTimestamp();
+            if (!force && now < _nextGamepadOpenAttemptTicks)
+            {
+                return;
+            }
+
+            _gamepad = SdlGamepadStateReader.OpenPreferredGamepad();
+            if (_gamepad is null)
+            {
+                _nextGamepadOpenAttemptTicks = now + GamepadOpenRetryTicks;
+                return;
+            }
+
+            _nextGamepadOpenAttemptTicks = 0;
             _gamepadType = SdlGamepadStateReader.MapGamepadType(SDL_GetRealGamepadType(_gamepad));
             EnableSensor(SDL_SensorType.SDL_SENSOR_ACCEL);
             EnableSensor(SDL_SensorType.SDL_SENSOR_GYRO);
+            description = DescribeGamepad();
+            type = _gamepadType;
+            connection = SdlGamepadStateReader.GetConnection(_gamepad);
         }
 
         Console.Error.WriteLine(
-            $"[LOADER][INFO] SDL gamepad connected: {DescribeGamepad()} " +
-            $"type={_gamepadType} connection={SdlGamepadStateReader.GetConnection(_gamepad)}");
-        SampleGamepad();
+            $"[LOADER][INFO] SDL gamepad connected: {description} " +
+            $"type={type} connection={connection}");
     }
 
     private void CloseGamepad()
@@ -731,6 +767,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             }
 
             _gamepadType = HostGamepadType.Generic;
+            _nextGamepadOpenAttemptTicks = 0;
             _leftTriggerRumble = 0;
             _rightTriggerRumble = 0;
         }
@@ -740,6 +777,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 
     private void SampleGamepad()
     {
+        OpenFirstGamepad();
         lock (_gamepadGate)
         {
             if (!IsGamepadConnected())

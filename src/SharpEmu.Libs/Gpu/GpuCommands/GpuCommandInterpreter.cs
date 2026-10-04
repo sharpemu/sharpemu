@@ -32,6 +32,14 @@ public sealed partial class GpuCommandInterpreter
     private readonly uint[] _constantRam = new uint[ConstantRamDwords];
     private PacketCursorStack? _execution;
     private bool _chainRequested;
+    private uint _activePacketHeader;
+    private static readonly bool LogGpuWaits =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GPU_WAITS"), "1", StringComparison.Ordinal) ||
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GPU_WAITS"), "true", StringComparison.OrdinalIgnoreCase);
+    private ulong _lastSuspendedSubmitId;
+    private ulong _lastSuspendedPacketAddress;
+    private string? _lastSuspensionReason;
+    private ulong _repeatedSuspensionCount;
     private ulong _packetSerial;
     private ulong _lastWriteAddress;
     private ulong _lastWriteValue;
@@ -132,6 +140,7 @@ public sealed partial class GpuCommandInterpreter
         UserDataMarker = 0;
         DrawIndirectArgumentsBase = 0;
         DispatchIndirectArgumentsBase = 0;
+        PredicateSkip = false;
         Array.Clear(_constantRam);
     }
 
@@ -212,7 +221,42 @@ public sealed partial class GpuCommandInterpreter
         _chainRequested = true;
     }
 
-    public void Suspend() => RequireExecution().Suspended = true;
+    public void Suspend() => Suspend("packet condition");
+
+    // A blocked packet is retried on events or the queue's bounded fallback. Keep this opt-in trace useful
+    // without flooding the log: report condition changes, then powers of two for a
+    // condition that remains stuck.
+    private void Suspend(string reason)
+    {
+        var execution = RequireExecution();
+        if (LogGpuWaits)
+        {
+            var packetAddress = execution.CurrentPacketAddress;
+            if (_lastSuspendedSubmitId == SubmitId &&
+                _lastSuspendedPacketAddress == packetAddress &&
+                string.Equals(_lastSuspensionReason, reason, StringComparison.Ordinal))
+            {
+                _repeatedSuspensionCount++;
+            }
+            else
+            {
+                _lastSuspendedSubmitId = SubmitId;
+                _lastSuspendedPacketAddress = packetAddress;
+                _lastSuspensionReason = reason;
+                _repeatedSuspensionCount = 1;
+            }
+
+            if (_repeatedSuspensionCount <= 4 || (_repeatedSuspensionCount & (_repeatedSuspensionCount - 1)) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[GPU][WAIT] queue={QueueId} submit={SubmitId} packet=0x{packetAddress:X16} " +
+                    $"header=0x{_activePacketHeader:X8} opcode=0x{PacketHeader.Opcode(_activePacketHeader):X2} " +
+                    $"repeats={_repeatedSuspensionCount} reason={reason}");
+            }
+        }
+
+        execution.Suspended = true;
+    }
 
     // A paired wait must still observe this queue's immediate label store when the CPU
     // resets the live address for the next frame between the two packets (Dead Cells).
@@ -320,6 +364,7 @@ public sealed partial class GpuCommandInterpreter
 
             var payload = ReadPayload(cursorIndex, packetAddress, length - 1);
             var packet = new PacketContext(header & ~1u, packetAddress, offset, remaining, total);
+            _activePacketHeader = packet.Header;
             var consumed = handler(this, in packet, payload) + 1;
             if (consumed > remaining)
             {

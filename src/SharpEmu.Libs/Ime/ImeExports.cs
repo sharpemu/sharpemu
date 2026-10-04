@@ -10,6 +10,9 @@ public static class ImeExports
 {
     // libIme error space.
     private const int ImeErrorInvalidAddress = unchecked((int)0x80BC0031);
+    private const int ImeErrorNotOpened = unchecked((int)0x80BC0002);
+    private const int ImeErrorInvalidUserId = unchecked((int)0x80BC0010);
+    private const int ImeErrorNoResourceId = unchecked((int)0x80BC0023);
 
     // SCE_IME_KEYBOARD_MAX_NUMBER.
     private const int KeyboardMaxNumber = 5;
@@ -26,6 +29,10 @@ public static class ImeExports
     private const uint KeyboardStateDisconnected = 0;
     // The single local user this emulator exposes (see UserServiceExports).
     private const int PrimaryUserId = 0x10000000;
+    private static int _keyboardOpen;
+
+    public static void ResetRuntimeState() =>
+        Interlocked.Exchange(ref _keyboardOpen, 0);
 
     // Quake (KEX) calls this from its main loop and from the audio bring-up path with
     // an event-handler pointer. No IME session ever exists here, so report success
@@ -49,6 +56,7 @@ public static class ImeExports
         LibraryName = "libSceIme")]
     public static int ImeKeyboardOpen(CpuContext ctx)
     {
+        Interlocked.Exchange(ref _keyboardOpen, 1);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -80,6 +88,27 @@ public static class ImeExports
             : ctx.SetReturn(ImeErrorInvalidAddress);
     }
 
+    [SysAbiExport(
+        Nid = "PMVehSlfZ94",
+        ExportName = "sceImeKeyboardClose",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceIme")]
+    public static int ImeKeyboardClose(CpuContext ctx)
+    {
+        if (Volatile.Read(ref _keyboardOpen) == 0)
+        {
+            return ctx.SetReturn(ImeErrorNotOpened);
+        }
+
+        if (unchecked((int)ctx[CpuRegister.Rdi]) == -1)
+        {
+            return ctx.SetReturn(ImeErrorInvalidUserId);
+        }
+
+        Interlocked.Exchange(ref _keyboardOpen, 0);
+        return ctx.SetReturn(0);
+    }
+
     // ABI: int sceImeKeyboardGetInfo(uint32_t resourceId,
     // SceImeKeyboardInfo *info) — rdi is a plain resource id, rsi the out struct,
     // written at exactly sizeof(SceImeKeyboardInfo) == 0x24.
@@ -98,16 +127,16 @@ public static class ImeExports
 
         Span<byte> info = stackalloc byte[KeyboardInfoSize];
         info.Clear();
-        //   +0x00 userId       = the single local user
-        //   +0x04 device       = OSK (the host has no USB/BT keyboard bridge)
-        //   +0x08 type         = 0 (no layout reported for a disconnected device)
-        //   +0x0C repeatDelay  = 0, +0x10 repeatRate = 0
-        //   +0x14 status       = DISCONNECTED
         BinaryPrimitives.WriteInt32LittleEndian(info[0x00..], PrimaryUserId);
         BinaryPrimitives.WriteUInt32LittleEndian(info[0x04..], KeyboardDeviceTypeOsk);
         BinaryPrimitives.WriteUInt32LittleEndian(info[0x14..], KeyboardStateDisconnected);
-        return ctx.Memory.TryWrite(infoAddress, info)
-            ? ctx.SetReturn(0)
-            : ctx.SetReturn(ImeErrorInvalidAddress);
+        if (!ctx.Memory.TryWrite(infoAddress, info))
+        {
+            return ctx.SetReturn(ImeErrorInvalidAddress);
+        }
+
+        return Volatile.Read(ref _keyboardOpen) == 0
+            ? ctx.SetReturn(ImeErrorNotOpened)
+            : ctx.SetReturn(ImeErrorNoResourceId);
     }
 }

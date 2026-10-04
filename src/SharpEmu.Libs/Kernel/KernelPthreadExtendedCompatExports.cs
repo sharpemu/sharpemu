@@ -548,23 +548,48 @@ public static class KernelPthreadExtendedCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+		// The scheduler is the authority for native guest pthread mappings. Query
+		// it before taking the pthread-state gate: scheduler implementations lock
+		// their own thread table, and nesting those locks in the opposite order can
+		// deadlock with scheduler callbacks into pthread HLE.
+		ulong stackAddress = 0;
+		ulong stackSize = 0;
+		var hasStackBounds = false;
+		var scheduler = GuestThreadExecution.Scheduler;
+		if (scheduler is not null &&
+			scheduler.TryGetGuestThreadStackBounds(thread, out stackAddress, out stackSize) &&
+			IsValidStackBounds(stackAddress, stackSize))
+		{
+			hasStackBounds = true;
+		}
+		else
+		{
+			stackAddress = 0;
+			stackSize = 0;
+			// Primary/external executors do not own a GuestThreadState. Preserve the
+			// bounded current-stack fallback for those contexts and alternate CPU
+			// schedulers, but do not guess another thread's mapping from this RSP.
+			if (thread == KernelPthreadState.GetCurrentThreadHandle() &&
+				TryInferNativeGuestStack(ctx[CpuRegister.Rsp], out stackAddress))
+			{
+				stackSize = NativeGuestStackSize;
+				hasStackBounds = true;
+			}
+		}
+
         lock (_stateGate)
         {
             var threadState = GetOrCreateThreadStateLocked(thread);
 
-			// The native executor maps guest pthread stacks itself, after the
-			// kernel-facing thread object has been created.  Report that live
-			// mapping when a thread asks for its own attributes.  IL2CPP's
-			// conservative collector uses these two fields to register the stack;
-			// returning the default null address lets it recycle objects that are
-			// still reachable only from guest registers/stack frames.
-			if (thread == KernelPthreadState.GetCurrentThreadHandle() &&
-				TryInferNativeGuestStack(ctx[CpuRegister.Rsp], out var stackAddress))
+			// IL2CPP's conservative collector uses these fields to register every
+			// worker stack. Returning a null address can recycle objects that remain
+			// reachable only from guest registers or stack frames.
+			if (hasStackBounds)
 			{
 				threadState.Attributes = threadState.Attributes with
 				{
 					StackAddress = stackAddress,
-					StackSize = NativeGuestStackSize,
+					StackSize = stackSize,
 				};
 			}
             _attrStates[outAttrAddress] = threadState.Attributes;
@@ -573,6 +598,11 @@ public static class KernelPthreadExtendedCompatExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+	private static bool IsValidStackBounds(ulong stackAddress, ulong stackSize) =>
+		stackAddress != 0 &&
+		stackSize != 0 &&
+		stackAddress <= ulong.MaxValue - stackSize;
 
 	private static bool TryInferNativeGuestStack(ulong stackPointer, out ulong stackAddress)
 	{

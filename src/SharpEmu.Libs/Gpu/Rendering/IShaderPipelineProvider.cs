@@ -54,14 +54,55 @@ public sealed class ComputeProgram
 // The shader and pipeline caches behind the executor.
 public interface IShaderPipelineProvider
 {
+    // Geometry front/back objects are registered as one program by AGC.  The
+    // executor uses this capability check before admitting the legacy ES+GS
+    // register path; providers without a registry keep rejecting that path.
+    bool IsFusedGraphicsProgram(ulong codeAddress) => false;
+
+    // Returns the registered continuation so the executor can validate a
+    // non-zero GS address instead of rejecting every split-address encoding.
+    bool TryGetFusedGraphicsProgram(ulong codeAddress, out ulong continuationAddress)
+    {
+        continuationAddress = 0;
+        return IsFusedGraphicsProgram(codeAddress);
+    }
+
+    // True only when the provider can lower a fused ES+GS program to a native mesh stage.
+    bool SupportsFusedGeometry => false;
+
     GraphicsPrograms GetGraphicsPrograms(
         VertexStageRegisters vertex,
         PixelStageRegisters pixel,
         ShaderInterfaceRegisters shaderInterface,
         ContextRegisters context,
+        UserConfigRegisters userConfig,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound);
+
+    // The executor can discover stale colour-register slots only after decoding the pixel
+    // program. Providers that specialize pixel outputs by host attachment location use this
+    // overload when the surviving guest slots are known. The default keeps lightweight and
+    // external providers source-compatible; the production cache implements the mask.
+    GraphicsPrograms GetGraphicsPrograms(
+        VertexStageRegisters vertex,
+        PixelStageRegisters pixel,
+        ShaderInterfaceRegisters shaderInterface,
+        ContextRegisters context,
+        UserConfigRegisters userConfig,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        uint boundColorSlots,
+        bool pixelActive,
+        bool depthBound) =>
+        GetGraphicsPrograms(
+            vertex,
+            pixel,
+            shaderInterface,
+            context,
+            userConfig,
+            targetExportMapping,
+            pixelActive,
+            depthBound);
 
     PipelineHandle CreateGraphicsPipeline(
         ReadOnlySpan<ColorTargetState> colors,

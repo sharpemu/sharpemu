@@ -20,7 +20,8 @@ public sealed partial class GpuCommandInterpreter
 
     private static int _unknownGcrWarnings;
 
-    // The label is written to guest memory now; only the interrupt waits for the GPU.
+    // The host publishes ordinary CPU-visible labels while interpreting this packet;
+    // GPU-derived GDS data and completion notifications remain deferred.
     internal void WriteEndOfPipe(
         bool is64Bit,
         uint cachePolicy,
@@ -145,7 +146,7 @@ public sealed partial class GpuCommandInterpreter
                                 case 0x04:
                                 case 0x14:
                                 case 0x28:
-                                    if (((eopEventType is 0x04 or 0x28) && eventIndex == 0x05 && !withInterrupt) || eventIndex == 0x00)
+                                    if (((eopEventType is 0x04 or 0x28) && eventIndex == 0x05) || eventIndex == 0x00)
                                     {
                                         Write64(destination, value, withWriteBack: true, withInterrupt, eventId, interruptContextId);
                                         return;
@@ -187,14 +188,12 @@ public sealed partial class GpuCommandInterpreter
             case 4:
                 if (is64Bit)
                 {
-                    var clock = EndOfPipe.ReadReferenceClock();
-                    WriteQword(destination, clock);
                     switch (cacheAction)
                     {
                         case 0x00:
                             if ((eopEventType == 0x04 && eventIndex == 0x05) || (eopEventType == 0x28 && eventIndex == 0x00))
                             {
-                                RecordClock(destination, clock, withWriteBack: false, withInterrupt, eventId, interruptContextId);
+                                RecordClock(destination, withWriteBack: false, withInterrupt, eventId, interruptContextId);
                                 return;
                             }
 
@@ -202,7 +201,7 @@ public sealed partial class GpuCommandInterpreter
                         case 0x38:
                             if ((eopEventType == 0x04 && eventIndex is 0x00 or 0x05) || (eopEventType == 0x28 && eventIndex == 0x00))
                             {
-                                RecordClock(destination, clock, withWriteBack: true, withInterrupt, eventId, interruptContextId);
+                                RecordClock(destination, withWriteBack: true, withInterrupt, eventId, interruptContextId);
                                 return;
                             }
 
@@ -220,7 +219,6 @@ public sealed partial class GpuCommandInterpreter
 
     private void Write32(ulong destination, uint value, bool withWriteBack, bool withInterrupt, int eventId, uint contextId)
     {
-        WriteDword(destination, value);
         var kind = withInterrupt
             ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack32 : EndOfPipeWriteKind.Interrupt32)
             : (withWriteBack ? EndOfPipeWriteKind.WriteBack32 : EndOfPipeWriteKind.Write32);
@@ -229,35 +227,29 @@ public sealed partial class GpuCommandInterpreter
 
     private void Write64(ulong destination, ulong value, bool withWriteBack, bool withInterrupt, int eventId, uint contextId)
     {
-        WriteQword(destination, value);
         var kind = withInterrupt
             ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack64 : EndOfPipeWriteKind.Interrupt64)
             : (withWriteBack ? EndOfPipeWriteKind.WriteBack64 : EndOfPipeWriteKind.Write64);
         _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, value, eventId, contextId));
     }
 
-    private void RecordClock(ulong destination, ulong clock, bool withWriteBack, bool withInterrupt, int eventId, uint contextId)
+    private void RecordClock(ulong destination, bool withWriteBack, bool withInterrupt, int eventId, uint contextId)
     {
         var kind = withInterrupt
-            ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack64 : EndOfPipeWriteKind.Interrupt64)
+            ? (withWriteBack ? EndOfPipeWriteKind.InterruptClockWriteBack : EndOfPipeWriteKind.InterruptClockWrite)
             : (withWriteBack ? EndOfPipeWriteKind.ClockWriteBack : EndOfPipeWriteKind.ClockWrite);
-        _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, clock, eventId, contextId));
+        _host.RecordEndOfPipe(new EndOfPipeWrite(kind, SubmitId, destination, EventId: eventId, ContextId: contextId));
     }
 
-    // GDS contents are only valid after the GPU finished, so this variant waits first.
+    // GDS contents are sampled by the host when the current GPU tick retires.
     private void WriteGdsWords(ulong destination, ulong value, bool withInterrupt, uint contextId)
     {
         var wordOffset = (uint)(value & 0xFFFFu);
         var wordCount = (uint)(value >> 16);
-        _host.SynchronizeGpu();
-        var words = new uint[wordCount];
-        _host.ReadGds(words, wordOffset, wordCount);
-        WriteBytes(destination, System.Runtime.InteropServices.MemoryMarshal.AsBytes<uint>(words));
-        _host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.GdsWrite32, SubmitId, destination, GdsWordOffset: wordOffset, GdsWordCount: wordCount));
-        if (withInterrupt)
-        {
-            _host.TriggerInterrupt(InterruptEventId, contextId);
-        }
+        var kind = withInterrupt ? EndOfPipeWriteKind.InterruptGdsWrite32 : EndOfPipeWriteKind.GdsWrite32;
+        _host.RecordEndOfPipe(new EndOfPipeWrite(
+            kind, SubmitId, destination, EventId: InterruptEventId, ContextId: contextId,
+            GdsWordOffset: wordOffset, GdsWordCount: wordCount));
     }
 
     // Release-memory completions stay in the recording command buffer instead of
@@ -485,7 +477,6 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        WriteDword(destination, value);
         var flip = PendingFlip;
         var requestId = _host.PrepareFlip(flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
         _host.RecordEndOfPipe(new EndOfPipeWrite(
@@ -506,7 +497,6 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        WriteDword(destination, value);
         var flip = PendingFlip;
         var requestId = _host.PrepareFlip(flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
         _host.RecordEndOfPipe(new EndOfPipeWrite(

@@ -73,7 +73,20 @@ public sealed class AvPlayerAllocationTests : IDisposable
             Handle,
             out var firstBuffer));
         Assert.NotEqual(0UL, firstBuffer);
+        Assert.True(AvPlayerExports.IsVideoBufferAddress(firstBuffer));
+        Assert.True(AvPlayerExports.IsVideoBufferRange(
+            firstBuffer - 0x20,
+            0x40));
+        Assert.False(AvPlayerExports.IsVideoBufferRange(
+            firstBuffer - 0x20,
+            0x20));
         Assert.Equal(2, scheduler.CallCount);
+
+        AvPlayerExports.RemovePlayerForTest(Handle);
+        Assert.False(AvPlayerExports.IsVideoBufferAddress(firstBuffer));
+        Assert.False(AvPlayerExports.IsVideoBufferRange(
+            firstBuffer - 0x20,
+            0x40));
     }
 
     [Fact]
@@ -107,7 +120,9 @@ public sealed class AvPlayerAllocationTests : IDisposable
             out var path));
         Assert.Equal("archive:/packed.resource", scheduler.OpenedPath);
         Assert.Equal(payload, File.ReadAllBytes(path));
-        Assert.Equal(2, scheduler.ReadCount);
+        Assert.Equal(
+            (payload.Length + (1024 * 1024) - 1) / (1024 * 1024),
+            scheduler.ReadCount);
         Assert.Equal(1, scheduler.CloseCount);
 
         AvPlayerExports.RemovePlayerForTest(Handle);

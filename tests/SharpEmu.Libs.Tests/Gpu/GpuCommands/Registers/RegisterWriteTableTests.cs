@@ -226,6 +226,23 @@ public sealed class RegisterWriteTableTests
         Assert.Equal(1u, banks.Context.UnmodeledTableRegisters[0x024A]);
     }
 
+    [Fact]
+    public void PixelTrapMemoryAddress_IsAcceptedFromPacketsAndRegisterTables()
+    {
+        var banks = NewBanks();
+
+        Assert.Equal(2u, WriteShader(banks, SpiShaderTmaLoPs, 0x526E_9080, 0x12A));
+        Assert.Equal(0x2A_526E_9080ul, banks.Shader.Pixel.TrapMemoryAddress);
+
+        RegisterWriteTable.WriteShaderEntry(banks, SpiShaderTmaLoPs, 0x89AB_CDEF, 0x0240_407A_38);
+        RegisterWriteTable.WriteShaderEntry(banks, SpiShaderTmaHiPs, 0x7C, 0x0240_407A_38);
+
+        Assert.Equal(0x7C_89AB_CDEFul, banks.Shader.Pixel.TrapMemoryAddress);
+        Assert.Equal(0x7C_89AB_CDEFul, banks.Clone().Shader.Pixel.TrapMemoryAddress);
+        Assert.Contains("not supported", Assert.Throws<InvalidOperationException>(() =>
+            RegisterWriteTable.WriteShaderEntry(banks, SpiShaderTmaHiPs + 1, 0, 0x0240_407A_38)).Message);
+    }
+
     // Registers without a decoded field are stored so a title that writes them does not stop.
     [Fact]
     public void RegistersWithoutAReferenceEntry_AreStored()
@@ -400,12 +417,14 @@ public sealed class RegisterWriteTableTests
         var banks = NewBanks();
 
         WriteShader(banks, SpiShaderPgmLoGs, 0x2000, 0x3, (1u << 24) | (3u << 29), (1u << 27) | (5u << 1));
+        WriteShader(banks, SpiShaderUserDataAddrLoGs, 0x5566_7788, 0x1122_3344);
         WriteShader(banks, SpiShaderPgmLoHs, 0x4000, 0x4, 1u << 28, 0x1FFu << 18);
         WriteShader(banks, SpiShaderPgmRsrc2Ps, (1u << 27) | (5u << 1) | (0xFFu << 8));
         WriteShader(banks, SpiShaderUserAccumPs0, 0x7F, 0x00);
 
         var vertex = banks.Shader.Vertex;
         Assert.Equal(0x0300_0020_0000ul, vertex.GeometryAddress);
+        Assert.Equal(0x1122_3344_5566_7788ul, vertex.GeometryUserDataAddress);
         Assert.True(vertex.GeometryResource1.ComputeUnitGroupEnable);
         Assert.Equal(3, vertex.GeometryResource1.GeometryVectorComponentCount);
         Assert.Equal(37, vertex.GeometryResource2.UserScalarCount);

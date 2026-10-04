@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
@@ -13,8 +14,10 @@ namespace SharpEmu.Libs.Tests.Gpu.Rendering;
 public sealed class RenderExecutorComputeTests : IDisposable
 {
     private const ulong MetadataAddress = RecordingRenderHost.MemoryBase + 0x60_0000;
+    private const ulong IndirectArgumentsAddress = RecordingRenderHost.MemoryBase + 0x70_0000;
     private const uint ClearInitiator = 0x61;
     private const uint ClearValue = 0x8080_8080;
+    private static readonly ComputeWorkgroupAxisMapping VulkanTallZAxisMapping = new(1, 2, 0);
 
     private readonly RecordingRenderHost _host = new();
     private readonly FakePipelineProvider _pipelines = new();
@@ -50,6 +53,15 @@ public sealed class RenderExecutorComputeTests : IDisposable
         Assert.DoesNotContain("create_compute_pipeline", _pipelines.Calls);
     }
 
+    private void WriteDispatchArguments(uint groupsX, uint groupsY, uint groupsZ)
+    {
+        var arguments = new byte[3 * sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(arguments, groupsX);
+        BinaryPrimitives.WriteUInt32LittleEndian(arguments.AsSpan(sizeof(uint)), groupsY);
+        BinaryPrimitives.WriteUInt32LittleEndian(arguments.AsSpan(2 * sizeof(uint)), groupsZ);
+        _host.WriteGuest(IndirectArgumentsAddress, arguments);
+    }
+
     [Fact]
     public void Dispatch_RecordsTheTailInOrder()
     {
@@ -62,6 +74,104 @@ public sealed class RenderExecutorComputeTests : IDisposable
         };
         Assert.Equal(expected, _host.Calls);
         Assert.Equal(["get_compute_program threadDimensions=False", "create_compute_pipeline"], _pipelines.Calls);
+    }
+
+    [Fact]
+    public void IndirectDispatch_DefaultsToCpuResolvedCounts()
+    {
+        WriteDispatchArguments(2, 3, 4);
+
+        // Zero XYZ is the interpreter's deferred-count representation when the
+        // command-stream host can otherwise leave the arguments on the GPU.
+        _executor.Dispatch(1, Banks(), 0, 0, 0, 0x41, IndirectArgumentsAddress);
+
+        Assert.Contains("dispatch 2 3 4", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("dispatch_indirect ", StringComparison.Ordinal));
+        Assert.Equal(1, _host.GuestReads);
+    }
+
+    [Fact]
+    public void IndirectDispatch_NativePathRequiresExplicitOptIn()
+    {
+        var nativeExecutor = new RenderExecutor(_host, _pipelines, strictDrawResources: true, nativeIndirectDispatch: true);
+
+        nativeExecutor.Dispatch(1, Banks(), 0, 0, 0, 0x41, IndirectArgumentsAddress);
+
+        Assert.Contains($"dispatch_indirect {IndirectArgumentsAddress:X}", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("dispatch ", StringComparison.Ordinal));
+        Assert.Equal(0, _host.GuestReads);
+    }
+
+    [Fact]
+    public void NativeIndirectDispatch_ResolvesCountsForADirectHostFallback()
+    {
+        WriteDispatchArguments(2, 3, 4);
+        _host.AcceptIndirectDispatch = false;
+        var nativeExecutor = new RenderExecutor(_host, _pipelines, strictDrawResources: true, nativeIndirectDispatch: true);
+
+        nativeExecutor.Dispatch(1, Banks(), 0, 0, 0, 0x41, IndirectArgumentsAddress);
+
+        Assert.Contains($"dispatch_indirect {IndirectArgumentsAddress:X}", _host.Calls);
+        Assert.Contains("dispatch 2 3 4", _host.Calls);
+        Assert.Equal(1, _host.GuestReads);
+    }
+
+    [Fact]
+    public void TallZWorkgroup_PermutesLogicalDispatchCounts()
+    {
+        _pipelines.Compute = ComputeProgram(
+            threadsX: 1,
+            threadsY: 1,
+            threadsZ: 256);
+        _pipelines.Compute.Input.WorkgroupAxisMapping = VulkanTallZAxisMapping;
+
+        _executor.Dispatch(1, Banks(), 2, 3, 4, 0x41);
+
+        AssertDispatched(4, 2, 3);
+    }
+
+    [Fact]
+    public void TallZWorkgroup_IdentityBackendPreservesLogicalDispatchCounts()
+    {
+        _pipelines.Compute = ComputeProgram(
+            threadsX: 1,
+            threadsY: 1,
+            threadsZ: 256);
+
+        _executor.Dispatch(1, Banks(), 2, 3, 4, 0x41);
+
+        AssertDispatched(2, 3, 4);
+    }
+
+    [Fact]
+    public void TallZWorkgroup_UsesCpuResolvedIndirectCounts()
+    {
+        var nativeExecutor = new RenderExecutor(
+            _host,
+            _pipelines,
+            strictDrawResources: true,
+            nativeIndirectDispatch: true);
+        _pipelines.Compute = ComputeProgram(
+            threadsX: 1,
+            threadsY: 1,
+            threadsZ: 256);
+        _pipelines.Compute.Input.WorkgroupAxisMapping = VulkanTallZAxisMapping;
+        WriteDispatchArguments(2, 3, 4);
+
+        nativeExecutor.Dispatch(
+            1,
+            Banks(),
+            0,
+            0,
+            0,
+            0x41,
+            IndirectArgumentsAddress);
+
+        AssertDispatched(4, 2, 3);
+        Assert.Equal(1, _host.GuestReads);
+        Assert.DoesNotContain(
+            _host.Calls,
+            call => call.StartsWith("dispatch_indirect ", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -108,6 +108,10 @@ internal static unsafe partial class VulkanVideoPresenter
             (12, 4, _) => Format.R16G16B16A16Uint,
             (12, 5, _) => Format.R16G16B16A16Sint,
             (12, 7, _) => Format.R16G16B16A16Sfloat,
+            // Keep 128-bit integer targets distinct so the shader pipeline can
+            // select the matching integer output type.
+            (13, 4, _) or (14, 4, _) => Format.R32G32B32A32Uint,
+            (13, 5, _) or (14, 5, _) => Format.R32G32B32A32Sint,
             (13, 7, _) or (14, 7, _) => Format.R32G32B32A32Sfloat,
             (20, 0, _) => Format.R32Uint,
             (29, 0, _) or (4, 0, _) => Format.R32Sfloat,
@@ -138,10 +142,12 @@ internal static unsafe partial class VulkanVideoPresenter
         var outputKind = format switch
         {
             Format.R8Uint or Format.R16Uint or Format.R32Uint or Format.R16G16Uint or
-                Format.R32G32Uint or Format.R8G8B8A8Uint or Format.R16G16B16A16Uint =>
+                Format.R32G32Uint or Format.R8G8B8A8Uint or Format.R16G16B16A16Uint or
+                Format.R32G32B32A32Uint =>
                 Gen5PixelOutputKind.Uint,
             Format.R16Sint or Format.R32Sint or Format.R16G16Sint or Format.R32G32Sint or
-                Format.R8G8B8A8Sint or Format.R16G16B16A16Sint => Gen5PixelOutputKind.Sint,
+                Format.R8G8B8A8Sint or Format.R16G16B16A16Sint or
+                Format.R32G32B32A32Sint => Gen5PixelOutputKind.Sint,
             _ => Gen5PixelOutputKind.Float,
         };
 

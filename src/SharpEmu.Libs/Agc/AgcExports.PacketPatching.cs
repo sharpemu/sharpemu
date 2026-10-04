@@ -57,6 +57,22 @@ public static partial class AgcExports
         SetIndirectPatchRegisterCount(ctx, "cx");
 
     [SysAbiExport(
+        Nid = "nCUgItdN2ms",
+        ExportName = "sceAgcSetShRegIndirectPatchSetNumRegisters",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int SetShRegIndirectPatchSetNumRegisters(CpuContext ctx) =>
+        SetIndirectPatchRegisterCount(ctx, "sh");
+
+    [SysAbiExport(
+        Nid = "fRG-JOH5+sI",
+        ExportName = "sceAgcSetUcRegIndirectPatchSetNumRegisters",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int SetUcRegIndirectPatchSetNumRegisters(CpuContext ctx) =>
+        SetIndirectPatchRegisterCount(ctx, "uc");
+
+    [SysAbiExport(
         Nid = "Qrj4c+61z4A",
         ExportName = "sceAgcSetShRegIndirectPatchSetAddress",
         Target = Generation.Gen5,

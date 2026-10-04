@@ -12,6 +12,7 @@ public enum ShaderStage : byte
     Vertex,
     Pixel,
     Compute,
+    Mesh,
 }
 
 public enum ImageNumericClass : byte
@@ -156,7 +157,7 @@ public sealed class BufferCandidateTableInfo
 // The dense resource tables of a program plus the facts the pipeline layout needs.
 public sealed class ShaderResourceInfo
 {
-    public const int MaxBuffers = 32;
+    public const int MaxBuffers = 64;
     public const int MaxImages = 64;
     public const int MaxSamplers = 32;
     public const int MaxSampledPairs = 64;
@@ -207,18 +208,23 @@ public sealed record IndirectImageSelector(
     public uint DynamicOffsetBase { get; init; }
     public uint KeyBound { get; init; }
     public WaveIndexedImageSelector? WaveIndexed { get; init; }
-
     // The key read's immediate offset. The hardware adds it after the 32-bit selector offset, without wrapping.
     public uint MaterialImmediate { get; init; }
 }
 
 public sealed record DirectImageCandidate(uint Offset, uint Source);
 
-// A wave-uniform descriptor selector. The guest derives each descriptor key from
-// a set bit in one scalar mask, through a compact global index table. Keeping this
-// shape explicit lets the host materialize only those keys, rather than treating a
-// lane value as an unknowable descriptor address.
-public sealed record WaveIndexedImageSelector(uint MaskOffset, uint IndexTableOffset, uint IndexStride);
+// A wave-uniform descriptor selector. The guest derives descriptor keys from
+// active bits in one scalar mask through a compact global index table.
+public sealed record WaveIndexedImageSelector(
+    uint MaskOffset,
+    uint IndexTableOffset,
+    uint IndexStride)
+{
+    // Only selectors with a proven signed lower-bound guard may discard the
+    // negative sentinel values which that guard removes on the guest.
+    public bool RejectNegativeKeys { get; init; }
+}
 
 // The graph values one descriptor is assembled from, up to eight dwords.
 public sealed class DescriptorSource

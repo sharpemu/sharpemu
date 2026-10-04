@@ -344,11 +344,11 @@ public static partial class AgcExports
         var interruptContextId = (uint)interruptContextIdRaw;
         if (commandBufferAddress == 0 ||
             destination > 1 ||
-            dataSelection > 3 ||
-            gdsOffset != 0 ||
+            dataSelection is not (0 or 1 or 2 or 3 or 5) ||
+            (dataSelection != 5 && gdsOffset != 0) ||
             gdsSize > 2 ||
             interrupt > 6 ||
-            (interrupt >= 4 && gcrControl != 0) ||
+            (interrupt >= 5 && gcrControl != 0) ||
             (interrupt == 5 &&
              (destinationAddress == 0 || destinationAddress % sizeof(uint) != 0)) ||
             (interrupt == 6 &&
@@ -358,7 +358,11 @@ public static partial class AgcExports
         }
 
         var packetAddressValue = interrupt == 4 ? 0UL : destinationAddress;
-        var packetData = interrupt == 4 ? 0UL : data;
+        var packetData = interrupt == 4
+            ? 0UL
+            : dataSelection == 5
+                ? gdsOffset | ((ulong)gdsSize << 16)
+                : data;
 
         if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 8, out var commandAddress) ||
             !TryWriteUInt32(ctx, commandAddress, Pm4(8, ItNop, RReleaseMem)) ||

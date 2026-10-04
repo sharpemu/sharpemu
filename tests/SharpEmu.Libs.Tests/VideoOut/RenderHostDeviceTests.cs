@@ -189,6 +189,7 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
             PixelStageRegisters pixel,
             ShaderInterfaceRegisters shaderInterface,
             ContextRegisters context,
+            UserConfigRegisters userConfig,
             ReadOnlySpan<ColorComponentMap> targetExportMapping,
             bool pixelActive,
             bool depthBound)

@@ -1457,15 +1457,32 @@ public sealed partial class DirectExecutionBackend
 	private static extern int ReadMachVirtualMemory(
 		uint taskHandle, ulong sourceAddress, ulong byteCount, ulong destinationAddress, out ulong bytesRead);
 
-	private unsafe static bool TryReadExecutableBytes(ulong address, byte[] buffer)
+	private unsafe static bool TryReadExecutableBytes(ulong address, byte[] buffer) =>
+		TryReadExecutableBytes(address, buffer.AsSpan());
+
+	private unsafe static bool TryReadExecutableBytes(ulong address, Span<byte> buffer)
 	{
-		if (!OperatingSystem.IsWindows())
+		if (OperatingSystem.IsLinux())
 		{
-			return TryReadHostBytes(address, buffer);
+			fixed (byte* destination = buffer)
+			{
+				return TryReadLinuxMemory(address, destination, buffer.Length);
+			}
+		}
+
+		if (OperatingSystem.IsMacOS())
+		{
+			fixed (byte* destination = buffer)
+			{
+				return TryReadMacOsMemory(address, destination, buffer.Length);
+			}
 		}
 
 		// Faulting x64 code can have execute-only protection. Data probes still require read access.
-		if (!IsReadableHostRange(address, buffer.Length, allowExecuteOnly: true))
+		if (!IsReadableHostRange(
+				address,
+				buffer.Length,
+				allowExecuteOnly: OperatingSystem.IsWindows()))
 		{
 			return false;
 		}

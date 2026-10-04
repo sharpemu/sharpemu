@@ -23,21 +23,41 @@ public sealed class AgcShaderCreationTests
     [InlineData(0, 0x20C)]
     [InlineData(1, 0x8)]
     [InlineData(2, 0xC8)]
-    [InlineData(3, 0x48)]
-    [InlineData(4, 0x88)]
-    [InlineData(5, 0x108)]
-    [InlineData(6, 0xC8)]
-    [InlineData(7, 0x148)]
-    public void CreateShader_PreservesExistingStageAddressPatching(byte shaderType, uint lowRegister)
+    [InlineData(3, 0x148)]
+    [InlineData(6, 0x88)]
+    [InlineData(7, 0x108)]
+    public void CreateShader_RebasesTheExactProgramPairForEveryPatchedType(byte shaderType, uint lowRegister)
     {
+        const ulong shaderOffset = 0x12_3456_7800;
+        const uint highFlags = 0xA5A5_A500;
+        var originalHigh = highFlags | (uint)((shaderOffset >> 40) & 0xFF);
         var context = CreateContext(shaderType, 2, out var memory);
-        WriteRegister(memory, 0, lowRegister, 0);
-        WriteRegister(memory, 1, lowRegister + 1, 0);
+        WriteRegister(memory, 0, lowRegister, (uint)(shaderOffset >> 8));
+        WriteRegister(memory, 1, lowRegister + 1, originalHigh);
 
         AssertSuccess(context, memory);
 
-        Assert.Equal(unchecked((uint)(CodeAddress >> 8)), ReadUInt32(memory, RegistersAddress + 4));
-        Assert.Equal((uint)(CodeAddress >> 40), ReadUInt32(memory, RegistersAddress + 12));
+        var patchedAddress = unchecked(CodeAddress + shaderOffset);
+        Assert.Equal(unchecked((uint)(patchedAddress >> 8)), ReadUInt32(memory, RegistersAddress + 4));
+        Assert.Equal(
+            highFlags | (uint)((patchedAddress >> 40) & 0xFF),
+            ReadUInt32(memory, RegistersAddress + 12));
+    }
+
+    [Theory]
+    [InlineData(3, 0x48)]
+    [InlineData(6, 0xC8)]
+    [InlineData(7, 0x148)]
+    public void CreateShader_DoesNotFallBackToAnotherStageProgramPair(byte shaderType, uint wrongLowRegister)
+    {
+        var context = CreateContext(shaderType, 2, out var memory);
+        WriteRegister(memory, 0, wrongLowRegister, 0x1122);
+        WriteRegister(memory, 1, wrongLowRegister + 1, 0x3344);
+
+        AssertFailure(context, memory, IncompleteRegistersResult);
+
+        Assert.Equal(0x1122u, ReadUInt32(memory, RegistersAddress + 4));
+        Assert.Equal(0x3344u, ReadUInt32(memory, RegistersAddress + 12));
     }
 
     [Theory]
@@ -80,6 +100,21 @@ public sealed class AgcShaderCreationTests
     }
 
     [Theory]
+    [InlineData(4, 0x88)]
+    [InlineData(5, 0x108)]
+    public void CreateShader_FrontStagesDoNotPatchProgramAddressPairs(byte shaderType, uint lowRegister)
+    {
+        var context = CreateContext(shaderType, 2, out var memory);
+        WriteRegister(memory, 0, lowRegister, 0x1122_3344);
+        WriteRegister(memory, 1, lowRegister + 1, 0xAABB_CCDD);
+
+        AssertSuccess(context, memory);
+
+        Assert.Equal(0x1122_3344u, ReadUInt32(memory, RegistersAddress + 4));
+        Assert.Equal(0xAABB_CCDDu, ReadUInt32(memory, RegistersAddress + 12));
+    }
+
+    [Theory]
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
@@ -97,10 +132,14 @@ public sealed class AgcShaderCreationTests
     [InlineData(0, 0x20D)]
     [InlineData(1, 0x8)]
     [InlineData(1, 0x9)]
-    [InlineData(4, 0x88)]
-    [InlineData(4, 0x89)]
-    [InlineData(5, 0x108)]
-    [InlineData(5, 0x109)]
+    [InlineData(2, 0xC8)]
+    [InlineData(2, 0xC9)]
+    [InlineData(3, 0x148)]
+    [InlineData(3, 0x149)]
+    [InlineData(6, 0x88)]
+    [InlineData(6, 0x89)]
+    [InlineData(7, 0x108)]
+    [InlineData(7, 0x109)]
     public void CreateShader_RejectsIncompleteAddressPair(byte shaderType, uint remainingRegister)
     {
         var context = CreateContext(shaderType, 2, out var memory);
@@ -124,10 +163,12 @@ public sealed class AgcShaderCreationTests
     }
 
     [Theory]
+    [InlineData(0)]
     [InlineData(1)]
-    [InlineData(4)]
-    [InlineData(5)]
-    [InlineData(8)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(6)]
+    [InlineData(7)]
     public void CreateShader_RejectsNullPointerWithDeclaredEntries(byte shaderType)
     {
         var context = CreateContext(shaderType, 2, out var memory);
@@ -136,14 +177,20 @@ public sealed class AgcShaderCreationTests
     }
 
     [Theory]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(8)]
+    public void CreateShader_NoOpTypesDoNotReadDeclaredTable(byte shaderType)
+    {
+        var context = CreateContext(shaderType, 2, out var memory);
+        WriteUInt64(memory, HeaderAddress + 0x20, 0);
+
+        AssertSuccess(context, memory);
+    }
+
+    [Theory]
     [InlineData(1, 0)]
-    [InlineData(4, 0)]
-    [InlineData(5, 0)]
-    [InlineData(8, 0)]
     [InlineData(1, 4)]
-    [InlineData(4, 4)]
-    [InlineData(5, 4)]
-    [InlineData(8, 4)]
     public void CreateShader_RejectsUnreadableEntryOrValue(byte shaderType, uint readableBytes)
     {
         var context = CreateContext(shaderType, 1, out var memory);
@@ -157,12 +204,10 @@ public sealed class AgcShaderCreationTests
         AssertFailure(context, memory, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
-    [Theory]
-    [InlineData(1)]
-    [InlineData(8)]
-    public void CreateShader_RejectsTableAddressOverflow(byte shaderType)
+    [Fact]
+    public void CreateShader_RejectsTableAddressOverflow()
     {
-        var context = CreateContext(shaderType, 2, out var memory);
+        var context = CreateContext(1, 2, out var memory);
         WriteUInt64(memory, HeaderAddress + 0x20, (ulong.MaxValue - 7) - (HeaderAddress + 0x20));
         AssertFailure(context, memory, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }

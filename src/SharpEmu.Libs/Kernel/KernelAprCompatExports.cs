@@ -24,6 +24,13 @@ public static class KernelAprCompatExports
         int ExecutionResult,
         uint ErrorOffset);
 
+    public static void ResetRuntimeState()
+    {
+        _submittedCommandBuffers.Clear();
+        Volatile.Write(ref _nextSubmissionId, 0);
+        Volatile.Write(ref _aprWaitTraceCount, 0);
+    }
+
     [SysAbiExport(
         Nid = "ASoW5WE-UPo",
         ExportName = "sceKernelAprSubmitCommandBufferAndGetResult",
@@ -41,11 +48,7 @@ public static class KernelAprCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var submissionId = unchecked((uint)Interlocked.Increment(ref _nextSubmissionId));
-        if (submissionId == 0)
-        {
-            submissionId = unchecked((uint)Interlocked.Increment(ref _nextSubmissionId));
-        }
+        var submissionId = AllocateSubmissionId();
 
         var completionResult = AmprExports.CompleteCommandBuffer(
             ctx,
@@ -113,7 +116,7 @@ public static class KernelAprCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var submissionId = unchecked((uint)Interlocked.Increment(ref _nextSubmissionId));
+        var submissionId = AllocateSubmissionId();
         var completionResult = AmprExports.CompleteCommandBuffer(
             ctx,
             commandBuffer,
@@ -144,7 +147,7 @@ public static class KernelAprCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var submissionId = unchecked((uint)Interlocked.Increment(ref _nextSubmissionId));
+        var submissionId = AllocateSubmissionId();
         var completionResult = AmprExports.CompleteCommandBuffer(
             ctx,
             commandBuffer,
@@ -166,7 +169,48 @@ public static class KernelAprCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    private static bool TryWriteAprResult(
+    internal static uint RegisterCompletedSubmission(
+        ulong commandBuffer,
+        ulong priority,
+        ulong resultAddress,
+        int executionResult,
+        uint errorOffset)
+    {
+        var submissionId = AllocateSubmissionId();
+        _submittedCommandBuffers[submissionId] =
+            new AprSubmission(commandBuffer, priority, resultAddress, executionResult, errorOffset);
+        return submissionId;
+    }
+
+    internal static bool TryTakeCompletedSubmission(
+        uint submissionId,
+        out ulong resultAddress,
+        out int executionResult,
+        out uint errorOffset)
+    {
+        if (_submittedCommandBuffers.TryRemove(submissionId, out var submission))
+        {
+            resultAddress = submission.ResultAddress;
+            executionResult = submission.ExecutionResult;
+            errorOffset = submission.ErrorOffset;
+            return true;
+        }
+
+        resultAddress = 0;
+        executionResult = 0;
+        errorOffset = 0;
+        return false;
+    }
+
+    private static uint AllocateSubmissionId()
+    {
+        var submissionId = unchecked((uint)Interlocked.Increment(ref _nextSubmissionId));
+        if (submissionId == 0)
+            submissionId = unchecked((uint)Interlocked.Increment(ref _nextSubmissionId));
+        return submissionId;
+    }
+
+    internal static bool TryWriteAprResult(
         CpuContext ctx,
         ulong resultAddress,
         int executionResult,

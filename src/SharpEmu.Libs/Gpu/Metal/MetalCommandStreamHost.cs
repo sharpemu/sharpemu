@@ -143,9 +143,36 @@ internal sealed partial class MetalCommandStreamHost : AgcExports.TranslatingCom
     public override void RecordEndOfPipe(in EndOfPipeWrite write)
     {
         var completion = write;
-        if (MetalVideoPresenter.SubmitOrderedGuestAction(() => base.RecordEndOfPipe(in completion), $"command_stream completion {write.Kind}") == 0)
+        if (write.Kind is EndOfPipeWriteKind.GdsWrite32 or EndOfPipeWriteKind.InterruptGdsWrite32)
         {
-            base.RecordEndOfPipe(in completion);
+            if (MetalVideoPresenter.SubmitOrderedGuestAction(
+                    () => base.RecordEndOfPipe(in completion),
+                    $"command_stream completion {write.Kind}") == 0)
+            {
+                base.RecordEndOfPipe(in completion);
+            }
+
+            return;
+        }
+
+        PublishEndOfPipeLabel(in completion);
+        var needsOrderedNotification = write.Kind is
+            EndOfPipeWriteKind.InterruptOnly or
+            EndOfPipeWriteKind.Interrupt32 or
+            EndOfPipeWriteKind.Interrupt64 or
+            EndOfPipeWriteKind.InterruptWriteBack32 or
+            EndOfPipeWriteKind.InterruptWriteBack64 or
+            EndOfPipeWriteKind.InterruptClockWrite or
+            EndOfPipeWriteKind.InterruptClockWriteBack or
+            EndOfPipeWriteKind.Flip or
+            EndOfPipeWriteKind.FlipWithWrite32 or
+            EndOfPipeWriteKind.FlipWithInterruptWriteBack32;
+        if (needsOrderedNotification &&
+            MetalVideoPresenter.SubmitOrderedGuestAction(
+                () => CompleteEndOfPipe(in completion),
+                $"command_stream completion {write.Kind}") == 0)
+        {
+            CompleteEndOfPipe(in completion);
         }
     }
 

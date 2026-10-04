@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
+using SharpEmu.HLE;
 
 namespace SharpEmu.GUI;
 
@@ -18,6 +19,7 @@ internal sealed class EmulatorProcess : IDisposable
     public const int HostStopExitCode = -2;
 
     private const uint ExtendedStartupInfoPresent = 0x00080000;
+    private const uint CreateSuspended = 0x00000004;
     private const uint CreateNoWindow = 0x08000000;
     private const int StartfUseStdHandles = 0x00000100;
     private const uint HandleFlagInherit = 0x00000001;
@@ -26,10 +28,17 @@ internal sealed class EmulatorProcess : IDisposable
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
     private const int JobObjectExtendedLimitInformationClass = 9;
     private const string MitigatedChildFlag = "--sharpemu-mitigated-child";
+    private const string PreReservedPrimaryUserWindowFlag = "--sharpemu-pre-reserved-primary-user-window";
     private const string MitigatedChildEnvironment = "SHARPEMU_MITIGATED_CHILD";
+    private const ulong HighEntropyAslrAlwaysOff = 0x00000002UL << 20;
     private const ulong ControlFlowGuardAlwaysOff = 0x00000002UL << 40;
     private const ulong CetUserShadowStacksAlwaysOff = 0x00000002UL << 28;
     private const ulong UserCetSetContextIpValidationAlwaysOff = 0x00000002UL << 32;
+    private const uint MemReserve = 0x00002000;
+    private const uint MemRelease = 0x00008000;
+    private const uint MemReservePlaceholder = 0x00040000;
+    private const uint PageNoAccess = 0x00000001;
+    private const int ErrorInvalidAddress = 487;
 
     private static readonly object EnvironmentGate = new();
 
@@ -185,6 +194,7 @@ internal sealed class EmulatorProcess : IDisposable
         nint mitigationPolicies = 0;
         nint processHandle = 0;
         nint threadHandle = 0;
+        nint jobHandle = 0;
 
         try
         {
@@ -214,7 +224,9 @@ internal sealed class EmulatorProcess : IDisposable
             }
 
             mitigationPolicies = Marshal.AllocHGlobal(sizeof(ulong) * 2);
-            Marshal.WriteInt64(mitigationPolicies, unchecked((long)ControlFlowGuardAlwaysOff));
+            Marshal.WriteInt64(
+                mitigationPolicies,
+                unchecked((long)(HighEntropyAslrAlwaysOff | ControlFlowGuardAlwaysOff)));
             Marshal.WriteInt64(
                 nint.Add(mitigationPolicies, sizeof(long)),
                 unchecked((long)(CetUserShadowStacksAlwaysOff | UserCetSetContextIpValidationAlwaysOff)));
@@ -237,23 +249,32 @@ internal sealed class EmulatorProcess : IDisposable
             startup.StartupInfo.StdError = stderrWrite;
             startup.AttributeList = attributeList;
 
-            var childArguments = new List<string>(arguments.Count + 1) { MitigatedChildFlag };
+            var childArguments = new List<string>(arguments.Count + 2)
+            {
+                MitigatedChildFlag,
+                PreReservedPrimaryUserWindowFlag,
+            };
             childArguments.AddRange(arguments);
             var commandLine = new StringBuilder(BuildCommandLine(exePath, childArguments));
             ProcessInformation processInfo;
             lock (EnvironmentGate)
             {
                 var previousValue = Environment.GetEnvironmentVariable(MitigatedChildEnvironment);
+                var previousPreReservationValue = Environment.GetEnvironmentVariable(
+                    GuestMemoryLayout.PreReservedPrimaryUserWindowVariable);
                 try
                 {
                     Environment.SetEnvironmentVariable(MitigatedChildEnvironment, "1");
+                    Environment.SetEnvironmentVariable(
+                        GuestMemoryLayout.PreReservedPrimaryUserWindowVariable,
+                        GuestMemoryLayout.PreReservedPrimaryUserWindowMarker);
                     if (!CreateProcessW(
                             null,
                             commandLine,
                             0,
                             0,
                             true,
-                            ExtendedStartupInfoPresent | CreateNoWindow,
+                            ExtendedStartupInfoPresent | CreateSuspended | CreateNoWindow,
                             0,
                             string.IsNullOrWhiteSpace(workingDirectory)
                                 ? Path.GetDirectoryName(exePath) ?? Environment.CurrentDirectory
@@ -267,23 +288,44 @@ internal sealed class EmulatorProcess : IDisposable
                 finally
                 {
                     Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousValue);
+                    Environment.SetEnvironmentVariable(
+                        GuestMemoryLayout.PreReservedPrimaryUserWindowVariable,
+                        previousPreReservationValue);
                 }
             }
 
             processHandle = processInfo.Process;
             threadHandle = processInfo.Thread;
-            CloseHandle(stdoutWrite);
-            stdoutWrite = 0;
-            CloseHandle(stderrWrite);
-            stderrWrite = 0;
+            if (!TryPreReservePrimaryUserWindow(processHandle, out var reservationError))
+            {
+                throw new InvalidOperationException(
+                    $"Could not pre-reserve the primary guest user window " +
+                    $"(Win32 error {reservationError}).");
+            }
 
-            var jobHandle = CreateJobObjectW(0, null);
+            jobHandle = CreateJobObjectW(0, null);
             if (jobHandle != 0 &&
                 (!TryEnableKillOnJobClose(jobHandle) || !AssignProcessToJobObject(jobHandle, processHandle)))
             {
                 CloseHandle(jobHandle);
                 jobHandle = 0;
             }
+
+            var previousSuspendCount = ResumeThread(threadHandle);
+            if (previousSuspendCount != 1)
+            {
+                var resumeError = previousSuspendCount == uint.MaxValue
+                    ? Marshal.GetLastWin32Error()
+                    : 87;
+                throw new InvalidOperationException(
+                    $"Could not resume the pre-reserved emulator process " +
+                    $"(suspend count {previousSuspendCount}, Win32 error {resumeError}).");
+            }
+
+            CloseHandle(stdoutWrite);
+            stdoutWrite = 0;
+            CloseHandle(stderrWrite);
+            stderrWrite = 0;
 
             lock (_sync)
             {
@@ -292,6 +334,7 @@ internal sealed class EmulatorProcess : IDisposable
                 _running = true;
             }
             processHandle = 0;
+            jobHandle = 0;
 
             StartPipeReader(stdoutRead, isError: false);
             stdoutRead = 0;
@@ -304,6 +347,7 @@ internal sealed class EmulatorProcess : IDisposable
             if (processHandle != 0)
             {
                 _ = TerminateProcess(processHandle, 1);
+                _ = WaitForSingleObject(processHandle, Infinite);
             }
 
             throw;
@@ -317,6 +361,10 @@ internal sealed class EmulatorProcess : IDisposable
             if (processHandle != 0)
             {
                 CloseHandle(processHandle);
+            }
+            if (jobHandle != 0)
+            {
+                CloseHandle(jobHandle);
             }
             if (stdoutRead != 0)
             {
@@ -344,6 +392,54 @@ internal sealed class EmulatorProcess : IDisposable
                 Marshal.FreeHGlobal(mitigationPolicies);
             }
         }
+    }
+
+    private static bool TryPreReservePrimaryUserWindow(nint process, out int error)
+    {
+        var expectedAddress = unchecked((nint)(long)GuestMemoryLayout.GuestUserAddressStart);
+        var expectedSize = unchecked((nuint)GuestMemoryLayout.GuestPrimaryUserAddressSize);
+        var address = VirtualAlloc2(
+            process,
+            expectedAddress,
+            expectedSize,
+            MemReserve | MemReservePlaceholder,
+            PageNoAccess,
+            0,
+            0);
+        if (address != expectedAddress)
+        {
+            error = Marshal.GetLastWin32Error();
+            if (address != 0)
+            {
+                _ = VirtualFreeEx(process, address, 0, MemRelease);
+            }
+            return false;
+        }
+
+        if (VirtualQueryEx(
+                process,
+                address,
+                out var info,
+                (nuint)Marshal.SizeOf<MemoryBasicInformation>()) == 0)
+        {
+            error = Marshal.GetLastWin32Error();
+            _ = VirtualFreeEx(process, address, 0, MemRelease);
+            return false;
+        }
+
+        if (info.BaseAddress != expectedAddress ||
+            info.AllocationBase != expectedAddress ||
+            info.AllocationProtect != PageNoAccess ||
+            info.RegionSize != expectedSize ||
+            info.State != MemReserve)
+        {
+            error = ErrorInvalidAddress;
+            _ = VirtualFreeEx(process, address, 0, MemRelease);
+            return false;
+        }
+
+        error = 0;
+        return true;
     }
 
     private void StartPipeReader(nint handle, bool isError)
@@ -562,6 +658,20 @@ internal sealed class EmulatorProcess : IDisposable
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryBasicInformation
+    {
+        public nint BaseAddress;
+        public nint AllocationBase;
+        public uint AllocationProtect;
+        public uint Alignment1;
+        public nuint RegionSize;
+        public uint State;
+        public uint Protect;
+        public uint Type;
+        public uint Alignment2;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     private struct JobObjectBasicLimitInformation
     {
         public long PerProcessUserTimeLimit;
@@ -630,6 +740,34 @@ internal sealed class EmulatorProcess : IDisposable
     [DllImport("kernel32.dll", EntryPoint = "CreateProcessW", SetLastError = true, CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CreateProcessW(string? applicationName, StringBuilder commandLine, nint processAttributes, nint threadAttributes, [MarshalAs(UnmanagedType.Bool)] bool inheritHandles, uint flags, nint environment, string currentDirectory, ref StartupInfoEx startupInfo, out ProcessInformation processInformation);
+
+    [DllImport("kernelbase.dll", EntryPoint = "VirtualAlloc2", SetLastError = true)]
+    private static extern nint VirtualAlloc2(
+        nint process,
+        nint baseAddress,
+        nuint size,
+        uint allocationType,
+        uint pageProtection,
+        nint extendedParameters,
+        uint parameterCount);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool VirtualFreeEx(
+        nint process,
+        nint baseAddress,
+        nuint size,
+        uint freeType);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nuint VirtualQueryEx(
+        nint process,
+        nint address,
+        out MemoryBasicInformation information,
+        nuint informationLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint ResumeThread(nint thread);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern uint WaitForSingleObject(nint handle, uint milliseconds);

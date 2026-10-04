@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Metal;
+using SharpEmu.ShaderCompiler;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
@@ -53,5 +54,27 @@ public sealed class MetalRenderTargetFormatTests
                 numberType: 0,
                 componentSwap: 4,
                 out _));
+    }
+
+    [Theory]
+    [InlineData(13u, 4u, 123u, Gen5PixelOutputKind.Uint)]
+    [InlineData(14u, 4u, 123u, Gen5PixelOutputKind.Uint)]
+    [InlineData(14u, 5u, 124u, Gen5PixelOutputKind.Sint)]
+    [InlineData(14u, 7u, 125u, Gen5PixelOutputKind.Float)]
+    public void Rgba32TargetsPreserveNumberType(
+        uint dataFormat,
+        uint numberType,
+        uint expectedFormat,
+        Gen5PixelOutputKind expectedOutputKind)
+    {
+        Assert.True(
+            MetalGuestFormats.TryDecodeRenderTargetFormat(
+                dataFormat,
+                numberType,
+                componentSwap: 0,
+                out var decoded));
+
+        Assert.Equal((MtlPixelFormat)expectedFormat, decoded.Format);
+        Assert.Equal(expectedOutputKind, decoded.OutputKind);
     }
 }

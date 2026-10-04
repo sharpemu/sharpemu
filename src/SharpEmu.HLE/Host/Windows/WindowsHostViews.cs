@@ -8,6 +8,7 @@ namespace SharpEmu.HLE.Host.Windows;
 internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
 {
     internal static bool FailAliasMapForTests;
+    internal static bool FailBackingCommitForTests;
     internal static bool FailProtectForTests;
 
     private const uint MEM_COMMIT = 0x1000;
@@ -25,8 +26,8 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
     private const uint PAGE_EXECUTE_READ = 0x20;
     private const uint PAGE_EXECUTE_READWRITE = 0x40;
     private const uint PAGE_EXECUTE_WRITECOPY = 0x80;
-    private const uint SEC_COMMIT = 0x8000000;
-    private const uint FILE_MAP_READ_WRITE = 0x6;
+    private const uint SEC_RESERVE = 0x4000000;
+    private const ulong MEM_EXTENDED_PARAMETER_ADDRESS_REQUIREMENTS = 1;
     private static readonly nint InvalidHandle = -1;
 
     public WindowsHostViews()
@@ -49,13 +50,13 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
             return false;
         }
 
-        var handle = CreateFileMappingW(InvalidHandle, null, PAGE_EXECUTE_READWRITE | SEC_COMMIT, (uint)(size >> 32), (uint)size, null);
+        var handle = CreateFileMappingW(InvalidHandle, null, PAGE_EXECUTE_READWRITE | SEC_RESERVE, (uint)(size >> 32), (uint)size, null);
         if (handle == 0)
         {
             return false;
         }
 
-        var alias = FailAliasMapForTests ? null : MapViewOfFile(handle, FILE_MAP_READ_WRITE, 0, 0, (nuint)size);
+        var alias = FailAliasMapForTests ? null : MapBackingAlias(handle, size);
         if (alias == null)
         {
             CloseHandle(handle);
@@ -65,6 +66,122 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
         backing = new HostBackingObject((ulong)alias, size, ReleaseBackingObject) { Handle = handle };
         failure = HostViewFailure.None;
         return true;
+    }
+
+    private static void* MapBackingAlias(nint handle, ulong size)
+    {
+        // Keep host-only storage above every address the guest allocator can return.
+        var requirements = new MemAddressRequirements
+        {
+            LowestStartingAddress = (void*)GuestMemoryLayout.GuestAddressLimit,
+            Alignment = 0,
+        };
+        var parameter = new MemExtendedParameter
+        {
+            Type = MEM_EXTENDED_PARAMETER_ADDRESS_REQUIREMENTS,
+            Pointer = &requirements,
+        };
+
+        return MapViewOfFile3(
+            handle,
+            GetCurrentProcess(),
+            null,
+            0,
+            (nuint)size,
+            0,
+            PAGE_READWRITE,
+            &parameter,
+            1);
+    }
+
+    public bool TryCommitBacking(HostBackingObject backing, ulong offset, ulong size)
+    {
+        lock (backing.Gate)
+        {
+            return !backing.IsDisposed &&
+                   HostViewMemory.IsValidOffset(backing, offset, size, PageSize) &&
+                   TryCommitBackingCore(backing, offset, size);
+        }
+    }
+
+    public bool TryReserveFreeRegions(
+        ulong startAddress,
+        ulong endAddress,
+        ulong minimumRegionSize,
+        out IReadOnlyList<HostAddressRange> reservations)
+    {
+        var reserved = new List<HostAddressRange>();
+        reservations = reserved;
+        if (startAddress == 0 || startAddress >= endAddress)
+        {
+            return false;
+        }
+
+        var process = GetCurrentProcess();
+        var current = startAddress;
+        while (current < endAddress)
+        {
+            if (VirtualQuery((void*)current, out var info, (nuint)sizeof(MemoryBasicInformation)) == 0)
+            {
+                RollBackReservations(reserved);
+                reservations = Array.Empty<HostAddressRange>();
+                return false;
+            }
+
+            var nativeEnd = info.RegionSize > ulong.MaxValue - info.BaseAddress
+                ? ulong.MaxValue
+                : info.BaseAddress + info.RegionSize;
+            var regionEnd = Math.Min(endAddress, nativeEnd);
+            if (regionEnd <= current)
+            {
+                RollBackReservations(reserved);
+                reservations = Array.Empty<HostAddressRange>();
+                return false;
+            }
+
+            var reserveStart = AlignUp(Math.Max(startAddress, info.BaseAddress), Granularity);
+            var reserveEnd = AlignDown(regionEnd, Granularity);
+            if (info.State == MEM_FREE && reserveStart != 0 && reserveEnd > reserveStart &&
+                reserveEnd - reserveStart > minimumRegionSize)
+            {
+                var size = reserveEnd - reserveStart;
+                var ptr = VirtualAlloc2(
+                    process,
+                    (void*)reserveStart,
+                    (nuint)size,
+                    MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+                    PAGE_NOACCESS,
+                    null,
+                    0);
+                if ((ulong)ptr != reserveStart)
+                {
+                    if (ptr != null)
+                    {
+                        VirtualFree(ptr, 0, MEM_RELEASE);
+                    }
+
+                    RollBackReservations(reserved);
+                    reservations = Array.Empty<HostAddressRange>();
+                    return false;
+                }
+
+                reserved.Add(new HostAddressRange(reserveStart, size));
+            }
+
+            current = regionEnd;
+        }
+
+        return true;
+    }
+
+    private static void RollBackReservations(List<HostAddressRange> reservations)
+    {
+        for (var index = reservations.Count - 1; index >= 0; index--)
+        {
+            VirtualFree((void*)reservations[index].Address, 0, MEM_RELEASE);
+        }
+
+        reservations.Clear();
     }
 
     public ulong ReserveHole(ulong address, ulong size)
@@ -130,6 +247,26 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
         return reserved;
     }
 
+    public bool TryAdoptPlaceholder(ulong address, ulong size)
+    {
+        if (!HostViewMemory.IsValidRange(address, size) ||
+            address % Granularity != 0 || size % Granularity != 0 ||
+            VirtualQuery((void*)address, out var info, (nuint)sizeof(MemoryBasicInformation)) == 0)
+        {
+            return false;
+        }
+
+        // VirtualQuery cannot distinguish an ordinary reservation from a placeholder.
+        // The trusted launch handshake proves that the suspended parent created this
+        // exact allocation with MEM_RESERVE_PLACEHOLDER; these checks ensure that no
+        // intervening allocation changed or split it before ownership is published.
+        return info.BaseAddress == address &&
+               info.AllocationBase == address &&
+               info.AllocationProtect == PAGE_NOACCESS &&
+               info.RegionSize == size &&
+               info.State == MEM_RESERVE;
+    }
+
     public bool SplitHole(ulong address, ulong size) =>
         VirtualFree((void*)address, (nuint)size, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
 
@@ -181,6 +318,13 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
             {
                 UnmapViewOfFile2(process, ptr, MEM_PRESERVE_PLACEHOLDER);
                 failure = HostViewFailure.WrongHostAddress;
+                return false;
+            }
+
+            if (!TryCommitBackingCore(backing, offset, size))
+            {
+                UnmapViewOfFile2(process, ptr, MEM_PRESERVE_PLACEHOLDER);
+                failure = HostViewFailure.BackingCommitFailed;
                 return false;
             }
 
@@ -254,13 +398,17 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
         return true;
     }
 
-    private static ulong AlignUp(ulong value, ulong alignment)
+    private static bool TryCommitBackingCore(HostBackingObject backing, ulong offset, ulong size)
     {
-        var remainder = value % alignment;
-        return remainder == 0 ? value : value + (alignment - remainder);
-    }
+        if (FailBackingCommitForTests)
+        {
+            return false;
+        }
 
-    private static ulong AlignDown(ulong value, ulong alignment) => value - value % alignment;
+        var address = backing.AliasBase + offset;
+        var ptr = VirtualAlloc2(GetCurrentProcess(), (void*)address, (nuint)size, MEM_COMMIT, PAGE_READWRITE, null, 0);
+        return ptr != null && (ulong)ptr == address;
+    }
 
     private static void ReleaseBackingObject(HostBackingObject backing)
     {
@@ -279,6 +427,16 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
         HostPageProtection.ExecuteWriteCopy => PAGE_EXECUTE_WRITECOPY,
         _ => throw new ArgumentOutOfRangeException(nameof(protection), protection, null),
     };
+
+    private static ulong AlignDown(ulong value, ulong alignment) => value / alignment * alignment;
+
+    private static ulong AlignUp(ulong value, ulong alignment)
+    {
+        var remainder = value % alignment;
+        return remainder == 0 ? value : value <= ulong.MaxValue - (alignment - remainder)
+            ? value + alignment - remainder
+            : 0;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SystemInfo
@@ -310,6 +468,21 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
         public uint Alignment2;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemAddressRequirements
+    {
+        public void* LowestStartingAddress;
+        public void* HighestEndingAddress;
+        public nuint Alignment;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemExtendedParameter
+    {
+        public ulong Type;
+        public void* Pointer;
+    }
+
     [LibraryImport("kernel32.dll")]
     private static partial nuint VirtualQuery(void* address, out MemoryBasicInformation info, nuint length);
 
@@ -325,9 +498,6 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial nint CreateFileMappingW(nint file, void* attributes, uint protect, uint maximumSizeHigh, uint maximumSizeLow, ushort* name);
-
-    [LibraryImport("kernel32.dll", SetLastError = true)]
-    private static partial void* MapViewOfFile(nint fileMapping, uint desiredAccess, uint offsetHigh, uint offsetLow, nuint bytesToMap);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

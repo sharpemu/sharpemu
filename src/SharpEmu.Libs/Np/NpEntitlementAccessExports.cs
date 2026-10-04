@@ -23,7 +23,16 @@ public static class NpEntitlementAccessExports
 
     private const int NpEntitlementAccessErrorParameter = unchecked((int)0x817D0002);
     private const int NpEntitlementAccessErrorNoEntitlement = unchecked((int)0x817D0007);
+    private const int NpEntitlementAccessErrorRequestNotFound = unchecked((int)0x817D0015);
+    private const int NpEntitlementAccessErrorAborted = unchecked((int)0x817D0016);
+    private const int UnifiedRequestParameterSize = 0x20;
+    private const long UnifiedRequestIdOffset = 0x1000_0000;
+    private const int InvalidUnifiedEntitlementOffset = -1;
     private const int EntitlementKeySize = 16;
+
+    private static readonly object UnifiedRequestGate = new();
+    private static readonly Dictionary<long, bool> UnifiedRequests = [];
+    private static long _unifiedRequestCount;
 
     // Offline entitlements queried by titles through NpEntitlementAccess.
     // GTA V Enhanced (PPSA04264) gates Story Mode on these three labels; without
@@ -45,6 +54,17 @@ public static class NpEntitlementAccessExports
         string Label,
         uint PackageType,
         uint DownloadStatus);
+
+    public static void ResetRuntimeState()
+    {
+        lock (UnifiedRequestGate)
+        {
+            UnifiedRequests.Clear();
+            _unifiedRequestCount = 0;
+        }
+    }
+
+    internal static void ResetForTests() => ResetRuntimeState();
 
     [SysAbiExport(
         Nid = "jO8DM8oyego",
@@ -201,21 +221,154 @@ public static class NpEntitlementAccessExports
     }
 
     [SysAbiExport(
+        Nid = "uCZf2L27th8",
+        ExportName = "sceNpEntitlementAccessRequestUnifiedEntitlementInfoList",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessRequestUnifiedEntitlementInfoList(CpuContext ctx)
+    {
+        var listAddress = ctx[CpuRegister.Rdx];
+        var listNum = (uint)ctx[CpuRegister.Rcx];
+        var parameterAddress = ctx[CpuRegister.R8];
+        var requestIdAddress = ctx[CpuRegister.R9];
+        if (parameterAddress == 0 || requestIdAddress == 0 || (listAddress == 0 && listNum != 0))
+        {
+            return ctx.SetReturn(NpEntitlementAccessErrorParameter);
+        }
+
+        // The offline implementation returns an already-completed empty request, but the
+        // parameter still belongs to the ABI and must point at the complete 0x20-byte record.
+        Span<byte> parameter = stackalloc byte[UnifiedRequestParameterSize];
+        if (!ctx.Memory.TryRead(parameterAddress, parameter))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        long requestId;
+        lock (UnifiedRequestGate)
+        {
+            requestId = UnifiedRequestIdOffset + ++_unifiedRequestCount;
+            Span<byte> encodedRequestId = stackalloc byte[sizeof(long)];
+            BinaryPrimitives.WriteInt64LittleEndian(encodedRequestId, requestId);
+            if (!ctx.Memory.TryWrite(requestIdAddress, encodedRequestId))
+            {
+                _unifiedRequestCount--;
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            UnifiedRequests.Add(requestId, false);
+        }
+
+        TraceNpEntitlementAccess(
+            $"request_unified user={unchecked((int)ctx[CpuRegister.Rdi])} service={(uint)ctx[CpuRegister.Rsi]} " +
+            $"list=0x{listAddress:X16} list_num={listNum} request_id={requestId}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "nAEqawEZG5s",
+        ExportName = "sceNpEntitlementAccessPollUnifiedEntitlementInfoList",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessPollUnifiedEntitlementInfoList(CpuContext ctx)
+    {
+        var requestId = unchecked((long)ctx[CpuRegister.Rdi]);
+        var resultAddress = ctx[CpuRegister.Rsi];
+        var hitNumAddress = ctx[CpuRegister.R8];
+        var nextOffsetAddress = ctx[CpuRegister.R9];
+        if (resultAddress == 0)
+        {
+            return ctx.SetReturn(NpEntitlementAccessErrorParameter);
+        }
+
+        var previousOffsetAddress = 0ul;
+        if (!ctx.TryGetImportStackArgument(0, out previousOffsetAddress) &&
+            ctx[CpuRegister.Rsp] != 0 &&
+            !ctx.TryReadUInt64(ctx[CpuRegister.Rsp] + sizeof(ulong), out previousOffsetAddress))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        bool aborted;
+        lock (UnifiedRequestGate)
+        {
+            if (!UnifiedRequests.TryGetValue(requestId, out aborted))
+            {
+                return ctx.SetReturn(NpEntitlementAccessErrorRequestNotFound);
+            }
+        }
+
+        if (!TryWriteInt32(ctx, resultAddress, aborted ? NpEntitlementAccessErrorAborted : 0) ||
+            (hitNumAddress != 0 && !TryWriteUInt32(ctx, hitNumAddress, 0)) ||
+            (nextOffsetAddress != 0 && !TryWriteInt32(ctx, nextOffsetAddress, InvalidUnifiedEntitlementOffset)) ||
+            (previousOffsetAddress != 0 && !TryWriteInt32(ctx, previousOffsetAddress, InvalidUnifiedEntitlementOffset)))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        TraceNpEntitlementAccess(
+            $"poll_unified request_id={requestId} result={(aborted ? NpEntitlementAccessErrorAborted : 0)} hit_num=0");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "HFcQl9TMcFQ",
+        ExportName = "sceNpEntitlementAccessAbortRequest",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessAbortRequest(CpuContext ctx)
+    {
+        var requestId = unchecked((long)ctx[CpuRegister.Rdi]);
+        lock (UnifiedRequestGate)
+        {
+            if (!UnifiedRequests.ContainsKey(requestId))
+            {
+                return ctx.SetReturn(NpEntitlementAccessErrorRequestNotFound);
+            }
+
+            UnifiedRequests[requestId] = true;
+        }
+
+        TraceNpEntitlementAccess($"abort_request request_id={requestId}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "Z0eQj8m7XA8",
+        ExportName = "sceNpEntitlementAccessDeleteRequest",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessDeleteRequest(CpuContext ctx)
+    {
+        var requestId = unchecked((long)ctx[CpuRegister.Rdi]);
+        lock (UnifiedRequestGate)
+        {
+            if (!UnifiedRequests.Remove(requestId))
+            {
+                return ctx.SetReturn(NpEntitlementAccessErrorRequestNotFound);
+            }
+        }
+
+        TraceNpEntitlementAccess($"delete_request request_id={requestId}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
         Nid = "5LiMEPuW0DQ",
         ExportName = "sceNpEntitlementAccessGetEntitlementKey",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNpEntitlementAccess")]
     public static int NpEntitlementAccessGetEntitlementKey(CpuContext ctx)
     {
-        var labelAddress = ctx[CpuRegister.Rsi];
-        var keyAddress = ctx[CpuRegister.Rdx];
-        if (labelAddress == 0 || keyAddress == 0)
+        var entitlementLabelAddress = ctx[CpuRegister.Rsi];
+        var entitlementKeyAddress = ctx[CpuRegister.Rdx];
+        if (entitlementLabelAddress == 0 || entitlementKeyAddress == 0)
         {
             return ctx.SetReturn(NpEntitlementAccessErrorParameter);
         }
 
         Span<byte> labelBytes = stackalloc byte[EntitlementLabelSize];
-        if (!ctx.Memory.TryRead(labelAddress, labelBytes))
+        if (!ctx.Memory.TryRead(entitlementLabelAddress, labelBytes))
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
@@ -223,15 +376,19 @@ public static class NpEntitlementAccessExports
         var label = ReadEntitlementLabel(labelBytes);
         Span<byte> key = stackalloc byte[EntitlementKeySize];
         key.Clear();
-        if (!ctx.Memory.TryWrite(keyAddress, key))
+        if (!ctx.Memory.TryWrite(entitlementKeyAddress, key))
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        return ctx.SetReturn(OwnedAddcontEntitlements.Any(entitlement =>
+        var result = OwnedAddcontEntitlements.Any(entitlement =>
             string.Equals(label, entitlement.Label, StringComparison.Ordinal))
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
-            : NpEntitlementAccessErrorNoEntitlement);
+            : NpEntitlementAccessErrorNoEntitlement;
+        TraceNpEntitlementAccess(
+            $"get_entitlement_key service={ctx[CpuRegister.Rdi]} " +
+            $"label=0x{entitlementLabelAddress:X16} key=0x{entitlementKeyAddress:X16} result=0x{result:X8}");
+        return ctx.SetReturn(result);
     }
 
     private static bool TryWriteAddcontEntitlementInfo(
@@ -269,6 +426,20 @@ public static class NpEntitlementAccessExports
         return length == 0
             ? string.Empty
             : Encoding.ASCII.GetString(bytes[..length]);
+    }
+
+    private static bool TryWriteInt32(CpuContext ctx, ulong address, int value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
+        return ctx.Memory.TryWrite(address, bytes);
+    }
+
+    private static bool TryWriteUInt32(CpuContext ctx, ulong address, uint value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        return ctx.Memory.TryWrite(address, bytes);
     }
 
     private static void TraceNpEntitlementAccess(string message)

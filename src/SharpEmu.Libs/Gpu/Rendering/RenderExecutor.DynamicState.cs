@@ -29,7 +29,11 @@ public sealed partial class RenderExecutor
     }
 
     // The dynamic state of a draw from the context bank and the resolved targets.
-    private DynamicDrawState BuildDynamicState(ContextRegisters context, in DrawState state)
+    private DynamicDrawState BuildDynamicState(
+        ContextRegisters context,
+        in DrawState state,
+        Span<DynamicViewportState> viewportStates,
+        out int viewportCount)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawDynamicStatePreparation);
         var viewportRegisters = context.ScreenViewport;
@@ -52,26 +56,75 @@ public sealed partial class RenderExecutor
             framebufferHeight = limits.MaxFramebufferHeight;
         }
 
-        var scissor = ResolveScissor(viewportRegisters, context.ScanMode, framebufferWidth, framebufferHeight);
-        ref readonly var viewport = ref viewportRegisters.Viewports[0];
-        float viewportX;
-        float viewportY;
-        float viewportWidth;
-        float viewportHeight;
-        if (context.Clip.ClipDisable)
+        var writesViewportIndex = state.Programs.VertexInput.Stage.Program?.WritesViewportIndex == true;
+        viewportCount = writesViewportIndex ? ScreenViewportRegisters.ViewportCount : 1;
+        if (writesViewportIndex && limits.MaxViewports < ScreenViewportRegisters.ViewportCount)
         {
-            viewportX = 0;
-            viewportY = 0;
-            viewportWidth = Math.Min(limits.MaxViewportWidth, MaxViewportDimension);
-            viewportHeight = Math.Min(limits.MaxViewportHeight, MaxViewportDimension);
+            throw _host.Fatal(
+                $"The final pre-raster stage exports ViewportIndex but the host cannot bind every guest viewport: " +
+                $"required={ScreenViewportRegisters.ViewportCount} available={limits.MaxViewports}.");
         }
-        else
+        if (viewportStates.Length < viewportCount)
         {
-            viewportX = viewport.XOffset - viewport.XScale;
-            viewportY = viewport.YOffset - viewport.YScale;
-            viewportWidth = viewport.XScale * 2f;
-            viewportHeight = viewport.YScale * 2f;
+            throw new ArgumentException(
+                $"The dynamic viewport destination is too small: required={viewportCount} available={viewportStates.Length}.",
+                nameof(viewportStates));
         }
+
+        for (var index = 0; index < viewportCount; index++)
+        {
+            ref readonly var viewport = ref viewportRegisters.Viewports[index];
+            float viewportX;
+            float viewportY;
+            float viewportWidth;
+            float viewportHeight;
+            if (context.Clip.ClipDisable)
+            {
+                viewportX = 0;
+                viewportY = 0;
+                viewportWidth = Math.Min(limits.MaxViewportWidth, MaxViewportDimension);
+                viewportHeight = Math.Min(limits.MaxViewportHeight, MaxViewportDimension);
+            }
+            else
+            {
+                viewportX = viewport.XOffset - viewport.XScale;
+                viewportY = viewport.YOffset - viewport.YScale;
+                viewportWidth = viewport.XScale * 2f;
+                viewportHeight = viewport.YScale * 2f;
+            }
+
+            var scissor = ResolveScissor(
+                viewportRegisters,
+                context.ScanMode,
+                framebufferWidth,
+                framebufferHeight,
+                index);
+            if (viewportWidth == 0f || viewportHeight == 0f)
+            {
+                // Preserve the guest index while satisfying Vulkan's nonzero viewport
+                // extent requirements. An empty scissor keeps an unused slot rasterless.
+                if (viewportWidth == 0f)
+                {
+                    viewportWidth = 1f;
+                }
+                if (viewportHeight == 0f)
+                {
+                    viewportHeight = 1f;
+                }
+                scissor = new ScissorRectangle(scissor.Left, scissor.Top, scissor.Left, scissor.Top);
+            }
+
+            viewportStates[index] = new DynamicViewportState(
+                viewportX,
+                viewportY,
+                viewportWidth,
+                viewportHeight,
+                viewport.ZOffset - (context.Clip.DirectXClipSpace ? 0f : viewport.ZScale),
+                viewport.ZScale + viewport.ZOffset,
+                scissor);
+        }
+
+        ref readonly var firstViewport = ref viewportStates[0];
 
         var lineWidth = context.LineWidth;
         if (lineWidth != 1f)
@@ -113,13 +166,13 @@ public sealed partial class RenderExecutor
 
         var blend = context.BlendColor;
         return new DynamicDrawState(
-            viewportX,
-            viewportY,
-            viewportWidth,
-            viewportHeight,
-            viewport.ZOffset - (context.Clip.DirectXClipSpace ? 0f : viewport.ZScale),
-            viewport.ZScale + viewport.ZOffset,
-            scissor,
+            firstViewport.X,
+            firstViewport.Y,
+            firstViewport.Width,
+            firstViewport.Height,
+            firstViewport.MinDepth,
+            firstViewport.MaxDepth,
+            firstViewport.Scissor,
             lineWidth,
             blend.Red,
             blend.Green,
@@ -140,7 +193,12 @@ public sealed partial class RenderExecutor
     }
 
     // The screen, window, generic, viewport and clip rectangles intersected and clamped to the extent.
-    public static ScissorRectangle ResolveScissor(ScreenViewportRegisters viewport, in ScanModeRegisters scanMode, uint width, uint height)
+    public static ScissorRectangle ResolveScissor(
+        ScreenViewportRegisters viewport,
+        in ScanModeRegisters scanMode,
+        uint width,
+        uint height,
+        int viewportIndex = 0)
     {
         var screen = new ScissorRectangle(viewport.ScreenScissorLeft, viewport.ScreenScissorTop, viewport.ScreenScissorRight, viewport.ScreenScissorBottom);
         var final = screen;
@@ -175,11 +233,20 @@ public sealed partial class RenderExecutor
             final = final.Intersect(in generic);
         }
 
-        ref readonly var first = ref viewport.Viewports[0];
-        var viewportScissor = new ScissorRectangle(first.ScissorLeft, first.ScissorTop, first.ScissorRight, first.ScissorBottom);
+        if ((uint)viewportIndex >= ScreenViewportRegisters.ViewportCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(viewportIndex));
+        }
+
+        ref readonly var indexedViewport = ref viewport.Viewports[viewportIndex];
+        var viewportScissor = new ScissorRectangle(
+            indexedViewport.ScissorLeft,
+            indexedViewport.ScissorTop,
+            indexedViewport.ScissorRight,
+            indexedViewport.ScissorBottom);
         if (scanMode.ViewportScissorEnable && viewportScissor.IsSet)
         {
-            if (first.ScissorWindowOffsetEnable)
+            if (indexedViewport.ScissorWindowOffsetEnable)
             {
                 viewportScissor = viewportScissor.Offset(viewport.WindowOffsetX, viewport.WindowOffsetY);
             }

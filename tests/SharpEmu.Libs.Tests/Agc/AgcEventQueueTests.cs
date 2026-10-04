@@ -115,6 +115,243 @@ public sealed class AgcEventQueueTests
     }
 
     [Fact]
+    public void GraphicsCompletionQueue_PreservesMoreThan256EventsInOrder()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        var handle = CreateEqueue(ctx, memory, BaseAddress + 0x100);
+        const ulong eventId = 0x31;
+        const ulong userData = 0xCAFE_BABE;
+        const int eventCount = 300;
+
+        Assert.True(KernelEventQueueCompatExports.RegisterEvent(
+            handle,
+            eventId,
+            KernelEventQueueCompatExports.KernelEventFilterGraphics,
+            userData));
+
+        for (var index = 0; index < eventCount; index++)
+        {
+            Assert.Equal(1, KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
+                KernelEventQueueCompatExports.KernelEventFilterGraphics,
+                unchecked((ulong)index),
+                eventId));
+        }
+
+        for (var index = 0; index < eventCount; index++)
+        {
+            Assert.True(KernelEventQueueCompatExports.TryReservePendingEventForTest(
+                handle,
+                out var delivered));
+            Assert.Equal(unchecked((ulong)index), delivered.Data);
+            Assert.Equal(userData, delivered.UserData);
+        }
+
+        Assert.False(KernelEventQueueCompatExports.TryReservePendingEventForTest(
+            handle,
+            out _));
+        DeleteEqueue(ctx, handle);
+    }
+
+    [Fact]
+    public void DeleteRegistration_PurgesEveryPendingGraphicsCompletion()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        var handle = CreateEqueue(ctx, memory, BaseAddress + 0x100);
+        const ulong eventId = 0x32;
+
+        Assert.True(KernelEventQueueCompatExports.RegisterEvent(
+            handle,
+            eventId,
+            KernelEventQueueCompatExports.KernelEventFilterGraphics,
+            userData: 0x1111));
+        for (ulong data = 1; data <= 3; data++)
+        {
+            Assert.Equal(1, KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
+                KernelEventQueueCompatExports.KernelEventFilterGraphics,
+                data,
+                eventId));
+        }
+
+        Assert.True(KernelEventQueueCompatExports.DeleteRegisteredEvent(
+            handle,
+            eventId,
+            KernelEventQueueCompatExports.KernelEventFilterGraphics));
+        Assert.False(KernelEventQueueCompatExports.TryReservePendingEventForTest(
+            handle,
+            out _));
+
+        DeleteEqueue(ctx, handle);
+    }
+
+    [Fact]
+    public void ReregisteringGraphicsEvent_UpdatesEveryPendingUserData()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        var handle = CreateEqueue(ctx, memory, BaseAddress + 0x100);
+        const ulong eventId = 0x33;
+        const ulong replacementUserData = 0x2222;
+
+        Assert.True(KernelEventQueueCompatExports.RegisterEvent(
+            handle,
+            eventId,
+            KernelEventQueueCompatExports.KernelEventFilterGraphics,
+            userData: 0x1111));
+        for (ulong data = 1; data <= 3; data++)
+        {
+            Assert.Equal(1, KernelEventQueueCompatExports.TriggerRegisteredEventsByFilter(
+                KernelEventQueueCompatExports.KernelEventFilterGraphics,
+                data,
+                eventId));
+        }
+
+        Assert.True(KernelEventQueueCompatExports.RegisterEvent(
+            handle,
+            eventId,
+            KernelEventQueueCompatExports.KernelEventFilterGraphics,
+            replacementUserData));
+
+        for (ulong data = 1; data <= 3; data++)
+        {
+            Assert.True(KernelEventQueueCompatExports.TryReservePendingEventForTest(
+                handle,
+                out var delivered));
+            Assert.Equal(data, delivered.Data);
+            Assert.Equal(replacementUserData, delivered.UserData);
+        }
+
+        Assert.False(KernelEventQueueCompatExports.TryReservePendingEventForTest(
+            handle,
+            out _));
+        DeleteEqueue(ctx, handle);
+    }
+
+    [Fact]
+    public void FiniteWait_StagesCooperativeBlockAndCanWakeWithAnEvent()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        var handle = CreateEqueue(ctx, memory, BaseAddress + 0x100);
+        const ulong eventsAddress = BaseAddress + 0x200;
+        const ulong outCountAddress = BaseAddress + 0x300;
+        const ulong timeoutAddress = BaseAddress + 0x400;
+        WriteUInt32(memory, timeoutAddress, 5_000_000);
+
+        IGuestThreadBlockWaiter? stagedWaiter = null;
+        var previousThread = GuestThreadExecution.EnterGuestThread(0x734);
+        var previousFrame = GuestThreadExecution.EnterImportCallFrame(
+            returnRip: 0x1_7340,
+            resumeRsp: 0x2_7340,
+            returnSlotAddress: 0x3_7340);
+        try
+        {
+            ctx[CpuRegister.Rdi] = handle;
+            ctx[CpuRegister.Rsi] = eventsAddress;
+            ctx[CpuRegister.Rdx] = 1;
+            ctx[CpuRegister.Rcx] = outCountAddress;
+            ctx[CpuRegister.R8] = timeoutAddress;
+
+            Assert.Equal(
+                (int)OrbisGen2Result.ORBIS_GEN2_OK,
+                KernelEventQueueCompatExports.KernelWaitEqueue(ctx));
+            Assert.True(GuestThreadExecution.TryConsumeCurrentThreadBlock(
+                out var reason,
+                out _,
+                out var hasContinuation,
+                out _,
+                out stagedWaiter,
+                out var deadline));
+            Assert.Equal("sceKernelWaitEqueue", reason);
+            Assert.True(hasContinuation);
+            Assert.NotNull(stagedWaiter);
+            Assert.True(deadline > 0);
+        }
+        finally
+        {
+            GuestThreadExecution.RestoreImportCallFrame(previousFrame);
+            GuestThreadExecution.RestoreGuestThread(previousThread);
+        }
+
+        Assert.True(KernelEventQueueCompatExports.EnqueueEvent(
+            handle,
+            new KernelEventQueueCompatExports.KernelQueuedEvent(
+                Ident: 0x34,
+                Filter: KernelEventQueueCompatExports.KernelEventFilterGraphics,
+                Flags: KernelEventQueueCompatExports.KernelEventFlagClear,
+                Fflags: 1,
+                Data: 0x1234,
+                UserData: 0x5678)));
+        Assert.True(stagedWaiter!.TryWake());
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_OK,
+            stagedWaiter.Resume());
+        Assert.Equal(1u, ReadUInt32(memory, outCountAddress));
+        Assert.Equal(0x1234UL, ReadUInt64(memory, eventsAddress + 0x10));
+
+        DeleteEqueue(ctx, handle);
+    }
+
+    [Fact]
+    public void FiniteWait_ResumeWithoutEventReturnsTimedOut()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        var handle = CreateEqueue(ctx, memory, BaseAddress + 0x100);
+        const ulong eventsAddress = BaseAddress + 0x200;
+        const ulong outCountAddress = BaseAddress + 0x300;
+        const ulong timeoutAddress = BaseAddress + 0x400;
+        WriteUInt32(memory, outCountAddress, uint.MaxValue);
+        WriteUInt32(memory, timeoutAddress, 5_000_000);
+
+        IGuestThreadBlockWaiter? stagedWaiter = null;
+        var previousThread = GuestThreadExecution.EnterGuestThread(0x735);
+        var previousFrame = GuestThreadExecution.EnterImportCallFrame(
+            returnRip: 0x1_7350,
+            resumeRsp: 0x2_7350,
+            returnSlotAddress: 0x3_7350);
+        try
+        {
+            ctx[CpuRegister.Rdi] = handle;
+            ctx[CpuRegister.Rsi] = eventsAddress;
+            ctx[CpuRegister.Rdx] = 1;
+            ctx[CpuRegister.Rcx] = outCountAddress;
+            ctx[CpuRegister.R8] = timeoutAddress;
+
+            Assert.Equal(
+                (int)OrbisGen2Result.ORBIS_GEN2_OK,
+                KernelEventQueueCompatExports.KernelWaitEqueue(ctx));
+            Assert.True(GuestThreadExecution.TryConsumeCurrentThreadBlock(
+                out var reason,
+                out _,
+                out var hasContinuation,
+                out _,
+                out stagedWaiter,
+                out var deadline));
+            Assert.Equal("sceKernelWaitEqueue", reason);
+            Assert.True(hasContinuation);
+            Assert.NotNull(stagedWaiter);
+            Assert.True(deadline > 0);
+        }
+        finally
+        {
+            GuestThreadExecution.RestoreImportCallFrame(previousFrame);
+            GuestThreadExecution.RestoreGuestThread(previousThread);
+        }
+
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT,
+            stagedWaiter!.Resume());
+        Assert.Equal(0u, ReadUInt32(memory, outCountAddress));
+        Assert.False(KernelEventQueueCompatExports.TryReservePendingEventForTest(
+            handle,
+            out _));
+
+        DeleteEqueue(ctx, handle);
+    }
+
+    [Fact]
     public void TriggerRegisteredEventsByFilter_NoGraphicsRegistrations_ReturnsZero()
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);

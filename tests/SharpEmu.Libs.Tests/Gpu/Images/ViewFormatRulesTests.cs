@@ -76,6 +76,10 @@ public sealed class ViewFormatRulesTests
     {
         var replicated = ViewFormatRules.PackDestinationSelect(4, 4, 4, 4);
         Assert.True(ViewFormatRules.IsSupportedSampledDepthView(Format.D32Sfloat, Format.R32Sfloat, replicated));
+        Assert.True(ViewFormatRules.IsSupportedSampledDepthView(
+            Format.D16Unorm,
+            Format.R16Unorm,
+            ViewFormatRules.PackDestinationSelect(4, 4, 4, 1)));
         Assert.True(ViewFormatRules.IsSupportedSampledDepthView(Format.D16Unorm, Format.R16Unorm, ViewFormatRules.PackDestinationSelect(4, 0, 0, 1)));
         Assert.False(ViewFormatRules.IsSupportedSampledDepthView(Format.D32Sfloat, Format.R32Sfloat, ViewFormatRules.PackDestinationSelect(4, 5, 6, 7)));
         Assert.False(ViewFormatRules.IsSupportedSampledDepthView(Format.R32Sfloat, Format.R32Sfloat, replicated));
@@ -99,6 +103,7 @@ public sealed class ViewFormatRulesTests
         Assert.Equal(left.GetHashCode(), same.GetHashCode());
         Assert.NotEqual(left, swizzled);
         Assert.NotEqual(left, left with { LevelCount = 2 });
+        Assert.NotEqual(left, left with { MinLod = 0x80 });
         Assert.NotEqual(left, left with { Usage = ImageUsageFlags.StorageBit });
     }
 }

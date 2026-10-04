@@ -25,7 +25,7 @@ public sealed partial class RenderExecutor
     private readonly record struct PreparedIndexBuffer(BufferBinding Binding, ulong Size, IndexType Type);
 
     // Merges the vertex ranges, obtains one host buffer per merged range and offsets every slot into it.
-    private BufferBinding[] AcquireVertexBuffers(VertexInputInfo vertexInput)
+    private void AcquireVertexBuffers(VertexInputInfo vertexInput, Span<BufferBinding> prepared)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawVertexBufferAcquisition);
         var buffers = vertexInput.Buffers;
@@ -34,11 +34,19 @@ public sealed partial class RenderExecutor
             throw _host.Fatal($"The vertex input has too many buffers: count={buffers.Length} max={VertexInputInfo.MaxBuffers}.");
         }
 
-        Span<VertexBufferRange> ranges = stackalloc VertexBufferRange[VertexInputInfo.MaxBuffers];
-        var rangeCount = 0;
-        foreach (ref readonly var vertex in buffers.AsSpan())
+        if (prepared.Length < buffers.Length)
         {
-            var size = vertex.Size;
+            throw _host.Fatal($"The vertex binding scratch size is invalid: scratch={prepared.Length} buffers={buffers.Length}.");
+        }
+
+        Span<VertexBufferRange> ranges = stackalloc VertexBufferRange[VertexInputInfo.MaxBuffers];
+        Span<ulong> sizes = stackalloc ulong[VertexInputInfo.MaxBuffers];
+        var rangeCount = 0;
+        for (var slot = 0; slot < buffers.Length; slot++)
+        {
+            ref readonly var vertex = ref buffers[slot];
+            var size = vertexInput.BufferSize(slot);
+            sizes[slot] = size;
             if (size == 0)
             {
                 continue;
@@ -75,15 +83,14 @@ public sealed partial class RenderExecutor
             range.Binding = _host.ObtainBuffer(range.BaseAddress, size, isWritten: false);
         }
 
-        var prepared = new BufferBinding[buffers.Length];
         BufferBinding? nullBuffer = null;
         for (var slot = 0; slot < buffers.Length; slot++)
         {
             ref readonly var vertex = ref buffers[slot];
-            if (vertex.Size == 0)
+            if (sizes[slot] == 0)
             {
                 nullBuffer ??= _host.NullBuffer;
-                prepared[slot] = nullBuffer.Value;
+                prepared[slot] = nullBuffer.Value with { Size = 0 };
                 continue;
             }
 
@@ -103,10 +110,12 @@ public sealed partial class RenderExecutor
             }
 
             ref readonly var owner = ref merged[found];
-            prepared[slot] = new BufferBinding(owner.Binding.Handle, owner.Binding.Offset + vertex.Address - owner.BaseAddress);
+            prepared[slot] = new BufferBinding(
+                owner.Binding.Handle,
+                owner.Binding.Offset + vertex.Address - owner.BaseAddress,
+                Math.Min(sizes[slot], owner.AcquiredEnd - vertex.Address));
         }
 
-        return prepared;
     }
 
     private PreparedIndexBuffer AcquireIndexBuffer(in IndexSource source)
@@ -187,7 +196,61 @@ public sealed partial class RenderExecutor
         var context = banks.Context;
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
+        var mesh = vertexInput.Mesh;
+        var meshActive = mesh.IsActive;
+        IMeshRenderHost? meshHost = null;
+        var meshGroups = 0u;
+        if (meshActive)
+        {
+            if (primitiveRestart)
+            {
+                throw _host.Fatal(
+                    $"Primitive restart is not supported for a mesh draw: primitiveType={banks.UserConfig.PrimitiveType} indexed={emission.Indexed}.");
+            }
+
+            meshHost = _host as IMeshRenderHost;
+            var capabilities = meshHost?.MeshShaderCapabilities ?? default;
+            if (meshHost is null || !capabilities.Supported)
+            {
+                throw _host.Fatal("The draw needs VK_EXT_mesh_shader, but the render host does not support it.");
+            }
+
+            if (mesh.PrimitivesPerGroup == 0)
+            {
+                throw _host.Fatal("A mesh draw has no input primitives per workgroup.");
+            }
+
+            var primitiveCount = mesh.InputPrimitiveCount(draw.Count);
+            if (primitiveCount == 0)
+            {
+                TraceLegacyFusedDisposition(banks, draw.Name, draw.Count, draw.InstanceCount, "zero-mesh-primitives");
+                return;
+            }
+
+            meshGroups = ((primitiveCount - 1u) / mesh.PrimitivesPerGroup) + 1u;
+            if (meshGroups > capabilities.MaxWorkGroupCountX ||
+                draw.InstanceCount > capabilities.MaxWorkGroupCountY ||
+                (ulong)meshGroups * draw.InstanceCount > capabilities.MaxWorkGroupTotalCount)
+            {
+                throw _host.Fatal(
+                    $"The mesh draw exceeds host workgroup limits: groups={meshGroups} instances={draw.InstanceCount} " +
+                    $"maxX={capabilities.MaxWorkGroupCountX} maxY={capabilities.MaxWorkGroupCountY} total={capabilities.MaxWorkGroupTotalCount}.");
+            }
+        }
+
         using var preparation = _host.BeginPreparation();
+        if (meshActive && emission.Indexed)
+        {
+            if (indexSource.Address == 0 || indexSource.GuestElementSize == 0)
+            {
+                throw _host.Fatal(
+                    $"An indexed mesh draw has an invalid source: address=0x{indexSource.Address:X16} elementSize={indexSource.GuestElementSize}.");
+            }
+
+            var indexBytes = checked((ulong)draw.Count * indexSource.GuestElementSize);
+            _host.RegisterDeviceAddressRange(indexSource.Address, indexBytes);
+        }
+
         IPreparedBindings vertexBindings;
         IPreparedBindings? pixelBindings;
         try
@@ -208,6 +271,13 @@ public sealed partial class RenderExecutor
                     "The draw was not executed. Images and FPS can be incorrect. Set SHARPEMU_STRICT_COMPUTE=1 to stop on this failure.");
             }
 
+            TraceLegacyFusedDisposition(
+                banks,
+                draw.Name,
+                draw.Count,
+                draw.InstanceCount,
+                "resource-binding-rejected",
+                $"message={rejection.Message}");
             return;
         }
         var vertexProgram = vertexInput.Stage.Program ?? throw _host.Fatal("The vertex stage has no program.");
@@ -223,8 +293,13 @@ public sealed partial class RenderExecutor
             _host.BindResources(pixelBindings);
         }
 
-        var vertexBuffers = AcquireVertexBuffers(vertexInput);
-        var indexBuffer = AcquireIndexBuffer(in indexSource);
+        Span<BufferBinding> vertexBuffers = stackalloc BufferBinding[VertexInputInfo.MaxBuffers];
+        var vertexBufferCount = meshActive ? 0 : vertexInput.Buffers.Length;
+        if (!meshActive)
+        {
+            AcquireVertexBuffers(vertexInput, vertexBuffers);
+        }
+        var indexBuffer = meshActive ? default : AcquireIndexBuffer(in indexSource);
         var indirectArguments = emission.IndirectArgumentsAddress != 0
             ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, IndexedIndirectArgumentsSize, isWritten: false)
             : default;
@@ -243,6 +318,18 @@ public sealed partial class RenderExecutor
             state.Programs.DisableBlending,
             state.Programs.Vertex,
             state.Programs.Pixel);
+        if (meshActive && ExperimentalLegacyFusedGeometryCompileOnly)
+        {
+            TraceLegacyFusedDisposition(
+                banks,
+                draw.Name,
+                draw.Count,
+                draw.InstanceCount,
+                "compile-only",
+                $"meshGroups={meshGroups}");
+            return;
+        }
+
         if (setBindDebug)
         {
             SetDrawDebugPhase(submitId, in draw, 0x100);
@@ -253,7 +340,10 @@ public sealed partial class RenderExecutor
             SetDrawDebugPhase(submitId, in draw, 0x200);
         }
 
-        _host.BindVertexBuffers(vertexBuffers, vertexInput);
+        if (!meshActive)
+        {
+            _host.BindVertexBuffers(vertexBuffers[..vertexBufferCount], vertexInput);
+        }
 
         if (pixelBindings is not null && setAutoDebug)
         {
@@ -262,12 +352,28 @@ public sealed partial class RenderExecutor
 
         Span<IPreparedBindings> stages = pixelBindings is null ? [vertexBindings] : [vertexBindings, pixelBindings];
         _host.CommitBindings(PipelineBindPoint.Graphics, in pipeline, stages);
-        if (indexBuffer.Size != 0)
+        if (!meshActive && indexBuffer.Size != 0)
         {
             _host.BindIndexBuffer(indexBuffer.Binding, indexBuffer.Type);
         }
 
-        _host.SetDynamicState(BuildDynamicState(context, in state));
+        if (meshActive)
+        {
+            Span<uint> drawData = stackalloc uint[6]
+            {
+                draw.Count,
+                emission.Indexed ? unchecked((uint)emission.VertexOffset) : emission.FirstVertex,
+                emission.FirstInstance,
+                emission.Indexed ? indexSource.GuestElementSize : 0u,
+                emission.Indexed ? (uint)indexSource.Address : 0u,
+                emission.Indexed ? (uint)(indexSource.Address >> 32) : 0u,
+            };
+            meshHost!.PushMeshDrawData(in pipeline, drawData);
+        }
+
+        Span<DynamicViewportState> viewports = stackalloc DynamicViewportState[ScreenViewportRegisters.ViewportCount];
+        var dynamicState = BuildDynamicState(context, in state, viewports, out var viewportCount);
+        _host.SetDynamicState(in dynamicState, viewports[..viewportCount]);
         if (setAutoDebug)
         {
             SetDrawDebugPhase(submitId, in draw, 0x400);
@@ -285,7 +391,18 @@ public sealed partial class RenderExecutor
             SetDrawDebugPhase(submitId, in draw, 0x500);
         }
 
-        if (emission.IndirectArgumentsAddress != 0)
+        if (meshActive)
+        {
+            TraceLegacyFusedDisposition(
+                banks,
+                draw.Name,
+                draw.Count,
+                draw.InstanceCount,
+                "mesh-dispatch",
+                $"meshGroups={meshGroups}");
+            meshHost!.DrawMeshTasks(meshGroups, draw.InstanceCount, 1);
+        }
+        else if (emission.IndirectArgumentsAddress != 0)
         {
             // Uploads and shader writes end with barriers to all commands, so the
             // indirect read sees them.
@@ -303,7 +420,7 @@ public sealed partial class RenderExecutor
         var writeStages = PipelineStageFlags.None;
         if (HasBufferWrites(vertexInput.Stage))
         {
-            writeStages |= PipelineStageFlags.VertexShaderBit;
+            writeStages |= meshActive ? PipelineStageFlags.MeshShaderBitExt : PipelineStageFlags.VertexShaderBit;
         }
 
         if (state.PixelActive && HasBufferWrites(pixelInput.Stage))
@@ -337,6 +454,7 @@ public sealed partial class RenderExecutor
             case GuestPrimitiveType.TriangleStrip:
             case GuestPrimitiveType.Polygon:
             case GuestPrimitiveType.RectangleList:
+            case GuestPrimitiveType.RectangleListLegacy:
                 if (emission.Indexed)
                 {
                     _host.DrawIndexed(draw.Count, draw.InstanceCount, 0, emission.VertexOffset, emission.FirstInstance);
@@ -345,20 +463,6 @@ public sealed partial class RenderExecutor
                 {
                     _host.Draw(draw.Count, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);
                 }
-
-                break;
-            case GuestPrimitiveType.RectangleListLegacy:
-                if (emission.Indexed)
-                {
-                    throw _host.Fatal($"The primitive type is unknown for an indexed draw: primitiveType={userConfig.PrimitiveType}.");
-                }
-
-                if (draw.Count != 3 || vertexInput.Buffers.Length != 0)
-                {
-                    throw _host.Fatal($"A legacy rectangle list needs three vertices and no vertex buffers: count={draw.Count} buffers={vertexInput.Buffers.Length}.");
-                }
-
-                _host.Draw(4, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);
                 break;
             case GuestPrimitiveType.QuadListLegacy:
                 if ((draw.Count & 0x3) != 0)

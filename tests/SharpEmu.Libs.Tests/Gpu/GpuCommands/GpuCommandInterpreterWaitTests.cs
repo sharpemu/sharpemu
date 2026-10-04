@@ -9,6 +9,7 @@ namespace SharpEmu.Libs.Tests.Gpu.GpuCommands;
 public sealed class GpuCommandInterpreterWaitTests
 {
     private const uint Nop = PacketOpcode.Nop;
+    private const ulong OcclusionReady = 1UL << 63;
     private const ulong Label = StreamRunner.LabelAddress;
     private const ulong Data = StreamRunner.DataAddress;
 
@@ -45,6 +46,22 @@ public sealed class GpuCommandInterpreterWaitTests
 
     private static uint[] Semaphore(ulong address, uint selection, bool writeSignal = false) =>
         StreamRunner.Packet(PacketOpcode.MemorySemaphore, StreamRunner.Low(address), StreamRunner.High(address), (selection << 29) | (writeSignal ? 1u << 20 : 0));
+
+    private static uint[] Predication(uint operation, uint condition, uint waitOperation, ulong address) =>
+        StreamRunner.Packet(
+            PacketOpcode.SetPredication,
+            (operation << 16) | (condition << 8) | (waitOperation << 12),
+            StreamRunner.Low(address), StreamRunner.High(address));
+
+    private static void WriteOcclusionPairs(StreamRunner runner, ulong begin, ulong end)
+    {
+        for (var depthBlock = 0u; depthBlock < 16u; depthBlock++)
+        {
+            var pairAddress = Label + ((ulong)depthBlock * 2 * sizeof(ulong));
+            runner.Host.WriteQword(pairAddress, OcclusionReady | begin);
+            runner.Host.WriteQword(pairAddress + sizeof(ulong), OcclusionReady | end);
+        }
+    }
 
     [Theory]
     [InlineData(1u, 5u, 6u, true)]
@@ -162,7 +179,7 @@ public sealed class GpuCommandInterpreterWaitTests
     }
 
     [Fact]
-    public void SetPredication_BothLayoutsAndTheWaitFlag()
+    public void SetPredication_BooleanWaitFlagDrainsTheGpuBeforeReading()
     {
         var runner = new StreamRunner();
         runner.Host.WriteQword(Label, 0);
@@ -190,10 +207,73 @@ public sealed class GpuCommandInterpreterWaitTests
         Assert.False(runner.Interpreter.PredicateSkip);
         Assert.Equal(2u, runner.Interpreter.InstanceCount);
 
-        runner.Run(StreamRunner.Packet(PacketOpcode.SetPredication, 0, 0, 0));
+        runner.Host.Calls.Clear();
+        runner.Run(Predication(0, 0, 1, 0));
         Assert.False(runner.Interpreter.PredicateSkip);
+        Assert.Empty(runner.Host.Calls);
         Assert.Contains("predication address is zero", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.SetPredication, 3u << 16, 0, 0)).Message);
-        Assert.Contains("predication operation is unknown", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.SetPredication, 1u << 16, 0, 0)).Message);
+        Assert.Contains("predication operation is unknown", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.SetPredication, 2u << 16, 0, 0)).Message);
+    }
+
+    [Theory]
+    [InlineData(0UL, 0u, false)]
+    [InlineData(7UL, 0u, true)]
+    [InlineData(0UL, 1u, true)]
+    [InlineData(7UL, 1u, false)]
+    public void SetPredication_OcclusionReadyPairsApplyTheCondition(ulong sampleDelta, uint condition, bool skips)
+    {
+        var runner = new StreamRunner();
+        WriteOcclusionPairs(runner, 10, 10);
+        runner.Host.WriteQword(Label + (15u * 2u * sizeof(ulong)) + sizeof(ulong), OcclusionReady | (10 + sampleDelta));
+        var predicated = CreateInstanceCountPacket(4);
+        predicated[0] |= 1u;
+
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(Predication(1, condition, 0, Label), predicated));
+
+        Assert.Equal(skips, runner.Interpreter.PredicateSkip);
+        Assert.Equal(skips ? 1u : 4u, runner.Interpreter.InstanceCount);
+        Assert.DoesNotContain("flush_and_wait", runner.Host.Calls);
+    }
+
+    [Fact]
+    public void SetPredication_OcclusionNotReadyWaitsAndRetriesTheSamePacket()
+    {
+        var runner = new StreamRunner();
+        WriteOcclusionPairs(runner, 20, 20);
+        var missingEnd = Label + (5u * 2u * sizeof(ulong)) + sizeof(ulong);
+        runner.Host.WriteQword(missingEnd, 20);
+        var predicated = CreateInstanceCountPacket(6);
+        predicated[0] |= 1u;
+
+        Assert.Equal(SubmissionProgress.Blocked, runner.Run(Predication(1, 0, 0, Label), predicated));
+        Assert.Equal(1u, runner.Interpreter.InstanceCount);
+
+        runner.Host.WriteQword(missingEnd, OcclusionReady | 21);
+        Assert.Equal(SubmissionProgress.Complete, runner.Run());
+        Assert.True(runner.Interpreter.PredicateSkip);
+        Assert.Equal(1u, runner.Interpreter.InstanceCount);
+        Assert.DoesNotContain("flush_and_wait", runner.Host.Calls);
+    }
+
+    [Fact]
+    public void SetPredication_OcclusionNotReadyNoWaitDisablesPredication()
+    {
+        var runner = new StreamRunner();
+        runner.Host.WriteQword(Data, 1);
+        runner.Run(Predication(3, 0, 0, Data));
+        Assert.True(runner.Interpreter.PredicateSkip);
+
+        WriteOcclusionPairs(runner, 30, 30);
+        runner.Host.WriteQword(Label, 30);
+        runner.Host.Calls.Clear();
+        var predicated = CreateInstanceCountPacket(8);
+        predicated[0] |= 1u;
+
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(Predication(1, 0, 1, Label), predicated));
+
+        Assert.False(runner.Interpreter.PredicateSkip);
+        Assert.Equal(8u, runner.Interpreter.InstanceCount);
+        Assert.DoesNotContain("flush_and_wait", runner.Host.Calls);
     }
 
     [Fact]

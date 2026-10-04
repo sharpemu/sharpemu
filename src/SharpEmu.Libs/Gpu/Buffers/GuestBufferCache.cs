@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
@@ -22,12 +23,13 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 {
     public const int CachingPageBits = 14;
     public const ulong CachingPageSize = 1UL << CachingPageBits;
-    public const ulong CachingPageCount = 1UL << (40 - CachingPageBits);
+    public const ulong CachingPageCount = PageOwnerTable.PackedPageCount;
     public const ulong BdaPageTableSize = CachingPageCount * sizeof(ulong);
     public static readonly ResourceSlotIdentifier NullBufferId = new(0, 1);
 
     private const ulong MiB = 1024 * 1024;
     private const ulong GdsBufferSize = 64 * 1024;
+    private const int CpuTransferChunkBytes = 64 * 1024;
     private readonly record struct PlannedDownload(GpuBuffer Buffer, ulong Address, BufferDownloadPlacement Placement);
 
     private enum ShutdownOutcome
@@ -41,6 +43,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private readonly SubmissionScheduler _scheduler;
     private readonly IGpuQueueRelay _relay;
     private readonly GuestBufferUploader _uploader;
+    private readonly ICpuMemory _guest;
     private readonly IGuestBackedSpace _backing;
     private readonly BdaFaultProcessor _faults;
     private readonly GpuBuffer _gds;
@@ -70,6 +73,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         _device = device;
         _scheduler = scheduler;
         _relay = relay;
+        _guest = guest;
         _backing = backing;
         _faults = new BdaFaultProcessor(device, scheduler, this, CachingPageBits, CachingPageCount);
         _gds = new GpuBuffer(device, scheduler, GpuBufferUsage.Stream, 0, GpuBuffer.AllFlags, GdsBufferSize);
@@ -297,9 +301,10 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             throw SubmissionScheduler.Fatal(
                 $"Cannot reserve image staging space: address=0x{guestAddress:X16} size=0x{size:X16} capacity=0x{_staging.Size:X16} tick={_scheduler.CurrentTick}.");
         }
-        if (!_backing.TryReadBacking(guestAddress, _staging.Mapped.Slice((int)stageOffset, (int)size)) &&
-            !KernelMemoryCompatExports.TryReadPrtBacking(_backing, guestAddress,
-                _staging.Mapped.Slice((int)stageOffset, (int)size)))
+        var staging = _staging.Mapped.Slice((int)stageOffset, (int)size);
+        if (!_backing.TryReadBacking(guestAddress, staging) &&
+            !KernelMemoryCompatExports.TryReadPrtBacking(_backing, guestAddress, staging) &&
+            !_guest.TryRead(guestAddress, staging))
         {
             throw SubmissionScheduler.Fatal(
                 $"Could not read the mapped guest image backing: address=0x{guestAddress:X16} size=0x{size:X16} range_backed={_backing.IsBackedRange(guestAddress, size)} first_byte_backed={_backing.IsBackedRange(guestAddress, 1)} last_byte_backed={_backing.IsBackedRange(guestAddress + size - 1, 1)} tick={_scheduler.CurrentTick}.");
@@ -551,7 +556,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 images.InvalidateMemory(dstVaddr, size);
             }
 
-            var bytes = System.Buffers.ArrayPool<byte>.Shared.Rent((int)Math.Min(size, 64UL * 1024));
+            var bytes = ArrayPool<byte>.Shared.Rent((int)Math.Min(size, (ulong)CpuTransferChunkBytes));
             try
             {
                 for (ulong offset = 0; offset < size;)
@@ -568,7 +573,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             }
             finally
             {
-                System.Buffers.ArrayPool<byte>.Shared.Return(bytes);
+                ArrayPool<byte>.Shared.Return(bytes);
             }
 
             return;
@@ -1392,6 +1397,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         var sizePages = lastExclusive - first;
+        var tableOffset = PageOwnerTable.PageIndex(buffer.CpuAddress) * sizeof(ulong);
         if (GuestGpuMemoryHook.Traces(buffer.CpuAddress, buffer.Size))
             GuestGpuMemoryHook.Trace(buffer.CpuAddress, buffer.Size,
                 $"device-address-registration insert={insert} buffer={bufferIdentifier} submission_tick={_scheduler.CurrentTick} collection_tick={_retirementPolicy.CurrentTick}");
@@ -1404,12 +1410,12 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 addresses[page] = buffer.DeviceAddress + (page << CachingPageBits);
             }
 
-            WriteDataBuffer(_bdaPageTable, first * sizeof(ulong), MemoryMarshal.AsBytes<ulong>(addresses));
+            WriteDataBuffer(_bdaPageTable, tableOffset, MemoryMarshal.AsBytes<ulong>(addresses));
         }
         else
         {
             _registry.BeginRetirement(bufferIdentifier);
-            _bdaPageTable.Fill(first * sizeof(ulong), sizePages * sizeof(ulong), 0);
+            _bdaPageTable.Fill(tableOffset, sizePages * sizeof(ulong), 0);
         }
     }
 

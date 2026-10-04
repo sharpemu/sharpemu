@@ -12,9 +12,109 @@ public sealed class ResourceMaterializerTests
 {
     private const uint Format32Float = 22;
     private const uint Format32Sint = 21;
+    private const uint Format16Float = 14;
+    private const uint Format32Uint = 20;
     private const uint Format11x2x10Uint = 34;
     private const uint Format8x2Uscaled = 16;
     private const uint ImageType2D = 9;
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DirectImageDescriptorReservedFieldsMatch(bool r128)
+    {
+        var plan = Extract(Program(
+            Image(0, "ImageSample", 0, 8, r128: r128),
+            EndProgram(8)));
+        uint[] descriptor =
+        [
+            0x100, Format32Float << 20, 3 | (3 << 14), 0xFAC | (ImageType2D << 28),
+            0, 0, 0, 0,
+        ];
+
+        uint[] Materialize()
+        {
+            var userData = new uint[12];
+            descriptor.CopyTo(userData, 0);
+            var snapshot = new ResourceSnapshot();
+            var specialization = new ResourceSpecialization();
+            Assert.True(ResourceMaterializer.Materialize(
+                plan, Inputs(userData), ref snapshot, ref specialization));
+            return Assert.Single(snapshot.Images);
+        }
+
+        Assert.Equal(descriptor, Materialize());
+
+        // RESOURCE_LEVEL is defined on this descriptor generation, not reserved.
+        descriptor[2] |= 0x80000000u;
+        Assert.Equal(descriptor, Materialize());
+        descriptor[2] &= 0x7fffffffu;
+
+        (int Word, uint Mask)[] reserved =
+        [
+            (1, 0x20000000u),
+            (2, 0x70003000u),
+            (4, 0xe000e000u),
+            (5, 0xf9000000u),
+            (6, 0x00007b00u),
+        ];
+        foreach (var (word, mask) in reserved)
+        {
+            for (var bits = mask; bits != 0; bits &= bits - 1)
+            {
+                var bit = bits & (0u - bits);
+                descriptor[word] |= bit;
+                var materialized = Materialize();
+                if (r128 && word >= 4)
+                {
+                    Assert.Equal(descriptor, materialized);
+                }
+                else
+                {
+                    Assert.All(materialized, value => Assert.Equal(0u, value));
+                }
+                descriptor[word] &= ~bit;
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(false, 2, 0x80000000u, true)]
+    [InlineData(false, 2, 0x40000000u, false)]
+    [InlineData(false, 4, 0x20000000u, false)]
+    [InlineData(true, 2, 0x80000000u, true)]
+    [InlineData(true, 2, 0x40000000u, false)]
+    [InlineData(true, 4, 0x20000000u, true)]
+    public void SparseHeapImageCandidateReservedFieldsMatch(
+        bool r128,
+        int word,
+        uint bit,
+        bool expectedValid)
+    {
+        var plan = Extract(ResourceTrackerTests.IndirectImageProgram(false, r128: r128));
+        uint[] userData = [0x1000, 224 << 16, 1, 0, 0x2000, 16 << 16, 2, 0, 0];
+        var memory = ResourceTrackerTests.LinearMemory();
+        var descriptor = ResourceTrackerTests.ImageDescriptor();
+        descriptor[word] |= bit;
+        ResourceTrackerTests.WriteImage(memory, 0x2000, descriptor);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(
+            plan,
+            Inputs(userData, readCleanMemory: memory.Read),
+            ref snapshot,
+            ref specialization));
+        var materialized = Assert.Single(snapshot.Images);
+        if (expectedValid)
+        {
+            Assert.Equal(descriptor, materialized);
+        }
+        else
+        {
+            Assert.All(materialized, value => Assert.Equal(0u, value));
+        }
+    }
 
     [Theory]
     [InlineData(32)]
@@ -172,6 +272,66 @@ public sealed class ResourceMaterializerTests
         }
 
         return instructions;
+    }
+
+    [Theory]
+    [InlineData("ImageAtomicFmin", Format32Float, true)]
+    [InlineData("ImageAtomicFmin", Format32Uint, false)]
+    [InlineData("ImageAtomicFmin", Format16Float, false)]
+    [InlineData("ImageAtomicAdd", Format32Uint, true)]
+    [InlineData("ImageAtomicAdd", Format32Float, false)]
+    public void AtomicImage_RequiresMatching32BitComponent(
+        string opcode,
+        uint format,
+        bool expected)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, 16, 0x1000, format));
+        instructions.Add(Image(pc, opcode, 16, dmask: 1));
+        instructions.Add(EndProgram(pc + 8));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.Equal(expected, ResourceMaterializer.Materialize(
+            plan,
+            Inputs([]),
+            ref snapshot,
+            ref specialization));
+    }
+
+    [Theory]
+    [InlineData("ImageAtomicFmin", ImageNumericClass.Float)]
+    [InlineData("ImageAtomicAdd", ImageNumericClass.Uint)]
+    public void NullAtomicImage_PreservesPlannedNumericClass(
+        string opcode,
+        ImageNumericClass expectedClass)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, 16, 0, 0));
+        instructions.Add(Image(pc, opcode, 16, dmask: 1));
+        instructions.Add(EndProgram(pc + 8));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(
+            plan,
+            Inputs([]),
+            ref snapshot,
+            ref specialization));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var image = Assert.Single(resources.Info.Images);
+        Assert.Equal(expectedClass, image.NumericClass);
+        Assert.NotNull(ImageDescriptorBinding.ForImage(image));
+        Assert.NotNull(BindingLayout.Allocate(
+            resources.Info,
+            BindingLayout.CollectUserDataRegisters(plan.Graph.Program, 0, 64),
+            false,
+            false,
+            false));
     }
 
     [Fact]

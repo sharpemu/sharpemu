@@ -6,10 +6,12 @@ namespace SharpEmu.Libs.Kernel;
 // The caller holds the kernel memory lock for all queries and changes.
 internal sealed class DirectMemoryAllocationMap
 {
-    internal readonly record struct Allocation(ulong Start, ulong Length, int MemoryType);
+    internal readonly record struct Allocation(ulong Start, ulong Length, int MemoryType, bool IsAutomatic = false);
+    internal readonly record struct PhysicalRange(ulong Start, ulong Length);
 
     private readonly SortedList<ulong, Allocation> _allocations = new();
     private readonly SortedList<ulong, ulong> _freeRanges = new();
+    private readonly SortedList<ulong, ulong> _automaticFreeRanges = new();
     private readonly ulong _capacity;
 
     public DirectMemoryAllocationMap(ulong capacity)
@@ -24,13 +26,14 @@ internal sealed class DirectMemoryAllocationMap
     {
         _allocations.Clear();
         _freeRanges.Clear();
+        _automaticFreeRanges.Clear();
         if (_capacity != 0)
             _freeRanges.Add(0, _capacity);
         AvailableBytes = _capacity;
     }
 
     public bool TryAllocate(ulong searchStart, ulong searchEnd, ulong length, ulong alignment,
-        int memoryType, out ulong address)
+        int memoryType, out ulong address, bool isAutomatic = false)
     {
         address = 0;
         searchEnd = Math.Min(searchEnd, _capacity);
@@ -54,7 +57,9 @@ internal sealed class DirectMemoryAllocationMap
                 _freeRanges.Add(rangeStart, candidate - rangeStart);
             if (candidate + length < rangeEnd)
                 _freeRanges.Add(candidate + length, rangeEnd - candidate - length);
-            _allocations.Add(candidate, new Allocation(candidate, length, memoryType));
+            _allocations.Add(candidate, new Allocation(candidate, length, memoryType, isAutomatic));
+            if (isAutomatic)
+                AddRange(_automaticFreeRanges, candidate, length);
             AvailableBytes -= length;
             address = candidate;
             return true;
@@ -131,12 +136,76 @@ internal sealed class DirectMemoryAllocationMap
     public void SetMemoryType(ulong allocationStart, int memoryType)
         => _allocations[allocationStart] = _allocations[allocationStart] with { MemoryType = memoryType };
 
+    public bool TryReserveAutomatic(ulong length, out PhysicalRange[] ranges)
+    {
+        ranges = [];
+        if (length == 0)
+            return false;
+
+        var remaining = length;
+        var plan = new List<PhysicalRange>();
+        for (var index = 0; index < _automaticFreeRanges.Count && remaining != 0; index++)
+        {
+            var available = _automaticFreeRanges.Values[index];
+            var take = Math.Min(available, remaining);
+            if (take == 0)
+                continue;
+            plan.Add(new PhysicalRange(_automaticFreeRanges.Keys[index], take));
+            remaining -= take;
+        }
+
+        if (remaining != 0)
+            return false;
+
+        foreach (var range in plan)
+            RemoveRange(_automaticFreeRanges, range.Start, range.Length);
+        ranges = plan.ToArray();
+        return true;
+    }
+
+    public void ReturnAutomatic(ulong address, ulong length)
+    {
+        if (!ContainsAutomaticAllocatedRange(address, length))
+            throw new InvalidOperationException("The returned automatic range is not allocated as automatic memory.");
+        AddRange(_automaticFreeRanges, address, length);
+    }
+
+    public void RemoveAutomaticAvailability(ulong address, ulong length)
+    {
+        foreach (var range in GetAutomaticRanges(address, length))
+            RemoveRange(_automaticFreeRanges, range.Start, range.Length, requireCovered: false);
+    }
+
+    public PhysicalRange[] GetAutomaticRanges(ulong address, ulong length)
+    {
+        if (length == 0 || address > _capacity || length > _capacity - address)
+            return [];
+
+        var end = address + length;
+        var ranges = new List<PhysicalRange>();
+        for (var index = Math.Max(0, FindLastIndexAtOrBelow(_allocations.Keys, address));
+             index < _allocations.Count;
+             index++)
+        {
+            var allocation = _allocations.Values[index];
+            if (allocation.Start >= end)
+                break;
+            var allocationEnd = allocation.Start + allocation.Length;
+            if (!allocation.IsAutomatic || allocationEnd <= address)
+                continue;
+            var start = Math.Max(address, allocation.Start);
+            ranges.Add(new PhysicalRange(start, Math.Min(end, allocationEnd) - start));
+        }
+        return ranges.ToArray();
+    }
+
     // Host aliases must be removed before their physical storage becomes available.
     public void ReleaseRange(ulong address, ulong length)
     {
         if (!ContainsAllocatedRange(address, length))
             throw new InvalidOperationException("The physical release range is not fully allocated.");
 
+        RemoveRange(_automaticFreeRanges, address, length, requireCovered: false);
         var end = address + length;
         var index = FindLastIndexAtOrBelow(_allocations.Keys, address);
         while (index < _allocations.Count)
@@ -157,28 +226,99 @@ internal sealed class DirectMemoryAllocationMap
                 break;
             }
         }
-        AddFreeRange(address, length);
+        AddRange(_freeRanges, address, length);
         AvailableBytes += length;
     }
 
-    private void AddFreeRange(ulong address, ulong length)
+    private bool ContainsAutomaticAllocatedRange(ulong address, ulong length)
     {
+        if (!ContainsAllocatedRange(address, length))
+            return false;
         var end = address + length;
-        var previousIndex = FindLastIndexAtOrBelow(_freeRanges.Keys, address);
-        var nextIndex = previousIndex + 1;
-        if (previousIndex >= 0 &&
-            _freeRanges.Keys[previousIndex] + _freeRanges.Values[previousIndex] == address)
+        var index = FindLastIndexAtOrBelow(_allocations.Keys, address);
+        var current = address;
+        for (; index < _allocations.Count && current < end; index++)
         {
-            address = _freeRanges.Keys[previousIndex];
-            _freeRanges.RemoveAt(previousIndex);
-            nextIndex = previousIndex;
+            var allocation = _allocations.Values[index];
+            if (!allocation.IsAutomatic || allocation.Start > current || allocation.Start + allocation.Length <= current)
+                return false;
+            current = Math.Min(end, allocation.Start + allocation.Length);
         }
-        if (nextIndex < _freeRanges.Count && _freeRanges.Keys[nextIndex] == end)
+        return current == end;
+    }
+
+    private static void AddRange(SortedList<ulong, ulong> ranges, ulong address, ulong length)
+    {
+        if (length == 0)
+            return;
+
+        if (address > ulong.MaxValue - length)
+            throw new InvalidOperationException("The free range wraps the physical address space.");
+
+        var end = address + length;
+        var index = Math.Max(0, FindLastIndexAtOrBelow(ranges.Keys, address));
+        if (index < ranges.Count && ranges.Keys[index] + ranges.Values[index] < address)
+            index++;
+
+        if (index > 0 && ranges.Keys[index - 1] + ranges.Values[index - 1] >= address)
+            index--;
+
+        while (index < ranges.Count)
         {
-            end += _freeRanges.Values[nextIndex];
-            _freeRanges.RemoveAt(nextIndex);
+            var rangeStart = ranges.Keys[index];
+            if (rangeStart > end)
+                break;
+
+            var rangeEnd = rangeStart + ranges.Values[index];
+            address = Math.Min(address, rangeStart);
+            end = Math.Max(end, rangeEnd);
+            ranges.RemoveAt(index);
         }
-        _freeRanges.Add(address, end - address);
+
+        ranges.Add(address, end - address);
+    }
+
+    private static void RemoveRange(
+        SortedList<ulong, ulong> ranges,
+        ulong address,
+        ulong length,
+        bool requireCovered = true)
+    {
+        if (length == 0)
+            return;
+
+        var end = address + length;
+        var covered = 0UL;
+        for (var index = Math.Max(0, FindLastIndexAtOrBelow(ranges.Keys, address)); index < ranges.Count;)
+        {
+            var rangeStart = ranges.Keys[index];
+            var rangeEnd = rangeStart + ranges.Values[index];
+            if (rangeStart >= end)
+                break;
+            if (rangeEnd <= address)
+            {
+                index++;
+                continue;
+            }
+
+            var cutStart = Math.Max(address, rangeStart);
+            var cutEnd = Math.Min(end, rangeEnd);
+            covered += cutEnd - cutStart;
+            ranges.RemoveAt(index);
+            if (rangeStart < cutStart)
+            {
+                ranges.Add(rangeStart, cutStart - rangeStart);
+                index++;
+            }
+            if (cutEnd < rangeEnd)
+            {
+                ranges.Add(cutEnd, rangeEnd - cutEnd);
+                break;
+            }
+        }
+
+        if (requireCovered && covered != length)
+            throw new InvalidOperationException("The automatic range is not completely free.");
     }
 
     private static bool TryAlignWithinRange(ulong address, ulong end, ulong alignment, out ulong aligned)

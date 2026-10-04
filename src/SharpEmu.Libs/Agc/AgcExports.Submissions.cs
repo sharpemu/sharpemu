@@ -166,7 +166,12 @@ public static partial class AgcExports
     public static int SuspendPoint(CpuContext ctx)
     {
         TraceAgc("agc.suspend_point");
-        // The frame boundary: off the worker it waits for every accepted submission first.
+        // The frame boundary: off the worker it waits for every accepted command stream to be
+        // interpreted. This intentionally is not a host-GPU retirement fence: ordinary, clock,
+        // and flip labels are already CPU-visible when their packets are interpreted, while GDS
+        // values and completion notifications remain ordered on the recorded backend tick.
+        // Fencing here would serialize every frame and turn the guest's watchdog fallback into
+        // another stall.
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (gpuState.CommandSubmissionGate)
         {

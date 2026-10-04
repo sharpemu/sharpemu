@@ -16,12 +16,17 @@ public readonly record struct OwnedRange(ulong Address, ulong Size, RangeKind Ki
 
 public sealed class GuestSpaceOwner : IDisposable
 {
+    private enum PrimaryUserReservationMode
+    {
+        None,
+        Opportunistic,
+        Required,
+    }
+
     internal static Action<string> OnFatal = message => Environment.FailFast(message);
 
     public const ulong GuestPage = 0x4000;
-    private const ulong UserAddressStart = 0x10_0000_0000;
-    private const ulong UserAddressEnd = 0xFC_0000_0000;
-    private const ulong MinimumPreReservedRange = 0x0100_0000;
+    private const ulong MinimumEarlyReservationSize = 0x0100_0000;
 
     private readonly IHostViewMemory _host;
     private readonly SharedBackingViews _views;
@@ -30,25 +35,228 @@ public sealed class GuestSpaceOwner : IDisposable
     private readonly SortedList<ulong, ulong> _free = new();
     private readonly SortedList<ulong, OwnedRange> _mapped = new();
     private readonly List<(ulong Address, ulong Size)> _owned = new();
-    private readonly bool _preReserveGuestAddressSpace;
+    private readonly ulong _configuredGuestAddressStart;
+    private readonly ulong _configuredGuestAddressLimit;
+    private readonly ulong _configuredMinimumReservationSize;
+    private readonly PrimaryUserReservationMode _configuredPrimaryReservationMode;
+    private readonly bool _restoreConfiguredReservationsAfterRelease;
+    private readonly bool _reserveExtendedAddressSpace;
     private bool _disposed;
 
     public GuestSpaceOwner(IHostViewMemory host, ulong backingSize, bool preReserveGuestAddressSpace = false)
+        : this(
+            host,
+            backingSize,
+            preReserveGuestAddressSpace
+                ? GuestMemoryLayout.GuestAddressStart
+                : 0,
+            preReserveGuestAddressSpace
+                ? GuestMemoryLayout.GuestAddressLimit
+                : 0,
+            MinimumEarlyReservationSize,
+            preReserveGuestAddressSpace && OperatingSystem.IsWindows()
+                ? PrimaryUserReservationMode.Required
+                : PrimaryUserReservationMode.None,
+            restoreConfiguredReservationsAfterRelease: preReserveGuestAddressSpace,
+            reserveExtendedAddressSpace: preReserveGuestAddressSpace)
+    {
+    }
+
+    internal GuestSpaceOwner(
+        IHostViewMemory host,
+        ulong backingSize,
+        GuestVirtualAddressPlacement placement)
+        : this(
+            host,
+            backingSize,
+            placement == GuestVirtualAddressPlacement.Canonical
+                ? GuestMemoryLayout.GuestAddressStart
+                : 0,
+            placement == GuestVirtualAddressPlacement.Canonical
+                ? GuestMemoryLayout.GuestAddressLimit
+                : 0,
+            MinimumEarlyReservationSize,
+            OperatingSystem.IsWindows()
+                ? placement == GuestVirtualAddressPlacement.Canonical
+                    ? PrimaryUserReservationMode.Required
+                    : PrimaryUserReservationMode.Opportunistic
+                : PrimaryUserReservationMode.None,
+            restoreConfiguredReservationsAfterRelease:
+                placement == GuestVirtualAddressPlacement.Canonical,
+            reserveExtendedAddressSpace: true)
+    {
+    }
+
+    internal GuestSpaceOwner(
+        IHostViewMemory host,
+        ulong backingSize,
+        ulong guestAddressStart,
+        ulong guestAddressLimit,
+        ulong minimumEarlyReservationSize)
+        : this(
+            host,
+            backingSize,
+            guestAddressStart,
+            guestAddressLimit,
+            minimumEarlyReservationSize,
+            PrimaryUserReservationMode.None,
+            restoreConfiguredReservationsAfterRelease: false,
+            reserveExtendedAddressSpace: false)
+    {
+    }
+
+    private GuestSpaceOwner(
+        IHostViewMemory host,
+        ulong backingSize,
+        ulong guestAddressStart,
+        ulong guestAddressLimit,
+        ulong minimumEarlyReservationSize,
+        PrimaryUserReservationMode primaryUserReservationMode,
+        bool restoreConfiguredReservationsAfterRelease,
+        bool reserveExtendedAddressSpace)
     {
         _host = host;
         Granularity = host.Granularity;
+        _configuredGuestAddressStart = guestAddressStart;
+        _configuredGuestAddressLimit = guestAddressLimit;
+        _configuredMinimumReservationSize = minimumEarlyReservationSize;
+        _configuredPrimaryReservationMode = primaryUserReservationMode;
+        _restoreConfiguredReservationsAfterRelease = restoreConfiguredReservationsAfterRelease;
+        _reserveExtendedAddressSpace = reserveExtendedAddressSpace;
         // Create lookup views before concurrent fault handlers can read the range table.
         _ = _mapped.Keys;
         _ = _mapped.Values;
-        _preReserveGuestAddressSpace = preReserveGuestAddressSpace;
-        PreReserveGuestAddressSpace();
+        ReserveConfiguredGuestAddressSpace();
+
         _views = new SharedBackingViews(host, backingSize);
         if (!_views.IsAvailable)
         {
             var megabytes = backingSize / (1024 * 1024);
             OnFatal(OperatingSystem.IsWindows()
                 ? $"Could not allocate {megabytes} MB for guest direct memory. Windows requires this amount of available system commit. Close other applications or increase the paging file size."
-                : $"Could not allocate {megabytes} MB for guest direct memory.");
+                : $"Could not reserve {megabytes} MB of virtual address space for guest direct memory.");
+        }
+    }
+
+    private void ReserveConfiguredGuestAddressSpace()
+    {
+        // Attempt the primary user window before backing aliases can fragment it. Lazy
+        // placement keeps the existing on-demand path when the exact claim is unavailable.
+        var primaryReservationHandled = TryReservePrimaryUserAddressSpace(
+            _configuredPrimaryReservationMode,
+            out var primaryReservationSucceeded);
+        if (_configuredGuestAddressStart < _configuredGuestAddressLimit &&
+            (!primaryReservationHandled || primaryReservationSucceeded))
+        {
+            ReserveGuestAddressSpace(
+                _configuredGuestAddressStart,
+                _configuredGuestAddressLimit,
+                _configuredMinimumReservationSize);
+        }
+
+        if (_reserveExtendedAddressSpace)
+        {
+            ReserveExtendedGuestAddressSpace();
+        }
+    }
+
+    private void ReserveExtendedGuestAddressSpace()
+    {
+        var address = GuestMemoryLayout.GuestExtendedAddressStart;
+        var size = GuestMemoryLayout.GuestExtendedAddressSize;
+        if (_host.ReserveHole(address, size) != address)
+        {
+            OnFatal($"Could not reserve the extended guest address range from " +
+                $"0x{address:X16} to 0x{GuestMemoryLayout.GuestExtendedAddressLimit:X16}.");
+            return;
+        }
+
+        _owned.Add((address, size));
+        AddFreeRange(address, size);
+    }
+
+    private bool TryReservePrimaryUserAddressSpace(
+        PrimaryUserReservationMode mode,
+        out bool reservationSucceeded)
+    {
+        reservationSucceeded = false;
+        if (mode == PrimaryUserReservationMode.None)
+        {
+            return false;
+        }
+
+        var address = GuestMemoryLayout.GuestUserAddressStart;
+        var size = GuestMemoryLayout.GuestPrimaryUserAddressSize;
+        // libc requests this entire 512 GiB arena as one virtual range. Owning
+        // fragmented regions is therefore not sufficient: reserve it exactly
+        // before backing aliases or runtime allocations can split the window.
+        var trustedPreReservation = string.Equals(
+            Environment.GetEnvironmentVariable(
+                GuestMemoryLayout.TrustedPreReservedPrimaryUserWindowVariable),
+            GuestMemoryLayout.PreReservedPrimaryUserWindowMarker,
+            StringComparison.Ordinal);
+        if (trustedPreReservation)
+        {
+            // The handoff is one-shot. A second owner in this process must never
+            // adopt and later release a placeholder that belongs to the first.
+            Environment.SetEnvironmentVariable(
+                GuestMemoryLayout.TrustedPreReservedPrimaryUserWindowVariable,
+                null);
+            if (!_host.TryAdoptPlaceholder(address, size))
+            {
+                OnFatal($"Could not adopt the pre-reserved primary guest user address range from " +
+                    $"0x{address:X16} to 0x{GuestMemoryLayout.GuestPrimaryUserAddressLimit:X16}.");
+                return true;
+            }
+        }
+        else if (_host.ReserveHole(address, size) != address)
+        {
+            if (mode == PrimaryUserReservationMode.Required)
+            {
+                OnFatal($"Could not reserve the primary guest user address range from " +
+                    $"0x{address:X16} to 0x{GuestMemoryLayout.GuestPrimaryUserAddressLimit:X16}.");
+                return true;
+            }
+
+            return false;
+        }
+
+        reservationSucceeded = true;
+        _owned.Add((address, size));
+        AddFreeRange(address, size);
+        return true;
+    }
+
+    private void ReserveGuestAddressSpace(ulong startAddress, ulong endAddress, ulong minimumRegionSize)
+    {
+        if (!_host.TryReserveFreeRegions(startAddress, endAddress, minimumRegionSize, out var reservations))
+        {
+            OnFatal($"Could not reserve the guest address space from 0x{startAddress:X16} to 0x{endAddress:X16}.");
+            return;
+        }
+
+        foreach (var range in reservations)
+        {
+            if (range.Address < startAddress || range.Address >= endAddress || range.Size == 0 ||
+                range.Size > endAddress - range.Address || range.Address % Granularity != 0 ||
+                range.Size % Granularity != 0 ||
+                reservations.Any(other => other != range &&
+                    range.Address < other.Address + other.Size && other.Address < range.Address + range.Size))
+            {
+                foreach (var reserved in reservations)
+                {
+                    _host.FreeOwnedRange(reserved.Address, reserved.Size);
+                }
+
+                OnFatal($"The host returned an invalid guest reservation at 0x{range.Address:X16}.");
+                return;
+            }
+        }
+
+        foreach (var range in reservations)
+        {
+            _owned.Add((range.Address, range.Size));
+            AddFreeRange(range.Address, range.Size);
         }
     }
 
@@ -181,7 +389,29 @@ public sealed class GuestSpaceOwner : IDisposable
 
         lock (_mappingLock)
         {
-            return _owned.Any(range => address >= range.Address && address + size <= range.Address + range.Size);
+            var end = address + size;
+            var current = address;
+            foreach (var range in _owned.OrderBy(range => range.Address))
+            {
+                var rangeEnd = range.Address + range.Size;
+                if (rangeEnd <= current)
+                {
+                    continue;
+                }
+
+                if (range.Address > current)
+                {
+                    return false;
+                }
+
+                current = Math.Max(current, rangeEnd);
+                if (current >= end)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
     }
 
@@ -396,7 +626,7 @@ public sealed class GuestSpaceOwner : IDisposable
 
     public bool AllocatePrivate(ulong address, ulong size, HostPageProtection protection)
     {
-        if (!IsValidAlignedRange(address, size))
+        if (!IsValidRange(address, size) || address % _host.PageSize != 0 || size % _host.PageSize != 0)
         {
             return false;
         }
@@ -425,7 +655,7 @@ public sealed class GuestSpaceOwner : IDisposable
 
     public bool FreePrivate(ulong address, ulong size)
     {
-        if (!IsValidAlignedRange(address, size))
+        if (!IsValidRange(address, size) || address % _host.PageSize != 0 || size % _host.PageSize != 0)
         {
             return false;
         }
@@ -471,6 +701,21 @@ public sealed class GuestSpaceOwner : IDisposable
         }
     }
 
+    // Release all mappings while retaining the process-lifetime address-space reservations.
+    public void ResetAddressRanges()
+    {
+        using (EnterMappingLock())
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            ReleaseMappingsLocked();
+            _mapped.Clear();
+        }
+    }
+
     // Release all mappings and reserved ranges, but keep the backing object for reuse.
     public void ReleaseAddressRanges()
     {
@@ -481,16 +726,7 @@ public sealed class GuestSpaceOwner : IDisposable
                 return;
             }
 
-            foreach (var range in _mapped.Values.ToArray())
-            {
-                var released = range.Kind == RangeKind.Backed
-                    ? _views.Unmap(range.Address, range.Size, out _)
-                    : _host.ReleasePrivate(range.Address, range.Size);
-                if (!released)
-                {
-                    OnFatal($"Could not release the reserved range at 0x{range.Address:X16}.");
-                }
-            }
+            ReleaseMappingsLocked();
 
             foreach (var (address, size) in _owned)
             {
@@ -503,21 +739,30 @@ public sealed class GuestSpaceOwner : IDisposable
             _owned.Clear();
             _free.Clear();
             _mapped.Clear();
-            // A new image load needs the guest address space reserved again.
-            PreReserveGuestAddressSpace();
+            if (_restoreConfiguredReservationsAfterRelease || _reserveExtendedAddressSpace)
+            {
+                // A new image load needs the configured guest apertures again.
+                ReserveConfiguredGuestAddressSpace();
+            }
         }
     }
 
-    private void PreReserveGuestAddressSpace()
+    private void ReleaseMappingsLocked()
     {
-        if (!_preReserveGuestAddressSpace)
+        foreach (var range in _mapped.Values.ToArray())
         {
-            return;
-        }
+            var released = range.Kind == RangeKind.Backed
+                ? _views.Unmap(range.Address, range.Size, out _)
+                : _host.ReleasePrivate(range.Address, range.Size);
+            if (!released)
+            {
+                OnFatal($"Could not release the reserved range at 0x{range.Address:X16}.");
+                continue;
+            }
 
-        foreach (var range in _host.ReserveFreeAddressRanges(UserAddressStart, UserAddressEnd, MinimumPreReservedRange))
-        {
-            _owned.Add((range.Address, range.Size));
+            // Releasing a view or private mapping leaves a placeholder behind. Publish it
+            // through the normal coalescing path so the range table matches the host's
+            // placeholder boundaries when this owner is reused.
             AddFreeRange(range.Address, range.Size);
         }
     }

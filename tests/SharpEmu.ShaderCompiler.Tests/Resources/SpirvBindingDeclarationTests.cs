@@ -129,6 +129,17 @@ public sealed class SpirvBindingDeclarationTests
         var module = new SpirvModuleInspector(shader.Spirv);
         Assert.Contains((uint)SpirvCapability.PhysicalStorageBufferAddresses, module.Capabilities);
         Assert.Contains((ushort)SpirvOp.ConvertUToPtr, module.Opcodes);
+        Assert.Contains((ushort)SpirvOp.UGreaterThanEqual, module.Opcodes);
+        Assert.Contains((ushort)SpirvOp.ISub, module.Opcodes);
+        Assert.Contains((ushort)SpirvOp.Select, module.Opcodes);
+        Assert.Contains((ushort)SpirvOp.ShiftRightLogical, module.Opcodes);
+        Assert.Contains((ushort)SpirvOp.ULessThan, module.Opcodes);
+        Assert.Contains((ushort)SpirvOp.LogicalAnd, module.Opcodes);
+        Assert.Contains((ushort)SpirvOp.LogicalOr, module.Opcodes);
+        Assert.Contains(DeviceAddressPaging.LowerAddressSize, module.Constants64);
+        Assert.Contains(DeviceAddressPaging.ExtendedAddressBase, module.Constants64);
+        Assert.Contains(DeviceAddressPaging.ExtendedAddressLimit, module.Constants64);
+        Assert.Contains(DeviceAddressPaging.ExtendedAddressBias, module.Constants64);
     }
 
     [Fact]
@@ -156,8 +167,20 @@ public sealed class SpirvBindingDeclarationTests
     [Fact]
     public void ShaderBaseRead_TakesTheBaseFromPushData()
     {
+        const ulong continuationOffset = 0x0000_0001_7FBD_5D00;
+        var getpc = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Sop1,
+            "SGetpcB64",
+            [0u],
+            [],
+            [Gen5Operand.Scalar(4)],
+            null)
+        {
+            GuestProgramCounterOffset = continuationOffset,
+        };
         var program = Program(
-            new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Sop1, "SGetpcB64", [0u], [], [Gen5Operand.Scalar(4)], null),
+            getpc,
             Sop2(4, "SAddU32", 4, Gen5Operand.Scalar(4), Operand(0x100)),
             Sop2(8, "SAddcU32", 5, Gen5Operand.Scalar(5), Operand(0)),
             ScalarLoad(12, 4, destination: 8, count: 4),
@@ -170,6 +193,7 @@ public sealed class SpirvBindingDeclarationTests
         var module = new SpirvModuleInspector(shader.Spirv);
         Assert.True(module.HasVariableInStorageClass(SpirvStorageClass.PushConstant));
         Assert.Contains((ushort)SpirvOp.UConvert, module.Opcodes);
+        Assert.Contains(continuationOffset + sizeof(uint), module.Constants64);
     }
 
     [Fact]

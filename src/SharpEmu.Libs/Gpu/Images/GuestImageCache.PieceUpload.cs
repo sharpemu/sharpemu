@@ -25,8 +25,7 @@ public sealed partial class GuestImageCache
     private static ColorTransferPlan? PieceHashPlan(CachedImage image, in ImageRequest request)
     {
         ref readonly var info = ref image.Description;
-        if (request.Role is not (ImageRole.Texture or ImageRole.StorageImage) || info.IsVolume || info.IsDepth ||
-            info.Data.Size < PieceHashMinimumImageSize)
+        if (!CanUsePieceHashes(request.Role, image.DepthOwner.IsValid, info.IsVolume, info.IsDepth, info.Data.Size))
         {
             return null;
         }
@@ -39,6 +38,22 @@ public sealed partial class GuestImageCache
 
         return plan;
     }
+
+    // Stencil associations are lightweight proxy records. Their description intentionally
+    // contains only the guest range and extent, so it has no color format or tile layout to
+    // hash. Keep those records on UploadStencilPlane instead of asking PlanColorTransfer to
+    // interpret the proxy as an ordinary texture.
+    internal static bool CanUsePieceHashes(
+        ImageRole role,
+        bool isStencilAssociation,
+        bool isVolume,
+        bool isDepth,
+        ulong dataSize)
+        => !isStencilAssociation &&
+           role is ImageRole.Texture or ImageRole.StorageImage &&
+           !isVolume &&
+           !isDepth &&
+           dataSize >= PieceHashMinimumImageSize;
 
     // Null when a piece's guest bytes cannot be read; the caller then keeps no hashes.
     private ulong[]? HashGuestPieces(in GuestSpan data, List<TileTransfer> tiles)

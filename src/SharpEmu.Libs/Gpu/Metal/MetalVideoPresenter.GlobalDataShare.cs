@@ -11,8 +11,7 @@ namespace SharpEmu.Libs.Gpu.Metal;
 // touches in queue order. The fault bitmap of device-address programs lives beside it.
 internal static partial class MetalVideoPresenter
 {
-    private const ulong DeviceAddressSpaceBits = 40;
-    private const ulong FaultBitmapWords = 1UL << (int)(DeviceAddressSpaceBits - DeviceAddressPaging.PageBits - 5);
+    private const ulong FaultBitmapWords = DeviceAddressPaging.PageCount / 32;
     private const nuint StorageModeShared = 0;
     private const nint CommandBufferCompleted = 4;
 
@@ -247,8 +246,10 @@ internal static partial class MetalVideoPresenter
                     {
                         if (_faultLoggedHashes.Add(hash))
                         {
+                            var packedAddress = (ulong)firstPage << DeviceAddressPaging.PageBits;
+                            var guestAddress = DeviceAddressPaging.GuestAddress(packedAddress);
                             Console.Error.WriteLine(
-                                $"[LOADER][WARN] metal.device_address_fault hash=0x{hash:X16} page=0x{firstPage:X} address=0x{firstPage << DeviceAddressPaging.PageBits:X16}");
+                                $"[LOADER][WARN] metal.device_address_fault hash=0x{hash:X16} page=0x{guestAddress >> DeviceAddressPaging.PageBits:X} address=0x{guestAddress:X16}");
                         }
                     }
 

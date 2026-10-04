@@ -201,7 +201,11 @@ public static partial class AgcExports
             return false;
         }
 
-        // Prospero T# stores width-minus-one across 14 bits and height-minus-one in 14 bits.
+        // The hardware descriptor stores width-minus-one in 14 bits: the top
+        // two bits of word 1 followed by twelve bits of word 2.  Height-minus-
+        // one occupies the following fourteen bits of word 2.  Bits 12-13
+        // and 28-31 of word 2 belong to other descriptor state and must not
+        // inflate the image dimensions.
         var address = (((ulong)(fields[1] & 0xFFu) << 32) | fields[0]) << 8;
         var width = (((fields[1] >> 30) & 0x3u) | ((fields[2] & 0x0FFFu) << 2)) + 1;
         var height = ((fields[2] >> 14) & 0x3FFFu) + 1;

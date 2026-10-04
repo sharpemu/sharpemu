@@ -19,7 +19,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     {
         if (!Supported) return;
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var address = AcquireRange(owner, host, HoleSize(host));
         WithProtectionPaused(host, address,
             () => Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _)),
@@ -38,7 +38,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     {
         if (!Supported) return;
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var address = AcquireRange(owner, host, 258 * ProtectionBlockBytes);
         var otherAddress = address + (coverAllLocks ? 128UL : 256UL) * ProtectionBlockBytes;
         Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _));
@@ -57,7 +57,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     {
         if (!Supported) return;
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var address = AcquireRange(owner, host, 2 * ProtectionBlockBytes);
         var otherAddress = address + ProtectionBlockBytes;
         Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _));
@@ -82,7 +82,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     {
         if (!Supported) return;
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var reservationSize = wrapsLockIndices ? 258 * ProtectionBlockBytes : 3 * ProtectionBlockBytes;
         var reservation = AcquireRange(owner, host, reservationSize);
         var boundary = wrapsLockIndices
@@ -111,7 +111,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     {
         if (!Supported) return;
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var address = AcquireRange(owner, host, HoleSize(host));
         if (operation == "free")
             Assert.True(owner.AllocatePrivate(address, Page, HostPageProtection.ReadWrite));
@@ -147,7 +147,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     {
         if (!Supported) return;
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var address = AcquireRange(owner, host, 2 * ProtectionBlockBytes);
         Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _));
         host.BeforeChangeAccess = (_, _) => throw new InvalidOperationException("Injected protection failure.");
@@ -168,7 +168,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     {
         if (!Supported) return;
         var host = HostViewMemory.Create();
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var address = AcquireRange(owner, host, HoleSize(host));
         Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _));
         long allocated = -1;

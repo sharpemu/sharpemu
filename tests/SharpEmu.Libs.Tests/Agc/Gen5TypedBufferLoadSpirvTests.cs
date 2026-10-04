@@ -35,6 +35,31 @@ public sealed class Gen5TypedBufferLoadSpirvTests
         Assert.DoesNotContain(DescriptorFormatTableName, ModuleNames(shader.Spirv));
     }
 
+    [Theory]
+    [InlineData("BufferLoadFormatX", 1u)]
+    [InlineData("BufferLoadFormatXyzw", 4u)]
+    public void FormattedUntypedLoad_WithInvalidDescriptorFormat_ReadsRawDwords(
+        string opcode,
+        uint dwordCount)
+    {
+        var request = CreateCompileRequest(
+            opcode,
+            typed: false,
+            typedFormat: 0,
+            dwordCount: dwordCount,
+            descriptorFormat: 0,
+            descriptorSwizzle: 0xFAC);
+        Assert.Equal(0u, Assert.Single(request.Resources.Info.Buffers).DescriptorFormat);
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error),
+            error);
+
+        Assert.DoesNotContain(DescriptorFormatTableName, ModuleNames(shader.Spirv));
+        Assert.True(
+            ModuleOpcodes(shader.Spirv).Count(static opcode => opcode == OpArrayLength) >= dwordCount,
+            "The invalid-format fallback must issue one bounds-checked raw load per transferred dword.");
+    }
+
     [Fact]
     public void TypedLoad_WithAnUnknownInstructionFormat_ReadsRawDwords()
     {
@@ -72,6 +97,7 @@ public sealed class Gen5TypedBufferLoadSpirvTests
     }
 
     private const uint OpAtomicCompareExchange = 230;
+    private const uint OpArrayLength = 68;
 
     private static Gen5SpirvShader CompileBufferProgram(string opcode, bool typed, uint typedFormat, uint dwordCount)
     {
@@ -112,7 +138,9 @@ public sealed class Gen5TypedBufferLoadSpirvTests
         string opcode,
         bool typed,
         uint typedFormat,
-        uint dwordCount)
+        uint dwordCount,
+        uint descriptorFormat = 77,
+        uint descriptorSwizzle = 0)
     {
         var load = new Gen5ShaderInstruction(
             0,
@@ -136,7 +164,11 @@ public sealed class Gen5TypedBufferLoadSpirvTests
         var end = new Gen5ShaderInstruction(8, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null);
         var program = new Gen5ShaderProgram(0, [load, end]);
         var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, 1, 0, 12);
-        uint[] userData = [0, 0, 0, 0, 0, 0, 0, 0, 0x2000, 0, 64, 77u << 12];
+        uint[] userData =
+        [
+            0, 0, 0, 0, 0, 0, 0, 0,
+            0x2000, 0, 64, (descriptorFormat << 12) | descriptorSwizzle,
+        ];
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
         Assert.True(ResourceMaterializer.Materialize(plan, ResourceTestProgram.Inputs(userData),

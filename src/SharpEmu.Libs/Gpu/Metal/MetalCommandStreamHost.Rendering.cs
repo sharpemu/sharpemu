@@ -162,6 +162,14 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
 
     bool IShaderPipelineHost.ComputeWave64Supported => true;
 
+    uint IShaderPipelineHost.ComputeSubgroupSize => 64;
+
+    // MSL keeps the guest workgroup dimensions and IDs in logical XYZ order.
+    ComputeWorkgroupAxisMapping IShaderPipelineHost.ResolveComputeWorkgroupAxisMapping(
+        uint threadsX,
+        uint threadsY,
+        uint threadsZ) => ComputeWorkgroupAxisMapping.Identity;
+
     bool IShaderPipelineHost.GraphicsSubgroupOperationsEnabled => true;
 
     // Metal has no 64-bit workgroup atomics here; keep the non-atomic 32-bit pair.
@@ -310,14 +318,21 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         _hasDepth = true;
     }
 
-    BufferBinding IRenderHost.NullBuffer => new(0, 0);
+    BufferBinding IRenderHost.NullBuffer => new(0, 0, 0);
 
     BufferBinding IRenderHost.ObtainBuffer(ulong address, ulong size, bool isWritten)
     {
         _ = isWritten;
         var handle = _nextBufferHandle++;
         _buffers[handle] = new BoundBuffer(address, size, null);
-        return new BufferBinding(handle, 0);
+        return new BufferBinding(handle, 0, size);
+    }
+
+    void IRenderHost.RegisterDeviceAddressRange(ulong address, ulong size)
+    {
+        // Metal currently has no mesh host, so retain the previous indexed-mesh
+        // acquisition semantics without introducing Vulkan's persistent BDA cache.
+        _ = ((IRenderHost)this).ObtainBuffer(address, size, isWritten: false);
     }
 
     BufferBinding IRenderHost.UploadTransient(ReadOnlySpan<byte> data, uint alignment)
@@ -325,7 +340,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         _ = alignment;
         var handle = _nextBufferHandle++;
         _buffers[handle] = new BoundBuffer(0, (ulong)data.Length, data.ToArray());
-        return new BufferBinding(handle, 0);
+        return new BufferBinding(handle, 0, (ulong)data.Length);
     }
 
     void IRenderHost.BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input)
@@ -602,8 +617,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
                 continue;
             }
 
-            var limit = PageOwnerTable.AddressSpaceSize;
-            if (range.Base >= limit || range.Size > limit - range.Base)
+            if (!GuestMemoryLayout.ContainsGpuAddressRange(range.Base, range.Size))
             {
                 throw Fatal($"A device-address range is outside the address space: handle={range.Handle} base=0x{range.Base:X16} size=0x{range.Size:X} hash=0x{program.Hash:X16}.");
             }
@@ -715,7 +729,10 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         }
     }
 
-    void IRenderHost.SetDynamicState(in DynamicDrawState state) => _dynamicState = state;
+    void IRenderHost.SetDynamicState(
+        in DynamicDrawState state,
+        ReadOnlySpan<DynamicViewportState> viewports) =>
+        _dynamicState = state;
 
     void IRenderHost.BeginRendering(in RenderingState state)
     {
@@ -904,6 +921,11 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
     // Blend and cull state come from the pipeline's static parameters; the rest from the dynamic state.
     private GuestRenderState RenderStateOf(ContextRegisters context, IReadOnlyList<ColorTargetState> targets, PipelineStaticParameters parameters)
     {
+        if (parameters.PolygonMode == PolygonMode.Point)
+        {
+            throw Fatal("Point polygon mode is not supported by the Metal renderer.");
+        }
+
         var blends = new GuestBlendState[targets.Count];
         for (var index = 0; index < targets.Count; index++)
         {
@@ -930,7 +952,7 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
                 parameters.CullFront,
                 parameters.CullBack,
                 parameters.FrontFaceClockwise,
-                context.RasterMode.PolygonMode != 0,
+                parameters.PolygonMode == PolygonMode.Line,
                 state.DepthBiasEnabled,
                 state.DepthBiasConstantFactor,
                 state.DepthBiasClamp,

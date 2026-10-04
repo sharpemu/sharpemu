@@ -17,12 +17,13 @@ public static class ComputeStageInputResolver
         ComputeStageRegisters compute,
         RegisteredShader shader,
         uint dispatchInitiator,
-        bool needsLocalDataShareBarriers,
+        uint hostSubgroupSize,
         uint dispatchX,
         uint dispatchY,
         uint dispatchZ)
     {
         var threadDimensions = (dispatchInitiator & UseThreadDimensionsBit) != 0;
+        var waveSize = (dispatchInitiator & Wave32Bit) != 0 ? 32u : 64u;
         return new ComputeInputInfo
         {
             ThreadsX = compute.ThreadsX & 0xFFFFu,
@@ -37,10 +38,11 @@ public static class ComputeStageInputResolver
             GroupIdX = compute.ThreadGroupIdXEnable,
             GroupIdY = compute.ThreadGroupIdYEnable,
             GroupIdZ = compute.ThreadGroupIdZEnable,
-            WaveSize = (dispatchInitiator & Wave32Bit) != 0 ? 32u : 64u,
+            WaveSize = waveSize,
             ThreadIdCount = compute.ThreadIdComponentCount + 1,
             ThreadGroupSizeEnabled = compute.ThreadGroupSizeEnable,
-            NeedsLocalDataShareBarriers = needsLocalDataShareBarriers,
+            NeedsLocalDataShareBarriers = waveSize == 64 && hostSubgroupSize < 64,
+            HostSubgroupSize = hostSubgroupSize,
             WorkgroupRegister = compute.UserScalarCount,
         };
     }

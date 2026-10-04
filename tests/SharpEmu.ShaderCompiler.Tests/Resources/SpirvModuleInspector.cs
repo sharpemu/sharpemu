@@ -14,6 +14,7 @@ internal sealed class SpirvModuleInspector
     public Dictionary<uint, uint> DescriptorSets { get; } = [];
     public HashSet<uint> Capabilities { get; } = [];
     public HashSet<ushort> Opcodes { get; } = [];
+    public HashSet<ulong> Constants64 { get; } = [];
     public Dictionary<uint, uint> VariableStorageClasses { get; } = [];
     public uint AddressingModel { get; private set; }
 
@@ -46,6 +47,9 @@ internal sealed class SpirvModuleInspector
                     break;
                 case SpirvOp.Variable when wordCount >= 4:
                     VariableStorageClasses[words[offset + 2]] = words[offset + 3];
+                    break;
+                case SpirvOp.Constant when wordCount == 5:
+                    Constants64.Add((ulong)words[offset + 3] | ((ulong)words[offset + 4] << 32));
                     break;
             }
 

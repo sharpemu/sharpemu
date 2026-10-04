@@ -117,7 +117,7 @@ public sealed class GuestGpuMemoryTests
         Assert.True(_memory.Covers(0x10000, 0x4000));
         Assert.True(_memory.Covers(0x11000, 0x8));
         Assert.False(_memory.Covers(0x13FF8, 0x10));
-        Assert.False(_memory.Covers(1UL << 40, 0x8));
+        Assert.False(_memory.Covers(TrackerLayout.SpaceBytes, 0x8));
         Assert.Empty(_stores.Calls);
 
         _memory.Unregister(0x10000, 0x4000);
@@ -127,10 +127,10 @@ public sealed class GuestGpuMemoryTests
     }
 
     [Theory]
-    [InlineData(FaultKind.Write, "buffer.write 10010+8", "image.write 10010+8")]
-    [InlineData(FaultKind.Read, "buffer.pull 10010+8")]
+    [InlineData(FaultKind.Write, "buffer.write 10010+1", "image.write 10010+1")]
+    [InlineData(FaultKind.Read, "buffer.pull 10010+1")]
     [InlineData(FaultKind.Execute)]
-    [InlineData(FaultKind.Unknown, "buffer.pull 10010+8")]
+    [InlineData(FaultKind.Unknown, "buffer.pull 10010+1")]
     public void TryResolveFault_NotifiesStoresButDeclinesWhenNoneRecovers(FaultKind kind, params string[] expected)
     {
         _memory.Register(0x10000, 0x1000, ReadWrite);
@@ -165,7 +165,7 @@ public sealed class GuestGpuMemoryTests
         _memory.Register(0x10000, 0x1000, ReadWrite);
 
         Assert.True(_memory.TryResolveFault(FaultKind.Write, 0x10010));
-        Assert.Equal(new[] { "buffer.write 10010+8", "image.write 10010+8" }, _stores.Calls);
+        Assert.Equal(new[] { "buffer.write 10010+1", "image.write 10010+1" }, _stores.Calls);
 
         _memory.Unregister(0x10000, 0x1000);
         _memory.Dispose();
@@ -206,12 +206,26 @@ public sealed class GuestGpuMemoryTests
         _memory.Register(0x10000, 0x1000, ReadWrite);
 
         Assert.False(_memory.TryResolveFault(FaultKind.Write, 0x20000));
-        Assert.False(_memory.TryResolveFault(FaultKind.Write, 0x10FFC));
+        Assert.False(_memory.TryResolveFault(FaultKind.Write, 0x11000));
         Assert.False(_memory.MarkCpuWrite(0x20000, 0x10));
         Assert.Empty(_stores.Calls);
 
         Assert.True(_memory.MarkCpuWrite(0x10100, 0x10));
         Assert.Equal(new[] { "buffer.write 10100+10", "image.write 10100+10" }, _stores.Calls);
+
+        _memory.Unregister(0x10000, 0x1000);
+        _memory.Dispose();
+    }
+
+    [Fact]
+    public void TryResolveFault_UsesTheFaultingByteAtTheMappedTail()
+    {
+        _stores.BufferHandles = true;
+        _memory.Register(0x10000, 0x1000, ReadWrite);
+
+        Assert.True(_memory.TryResolveFault(FaultKind.Write, 0x10FFF));
+        Assert.False(_memory.TryResolveFault(FaultKind.Write, 0x11000));
+        Assert.Equal(new[] { "buffer.write 10FFF+1", "image.write 10FFF+1" }, _stores.Calls);
 
         _memory.Unregister(0x10000, 0x1000);
         _memory.Dispose();
@@ -230,7 +244,7 @@ public sealed class GuestGpuMemoryTests
         Assert.False(_memory.TryResolveFault(FaultKind.Read, 0x11010));
         Assert.Empty(_stores.Calls);
         Assert.True(_memory.TryResolveFault(FaultKind.Read, 0x10010));
-        Assert.Equal(new[] { "buffer.pull 10010+8" }, _stores.Calls);
+        Assert.Equal(new[] { "buffer.pull 10010+1" }, _stores.Calls);
 
         _memory.Unregister(0x10000, 0x2000);
         _memory.Dispose();

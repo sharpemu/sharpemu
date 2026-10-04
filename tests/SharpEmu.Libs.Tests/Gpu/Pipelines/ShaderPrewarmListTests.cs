@@ -32,39 +32,69 @@ public sealed class ShaderPrewarmListTests : IDisposable
         return shader.Spirv;
     }
 
-    private static (IShaderPipelineHost Host, byte[] Spirv) CompileAtRuntime(ShaderPrewarmList list, uint format)
+    private static (FakePipelineHost Host, byte[] Spirv) CompileAtRuntime(
+        ShaderPrewarmList list,
+        uint format,
+        Action<FakePipelineHost>? configureHost = null)
     {
         var guest = new PipelineTestGuest(Compile);
+        configureHost?.Invoke(guest.Host);
         guest.Host.ShaderPrewarm = list;
         guest.RegisterProgram(CodeAddress, HeaderAddress, PipelineTestGuest.FormatLoadProgram);
         var userData = PipelineTestGuest.BufferDescriptor(BufferAddress, 4, 64, format);
         var cursor = 0u;
         guest.Programs.GetOrCompile(
-            guest.Source(CodeAddress, ShaderStage.Compute, userData), PipelineTestGuest.ComputeOptions(threadsX: 64), ref cursor, out _);
+            guest.Source(CodeAddress, ShaderStage.Compute, userData),
+            PipelineTestGuest.ComputeOptions(
+                threadsX: 64,
+                hostSubgroupSize: guest.Host.ComputeSubgroupSize,
+                workgroupAxisMapping: guest.Host.WorkgroupAxisMapping),
+            ref cursor,
+            out _);
         return (guest.Host, Assert.Single(guest.Compiler.Shaders).Spirv);
     }
 
     private ShaderPrewarmList Open() => ShaderPrewarmList.Open(_directory) ?? throw new InvalidOperationException("The list did not open.");
 
     [Fact]
-    public void ARecordedComputeProgramCompilesToTheSameSpirvAfterReload()
+    public void ARecordedComputeProgramPreservesHostInputsAndCompilesToTheSameSpirvAfterReload()
     {
+        var workgroupAxisMapping = new ComputeWorkgroupAxisMapping(1, 2, 0);
         byte[] runtime;
-        IShaderPipelineHost host;
+        FakePipelineHost host;
         using (var list = Open())
         {
-            (host, runtime) = CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+            (host, runtime) = CompileAtRuntime(list, BufferDescriptorWords.Format32UInt, candidate =>
+            {
+                candidate.ComputeSubgroupSize = 32;
+                candidate.WorkgroupAxisMapping = workgroupAxisMapping;
+                candidate.BufferInt64AtomicsSupported = true;
+                candidate.ShaderFloat64Supported = true;
+                candidate.ShaderSignedZeroInfNanPreserveFloat32Supported = true;
+                candidate.ShaderDeviceClockSupported = true;
+                candidate.ShaderDeviceClockShift = 7;
+            });
         }
 
         using var reloaded = Open();
         var (record, code) = Assert.Single(reloaded.LoadedComputes());
+        Assert.True(record.HasHostComputeInfo);
+        Assert.Equal(32u, record.Info.HostSubgroupSize);
+        Assert.Equal(workgroupAxisMapping, record.Info.WorkgroupAxisMapping);
+        var compiler = new FakeShaderCompiler(Compile);
         Assert.True(
             ShaderProgramCache.TryCompilePrewarm(
-                record, code, new FakeShaderCompiler(Compile), host.SharedInt64AtomicsEnabled, host.ExecGuardElisionEnabled,
-                out var compiled, out var layout, out var error),
+                record, code, compiler, host, out var compiled, out var layout, out var error),
             error);
         Assert.NotNull(layout);
         Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
+        var request = Assert.Single(compiler.Requests);
+        Assert.Equal(32u, request.HostSubgroupSize);
+        Assert.True(request.BufferInt64AtomicsSupported);
+        Assert.True(request.ShaderFloat64Supported);
+        Assert.True(request.ShaderSignedZeroInfNanPreserveFloat32Supported);
+        Assert.True(request.ShaderDeviceClockSupported);
+        Assert.Equal(7u, request.ShaderDeviceClockShift);
     }
 
     [Fact]

@@ -28,6 +28,29 @@ public sealed class AgcTextureTransportTests
         Assert.Equal(expected, Assert.IsType<bool>(decoder.Invoke(null, arguments)));
     }
 
+    [Fact]
+    public void TextureDecoderUsesOnlyTheDescriptorDimensionBits()
+    {
+        // Width is encoded as word1[31:30] plus word2[11:0], while height is
+        // word2[27:14].  The neighboring fields are deliberately populated
+        // to ensure they cannot expand either dimension.
+        const uint widthLow = 2;
+        const uint widthHigh = 0x123;
+        const uint height = 0x456;
+        uint[] words =
+        [
+            0xCD606800,
+            0x01000000u | (10u << 20) | (widthLow << 30),
+            (widthHigh & 0xFFFu) | (3u << 12) | (height << 14) | (3u << 28),
+            0x4DFAC | (9u << 28),
+            0, 0, 0, 0,
+        ];
+
+        Assert.True(AgcExports.TryDecodeTextureDescriptor(words, out var descriptor));
+        Assert.Equal((widthLow | (widthHigh << 2)) + 1, descriptor.Width);
+        Assert.Equal(height + 1, descriptor.Height);
+    }
+
     [Theory]
     [InlineData(10u, 4u, 4u)]
     [InlineData(10u, 0u, 1u)]

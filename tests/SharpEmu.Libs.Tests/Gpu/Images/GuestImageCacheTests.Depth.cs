@@ -382,6 +382,40 @@ public sealed unsafe partial class GuestImageCacheTests
     }
 
     [Fact]
+    public void StencilAssociation_DoesNotClaimDifferentImageAtSameAddress()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        var stencilFormat = SupportedStencilFormat(_vulkan, SampleCountFlags.Count1Bit);
+        if (stencilFormat == Format.Undefined) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x40000, ReadWrite);
+        var stencilAddress = address + 0x10000;
+
+        var color = LinearRequest(stencilAddress, 0x100, Format.R8Unorm, GuestPixelFormat.Bits8UNorm,
+            GuestImageType.Color2D, new Extent3D(16, 16, 1), 1, 1, 1);
+        var colorId = harness.Find(ref color);
+
+        var depth = LinearRequest(address + 0x20000, 0x80, stencilFormat, GuestPixelFormat.Bits16UNorm,
+            GuestImageType.Color2D, new Extent3D(8, 8, 1), 1, 2, 1);
+        depth = AsDepthTarget(depth, stencilFormat);
+        depth.Description.Stencil = new GuestSpan(stencilAddress, 0x40);
+        depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        var depthId = harness.Find(ref depth);
+
+        harness.Worker.Run(() => harness.Images.AssociateStencilForTest(depthId, depth.Description.Stencil));
+        var proxy = harness.ProxyAt(stencilAddress, depth.Description.Stencil.Size);
+
+        Assert.True(proxy.IsValid);
+        Assert.NotEqual(colorId, proxy);
+        Assert.False(harness.Image(colorId).DepthOwner.IsValid);
+        Assert.True(harness.Image(colorId).Backing.Exists);
+        Assert.Equal(depthId, harness.Image(proxy).DepthOwner);
+        Assert.Equal(depth.Description.Stencil, harness.Image(proxy).Description.Data);
+        Assert.Equal(depth.Description.Extent, harness.Image(proxy).Description.Extent);
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void DepthOnlyToCombined_RecreatesDepthAndAssociatesStencil()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

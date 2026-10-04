@@ -1,8 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Reflection;
 using SharpEmu.Core.Memory;
 using SharpEmu.Core.Loader;
+using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
 using Xunit;
 
@@ -161,6 +163,62 @@ public sealed class PhysicalVirtualMemoryTests
         Assert.True(memory.TryCopy(destination, source, 4));
 
         Assert.Equal(queryCallsAfterFirstCopy, host.QueryCalls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TryProtectWaitsForActiveGuestMemoryAccess(bool copy)
+    {
+        using var host = new BlockingAccessHostMemory();
+        using var memory = new PhysicalVirtualMemory(host);
+
+        var address = memory.AllocateAt(0, (4UL << 30) + 0x1000, executable: false);
+        Assert.NotEqual(0UL, address);
+        Assert.True(memory.TryWrite(address, new byte[] { 1, 2, 3, 4 }));
+
+        var gate = Assert.IsType<ReaderWriterLockSlim>(typeof(PhysicalVirtualMemory)
+            .GetField("_gate", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(memory));
+        host.BlockNextQuery();
+
+        var access = Task.Run(() => copy
+            ? memory.TryCopy(address + 0x1000, address, 4)
+            : memory.TryWrite(address, new byte[] { 5, 6, 7, 8 }));
+        Task<bool>? protect = null;
+        try
+        {
+            Assert.True(host.QueryBlocked.Wait(TimeSpan.FromSeconds(10)),
+                "The guest memory access did not reach the blocked host query.");
+
+            protect = Task.Run(() => memory.TryProtect(
+                address,
+                0x1000,
+                GuestPageProtection.Read));
+
+            Assert.True(SpinWait.SpinUntil(
+                    () => gate.WaitingWriteCount != 0 || host.ProtectEntered.IsSet,
+                    TimeSpan.FromSeconds(10)),
+                "The protection request neither waited for the access lock nor reached the host.");
+            Assert.False(host.ProtectEntered.IsSet);
+            Assert.NotEqual(0, gate.WaitingWriteCount);
+        }
+        finally
+        {
+            host.ReleaseQuery.Set();
+            if (!access.IsCompleted)
+            {
+                await Task.WhenAny(access, Task.Delay(TimeSpan.FromSeconds(10)));
+            }
+            if (protect is { IsCompleted: false })
+            {
+                await Task.WhenAny(protect, Task.Delay(TimeSpan.FromSeconds(10)));
+            }
+        }
+
+        Assert.True(await access.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.NotNull(protect);
+        Assert.True(await protect!.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.True(host.ProtectEntered.IsSet);
     }
 
     // 2. Reserve-only region: GetPointer commits the page before returning it,
@@ -393,6 +451,98 @@ public sealed class PhysicalVirtualMemoryTests
 
         public void Dispose() =>
             System.Runtime.InteropServices.NativeMemory.Free(_allocation);
+    }
+
+    private sealed unsafe class BlockingAccessHostMemory : IHostMemory, IDisposable
+    {
+        private readonly void* _allocation;
+        private readonly ulong _address;
+        private int _blockNextQuery;
+
+        public BlockingAccessHostMemory()
+        {
+            _allocation = System.Runtime.InteropServices.NativeMemory.AllocZeroed(0x5000);
+            _address = ((ulong)_allocation + 0xFFF) & ~0xFFFUL;
+        }
+
+        public ManualResetEventSlim QueryBlocked { get; } = new(false);
+
+        public ManualResetEventSlim ReleaseQuery { get; } = new(false);
+
+        public ManualResetEventSlim ProtectEntered { get; } = new(false);
+
+        public void BlockNextQuery()
+        {
+            QueryBlocked.Reset();
+            ReleaseQuery.Reset();
+            ProtectEntered.Reset();
+            Volatile.Write(ref _blockNextQuery, 1);
+        }
+
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) => 0;
+
+        public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) => _address;
+
+        public bool Commit(ulong address, ulong size, HostPageProtection protection) => true;
+
+        public bool Free(ulong address) => true;
+
+        public bool Protect(
+            ulong address,
+            ulong size,
+            HostPageProtection protection,
+            out uint rawOldProtection)
+        {
+            ProtectEntered.Set();
+            rawOldProtection = 0x04;
+            return true;
+        }
+
+        public bool ProtectRaw(
+            ulong address,
+            ulong size,
+            uint rawProtection,
+            out uint rawOldProtection)
+        {
+            rawOldProtection = 0x04;
+            return true;
+        }
+
+        public bool Query(ulong address, out HostRegionInfo info)
+        {
+            if (Interlocked.Exchange(ref _blockNextQuery, 0) != 0)
+            {
+                QueryBlocked.Set();
+                if (!ReleaseQuery.Wait(TimeSpan.FromSeconds(10)))
+                {
+                    throw new TimeoutException("The blocked guest memory query was not released.");
+                }
+            }
+
+            info = new HostRegionInfo(
+                _address,
+                _address,
+                (4UL << 30) + 0x1000,
+                HostRegionState.Committed,
+                RawState: 0x1000,
+                HostPageProtection.ReadWrite,
+                RawProtection: 0x04,
+                RawAllocationProtection: 0x04);
+            return true;
+        }
+
+        public void FlushInstructionCache(ulong address, ulong size)
+        {
+        }
+
+        public void Dispose()
+        {
+            ReleaseQuery.Set();
+            QueryBlocked.Dispose();
+            ReleaseQuery.Dispose();
+            ProtectEntered.Dispose();
+            System.Runtime.InteropServices.NativeMemory.Free(_allocation);
+        }
     }
 
     // Minimal host memory for free-list tests: Allocate honours the desired

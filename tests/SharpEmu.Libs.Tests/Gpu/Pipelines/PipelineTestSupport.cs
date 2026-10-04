@@ -40,15 +40,50 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public uint MaxPushDescriptors => 32;
 
-    public bool ComputeWave64Supported => true;
+    public bool ComputeWave64Supported => ComputeSubgroupSize >= 64;
+
+    public uint ComputeSubgroupSize { get; set; } = 64;
+
+    public ComputeWorkgroupAxisMapping WorkgroupAxisMapping { get; set; } = ComputeWorkgroupAxisMapping.Identity;
+
+    public ComputeWorkgroupAxisMapping ResolveComputeWorkgroupAxisMapping(uint threadsX, uint threadsY, uint threadsZ) =>
+        WorkgroupAxisMapping;
 
     public bool GraphicsSubgroupOperationsEnabled => true;
+
+    public bool BufferInt64AtomicsSupported { get; set; }
+
+    public bool ShaderFloat64Supported { get; set; }
+
+    public bool ShaderSignedZeroInfNanPreserveFloat32Supported { get; set; }
+
+    public bool ShaderDeviceClockSupported { get; set; }
+
+    public uint ShaderDeviceClockShift { get; set; }
 
     public bool SharedInt64AtomicsEnabled => false;
 
     public ShaderPrewarmList? ShaderPrewarm { get; set; }
 
     public RenderHostLimits Limits => new(16384, 16384, 16384, 16384);
+
+    public bool MeshShadersSupported { get; set; }
+
+    public uint MeshSubgroupSize { get; set; } = 32;
+
+    public MeshShaderHostCapabilities MeshShaderCapabilities { get; set; } = new(
+        true,
+        uint.MaxValue,
+        uint.MaxValue,
+        uint.MaxValue,
+        uint.MaxValue,
+        1024,
+        1024,
+        1024,
+        64,
+        64 * 1024,
+        256,
+        256);
 
     public bool TryResolveColorOutput(uint dataFormat, uint numberType, uint componentSwap, out Gen5PixelOutputKind outputKind, out Gen5ColorComponentMapping componentMapping)
     {
@@ -182,6 +217,7 @@ internal sealed class PipelineTestGuest
     private const ulong UserDataOffset = 0x08;
     private const ulong InputSemanticsOffset = 0x30;
     private const ulong InputSemanticsCountOffset = 0x50;
+    private const ulong ScratchDwordsPerThreadOffset = 0x54;
 
     public static readonly uint[] EndProgram = [0xBF810000];
 
@@ -189,6 +225,7 @@ internal sealed class PipelineTestGuest
     public static readonly uint[] FormatLoadProgram = [0xE0000000, 0x80000000, 0xBF810000];
 
     private readonly Dictionary<ulong, ulong> _headers = new();
+    private readonly Dictionary<ulong, FusedProgramParts> _fusedPrograms = new();
 
     public PipelineTestGuest(Func<ShaderCompileRequest, byte[]>? compile = null)
     {
@@ -196,7 +233,10 @@ internal sealed class PipelineTestGuest
         Context = new CpuContext(Memory, Generation.Gen5);
         Host = new FakePipelineHost(Memory);
         Compiler = new FakeShaderCompiler(compile);
-        Registry = new ShaderHeaderRegistry(Context, code => _headers.TryGetValue(code, out var header) ? header : 0, _ => null);
+        Registry = new ShaderHeaderRegistry(
+            Context,
+            code => _headers.TryGetValue(code, out var header) ? header : 0,
+            code => _fusedPrograms.TryGetValue(code, out var parts) ? parts : null);
         Programs = new ShaderProgramCache(Context, Compiler, Host);
     }
 
@@ -213,7 +253,14 @@ internal sealed class PipelineTestGuest
     public ShaderProgramCache Programs { get; }
 
     // Writes the code and a header that names its size; extra header fields are optional.
-    public void RegisterProgram(ulong codeAddress, ulong headerAddress, uint[] words, ulong userDataAddress = 0, ulong inputSemanticsAddress = 0, uint inputSemanticsCount = 0)
+    public void RegisterProgram(
+        ulong codeAddress,
+        ulong headerAddress,
+        uint[] words,
+        ulong userDataAddress = 0,
+        ulong inputSemanticsAddress = 0,
+        uint inputSemanticsCount = 0,
+        ushort scratchDwords = 0)
     {
         var code = new byte[words.Length * sizeof(uint)];
         for (var index = 0; index < words.Length; index++)
@@ -227,8 +274,28 @@ internal sealed class PipelineTestGuest
         BinaryPrimitives.WriteUInt64LittleEndian(header.AsSpan((int)UserDataOffset), userDataAddress);
         BinaryPrimitives.WriteUInt64LittleEndian(header.AsSpan((int)InputSemanticsOffset), inputSemanticsAddress);
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan((int)InputSemanticsCountOffset), inputSemanticsCount);
+        BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan((int)ScratchDwordsPerThreadOffset), scratchDwords);
         Write(headerAddress, header);
         _headers[codeAddress] = headerAddress;
+    }
+
+    public void RegisterFusedProgram(ulong entryCodeAddress, ulong continuationCodeAddress)
+    {
+        if (!_headers.TryGetValue(entryCodeAddress, out var entryHeaderAddress) ||
+            !_headers.TryGetValue(continuationCodeAddress, out var continuationHeaderAddress))
+        {
+            throw new InvalidOperationException("Both fused shader halves must be registered first.");
+        }
+
+        _fusedPrograms[entryCodeAddress] = new FusedProgramParts(
+            continuationCodeAddress,
+            continuationHeaderAddress);
+        Gen5ShaderTranslator.RegisterFusedProgram(
+            Context,
+            entryCodeAddress,
+            entryHeaderAddress,
+            continuationCodeAddress,
+            continuationHeaderAddress);
     }
 
     public void Write(ulong address, byte[] bytes)
@@ -257,9 +324,22 @@ internal sealed class PipelineTestGuest
         return new ShaderSource(registered, hash, userData, userDataBase, stage);
     }
 
-    public static StageCompileOptions ComputeOptions(uint threadsX = 64) => new()
+    public static StageCompileOptions ComputeOptions(
+        uint threadsX = 64,
+        uint hostSubgroupSize = 64,
+        ComputeWorkgroupAxisMapping? workgroupAxisMapping = null) => new()
     {
-        ComputeInfo = new ComputeInputInfo { ThreadsX = threadsX, ThreadsY = 1, ThreadsZ = 1, WaveSize = 32, GroupIdX = true, ThreadIdCount = 1 },
+        ComputeInfo = new ComputeInputInfo
+        {
+            ThreadsX = threadsX,
+            ThreadsY = 1,
+            ThreadsZ = 1,
+            WaveSize = 32,
+            GroupIdX = true,
+            ThreadIdCount = 1,
+            HostSubgroupSize = hostSubgroupSize,
+            WorkgroupAxisMapping = workgroupAxisMapping ?? ComputeWorkgroupAxisMapping.Identity,
+        },
     };
 
     // The four words of a raw buffer descriptor with the given format and record count.

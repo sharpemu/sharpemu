@@ -531,6 +531,76 @@ public static class AjmExports
     public static int AjmBatchJobDecodeSingle(CpuContext ctx) =>
         AjmBatchJobDecodeCore(ctx, multipleFrames: false);
 
+    [SysAbiExport(
+        Nid = "SJ3i0DXP8vg",
+        ExportName = "sceAjmBatchJobDecodeSplit",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobDecodeSplit(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var inputAddress = ctx[CpuRegister.Rdx];
+        var inputCount = ctx[CpuRegister.Rcx];
+        var outputAddress = ctx[CpuRegister.R8];
+        var outputCount = ctx[CpuRegister.R9];
+        var resultAddress = ReadStackArg64(ctx, 0);
+
+        var descriptors = Math.Min(inputCount, MaxBufferDescriptors) +
+                          Math.Min(outputCount, MaxBufferDescriptors);
+        var jobSize = AjmJobRunSplitBaseSize + (descriptors * AjmBufferDescriptorBytes);
+        if (!TryAppendBatchJob(ctx, infoAddress, jobSize))
+        {
+            return ctx.SetReturn(OrbisAjmErrorJobCreation);
+        }
+
+        Atrac9DecodeResult result;
+        if (!TryGetInstance(instanceId, out var instance))
+        {
+            result = new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
+        }
+        else if (!TryCollectBuffers(ctx, true, inputAddress, inputCount, out var inputs, out var inputLength) ||
+                 !TryCollectBuffers(ctx, true, outputAddress, outputCount, out var outputs, out var outputLength))
+        {
+            result = new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
+        }
+        else if (instance.Codec != Atrac9CodecType || instance.Atrac9 is null)
+        {
+            foreach (var buffer in outputs)
+            {
+                ClearGuestMemory(ctx, buffer.Address, (ulong)buffer.Length);
+            }
+
+            result = new Atrac9DecodeResult(
+                0,
+                inputLength,
+                0,
+                0,
+                inputLength != 0 || outputLength != 0 ? 1u : 0u);
+        }
+        else
+        {
+            result = DecodeAtrac9Scattered(
+                ctx,
+                instance,
+                inputs,
+                inputLength,
+                outputs,
+                outputLength,
+                multipleFrames: true);
+        }
+
+        WriteDecodeStreamResult(ctx, resultAddress, result, multipleFrames: true);
+        Trace(
+            $"batch_job_decode_split instance=0x{instanceId:X8} " +
+            $"in=0x{inputAddress:X16}#{inputCount} out=0x{outputAddress:X16}#{outputCount} " +
+            $"consumed={result.InputConsumed} produced={result.OutputWritten} " +
+            $"frames={result.Frames} status=0x{result.Status:X8}");
+        TraceBufferDescriptors(ctx, true, "in", inputAddress, inputCount);
+        TraceBufferDescriptors(ctx, true, "out", outputAddress, outputCount);
+        return ctx.SetReturn(0);
+    }
+
     /// <summary>
     /// The flag-driven decode entry point. Titles built on the modern AJM API
     /// drive ATRAC9 playback exclusively through Run/RunSplit —
@@ -604,6 +674,73 @@ public static class AjmExports
         Trace(
             $"batch_job_set_gapless_decode instance=0x{instanceId:X8} " +
             $"gapless=0x{gaplessAddress:X16} reset={reset} status=0x{status:X8}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "5ldnD16rYZw",
+        ExportName = "sceAjmBatchJobSetResampleParametersEx",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobSetResampleParametersEx(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var flags = unchecked((uint)ctx[CpuRegister.Rdx]);
+        var resultAddress = ctx[CpuRegister.Rcx];
+        ctx.GetXmmRegister(0, out var ratioStartBits, out _);
+        ctx.GetXmmRegister(1, out var ratioChangeBits, out _);
+        var ratioStart = BitConverter.Int32BitsToSingle(unchecked((int)(uint)ratioStartBits));
+        var ratioChange = BitConverter.Int32BitsToSingle(unchecked((int)(uint)ratioChangeBits));
+
+        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobSetResampleParametersSize))
+        {
+            return ctx.SetReturn(OrbisAjmErrorJobCreation);
+        }
+
+        var status = TryGetInstance(instanceId, out _)
+            ? 0
+            : Atrac9DecodeState.ResultInvalidParameter;
+        WriteBasicResult(ctx, resultAddress, status);
+        Trace(
+            $"batch_job_set_resample_parameters_ex instance=0x{instanceId:X8} " +
+            $"ratio_start={ratioStart:R} ratio_change={ratioChange:R} flags=0x{flags:X8} " +
+            $"status=0x{status:X8}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "JkdNCocpu1M",
+        ExportName = "sceAjmBatchJobGetResampleInfo",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobGetResampleInfo(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var resultAddress = ctx[CpuRegister.Rdx];
+
+        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobRunSize))
+        {
+            return ctx.SetReturn(OrbisAjmErrorJobCreation);
+        }
+
+        var status = TryGetInstance(instanceId, out _)
+            ? 0
+            : Atrac9DecodeState.ResultInvalidParameter;
+        if (resultAddress != 0)
+        {
+            Span<byte> result = stackalloc byte[AjmSidebandResultBytes + AjmSidebandResampleInfoBytes];
+            result.Clear();
+            BinaryPrimitives.WriteInt32LittleEndian(result, status);
+            BinaryPrimitives.WriteSingleLittleEndian(result[AjmSidebandResultBytes..], 1.0f);
+            if (!ctx.Memory.TryWrite(resultAddress, result))
+            {
+                return ctx.SetReturn(OrbisAjmErrorInvalidParameter);
+            }
+        }
+
+        Trace($"batch_job_get_resample_info instance=0x{instanceId:X8} status=0x{status:X8}");
         return ctx.SetReturn(0);
     }
 
@@ -1299,6 +1436,7 @@ public static class AjmExports
     // SCE_AJM_JOB_RUN_SPLIT_SIZE(N) is 32 + 16 bytes per descriptor.
     private const ulong AjmJobRunSplitBaseSize = 32;
     private const ulong AjmJobGetStatisticsSize = 88;
+    private const ulong AjmJobSetResampleParametersSize = 72;
     private const int AjmStatisticsResultBytes = 48;
     private const int AjmSidebandResultBytes = 8;
     private const int AjmSidebandStreamBytes = 16;
@@ -1306,6 +1444,7 @@ public static class AjmExports
     private const int AjmSidebandGaplessDecodeBytes = 8;
     private const int AjmSidebandMFrameBytes = 8;
     private const int AjmSidebandCodecInfoBytes = 64;
+    private const int AjmSidebandResampleInfoBytes = 40;
     // AjmSidebandResult (8) + AjmSidebandStream (16) + AjmSidebandMFrame (8).
     private const int DecodeSidebandBytes =
         AjmSidebandResultBytes + AjmSidebandStreamBytes + AjmSidebandMFrameBytes;

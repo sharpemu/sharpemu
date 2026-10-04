@@ -17,6 +17,8 @@ public static class HostWindowInput
     private static IHostGamepadOutput? _gamepadOutput;
     private static readonly WindowInputSource Source = new();
 
+    internal static event Action? StateChanged;
+
     public static void Connect(IHostGamepadOutput? gamepadOutput = null)
     {
         lock (Gate)
@@ -27,6 +29,7 @@ public static class HostWindowInput
         }
 
         HostWindowInputSource.Set(Source);
+        StateChanged?.Invoke();
     }
 
     public static void Disconnect()
@@ -41,55 +44,108 @@ public static class HostWindowInput
             PressedKeys.Clear();
         }
 
+        StateChanged?.Invoke();
         HostWindowInputSource.Clear(Source);
     }
 
     public static void SetFocused(bool focused)
     {
+        bool changed;
         lock (Gate)
         {
+            changed = _focused != focused;
             _focused = focused;
             if (!focused)
             {
+                changed |= PressedKeys.Count != 0;
                 PressedKeys.Clear();
             }
+        }
+
+        if (changed)
+        {
+            StateChanged?.Invoke();
         }
     }
 
     public static void SetKey(int virtualKey, bool down)
     {
+        bool changed;
         lock (Gate)
         {
-            if (down)
+            // SDL can deliver keyboard events that were queued around an
+            // alt-tab after the focus-lost event has already cleared our
+            // state.  Never let a late key-down repopulate PressedKeys while
+            // the game window is unfocused; otherwise it becomes a phantom
+            // held button as soon as focus returns.
+            if (down && !_focused)
             {
-                PressedKeys.Add(virtualKey);
+                changed = false;
+            }
+            else if (down)
+            {
+                changed = PressedKeys.Add(virtualKey);
             }
             else
             {
-                PressedKeys.Remove(virtualKey);
+                changed = PressedKeys.Remove(virtualKey);
             }
+        }
+
+        if (changed)
+        {
+            StateChanged?.Invoke();
         }
     }
 
     public static void SetGamepad(string? name, HostGamepadState state)
     {
+        bool changed;
         lock (Gate)
         {
+            changed = _gamepadConnected != state.Connected ||
+                !string.Equals(_gamepadName, name, StringComparison.Ordinal) ||
+                !HasSameInput(_gamepadState, state);
             _gamepadConnected = state.Connected;
             _gamepadName = name;
             _gamepadState = state;
+        }
+
+        if (changed)
+        {
+            StateChanged?.Invoke();
         }
     }
 
     public static void ClearGamepad()
     {
+        bool changed;
         lock (Gate)
         {
+            changed = _gamepadConnected || _gamepadName is not null || _gamepadState != default;
             _gamepadConnected = false;
             _gamepadName = null;
             _gamepadState = default;
         }
+
+        if (changed)
+        {
+            StateChanged?.Invoke();
+        }
     }
+
+    private static bool HasSameInput(HostGamepadState left, HostGamepadState right) =>
+        left.Connected == right.Connected &&
+        left.Buttons == right.Buttons &&
+        left.LeftX == right.LeftX &&
+        left.LeftY == right.LeftY &&
+        left.RightX == right.RightX &&
+        left.RightY == right.RightY &&
+        left.LeftTrigger == right.LeftTrigger &&
+        left.RightTrigger == right.RightTrigger &&
+        left.Type == right.Type &&
+        left.Connection == right.Connection &&
+        left.Touch == right.Touch;
 
     internal static byte ToStickByte(short value)
     {

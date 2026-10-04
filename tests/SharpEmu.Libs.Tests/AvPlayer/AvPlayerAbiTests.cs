@@ -79,7 +79,7 @@ public sealed class AvPlayerAbiTests
     }
 
     [Fact]
-    public void DefaultSyncUsesDeliveredAudioAsTheVideoClock()
+    public void DefaultSyncUsesLastDeliveredAudioTimestampAsTheVideoClock()
     {
         Assert.Equal(
             0,
@@ -89,10 +89,17 @@ public sealed class AvPlayerAbiTests
                 internalClockSeconds: 10,
                 framesPerSecond: 60));
         Assert.Equal(
-            1,
+            0,
             AvPlayerExports.CalculateExpectedDefaultSyncVideoFrame(
                 hasAudio: true,
                 deliveredAudioFrameCount: 1,
+                internalClockSeconds: 10,
+                framesPerSecond: 60));
+        Assert.Equal(
+            1,
+            AvPlayerExports.CalculateExpectedDefaultSyncVideoFrame(
+                hasAudio: true,
+                deliveredAudioFrameCount: 2,
                 internalClockSeconds: 10,
                 framesPerSecond: 60));
     }
@@ -106,6 +113,25 @@ public sealed class AvPlayerAbiTests
                 hasAudio: false,
                 deliveredAudioFrameCount: 0,
                 internalClockSeconds: 3,
+                framesPerSecond: 30));
+    }
+
+    [Fact]
+    public void DecodedVideoTimestampTakesPrecedenceOverSyntheticTiming()
+    {
+        Assert.Equal(
+            1_234UL,
+            AvPlayerExports.ResolveVideoFrameTimestamp(
+                decodedTimestampMilliseconds: 1_234,
+                startTimeMilliseconds: 500,
+                frameIndex: 30,
+                framesPerSecond: 30));
+        Assert.Equal(
+            1_500UL,
+            AvPlayerExports.ResolveVideoFrameTimestamp(
+                decodedTimestampMilliseconds: null,
+                startTimeMilliseconds: 500,
+                frameIndex: 30,
                 framesPerSecond: 30));
     }
 

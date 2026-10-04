@@ -93,8 +93,6 @@ internal static unsafe partial class VulkanVideoPresenter
             var workerCount = Math.Clamp(Environment.ProcessorCount / 4, 1, 4);
             var remaining = workerCount;
             var host = (IShaderPipelineHost)this;
-            var sharedInt64Atomics = host.SharedInt64AtomicsEnabled;
-            var execGuardElision = host.ExecGuardElisionEnabled;
             Volatile.Write(ref _shaderPrewarmTotal, pending.Count);
             Volatile.Write(ref _shaderPrewarmProgress, 0);
             Console.Error.WriteLine(
@@ -107,7 +105,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     while (!_shaderPrewarmStopping && work.TryDequeue(out var item))
                     {
-                        PrewarmComputePipeline(item.Record, item.Code, compiler, sharedInt64Atomics, execGuardElision);
+                        PrewarmComputePipeline(item.Record, item.Code, compiler, host);
                         _shaderPrewarmCompleted.Enqueue(ShaderPrewarmList.Identity(item.Record));
                         if (Interlocked.Increment(ref _shaderPrewarmProgress) % PrewarmProgressBatch == 0)
                         {
@@ -158,11 +156,10 @@ internal static unsafe partial class VulkanVideoPresenter
             ComputePrewarmRecord record,
             ShaderCodeCapture code,
             IGuestGpuBackend compiler,
-            bool sharedInt64Atomics,
-            bool execGuardElision)
+            IShaderPipelineHost host)
         {
             if (!ShaderProgramCache.TryCompilePrewarm(
-                    record, code, compiler, sharedInt64Atomics, execGuardElision, out var compiled, out var layout, out var error))
+                    record, code, compiler, host, out var compiled, out var layout, out var error))
             {
                 NoteShaderPrewarmFailure(record, error);
                 return;

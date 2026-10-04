@@ -406,7 +406,7 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
 
         public uint FaultWord(ulong guestAddress)
         {
-            var pageIndex = guestAddress >> Gen5SpirvTranslator.DeviceAddressPageBits;
+            var pageIndex = DeviceAddressPaging.PageIndex(guestAddress);
             return ReadWord(_runner.ReadBack(_fault, 0, _fault.Size), (int)(pageIndex / 32) * 4);
         }
 

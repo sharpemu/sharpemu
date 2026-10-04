@@ -150,15 +150,15 @@ public sealed class BindingLayoutTests
     [Fact]
     public void ImageBindingAbi()
     {
-        Assert.Equal(45u, BindingLayout.ImageBindingCount);
+        Assert.Equal(50u, BindingLayout.ImageBindingCount);
         Assert.Equal(0u, (uint)DescriptorBindingKind.Buffers);
-        Assert.Equal(46u, (uint)DescriptorBindingKind.Samplers);
-        Assert.Equal(47u, (uint)DescriptorBindingKind.GlobalDataShare);
-        Assert.Equal(48u, (uint)DescriptorBindingKind.DeviceAddressPageTable);
-        Assert.Equal(49u, (uint)DescriptorBindingKind.FaultBuffer);
-        Assert.Equal(50u, (uint)DescriptorBindingKind.FlattenedResourceTable);
-        Assert.Equal(51u, (uint)DescriptorBindingKind.ShaderData);
-        Assert.Equal(52u, (uint)DescriptorBindingKind.Count);
+        Assert.Equal(51u, (uint)DescriptorBindingKind.Samplers);
+        Assert.Equal(52u, (uint)DescriptorBindingKind.GlobalDataShare);
+        Assert.Equal(53u, (uint)DescriptorBindingKind.DeviceAddressPageTable);
+        Assert.Equal(54u, (uint)DescriptorBindingKind.FaultBuffer);
+        Assert.Equal(55u, (uint)DescriptorBindingKind.FlattenedResourceTable);
+        Assert.Equal(56u, (uint)DescriptorBindingKind.ShaderData);
+        Assert.Equal(57u, (uint)DescriptorBindingKind.Count);
 
         ImageDimension[] sampledDimensions =
         [
@@ -213,6 +213,10 @@ public sealed class BindingLayoutTests
         CheckBinding(ImageResourceClass.Sampled, ImageNumericClass.Float, ImageDimension.Dim2D, false, depthCompare: true);
         CheckBinding(ImageResourceClass.Sampled, ImageNumericClass.Float, ImageDimension.Dim2DArray, false, depthCompare: true);
         CheckBinding(ImageResourceClass.Sampled, ImageNumericClass.Float, ImageDimension.Dim2D, false, cube: true, depthCompare: true);
+        foreach (var dimension in storageDimensions)
+        {
+            CheckBinding(ImageResourceClass.Storage, ImageNumericClass.Float, dimension, true);
+        }
 
         Assert.Equal(BindingLayout.ImageBindingCount, index);
 
@@ -243,6 +247,8 @@ public sealed class BindingLayoutTests
         Assert.True(Invalid(invalid));
         invalid.Dimension = ImageDimension.Dim2D;
         invalid.Atomic = true;
+        Assert.False(Invalid(invalid));
+        invalid.NumericClass = ImageNumericClass.Sint;
         Assert.True(Invalid(invalid));
     }
 

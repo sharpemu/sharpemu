@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
 // The static state of a stage as one word list; two draws with equal lists share a program entry.
 public static class StageStaticKey
 {
-    public const int MaxWords = 14 + VertexInputInfo.MaxBuffers * 13;
+    public const int MaxWords = 27 + VertexInputInfo.MaxBuffers * 13;
 
     private static uint Bits(float value) => BitConverter.SingleToUInt32Bits(value);
 
@@ -22,6 +23,7 @@ public static class StageStaticKey
         key.Add((uint)info.FetchAttributeRegister);
         key.Add((uint)info.FetchBufferRegister);
         key.Add((uint)info.Attributes.Length);
+        key.Add(info.WaveSize);
         key.Add(info.ScratchDwords);
         key.Add(info.PositionExportControl);
         key.Add(Bit(info.ClipSpace.Enabled));
@@ -36,6 +38,23 @@ public static class StageStaticKey
         }
 
         key.Add((uint)requiredOutputCount);
+        var mesh = info.Mesh;
+        key.Add(mesh.ThreadsX);
+        if (mesh.IsActive)
+        {
+            key.Add(mesh.WaveSize);
+            key.Add(mesh.HostSubgroupSize);
+            key.Add(mesh.LocalDataShareDwords);
+            key.Add(mesh.ScratchDwords);
+            key.Add((uint)mesh.InputPrimitive);
+            key.Add(mesh.PrimitivesPerGroup);
+            key.Add(mesh.VerticesPerGroup);
+            key.Add(mesh.MaxVertices);
+            key.Add(mesh.MaxPrimitives);
+            key.Add(mesh.ProvokingVertex);
+            key.Add(mesh.OutputPrimitive);
+        }
+
         foreach (var attribute in info.Attributes)
         {
             var descriptor = attribute.Descriptor;
@@ -55,11 +74,15 @@ public static class StageStaticKey
         }
     }
 
-    public static void Build(PixelInputInfo info, List<uint> key)
+    public static void Build(
+        PixelInputInfo info,
+        IReadOnlyList<Gen5PixelOutputBinding> outputs,
+        List<uint> key)
     {
         key.Clear();
         key.Add(info.ScratchDwords);
         key.Add(info.InputCount);
+        key.Add(info.WaveSize);
         key.Add(info.SystemInputBase);
         key.Add(info.CustomInterpolationMask);
         key.Add(info.PerspectiveCenterRegister);
@@ -68,6 +91,7 @@ public static class StageStaticKey
         key.Add(Bit(info.PositionZ));
         key.Add(Bit(info.PositionW));
         key.Add(Bit(info.FrontFace));
+        key.Add(Bit(info.Ancillary));
         key.Add(Bit(info.NoPerspective));
         key.Add(Bit(info.KillEnable));
         key.Add(Bit(info.DepthExportEnable));
@@ -89,6 +113,18 @@ public static class StageStaticKey
             key.Add(packed);
         }
 
+        // The slot state above does not encode the dense host locations or the
+        // SPIR-V numeric interface type selected for each active attachment.
+        key.Add((uint)outputs.Count);
+        foreach (var output in outputs)
+        {
+            key.Add(output.GuestSlot);
+            key.Add(output.HostLocation);
+            key.Add((uint)output.Kind);
+            key.Add(output.ComponentMapping.Packed);
+            key.Add(output.TargetOutputMode);
+        }
+
         for (var index = 0; index < info.InputCount; index++)
         {
             key.Add(info.InterpolatorSettings[index]);
@@ -105,6 +141,7 @@ public static class StageStaticKey
         key.Add(info.LocalDataShareDwords);
         key.Add(info.ScratchDwords);
         key.Add(Bit(info.NeedsLocalDataShareBarriers));
+        key.Add(info.HostSubgroupSize);
         key.Add(Bit(info.DispatchThreadDimensions));
         key.Add(info.ThreadsX);
         key.Add(Bit(info.GroupIdX));

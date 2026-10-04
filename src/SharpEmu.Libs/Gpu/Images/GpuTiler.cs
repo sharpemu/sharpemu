@@ -63,7 +63,7 @@ public struct TileTransferArguments
 // Runs the tiling, detiling, depth conversion and channel swap compute passes.
 public sealed unsafe class GpuTiler : IDisposable
 {
-    private const uint KindCount = 9;
+    private const uint KindCount = 10;
     private const uint ElementSizeCount = 5;
     private const uint DirectionCount = 2;
     private const uint PipelineCount = KindCount * ElementSizeCount * DirectionCount;

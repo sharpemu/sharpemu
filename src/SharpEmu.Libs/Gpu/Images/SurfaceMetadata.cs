@@ -4,7 +4,7 @@
 namespace SharpEmu.Libs.Gpu.Images;
 
 // PendingDcc holds a metadata fill seen before its color target was bound; it stays invisible
-// to the metadata queries until the target classifies the address.
+// to metadata queries until an image descriptor classifies the address.
 public enum SurfaceMetadataKind : byte
 {
     PendingDcc,
@@ -17,6 +17,8 @@ public enum SurfaceMetadataKind : byte
 public sealed class SurfaceMetadata
 {
     public SurfaceMetadataKind Kind;
+    // Compact per-slice clear state for HTile and command-side metadata queries. DCC image
+    // materialization scans its authoritative guest backing and is not limited by this mask.
     public uint ClearMask;
     public uint FillValue = 0xffffffff;
     public ulong FillSize;

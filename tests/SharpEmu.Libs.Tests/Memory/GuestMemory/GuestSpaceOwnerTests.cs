@@ -14,6 +14,34 @@ public sealed unsafe partial class GuestSpaceOwnerTests
 {
     private const ulong Page = GuestSpaceOwner.GuestPage;
 
+    private static GuestSpaceOwner CreateIsolatedOwner(IHostViewMemory host) =>
+        new(host, BackingSize, 0, 0, 0);
+
+    [Fact]
+    public void InitializationOwnsFreeRegionsBeforePrivateAllocationOnWindows()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var host = HostViewMemory.Create();
+        var size = 4 * host.Granularity;
+        var address = ProbeFreeAddress(host, size);
+
+        using (var owner = new GuestSpaceOwner(host, BackingSize, address, address + size, 0))
+        {
+            Assert.True(owner.OwnsReservedRange(address, size));
+            Assert.True(owner.ContainsFreeRange(address, size));
+
+            var privateAddress = address + host.PageSize;
+            Assert.True(owner.AllocatePrivate(privateAddress, host.PageSize, HostPageProtection.ReadWrite));
+            *(ulong*)privateAddress = Marker;
+            Assert.Equal(Marker, *(ulong*)privateAddress);
+            Assert.True(owner.FreePrivate(privateAddress, host.PageSize));
+            Assert.True(owner.ContainsFreeRange(address, size));
+        }
+
+        Assert.Equal(address, host.ReserveHole(address, size));
+        Assert.True(host.FreeHole(address, size));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -21,7 +49,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     {
         if (!Supported) return;
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var granularity = Math.Max(host.Granularity, Page);
         var address = ProbeGuestAddress(host, 5 * granularity);
         Assert.True(owner.TryReserveAddressRange(address + 2 * granularity, granularity));
@@ -52,7 +80,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     {
         if (!Supported) return;
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var holeSize = HoleSize(host);
         var address = ProbeGuestAddress(host, 3 * holeSize);
         Assert.True(owner.TryReserveAddressRange(address, holeSize), "The initial reservation failed.");
@@ -72,7 +100,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     {
         if (!Supported) return;
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var holeSize = HoleSize(host);
         var address = ProbeGuestAddress(host, 3 * holeSize);
         Assert.True(owner.TryReserveAddressRange(address, holeSize));
@@ -114,7 +142,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         }
 
         var host = HostViewMemory.Create();
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var hole = HoleSize(host);
         var baseAddress = AcquireRange(owner, host, hole);
 
@@ -137,7 +165,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         }
 
         var host = HostViewMemory.Create();
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var hole = HoleSize(host);
         var first = AcquireRange(owner, host, hole);
         var second = AcquireRange(owner, host, hole);
@@ -165,7 +193,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         }
 
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var hole = HoleSize(host);
         var owned = AcquireRange(owner, host, hole);
         var foreign = ProbeGuestAddress(host, hole);
@@ -197,7 +225,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         }
 
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var hole = HoleSize(host);
         var baseAddress = AcquireRange(owner, host, hole);
         host.Log.Clear();
@@ -224,7 +252,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         }
 
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var hole = HoleSize(host);
         var baseAddress = AcquireRange(owner, host, hole);
         Assert.True(owner.MapShared(baseAddress, Page, 0, HostPageProtection.ReadWrite, out _));
@@ -248,7 +276,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     {
         if (!Supported) return;
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var address = AcquireRange(owner, host, HoleSize(host));
         Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _));
         *(ulong*)address = Marker;
@@ -278,7 +306,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         }
 
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var hole = HoleSize(host);
         var baseAddress = AcquireRange(owner, host, hole);
         Assert.True(owner.AllocatePrivate(baseAddress, Page, HostPageProtection.ReadWrite));
@@ -301,7 +329,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         }
 
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var hole = HoleSize(host);
         var baseAddress = AcquireRange(owner, host, hole);
 
@@ -337,7 +365,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         }
 
         var host = new FailingHostViews(HostViewMemory.Create());
-        using var owner = new GuestSpaceOwner(host, BackingSize);
+        using var owner = CreateIsolatedOwner(host);
         var hole = HoleSize(host);
         var baseAddress = AcquireRange(owner, host, hole);
         host.Log.Clear();
@@ -352,9 +380,19 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         {
             Assert.False(owner.MapShared(address, size, 0, HostPageProtection.ReadWrite, out _));
             Assert.False(owner.UnmapShared(address, size));
+            Assert.False(owner.ContainsFreeRange(address, size));
+        }
+
+        foreach (var (address, size) in new[]
+                 {
+                     (baseAddress + 1, Page),
+                     (baseAddress, Page + 1),
+                     (baseAddress, 0UL),
+                     (ulong.MaxValue - Page + 1, 2 * Page),
+                 })
+        {
             Assert.False(owner.AllocatePrivate(address, size, HostPageProtection.ReadWrite));
             Assert.False(owner.FreePrivate(address, size));
-            Assert.False(owner.ContainsFreeRange(address, size));
         }
 
         // Transient access works on host pages; it still rejects misaligned, empty and wrapping ranges.
@@ -381,7 +419,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         }
 
         var host = HostViewMemory.Create();
-        var owner = new GuestSpaceOwner(host, BackingSize);
+        var owner = CreateIsolatedOwner(host);
         var hole = HoleSize(host);
         var baseAddress = AcquireRange(owner, host, hole);
         Assert.True(owner.MapShared(baseAddress, Page, 0, HostPageProtection.ReadWrite, out _));
@@ -392,7 +430,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
         Assert.False(owner.TryReserveAddressRange(baseAddress, hole));
         Assert.False(owner.MapShared(baseAddress, Page, 0, HostPageProtection.ReadWrite, out _));
 
-        using var fresh = new GuestSpaceOwner(host, BackingSize);
+        using var fresh = CreateIsolatedOwner(host);
         Assert.True(fresh.TryReserveAddressRange(baseAddress, hole));
         Assert.True(fresh.ContainsFreeRange(baseAddress, hole));
     }
@@ -407,7 +445,7 @@ public sealed unsafe partial class GuestSpaceOwnerTests
 
         var raw = HostViewMemory.Create();
         var host = new FailingHostViews(raw);
-        var owner = new GuestSpaceOwner(host, BackingSize);
+        var owner = CreateIsolatedOwner(host);
         var hole = HoleSize(host);
         var baseAddress = AcquireRange(owner, host, hole);
         Assert.True(owner.MapShared(baseAddress + Page, Page, 0, HostPageProtection.ReadWrite, out _));

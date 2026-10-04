@@ -100,31 +100,31 @@ public sealed partial class GuestImageCacheTests
     }
 
     [Fact]
-    public void DccFills_AreAbsorbedOnlyByRegisteredDcc()
+    public void DccFills_RemainGuestProducersUntilDescriptorDiscovery()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
-        using var fatal = new FatalScope();
         using var harness = new CacheHarness(_vulkan);
         var address = harness.MapBacked(0x20000, ReadWrite);
         var metadata = address + 0x10000;
-        Assert.False(harness.Images.TryAbsorbDccFill(metadata, 0x100, 0x20202020u));
+        harness.Write(metadata, Bytes(0x11223344u));
+        Assert.False(harness.Images.TryAbsorbDccFill(metadata, 0x1000, 0x20202020u));
         Assert.False(harness.Images.IsMetadata(metadata));
-        Assert.False(harness.Images.TryAbsorbDccFill(metadata, 0x100, 0x40404040u));
+        Assert.False(harness.Images.TryAbsorbDccFill(metadata, 0x1000, 0x40404040u));
 
         harness.Write(address + 0xc000, Bytes(0x55667788u));
         var target = LinearRequest(address + 0xc000, 4, Format.R8G8B8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
         target = AsColorTarget(target);
         target.Description.Metadata.Kind = MetadataKind.Dcc;
-        target.Description.Metadata.Range = new GuestSpan(metadata, 0x100);
+        target.Description.Metadata.Range = new GuestSpan(metadata, 0x1000);
         target.Description.Metadata.Compression = DisplayCompression.Dcc256_256_0;
         var targetId = harness.Acquire(ref target);
-        Assert.True(harness.Images.IsMetadata(metadata));
-        Assert.True(harness.Images.IsMetadataCleared(metadata, 0, out var fill));
-        Assert.Equal(0x40404040u, fill);
-        Assert.True(harness.Images.TryAbsorbDccFill(metadata, 0x100, 0x01010101u));
+        Assert.False(harness.Images.IsMetadata(metadata));
         Assert.False(harness.Images.IsMetadataCleared(metadata, 0));
-        Assert.True(harness.Images.TryAbsorbDccFill(metadata, 0x100, 0xc0c0c0c0u));
-        Assert.True(harness.Images.IsMetadataCleared(metadata, 5));
+        Assert.Equal(0x11223344u, harness.ReadUInt32(metadata));
+        Assert.False(harness.Images.TryAbsorbDccFill(metadata, 0x1000, 0x01010101u));
+        Assert.False(harness.Images.TryAbsorbDccFill(metadata, 0x1000, 0xc0c0c0c0u));
+        Assert.False(harness.Images.IsMetadataCleared(metadata, 5));
+        Assert.Equal(0x11223344u, harness.ReadUInt32(metadata));
         Assert.False(harness.Images.ClearMetadata(metadata));
 
         // A compressed target rejects readback and read claims but keeps GPU ownership.
@@ -144,15 +144,171 @@ public sealed partial class GuestImageCacheTests
         Assert.False(videoImage.Binding.NeedsRebind);
         Assert.False(videoImage.Uses.VideoOut);
 
-        // A depth target must not reuse DCC metadata.
+        // DCC is not retained in the generic metadata map, so a later HTile allocation can
+        // classify the same address without inheriting stale DCC side state.
         var depth = LinearRequest(address + 0xe000, 4, Format.D32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
         depth = AsDepthTarget(depth, Format.D32Sfloat);
         depth.Description.Metadata.Kind = MetadataKind.Htile;
         depth.Description.Metadata.Range = new GuestSpan(metadata, 0x100);
         var depthId = harness.Find(ref depth);
         var depthLocal = depth;
-        harness.Worker.Run(() => Assert.Throws<SchedulerFatalException>(() => harness.Images.AcquireDepthTargetView(depthId, depthLocal)));
-        Assert.Contains(fatal.Messages, message => message.Contains("depth target reuses metadata that is not HTile"));
+        harness.Worker.Run(() => Assert.NotEqual(
+            0UL,
+            harness.Images.AcquireDepthTargetView(depthId, depthLocal).Handle));
+        Assert.True(harness.Images.IsMetadata(metadata));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void DccVolumeOverThirtyTwoSlices_MaterializesAndConsumesEveryUniformSlice()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x80000, ReadWrite);
+        var imageAddress = address + 0x1000;
+        var metadataAddress = address + 0x10000;
+        const uint depth = 64;
+        const ulong metadataSliceSize = 0x1000;
+        var metadataBytes = new byte[checked((int)(depth * metadataSliceSize))];
+        Array.Fill(metadataBytes, (byte)0xc0);
+        harness.Write(metadataAddress, metadataBytes);
+
+        const uint width = 4;
+        const uint height = 4;
+        var imageSize = (ulong)width * height * depth * 4;
+        var target = LinearRequest(
+            imageAddress,
+            imageSize,
+            Format.R8G8B8A8Unorm,
+            GuestPixelFormat.Bits8_8_8_8UNorm,
+            GuestImageType.Color3D,
+            new Extent3D(width, height, depth),
+            1,
+            4,
+            1);
+        target = AsColorTarget(target);
+        target.View = target.View with
+        {
+            Type = ImageViewType.Type2DArray,
+            BaseLayer = 0,
+            LayerCount = depth,
+        };
+        target.Description.Metadata.Kind = MetadataKind.Dcc;
+        target.Description.Metadata.Range = new GuestSpan(metadataAddress, depth * metadataSliceSize);
+        target.Description.Metadata.DccAlphaMsb = true;
+
+        Assert.False(harness.Images.TryAbsorbDccFill(
+            metadataAddress,
+            depth * metadataSliceSize,
+            0xc0c0c0c0u));
+        var targetId = harness.Find(ref target);
+        harness.Finish();
+
+        Assert.True(targetId.IsValid);
+        Assert.Equal(uint.MaxValue, harness.ReadUInt32(metadataAddress));
+        Assert.Equal(uint.MaxValue, harness.ReadUInt32(metadataAddress + 31 * metadataSliceSize));
+        Assert.Equal(uint.MaxValue, harness.ReadUInt32(metadataAddress + 32 * metadataSliceSize));
+        Assert.Equal(uint.MaxValue, harness.ReadUInt32(metadataAddress + (depth - 1) * metadataSliceSize));
+        Assert.False(harness.Images.IsMetadataCleared(metadataAddress, 0));
+        Assert.False(harness.Images.IsMetadataCleared(metadataAddress, 31));
+        Assert.False(harness.Images.IsMetadataCleared(metadataAddress, 32));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void SelflossShapeDccVolume_HandlesOneHundredTwentyEightSlicesIndependently()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x140000, ReadWrite);
+        var imageAddress = address + 0x1000;
+        var metadataAddress = address + 0x20000;
+        const uint depth = 128;
+        const ulong metadataSliceSize = 0x2000;
+        var metadataBytes = new byte[checked((int)(depth * metadataSliceSize))];
+        Array.Fill(metadataBytes, (byte)0xc0);
+        const uint mixedSlice = 73;
+        Array.Fill(
+            metadataBytes,
+            (byte)0x55,
+            checked((int)(mixedSlice * metadataSliceSize + 1)),
+            checked((int)metadataSliceSize - 1));
+        harness.Write(metadataAddress, metadataBytes);
+
+        const uint width = 4;
+        const uint height = 4;
+        var imageSize = (ulong)width * height * depth * 8;
+        var texture = LinearRequest(
+            imageAddress,
+            imageSize,
+            Format.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float,
+            GuestImageType.Color3D,
+            new Extent3D(width, height, depth),
+            1,
+            8,
+            1);
+        texture.Description.Metadata.Kind = MetadataKind.Dcc;
+        texture.Description.Metadata.Range = new GuestSpan(
+            metadataAddress,
+            depth * metadataSliceSize);
+        texture.Description.Metadata.DccAlphaMsb = true;
+
+        var textureId = harness.Find(ref texture);
+        harness.Finish();
+
+        Assert.True(textureId.IsValid);
+        Assert.Equal(uint.MaxValue, harness.ReadUInt32(metadataAddress));
+        Assert.Equal(
+            0x555555c0u,
+            harness.ReadUInt32(metadataAddress + mixedSlice * metadataSliceSize));
+        Assert.Equal(
+            uint.MaxValue,
+            harness.ReadUInt32(metadataAddress + (depth - 1) * metadataSliceSize));
+        Assert.False(harness.Images.IsMetadata(metadataAddress));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void DccMetadataScan_RejectsAMismatchBeyondTheFirstPooledChunk()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x50000, ReadWrite);
+        var imageAddress = address + 0x1000;
+        var metadataAddress = address + 0x10000;
+        const uint layers = 2;
+        const ulong metadataSliceSize = 0x11000;
+        var metadataBytes = new byte[checked((int)(layers * metadataSliceSize))];
+        Array.Fill(metadataBytes, (byte)0xc0);
+        metadataBytes[^1] = 0x55;
+        harness.Write(metadataAddress, metadataBytes);
+
+        const uint width = 4;
+        const uint height = 4;
+        var texture = LinearRequest(
+            imageAddress,
+            (ulong)width * height * layers * 4,
+            Format.R8G8B8A8Unorm,
+            GuestPixelFormat.Bits8_8_8_8UNorm,
+            GuestImageType.Color2D,
+            new Extent3D(width, height, 1),
+            layers,
+            4,
+            1);
+        texture.Description.Metadata.Kind = MetadataKind.Dcc;
+        texture.Description.Metadata.Range = new GuestSpan(
+            metadataAddress,
+            layers * metadataSliceSize);
+        texture.Description.Metadata.DccAlphaMsb = true;
+
+        var textureId = harness.Find(ref texture);
+        harness.Finish();
+
+        Assert.True(textureId.IsValid);
+        Assert.Equal(uint.MaxValue, harness.ReadUInt32(metadataAddress));
+        Assert.Equal(0xc0c0c0c0u, harness.ReadUInt32(metadataAddress + metadataSliceSize));
+        Assert.Equal(0x55, harness.Read(metadataAddress + 2 * metadataSliceSize - 1, 1)[0]);
         harness.Shutdown();
     }
 

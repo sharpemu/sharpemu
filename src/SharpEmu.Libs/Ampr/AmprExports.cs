@@ -39,9 +39,20 @@ public static class AmprExports
     private const ulong WaitAddressRecordSizeWithoutReference = 0x08;
     private const ulong WaitAddressRecordSizeWith32BitReference = 0x0C;
     private const ulong WaitAddressRecordSizeWith64BitReference = 0x10;
+    private const ulong AmmMapRecordSize = 0x20;
+    private const ulong AmmMapDirectRecordSize = 0x30;
+    private const ulong AmmUnmapRecordSize = 0x20;
+    private const ulong AmmPageSize = 0x4000;
     private const uint ReadFileRecordType = 0x17;
     private const uint KernelEventQueueRecordType = 2;
     private const uint WriteAddressRecordType = 3;
+    private const ulong AmmBlockSize = 0x20_0000;
+    private const int AmmUsageDirect = 0;
+    private const int AmmUsageAuto = 1;
+    private const int AmmErrorNoSuchProcess = unchecked((int)0x80020003);
+    private const int AmmErrorFault = unchecked((int)0x8002000E);
+    private const int AmmErrorBusy = unchecked((int)0x80020010);
+    private const int AmmErrorInvalidArgument = unchecked((int)0x80020016);
     private static readonly ConcurrentDictionary<ulong, CommandBufferState> _commandBuffers = new();
     private static readonly ConcurrentDictionary<ulong, ulong> _commandBufferAliases = new();
     private static readonly bool _traceAmpr =
@@ -49,6 +60,13 @@ public static class AmprExports
     private static readonly bool _traceAmprReads =
         _traceAmpr ||
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AMPR_READS"), "1", StringComparison.Ordinal);
+
+    public static void ResetRuntimeState()
+    {
+        _commandBuffers.Clear();
+        _commandBufferAliases.Clear();
+        Volatile.Write(ref _unknownReadFileIdWarnings, 0);
+    }
 
     private sealed class CommandBufferState
     {
@@ -60,6 +78,7 @@ public static class AmprExports
         public readonly List<KernelEventCommand> KernelEventCommands = [];
         public readonly List<WriteAddressCommand> WriteAddressCommands = [];
         public readonly List<WaitAddressCommand> WaitAddressCommands = [];
+        public readonly List<AmmMapCommand> AmmMapCommands = [];
         public bool GatherScatterValid;
         public uint GatherScatterFileId;
         public ulong GatherScatterDestination;
@@ -69,7 +88,6 @@ public static class AmprExports
     private sealed class ReadFileCommand
     {
         public ulong RecordOffset;
-        public ulong RecordSize;
         public uint FileId;
         public ulong Destination;
         public ulong Size;
@@ -98,6 +116,26 @@ public static class AmprExports
         public ulong Reference;
         public uint Compare;
         public uint Flush;
+    }
+
+    private sealed class AmmMapCommand
+    {
+        public ulong RecordOffset;
+        public AmmCommandKind Kind;
+        public ulong Address;
+        public ulong DirectMemoryOffset;
+        public ulong Size;
+        public int MemoryType;
+        public int Protection;
+        public byte GpuMaskId;
+        public required KernelMemoryCompatExports.MappingRangeSnapshot MappingSnapshot;
+    }
+
+    private enum AmmCommandKind : byte
+    {
+        MapAutomatic,
+        MapDirect,
+        Unmap,
     }
 
     private sealed class CachedHostFile : IDisposable
@@ -134,6 +172,515 @@ public static class AmprExports
     private static readonly Dictionary<string, LinkedListNode<CachedHostFileEntry>> _hostFileByPath =
         new(HostFsPath.Comparer);
     private static readonly LinkedList<CachedHostFileEntry> _hostFileLru = new();
+
+    [SysAbiExport(
+        Nid = "Q07J7XpvhrU",
+        ExportName = "sceAmprAmmGiveDirectMemory",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmGiveDirectMemory(CpuContext ctx)
+    {
+        var searchStart = unchecked((long)ctx[CpuRegister.Rdi]);
+        var searchEnd = unchecked((long)ctx[CpuRegister.Rsi]);
+        var size = ctx[CpuRegister.Rdx];
+        var alignment = ctx[CpuRegister.Rcx];
+        var usage = unchecked((int)ctx[CpuRegister.R8]);
+        var outDirectMemoryOffset = ctx[CpuRegister.R9];
+
+        if (searchStart < 0 || searchEnd <= searchStart || outDirectMemoryOffset == 0 || size == 0 ||
+            (size & (AmmBlockSize - 1)) != 0 || (alignment & (AmmBlockSize - 1)) != 0 ||
+            usage is not (AmmUsageDirect or AmmUsageAuto))
+        {
+            return SetAmprResult(ctx, AmmErrorInvalidArgument);
+        }
+
+        if (usage == AmmUsageAuto)
+        {
+            var automaticResult = KernelMemoryCompatExports.AllocateAutomaticDirectMemory(
+                ctx,
+                unchecked((ulong)searchStart),
+                unchecked((ulong)searchEnd),
+                size,
+                alignment == 0 ? AmmBlockSize : alignment,
+                memoryType: 0,
+                outDirectMemoryOffset);
+            if (automaticResult == (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT)
+                automaticResult = AmmErrorFault;
+            ctx[CpuRegister.Rax] = unchecked((ulong)(long)automaticResult);
+            return automaticResult;
+        }
+
+        // Direct AMM donations use the public kernel allocator contract.
+        var savedAlignment = ctx[CpuRegister.Rcx];
+        var savedUsage = ctx[CpuRegister.R8];
+        try
+        {
+            ctx[CpuRegister.Rcx] = alignment == 0 ? AmmBlockSize : alignment;
+            ctx[CpuRegister.R8] = 0;
+            var result = KernelMemoryCompatExports.KernelAllocateDirectMemory(ctx);
+            if (result == (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT)
+                result = AmmErrorFault;
+            ctx[CpuRegister.Rax] = unchecked((ulong)(long)result);
+            return result;
+        }
+        finally
+        {
+            ctx[CpuRegister.Rcx] = savedAlignment;
+            ctx[CpuRegister.R8] = savedUsage;
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "wkQR9+xTFKY",
+        ExportName = "sceAmprAmmGetVirtualAddressRanges",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmGetVirtualAddressRanges(CpuContext ctx)
+    {
+        var vaStart = ctx[CpuRegister.Rdi];
+        var vaEnd = ctx[CpuRegister.Rsi];
+        var multimapVaStart = ctx[CpuRegister.Rdx];
+        var multimapVaEnd = ctx[CpuRegister.Rcx];
+
+        if (vaStart != 0)
+        {
+            _ = ctx.TryWriteUInt64(vaStart, GuestMemoryLayout.GuestExtendedAddressStart);
+        }
+
+        if (vaEnd != 0)
+        {
+            _ = ctx.TryWriteUInt64(vaEnd, GuestMemoryLayout.GuestExtendedAddressLimit);
+        }
+
+        if (multimapVaStart != 0)
+        {
+            _ = ctx.TryWriteUInt64(multimapVaStart, GuestMemoryLayout.GuestExtendedAddressLimit);
+        }
+
+        if (multimapVaEnd != 0)
+        {
+            _ = ctx.TryWriteUInt64(multimapVaEnd, GuestMemoryLayout.GuestExtendedAddressLimit);
+        }
+
+        return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "KqiWXLgCVe0",
+        ExportName = "sceAmprAmmGetUsageStatsData",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmGetUsageStatsData(CpuContext ctx)
+    {
+        const int usageStatsSize = 0x18;
+        var statsAddress = ctx[CpuRegister.Rdi];
+        if (statsAddress == 0)
+            return SetAmprResult(ctx, AmmErrorInvalidArgument);
+
+        if (!ctx.TryReadUInt64(statsAddress, out var requestedSize))
+            return SetAmprResult(ctx, AmmErrorFault);
+        if (requestedSize > usageStatsSize)
+            return SetAmprResult(ctx, AmmErrorInvalidArgument);
+
+        Span<byte> stats = stackalloc byte[usageStatsSize];
+        stats.Clear();
+        BinaryPrimitives.WriteUInt64LittleEndian(stats, requestedSize);
+        BinaryPrimitives.WriteUInt16LittleEndian(stats[8..], 512);
+        BinaryPrimitives.WriteUInt32LittleEndian(stats[0x10..], 0x7);
+        if (requestedSize != 0 &&
+            !ctx.Memory.TryWrite(statsAddress, stats[..checked((int)requestedSize)]))
+        {
+            return SetAmprResult(ctx, AmmErrorFault);
+        }
+
+        return SetAmprResult(ctx, 0);
+    }
+
+    [SysAbiExport(
+        Nid = "touqMEt6qXQ",
+        ExportName = "sceAmprAmmSetPageTablePoolOccupancyNotificationThreshold",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmSetPageTablePoolOccupancyNotificationThreshold(CpuContext ctx)
+        => SetAmprResult(ctx, 0);
+
+    [SysAbiExport(
+        Nid = "6hbai6KIXkk",
+        ExportName = "sceAmprAmmMeasureAmmCommandSizeMap",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int MeasureAmmCommandSizeMap(CpuContext ctx)
+        => SetAmprResult(ctx, checked((int)AmmMapRecordSize));
+
+    [SysAbiExport(
+        Nid = "m+fYyX8oFqw",
+        ExportName = "sceAmprAmmMeasureAmmCommandSizeMapWithGpuMaskId",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int MeasureAmmCommandSizeMapWithGpuMaskId(CpuContext ctx)
+        => SetAmprResult(ctx, checked((int)AmmMapRecordSize));
+
+    [SysAbiExport(
+        Nid = "ZFDZoN9IbVU",
+        ExportName = "sceAmprAmmMeasureAmmCommandSizeMapDirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int MeasureAmmCommandSizeMapDirect(CpuContext ctx)
+        => SetAmprResult(ctx, checked((int)AmmMapDirectRecordSize));
+
+    [SysAbiExport(
+        Nid = "KUjtdPZJo5I",
+        ExportName = "sceAmprAmmMeasureAmmCommandSizeMapDirectWithGpuMaskId",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int MeasureAmmCommandSizeMapDirectWithGpuMaskId(CpuContext ctx)
+        => SetAmprResult(ctx, checked((int)AmmMapDirectRecordSize));
+
+    [SysAbiExport(
+        Nid = "Ayg6PIon2wA",
+        ExportName = "sceAmprAmmMeasureAmmCommandSizeUnmap",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int MeasureAmmCommandSizeUnmap(CpuContext ctx)
+        => SetAmprResult(ctx, checked((int)AmmUnmapRecordSize));
+
+    [SysAbiExport(
+        Nid = "JEVYGhDc97M",
+        ExportName = "sceAmprAmmCommandBufferMap",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferMap(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        var address = ctx[CpuRegister.Rsi];
+        var size = ctx[CpuRegister.Rdx];
+        var memoryType = unchecked((int)ctx[CpuRegister.Rcx]);
+        var protection = unchecked((int)ctx[CpuRegister.R8]);
+
+        if (commandBuffer == 0 || !IsValidAmmAutomaticMapRange(address, size))
+        {
+            return SetAmprResult(ctx, AmmErrorInvalidArgument);
+        }
+
+        if (!AppendAmmMapRecord(
+                ctx,
+                commandBuffer,
+                AmmCommandKind.MapAutomatic,
+                address,
+                0,
+                size,
+                memoryType,
+                protection,
+                0,
+                AmmMapRecordSize))
+        {
+            return SetAmprResult(ctx, AmmErrorBusy);
+        }
+
+        TraceAmpr(ctx, "amm_map", commandBuffer, address, size);
+        return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "EDq5bqCqYpA",
+        ExportName = "sceAmprAmmCommandBufferConstructor",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferConstructor(CpuContext ctx)
+        => SetAmprResult(ctx, 0);
+
+    [SysAbiExport(
+        Nid = "pvUFDOHilnE",
+        ExportName = "sceAmprAmmCommandBufferDestructor",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferDestructor(CpuContext ctx)
+        => SetAmprResult(ctx, 0);
+
+    [SysAbiExport(
+        Nid = "ojBkmG7+CgE",
+        ExportName = "sceAmprAmmCommandBufferMapWithGpuMaskId",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferMapWithGpuMaskId(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        var address = ctx[CpuRegister.Rsi];
+        var size = ctx[CpuRegister.Rdx];
+        var memoryType = unchecked((int)ctx[CpuRegister.Rcx]);
+        var protection = unchecked((int)ctx[CpuRegister.R8]);
+        var gpuMaskId = unchecked((byte)ctx[CpuRegister.R9]);
+
+        if (commandBuffer == 0 || !IsValidAmmAutomaticMapRange(address, size))
+            return SetAmprResult(ctx, AmmErrorInvalidArgument);
+
+        return AppendAmmMapRecord(
+            ctx,
+            commandBuffer,
+            AmmCommandKind.MapAutomatic,
+            address,
+            0,
+            size,
+            memoryType,
+            protection,
+            gpuMaskId,
+            AmmMapRecordSize)
+            ? SetAmprResult(ctx, 0)
+            : SetAmprResult(ctx, AmmErrorBusy);
+    }
+
+    [SysAbiExport(
+        Nid = "8TBE+9XCZbI",
+        ExportName = "sceAmprAmmCommandBufferMapDirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferMapDirect(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        var address = ctx[CpuRegister.Rsi];
+        var directMemoryOffset = ctx[CpuRegister.Rdx];
+        var size = ctx[CpuRegister.Rcx];
+        var memoryType = unchecked((int)ctx[CpuRegister.R8]);
+        var protection = unchecked((int)ctx[CpuRegister.R9]);
+
+        if (commandBuffer == 0 ||
+            !IsValidAmmMapRange(address, size) ||
+            (directMemoryOffset & (AmmPageSize - 1)) != 0)
+        {
+            return SetAmprResult(ctx, AmmErrorInvalidArgument);
+        }
+
+        return AppendAmmMapRecord(
+            ctx,
+            commandBuffer,
+            AmmCommandKind.MapDirect,
+            address,
+            directMemoryOffset,
+            size,
+            memoryType,
+            protection,
+            0,
+            AmmMapDirectRecordSize)
+            ? SetAmprResult(ctx, 0)
+            : SetAmprResult(ctx, AmmErrorBusy);
+    }
+
+    [SysAbiExport(
+        Nid = "kOfZlhbVAkc",
+        ExportName = "sceAmprAmmCommandBufferMapDirectWithGpuMaskId",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferMapDirectWithGpuMaskId(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        var address = ctx[CpuRegister.Rsi];
+        var directMemoryOffset = ctx[CpuRegister.Rdx];
+        var size = ctx[CpuRegister.Rcx];
+        var memoryType = unchecked((int)ctx[CpuRegister.R8]);
+        var protection = unchecked((int)ctx[CpuRegister.R9]);
+        if (!ctx.TryGetImportStackArgument(0, out var gpuMaskArgument) &&
+            !ctx.TryReadUInt64(ctx[CpuRegister.Rsp] + sizeof(ulong), out gpuMaskArgument))
+        {
+            return SetAmprResult(ctx, AmmErrorFault);
+        }
+
+        if (commandBuffer == 0 ||
+            !IsValidAmmMapRange(address, size) ||
+            (directMemoryOffset & (AmmPageSize - 1)) != 0)
+        {
+            return SetAmprResult(ctx, AmmErrorInvalidArgument);
+        }
+
+        return AppendAmmMapRecord(
+            ctx,
+            commandBuffer,
+            AmmCommandKind.MapDirect,
+            address,
+            directMemoryOffset,
+            size,
+            memoryType,
+            protection,
+            unchecked((byte)gpuMaskArgument),
+            AmmMapDirectRecordSize)
+            ? SetAmprResult(ctx, 0)
+            : SetAmprResult(ctx, AmmErrorBusy);
+    }
+
+    [SysAbiExport(
+        Nid = "M-VFI2DJWQA",
+        ExportName = "sceAmprAmmCommandBufferUnmap",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferUnmap(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        var address = ctx[CpuRegister.Rsi];
+        var size = ctx[CpuRegister.Rdx];
+        if (commandBuffer == 0 || !IsValidAmmMapRange(address, size))
+            return SetAmprResult(ctx, AmmErrorInvalidArgument);
+
+        return AppendAmmMapRecord(
+            ctx,
+            commandBuffer,
+            AmmCommandKind.Unmap,
+            address,
+            0,
+            size,
+            0,
+            0,
+            0,
+            AmmUnmapRecordSize)
+            ? SetAmprResult(ctx, 0)
+            : SetAmprResult(ctx, AmmErrorBusy);
+    }
+
+    [SysAbiExport(
+        Nid = "RPCAhx-aabE",
+        ExportName = "sceAmprCommandBufferGetBufferBaseAddress",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int CommandBufferGetBufferBaseAddress(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        ctx[CpuRegister.Rax] = commandBuffer != 0 &&
+                               ctx.TryReadUInt64(commandBuffer + CommandBufferDataOffset, out var buffer)
+            ? buffer
+            : 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "lwS-7y3jcBI",
+        ExportName = "sceAmprAmmSubmitCommandBuffer",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmSubmitCommandBuffer(CpuContext ctx)
+    {
+        var commandBufferBase = ctx[CpuRegister.Rdi];
+        var submittedBytes = ctx[CpuRegister.Rsi];
+        var priority = ctx[CpuRegister.Rdx];
+        if (commandBufferBase == 0)
+        {
+            return SetAmprResult(ctx, AmmErrorInvalidArgument);
+        }
+
+        var completionResult = CompleteCommandBuffer(
+            ctx,
+            commandBufferBase,
+            out _,
+            out _);
+        if (completionResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return SetAmprResult(ctx, NormalizeAmmSubmissionError(completionResult));
+        }
+
+        // Plain submit reports whether the snapshot was accepted. Command
+        // execution status belongs to the result-bearing submit variants.
+        TraceAmpr(ctx, "amm_submit", commandBufferBase, submittedBytes, priority);
+        return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "NnKhlMJtIsI",
+        ExportName = "sceAmprAmmSubmitCommandBuffer3",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmSubmitCommandBufferAndGetId(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        var priority = ctx[CpuRegister.Rdx];
+        var outSubmissionId = ctx[CpuRegister.Rcx];
+        if (commandBuffer == 0 || outSubmissionId == 0)
+            return SetAmprResult(ctx, AmmErrorInvalidArgument);
+
+        var completionResult = CompleteCommandBuffer(
+            ctx,
+            commandBuffer,
+            out var executionResult,
+            out var errorOffset);
+        if (completionResult != 0)
+            return SetAmprResult(ctx, NormalizeAmmSubmissionError(completionResult));
+
+        var submissionId = KernelAprCompatExports.RegisterCompletedSubmission(
+            commandBuffer,
+            priority,
+            0,
+            executionResult,
+            errorOffset);
+        if (!ctx.TryWriteUInt32(outSubmissionId, submissionId))
+            return SetAmprResult(ctx, AmmErrorFault);
+
+        TraceAmpr(ctx, "amm_submit_get_id", commandBuffer, submissionId, priority);
+        return SetAmprResult(ctx, 0);
+    }
+
+    [SysAbiExport(
+        Nid = "OJf3vCckPAM",
+        ExportName = "sceAmprAmmSubmitCommandBuffer2",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmSubmitCommandBufferAndGetResult(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        var priority = ctx[CpuRegister.Rdx];
+        var resultAddress = ctx[CpuRegister.Rcx];
+        var outSubmissionId = ctx[CpuRegister.R8];
+        if (commandBuffer == 0)
+            return SetAmprResult(ctx, AmmErrorInvalidArgument);
+
+        var completionResult = CompleteCommandBuffer(
+            ctx,
+            commandBuffer,
+            out var executionResult,
+            out var errorOffset);
+        if (completionResult != 0)
+            return SetAmprResult(ctx, NormalizeAmmSubmissionError(completionResult));
+
+        var submissionId = KernelAprCompatExports.RegisterCompletedSubmission(
+            commandBuffer,
+            priority,
+            resultAddress,
+            executionResult,
+            errorOffset);
+        if (outSubmissionId != 0 && !ctx.TryWriteUInt32(outSubmissionId, submissionId))
+            return SetAmprResult(ctx, AmmErrorFault);
+        if (resultAddress != 0 &&
+            !KernelAprCompatExports.TryWriteAprResult(ctx, resultAddress, executionResult, errorOffset))
+        {
+            return SetAmprResult(ctx, AmmErrorFault);
+        }
+
+        TraceAmpr(ctx, "amm_submit_get_result", commandBuffer, submissionId, resultAddress);
+        return SetAmprResult(ctx, 0);
+    }
+
+    [SysAbiExport(
+        Nid = "HXymib4T8gc",
+        ExportName = "sceAmprAmmWaitCommandBufferCompletion",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmWaitCommandBufferCompletion(CpuContext ctx)
+    {
+        var submissionId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        if (submissionId == 0 ||
+            !KernelAprCompatExports.TryTakeCompletedSubmission(
+                submissionId,
+                out var resultAddress,
+                out var executionResult,
+                out var errorOffset))
+        {
+            return SetAmprResult(ctx, AmmErrorNoSuchProcess);
+        }
+
+        if (resultAddress != 0 &&
+            !KernelAprCompatExports.TryWriteAprResult(ctx, resultAddress, executionResult, errorOffset))
+        {
+            return SetAmprResult(ctx, AmmErrorFault);
+        }
+
+        TraceAmpr(ctx, "amm_wait", submissionId, resultAddress, errorOffset);
+        return SetAmprResult(ctx, 0);
+    }
 
     [SysAbiExport(
         Nid = "8aI7R7WaOlc",
@@ -193,7 +740,10 @@ public static class AmprExports
 
         TraceAmpr(ctx, "apr_ctor", commandBuffer, aux0, aux1);
         TryPreindexApp0();
-        ctx[CpuRegister.Rax] = commandBuffer;
+        // libSceAmpr reports constructor status in RAX.  Returning the object
+        // address here makes a successful construction look like an error to
+        // guests which gate the following SetBuffer call on a zero result.
+        ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -275,18 +825,26 @@ public static class AmprExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        if (!ctx.TryReadUInt64(commandBuffer + CommandBufferDataOffset, out var buffer) ||
-            !TryReadUInt32(ctx, commandBuffer + CommandBufferSizeOffset, out var size32))
+        // AMM submissions can replace the guest mapping that contains this
+        // header. Reset restores the buffer binding retained by SetBuffer;
+        // rereading the remapped header here would turn its cleared fields into
+        // a permanent null/zero command buffer.
+        if (!TryGetCommandBufferState(ctx, commandBuffer, out var buffer, out var size, out _))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        if (!WriteCommandBufferPointers(ctx, commandBuffer, buffer, size32, writeOffset: 0))
+        if (buffer == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
+
+        if (!WriteCommandBufferPointers(ctx, commandBuffer, buffer, size, writeOffset: 0))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        TraceAmpr(ctx, "reset", commandBuffer, buffer, size32);
+        TraceAmpr(ctx, "reset", commandBuffer, buffer, size);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -879,6 +1437,7 @@ public static class AmprExports
         KernelEventCommand[] kernelEventCommands;
         WriteAddressCommand[] writeAddressCommands;
         WaitAddressCommand[] waitAddressCommands;
+        AmmMapCommand[] ammMapCommands;
         lock (state)
         {
             writeOffset = state.WriteOffset;
@@ -886,25 +1445,59 @@ public static class AmprExports
             kernelEventCommands = state.KernelEventCommands.ToArray();
             writeAddressCommands = state.WriteAddressCommands.ToArray();
             waitAddressCommands = state.WaitAddressCommands.ToArray();
+            ammMapCommands = state.AmmMapCommands.ToArray();
         }
 
+        var mappingSnapshots = new KernelMemoryCompatExports.MappingRangeSnapshot[ammMapCommands.Length];
+        for (var index = 0; index < ammMapCommands.Length; index++)
+        {
+            mappingSnapshots[index] = ammMapCommands[index].MappingSnapshot;
+        }
+        var mappingOwnersUnchanged = KernelMemoryCompatExports.MatchMappingRangeSnapshots(mappingSnapshots);
+        var mappingCommandsExecuted = new bool[ammMapCommands.Length];
+
+        // The guest's second submit argument is not a byte count. Execute a
+        // coherent append-order snapshot through its published write offset.
+        // Do not retain the mutable command-buffer lock while a command waits
+        // or performs I/O.
+        var executionLimit = writeOffset;
         var commands = new List<(ulong Offset, int Kind, int Index)>(
-            readCommands.Length + kernelEventCommands.Length + writeAddressCommands.Length + waitAddressCommands.Length);
+            readCommands.Length + kernelEventCommands.Length + writeAddressCommands.Length +
+            waitAddressCommands.Length + ammMapCommands.Length);
         for (var i = 0; i < readCommands.Length; i++)
         {
-            commands.Add((readCommands[i].RecordOffset, 0, i));
+            if (readCommands[i].RecordOffset < executionLimit)
+            {
+                commands.Add((readCommands[i].RecordOffset, 0, i));
+            }
         }
         for (var i = 0; i < kernelEventCommands.Length; i++)
         {
-            commands.Add((kernelEventCommands[i].RecordOffset, 1, i));
+            if (kernelEventCommands[i].RecordOffset < executionLimit)
+            {
+                commands.Add((kernelEventCommands[i].RecordOffset, 1, i));
+            }
         }
         for (var i = 0; i < writeAddressCommands.Length; i++)
         {
-            commands.Add((writeAddressCommands[i].RecordOffset, 2, i));
+            if (writeAddressCommands[i].RecordOffset < executionLimit)
+            {
+                commands.Add((writeAddressCommands[i].RecordOffset, 2, i));
+            }
         }
         for (var i = 0; i < waitAddressCommands.Length; i++)
         {
-            commands.Add((waitAddressCommands[i].RecordOffset, 3, i));
+            if (waitAddressCommands[i].RecordOffset < executionLimit)
+            {
+                commands.Add((waitAddressCommands[i].RecordOffset, 3, i));
+            }
+        }
+        for (var i = 0; i < ammMapCommands.Length; i++)
+        {
+            if (ammMapCommands[i].RecordOffset < executionLimit)
+            {
+                commands.Add((ammMapCommands[i].RecordOffset, 4, i));
+            }
         }
         commands.Sort(static (left, right) => left.Offset.CompareTo(right.Offset));
 
@@ -958,10 +1551,77 @@ public static class AmprExports
                         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                     }
                     break;
+
+                case 4:
+                    var mapCommand = ammMapCommands[commandEntry.Index];
+                    if (!mappingOwnersUnchanged[commandEntry.Index])
+                    {
+                        // A delayed AMPR record must not destroy a mapping installed by a
+                        // newer subsystem owner. Treat the stale record as superseded so
+                        // later completion/event records in the same buffer still execute.
+                        TraceAmpr(ctx, "amm_map_superseded", commandBuffer,
+                            mapCommand.Address, mapCommand.Size);
+                        break;
+                    }
+                    var normalizedProtection = NormalizeAmmProtection(mapCommand.Protection);
+                    var mapResult = mapCommand.Kind switch
+                    {
+                        AmmCommandKind.MapAutomatic => KernelMemoryCompatExports.MapAutomaticMemory(
+                            ctx,
+                            mapCommand.Address,
+                            mapCommand.Size,
+                            mapCommand.MemoryType,
+                            normalizedProtection),
+                        AmmCommandKind.MapDirect => KernelMemoryCompatExports.MapDirectMemoryAt(
+                            ctx,
+                            mapCommand.Address,
+                            mapCommand.Size,
+                            mapCommand.MemoryType,
+                            normalizedProtection,
+                            mapCommand.DirectMemoryOffset),
+                        AmmCommandKind.Unmap => KernelMemoryCompatExports.UnmapMemoryAt(
+                            ctx,
+                            mapCommand.Address,
+                            mapCommand.Size),
+                        _ => AmmErrorInvalidArgument,
+                    };
+                    if (mapResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+                    {
+                        executionResult = mapResult;
+                        errorOffset = checked((uint)commandEntry.Offset);
+                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                    }
+                    mappingCommandsExecuted[commandEntry.Index] = true;
+                    break;
             }
         }
 
-        TraceAmpr(ctx, "complete", commandBuffer, buffer, writeOffset);
+        // A command buffer can be submitted again. Refresh successful records to the
+        // final post-buffer ownership state, while deliberately leaving superseded
+        // records tied to their original owner so they remain harmless on resubmission.
+        var refreshedSnapshots = new KernelMemoryCompatExports.MappingRangeSnapshot?[ammMapCommands.Length];
+        for (var index = 0; index < ammMapCommands.Length; index++)
+        {
+            if (mappingCommandsExecuted[index])
+            {
+                refreshedSnapshots[index] = KernelMemoryCompatExports.CaptureMappingRangeSnapshot(
+                    ammMapCommands[index].Address,
+                    ammMapCommands[index].Size);
+            }
+        }
+        lock (state)
+        {
+            for (var index = 0; index < ammMapCommands.Length; index++)
+            {
+                if (refreshedSnapshots[index] is { } refreshed &&
+                    state.AmmMapCommands.Contains(ammMapCommands[index]))
+                {
+                    ammMapCommands[index].MappingSnapshot = refreshed;
+                }
+            }
+        }
+
+        TraceAmpr(ctx, "complete", commandBuffer, buffer, executionLimit);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1065,6 +1725,7 @@ public static class AmprExports
             state.KernelEventCommands.Clear();
             state.WriteAddressCommands.Clear();
             state.WaitAddressCommands.Clear();
+            state.AmmMapCommands.Clear();
             state.GatherScatterValid = false;
             state.GatherScatterFileId = 0;
             state.GatherScatterDestination = 0;
@@ -1132,6 +1793,7 @@ public static class AmprExports
                 state.KernelEventCommands.Clear();
                 state.WriteAddressCommands.Clear();
                 state.WaitAddressCommands.Clear();
+                state.AmmMapCommands.Clear();
                 state.GatherScatterValid = false;
                 state.GatherScatterFileId = 0;
                 state.GatherScatterDestination = 0;
@@ -1154,7 +1816,8 @@ public static class AmprExports
             return state.ReadFileCommands.Count != 0 ||
                    state.KernelEventCommands.Count != 0 ||
                    state.WriteAddressCommands.Count != 0 ||
-                   state.WaitAddressCommands.Count != 0;
+                   state.WaitAddressCommands.Count != 0 ||
+                   state.AmmMapCommands.Count != 0;
         }
     }
 
@@ -1453,7 +2116,6 @@ public static class AmprExports
             state.ReadFileCommands.Add(new ReadFileCommand
             {
                 RecordOffset = recordOffset,
-                RecordSize = recordSize,
                 FileId = fileId,
                 Destination = destination,
                 Size = size,
@@ -1692,6 +2354,68 @@ public static class AmprExports
         return true;
     }
 
+    private static bool AppendAmmMapRecord(
+        CpuContext ctx,
+        ulong commandBuffer,
+        AmmCommandKind kind,
+        ulong address,
+        ulong directMemoryOffset,
+        ulong size,
+        int memoryType,
+        int protection,
+        byte gpuMaskId,
+        ulong recordSize)
+    {
+        // AMPR reserves a zero-filled guest command slot while retaining the
+        // decoded arguments in a host sidecar. Direct records are wider than
+        // automatic-map and unmap records, but all share append ordering.
+        Span<byte> record = stackalloc byte[(int)recordSize];
+        record.Clear();
+
+        if (!TryGetCommandBufferState(ctx, commandBuffer, out _, out _, out var state) || state is null)
+        {
+            return false;
+        }
+
+        var mappingSnapshot = KernelMemoryCompatExports.CaptureMappingRangeSnapshot(address, size);
+
+        lock (state)
+        {
+            if (state.Buffer == 0 ||
+                state.WriteOffset > state.Size ||
+                recordSize > state.Size - state.WriteOffset ||
+                !ctx.Memory.TryWrite(state.Buffer + state.WriteOffset, record))
+            {
+                return false;
+            }
+
+            var recordOffset = state.WriteOffset;
+            state.AmmMapCommands.Add(new AmmMapCommand
+            {
+                RecordOffset = recordOffset,
+                Kind = kind,
+                Address = address,
+                DirectMemoryOffset = directMemoryOffset,
+                Size = size,
+                MemoryType = memoryType,
+                Protection = protection,
+                GpuMaskId = gpuMaskId,
+                MappingSnapshot = mappingSnapshot,
+            });
+            state.WriteOffset += recordSize;
+            state.CommandCount++;
+            if (!WriteCommandBufferProgress(ctx, commandBuffer, state))
+            {
+                state.AmmMapCommands.RemoveAt(state.AmmMapCommands.Count - 1);
+                state.WriteOffset -= recordSize;
+                state.CommandCount--;
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static int WaitForAddress(CpuContext ctx, WaitAddressCommand command)
     {
         var spinWait = new SpinWait();
@@ -1751,9 +2475,51 @@ public static class AmprExports
             : WaitAddressRecordSizeWith64BitReference;
     }
 
-    private static int SetAmprResult(CpuContext ctx, OrbisGen2Result result)
+    private static bool IsValidAmmMapRange(ulong address, ulong size) =>
+        address != 0 &&
+        size != 0 &&
+        (address & (AmmPageSize - 1)) == 0 &&
+        (size & (AmmPageSize - 1)) == 0 &&
+        address <= ulong.MaxValue - size;
+
+    private static bool IsValidAmmAutomaticMapRange(ulong address, ulong size) =>
+        IsValidAmmMapRange(address, size) &&
+        address >= GuestMemoryLayout.GuestExtendedAddressStart &&
+        address < GuestMemoryLayout.GuestExtendedAddressLimit &&
+        size <= GuestMemoryLayout.GuestExtendedAddressLimit - address;
+
+    private static int NormalizeAmmProtection(int protection)
     {
-        var value = (int)result;
+        const int cpuGpuProtection = 0x01 | 0x02 | 0x04 | 0x10 | 0x20;
+        const int amprAcpRead = 0x40 | 0x100;
+        const int amprAcpWrite = 0x80 | 0x200;
+
+        var normalized = protection & cpuGpuProtection;
+        if ((protection & amprAcpRead) != 0)
+        {
+            normalized |= 0x01;
+        }
+
+        if ((protection & amprAcpWrite) != 0)
+        {
+            normalized |= 0x01 | 0x02;
+        }
+
+        return normalized;
+    }
+
+    private static int NormalizeAmmSubmissionError(int result) => result switch
+    {
+        (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT => AmmErrorFault,
+        (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT => AmmErrorInvalidArgument,
+        _ => result,
+    };
+
+    private static int SetAmprResult(CpuContext ctx, OrbisGen2Result result)
+        => SetAmprResult(ctx, (int)result);
+
+    private static int SetAmprResult(CpuContext ctx, int value)
+    {
         ctx[CpuRegister.Rax] = unchecked((ulong)(long)value);
         return value;
     }

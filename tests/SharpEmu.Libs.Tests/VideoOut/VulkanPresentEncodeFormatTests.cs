@@ -126,6 +126,10 @@ public sealed class VulkanPresentEncodeFormatTests
     [InlineData(11u, 4u, Format.R32G32Uint)]
     [InlineData(11u, 5u, Format.R32G32Sint)]
     [InlineData(11u, 7u, Format.R32G32Sfloat)]
+    [InlineData(13u, 4u, Format.R32G32B32A32Uint)]
+    [InlineData(14u, 4u, Format.R32G32B32A32Uint)]
+    [InlineData(14u, 5u, Format.R32G32B32A32Sint)]
+    [InlineData(14u, 7u, Format.R32G32B32A32Sfloat)]
     public void TryDecodeRenderTargetFormat_DecodesGen5R16AndRg32(
         uint dataFormat,
         uint numberType,

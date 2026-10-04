@@ -22,7 +22,7 @@ internal static partial class RegisterWriters
     private static readonly uint[] IgnoredShaderOffsets =
     [
         SpiShaderPaceIdPs, SpiGraphicsShaderControlPs, SpiShaderPaceIdGs, SpiShaderPgmRsrc4Gs, SpiGraphicsShaderControlGs,
-        SpiShaderUserDataAddrLoGs, SpiShaderUserDataAddrHiGs, SpiShaderPgmChksumHs, SpiShaderPgmRsrc4Hs, SpiGraphicsShaderControlHs,
+        SpiShaderPgmChksumHs, SpiShaderPgmRsrc4Hs, SpiGraphicsShaderControlHs,
         SpiShaderUserDataAddrLoHs, SpiShaderUserDataAddrHiHs,
     ];
 
@@ -89,8 +89,20 @@ internal static partial class RegisterWriters
         indirect[SpiShaderPgmHiGs] = static (banks, _, value) => banks.Shader.Vertex.GeometryAddress = RegisterField.WithHighAddress(banks.Shader.Vertex.GeometryAddress, value);
         indirect[SpiShaderPgmRsrc1Gs] = static (banks, _, value) => banks.Shader.Vertex.GeometryResource1 = GeometryResource1.Decode(value);
         indirect[SpiShaderPgmRsrc2Gs] = static (banks, _, value) => banks.Shader.Vertex.GeometryResource2 = GeometryResource2.Decode(value);
+        indirect[SpiShaderUserDataAddrLoGs] = static (banks, _, value) =>
+            banks.Shader.Vertex.GeometryUserDataAddress =
+                (banks.Shader.Vertex.GeometryUserDataAddress & 0xFFFF_FFFF_0000_0000ul) | value;
+        indirect[SpiShaderUserDataAddrHiGs] = static (banks, _, value) =>
+            banks.Shader.Vertex.GeometryUserDataAddress =
+                (banks.Shader.Vertex.GeometryUserDataAddress & 0x0000_0000_FFFF_FFFFul) | ((ulong)value << 32);
         indirect[SpiShaderPgmLoPs] = static (banks, _, value) => banks.Shader.Pixel.Address = RegisterField.WithLowAddress(banks.Shader.Pixel.Address, value);
         indirect[SpiShaderPgmHiPs] = static (banks, _, value) => banks.Shader.Pixel.Address = RegisterField.WithHighAddress(banks.Shader.Pixel.Address, value);
+        indirect[SpiShaderTmaLoPs] = static (banks, _, value) =>
+            banks.Shader.Pixel.TrapMemoryAddress =
+                (banks.Shader.Pixel.TrapMemoryAddress & 0xFFFF_FFFF_0000_0000ul) | value;
+        indirect[SpiShaderTmaHiPs] = static (banks, _, value) =>
+            banks.Shader.Pixel.TrapMemoryAddress =
+                (banks.Shader.Pixel.TrapMemoryAddress & 0x0000_0000_FFFF_FFFFul) | ((ulong)(value & 0xFFu) << 32);
         indirect[SpiShaderPgmRsrc1Ps] = static (banks, _, value) => banks.Shader.Pixel.Resource1 = PixelResource1.Decode(value);
         indirect[SpiShaderPgmRsrc2Ps] = static (banks, _, value) => banks.Shader.Pixel.Resource2 = PixelResource2.Decode(value);
         indirect[SpiShaderPgmLoVs] = static (banks, _, value) => banks.Shader.Vertex.LegacyVertexAddress = RegisterField.WithLowAddress(banks.Shader.Vertex.LegacyVertexAddress, value);

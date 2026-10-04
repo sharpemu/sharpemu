@@ -169,6 +169,7 @@ public partial class MainWindow : Window
     private string? _runningGameTitleId;
     private long _runningSinceUnixSeconds;
     private int _libraryScanGeneration;
+    private CancellationTokenSource? _libraryScanCancellation;
     private int _detailLoadGeneration;
     private int _backdropGeneration;
     private bool _isClosing;
@@ -804,25 +805,20 @@ public partial class MainWindow : Window
 
     private void PollGamepad()
     {
-        if (!SdlLauncherGamepad.TryGetState(out var pad))
+        if (!IsActive || _isRunning || _isStopping)
         {
+            // The launcher and game are separate processes. Release the SDL
+            // handle while the launcher is in the background so the active
+            // game window can acquire controllers that use exclusive HID I/O.
+            SdlLauncherGamepad.Suspend();
             _previousPadButtons = HostGamepadButtons.None;
             return;
         }
 
-        if (!IsActive)
+        SdlLauncherGamepad.Resume();
+        if (!SdlLauncherGamepad.TryGetState(out var pad))
         {
-            // Ignore input while the launcher is in the background, e.g. the
-            // game window is focused and using the same controller.
-            _previousPadButtons = pad.Buttons;
-            return;
-        }
-
-        if (_isRunning || _isStopping)
-        {
-            // The controller belongs to the separate game window while a
-            // session is active; Circle/B must never stop the session.
-            _previousPadButtons = pad.Buttons;
+            _previousPadButtons = HostGamepadButtons.None;
             return;
         }
 
@@ -1130,6 +1126,7 @@ public partial class MainWindow : Window
 
         _isClosing = true;
         Interlocked.Increment(ref _libraryScanGeneration);
+        Interlocked.Exchange(ref _libraryScanCancellation, null)?.Cancel();
         Interlocked.Increment(ref _detailLoadGeneration);
         _consoleFlushTimer.Stop();
         _libraryLayoutTimer.Stop();
@@ -1710,7 +1707,10 @@ public partial class MainWindow : Window
 
         _allGames.AddRange(cached);
         RefreshVisibleGames(new HashSet<GameEntry>(cached));
-        LoadGameDetailsInBackground(cached, cached);
+        // Cached install sizes are already complete. Re-decoding covers is
+        // cheap; recursively measuring every installed game here made a cold
+        // frontend start compete with the game the user launched immediately.
+        LoadGameDetailsInBackground(cached, []);
     }
 
     private async Task RescanLibraryAsync(bool showProgress = true)
@@ -1718,6 +1718,8 @@ public partial class MainWindow : Window
         Dispatcher.UIThread.VerifyAccess();
 
         var scanGeneration = Interlocked.Increment(ref _libraryScanGeneration);
+        var scanCancellation = new CancellationTokenSource();
+        Interlocked.Exchange(ref _libraryScanCancellation, scanCancellation)?.Cancel();
         var folders = _settings.GameFolders.ToArray();
         var excluded = new HashSet<string>(_settings.ExcludedGames, GameLibraryPath.Comparer);
         _libraryWatcher.Watch(folders);
@@ -1728,7 +1730,34 @@ public partial class MainWindow : Window
             LoadingState.IsVisible = true;
         }
 
-        var games = await Task.Run(() => ScanFolders(folders, excluded));
+        List<GameEntry> games;
+        try
+        {
+            games = await Task.Run(
+                () => ScanFolders(folders, excluded, scanCancellation.Token),
+                scanCancellation.Token);
+        }
+        catch (OperationCanceledException) when (scanCancellation.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception exception)
+        {
+            if (!_isClosing && scanGeneration == Volatile.Read(ref _libraryScanGeneration))
+            {
+                Console.Error.WriteLine($"[GUI][WARN] Game library scan failed: {exception.Message}");
+                LoadingState.IsVisible = false;
+                EmptyState.IsVisible = _allGames.Count == 0;
+            }
+
+            return;
+        }
+        finally
+        {
+            Interlocked.CompareExchange(ref _libraryScanCancellation, null, scanCancellation);
+            scanCancellation.Dispose();
+        }
+
         if (_isClosing || scanGeneration != Volatile.Read(ref _libraryScanGeneration))
         {
             return;
@@ -1740,9 +1769,15 @@ public partial class MainWindow : Window
         _allGames.AddRange(reconciliation.Games);
         RefreshVisibleGames(reconciliation.BackgroundsChanged);
         LoadingState.IsVisible = false;
-        LoadGameDetailsInBackground(reconciliation.CoversToLoad, reconciliation.Games);
+        LoadGameDetailsInBackground(reconciliation.CoversToLoad, reconciliation.SizesToMeasure);
         UpdateDiscordPresence();
-        GameLibraryCache.Save(folders, reconciliation.Games);
+        // Do not persist the eboot-only placeholder size for entries that are
+        // still being measured. If the frontend exits mid-pass, retaining the
+        // previous cache makes the next scan retry those new/changed games.
+        if (reconciliation.SizesToMeasure.Count == 0)
+        {
+            GameLibraryCache.Save(folders, reconciliation.Games);
+        }
     }
 
     /// <summary>
@@ -1819,6 +1854,19 @@ public partial class MainWindow : Window
                     });
                 }
             }
+
+            if (gamesToMeasure.Count != 0)
+            {
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (generation == _detailLoadGeneration && !_isClosing)
+                    {
+                        GameLibraryCache.Save(
+                            _settings.GameFolders.ToArray(),
+                            _allGames);
+                    }
+                });
+            }
         });
     }
 
@@ -1856,19 +1904,17 @@ public partial class MainWindow : Window
         return total;
     }
 
-    private static List<GameEntry> ScanFolders(IReadOnlyList<string> folders, IReadOnlySet<string> excludedPaths)
+    private static List<GameEntry> ScanFolders(
+        IReadOnlyList<string> folders,
+        IReadOnlySet<string> excludedPaths,
+        CancellationToken cancellationToken)
     {
         var games = new List<GameEntry>();
         var seen = new HashSet<string>(GameLibraryPath.Comparer);
-        var enumeration = new EnumerationOptions
-        {
-            IgnoreInaccessible = true,
-            RecurseSubdirectories = true,
-            MaxRecursionDepth = 8,
-        };
 
         foreach (var folder in folders)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!Directory.Exists(folder))
             {
                 continue;
@@ -1876,8 +1922,11 @@ public partial class MainWindow : Window
 
             try
             {
-                foreach (var file in Directory.EnumerateFiles(folder, "eboot.bin", enumeration))
+                foreach (var file in GameLibraryScanner.EnumerateExecutables(
+                             folder,
+                             cancellationToken))
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var fullPath = Path.GetFullPath(file);
                     if (!seen.Add(fullPath) || excludedPaths.Contains(fullPath))
                     {
@@ -1900,6 +1949,10 @@ public partial class MainWindow : Window
                         title ?? GameNameFor(fullPath), titleId, version, fullPath, size,
                         FindCoverFor(fullPath), FindBackgroundFor(fullPath)));
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception exception)
             {
@@ -2694,6 +2747,10 @@ public partial class MainWindow : Window
         _emulator?.Dispose();
         _emulator = null;
         _pendingLaunch = null;
+        if (IsActive)
+        {
+            SdlLauncherGamepad.Resume();
+        }
         UpdateEmbeddedConsoleVisibility();
 
         var meaningKey = exitCode switch
@@ -2745,6 +2802,7 @@ public partial class MainWindow : Window
             var arguments = BuildEmulatorArguments(launch);
             _emulator = process;
             _pendingLaunch = null;
+            SdlLauncherGamepad.Suspend();
             process.Start(
                 _emulatorExePath,
                 arguments,

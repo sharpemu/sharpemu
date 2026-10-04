@@ -142,4 +142,150 @@ public sealed class NetExportsTests
         NetExports.NetHtons(_ctx);
         Assert.NotEqual(0UL, _ctx[CpuRegister.Rax]);
     }
+
+    [Fact]
+    public void GetMacAddress_WritesDeterministicOfflineAddressAndValidatesArguments()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong address = memoryBase + 0x100;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(memory.TryWrite(address, new byte[] { 1, 2, 3, 4, 5, 6 }));
+
+        ctx[CpuRegister.Rdi] = address;
+        ctx[CpuRegister.Rsi] = 0;
+        Assert.Equal(0, NetExports.NetGetMacAddress(ctx));
+
+        var result = new byte[6];
+        Assert.True(memory.TryRead(address, result));
+        Assert.Equal(new byte[] { 0x02, 0x53, 0x48, 0x41, 0x52, 0x50 }, result);
+
+        ctx[CpuRegister.Rsi] = 1;
+        Assert.Equal(unchecked((int)0x80410116), NetExports.NetGetMacAddress(ctx));
+        ctx[CpuRegister.Rdi] = 0;
+        ctx[CpuRegister.Rsi] = 0;
+        Assert.Equal(unchecked((int)0x80410116), NetExports.NetGetMacAddress(ctx));
+    }
+
+    [Fact]
+    public void EtherNtostr_FormatsSixBytesAndChecksGuestBuffers()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong address = memoryBase + 0x100;
+        const ulong destination = memoryBase + 0x200;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(memory.TryWrite(address, new byte[] { 0x02, 0x1A, 0xB0, 0x04, 0xFE, 0x7D }));
+
+        ctx[CpuRegister.Rdi] = address;
+        ctx[CpuRegister.Rsi] = destination;
+        ctx[CpuRegister.Rdx] = 18;
+        Assert.Equal(0, NetExports.NetEtherNtostr(ctx));
+
+        var result = new byte[18];
+        Assert.True(memory.TryRead(destination, result));
+        Assert.Equal("02:1a:b0:04:fe:7d\0", System.Text.Encoding.ASCII.GetString(result));
+
+        ctx[CpuRegister.Rdx] = 17;
+        Assert.Equal(unchecked((int)0x80410116), NetExports.NetEtherNtostr(ctx));
+        ctx[CpuRegister.Rdx] = 18;
+        ctx[CpuRegister.Rsi] = memoryBase + 0x2000;
+        Assert.Equal(unchecked((int)0x80410116), NetExports.NetEtherNtostr(ctx));
+    }
+
+    [Theory]
+    [InlineData("6Oc0bLsIYe0", "sceNetGetMacAddress")]
+    [InlineData("v6M4txecCuo", "sceNetEtherNtostr")]
+    public void MacAddressExports_RegisterPs5Nids(string nid, string name)
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+
+        Assert.True(manager.TryGetExport(nid, out var export));
+        Assert.Equal(name, export.Name);
+        Assert.Equal("libSceNet", export.LibraryName);
+    }
+
+    [Fact]
+    public void EpollCreate_AllocatesBoundedIdsAndValidatesItsArguments()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong nameAddress = memoryBase + 0x100;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(memory.TryWrite(nameAddress, System.Text.Encoding.UTF8.GetBytes("matching\0")));
+
+        NetExports.ResetEpollsForTests();
+        try
+        {
+            ctx[CpuRegister.Rdi] = nameAddress;
+            ctx[CpuRegister.Rsi] = 0;
+            Assert.Equal(1024, NetExports.NetEpollCreate(ctx));
+            Assert.Equal(1024UL, ctx[CpuRegister.Rax]);
+            Assert.Equal(1025, NetExports.NetEpollCreate(ctx));
+
+            ctx[CpuRegister.Rsi] = 1;
+            Assert.Equal(unchecked((int)0x80410116), NetExports.NetEpollCreate(ctx));
+            ctx[CpuRegister.Rsi] = 0;
+            ctx[CpuRegister.Rdi] = 0;
+            Assert.Equal(unchecked((int)0x80410116), NetExports.NetEpollCreate(ctx));
+        }
+        finally
+        {
+            NetExports.ResetEpollsForTests();
+        }
+    }
+
+    [Theory]
+    [InlineData("SF47kB2MNTo", "sceNetEpollCreate")]
+    [InlineData("ZVw46bsasAk", "sceNetEpollControl")]
+    [InlineData("drjIbDbA7UQ", "sceNetEpollWait")]
+    [InlineData("Inp1lfL+Jdw", "sceNetEpollDestroy")]
+    public void EpollExports_RegisterWithCatalogIdentity(string nid, string name)
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+
+        Assert.True(manager.TryGetExport(nid, out var export));
+        Assert.Equal(name, export.Name);
+        Assert.Equal("libSceNet", export.LibraryName);
+    }
+
+    [Fact]
+    public void EpollWait_EmptySetReturnsNoEventsAndValidatesArguments()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong nameAddress = memoryBase + 0x100;
+        const ulong eventsAddress = memoryBase + 0x200;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(memory.TryWrite(nameAddress, System.Text.Encoding.UTF8.GetBytes("matching\0")));
+
+        NetExports.ResetEpollsForTests();
+        try
+        {
+            ctx[CpuRegister.Rdi] = nameAddress;
+            ctx[CpuRegister.Rsi] = 0;
+            var epollId = NetExports.NetEpollCreate(ctx);
+
+            ctx[CpuRegister.Rdi] = unchecked((ulong)epollId);
+            ctx[CpuRegister.Rsi] = eventsAddress;
+            ctx[CpuRegister.Rdx] = 1;
+            ctx[CpuRegister.Rcx] = 0;
+            Assert.Equal(0, NetExports.NetEpollWait(ctx));
+
+            ctx[CpuRegister.Rsi] = 0;
+            Assert.Equal(unchecked((int)0x8041010E), NetExports.NetEpollWait(ctx));
+            ctx[CpuRegister.Rsi] = eventsAddress;
+            ctx[CpuRegister.Rdx] = 0;
+            Assert.Equal(unchecked((int)0x80410116), NetExports.NetEpollWait(ctx));
+            ctx[CpuRegister.Rdx] = 1;
+            ctx[CpuRegister.Rcx] = ulong.MaxValue - 1;
+            Assert.Equal(unchecked((int)0x80410116), NetExports.NetEpollWait(ctx));
+        }
+        finally
+        {
+            NetExports.ResetEpollsForTests();
+        }
+    }
 }

@@ -36,16 +36,42 @@ internal interface IShaderPipelineHost
 
     bool ComputeWave64Supported { get; }
 
+    uint ComputeSubgroupSize { get; }
+
+    // The compiled host shader may move guest logical workgroup axes to fit
+    // backend limits. Backends that preserve logical XYZ use the identity map.
+    ComputeWorkgroupAxisMapping ResolveComputeWorkgroupAxisMapping(uint threadsX, uint threadsY, uint threadsZ) =>
+        ComputeWorkgroupAxisMapping.Identity;
+
     bool GraphicsSubgroupOperationsEnabled { get; }
+
+    bool BufferInt64AtomicsSupported => false;
+
+    bool ShaderFloat64Supported => false;
+
+    bool ShaderSignedZeroInfNanPreserveFloat32Supported => false;
+
+    bool ShaderDeviceClockSupported => false;
+
+    uint ShaderDeviceClockShift => 0;
 
     // The device supports shaderSharedInt64Atomics, so LDS 64-bit atomics can be
     // emitted as real 64-bit atomics instead of a non-atomic 32-bit pair.
     bool SharedInt64AtomicsEnabled { get; }
+
     bool ExecGuardElisionEnabled => true;
     ShaderPrewarmList? ShaderPrewarm => null;
+
     bool PerVertexPixelInputsSupported => true;
 
     RenderHostLimits Limits { get; }
+
+    // Optional mesh capability; non-mesh hosts use the default unsupported value.
+    bool MeshShadersSupported => false;
+
+    uint MeshSubgroupSize => 0;
+
+    MeshShaderHostCapabilities MeshShaderCapabilities => default;
 
     // The sample counts a pipeline without attachments can rasterize at.
     SampleCountFlags NoAttachmentSampleCounts { get; }

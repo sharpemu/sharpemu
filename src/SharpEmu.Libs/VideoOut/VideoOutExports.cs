@@ -346,6 +346,19 @@ public static partial class VideoOutExports
     }
 
     [SysAbiExport(
+        Nid = "w7Ipp9Xl7hg",
+        ExportName = "sceVideoOutAllowOutputResolutionWqhdDetection",
+        Target = Generation.Gen5,
+        LibraryName = "libSceVideoOut")]
+    public static int VideoOutAllowOutputResolutionWqhdDetection(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        return TryGetPort(handle, out _)
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : OrbisVideoOutErrorInvalidHandle;
+    }
+
+    [SysAbiExport(
         Nid = "Nv8c-Kb+DUM",
         ExportName = "sceVideoOutIsOutputSupported",
         Target = Generation.Gen5,
@@ -398,15 +411,18 @@ public static partial class VideoOutExports
     public static int VideoOutClose(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        lock (_stateGate)
+        GuestGpu.Current.RunAfterPendingCommandStreams(() =>
         {
-            foreach (var request in _flipRequests.Values.Where(request => request.Handle == handle).ToArray())
+            lock (_stateGate)
             {
-                CancelFlipLocked(request);
+                foreach (var request in _flipRequests.Values.Where(request => request.Handle == handle).ToArray())
+                {
+                    CancelFlipLocked(request);
+                }
+                _ports.Remove(handle);
+                Monitor.PulseAll(_stateGate);
             }
-            _ports.Remove(handle);
-            Monitor.PulseAll(_stateGate);
-        }
+        });
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -1246,36 +1262,52 @@ public static partial class VideoOutExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var attributeIndex = unchecked((int)ctx[CpuRegister.Rsi]);
-        if (!TryGetPort(handle, out var port))
-        {
-            return OrbisVideoOutErrorInvalidHandle;
-        }
-
         if (attributeIndex < 0)
         {
             return OrbisVideoOutErrorInvalidValue;
         }
 
-        lock (_stateGate)
+        var result = (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        GuestGpu.Current.RunAfterPendingCommandStreams(() =>
         {
-            if (attributeIndex >= port.Groups.Length || port.Groups[attributeIndex] is null)
+            lock (_stateGate)
             {
-                return OrbisVideoOutErrorInvalidValue;
-            }
-
-            port.Groups[attributeIndex] = null;
-            foreach (var slot in port.BufferSlots)
-            {
-                if (slot.GroupIndex == attributeIndex)
+                if (!_ports.TryGetValue(handle, out var port))
                 {
-                    slot.GroupIndex = -1;
-                    slot.AddressLeft = 0;
-                    slot.AddressRight = 0;
+                    result = OrbisVideoOutErrorInvalidHandle;
+                    return;
+                }
+
+                if (attributeIndex >= port.Groups.Length || port.Groups[attributeIndex] is null)
+                {
+                    result = OrbisVideoOutErrorInvalidValue;
+                    return;
+                }
+
+                port.Groups[attributeIndex] = null;
+                List<int>? clearedSlots = _traceVideoOut ? [] : null;
+                for (var slotIndex = 0; slotIndex < port.BufferSlots.Length; slotIndex++)
+                {
+                    var slot = port.BufferSlots[slotIndex];
+                    if (slot.GroupIndex == attributeIndex)
+                    {
+                        slot.GroupIndex = -1;
+                        slot.AddressLeft = 0;
+                        slot.AddressRight = 0;
+                        clearedSlots?.Add(slotIndex);
+                    }
+                }
+
+                if (clearedSlots is not null)
+                {
+                    TraceVideoOut(
+                        $"videoout.unregister_buffers handle={handle} group={attributeIndex} " +
+                        $"slots=[{string.Join(',', clearedSlots)}]");
                 }
             }
+        });
 
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-        }
+        return result;
     }
 
     [SysAbiExport(
@@ -1526,7 +1558,12 @@ public static partial class VideoOutExports
         }
 
         var groupIndex = RegisterBufferRange(port, bufferIndexStart, addresses[..bufferNum], attribute, setIndex);
-        return groupIndex < 0 ? groupIndex : setIndex;
+        // sceVideoOutRegisterBuffers2 uses setIndex to select the buffer group,
+        // but its ABI result is still ORBIS_OK. Returning the selected group is
+        // observable to the guest as a failed/non-standard registration when the
+        // requested set is not zero; titles may then skip registering later flip
+        // slots even though the host already accepted the first range.
+        return groupIndex < 0 ? groupIndex : (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     // The video-out export flip: paced on the guest thread, completed at submit.

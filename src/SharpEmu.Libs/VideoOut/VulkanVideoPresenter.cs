@@ -9,6 +9,9 @@ using SharpEmu.Libs.AvPlayer;
 using SharpEmu.Libs.Media;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
@@ -48,6 +51,87 @@ internal static class VulkanGraphicsSubgroupPolicy
         };
 }
 
+internal static class VulkanShaderClockPolicy
+{
+    private const double GuestRealtimeFrequencyHz = 100_000_000.0;
+
+    internal static bool ShouldEnable(bool extensionAvailable, bool deviceClockFeature) =>
+        extensionAvailable && deviceClockFeature;
+
+    // Vulkan exposes the timestamp tick period but not a separate shader-device-clock
+    // frequency. Current NVIDIA and AMD implementations use the same rate for both.
+    // Choose a power-of-two divisor that stays close to the guest's 100 MHz counter.
+    internal static bool TryComputeShift(float timestampPeriodNanoseconds, out uint shift)
+    {
+        shift = 0;
+        if (!float.IsFinite(timestampPeriodNanoseconds) || timestampPeriodNanoseconds <= 0)
+        {
+            return false;
+        }
+
+        var rateHz = 1_000_000_000.0 / timestampPeriodNanoseconds;
+        while (shift < 8 &&
+               rateHz / (1u << (int)(shift + 1)) >= GuestRealtimeFrequencyHz / 1.5)
+        {
+            shift++;
+        }
+
+        return true;
+    }
+}
+
+internal static class VulkanMeshShaderPolicy
+{
+    internal static bool ShouldEnable(bool extensionAvailable, bool meshShaderFeature) =>
+        extensionAvailable && meshShaderFeature;
+
+    internal static bool SupportsDraw(
+        in MeshShaderHostCapabilities capabilities,
+        uint groupCountX,
+        uint groupCountY,
+        uint groupCountZ)
+    {
+        if (!capabilities.Supported ||
+            groupCountX > capabilities.MaxWorkGroupCountX ||
+            groupCountY > capabilities.MaxWorkGroupCountY ||
+            groupCountZ > capabilities.MaxWorkGroupCountZ)
+        {
+            return false;
+        }
+
+        var xy = (ulong)groupCountX * groupCountY;
+        return groupCountZ == 0 ||
+            xy <= capabilities.MaxWorkGroupTotalCount / groupCountZ;
+    }
+}
+
+internal static class VulkanMultiViewportPolicy
+{
+    internal static bool ShouldEnable(bool featureSupported, uint maxViewports) =>
+        featureSupported && maxViewports >= ScreenViewportRegisters.ViewportCount;
+
+    internal static uint AvailableViewportCount(bool featureSupported, uint maxViewports) =>
+        ShouldEnable(featureSupported, maxViewports)
+            ? ScreenViewportRegisters.ViewportCount
+            : 1u;
+}
+
+internal static class VulkanPolygonModePolicy
+{
+    internal static bool IsSupported(PolygonMode mode, bool fillModeNonSolid) =>
+        mode == PolygonMode.Fill ||
+        (fillModeNonSolid && mode is PolygonMode.Line or PolygonMode.Point);
+}
+
+internal static class VulkanProvokingVertexPolicy
+{
+    internal static bool ShouldEnable(bool extensionAvailable, bool featureSupported) =>
+        extensionAvailable && featureSupported;
+
+    internal static ProvokingVertexModeEXT Mode(bool last) =>
+        last ? ProvokingVertexModeEXT.LastVertexExt : ProvokingVertexModeEXT.FirstVertexExt;
+}
+
 internal sealed record VulkanOffscreenColorClear(
     IReadOnlyList<GuestRenderTarget> Targets,
     float Red,
@@ -77,6 +161,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private const int LastResortPenalty = 1000;
     private const string PortabilityEnumerationExtensionName = "VK_KHR_portability_enumeration";
     private const string PortabilitySubsetExtensionName = "VK_KHR_portability_subset";
+    private const string MeshShaderExtensionName = "VK_EXT_mesh_shader";
 
     private static int _nativeSubgroupSize;
     private static int _nativeSubgroupShaderStages;
@@ -137,15 +222,11 @@ internal static unsafe partial class VulkanVideoPresenter
             out var guestWorkPerRender) && guestWorkPerRender > 0
             ? guestWorkPerRender
             : OperatingSystem.IsMacOS() ? 256 : 1024;
-    // On macOS the whole window loop — including Render() and its guest-work
-    // drain — runs on the process main thread, so draining a large backlog of
-    // slow guest work (heavy compute) blocks the Cocoa event pump and marks the
-    // window "Not Responding" while starving the swapchain present. Cap the
-    // wall-clock time spent draining per Render() call; leftover work stays
-    // queued for the next frame. SHARPEMU_RENDER_WORK_BUDGET_MS overrides
-    // (0 disables the cap); default 12ms keeps the macOS window interactive at
-    // ~60Hz. Windows and Linux use a dedicated render thread, so they drain
-    // without a time budget by default.
+    // On macOS, Render() runs on the process main thread, so cap the wall-clock
+    // time spent draining guest work to keep the Cocoa event pump responsive.
+    // Windows and Linux use a dedicated render thread and drain without a time
+    // budget by default. SHARPEMU_RENDER_WORK_BUDGET_MS overrides either value
+    // (0 disables the cap).
     private static readonly long _renderWorkBudgetTicks =
         (long.TryParse(
              Environment.GetEnvironmentVariable("SHARPEMU_RENDER_WORK_BUDGET_MS"),
@@ -243,6 +324,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             public string DebugName = "SharpEmu translated";
             public TextureResource[] Textures = [];
+            public int TextureCount;
             // Draw-local feedback copies stay alive until the GPU has consumed
             // the descriptors that reference them.
             public CachedImage[] FeedbackSnapshots = [];
@@ -255,6 +337,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public Presenter(uint width, uint height)
         {
             _commandStream = new CommandStreamQueue(this);
+            _relay = new GpuWorkerRelay(WakeRenderThread, _commandStream.TryEnqueueControlBarrier);
             _hostBufferPool = new VulkanHostBufferPool(
                 MaximumCachedHostBufferBytes,
                 DestroyHostBufferAllocation);
@@ -318,7 +401,7 @@ internal static unsafe partial class VulkanVideoPresenter
                    imageEntry.RetireTimeline <= _completedTimeline)
             {
                 _deferredGuestImageVersionDestroys.Dequeue();
-                DestroyGuestImage(imageEntry.Image);
+                RecycleGuestFlipSnapshot(imageEntry.Image);
                 FlipProgressTracker.RecordFlip(imageEntry.Image.FlipVersion);
                 TraceVulkanShader(
                     $"vk.flip_retired version={imageEntry.Image.FlipVersion} " +

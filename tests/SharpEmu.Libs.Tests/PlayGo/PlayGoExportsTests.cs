@@ -18,6 +18,8 @@ public sealed class PlayGoStateCollection
 public sealed class PlayGoExportsTests : IDisposable
 {
     private const int BadChunkId = unchecked((int)0x80B2000C);
+    private const int BadOptionalType = unchecked((int)0x80B20024);
+    private const int NotInitialized = unchecked((int)0x80B20005);
     private const byte LocusNotDownloaded = 0;
     private const byte LocusLocalFast = 3;
     private const ulong MemoryBase = 0x1_0000_0000;
@@ -26,6 +28,7 @@ public sealed class PlayGoExportsTests : IDisposable
     private const ulong HandleAddress = MemoryBase + 0x200;
     private const ulong ChunkIdsAddress = MemoryBase + 0x300;
     private const ulong LociAddress = MemoryBase + 0x400;
+    private const ulong OptionalChunkAddress = MemoryBase + 0x500;
 
     private readonly string? _originalApp0Root;
     private readonly string _app0Root;
@@ -130,6 +133,100 @@ public sealed class PlayGoExportsTests : IDisposable
         Assert.Equal(new byte[] { 0xA5 }, ReadLoci(1));
     }
 
+    [Theory]
+    [InlineData(0, ulong.MaxValue)]
+    [InlineData(1, 0x1fUL)]
+    public void OptionalChunkQueries_ReturnSupportedMasks(int type, ulong expectedMask)
+    {
+        var handle = InitializeAndOpen();
+        SetOptionalChunkArguments(handle, type, OptionalChunkAddress);
+
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_OK,
+            PlayGoExports.PlayGoGetOptionalChunk(_ctx));
+        Assert.True(_ctx.TryReadUInt64(OptionalChunkAddress, out var mask));
+        Assert.Equal(expectedMask, mask);
+
+        Assert.True(_ctx.TryWriteUInt64(OptionalChunkAddress, 0));
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_OK,
+            PlayGoExports.PlayGoGetSupportedOptionalChunk(_ctx));
+        Assert.True(_ctx.TryReadUInt64(OptionalChunkAddress, out mask));
+        Assert.Equal(expectedMask, mask);
+
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_OK,
+            PlayGoExports.PlayGoPrefetchOptionalChunk(_ctx));
+    }
+
+    [Fact]
+    public void OptionalChunkQueries_RejectUnknownType()
+    {
+        var handle = InitializeAndOpen();
+        SetOptionalChunkArguments(handle, 2, OptionalChunkAddress);
+
+        Assert.Equal(BadOptionalType, PlayGoExports.PlayGoGetOptionalChunk(_ctx));
+        Assert.Equal(BadOptionalType, PlayGoExports.PlayGoGetSupportedOptionalChunk(_ctx));
+        Assert.Equal(BadOptionalType, PlayGoExports.PlayGoPrefetchOptionalChunk(_ctx));
+    }
+
+    [Fact]
+    public void InstallChunkId_UsesInstalledChunkEnumeration()
+    {
+        var handle = InitializeAndOpen();
+        _ctx[CpuRegister.Rdi] = handle;
+        _ctx[CpuRegister.Rsi] = ChunkIdsAddress;
+        _ctx[CpuRegister.Rdx] = 1;
+        _ctx[CpuRegister.Rcx] = LociAddress;
+
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_OK,
+            PlayGoExports.PlayGoGetInstallChunkId(_ctx));
+        Assert.True(_ctx.TryReadUInt16(ChunkIdsAddress, out var chunkId));
+        Assert.True(_ctx.TryReadUInt32(LociAddress, out var entries));
+        Assert.Equal((ushort)0, chunkId);
+        Assert.Equal(1u, entries);
+    }
+
+    [Fact]
+    public void ScenarioOnlyMetadata_DoesNotInventInstalledChunkIds()
+    {
+        var sceSys = Directory.CreateDirectory(Path.Combine(_app0Root, "sce_sys"));
+        File.WriteAllText(Path.Combine(sceSys.FullName, "playgo-scenario.json"), "{}");
+        var handle = InitializeAndOpen();
+
+        _ctx[CpuRegister.Rdi] = handle;
+        _ctx[CpuRegister.Rsi] = 0;
+        _ctx[CpuRegister.Rdx] = 0;
+        _ctx[CpuRegister.Rcx] = LociAddress;
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_OK,
+            PlayGoExports.PlayGoGetInstallChunkId(_ctx));
+        Assert.True(_ctx.TryReadUInt32(LociAddress, out var count));
+        Assert.Equal(0u, count);
+
+        // The set is unknown rather than authoritatively empty: titles that
+        // query a concrete id can still consume their locally dumped content.
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [42]));
+        Assert.Equal(new byte[] { LocusLocalFast }, ReadLoci(1));
+    }
+
+    [Fact]
+    public void ResetRuntimeState_AllowsFreshSessionAfterMissingGuestTerminate()
+    {
+        var staleHandle = InitializeAndOpen();
+
+        PlayGoExports.ResetRuntimeState();
+        WriteChunkIds([0]);
+        SetGetLocusArguments(staleHandle, ChunkIdsAddress, 1, LociAddress);
+        Assert.Equal(NotInitialized, PlayGoExports.PlayGoGetLocus(_ctx));
+
+        var freshHandle = InitializeAndOpen();
+        Assert.Equal((uint)1, freshHandle);
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(freshHandle, [0]));
+        Assert.Equal(new byte[] { LocusLocalFast }, ReadLoci(1));
+    }
+
     public void Dispose()
     {
         PlayGoExports.ResetForTests();
@@ -198,6 +295,13 @@ public sealed class PlayGoExportsTests : IDisposable
         _ctx[CpuRegister.Rsi] = chunkIds;
         _ctx[CpuRegister.Rdx] = count;
         _ctx[CpuRegister.Rcx] = outLoci;
+    }
+
+    private void SetOptionalChunkArguments(uint handle, int type, ulong option)
+    {
+        _ctx[CpuRegister.Rdi] = handle;
+        _ctx[CpuRegister.Rsi] = unchecked((ulong)type);
+        _ctx[CpuRegister.Rdx] = option;
     }
 
     public enum UnusableMetadataKind

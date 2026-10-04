@@ -8,6 +8,11 @@ namespace SharpEmu.Libs.Np;
 
 public static class NpTrophy2Exports
 {
+    private const int TrophyDetailsSize = 1312;
+    private const int TrophyDataSize = 32;
+    private const int TrophyNameOffset = 32;
+    private const int TrophyDescriptionOffset = 160;
+
     private static int _nextContext = 1;
     private static int _nextHandle = 1;
 
@@ -104,8 +109,64 @@ public static class NpTrophy2Exports
         ExportName = "sceNpTrophy2GetTrophyInfoArray",
         Target = Generation.Gen5,
         LibraryName = "libSceNpTrophy2")]
-    public static int NpTrophy2GetTrophyInfoArray(CpuContext ctx) =>
-        SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+    public static int NpTrophy2GetTrophyInfoArray(CpuContext ctx)
+    {
+        var offset = unchecked((uint)ctx[CpuRegister.Rdx]);
+        var limit = unchecked((uint)ctx[CpuRegister.Rcx]);
+        var detailsAddress = ctx[CpuRegister.R8];
+        var dataAddress = ctx[CpuRegister.R9];
+
+        // The seventh integer argument follows the return address in the SysV
+        // stack frame.
+        if (!ctx.TryReadUInt64(ctx[CpuRegister.Rsp] + sizeof(ulong), out var countAddress))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        var count = offset == 0 && limit != 0 ? 1u : 0u;
+        if (count == 0)
+        {
+            if (countAddress != 0 && !ctx.TryWriteUInt32(countAddress, 0))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            return ReturnOk(ctx);
+        }
+
+        if (detailsAddress != 0)
+        {
+            Span<byte> details = stackalloc byte[TrophyDetailsSize];
+            details.Clear();
+            BinaryPrimitives.WriteInt32LittleEndian(details, 0);
+            BinaryPrimitives.WriteInt32LittleEndian(details[4..], 4);
+            "Trophy"u8.CopyTo(details[TrophyNameOffset..]);
+            "Trophy"u8.CopyTo(details[TrophyDescriptionOffset..]);
+
+            if (!ctx.Memory.TryWrite(detailsAddress, details))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        if (dataAddress != 0)
+        {
+            Span<byte> data = stackalloc byte[TrophyDataSize];
+            data.Clear();
+            BinaryPrimitives.WriteInt32LittleEndian(data, 0);
+            if (!ctx.Memory.TryWrite(dataAddress, data))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        if (countAddress != 0 && !ctx.TryWriteUInt32(countAddress, count))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return ReturnOk(ctx);
+    }
 
 
     private static int WriteIdAndReturn(CpuContext ctx, ulong outAddress, ref int nextId)

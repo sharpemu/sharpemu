@@ -123,13 +123,28 @@ public readonly record struct Gen5PixelOutputBinding(
     uint GuestSlot,
     uint HostLocation,
     Gen5PixelOutputKind Kind,
-    Gen5ColorComponentMapping ComponentMapping)
+    Gen5ColorComponentMapping ComponentMapping,
+    byte TargetOutputMode)
 {
     public Gen5PixelOutputBinding(
         uint guestSlot,
         uint hostLocation,
         Gen5PixelOutputKind kind)
-        : this(guestSlot, hostLocation, kind, Gen5ColorComponentMapping.Identity)
+        : this(
+            guestSlot,
+            hostLocation,
+            kind,
+            Gen5ColorComponentMapping.Identity,
+            0)
+    {
+    }
+
+    public Gen5PixelOutputBinding(
+        uint guestSlot,
+        uint hostLocation,
+        Gen5PixelOutputKind kind,
+        Gen5ColorComponentMapping componentMapping)
+        : this(guestSlot, hostLocation, kind, componentMapping, 0)
     {
     }
 
@@ -229,6 +244,24 @@ public sealed record Gen5RayIntersectControl(
             : VectorAddress + (uint)component;
 }
 
+// RDNA BVH operations share the MIMG encoding but do not use an ordinary
+// image descriptor or sampler.  Keep them out of Gen5ImageControl so the
+// resource planner cannot mistake the four-SGPR BVH descriptor for an
+// eight-SGPR texture descriptor.
+public sealed record Gen5BvhRayControl(
+    uint VectorAddress,
+    IReadOnlyList<uint> AddressRegisters,
+    uint VectorData,
+    uint ScalarResource,
+    bool Is64Bit,
+    bool A16) : Gen5InstructionControl
+{
+    public uint GetAddressRegister(int component) =>
+        component < AddressRegisters.Count
+            ? AddressRegisters[component]
+            : VectorAddress + (uint)component;
+}
+
 public sealed record Gen5GlobalMemoryControl(
     uint DwordCount,
     uint VectorAddress,
@@ -241,6 +274,28 @@ public sealed record Gen5GlobalMemoryControl(
     bool UsesFlatAddress = false,
     uint? DynamicOffsetRegister = null,
     bool SourceIsScalar = false) : Gen5InstructionControl;
+
+public enum Gen5ScratchAddressMode : byte
+{
+    Vector,
+    Scalar,
+    Immediate,
+    Invalid,
+}
+
+// Scratch is per-invocation private memory.  Its SADDR field selects one of
+// three address forms instead of naming the high half of a device address, so
+// keep it separate from Gen5GlobalMemoryControl and descriptor planning.
+public sealed record Gen5ScratchMemoryControl(
+    uint DwordCount,
+    uint VectorAddress,
+    uint SourceVectorRegister,
+    uint DestinationVectorRegister,
+    uint ScalarAddress,
+    int OffsetBytes,
+    bool Glc,
+    bool Slc,
+    Gen5ScratchAddressMode AddressMode) : Gen5InstructionControl;
 
 // A typed access carries the unified format from the instruction; a formatted
 // untyped access reads the descriptor format when it executes.
@@ -338,9 +393,30 @@ public sealed record Gen5ShaderInstruction(
     IReadOnlyList<Gen5Operand> Destinations,
     Gen5InstructionControl? Control)
 {
-    public ulong? AddressOffset { get; init; }
+    // Control flow uses the compact logical Pc. A fused continuation can live at
+    // any guest address, so S_GETPC keeps its physical offset from the entry base
+    // separately instead of stretching the uint CFG address space to fit it.
+    private ulong? _guestProgramCounterOffset;
 
-    public ulong ProgramOffset => AddressOffset ?? Pc;
+    public ulong? GuestProgramCounterOffset
+    {
+        get => _guestProgramCounterOffset;
+        init => _guestProgramCounterOffset = value;
+    }
+
+    // Upstream's name for the same physical offset. Keep both initializers so
+    // cached graphs and fused-program callers from either side retain one source
+    // of truth.
+    public ulong? AddressOffset
+    {
+        get => _guestProgramCounterOffset;
+        init => _guestProgramCounterOffset = value;
+    }
+
+    public ulong ProgramOffset => _guestProgramCounterOffset ?? Pc;
+
+    public ulong NextGuestProgramCounterOffset => unchecked(
+        ProgramOffset + (ulong)Words.Count * sizeof(uint));
 }
 
 public sealed record Gen5ShaderProgram(
@@ -355,6 +431,29 @@ public sealed record Gen5ShaderProgram(
     public uint PixelColorExportMasks => _pixelColorExportMasks;
 
     public uint ParameterExportMask => _parameterExportMask;
+
+    // ViewportIndex is sourced from POS1.z when the first auxiliary position
+    // vector and viewport export are enabled. Keep this predicate beside the IR
+    // scan so pipeline metadata agrees with the Vulkan translator's declaration.
+    public bool WritesViewportIndex(uint positionExportControl)
+    {
+        const uint viewportEnable = 1u << 19;
+        const uint positionVectorZeroEnable = 1u << 21;
+        const uint zComponent = 1u << 2;
+        if ((positionExportControl & (viewportEnable | positionVectorZeroEnable)) !=
+            (viewportEnable | positionVectorZeroEnable))
+        {
+            return false;
+        }
+
+        return Instructions.Any(static instruction =>
+            instruction.Control is Gen5ExportControl
+            {
+                Target: 13,
+                EnableMask: var enableMask,
+            } &&
+            (enableMask & zComponent) != 0);
+    }
 
     private static uint ComputePixelColorExportMasks(
         IReadOnlyList<Gen5ShaderInstruction> instructions)

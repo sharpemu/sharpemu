@@ -13,6 +13,16 @@ namespace SharpEmu.ShaderCompiler.Resources;
 public sealed record MemoryAccessBinding(ScalarValue? Handle, ScalarValue? SamplerHandle, ScalarValue? Read, ScalarValue? Offset = null,
     ScalarValue? Active = null);
 
+// A V_READLANE whose fixed VGPR lane is defined on every incoming control-flow
+// path. The emitter can restore this value through a branch-local shadow instead
+// of broadcasting from a host subgroup lane which may be inactive.
+public readonly record struct FixedLaneReadBinding(uint Register, uint Lane);
+
+// A V_WRITELANE with a scalar value source and a selector proven constant by
+// the value graph. Recording writes as well as reads keeps shadow updates and
+// shadow consumers on exactly the same control-flow proof.
+public readonly record struct FixedLaneWriteBinding(uint Register, uint Lane);
+
 // The uniform value graph of one program: every value a descriptor can be assembled
 // from, symbolic in user data and in the shader base.
 public sealed partial class ScalarValueGraph
@@ -44,6 +54,15 @@ public sealed partial class ScalarValueGraph
     // Index-aligned with Memory.Entries; null when the access has no descriptor value.
     public MemoryAccessBinding?[] Accesses { get; private set; } = [];
 
+    // Guest instruction PC -> fixed VGPR lane proven to reach that read on all
+    // paths. Populated by the final value-graph recording pass.
+    internal Dictionary<uint, FixedLaneReadBinding> MutableFixedLaneReads { get; } = [];
+    public IReadOnlyDictionary<uint, FixedLaneReadBinding> FixedLaneReads =>
+        MutableFixedLaneReads;
+    internal Dictionary<uint, FixedLaneWriteBinding> MutableFixedLaneWrites { get; } = [];
+    public IReadOnlyDictionary<uint, FixedLaneWriteBinding> FixedLaneWrites =>
+        MutableFixedLaneWrites;
+
     public IReadOnlyList<ScalarValue> Values => _values;
 
     internal Dictionary<uint, ScalarValue> BranchConditions { get; } = [];
@@ -62,6 +81,11 @@ public sealed partial class ScalarValueGraph
     public static ScalarValueGraph Build(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads = null, uint waveSize = 64)
     {
+        if (waveSize is not 32 and not 64)
+        {
+            throw new ArgumentOutOfRangeException(nameof(waveSize), waveSize, "Wave size must be 32 or 64.");
+        }
+
         var controlFlow = IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance);
         var graph = new ScalarValueGraph(program, controlFlow, MemoryAccessTable.Build(program, fixedFunctionVertexLoads), userDataBase, userDataCount,
             waveSize);

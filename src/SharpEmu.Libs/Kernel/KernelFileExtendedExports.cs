@@ -274,7 +274,7 @@ public static partial class KernelMemoryCompatExports
 
         try
         {
-            using var stream = new FileStream(hostPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+            using var stream = new FileStream(hostPath, FileMode.Open, FileAccess.Write, GuestFileShare);
             stream.SetLength(length);
         }
         catch (FileNotFoundException)
@@ -618,6 +618,10 @@ public static partial class KernelMemoryCompatExports
     [SysAbiExport(Nid = "o7O4z3jwKzo", ExportName = "sceKernelAioPollRequests",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
     public static int KernelAioPollRequests(CpuContext ctx) => KernelAioComplete(ctx);
+
+    [SysAbiExport(Nid = "2pOuoWoCxdk", ExportName = "sceKernelAioPollRequest",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
+    public static int KernelAioPollRequest(CpuContext ctx) => KernelAioWaitRequest(ctx);
 
     [SysAbiExport(Nid = "lgK+oIWkJyA", ExportName = "sceKernelAioWaitRequests",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]

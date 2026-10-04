@@ -135,7 +135,13 @@ public sealed class ShaderResourcePlan
             {
                 plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)indirect.HeapSource], cleanSlots);
                 if (indirect.WaveIndexed is not null)
-                    plan.MarkHeapReadSlots(plan.DescriptorSources[(int)indirect.HeapSource], cleanSlots);
+                {
+                    MarkHeapReadSlots(
+                        plan.Memory,
+                        plan.TableReads,
+                        plan.DescriptorSources[(int)indirect.HeapSource],
+                        cleanSlots);
+                }
             }
             else
             {
@@ -175,16 +181,25 @@ public sealed class ShaderResourcePlan
     // The flattened table the host fills per draw: table reads, then the written ranges.
     public int FlattenedTableReservedCount => TableReads.Count + WrittenRangeCount * WrittenRangeDwordCount;
 
-    // A wave-indexed table picks its keys from a mask word read off the same heap.
-    private void MarkHeapReadSlots(DescriptorSource heap, byte[] slots)
+    // A wave-indexed selector obtains its mask, index keys and descriptors from
+    // the same heap. Equivalent (not merely reference-identical) address handles
+    // must therefore use the clean reader as one coherent snapshot.
+    internal static void MarkHeapReadSlots(
+        MemoryAccessTable memory,
+        IReadOnlyList<ResourceTableRead> tableReads,
+        DescriptorSource heap,
+        byte[] slots)
     {
-        for (var slot = 0; slot < TableReads.Count && slot < slots.Length; slot++)
+        for (var slot = 0; slot < tableReads.Count && slot < slots.Length; slot++)
         {
-            var value = TableReads[slot].Value;
+            var value = tableReads[slot].Value;
             if (value.Kind == ScalarValueKind.ScalarAddressWord && value.Operands.Length != 0 &&
                 value.Operands[0].Kind == ScalarValueKind.AddressHandle &&
                 value.Operands[0].Operands.Length == heap.Dwords.Length &&
-                value.Operands[0].Operands.Zip(heap.Dwords).All(pair => ReferenceEquals(pair.First, pair.Second) || Graph.Equivalent(pair.First, pair.Second)))
+                value.Operands[0].Operands
+                    .Zip(heap.Dwords, (actual, expected) =>
+                        ScalarValueEquivalence.Equivalent(memory, actual, expected))
+                    .All(static equivalent => equivalent))
             {
                 slots[slot] = 1;
             }

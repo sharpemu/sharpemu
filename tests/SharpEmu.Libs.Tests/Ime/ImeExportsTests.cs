@@ -8,11 +8,13 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Ime;
 
+[Collection("ImeState")]
 public sealed class ImeExportsTests
 {
     private const ulong Base = 0x1_0000_0000;
     private const ulong OutAddress = Base + 0x100;
     private const int InvalidAddress = unchecked((int)0x80BC0031);
+    private const int NotOpened = unchecked((int)0x80BC0002);
     // sizeof(SceImeKeyboardInfo): six uint32 fields plus
     // int8_t reserved[12].
     private const int KeyboardInfoSize = 0x24;
@@ -22,6 +24,7 @@ public sealed class ImeExportsTests
 
     public ImeExportsTests()
     {
+        ImeExports.ResetRuntimeState();
         _ctx = new CpuContext(_memory, Generation.Gen5);
     }
 
@@ -39,7 +42,7 @@ public sealed class ImeExportsTests
         _ctx[CpuRegister.Rdi] = 0;
         _ctx[CpuRegister.Rsi] = OutAddress;
 
-        Assert.Equal(0, ImeExports.ImeKeyboardGetInfo(_ctx));
+        Assert.Equal(NotOpened, ImeExports.ImeKeyboardGetInfo(_ctx));
 
         Span<byte> info = stackalloc byte[KeyboardInfoSize + 0x10];
         Assert.True(_memory.TryRead(OutAddress, info));

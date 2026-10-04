@@ -29,7 +29,22 @@ public sealed class GameLibraryReconcilerTests
         Assert.Same(added, result.Games[1]);
         Assert.Equal("New name", retained.Name);
         Assert.Equal("02.000", retained.Version);
+        Assert.Contains(retained, result.SizesToMeasure);
+        Assert.Contains(added, result.SizesToMeasure);
         Assert.DoesNotContain(removed, result.Games);
+    }
+
+    [Fact]
+    public void Reconcile_UnchangedCachedEntryKeepsSizeWithoutRemeasuringInstall()
+    {
+        var retained = CreateGame("retained", sizeBytes: 8L << 30);
+        var scanned = CreateGame("retained", sizeBytes: 64L << 20);
+
+        var result = GameLibraryReconciler.Reconcile([retained], [scanned]);
+
+        Assert.Same(retained, Assert.Single(result.Games));
+        Assert.Equal(8L << 30, retained.SizeBytes);
+        Assert.Empty(result.SizesToMeasure);
     }
 
     [Fact]
@@ -51,6 +66,21 @@ public sealed class GameLibraryReconcilerTests
         Assert.Contains(retained, result.BackgroundsChanged);
         Assert.Equal(scanned.CoverPath, retained.CoverPath);
         Assert.Equal(scanned.BackgroundPath, retained.BackgroundPath);
+    }
+
+    [Fact]
+    public void Reconcile_UnchangedCachedCoverWithoutBitmapQueuesReload()
+    {
+        var coverPath = AssetPath("cover.png");
+        var retained = CreateGame("retained", coverPath: coverPath);
+        var scanned = CreateGame("retained", coverPath: coverPath);
+
+        Assert.Null(retained.Cover);
+
+        var result = GameLibraryReconciler.Reconcile([retained], [scanned]);
+
+        Assert.Same(retained, Assert.Single(result.Games));
+        Assert.Same(retained, Assert.Single(result.CoversToLoad));
     }
 
     [Fact]
@@ -82,13 +112,14 @@ public sealed class GameLibraryReconcilerTests
         string? name = null,
         string? version = null,
         string? coverPath = null,
-        string? backgroundPath = null)
+        string? backgroundPath = null,
+        long sizeBytes = 1)
         => new(
             name ?? id,
             $"PPSA-{id}",
             version,
             GamePath(id),
-            1,
+            sizeBytes,
             coverPath,
             backgroundPath);
 

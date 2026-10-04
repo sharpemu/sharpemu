@@ -248,6 +248,9 @@ public static class ScalarOperationSemantics
             case ScalarOperation.FMul:
                 result = BitConverter.SingleToUInt32Bits(Float(first) * Float(second));
                 return true;
+            case ScalarOperation.FDiv:
+                result = BitConverter.SingleToUInt32Bits(Float(first) / Float(second));
+                return true;
             case ScalarOperation.FAdd:
                 result = BitConverter.SingleToUInt32Bits(Float(first) + Float(second));
                 return true;

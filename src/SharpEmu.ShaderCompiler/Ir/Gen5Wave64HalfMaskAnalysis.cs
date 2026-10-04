@@ -48,7 +48,7 @@ public static class Gen5Wave64HalfMaskAnalysis
 
     private static readonly HashSet<string> SccReaders = new(StringComparer.Ordinal)
     {
-        "SCbranchScc0", "SCbranchScc1", "SAddcU32", "SSubbU32", "SCselectB32", "SCselectB64",
+        "SCbranchScc0", "SCbranchScc1", "SAddcU32", "SSubbU32", "SCmovB64", "SCselectB32", "SCselectB64",
     };
 
     private static readonly HashSet<string> SccWriters = new(StringComparer.Ordinal)
@@ -62,7 +62,7 @@ public static class Gen5Wave64HalfMaskAnalysis
 
     private static readonly HashSet<string> DynamicControlFlow = new(StringComparer.Ordinal)
     {
-        "SSetpcB64", "SSwappcB64", "SRfeB64", "SCbranchJoin", "SCbranchGFork", "SCbranchIFork",
+        "SSetpcB64", "SSwappcB64", "SCallB64", "SRfeB64", "SCbranchJoin", "SCbranchGFork", "SCbranchIFork",
     };
 
     private readonly record struct State(bool Reached, UInt128 Half, bool PendingRead, bool PendingWrite)
@@ -199,7 +199,8 @@ public static class Gen5Wave64HalfMaskAnalysis
             needed |= ReadRegisters(instruction, index, operand.Value);
         }
 
-        if (opcode is "SCbranchExecz" or "SCbranchExecnz")
+        if (opcode is "SCbranchExecz" or "SCbranchExecnz" or
+            "SSubvectorLoopBegin" or "SSubvectorLoopEnd")
         {
             needed |= Pair(Exec);
         }
@@ -212,6 +213,14 @@ public static class Gen5Wave64HalfMaskAnalysis
             instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister } readDestination, ..])
         {
             needed |= Range(readDestination.Value, opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u);
+        }
+
+        // S_CMOV_B64 retains the old destination pair when SCC is clear, so the
+        // destination is an input as well as an output.
+        if (opcode == "SCmovB64" &&
+            instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister } conditionalDestination, ..])
+        {
+            needed |= Pair(conditionalDestination.Value);
         }
 
         if (opcode.StartsWith("SMovrel", StringComparison.Ordinal))
@@ -230,6 +239,14 @@ public static class Gen5Wave64HalfMaskAnalysis
             {
                 needed |= bitwiseInputs;
             }
+        }
+
+        // The B32 saveexec family reads EXEC_LO implicitly before replacing it.
+        // Materialize both guest halves first so the saved low word is derived
+        // from the current guest Wave64 mask rather than one host half.
+        if (opcode.EndsWith("SaveexecB32", StringComparison.Ordinal))
+        {
+            needed |= Pair(Exec);
         }
 
         exact = Expand(needed & half);
@@ -277,7 +294,7 @@ public static class Gen5Wave64HalfMaskAnalysis
         }
         else
         {
-            var wide = IsWideScalar(opcode);
+            var wide = IsWideScalarDestination(opcode);
             foreach (var destination in instruction.Destinations)
             {
                 if (destination.Kind != Gen5OperandKind.ScalarRegister)
@@ -502,11 +519,13 @@ public static class Gen5Wave64HalfMaskAnalysis
         SccWriters.Contains(instruction.Opcode) ||
         BitwiseWithScc.Contains(instruction.Opcode);
 
-    private static bool IsWideScalar(string opcode) =>
-        opcode.StartsWith('S') &&
-        (opcode.EndsWith("B64", StringComparison.Ordinal) ||
-         opcode.EndsWith("U64", StringComparison.Ordinal) ||
-         opcode.EndsWith("I64", StringComparison.Ordinal));
+    private static bool IsWideScalarDestination(string opcode) =>
+        opcode == "SBitreplicateB64B32" ||
+        (opcode is not ("SBcnt1I32B64" or "SFF1I32B64" or "SFlbitI32B64") &&
+         opcode.StartsWith('S') &&
+         (opcode.EndsWith("B64", StringComparison.Ordinal) ||
+          opcode.EndsWith("U64", StringComparison.Ordinal) ||
+          opcode.EndsWith("I64", StringComparison.Ordinal)));
 
     private static UInt128 ReadRegisters(Gen5ShaderInstruction instruction, int sourceIndex, uint register)
     {

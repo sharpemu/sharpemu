@@ -183,6 +183,47 @@ public sealed class TlsLoadPatchBoundaryTests
     }
 
     [Fact]
+    public void ScanPatchesLittleNightmaresTripleOperandSizePrefixTlsLoad()
+    {
+        if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64) return;
+        using var fixture = new PatchFixture();
+        byte[] instructions = [0x66, 0x66, 0x66, 0x64, 0x48, 0x8B, 0x04, 0x25, 0, 0, 0, 0];
+        fixture.Patch(instructions);
+        var patched = fixture.Read(instructions.Length);
+        Assert.Equal(new byte[] { 0x66, 0x66, 0x66 }, patched[..3]);
+        Assert.Equal(new byte[] { 0x48, 0xE8 }, patched[3..5]);
+
+        var decoder = Decoder.Create(64, new ByteArrayCodeReader(patched));
+        decoder.IP = (ulong)fixture.Address;
+        var instruction = decoder.Decode();
+        Assert.Equal(Code.Call_rel32_64, instruction.Code);
+        Assert.Equal((ulong)fixture.HandlerAddress, instruction.NearBranch64);
+    }
+
+    [Fact]
+    public void FailedFarHandlerPatchCanBeRetriedAfterHandlerMovesNear()
+    {
+        if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64) return;
+        using var fixture = new PatchFixture();
+        byte[] instructions = [0x64, 0x48, 0x8B, 0x04, 0x25, 0, 0, 0, 0];
+        fixture.Write(instructions);
+        fixture.SetHandlerAddress(new nint(fixture.Address.ToInt64() + int.MaxValue + 7L));
+        fixture.Scan(0, instructions.Length);
+        Assert.Equal(instructions, fixture.Read(instructions.Length));
+
+        fixture.SetHandlerAddress(fixture.HandlerAddress);
+        fixture.Scan(0, instructions.Length);
+        var patched = fixture.Read(instructions.Length);
+        Assert.Equal(new byte[] { 0x48, 0xE8 }, patched[..2]);
+
+        var decoder = Decoder.Create(64, new ByteArrayCodeReader(patched));
+        decoder.IP = (ulong)fixture.Address;
+        var instruction = decoder.Decode();
+        Assert.Equal(Code.Call_rel32_64, instruction.Code);
+        Assert.Equal((ulong)fixture.HandlerAddress, instruction.NearBranch64);
+    }
+
+    [Fact]
     public unsafe void NativeLoadPreservesLiveAccumulator()
     {
         if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64) return;
@@ -221,6 +262,8 @@ public sealed class TlsLoadPatchBoundaryTests
 
         private void SetField(string name, object value) => typeof(DirectExecutionBackend)
             .GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(_backend, value);
+
+        public void SetHandlerAddress(nint address) => SetField("_tlsHandlerAddress", address);
 
         public void Patch(byte[] instructions)
         {

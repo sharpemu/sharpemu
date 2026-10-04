@@ -25,6 +25,8 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
     private readonly ulong _pageSize;
     private readonly ulong _pageCount;
     private readonly ulong _faultBufferSize;
+    private readonly ulong _diagnosticBytes;
+    private readonly bool _meshOutputProbeEnabled;
     private readonly GpuBuffer _faultBuffer;
     private readonly GpuBuffer _downloadBuffer;
     private readonly GpuBuffer? _traceDownloadBuffer;
@@ -45,9 +47,15 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         _pageSize = 1UL << pageBits;
         _pageCount = pageCount;
         _faultBufferSize = pageCount / 8;
+        _meshOutputProbeEnabled = MeshOutputProbe.Enabled;
+        _diagnosticBytes =
+            (_meshOutputProbeEnabled ? MeshOutputProbe.RecordBytes : 0UL) +
+            (GuestGpuMemoryHook.TraceEnabled || _meshOutputProbeEnabled
+                ? MeshOutputProbe.DeviceFaultRecordBytes
+                : 0UL);
         _faultBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags,
-            _faultBufferSize + (GuestGpuMemoryHook.TraceEnabled ? 32UL : 0UL));
-        if (GuestGpuMemoryHook.TraceEnabled)
+            _faultBufferSize + _diagnosticBytes);
+        if (_diagnosticBytes != 0)
             _traceDownloadBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, MaxPendingFaults * 256);
         _downloadBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, MaxPendingFaults * PageFaultAreaSize);
 
@@ -173,7 +181,7 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         {
             if (_traceDownloadBuffer is not null && !_traceInitialized)
             {
-                _faultBuffer.Fill(_faultBufferSize, 32, 0);
+                _faultBuffer.Fill(_faultBufferSize, _diagnosticBytes, 0);
                 _traceInitialized = true;
             }
             return _faultBuffer;
@@ -226,18 +234,27 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         var scanTick = _scheduler.CurrentTick;
         if (_traceDownloadBuffer is not null)
         {
-            _traceDownloadBuffer.CopyFrom(_scheduler.Current, _faultBuffer, _faultBufferSize, area * 256UL, 32,
+            _traceDownloadBuffer.CopyFrom(_scheduler.Current, _faultBuffer, _faultBufferSize, area * 256UL, _diagnosticBytes,
                 destinationAfter: AccessFlags.HostReadBit);
-            _faultBuffer.Fill(_faultBufferSize, 32, 0);
+            _faultBuffer.Fill(_faultBufferSize, _diagnosticBytes, 0);
         }
         _scheduler.QueueCompletionAction(() =>
         {
             if (_traceDownloadBuffer is not null)
             {
-                _traceDownloadBuffer.Invalidate(area * 256UL, 32);
-                var record = MemoryMarshal.Cast<byte, uint>(_traceDownloadBuffer.Mapped.Slice((int)area * 256, 32));
-                if (record[0] != 0)
-                    Console.Error.WriteLine($"[GPU][DEVICE_ADDRESS_FAULT] scan_tick={scanTick} hash=0x{((ulong)record[2] << 32 | record[1]):X16} pc=0x{record[3]:X} address=0x{((ulong)record[5] << 32 | record[4]):X16} stage={record[6]}");
+                _traceDownloadBuffer.Invalidate(area * 256UL, _diagnosticBytes);
+                var diagnostics = MemoryMarshal.Cast<byte, uint>(
+                    _traceDownloadBuffer.Mapped.Slice((int)area * 256, (int)_diagnosticBytes));
+                if (_meshOutputProbeEnabled)
+                    MeshOutputProbe.Report(diagnostics[..MeshOutputProbe.RecordWords], scanTick);
+
+                if (GuestGpuMemoryHook.TraceEnabled)
+                {
+                    var faultOffset = _meshOutputProbeEnabled ? MeshOutputProbe.RecordWords : 0;
+                    var record = diagnostics.Slice(faultOffset, MeshOutputProbe.DeviceFaultRecordWords);
+                    if (record[0] != 0)
+                        Console.Error.WriteLine($"[GPU][DEVICE_ADDRESS_FAULT] scan_tick={scanTick} hash=0x{((ulong)record[2] << 32 | record[1]):X16} pc=0x{record[3]:X} address=0x{((ulong)record[5] << 32 | record[4]):X16} stage={record[6]}");
+                }
             }
             _downloadBuffer.Invalidate(offset, PageFaultAreaSize);
             _faultRanges.Clear();
@@ -245,15 +262,16 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
             var count = Math.Min((uint)faults[0], MaxPageFaults - 1);
             for (var index = 1; index <= count; index++)
             {
-                _faultRanges.Add(faults[index], _pageSize);
-                GuestGpuMemoryHook.SelectDeviceFaultTracePage(faults[index]);
-                if (SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Traces(faults[index], _pageSize))
-                    SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Trace(faults[index], _pageSize,
-                        $"device-address-fault scan_tick={scanTick} callback_tick={_scheduler.CurrentTick} registered={_cache.IsRegionRegistered(faults[index], _pageSize)} reported_count={(uint)faults[0]} retained_count={count}");
+                var address = PageOwnerTable.GuestAddress(faults[index]);
+                _faultRanges.Add(address, _pageSize);
+                GuestGpuMemoryHook.SelectDeviceFaultTracePage(address);
+                if (SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Traces(address, _pageSize))
+                    SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Trace(address, _pageSize,
+                        $"device-address-fault scan_tick={scanTick} callback_tick={_scheduler.CurrentTick} registered={_cache.IsRegionRegistered(address, _pageSize)} reported_count={(uint)faults[0]} retained_count={count}");
                 var reported = Interlocked.Increment(ref _reportedFaults);
                 if (reported <= 16 || (reported & (reported - 1)) == 0)
                 {
-                    Console.Error.WriteLine($"[GPU][INFO] Accessed non-GPU cached memory at 0x{faults[index]:X16} count={reported}");
+                    Console.Error.WriteLine($"[GPU][INFO] Accessed non-GPU cached memory at 0x{address:X16} count={reported}");
                 }
             }
 
@@ -294,5 +312,61 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         {
             throw SubmissionScheduler.Fatal($"{operation} failed with {result}");
         }
+    }
+}
+
+// Optional, exact-hash mesh output readback. The shader record precedes the
+// existing final eight-word device-address-fault record in the same buffer.
+internal static class MeshOutputProbe
+{
+    public const string EnvironmentVariable = "SHARPEMU_TRACE_MESH_OUTPUT_HASH";
+    public const uint Magic = 0x4853454D; // "MESH" in little-endian memory.
+    public const int RecordWords = 48;
+    public const ulong RecordBytes = RecordWords * sizeof(uint);
+    public const int DeviceFaultRecordWords = 8;
+    public const ulong DeviceFaultRecordBytes = DeviceFaultRecordWords * sizeof(uint);
+
+    private static readonly ulong _targetHash = ParseTargetHash();
+
+    public static bool Enabled => _targetHash != 0;
+
+    public static bool Matches(ulong hash) => hash == _targetHash;
+
+    private static ulong ParseTargetHash()
+    {
+        var text = Environment.GetEnvironmentVariable(EnvironmentVariable);
+        if (text?.StartsWith("0x", StringComparison.OrdinalIgnoreCase) == true)
+            text = text[2..];
+        return ulong.TryParse(
+            text,
+            System.Globalization.NumberStyles.HexNumber,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var hash)
+            ? hash
+            : 0;
+    }
+
+    public static void Report(ReadOnlySpan<uint> record, ulong scanTick)
+    {
+        if (record.Length < RecordWords || record[0] != Magic)
+            return;
+
+        var hash = (ulong)record[2] << 32 | record[1];
+        Console.Error.WriteLine(
+            $"[GPU][MESH_OUTPUT_PROBE] scan_tick={scanTick} hash=0x{hash:X16} " +
+            $"group={record[3]},{record[4]},{record[5]} m0=0x{record[6]:X8} " +
+            $"vertices={record[7]} primitives={record[8]} packed0=0x{record[9]:X8} " +
+            $"indices0={record[10]},{record[11]},{record[12]} cull0={record[13]} layer0={record[14]} " +
+            $"position0_bits=({record[15]:X8},{record[16]:X8},{record[17]:X8},{record[18]:X8}) " +
+            $"position0=({BitConverter.UInt32BitsToSingle(record[15]):R},{BitConverter.UInt32BitsToSingle(record[16]):R}," +
+            $"{BitConverter.UInt32BitsToSingle(record[17]):R},{BitConverter.UInt32BitsToSingle(record[18]):R}) " +
+            $"position1=({BitConverter.UInt32BitsToSingle(record[30]):R},{BitConverter.UInt32BitsToSingle(record[31]):R}," +
+            $"{BitConverter.UInt32BitsToSingle(record[32]):R},{BitConverter.UInt32BitsToSingle(record[33]):R}) " +
+            $"position2=({BitConverter.UInt32BitsToSingle(record[34]):R},{BitConverter.UInt32BitsToSingle(record[35]):R}," +
+            $"{BitConverter.UInt32BitsToSingle(record[36]):R},{BitConverter.UInt32BitsToSingle(record[37]):R}) " +
+            $"packed1=0x{record[38]:X8} indices1={record[39]},{record[40]},{record[41]} cull1={record[42]} " +
+            $"packedLast=0x{record[43]:X8} indicesLast={record[44]},{record[45]},{record[46]} cullLast={record[47]} " +
+            $"draw=({record[20]},{record[21]},{record[22]},{record[23]},0x{record[25]:X8}{record[24]:X8}) " +
+            $"limits=({record[26]},{record[27]}) topology={record[28]} provoking={record[29]}");
     }
 }

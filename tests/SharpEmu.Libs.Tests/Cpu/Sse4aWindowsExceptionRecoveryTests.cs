@@ -21,6 +21,46 @@ public sealed unsafe class Sse4aWindowsExceptionRecoveryTests
         "TryRecoverAmdCompatInstruction",
         BindingFlags.Instance | BindingFlags.NonPublic)!;
 
+    [Theory]
+    [InlineData("660F78C22800", false, false, 2, 2, 0x28, 0, 6)]
+    [InlineData("66410F78C20804", false, false, 10, 10, 8, 4, 7)]
+    [InlineData("66440F79D8", false, true, 11, 0, 0, 0, 5)]
+    [InlineData("66410F79C8", false, true, 1, 8, 0, 0, 5)]
+    [InlineData("F2450F78C11008", true, false, 8, 9, 0x10, 8, 7)]
+    public void FixedDecoderRecognizesSupportedEncodingsWithoutIced(
+        string hex,
+        bool isInsert,
+        bool usesRegisterControl,
+        int destination,
+        int source,
+        int length,
+        int index,
+        int instructionLength)
+    {
+        var bytes = Convert.FromHexString(hex);
+
+        Assert.True(DirectExecutionBackend.TryDecodeSse4aInstruction(bytes, out var decoded));
+        Assert.Equal(isInsert, decoded.IsInsert);
+        Assert.Equal(usesRegisterControl, decoded.UsesRegisterControl);
+        Assert.Equal(destination, decoded.DestinationRegister);
+        Assert.Equal(source, decoded.SourceRegister);
+        Assert.Equal(length, decoded.Length);
+        Assert.Equal(index, decoded.Index);
+        Assert.Equal(instructionLength, decoded.InstructionLength);
+    }
+
+    [Theory]
+    [InlineData("660F78000800")] // Memory-looking ModRM is not an SSE4a register form.
+    [InlineData("F20F79C0")] // INSERTQ has no register-controlled opcode 79 form.
+    [InlineData("660F78C008")] // Immediate EXTRQ is truncated.
+    [InlineData("660F7AC0")] // Different opcode.
+    public void FixedDecoderRejectsUnsupportedOrTruncatedEncodings(string hex)
+    {
+        Assert.False(DirectExecutionBackend.TryDecodeSse4aInstruction(
+            Convert.FromHexString(hex),
+            out _));
+    }
+
     [Fact]
     public void RegisterExtrqRecoversAstroEncoding()
     {
@@ -177,15 +217,18 @@ public sealed unsafe class Sse4aWindowsExceptionRecoveryTests
                     HostMemory.PAGE_EXECUTE, out _));
             }
             const ulong value = 0x123456789ABCDEF0;
+            const ulong upper = 0xA5A5_5A5A_C3C3_3C3CUL;
             var context = stackalloc byte[0x4D0];
             new Span<byte>(context, 0x4D0).Clear();
             *(ulong*)(context + Win64ContextRipOffset) = (ulong)code;
             *(ulong*)(context + Win64ContextXmm0Offset) = value;
+            *(ulong*)(context + Win64ContextXmm0Offset + 8) = upper;
             var backend = RuntimeHelpers.GetUninitializedObject(typeof(DirectExecutionBackend));
             Assert.True((bool)TryRecoverAmdCompat.Invoke(backend,
                 [Pointer.Box(context, typeof(void*)), (ulong)code])!);
             Assert.Equal(Sse4aBitFieldEmulator.InsertBitField(value, value, 8, 8),
                 *(ulong*)(context + Win64ContextXmm0Offset));
+            Assert.Equal(upper, *(ulong*)(context + Win64ContextXmm0Offset + 8));
             Assert.Equal((ulong)code + 6, *(ulong*)(context + Win64ContextRipOffset));
         }
         finally

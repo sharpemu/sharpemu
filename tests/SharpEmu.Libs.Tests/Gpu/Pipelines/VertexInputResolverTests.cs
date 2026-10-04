@@ -131,6 +131,31 @@ public sealed class VertexInputResolverTests : IDisposable
     }
 
     [Fact]
+    public void ResolveFusedUserDataAppliesTheFrontScalarOffsetAndMaximumScratch()
+    {
+        var shader = RegisterTables() with { ContinuationScratchDwords = 23 };
+        WriteWord(Semantics, SemanticWord(0, 0, 4));
+        WriteWord(AttributeTable, AttributeWord(0, AttributeFormat32x2Float, 0));
+        WriteBuffer(0, StreamBase, 16, 3);
+        var userData = new uint[20];
+        userData[16] = unchecked((uint)AttributeTable);
+        userData[17] = (uint)(AttributeTable >> 32);
+        userData[18] = unchecked((uint)BufferTable);
+        userData[19] = (uint)(BufferTable >> 32);
+
+        var input = VertexInputResolver.ResolveVertexInputs(
+            _context,
+            shader,
+            userData,
+            userDataRegisterOffset: 8);
+
+        Assert.Equal(16, input.FetchAttributeRegister);
+        Assert.Equal(18, input.FetchBufferRegister);
+        Assert.Equal(23u, input.ScratchDwords);
+        Assert.Equal(new VertexInputBuffer(StreamBase, 16, 3), Assert.Single(input.Buffers));
+    }
+
+    [Fact]
     public void TryReadTables_WithoutDirectResources_HasNoTables()
     {
         var shader = RegisterTables(directCount: 0);
@@ -260,6 +285,22 @@ public sealed class VertexInputResolverTests : IDisposable
         Assert.Equal(destinationSelect, resource.Descriptor.DestinationSelectXYZW);
     }
 
+    [Fact]
+    public void ApplySemantics_UnknownAttributeFormat_IsKeptAsTheBufferFormatValue()
+    {
+        WriteWord(AttributeTable, AttributeWord(0, 64, 0));
+        WriteBuffer(0, StreamBase, 8, 1, BufferFormat32x4Float);
+
+        var resource = Assert.Single(VertexInputResolver.ApplySemantics(
+            _context,
+            [SemanticWord(0, 0, 2)],
+            AttributeTable,
+            BufferTable,
+            ShaderAddress));
+
+        Assert.Equal(64u, resource.Descriptor.Format);
+    }
+
     [Theory]
     [InlineData(1u << 25)]
     [InlineData(1u << 26)]
@@ -352,6 +393,16 @@ public sealed class VertexInputResolverTests : IDisposable
 
         Assert.Contains("disagree on the record count", fatal.Message);
         Assert.Contains("records=4/5", fatal.Message);
+    }
+
+    [Fact]
+    public void AttributeFormats_MapToTheBufferFormatsOfTheTable()
+    {
+        Assert.Equal(0u, VertexAttributeFormat.ToBufferFormat(0));
+        Assert.Equal(1u, VertexAttributeFormat.ToBufferFormat(4));
+        Assert.Equal(BufferFormat32x2Float, VertexAttributeFormat.ToBufferFormat(AttributeFormat32x2Float));
+        Assert.Equal(BufferFormat32x4Float, VertexAttributeFormat.ToBufferFormat(311));
+        Assert.Equal(999u, VertexAttributeFormat.ToBufferFormat(999));
     }
 
 }

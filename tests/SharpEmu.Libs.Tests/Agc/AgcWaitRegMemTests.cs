@@ -125,19 +125,81 @@ public sealed class AgcWaitRegMemTests
     }
 
     [Fact]
-    public void CbReleaseMem_RejectsContextInterruptWithCacheOperations()
+    public void CbReleaseMem_EncodesContextInterruptWithCacheOperations()
+    {
+        var memory = CreateMemory(out var ctx);
+
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rdx] = 0x301;
+        ctx[CpuRegister.R9] = BaseAddress + 0xC08;
+        WriteUInt64(memory, StackAddress + 8, 0);
+        WriteUInt64(memory, StackAddress + 16, 0x1122_3344_5566_7788);
+        WriteUInt64(memory, StackAddress + 24, 0);
+        WriteUInt64(memory, StackAddress + 32, 0);
+        WriteUInt64(memory, StackAddress + 40, 4);
+        WriteUInt64(memory, StackAddress + 48, 1);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.CbReleaseMem(ctx));
+        Assert.Equal(PacketAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(0x0400_0301u, ReadUInt32(memory, PacketAddress + 8));
+        Assert.Equal(0u, ReadUInt32(memory, PacketAddress + 12));
+        Assert.Equal(0u, ReadUInt32(memory, PacketAddress + 16));
+        Assert.Equal(0u, ReadUInt32(memory, PacketAddress + 20));
+        Assert.Equal(0u, ReadUInt32(memory, PacketAddress + 24));
+    }
+
+    [Fact]
+    public void CbReleaseMem_EncodesGdsDataSelection()
+    {
+        var memory = CreateMemory(out var ctx);
+
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.R9] = BaseAddress + 0xC08;
+        WriteUInt64(memory, StackAddress + 8, 5);
+        WriteUInt64(memory, StackAddress + 16, 0x1122_3344_5566_7788);
+        WriteUInt64(memory, StackAddress + 24, 0x1234);
+        WriteUInt64(memory, StackAddress + 32, 2);
+        WriteUInt64(memory, StackAddress + 40, 0);
+        WriteUInt64(memory, StackAddress + 48, 0);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.CbReleaseMem(ctx));
+        Assert.Equal(PacketAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(5u << 16, ReadUInt32(memory, PacketAddress + 8));
+        Assert.Equal(0x0002_1234u, ReadUInt32(memory, PacketAddress + 20));
+        Assert.Equal(0u, ReadUInt32(memory, PacketAddress + 24));
+    }
+
+    [Fact]
+    public void CbReleaseMem_RejectsUnknownDataSelection()
+    {
+        var memory = CreateMemory(out var ctx);
+
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        WriteUInt64(memory, StackAddress + 8, 4);
+        WriteUInt64(memory, StackAddress + 16, 0);
+        WriteUInt64(memory, StackAddress + 24, 0);
+        WriteUInt64(memory, StackAddress + 32, 0);
+        WriteUInt64(memory, StackAddress + 40, 0);
+        WriteUInt64(memory, StackAddress + 48, 0);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.CbReleaseMem(ctx));
+        Assert.Equal(0UL, ctx[CpuRegister.Rax]);
+    }
+
+    [Fact]
+    public void CbReleaseMem_RejectsConditionalInterruptWithCacheOperations()
     {
         var memory = CreateMemory(out var ctx);
 
         ctx[CpuRegister.Rdi] = CommandBufferAddress;
         ctx[CpuRegister.Rdx] = 1;
         ctx[CpuRegister.R9] = BaseAddress + 0xC08;
-        WriteUInt64(memory, StackAddress + 8, 0);
+        WriteUInt64(memory, StackAddress + 8, 2);
         WriteUInt64(memory, StackAddress + 16, 0);
         WriteUInt64(memory, StackAddress + 24, 0);
         WriteUInt64(memory, StackAddress + 32, 0);
-        WriteUInt64(memory, StackAddress + 40, 4);
-        WriteUInt64(memory, StackAddress + 48, 1);
+        WriteUInt64(memory, StackAddress + 40, 5);
+        WriteUInt64(memory, StackAddress + 48, 0);
 
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.CbReleaseMem(ctx));
         Assert.Equal(0UL, ctx[CpuRegister.Rax]);

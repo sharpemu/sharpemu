@@ -67,7 +67,9 @@ public sealed class WaveLaneTransferDeviceTests(HeadlessVulkanFixture fixture) :
         Add(Vop2(0, "VLshlrevB32", 5, Operand(2), Gen5Operand.Vector(2)));
         Add(BufferAccess(0, "BufferStoreDword", 4, vectorData: 3, offsetEnabled: true, vectorAddress: 5));
         Add(EndProgram(0));
-        var (plan, resources, layout) = Prepare(Program([.. instructions]));
+        var (plan, resources, layout) = Prepare(
+            Program([.. instructions]),
+            waveSize: waveSize);
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
             LocalSizeX = 8, LocalSizeY = waveSize / 8, ThreadCountX = 8, ThreadCountY = waveSize / 8,

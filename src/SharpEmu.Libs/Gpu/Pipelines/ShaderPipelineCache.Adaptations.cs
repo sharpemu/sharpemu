@@ -19,8 +19,13 @@ internal sealed partial class ShaderPipelineCache
     private const int WorkGroupRegisterOfCopyKernel = 12;
     private const uint MaxCopyKernelSourceBytes = 16 * 1024 * 1024;
 
-    private static readonly bool _premultipliedFillClearEnabled =
-        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_FILL_CLEAR"), "1", StringComparison.Ordinal);
+    // These substitutions bypass the guest draw and therefore need exact proof
+    // that the shader is a clear/fill. Execute the original draw; the
+    // recognisers below are intentionally broader than that proof, so preserve
+    // normal rasterisation unless a developer explicitly opts into the legacy
+    // diagnostic fast path.
+    private static readonly bool _drawSubstitutionsEnabled =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_ENABLE_DRAW_SUBSTITUTIONS"), "1", StringComparison.Ordinal);
 
     // A procedural fullscreen vertex program paired with a constant-color pixel program.
     private static bool IsProceduralFullscreenClearPair(
@@ -62,7 +67,8 @@ internal sealed partial class ShaderPipelineCache
 
     private static bool IsBenignProceduralVertexInstruction(Gen5ShaderInstruction instruction)
     {
-        if (instruction.Control is Gen5BufferMemoryControl or Gen5ImageControl or Gen5GlobalMemoryControl or Gen5ScalarMemoryControl)
+        if (instruction.Control is Gen5BufferMemoryControl or Gen5ImageControl or Gen5GlobalMemoryControl or
+            Gen5ScratchMemoryControl or Gen5ScalarMemoryControl)
         {
             return false;
         }
@@ -110,7 +116,7 @@ internal sealed partial class ShaderPipelineCache
         var vertexResources = vertexStage.Program?.Resources?.Info;
         var pixelResources = pixelStage.Program?.Resources?.Info;
         var pixelUserData = pixelStage.Resources.UserData;
-        if (!_premultipliedFillClearEnabled || vertexResources is null || pixelResources is null ||
+        if (!_drawSubstitutionsEnabled || vertexResources is null || pixelResources is null ||
             vertexResources.Images.Count != 0 || pixelResources.Images.Count != 0 ||
             vertexInfo.Attributes.Length != 0 || pixelUserData.Length < 4 || outputs.Length == 0)
         {

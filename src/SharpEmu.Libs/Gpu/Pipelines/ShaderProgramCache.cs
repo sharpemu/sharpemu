@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
+using System.Runtime.InteropServices;
 using ImageResourceClass = SharpEmu.Libs.Gpu.Rendering.ImageResourceClass;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
@@ -19,10 +21,19 @@ public sealed record ShaderSource(RegisteredShader Registered, ulong Hash, uint[
 
     public uint CodeSize => Registered.TotalCodeSizeBytes;
 
+    // SPIR-V/MSL adds this offset to the per-draw entry base for S_GETPC in a
+    // fused continuation. Identical words at a different relative layout are
+    // therefore a different compiled program, while relocated equal layouts
+    // remain shareable.
+    public ulong FusedLayout => Registered.IsFused
+        ? unchecked(Registered.ContinuationAddress - Registered.CodeAddress)
+        : 0;
+
     public string Label => Stage switch
     {
         ShaderStage.Vertex => "vertex",
         ShaderStage.Pixel => "pixel",
+        ShaderStage.Mesh => "mesh",
         _ => "compute",
     };
 }
@@ -43,29 +54,90 @@ public sealed class StageCompileOptions
 // The key of a program entry: what the emitter reads besides the resource specialization.
 public sealed class ProgramKey : IEquatable<ProgramKey>
 {
-    public ProgramKey(ShaderStage stage, ulong hash, uint userDataCount, uint codeSize, uint[] staticState)
+    public ProgramKey(
+        ShaderStage stage,
+        ulong hash,
+        uint userDataCount,
+        uint codeSize,
+        ulong fusedLayout,
+        uint[] staticState)
+        : this(stage, hash, userDataCount, codeSize, fusedLayout, staticState.ToArray(), staticState.Length)
+    {
+    }
+
+    private ProgramKey(
+        ShaderStage stage,
+        ulong hash,
+        uint userDataCount,
+        uint codeSize,
+        ulong fusedLayout,
+        uint[] staticState,
+        int staticStateLength)
     {
         Stage = stage;
         Hash = hash;
         UserDataCount = userDataCount;
         CodeSize = codeSize;
-        StaticState = staticState;
+        FusedLayout = fusedLayout;
+        _staticState = staticState;
+        _staticStateLength = staticStateLength;
     }
 
-    public ShaderStage Stage { get; }
-    public ulong Hash { get; }
-    public uint UserDataCount { get; }
-    public uint CodeSize { get; }
-    public uint[] StaticState { get; }
+    private uint[] _staticState;
+    private int _staticStateLength;
+
+    public ShaderStage Stage { get; private set; }
+    public ulong Hash { get; private set; }
+    public uint UserDataCount { get; private set; }
+    public uint CodeSize { get; private set; }
+    public ulong FusedLayout { get; private set; }
+    // Diagnostic serialization is off the hot path. Return only logical words so a reusable
+    // lookup key never exposes stale capacity beyond its current state.
+    public uint[] StaticState => StaticStateSpan.ToArray();
+
+    private ReadOnlySpan<uint> StaticStateSpan => _staticState.AsSpan(0, _staticStateLength);
+
+    internal static ProgramKey CreateLookup(int staticStateCapacity) =>
+        new(default, 0, 0, 0, 0, new uint[staticStateCapacity], 0);
+
+    internal void ResetLookup(
+        ShaderStage stage,
+        ulong hash,
+        uint userDataCount,
+        uint codeSize,
+        ulong fusedLayout,
+        ReadOnlySpan<uint> staticState)
+    {
+        if (_staticState.Length < staticState.Length)
+        {
+            Array.Resize(ref _staticState, staticState.Length);
+        }
+
+        staticState.CopyTo(_staticState);
+        _staticStateLength = staticState.Length;
+        Stage = stage;
+        Hash = hash;
+        UserDataCount = userDataCount;
+        CodeSize = codeSize;
+        FusedLayout = fusedLayout;
+    }
+
+    // A reusable lookup key must never be inserted into the dictionary: its next ResetLookup
+    // would invalidate the bucket. Freeze only a miss, copying exactly the logical state.
+    internal ProgramKey CloneImmutable() =>
+        new(Stage, Hash, UserDataCount, CodeSize, FusedLayout, StaticStateSpan.ToArray(), _staticStateLength);
 
     public bool Equals(ProgramKey? other) =>
         other is not null && Stage == other.Stage && Hash == other.Hash && UserDataCount == other.UserDataCount &&
-        CodeSize == other.CodeSize && StaticState.AsSpan().SequenceEqual(other.StaticState);
+        CodeSize == other.CodeSize && FusedLayout == other.FusedLayout &&
+        _staticStateLength == other._staticStateLength &&
+        StaticStateSpan.SequenceEqual(other.StaticStateSpan);
 
     public override bool Equals(object? obj) => Equals(obj as ProgramKey);
 
     // Same-shape variants share a bucket; equality does the one exact comparison of the state words.
-    public override int GetHashCode() => HashCode.Combine(Stage, Hash, UserDataCount, CodeSize, StaticState.Length);
+    public override int GetHashCode() =>
+        HashCode.Combine(Stage, Hash, UserDataCount, CodeSize, FusedLayout, _staticStateLength);
 }
 
 // One compiled module of a program entry for one specialization and push-data start.
@@ -103,9 +175,18 @@ internal sealed class ShaderProgramCache
     private readonly IGuestGpuBackend _compiler;
     private readonly IShaderPipelineHost _host;
     private readonly Dictionary<ProgramKey, ProgramSourceEntry> _programs = new();
-    private readonly Dictionary<(ulong Hash, uint CodeSize), Gen5ShaderProgram> _decoded = new();
-    private readonly Dictionary<(ulong Hash, uint CodeSize), ShaderCodeCapture> _codeCaptures = new();
+    private readonly Dictionary<(ulong Hash, uint CodeSize, ulong FusedLayout), Gen5ShaderProgram> _decoded = new();
+    private readonly Dictionary<(ulong Hash, uint CodeSize, ulong FusedLayout), ShaderCodeCapture> _codeCaptures = new();
     private readonly List<uint> _staticState = new(StageStaticKey.MaxWords);
+    private readonly ProgramKey _lookupKey = ProgramKey.CreateLookup(StageStaticKey.MaxWords);
+    // Pixel resources must remain intact while the vertex stage is materialized, so each
+    // stage owns distinct transient specialization storage. Cache misses clone before the
+    // specialization escapes into ProgramPermutation.
+    private readonly ResourceSpecializationScratch _vertexSpecializationScratch = new();
+    private readonly ResourceSpecializationScratch _pixelSpecializationScratch = new();
+    private readonly ResourceSpecializationScratch _computeSpecializationScratch = new();
+    private readonly ResourceSpecializationScratch _meshSpecializationScratch = new();
+
     // Draws that re-bind unchanged resources reuse the last materialization.
     // SHARPEMU_RESOURCE_CACHE=0 materializes every draw, for A/B comparisons.
     private readonly ResourceMaterializationCache? _materializations =
@@ -143,7 +224,7 @@ internal sealed class ShaderProgramCache
     // The decoded instructions of a program, shared by every static variant of the same code.
     public Gen5ShaderProgram Decode(ShaderSource source)
     {
-        var key = (source.Hash, source.CodeSize);
+        var key = (source.Hash, source.CodeSize, source.FusedLayout);
         if (_decoded.TryGetValue(key, out var program))
         {
             return program;
@@ -221,7 +302,14 @@ internal sealed class ShaderProgramCache
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramCacheLookup))
         {
             BuildStaticState(source.Stage, options);
-            key = new ProgramKey(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize, _staticState.ToArray());
+            _lookupKey.ResetLookup(
+                source.Stage,
+                source.Hash,
+                (uint)source.UserData.Length,
+                source.CodeSize,
+                source.FusedLayout,
+                CollectionsMarshal.AsSpan(_staticState));
+            key = _lookupKey;
             _programs.TryGetValue(key, out entry);
         }
         var sourceWasCached = entry is not null;
@@ -246,12 +334,13 @@ internal sealed class ShaderProgramCache
         if (entry is null)
         {
             entry = CreateEntry(source, options);
+            key = key.CloneImmutable();
             _programs.Add(key, entry);
             ShaderCacheCounters.CountProgram();
         }
 
-        var snapshot = new ResourceSnapshot();
-        var specialization = new ResourceSpecialization();
+        ResourceSnapshot snapshot = null!;
+        ResourceSpecialization specialization = null!;
         var captureIndirectImageFailure = _spirvDumpEnabled ? ShaderPermutationDump.CreateFailureCapture(source) : null;
         if (Diagnostics.GpuReadTrace.Enabled)
         {
@@ -261,15 +350,34 @@ internal sealed class ShaderProgramCache
 
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
         {
-            // Failure capture needs the full walk, so a dump run bypasses the cache.
+            var scratch = SpecializationScratch(source.Stage);
             var materialized = _materializations is not null && captureIndirectImageFailure is null
-                ? _materializations.Materialize(entry.Plan, inputs, _readResidentGuestBytes, ref snapshot, ref specialization,
-                    out var materializationFailure)
-                : ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
+                ? _materializations.Materialize(
+                    entry.Plan,
+                    inputs,
+                    _readResidentGuestBytes,
+                    scratch,
+                    ref snapshot,
+                    ref specialization,
+                    out var materializationFailure,
+                    out var materializationFailureDetail)
+                : ResourceMaterializer.Materialize(
+                    entry.Plan,
+                    inputs,
+                    scratch,
+                    ref snapshot,
+                    ref specialization,
+                    out materializationFailure,
+                    out materializationFailureDetail,
                     captureIndirectImageFailure);
             if (!materialized)
             {
-                var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
+                var detail = string.IsNullOrWhiteSpace(materializationFailureDetail)
+                    ? string.Empty
+                    : $" detail=[{materializationFailureDetail}]";
+                var message = $"The shader resources could not be materialized: stage={source.Label} " +
+                    $"hash=0x{source.Hash:X16} shader=0x{source.Address:X16} " +
+                    $"reason={materializationFailure}{detail}.";
                 if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
                     throw new ShaderProgramRejectedException(message);
                 throw SubmissionScheduler.Fatal(message);
@@ -295,7 +403,16 @@ internal sealed class ShaderProgramCache
             }
         }
 
-        var permutation = CompilePermutation(source, options, entry, specialization, pushDataCursor, key, sourceWasCached);
+        // The materializer's specialization is stage-local scratch. Only a cache miss makes
+        // it persistent, so clone exactly that escaping value and keep hit probes allocation-free.
+        var permutation = CompilePermutation(
+            source,
+            options,
+            entry,
+            specialization.Clone(),
+            pushDataCursor,
+            key,
+            sourceWasCached);
         entry.Permutations.Add(permutation);
         ShaderCacheCounters.CountPermutation();
         stage = CreateStageResources(permutation.Program, snapshot, source, options);
@@ -307,6 +424,15 @@ internal sealed class ShaderProgramCache
 
         return permutation.Handle;
     }
+
+    private ResourceSpecializationScratch SpecializationScratch(ShaderStage stage) => stage switch
+    {
+        ShaderStage.Vertex => _vertexSpecializationScratch,
+        ShaderStage.Pixel => _pixelSpecializationScratch,
+        ShaderStage.Compute => _computeSpecializationScratch,
+        ShaderStage.Mesh => _meshSpecializationScratch,
+        _ => throw new ArgumentOutOfRangeException(nameof(stage), stage, "The shader stage has no resource scratch storage."),
+    };
 
     private static ShaderStageResources CreateStageResources(
         ShaderProgramInfo program, ResourceSnapshot snapshot, ShaderSource source, StageCompileOptions options)
@@ -325,10 +451,14 @@ internal sealed class ShaderProgramCache
         switch (stage)
         {
             case ShaderStage.Vertex:
+            case ShaderStage.Mesh:
                 StageStaticKey.Build(options.VertexInfo ?? throw new ArgumentException("The vertex lookup has no vertex input info."), options.RequiredVertexOutputCount, _staticState);
                 break;
             case ShaderStage.Pixel:
-                StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), _staticState);
+                StageStaticKey.Build(
+                    options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."),
+                    options.PixelOutputs,
+                    _staticState);
                 break;
             default:
                 StageStaticKey.Build(options.ComputeInfo ?? throw new ArgumentException("The compute lookup has no compute input info."), _staticState);
@@ -351,10 +481,22 @@ internal sealed class ShaderProgramCache
                 (int)source.UserDataBase + vertexInfo.FetchBufferRegister,
                 source.UserDataBase,
                 (uint)source.UserData.Length,
-                waveSize: 32);
+                waveSize: vertexInfo.WaveSize);
             vertexInputs = BuildVertexInputs(fetch, vertexInfo, source);
             program = fetch.RemoveReplacedTableLoads(program);
         }
+
+        var waveSize = source.Stage switch
+        {
+            ShaderStage.Vertex => options.VertexInfo?.WaveSize ??
+                throw new ArgumentException("The vertex lookup has no vertex input info."),
+            ShaderStage.Pixel => options.PixelInfo?.WaveSize ??
+                throw new ArgumentException("The pixel lookup has no pixel input info."),
+            ShaderStage.Mesh => options.VertexInfo?.Mesh.WaveSize ??
+                throw new ArgumentException("The mesh lookup has no vertex input info."),
+            _ => options.ComputeInfo?.WaveSize ??
+                throw new ArgumentException("The compute lookup has no compute input info."),
+        };
 
         ShaderResourcePlan plan;
         try
@@ -362,8 +504,7 @@ internal sealed class ShaderProgramCache
             plan = ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length,
                 fetch?.Loads.Select(load => load.Pc).ToHashSet(),
                 beforeResourceTracking: dumpPlanning ? resourcePlan => ShaderPlanningDump.WriteGraph(source, resourcePlan) : null,
-                // Graphics stages compile as wave32 (see the compile request); compute follows the dispatch.
-                waveSize: source.Stage == ShaderStage.Compute ? options.ComputeInfo?.WaveSize ?? 64u : 32u);
+                waveSize: waveSize);
         }
         catch (ResourcePlanException exception)
         {
@@ -436,14 +577,16 @@ internal sealed class ShaderProgramCache
             }
 
             var attribute = info.Attributes[location];
+            var descriptor = attribute.Descriptor;
             var numberFormat = 0u;
-            if (Gfx10UnifiedFormat.TryDecode(attribute.Descriptor.Format, out _, out var decodedNumberFormat))
+            var formatComponents = 0u;
+            if (Gfx10UnifiedFormat.TryDecode(descriptor.Format, out _, out var decodedNumberFormat))
             {
                 numberFormat = decodedNumberFormat;
             }
 
             var requiredComponents = 0u;
-            var destinationSelect = attribute.Descriptor.DestinationSelectXYZW;
+            var destinationSelect = descriptor.DestinationSelectXYZW;
             for (uint component = 0; component < load.Components; component++)
             {
                 var selector = (destinationSelect >> (int)(component * 3)) & 0x7u;
@@ -468,6 +611,11 @@ internal sealed class ShaderProgramCache
                     $"The vertex program fetches an attribute without a memory component: hash=0x{source.Hash:X16} shader=0x{source.Address:X16} attribute={load.AttributeId} pc=0x{load.Pc:X}.");
             }
 
+            if (VertexAttributeFormats.TryResolve(in descriptor, 4, out _, out var resolvedComponents))
+            {
+                formatComponents = resolvedComponents;
+            }
+
             if (inputByLocation.TryGetValue(location, out var existingIndex))
             {
                 var existing = inputs[existingIndex];
@@ -476,6 +624,7 @@ internal sealed class ShaderProgramCache
                 {
                     FetchComponentCount = Math.Max(existing.FetchComponentCount, load.Components),
                     ComponentCount = Math.Max(existing.ComponentCount, requiredComponents),
+                    FormatComponentCount = Math.Max(existing.FormatComponentCount, formatComponents),
                 };
                 continue;
             }
@@ -490,7 +639,8 @@ internal sealed class ShaderProgramCache
                 numberFormat,
                 destinationSelect,
                 attribute.FetchIndex != 0,
-                aliasPcs));
+                aliasPcs,
+                formatComponents));
         }
 
         return inputs.ToArray();
@@ -512,6 +662,12 @@ internal sealed class ShaderProgramCache
         try
         {
             resources = ResourceMaterializer.ApplyTo(plan, specialization);
+            if (source.Stage == ShaderStage.Mesh)
+            {
+                // The mesh entry ABI performs the original guest-index fetch through BDA,
+                // even when the decoded guest instructions have no other address accesses.
+                resources.Info.UsesDeviceAddresses = true;
+            }
             layout = AllocateLayout(program, plan, resources, source.UserDataBase, (uint)source.UserData.Length, pushDataCursor,
                 source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions);
         }
@@ -559,7 +715,7 @@ internal sealed class ShaderProgramCache
         var info = CreateProgramInfo(source, entry, resources, layout, request);
         if (source.Stage == ShaderStage.Compute &&
             _host.ShaderPrewarm is { } prewarm &&
-            _codeCaptures.TryGetValue((source.Hash, source.CodeSize), out var capture))
+            _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.FusedLayout), out var capture))
         {
             prewarm.RecordCompute(capture, new ComputePrewarmRecord
             {
@@ -592,6 +748,12 @@ internal sealed class ShaderProgramCache
         BindingLayout layout)
     {
         var enableGraphicsSubgroups = _host.GraphicsSubgroupOperationsEnabled;
+        var bufferInt64AtomicsSupported = _host.BufferInt64AtomicsSupported;
+        var shaderFloat64Supported = _host.ShaderFloat64Supported;
+        var shaderSignedZeroInfNanPreserveFloat32Supported =
+            _host.ShaderSignedZeroInfNanPreserveFloat32Supported;
+        var shaderDeviceClockSupported = _host.ShaderDeviceClockSupported;
+        var shaderDeviceClockShift = _host.ShaderDeviceClockShift;
         var sharedInt64Atomics = _host.SharedInt64AtomicsEnabled;
         switch (source.Stage)
         {
@@ -600,10 +762,16 @@ internal sealed class ShaderProgramCache
                 var info = options.VertexInfo!;
                 return new ShaderCompileRequest(entry.Plan, resources, layout)
                 {
-                    WaveSize = 32,
+                    WaveSize = info.WaveSize,
                     TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
+                    BufferInt64AtomicsSupported = bufferInt64AtomicsSupported,
+                    ShaderFloat64Supported = shaderFloat64Supported,
+                    ShaderSignedZeroInfNanPreserveFloat32Supported =
+                        shaderSignedZeroInfNanPreserveFloat32Supported,
+                    ShaderDeviceClockSupported = shaderDeviceClockSupported,
+                    ShaderDeviceClockShift = shaderDeviceClockShift,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
                     RequiredVertexOutputCount = options.RequiredVertexOutputCount,
                     VertexInputs = entry.VertexInputs,
@@ -619,6 +787,54 @@ internal sealed class ShaderProgramCache
                 };
             }
 
+            case ShaderStage.Mesh:
+            {
+                var info = options.VertexInfo!;
+                var mesh = info.Mesh;
+                if (!mesh.IsActive)
+                {
+                    throw SubmissionScheduler.Fatal(
+                        $"The mesh compile request has no workgroup shape: shader=0x{source.Address:X16}.");
+                }
+
+                return new ShaderCompileRequest(entry.Plan, resources, layout)
+                {
+                    WaveSize = mesh.WaveSize,
+                    HostSubgroupSize = mesh.HostSubgroupSize,
+                    TraceMeshOutputs = MeshOutputProbe.Matches(source.Hash),
+                    ScratchDwords = mesh.ScratchDwords,
+                    LocalDataShareDwords = mesh.LocalDataShareDwords,
+                    EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
+                    BufferInt64AtomicsSupported = bufferInt64AtomicsSupported,
+                    ShaderFloat64Supported = shaderFloat64Supported,
+                    ShaderSignedZeroInfNanPreserveFloat32Supported =
+                        shaderSignedZeroInfNanPreserveFloat32Supported,
+                    ShaderDeviceClockSupported = shaderDeviceClockSupported,
+                    ShaderDeviceClockShift = shaderDeviceClockShift,
+                    RequiredVertexOutputCount = options.RequiredVertexOutputCount,
+                    PositionExportControl = info.PositionExportControl,
+                    ClipSpace = new ShaderClipSpaceTransform(
+                        info.ClipSpace.Enabled,
+                        info.ClipSpace.ScaleX,
+                        info.ClipSpace.ScaleY,
+                        info.ClipSpace.OffsetX,
+                        info.ClipSpace.OffsetY,
+                        info.ClipSpace.HalfExtentX,
+                        info.ClipSpace.HalfExtentY),
+                    LocalSizeX = mesh.ThreadsX,
+                    LocalSizeY = mesh.ThreadsY,
+                    LocalSizeZ = mesh.ThreadsZ,
+                    Mesh = new ShaderMeshInfo(
+                        (uint)mesh.InputPrimitive,
+                        mesh.PrimitivesPerGroup,
+                        mesh.VerticesPerGroup,
+                        mesh.MaxVertices,
+                        mesh.MaxPrimitives,
+                        mesh.OutputPrimitive,
+                        mesh.ProvokingVertex),
+                };
+            }
+
             case ShaderStage.Pixel:
             {
                 var info = options.PixelInfo!;
@@ -626,10 +842,16 @@ internal sealed class ShaderProgramCache
                 Array.Copy(info.InterpolatorSettings, interpolators, interpolators.Length);
                 return new ShaderCompileRequest(entry.Plan, resources, layout)
                 {
-                    WaveSize = 32,
+                    WaveSize = info.WaveSize,
                     TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
+                    BufferInt64AtomicsSupported = bufferInt64AtomicsSupported,
+                    ShaderFloat64Supported = shaderFloat64Supported,
+                    ShaderSignedZeroInfNanPreserveFloat32Supported =
+                        shaderSignedZeroInfNanPreserveFloat32Supported,
+                    ShaderDeviceClockSupported = shaderDeviceClockSupported,
+                    ShaderDeviceClockShift = shaderDeviceClockShift,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
                     PixelOutputs = options.PixelOutputs,
                     PixelInputEnable = options.PixelInputEnable,
@@ -637,12 +859,18 @@ internal sealed class ShaderProgramCache
                     SupportsPerVertexPixelInputs = _host.PerVertexPixelInputsSupported,
                     PixelInputAddress = options.PixelInputAddress,
                     PixelInputCntl = interpolators,
+                    PixelEarlyDepth = info.EarlyDepth,
                 };
             }
 
             default:
                 return BuildComputeRequest(entry.Plan, resources, layout, options.ComputeInfo!, options.ComputeSystemRegisters,
-                    sharedInt64Atomics, _host.ExecGuardElisionEnabled);
+                    sharedInt64Atomics, _host.ExecGuardElisionEnabled,
+                    bufferInt64AtomicsSupported,
+                    shaderFloat64Supported,
+                    shaderSignedZeroInfNanPreserveFloat32Supported,
+                    shaderDeviceClockSupported,
+                    shaderDeviceClockShift);
         }
     }
 
@@ -650,7 +878,7 @@ internal sealed class ShaderProgramCache
         uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits) =>
         BindingLayout.Allocate(
             resources.Info,
-            BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount),
+            BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount, plan.Graph.WaveSize),
             BindingLayout.UsesGlobalDataShare(program),
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
             BindingLayout.ReadsShaderBase(program),
@@ -658,13 +886,25 @@ internal sealed class ShaderProgramCache
             usesDispatchThreadLimits: usesDispatchThreadLimits);
 
     private static ShaderCompileRequest BuildComputeRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout layout,
-        ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision) =>
+        ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision,
+        bool bufferInt64AtomicsSupported = false,
+        bool shaderFloat64Supported = false,
+        bool shaderSignedZeroInfNanPreserveFloat32Supported = false,
+        bool shaderDeviceClockSupported = false,
+        uint shaderDeviceClockShift = 0,
+        uint? hostSubgroupSize = null) =>
         new(plan, resources, layout)
         {
             WaveSize = info.WaveSize,
             EnableExecGuardElision = info.WaveSize != 64 || execGuardElision,
             TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
+            HostSubgroupSize = hostSubgroupSize ?? info.HostSubgroupSize,
             ScratchDwords = info.ScratchDwords,
+            BufferInt64AtomicsSupported = bufferInt64AtomicsSupported,
+            ShaderFloat64Supported = shaderFloat64Supported,
+            ShaderSignedZeroInfNanPreserveFloat32Supported = shaderSignedZeroInfNanPreserveFloat32Supported,
+            ShaderDeviceClockSupported = shaderDeviceClockSupported,
+            ShaderDeviceClockShift = shaderDeviceClockShift,
             SupportsSharedInt64Atomics = sharedInt64Atomics,
             ComputeSystemRegisters = systemRegisters,
             LocalDataShareDwords = info.LocalDataShareDwords,
@@ -674,7 +914,7 @@ internal sealed class ShaderProgramCache
         };
 
     internal static bool TryCompilePrewarm(ComputePrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
-        bool sharedInt64Atomics, bool execGuardElision, out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error)
+        IShaderPipelineHost host, out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error)
     {
         compiled = null;
         layout = null;
@@ -691,7 +931,14 @@ internal sealed class ShaderProgramCache
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor,
                 record.Info.DispatchThreadDimensions);
             var request = BuildComputeRequest(plan, resources, layout, record.Info, record.SystemRegisters,
-                sharedInt64Atomics, execGuardElision);
+                host.SharedInt64AtomicsEnabled,
+                host.ExecGuardElisionEnabled,
+                host.BufferInt64AtomicsSupported,
+                host.ShaderFloat64Supported,
+                host.ShaderSignedZeroInfNanPreserveFloat32Supported,
+                host.ShaderDeviceClockSupported,
+                host.ShaderDeviceClockShift,
+                record.HasHostComputeInfo ? record.Info.HostSubgroupSize : host.ComputeSubgroupSize);
             return compiler.TryCompileProgram(request, out compiled, out error) && compiled is not null;
         }
         catch (Exception exception)
@@ -815,7 +1062,7 @@ internal sealed class ShaderProgramCache
         {
             if (input.Location < (uint)fetchComponents.Length)
             {
-                fetchComponents[input.Location] = (byte)input.ComponentCount;
+                fetchComponents[input.Location] = (byte)input.InputComponentCount;
             }
         }
 
@@ -825,12 +1072,24 @@ internal sealed class ShaderProgramCache
             {
                 ShaderStage.Vertex => ShaderStageKind.Vertex,
                 ShaderStage.Pixel => ShaderStageKind.Pixel,
+                ShaderStage.Mesh => ShaderStageKind.Mesh,
                 _ => ShaderStageKind.Compute,
             },
             Hash = source.Hash,
             UserDataBase = source.UserDataBase,
             UserDataCount = (uint)source.UserData.Length,
             ParameterExportMask = entry.Program.ParameterExportMask,
+            PixelParameterInputs = source.Stage == ShaderStage.Pixel
+                ? entry.Program.Instructions
+                    .Select(instruction => instruction.Control)
+                    .OfType<Gen5InterpolationControl>()
+                    .Select(control => control.Attribute)
+                    .Distinct()
+                    .Order()
+                    .ToArray()
+                : [],
+            WritesViewportIndex = source.Stage is ShaderStage.Vertex or ShaderStage.Mesh &&
+                entry.Program.WritesViewportIndex(request.PositionExportControl),
             PixelColorExportMasks = entry.Program.PixelColorExportMasks,
             VertexOffsetScalarRegister = entry.EmbeddedFetch?.VertexOffsetScalarRegister ?? ShaderProgramInfo.NoScalarRegister,
             InstanceOffsetScalarRegister = entry.EmbeddedFetch?.InstanceOffsetScalarRegister ?? ShaderProgramInfo.NoScalarRegister,
@@ -881,7 +1140,8 @@ internal static class CompiledShaderDump
         var hashFilter = Environment.GetEnvironmentVariable("SHARPEMU_DUMP_SPIRV_HASH");
         if (!string.IsNullOrWhiteSpace(hashFilter))
         {
-            foreach (var filter in hashFilter.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            var matches = false;
+            foreach (var filter in hashFilter.Split(new[] { ',', ';' }, StringSplitOptions.TrimEntries))
             {
                 var span = filter.AsSpan();
                 if (span.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
@@ -889,14 +1149,15 @@ internal static class CompiledShaderDump
                     span = span[2..];
                 }
 
-                if (ulong.TryParse(span, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var filteredHash) &&
-                    shaderHash == filteredHash)
+                if (!ulong.TryParse(span, System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out var filteredHash))
                 {
-                    return true;
+                    return false;
                 }
+
+                matches |= shaderHash == filteredHash;
             }
 
-            return false;
+            return matches;
         }
 
         return true;

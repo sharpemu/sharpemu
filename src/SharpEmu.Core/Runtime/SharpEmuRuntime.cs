@@ -17,6 +17,11 @@ using SharpEmu.Libs.Fiber;
 using SharpEmu.Libs.SystemService;
 using SharpEmu.Libs.Network;
 using SharpEmu.Libs.Np;
+using SharpEmu.Libs.Ime;
+using SharpEmu.Libs.Pad;
+using SharpEmu.Libs.PlayGo;
+using SharpEmu.Libs.Share;
+using SharpEmu.Libs.Ampr;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Linq;
@@ -86,37 +91,51 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
     public static ISharpEmuRuntime CreateDefault(SharpEmuRuntimeOptions options = default)
     {
-        var cpuExecutionOptions = new CpuExecutionOptions
-        {
-            CpuEngine = options.CpuEngine,
-            StrictDynlibResolution = options.StrictDynlibResolution,
-            ImportTraceLimit = Math.Max(0, options.ImportTraceLimit),
-            DebugHook = options.DebugHook,
-        };
         var virtualMemory = new PhysicalVirtualMemory(
             viewHost: HostViewMemory.Create(),
             preReserveGuestAddressSpace: true);
-        var moduleManager = new ModuleManager();
-        // The compile-time generated registry (SharpEmu.SourceGenerators) is the sole
-        // registration source; content tests in SharpEmu.Libs.Tests pin its invariants.
-        moduleManager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen4 | Generation.Gen5));
-        moduleManager.Freeze();
+        GuestGpuMemory? gpuMemory = null;
+        CpuDispatcher? cpuDispatcher = null;
+        try
+        {
+            var cpuExecutionOptions = new CpuExecutionOptions
+            {
+                CpuEngine = options.CpuEngine,
+                StrictDynlibResolution = options.StrictDynlibResolution,
+                ImportTraceLimit = Math.Max(0, options.ImportTraceLimit),
+                DebugHook = options.DebugHook,
+            };
+            var moduleManager = new ModuleManager();
+            // The compile-time generated registry (SharpEmu.SourceGenerators) is the sole
+            // registration source; content tests in SharpEmu.Libs.Tests pin its invariants.
+            moduleManager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen4 | Generation.Gen5));
+            moduleManager.Freeze();
 
-        var gpuMemory = new GuestGpuMemory(virtualMemory);
-        GuestGpuMemoryHook.Attach(gpuMemory);
+            gpuMemory = new GuestGpuMemory(virtualMemory);
+            GuestGpuMemoryHook.Attach(gpuMemory);
+            cpuDispatcher = new CpuDispatcher(virtualMemory, moduleManager);
 
-        var fileSystem = new PhysicalFileSystem();
+            var fileSystem = new PhysicalFileSystem();
 
-        return new SharpEmuRuntime(
-            new SelfLoader(),
-            virtualMemory,
-            new CpuDispatcher(virtualMemory, moduleManager),
-            moduleManager,
-            Aerolib.Instance,
-            cpuExecutionOptions,
-            fileSystem,
-            gpuMemory,
-            options.SystemLanguage ?? 1);
+            return new SharpEmuRuntime(
+                new SelfLoader(),
+                virtualMemory,
+                cpuDispatcher,
+                moduleManager,
+                Aerolib.Instance,
+                cpuExecutionOptions,
+                fileSystem,
+                gpuMemory,
+                options.SystemLanguage ?? 1);
+        }
+        catch
+        {
+            cpuDispatcher?.Dispose();
+            GuestGpuMemoryHook.Attach(null);
+            gpuMemory?.Dispose();
+            virtualMemory.Dispose();
+            throw;
+        }
     }
 
     public SelfImage LoadImage(string ebootPath)
@@ -141,9 +160,35 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             stream.ReadExactly(bytes);
         }
 
-        var mountRoot = Path.GetDirectoryName(fullPath);
+        var mountRoot = ResolveMetadataMountRoot(Path.GetDirectoryName(fullPath));
 
         return _selfLoader.Load(bytes.AsSpan(), _virtualMemory, _moduleManager, _fileSystem, mountRoot);
+    }
+
+    private static string? ResolveMetadataMountRoot(string? executableDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(executableDirectory) ||
+            !string.Equals(
+                Path.GetFileName(executableDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
+                "decrypted",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return executableDirectory;
+        }
+
+        // Decrypted dumps commonly keep eboot.bin and PRX files in a sidecar
+        // directory while retaining sce_sys/param.json in the content root.
+        // The executable/module search path remains the sidecar; this root is
+        // used only for application metadata during the initial image load.
+        var parentRoot = Path.GetDirectoryName(executableDirectory);
+        if (!string.IsNullOrWhiteSpace(parentRoot) &&
+            (File.Exists(Path.Combine(parentRoot, "sce_sys", "param.json")) ||
+             File.Exists(Path.Combine(parentRoot, "param.json"))))
+        {
+            return parentRoot;
+        }
+
+        return executableDirectory;
     }
 
     public OrbisGen2Result Run(string ebootPath)
@@ -156,9 +201,20 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         LastSessionSummary = null;
         LastBasicBlockTrace = null;
         LastMilestoneLog = null;
+        AmprExports.ResetRuntimeState();
+        KernelAprCompatExports.ResetRuntimeState();
         FiberExports.ResetRuntimeState();
+        HttpExports.ResetRuntimeState();
         Http2Exports.ResetRuntimeState();
+        RudpExports.ResetRuntimeState();
+        SharePlayExports.ResetRuntimeState();
         NpAuthExports.ResetRuntimeState();
+        NpEntitlementAccessExports.ResetRuntimeState();
+        NpWebApi2Exports.ResetRuntimeState();
+        NpUniversalDataSystemExports.ResetRuntimeState();
+        SharpEmu.Libs.Ime.ImeExports.ResetRuntimeState();
+        PadExports.ResetRuntimeState();
+        PlayGoExports.ResetRuntimeState();
         KernelModuleRegistry.Reset();
         var image = LoadImage(normalizedEbootPath);
         VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version);

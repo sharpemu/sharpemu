@@ -59,9 +59,12 @@ public sealed class GuestGpuMemoryHookTests
     [Theory]
     [InlineData(0UL, 0x1000UL, false)]
     [InlineData(0x1000UL, 0UL, false)]
-    [InlineData(1UL << 40, 0x1000UL, false)]
-    [InlineData(0x1000UL, (1UL << 40) - 0x1000, false)]
-    [InlineData(0x1000UL, (1UL << 40) - 0x1001, true)]
+    [InlineData(TrackerLayout.SpaceBytes, 0x1000UL, false)]
+    [InlineData(0x1000UL, GuestMemoryLayout.GuestGpuLowAddressLimit - 0x1000, false)]
+    [InlineData(0x1000UL, GuestMemoryLayout.GuestGpuLowAddressLimit - 0x1001, true)]
+    [InlineData(GuestMemoryLayout.GuestGpuLowAddressLimit, 0x1000UL, false)]
+    [InlineData(GuestMemoryLayout.GuestExtendedAddressStart, GuestMemoryLayout.GuestExtendedAddressSize, false)]
+    [InlineData(GuestMemoryLayout.GuestExtendedAddressStart, GuestMemoryLayout.GuestExtendedAddressSize - 1, true)]
     [InlineData(0x1000UL, 0x1000UL, true)]
     public void IsWithinGpuAddressSpace_ExcludesTheUpperAddressLimit(ulong address, ulong size, bool expected)
     {

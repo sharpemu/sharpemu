@@ -14,6 +14,138 @@ namespace SharpEmu.Libs.Tests.Kernel;
 public sealed class KernelSocketCompatExportsTests
 {
     [Fact]
+    public void PosixListen_BindsStreamSocketAndAllowsSceNetClose()
+    {
+        const ulong memoryBase = 0x0000_7FFF_3200_0000;
+        const ulong bindAddress = memoryBase + 0x100;
+        const ulong localAddress = memoryBase + 0x200;
+        const ulong localLengthAddress = memoryBase + 0x240;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        context[CpuRegister.Rdi] = 2;
+        context[CpuRegister.Rsi] = 1;
+        context[CpuRegister.Rdx] = 0;
+        Assert.Equal(0, KernelSocketCompatExports.Socket(context));
+        var guestFd = checked((int)context[CpuRegister.Rax]);
+
+        try
+        {
+            WriteSockaddr(memory, bindAddress, IPAddress.Loopback, 0);
+            context[CpuRegister.Rdi] = unchecked((uint)guestFd);
+            context[CpuRegister.Rsi] = bindAddress;
+            context[CpuRegister.Rdx] = 16;
+            Assert.Equal(0, KernelSocketCompatExports.Bind(context));
+
+            context[CpuRegister.Rdi] = unchecked((uint)guestFd);
+            context[CpuRegister.Rsi] = 1;
+            Assert.Equal(0, KernelSocketCompatExports.Listen(context));
+            Assert.Equal(0UL, context[CpuRegister.Rax]);
+
+            WriteUInt32(memory, localLengthAddress, 16);
+            context[CpuRegister.Rdi] = unchecked((uint)guestFd);
+            context[CpuRegister.Rsi] = localAddress;
+            context[CpuRegister.Rdx] = localLengthAddress;
+            Assert.Equal(0, KernelSocketCompatExports.Getsockname(context));
+            Assert.InRange(ReadPort(memory, localAddress), 1, ushort.MaxValue);
+
+            context[CpuRegister.Rdi] = unchecked((uint)guestFd);
+            Assert.Equal(0, NetExports.NetSocketClose(context));
+            Assert.Equal(0UL, context[CpuRegister.Rax]);
+            Assert.False(KernelSocketCompatExports.IsEmulatedSocketFd(guestFd));
+        }
+        finally
+        {
+            KernelSocketCompatExports.TryCloseSocketFd(guestFd);
+        }
+    }
+
+    [Fact]
+    public void PosixListen_RegistersFantasyLifeNid()
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+
+        Assert.True(manager.TryGetExport("pxnCmagrtao", out var export));
+        Assert.Equal("listen", export.Name);
+        Assert.Equal("libKernel", export.LibraryName);
+    }
+
+    [Fact]
+    public void PosixAccept_AcceptsLoopbackClientAndReturnsConnectedDescriptor()
+    {
+        const ulong memoryBase = 0x0000_7FFF_3300_0000;
+        const ulong bindAddress = memoryBase + 0x100;
+        const ulong localAddress = memoryBase + 0x200;
+        const ulong localLengthAddress = memoryBase + 0x240;
+        const ulong peerAddress = memoryBase + 0x300;
+        const ulong peerLengthAddress = memoryBase + 0x340;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        context[CpuRegister.Rdi] = 2;
+        context[CpuRegister.Rsi] = 1;
+        context[CpuRegister.Rdx] = 0;
+        Assert.Equal(0, KernelSocketCompatExports.Socket(context));
+        var listenerFd = checked((int)context[CpuRegister.Rax]);
+        var acceptedFd = -1;
+
+        try
+        {
+            WriteSockaddr(memory, bindAddress, IPAddress.Loopback, 0);
+            context[CpuRegister.Rdi] = unchecked((uint)listenerFd);
+            context[CpuRegister.Rsi] = bindAddress;
+            context[CpuRegister.Rdx] = 16;
+            Assert.Equal(0, KernelSocketCompatExports.Bind(context));
+
+            context[CpuRegister.Rdi] = unchecked((uint)listenerFd);
+            context[CpuRegister.Rsi] = 1;
+            Assert.Equal(0, KernelSocketCompatExports.Listen(context));
+
+            WriteUInt32(memory, localLengthAddress, 16);
+            context[CpuRegister.Rdi] = unchecked((uint)listenerFd);
+            context[CpuRegister.Rsi] = localAddress;
+            context[CpuRegister.Rdx] = localLengthAddress;
+            Assert.Equal(0, KernelSocketCompatExports.Getsockname(context));
+            var listenerPort = ReadPort(memory, localAddress);
+
+            using var hostClient = new TcpClient();
+            hostClient.Connect(IPAddress.Loopback, listenerPort);
+
+            WriteUInt32(memory, peerLengthAddress, 16);
+            context[CpuRegister.Rdi] = unchecked((uint)listenerFd);
+            context[CpuRegister.Rsi] = peerAddress;
+            context[CpuRegister.Rdx] = peerLengthAddress;
+            Assert.Equal(0, KernelSocketCompatExports.Accept(context));
+            acceptedFd = checked((int)context[CpuRegister.Rax]);
+
+            Assert.True(KernelSocketCompatExports.IsEmulatedSocketFd(acceptedFd));
+            Assert.Equal(16U, ReadUInt32(memory, peerLengthAddress));
+            Assert.Equal(IPAddress.Loopback, ReadAddress(memory, peerAddress));
+        }
+        finally
+        {
+            if (acceptedFd >= 0)
+            {
+                KernelSocketCompatExports.TryCloseSocketFd(acceptedFd);
+            }
+
+            KernelSocketCompatExports.TryCloseSocketFd(listenerFd);
+        }
+    }
+
+    [Fact]
+    public void PosixAccept_RegistersFantasyLifeNid()
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+
+        Assert.True(manager.TryGetExport("3e+4Iv7IJ8U", out var export));
+        Assert.Equal("accept", export.Name);
+        Assert.Equal("libKernel", export.LibraryName);
+    }
+
+    [Fact]
     public void PosixSendTo_SendsIpv4DatagramFromKernelDescriptor()
     {
         const ulong memoryBase = 0x0000_7FFF_3000_0000;
@@ -191,6 +323,13 @@ public sealed class KernelSocketCompatExportsTests
         Span<byte> sockaddr = stackalloc byte[16];
         Assert.True(memory.TryRead(address, sockaddr));
         return BinaryPrimitives.ReadUInt16BigEndian(sockaddr[2..4]);
+    }
+
+    private static IPAddress ReadAddress(FakeCpuMemory memory, ulong address)
+    {
+        Span<byte> sockaddr = stackalloc byte[16];
+        Assert.True(memory.TryRead(address, sockaddr));
+        return new IPAddress(sockaddr[4..8]);
     }
 
     private static byte[] ReadBytes(FakeCpuMemory memory, ulong address, int length)

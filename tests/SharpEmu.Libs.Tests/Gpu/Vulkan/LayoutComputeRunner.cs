@@ -164,7 +164,7 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         var table = new ulong[entryCount];
         foreach (var (guestAddress, buffer, bufferOffset) in pages)
         {
-            table[guestAddress >> Gen5SpirvTranslator.DeviceAddressPageBits] = buffer.DeviceAddress + bufferOffset;
+            table[DeviceAddressPaging.PageIndex(guestAddress)] = buffer.DeviceAddress + bufferOffset;
         }
 
         return CreateBuffer(MemoryMarshal.AsBytes<ulong>(table), (ulong)table.Length * sizeof(ulong));

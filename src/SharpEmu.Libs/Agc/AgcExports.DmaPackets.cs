@@ -63,6 +63,68 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "qzMN2XKGA4k",
+        ExportName = "sceAgcAcbCopyData",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbCopyData(CpuContext ctx)
+    {
+        var commandBufferAddress = ctx[CpuRegister.Rdi];
+        var destinationSelector = (uint)(ctx[CpuRegister.Rsi] & 0xFF);
+        var destinationPolicy = (uint)(ctx[CpuRegister.Rdx] & 0xFF);
+        var destinationAddress = ctx[CpuRegister.Rcx];
+        var sourceSelector = (uint)(ctx[CpuRegister.R8] & 0xFF);
+        var sourcePolicy = (uint)(ctx[CpuRegister.R9] & 0xFF);
+        var stackAddress = ctx[CpuRegister.Rsp];
+
+        if (!TryReadUInt64(ctx, stackAddress + sizeof(ulong), out var sourceValue) ||
+            !TryReadUInt64(ctx, stackAddress + (2 * sizeof(ulong)), out var elementSizeRaw) ||
+            !TryReadUInt64(ctx, stackAddress + (3 * sizeof(ulong)), out var confirmWriteRaw) ||
+            commandBufferAddress == 0 ||
+            !TryAllocateCommandDwords(ctx, commandBufferAddress, 6, out var packetAddress))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        // ACB COPY_DATA selectors use the async packet encoding directly. In
+        // particular, they do not carry DCB's PFP/ME selector bit in bit 30.
+        var control =
+            (sourceSelector & 0xFu) |
+            ((destinationSelector & 0xFu) << 8) |
+            ((sourcePolicy & 0x3u) << 13) |
+            (((uint)elementSizeRaw & 0x1u) << 16) |
+            (((uint)confirmWriteRaw & 0x1u) << 20) |
+            ((destinationPolicy & 0x3u) << 25);
+
+        if (!TryWriteUInt32(ctx, packetAddress, Pm4(6, ItCopyData, 0)) ||
+            !TryWriteUInt32(ctx, packetAddress + 4, control) ||
+            !TryWriteUInt32(ctx, packetAddress + 8, (uint)sourceValue) ||
+            !TryWriteUInt32(ctx, packetAddress + 12, (uint)(sourceValue >> 32)) ||
+            !TryWriteUInt32(ctx, packetAddress + 16, (uint)destinationAddress) ||
+            !TryWriteUInt32(ctx, packetAddress + 20, (uint)(destinationAddress >> 32)))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc(
+            $"agc.acb_copy_data buf=0x{commandBufferAddress:X16} cmd=0x{packetAddress:X16} " +
+            $"dstSel=0x{destinationSelector:X2} srcSel=0x{sourceSelector:X2} " +
+            $"dst=0x{destinationAddress:X16} src=0x{sourceValue:X16} control=0x{control:X8}");
+        return ReturnPointer(ctx, packetAddress);
+    }
+
+    [SysAbiExport(
+        Nid = "CbQh3DKMSno",
+        ExportName = "sceAgcAcbCopyDataGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbCopyDataGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 6u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
         Nid = "WmAc2MEj6Io",
         ExportName = "sceAgcDcbDmaData",
         Target = Generation.Gen5,

@@ -8,13 +8,45 @@ using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
-// A host buffer and the byte offset a guest address maps to inside it.
-public readonly record struct BufferBinding(ulong Handle, ulong Offset);
+// A host buffer, the byte offset a guest address maps to inside it and the accessible
+// byte range beginning at that offset. A zero size intentionally describes an empty range.
+public readonly record struct BufferBinding(ulong Handle, ulong Offset, ulong Size);
 
 // The packet arguments of a draw the host keeps until the next flip.
 public readonly record struct TargetlessDrawArguments(ulong SubmitId, bool Indexed, GpuCommands.DrawIndexedArguments Indexed_, GpuCommands.DrawAutoArguments Auto);
 
-public readonly record struct RenderHostLimits(uint MaxFramebufferWidth, uint MaxFramebufferHeight, uint MaxViewportWidth, uint MaxViewportHeight);
+public readonly record struct RenderHostLimits(
+    uint MaxFramebufferWidth,
+    uint MaxFramebufferHeight,
+    uint MaxViewportWidth,
+    uint MaxViewportHeight,
+    uint MaxViewports = 1);
+
+// Optional VK_EXT_mesh_shader-style host capabilities. Keeping this separate
+// from IRenderHost lets non-mesh backends remain unchanged while the shader
+// pipeline and executor gain mesh support incrementally.
+public readonly record struct MeshShaderHostCapabilities(
+    bool Supported,
+    uint MaxWorkGroupTotalCount,
+    uint MaxWorkGroupCountX,
+    uint MaxWorkGroupCountY,
+    uint MaxWorkGroupCountZ,
+    uint MaxWorkGroupInvocations,
+    uint MaxWorkGroupSizeX,
+    uint MaxWorkGroupSizeY,
+    uint MaxWorkGroupSizeZ,
+    uint MaxSharedMemorySize,
+    uint MaxOutputVertices,
+    uint MaxOutputPrimitives);
+
+public interface IMeshRenderHost
+{
+    MeshShaderHostCapabilities MeshShaderCapabilities { get; }
+
+    void PushMeshDrawData(in PipelineHandle pipeline, ReadOnlySpan<uint> drawData);
+
+    void DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ);
+}
 
 public readonly record struct ColorAttachmentAcquisition(
     ResourceSlotIdentifier Image,
@@ -37,6 +69,18 @@ public readonly record struct ScissorRectangle(int Left, int Top, int Right, int
     public ScissorRectangle Intersect(in ScissorRectangle other) =>
         new(Math.Max(Left, other.Left), Math.Max(Top, other.Top), Math.Min(Right, other.Right), Math.Min(Bottom, other.Bottom));
 }
+
+// One indexed viewport and its matching indexed scissor. The executor passes a
+// one-element span for ordinary shaders and every guest slot when the final
+// pre-raster stage can export ViewportIndex.
+public readonly record struct DynamicViewportState(
+    float X,
+    float Y,
+    float Width,
+    float Height,
+    float MinDepth,
+    float MaxDepth,
+    ScissorRectangle Scissor);
 
 // The state the host records before every draw.
 public readonly record struct DynamicDrawState(
@@ -81,12 +125,22 @@ public interface IRenderHost
 {
     RenderHostLimits Limits { get; }
 
+    // The guest can select the final vertex for flat interpolation. Hosts that
+    // do not expose an equivalent rasterization mode keep the safe default.
+    bool ProvokingVertexLastSupported => false;
+
     IImageFormatSupport FormatSupport { get; }
 
     // True while a command buffer is recording.
     bool IsRecording { get; }
 
     void RunPendingOperations();
+
+    // Optional diagnostic boundary. Vulkan overrides this to submit and wait for all
+    // commands recorded so far; other hosts may leave the default as a no-op.
+    void SynchronizeForDiagnostic()
+    {
+    }
 
     void SetDebugInformation(RecordedOperation operation, ulong submitId, uint argument0, uint argument1, uint argument2, uint argument3, ulong argument4);
 
@@ -113,6 +167,10 @@ public interface IRenderHost
 
     BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten);
 
+    // Makes a guest range persistent and visible through the shader device-address table.
+    // Unlike ObtainBuffer, this must not satisfy the request from a transient upload ring.
+    void RegisterDeviceAddressRange(ulong address, ulong size);
+
     // Copies host bytes into the stream ring for the current recording.
     BufferBinding UploadTransient(ReadOnlySpan<byte> data, uint alignment);
 
@@ -131,7 +189,7 @@ public interface IRenderHost
 
     void CommitBindings(PipelineBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages);
 
-    void SetDynamicState(in DynamicDrawState state);
+    void SetDynamicState(in DynamicDrawState state, ReadOnlySpan<DynamicViewportState> viewports);
 
     void BeginRendering(in RenderingState state);
 

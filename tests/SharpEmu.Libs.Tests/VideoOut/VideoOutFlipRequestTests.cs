@@ -97,6 +97,94 @@ public sealed class VideoOutFlipRequestTests : IDisposable
     }
 
     [Fact]
+    public void RegisterBuffers2ReturnsOkForNonzeroSetAndRegistersTheFlipSlot()
+    {
+        const ulong buffersAddress = MemoryBase + 0x200;
+        const ulong attributeAddress = MemoryBase + 0x300;
+        const ulong stackAddress = MemoryBase + 0x500;
+        const ulong firstDisplayBufferAddress = MemoryBase + 0x800;
+        const ulong secondDisplayBufferAddress = MemoryBase + 0x900;
+        const int setIndex = 1;
+        const int firstBufferIndex = 2;
+
+        Span<byte> buffers = stackalloc byte[0x40];
+        BinaryPrimitives.WriteUInt64LittleEndian(buffers[0x00..0x08], firstDisplayBufferAddress);
+        BinaryPrimitives.WriteUInt64LittleEndian(buffers[0x20..0x28], secondDisplayBufferAddress);
+        Assert.True(_memory.TryWrite(buffersAddress, buffers));
+
+        Span<byte> attribute = stackalloc byte[0x50];
+        BinaryPrimitives.WriteUInt32LittleEndian(attribute[0x04..0x08], 0);
+        BinaryPrimitives.WriteUInt32LittleEndian(attribute[0x0C..0x10], 1280);
+        BinaryPrimitives.WriteUInt32LittleEndian(attribute[0x10..0x14], 720);
+        BinaryPrimitives.WriteUInt64LittleEndian(attribute[0x20..0x28], 0x8000_0000_2200_0000UL);
+        Assert.True(_memory.TryWrite(attributeAddress, attribute));
+
+        Span<byte> stack = stackalloc byte[0x18];
+        BinaryPrimitives.WriteUInt64LittleEndian(stack[0x08..0x10], 0); // uncompressed category
+        BinaryPrimitives.WriteUInt64LittleEndian(stack[0x10..0x18], 0); // no options
+        Assert.True(_memory.TryWrite(stackAddress, stack));
+
+        _context[CpuRegister.Rdi] = unchecked((ulong)_handle);
+        _context[CpuRegister.Rsi] = unchecked((ulong)setIndex);
+        _context[CpuRegister.Rdx] = unchecked((ulong)firstBufferIndex);
+        _context[CpuRegister.Rcx] = buffersAddress;
+        _context[CpuRegister.R8] = 2;
+        _context[CpuRegister.R9] = attributeAddress;
+        _context[CpuRegister.Rsp] = stackAddress;
+
+        Assert.Equal(0, RunWithoutStartingPresenter(() => VideoOutExports.VideoOutRegisterBuffers2(_context)));
+        Assert.Equal(0, VideoOutExports.TryReserveFlipRequest(
+            _handle,
+            firstBufferIndex,
+            flipMode: 0,
+            flipArg: 0,
+            gpuQueued: true,
+            out var firstRequestId));
+        Assert.Equal(0, VideoOutExports.TryReserveFlipRequest(
+            _handle,
+            firstBufferIndex + 1,
+            flipMode: 0,
+            flipArg: 1,
+            gpuQueued: true,
+            out var secondRequestId));
+        Assert.NotEqual(0, VideoOutExports.TryReserveFlipRequest(
+            _handle,
+            setIndex,
+            flipMode: 0,
+            flipArg: 2,
+            gpuQueued: true,
+            out _));
+        VideoOutExports.CancelFlip(firstRequestId);
+        VideoOutExports.CancelFlip(secondRequestId);
+    }
+
+    private static T RunWithoutStartingPresenter<T>(Func<T> action)
+    {
+        var presenterType = typeof(VulkanVideoPresenter);
+        var flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+        var gate = presenterType.GetField("_gate", flags)!.GetValue(null)!;
+        var closed = presenterType.GetField("_closed", flags)!;
+        bool previousClosed;
+        lock (gate)
+        {
+            previousClosed = (bool)closed.GetValue(null)!;
+            closed.SetValue(null, true);
+        }
+
+        try
+        {
+            return action();
+        }
+        finally
+        {
+            lock (gate)
+            {
+                closed.SetValue(null, previousClosed);
+            }
+        }
+    }
+
+    [Fact]
     public void CleanupPreservesAnotherPortsPendingFlip()
     {
         var request = Reserve(42);

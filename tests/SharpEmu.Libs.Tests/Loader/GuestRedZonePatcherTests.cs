@@ -157,6 +157,231 @@ public sealed class GuestRedZonePatcherTests
         Assert.Equal(expected, ((delegate* unmanaged<ulong, ulong>)imageBase)(imageBase));
     }
 
+    [Fact]
+    public void DoesNotPatchAcrossAKnownInstructionEntryBoundary()
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS())
+            return;
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        using var memory = new PhysicalVirtualMemory();
+        const ulong imageSize = 0x10000;
+        var imageBase = memory.AllocateAt(0, imageSize);
+        // The four-byte memory write would normally borrow the following
+        // movabs instruction to make room for a five-byte relative jump. The
+        // jump at the end makes that movabs a known entry boundary, so the
+        // forward span must be refused.
+        byte[] function =
+        [
+            0x48, 0x89, 0x44, 0x24, 0xF8,             // mov [rsp-8],rax (red-zone use)
+            0xC6, 0x45, 0x98, 0x65,                   // mov byte [rbp-0x68],0x65
+            0x48, 0xB8, 0xFF, 0xFF, 0x00, 0x00,       // movabs rax,0xffffffff0000ffff
+            0xFF, 0xFF, 0xFF, 0xFF,
+            0xEB, 0xF4,                               // jmp back to movabs
+            0xC3,
+        ];
+        Assert.True(memory.TryWrite(imageBase, function));
+
+        var exceptionFrameHeader = new byte[32];
+        exceptionFrameHeader[0] = 1;
+        exceptionFrameHeader[2] = 3;
+        BinaryPrimitives.WriteUInt32LittleEndian(exceptionFrameHeader.AsSpan(12), 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(exceptionFrameHeader.AsSpan(16), imageBase);
+        Assert.True(memory.TryWrite(imageBase + 0x1000, exceptionFrameHeader));
+        ProgramHeader[] headers =
+        [
+            CreateProgramHeader(ProgramHeaderType.Load, ProgramHeaderFlags.Read | ProgramHeaderFlags.Execute,
+                0, (ulong)function.Length),
+            CreateProgramHeader(ProgramHeaderType.GnuEhFrame, ProgramHeaderFlags.Read,
+                0x1000, (ulong)exceptionFrameHeader.Length),
+        ];
+
+        var result = GuestRedZonePatcher.Patch(memory, memory, headers, imageBase, imageSize);
+        var patched = new byte[function.Length];
+        Assert.True(memory.TryRead(imageBase, patched));
+
+        Assert.Equal(1, result.RedZoneFunctions);
+        Assert.Equal(0, result.CandidateSites);
+        Assert.Equal(0, result.PatchedSites);
+        Assert.Equal(0, result.FailedSites);
+        Assert.Equal(function, patched);
+    }
+
+    [Fact]
+    public void PatchesAShortInstructionUsingOnlyFollowingBytes()
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS())
+            return;
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        using var memory = new PhysicalVirtualMemory();
+        const ulong imageSize = 0x10000;
+        var imageBase = memory.AllocateAt(0, imageSize);
+        byte[] function =
+        [
+            0x48, 0x89, 0x44, 0x24, 0xF8,             // mov [rsp-8],rax (red-zone use)
+            0xC6, 0x45, 0x98, 0x65,                   // mov byte [rbp-0x68],0x65
+            0x48, 0xB8, 0xFF, 0xFF, 0x00, 0x00,       // movabs rax,0xffffffff0000ffff
+            0xFF, 0xFF, 0xFF, 0xFF,
+            0xC3,
+        ];
+        Assert.True(memory.TryWrite(imageBase, function));
+
+        var exceptionFrameHeader = new byte[32];
+        exceptionFrameHeader[0] = 1;
+        exceptionFrameHeader[2] = 3;
+        BinaryPrimitives.WriteUInt32LittleEndian(exceptionFrameHeader.AsSpan(12), 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(exceptionFrameHeader.AsSpan(16), imageBase);
+        Assert.True(memory.TryWrite(imageBase + 0x1000, exceptionFrameHeader));
+        ProgramHeader[] headers =
+        [
+            CreateProgramHeader(ProgramHeaderType.Load, ProgramHeaderFlags.Read | ProgramHeaderFlags.Execute,
+                0, (ulong)function.Length),
+            CreateProgramHeader(ProgramHeaderType.GnuEhFrame, ProgramHeaderFlags.Read,
+                0x1000, (ulong)exceptionFrameHeader.Length),
+        ];
+
+        var result = GuestRedZonePatcher.Patch(memory, memory, headers, imageBase, imageSize);
+        var patched = new byte[function.Length];
+        Assert.True(memory.TryRead(imageBase, patched));
+
+        Assert.Equal(1, result.RedZoneFunctions);
+        Assert.Equal(1, result.CandidateSites);
+        Assert.Equal(1, result.PatchedSites);
+        Assert.Equal(0, result.FailedSites);
+        Assert.Equal(function[..5], patched[..5]);
+        Assert.Equal(0xE9, patched[5]);
+        Assert.Equal(0xC3, patched[^1]);
+    }
+
+    [Fact]
+    public void ResolvesRelativeJumpTableFromASeparateReadableLoadSegment()
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS())
+            return;
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        using var memory = new PhysicalVirtualMemory();
+        const ulong imageSize = 0x10000;
+        const ulong tableOffset = 0x2000;
+        var imageBase = memory.AllocateAt(0, imageSize);
+        byte[] function =
+        [
+            0x48, 0x89, 0x44, 0x24, 0xF8,             // mov [rsp-8],rax (red-zone use)
+            0x83, 0xF8, 0x00,                         // cmp eax,0
+            0x77, 0x1F,                               // ja default
+            0x48, 0x8D, 0x0D, 0, 0, 0, 0,             // lea rcx,[table]
+            0x48, 0x63, 0x04, 0x81,                   // movsxd rax,[rcx+rax*4]
+            0x48, 0x01, 0xC8,                         // add rax,rcx
+            0xFF, 0xE0,                               // jmp rax
+            0xC6, 0x45, 0x98, 0x65,                   // mov byte [rbp-0x68],0x65
+            0x48, 0xB8, 0xFF, 0xFF, 0x00, 0x00,       // jump-table target: movabs rax,...
+            0xFF, 0xFF, 0xFF, 0xFF,
+            0xC3,
+            0xC3,                                     // default
+        ];
+        var tableAddress = imageBase + tableOffset;
+        var tableTarget = imageBase + 30;
+        BinaryPrimitives.WriteInt32LittleEndian(
+            function.AsSpan(13, sizeof(int)),
+            checked((int)((long)tableAddress - (long)(imageBase + 17))));
+        Assert.True(memory.TryWrite(imageBase, function));
+        Span<byte> table = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(
+            table,
+            checked((int)((long)tableTarget - (long)tableAddress)));
+        Assert.True(memory.TryWrite(tableAddress, table));
+
+        var exceptionFrameHeader = new byte[32];
+        exceptionFrameHeader[0] = 1;
+        exceptionFrameHeader[2] = 3;
+        BinaryPrimitives.WriteUInt32LittleEndian(exceptionFrameHeader.AsSpan(12), 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(exceptionFrameHeader.AsSpan(16), imageBase);
+        Assert.True(memory.TryWrite(imageBase + 0x3000, exceptionFrameHeader));
+        ProgramHeader[] headers =
+        [
+            CreateProgramHeader(ProgramHeaderType.Load, ProgramHeaderFlags.Read | ProgramHeaderFlags.Execute,
+                0, (ulong)function.Length),
+            CreateProgramHeader(ProgramHeaderType.Load, ProgramHeaderFlags.Read,
+                tableOffset, (ulong)table.Length),
+            CreateProgramHeader(ProgramHeaderType.GnuEhFrame, ProgramHeaderFlags.Read,
+                0x3000, (ulong)exceptionFrameHeader.Length),
+        ];
+
+        var result = GuestRedZonePatcher.Patch(memory, memory, headers, imageBase, imageSize);
+
+        // The table target is the instruction after the four-byte store. Its
+        // hidden entry boundary must prevent that store from borrowing it.
+        Assert.Equal(1, result.CandidateSites);
+        Assert.Equal(1, result.PatchedSites);
+        Assert.Equal(1, result.BranchTargetRefusals);
+        Assert.Equal(0, result.IndirectBranchRefusals);
+    }
+
+    [Fact]
+    public void OutOfFunctionJumpTableTargetRefusesBorrowingButKeepsSingleInstructionSites()
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS())
+            return;
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        using var memory = new PhysicalVirtualMemory();
+        const ulong imageSize = 0x10000;
+        const ulong tableOffset = 0x2000;
+        var imageBase = memory.AllocateAt(0, imageSize);
+        byte[] function =
+        [
+            0x48, 0x89, 0x44, 0x24, 0xF8,             // mov [rsp-8],rax (red-zone use)
+            0x83, 0xF8, 0x00,                         // cmp eax,0
+            0x77, 0x1D,                               // ja default
+            0x48, 0x8D, 0x0D, 0, 0, 0, 0,             // lea rcx,[table]
+            0x48, 0x63, 0x04, 0x81,                   // movsxd rax,[rcx+rax*4]
+            0x48, 0x01, 0xC8,                         // add rax,rcx
+            0xFF, 0xE0,                               // jmp rax
+            0xC6, 0x45, 0x98, 0x65,                   // four-byte faultable store
+            0x90,                                     // would be borrowed without the guard
+            0x8B, 0x84, 0x8D, 0x00, 0x01, 0x00, 0x00, // seven-byte faultable load
+            0xC3,
+            0xC3,                                     // default
+        ];
+        var tableAddress = imageBase + tableOffset;
+        BinaryPrimitives.WriteInt32LittleEndian(
+            function.AsSpan(13, sizeof(int)),
+            checked((int)((long)tableAddress - (long)(imageBase + 17))));
+        Assert.True(memory.TryWrite(imageBase, function));
+        Span<byte> table = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(
+            table,
+            checked((int)((long)(imageBase + 0x4000) - (long)tableAddress)));
+        Assert.True(memory.TryWrite(tableAddress, table));
+
+        var exceptionFrameHeader = new byte[32];
+        exceptionFrameHeader[0] = 1;
+        exceptionFrameHeader[2] = 3;
+        BinaryPrimitives.WriteUInt32LittleEndian(exceptionFrameHeader.AsSpan(12), 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(exceptionFrameHeader.AsSpan(16), imageBase);
+        Assert.True(memory.TryWrite(imageBase + 0x1000, exceptionFrameHeader));
+        ProgramHeader[] headers =
+        [
+            CreateProgramHeader(ProgramHeaderType.Load, ProgramHeaderFlags.Read | ProgramHeaderFlags.Execute,
+                0, (ulong)function.Length),
+            CreateProgramHeader(ProgramHeaderType.Load, ProgramHeaderFlags.Read,
+                tableOffset, (ulong)table.Length),
+            CreateProgramHeader(ProgramHeaderType.GnuEhFrame, ProgramHeaderFlags.Read,
+                0x1000, (ulong)exceptionFrameHeader.Length),
+        ];
+
+        var result = GuestRedZonePatcher.Patch(memory, memory, headers, imageBase, imageSize);
+
+        Assert.Equal(1, result.CandidateSites);
+        Assert.Equal(1, result.PatchedSites);
+        Assert.Equal(2, result.IndirectBranchRefusals);
+    }
+
     // Demon's Souls FUN_800ad8fe0: a four-byte compare followed by JZ had no room
     // for the jump, so a fault there let Windows overwrite the saved red-zone pointer.
     [Theory]
@@ -190,10 +415,10 @@ public sealed class GuestRedZonePatcherTests
         Assert.Equal(expected, ((delegate* unmanaged<ulong, ulong>)image.Base)(image.Base));
     }
 
-    // Demon's Souls FUN_800ad8fe0: a two-byte AND whose successor is a branch
-    // target is patched by starting the span at the instruction before it.
+    // Demon's Souls FUN_800ad8fe0: spans never start before the faulting access,
+    // so a two-byte AND whose successor is a branch target stays unpatched.
     [Fact]
-    public unsafe void PatchesShortAccessBeforeBranchTargetFromThePreviousInstruction()
+    public unsafe void LeavesShortAccessBeforeBranchTargetUnpatched()
     {
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
@@ -214,8 +439,9 @@ public sealed class GuestRedZonePatcherTests
         using var image = PatchedImage.Create(function, [(0x2000, 7u)]);
         if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
         {
-            Assert.Equal(1, image.Result.PatchedSites);
-            Assert.Equal(0xE9, image.ReadByte(22));
+            Assert.Equal(0, image.Result.CandidateSites);
+            Assert.Equal(1, image.Result.BranchTargetRefusals);
+            Assert.Equal(0xB8, image.ReadByte(22));
         }
 
         Assert.Equal(0x1122_3344_5566_7788UL, ((delegate* unmanaged<ulong, ulong>)image.Base)(image.Base));

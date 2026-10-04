@@ -25,7 +25,9 @@ public sealed class Gen5IrBranchResolver : IIrBranchResolver
         "SCbranchCdbgsys" or
         "SCbranchCdbguser" or
         "SCbranchCdbgsysOrUser" or
-        "SCbranchCdbgsysAndUser" => true,
+        "SCbranchCdbgsysAndUser" or
+        "SSubvectorLoopBegin" or
+        "SSubvectorLoopEnd" => true,
         _ => false,
     };
 
@@ -42,7 +44,10 @@ public sealed class Gen5IrBranchResolver : IIrBranchResolver
             return false;
         }
 
-        if (instruction.Encoding != Gen5ShaderEncoding.Sopp || instruction.Words.Count == 0)
+        var directEncoding = instruction.Encoding == Gen5ShaderEncoding.Sopp ||
+            (instruction.Encoding == Gen5ShaderEncoding.Sopk &&
+             instruction.Opcode is "SSubvectorLoopBegin" or "SSubvectorLoopEnd");
+        if (!directEncoding || instruction.Words.Count == 0)
         {
             return false;
         }

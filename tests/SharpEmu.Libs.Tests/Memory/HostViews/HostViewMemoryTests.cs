@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
 using SharpEmu.HLE.Host.Posix;
 using SharpEmu.HLE.Host.Windows;
@@ -26,6 +27,20 @@ public sealed unsafe class HostViewMemoryTests
     {
         Assert.NotEqual((nuint)0, VirtualQuery((void*)address, out var info, (nuint)sizeof(MemoryBasicInformation)));
         return info.State;
+    }
+
+    [Fact]
+    public void BackingAliasStaysOutsideGuestAddressSpaceOnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var views = HostViewMemory.Create();
+        using var backing = CreateBacking(views);
+
+        Assert.True(backing.AliasBase >= GuestMemoryLayout.GuestAddressLimit);
     }
 
     [Fact]
@@ -85,6 +100,34 @@ public sealed unsafe class HostViewMemoryTests
         Assert.True(views.UnmapView(viewAddress, Segment));
         Assert.True(views.JoinHoles(baseAddress, hole));
         Assert.True(views.FreeHole(baseAddress, hole));
+    }
+
+    [Fact]
+    public void BackingRangeCanBeCommittedBeforeItIsMapped()
+    {
+        if (!Supported)
+        {
+            return;
+        }
+
+        var views = HostViewMemory.Create();
+        using var backing = CreateBacking(views);
+
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal(MEM_RESERVE, QueryState(backing.AliasBase + Segment));
+            Assert.Equal(MEM_RESERVE, QueryState(backing.AliasBase + (3 * Segment)));
+        }
+
+        Assert.True(views.TryCommitBacking(backing, Segment, Segment));
+        *(ulong*)(backing.AliasBase + Segment) = Marker;
+        Assert.Equal(Marker, *(ulong*)(backing.AliasBase + Segment));
+
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal(MEM_COMMIT, QueryState(backing.AliasBase + Segment));
+            Assert.Equal(MEM_RESERVE, QueryState(backing.AliasBase + (3 * Segment)));
+        }
     }
 
     [Fact]
@@ -197,6 +240,69 @@ public sealed unsafe class HostViewMemoryTests
     }
 
     [Fact]
+    public void ReservingFreeRegionsKeepsAnOccupiedHoleIntactOnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var views = HostViewMemory.Create();
+        var memory = PlatformMemory;
+        var granularity = views.Granularity;
+        var spanSize = 8 * granularity;
+        var occupiedSize = 2 * granularity;
+        ulong spanStart = 0;
+        ulong occupied = 0;
+        for (var attempt = 0; attempt < 8 && occupied == 0; attempt++)
+        {
+            var candidate = ProbeFreeAddress(views, spanSize);
+            var desired = candidate + 3 * granularity;
+            var allocation = memory.Allocate(desired, occupiedSize, HostPageProtection.ReadWrite);
+            if (allocation == desired)
+            {
+                spanStart = candidate;
+                occupied = allocation;
+            }
+            else if (allocation != 0)
+            {
+                Assert.True(memory.Free(allocation));
+            }
+        }
+
+        Assert.NotEqual(0UL, occupied);
+        IReadOnlyList<HostAddressRange> reservations = Array.Empty<HostAddressRange>();
+        try
+        {
+            *(ulong*)occupied = Marker;
+            Assert.True(views.TryReserveFreeRegions(
+                spanStart,
+                spanStart + spanSize,
+                minimumRegionSize: 0,
+                out reservations));
+
+            Assert.Equal(
+                new[]
+                {
+                    new HostAddressRange(spanStart, 3 * granularity),
+                    new HostAddressRange(occupied + occupiedSize, 3 * granularity),
+                },
+                reservations);
+            Assert.Equal(Marker, *(ulong*)occupied);
+            Assert.Equal(MEM_COMMIT, QueryState(occupied));
+        }
+        finally
+        {
+            foreach (var reservation in reservations)
+            {
+                Assert.True(views.FreeOwnedRange(reservation.Address, reservation.Size));
+            }
+
+            Assert.True(memory.Free(occupied));
+        }
+    }
+
+    [Fact]
     public void ProtectFailure_PreservesThePlaceholderOnWindows()
     {
         if (!OperatingSystem.IsWindows())
@@ -219,6 +325,39 @@ public sealed unsafe class HostViewMemoryTests
         finally
         {
             WindowsHostViews.FailProtectForTests = false;
+        }
+
+        Assert.Equal(MEM_RESERVE, QueryState(baseAddress));
+        Assert.True(views.TryMapView(backing, baseAddress, 0, Segment, HostPageProtection.ReadWrite, out _));
+
+        Assert.True(views.UnmapView(baseAddress, Segment));
+        Assert.True(views.JoinHoles(baseAddress, hole));
+        Assert.True(views.FreeHole(baseAddress, hole));
+    }
+
+    [Fact]
+    public void BackingCommitFailure_PreservesThePlaceholderOnWindows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var views = HostViewMemory.Create();
+        using var backing = CreateBacking(views);
+        var hole = HoleSize(views);
+        var baseAddress = ReserveFreeHole(views, hole);
+
+        Assert.True(views.SplitHole(baseAddress, Segment));
+        WindowsHostViews.FailBackingCommitForTests = true;
+        try
+        {
+            Assert.False(views.TryMapView(backing, baseAddress, 0, Segment, HostPageProtection.ReadWrite, out var failure));
+            Assert.Equal(HostViewFailure.BackingCommitFailed, failure);
+        }
+        finally
+        {
+            WindowsHostViews.FailBackingCommitForTests = false;
         }
 
         Assert.Equal(MEM_RESERVE, QueryState(baseAddress));
@@ -255,6 +394,8 @@ public sealed unsafe class HostViewMemoryTests
         Assert.Equal(HostViewFailure.OffsetOutOfBounds, MapFailure(views, backing, baseAddress, 0x800, page));
         Assert.Equal(HostViewFailure.WrongHostAddress, MapFailure(views, backing, baseAddress + 1, 0, page));
         Assert.Equal(HostViewFailure.WrongHostAddress, MapFailure(views, backing, 0, 0, page));
+        Assert.False(views.TryCommitBacking(backing, 0, 0));
+        Assert.False(views.TryCommitBacking(backing, BackingSize, page));
         Assert.Equal(0UL, views.ReserveHole(0, hole));
         Assert.Equal(0UL, views.ReserveHole(ulong.MaxValue - 0xFFF, 0x10000));
 
@@ -307,6 +448,7 @@ public sealed unsafe class HostViewMemoryTests
 
         backing.Dispose();
         backing.Dispose();
+        Assert.False(views.TryCommitBacking(backing, 0, Segment));
         Assert.False(views.TryMapView(backing, baseAddress, 0, Segment, HostPageProtection.ReadWrite, out var failure));
         Assert.Equal(HostViewFailure.BackingUnavailable, failure);
 

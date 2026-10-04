@@ -64,9 +64,19 @@ internal static class NpUniversalDataSystemState
     {
         lock (Gate)
         {
-            ResetLocked();
-            _initialized = true;
+            // Some retail middleware creates its long-lived context before the
+            // title issues the explicit pool initialization call.  Treat that
+            // later call as completion of the same bootstrap instead of
+            // invalidating the context and request handles the middleware has
+            // already published to guest memory.
+            if (!_initialized)
+            {
+                ResetLocked();
+                _initialized = true;
+            }
+
             _poolSize = poolSize;
+            UpdateMaximumInUseLocked();
             return true;
         }
     }
@@ -85,8 +95,11 @@ internal static class NpUniversalDataSystemState
         {
             if (!_initialized)
             {
-                context = 0;
-                return false;
+                // Context creation is used as the effective bootstrap by some
+                // SDK middleware.  Keep stricter object/handle entry points
+                // gated, but allow this first context to establish the state
+                // that a later Initialize call will finish configuring.
+                _initialized = true;
             }
 
             context = NextPositiveId(ref _nextContext);
@@ -480,13 +493,15 @@ internal static class NpUniversalDataSystemState
         }
     }
 
-    internal static void ResetForTests()
+    internal static void ResetRuntimeState()
     {
         lock (Gate)
         {
             ResetLocked();
         }
     }
+
+    internal static void ResetForTests() => ResetRuntimeState();
 
     private static ulong CreateObjectLocked(UdsObjectNode node)
     {
