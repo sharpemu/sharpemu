@@ -16,6 +16,12 @@ The trace writes at most 256 distinct requests per presenter and reports the lim
 It writes immediately, so a cache lookup failure does not require normal shutdown.
 This diagnostic does not change image selection or overlap handling.
 
+`ImageCandidate` uses the same address filter for dense indirect tables.
+It records the descriptor source ID, table key, heap pointer, descriptor address,
+and raw words before candidate validation. Match its words and shader hash with
+`ImageLookup` to locate the candidate. It has a separate 256-entry limit per
+shader cache. It does not record the GPU lane mask or prove that a candidate was selected.
+
 ## Invalid texture layers
 
 An out-of-range texture base layer includes the shader hash, image slot,

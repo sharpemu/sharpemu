@@ -252,6 +252,10 @@ internal sealed class ShaderProgramCache
             ShaderBase = source.Address,
             ReadMemory = _readGuestWord,
             ReadCleanMemory = _readCleanGuestWord,
+            TraceImageCandidate = SharpEmu.Libs.Gpu.Images.ImageClearTrace.Enabled
+                ? (descriptorSource, candidateKey, heap, address, words) =>
+                    _imageDescriptorTrace.RecordCandidate(source.Hash, descriptorSource, candidateKey, heap, address, words.Span)
+                : null,
             ReadResidentMemory = _prefetchResidentGuestBytes,
             ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
                 ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
