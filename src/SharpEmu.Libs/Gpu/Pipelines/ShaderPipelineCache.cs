@@ -201,8 +201,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 viewport.YScale,
                 viewport.XOffset,
                 viewport.YOffset,
-                Math.Min(limits.MaxViewportWidth, MaxViewportDimension) * 0.5f,
-                Math.Min(limits.MaxViewportHeight, MaxViewportDimension) * 0.5f);
+                Images.RenderScalePolicy.ClipSpaceReferenceExtent(Math.Min(limits.MaxViewportWidth, MaxViewportDimension)) * 0.5f,
+                Images.RenderScalePolicy.ClipSpaceReferenceExtent(Math.Min(limits.MaxViewportHeight, MaxViewportDimension)) * 0.5f);
         }
 
         return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,

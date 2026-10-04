@@ -19,7 +19,20 @@ public readonly record struct ColorTargetResolution(
     ColorComponentMap ExportMapping,
     bool MetadataClearSupported,
     bool MetadataFixedClearSupported,
-    ClearColorValue ColorClearValue);
+    ClearColorValue ColorClearValue)
+{
+    // The host resolution of the attachment; render area, viewport and scissor follow it.
+    public float RenderScale => RenderScalePolicy.ScaleFor(Request.Description);
+
+    public Extent2D HostExtent
+    {
+        get
+        {
+            var scale = RenderScale;
+            return new Extent2D(RenderScalePolicy.ScaleLength(Extent.Width, scale), RenderScalePolicy.ScaleLength(Extent.Height, scale));
+        }
+    }
+}
 
 // One layer window of a target view; the whole image has LastLayer + 1 layers.
 public readonly record struct TargetViewRange(uint BaseLayer, uint LayerCount, uint ImageLayers)

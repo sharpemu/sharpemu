@@ -269,8 +269,10 @@ public sealed partial class RenderExecutor
             }
 
             var view = target.Resolution.Request.View;
-            rendering.Width = Math.Min(rendering.Width, target.Resolution.Extent.Width);
-            rendering.Height = Math.Min(rendering.Height, target.Resolution.Extent.Height);
+            // The render area covers host texels, which a scaled attachment has more or fewer of.
+            var hostExtent = target.Resolution.HostExtent;
+            rendering.Width = Math.Min(rendering.Width, hostExtent.Width);
+            rendering.Height = Math.Min(rendering.Height, hostExtent.Height);
             rendering.Layers = Math.Min(rendering.Layers, view.LayerCount);
             var clear = acquired.MetadataClear ? acquired.MetadataClearValue : target.Resolution.ColorClearValue;
             rendering.ColorAttachments[i] = new RenderingAttachment(
@@ -317,8 +319,8 @@ public sealed partial class RenderExecutor
                 _host.DepthAttachmentLayout(in depth));
             _host.TransitionDepthAttachment(in depth, layout, loadState.AttachmentWriteAspects(target.Format));
             var view = target.Request.View;
-            rendering.Width = Math.Min(rendering.Width, target.Width);
-            rendering.Height = Math.Min(rendering.Height, target.Height);
+            rendering.Width = Math.Min(rendering.Width, target.HostWidth);
+            rendering.Height = Math.Min(rendering.Height, target.HostHeight);
             rendering.Layers = Math.Min(rendering.Layers, view.LayerCount);
             var aspects = ViewFormatRules.DepthAspects(target.Format);
             rendering.DepthStencilAttachment = new RenderingAttachment(
