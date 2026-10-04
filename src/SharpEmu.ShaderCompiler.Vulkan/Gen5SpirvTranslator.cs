@@ -172,6 +172,7 @@ public static partial class Gen5SpirvTranslator
         private uint _storageBlockPointer;
         private uint _storageUintPointer;
         private uint _lds;
+        private uint _ldsWritten;
         private uint _ldsElementPointer;
         private uint _lds64ElementPointer;
         private uint _ldsDwordMask;
@@ -772,14 +773,24 @@ public static partial class Gen5SpirvTranslator
             var ldsPointer = _module.TypePointer(storageClass, ldsArrayType);
             _ldsElementPointer = _module.TypePointer(storageClass, _uintType);
             _lds64ElementPointer = _module.TypePointer(storageClass, _ulongType);
-            _lds = storageClass == SpirvStorageClass.Workgroup
-                ? _module.AddGlobalVariable(ldsPointer, storageClass)
-                : _module.AddGlobalVariable(
-                    ldsPointer,
-                    storageClass,
-                    _module.ConstantNull(ldsArrayType));
+            // A private array must read zero where this invocation has not written, but
+            // zero-initializing it costs every invocation the whole array: Metal keeps a
+            // dynamically indexed private array in stack memory, so an NGG vertex shader
+            // cleared 8 KiB per vertex. A written-dword bitmap clears 1/32 of that, and
+            // LdsPointer zeroes a slot the first time it is addressed.
+            _lds = _module.AddGlobalVariable(ldsPointer, storageClass);
             _module.AddName(_lds, "lds");
             _interfaces.Add(_lds);
+            if (storageClass == SpirvStorageClass.Private)
+            {
+                var bitmapType = _module.TypeArray(_uintType, (arrayDwordCount + 31) / 32);
+                _ldsWritten = _module.AddGlobalVariable(
+                    _module.TypePointer(SpirvStorageClass.Private, bitmapType),
+                    SpirvStorageClass.Private,
+                    _module.ConstantNull(bitmapType));
+                _module.AddName(_ldsWritten, "ldsWritten");
+                _interfaces.Add(_ldsWritten);
+            }
         }
 
         internal static SpirvImageFormat DecodeStorageImageFormat(
@@ -2683,11 +2694,30 @@ public static partial class Gen5SpirvTranslator
             var index = BitwiseAnd(
                 ShiftRightLogical(addressWithOffset, UInt(2)),
                 UInt(_ldsDwordMask));
-            return _module.AddInstruction(
+            var pointer = _module.AddInstruction(
                 SpirvOp.AccessChain,
                 _ldsElementPointer,
                 _lds,
                 index);
+            if (_ldsWritten != 0)
+            {
+                var wordPointer = _module.AddInstruction(
+                    SpirvOp.AccessChain,
+                    _privateUintPointer,
+                    _ldsWritten,
+                    ShiftRightLogical(index, UInt(5)));
+                var bit = ShiftLeftLogical(UInt(1), BitwiseAnd(index, UInt(31)));
+                var word = Load(_uintType, wordPointer);
+                var unwritten = _module.AddInstruction(
+                    SpirvOp.IEqual, _boolType, BitwiseAnd(word, bit), UInt(0));
+                EmitConditional(unwritten, () =>
+                {
+                    Store(pointer, UInt(0));
+                    Store(wordPointer, BitwiseOr(word, bit));
+                });
+            }
+
+            return pointer;
         }
 
         private void StoreLds(uint pointer, uint value)
