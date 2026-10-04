@@ -1016,6 +1016,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           <ToggleSwitch x:Name="GameEnvDumpSpirvToggle"
                                         Classes="optionToggle" />
                         </local:SettingRow>
+                        <local:SettingRow Classes="optionRow" Label="SHARPEMU_SKIP_RT"
+                                          Description="{Binding [Options.Env.SkipRt.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                          <ToggleSwitch x:Name="GameEnvSkipRtToggle" Classes="optionToggle" />
+                        </local:SettingRow>
                         <local:SettingRow Classes="optionRow"
                                           Label="SHARPEMU_LOG_DIRECT_MEMORY"
                                           Description="{Binding [Options.Env.LogDirectMemory.Desc],
@@ -1607,6 +1611,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       <local:SettingRow x:Name="EnvDumpSpirvRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_DUMP_SPIRV"
                                         Description="{Binding [Options.Env.DumpSpirv.Desc], Source={x:Static local:Localization.Instance}}">
                         <ToggleSwitch x:Name="EnvDumpSpirvToggle" Classes="optionToggle" />
+                      </local:SettingRow>
+                      <local:SettingRow Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_SKIP_RT"
+                                        Description="{Binding [Options.Env.SkipRt.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ToggleSwitch x:Name="EnvSkipRtToggle" Classes="optionToggle" />
                       </local:SettingRow>
 
                       <local:SettingRow x:Name="EnvLogDirectMemoryRow" Classes="optionRow" LabelFontFamily="Consolas,monospace" Label="SHARPEMU_LOG_DIRECT_MEMORY"

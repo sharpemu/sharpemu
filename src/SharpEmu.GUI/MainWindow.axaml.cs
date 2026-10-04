@@ -349,6 +349,8 @@ public partial class MainWindow : Window
             SetEnvironmentToggle("SHARPEMU_VK_VALIDATION", EnvVkValidationToggle.IsChecked == true);
         EnvDumpSpirvToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_DUMP_SPIRV", EnvDumpSpirvToggle.IsChecked == true);
+        EnvSkipRtToggle.IsCheckedChanged += (_, _) =>
+            RayTracingSkipSettings.SetEnabled(_settings.EnvironmentToggles, EnvSkipRtToggle.IsChecked == true);
         EnvLogDirectMemoryToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_LOG_DIRECT_MEMORY", EnvLogDirectMemoryToggle.IsChecked == true);
         EnvLogIoToggle.IsCheckedChanged += (_, _) =>
@@ -1312,6 +1314,7 @@ public partial class MainWindow : Window
         BinkPlaybackBox.SelectedIndex = ChoiceIndex(_settings.BinkPlaybackMode, "Host", "Guest", "Skip");
         EnvVkValidationToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_VK_VALIDATION");
         EnvDumpSpirvToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_DUMP_SPIRV");
+        EnvSkipRtToggle.IsChecked = RayTracingSkipSettings.IsEnabled(_settings.EnvironmentToggles);
         EnvLogDirectMemoryToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_DIRECT_MEMORY");
         EnvLogIoToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_IO");
         EnvLogNpToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_LOG_NP");
@@ -2549,6 +2552,10 @@ public partial class MainWindow : Window
         Environment.SetEnvironmentVariable("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
             effective.EnvironmentToggles.Contains("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD") ? "1" : "0");
         _appliedEnvironmentVariables.Add("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD");
+
+        Environment.SetEnvironmentVariable("SHARPEMU_SKIP_RT",
+            RayTracingSkipSettings.GetLaunchValue(effective.EnvironmentToggles));
+        _appliedEnvironmentVariables.Add("SHARPEMU_SKIP_RT");
 
         Environment.SetEnvironmentVariable(
             BinkModeEnvironmentName,

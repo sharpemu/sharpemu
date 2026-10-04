@@ -46,11 +46,11 @@ public sealed class RayTracingComputePolicyTests
             for (var attempt = 0; attempt < 2; attempt++)
             {
                 var result = cache.GetComputeProgram(Registers(), new ShaderInterfaceRegisters(), 0x8001, 1, 1, 1);
-                Assert.Equal(setting == "0", result.Available);
+                Assert.Equal(setting != "1", result.Available);
                 Assert.False(result.Consumed);
-                Assert.Equal(setting == "0", result.Program.IsValid);
+                Assert.Equal(setting != "1", result.Program.IsValid);
             }
-            if (setting == "0")
+            if (setting != "1")
             {
                 Assert.Single(guest.Compiler.Requests);
                 Assert.Single(guest.Host.Modules);

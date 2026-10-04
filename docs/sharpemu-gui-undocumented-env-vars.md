@@ -8,19 +8,20 @@ SPDX-License-Identifier: GPL-2.0-or-later
 ## Scope
 
 This list contains each `SHARPEMU_*` environment variable in the repository that the GUI does not show.
-The GUI shows 14 variables on its **Options** and **Game options** pages. This list does not contain them:
+The GUI exposes these variables on its **Options** and **Game options** pages:
 `SHARPEMU_BTHID_UNAVAILABLE`, `SHARPEMU_CRASH_CAPTURE`, `SHARPEMU_DEFAULT_PROFILE`,
 `SHARPEMU_DISABLE_IMPORT_LOOP_GUARD`, `SHARPEMU_DUMP_SPIRV`, `SHARPEMU_LOG_DIRECT_MEMORY`, `SHARPEMU_LOG_IO`,
 `SHARPEMU_LOG_NP`, `SHARPEMU_PROFILE_PERFORMANCE`, `SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE`,
-`SHARPEMU_RENDERDOC`, `SHARPEMU_VK_DISABLE_IMPLICITS`, `SHARPEMU_STRICT_COMPUTE`, `SHARPEMU_VK_VALIDATION`, `SHARPEMU_WRITABLE_APP0`.
+`SHARPEMU_RENDERDOC`, `SHARPEMU_SKIP_RT`, `SHARPEMU_VK_DISABLE_IMPLICITS`, `SHARPEMU_STRICT_COMPUTE`, `SHARPEMU_VK_VALIDATION`, `SHARPEMU_WRITABLE_APP0`.
 
 The list contains 269 variables. The source was examined on 2026-09-19, branch `dev`.
 The descriptions come from the code that reads each variable. The emulator was not started for this list.
 
-## Automatic ray-tracing compute skip
+## Ray-tracing compute skip (GUI Debug option)
 
-`SHARPEMU_SKIP_RT` is enabled by default. Set it to `0` before launch to disable
-the skip, or set it to `1` to enable it explicitly. Restart after a change.
+`SHARPEMU_SKIP_RT` is off by default. Set it to `1` to skip ray-tracing compute.
+Unset it or set it to `0` to run those shaders. The Debug section exposes this
+switch in Options and Game options. Restart the game after a change.
 Compute shaders with `ImageBvhIntersectRay` or `ImageBvh64IntersectRay` are
 skipped before resource planning and compilation. The entire dispatch is skipped.
 This compatibility workaround applies with either strict-compute setting.
