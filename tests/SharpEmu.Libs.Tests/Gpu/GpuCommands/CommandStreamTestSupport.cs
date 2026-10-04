@@ -31,6 +31,11 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public List<EndOfPipeWrite> EndOfPipeWrites { get; } = new();
 
+    // Satisfied waits and command-processor memory writes reported to the host.
+    public int VisibilityPoints { get; private set; }
+
+    public void NoteMemoryVisibilityPoint() => VisibilityPoints++;
+
     public List<ulong> GuestReads { get; } = new();
 
     public Action<ulong>? BeforeGuestRead { get; set; }

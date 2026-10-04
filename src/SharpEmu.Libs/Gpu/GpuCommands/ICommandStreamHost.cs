@@ -107,6 +107,13 @@ public interface ICommandStreamHost
 
     void CopyBuffer(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds);
 
+    // A satisfied wait packet or a command-processor memory write: CPU writes released by the
+    // waited-on value, or the written bytes, must become visible to the commands that follow,
+    // the same as at the start of a submission slice.
+    void NoteMemoryVisibilityPoint()
+    {
+    }
+
     void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount);
 
     void RecordEndOfPipe(in EndOfPipeWrite write);

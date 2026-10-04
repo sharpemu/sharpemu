@@ -316,8 +316,11 @@ internal static unsafe partial class VulkanVideoPresenter
             _activeGuestQueue = new VulkanGuestQueueIdentity(_commandQueueNames[queueId], submissionId);
             BindSubmissionContext(_activeGuestQueue);
             _ = CurrentRecordingBuffer();
+            _bufferCache.NoteMemoryVisibilityPoint();
             _translation.BeginSubmission(queueId, submissionId, geometrySnapshots, _commandStream.GetInterpreter(queueId));
         }
+
+        public void NoteMemoryVisibilityPoint() => _bufferCache.NoteMemoryVisibilityPoint();
 
         public void Flush()
         {
