@@ -111,6 +111,26 @@ internal static unsafe partial class VulkanVideoPresenter
             DepthCompare: image.DepthCompare,
             Atomic: image.Atomic);
 
+        private readonly HashSet<string> _imageLookupTraceEntries = new(StringComparer.Ordinal);
+
+        private void TraceImageLookup(ImageResource image, uint[] words, ShaderProgramInfo program, int index, in ImageRequest request)
+        {
+            if (!ImageClearTrace.Enabled ||
+                !ImageTraceRange.Overlaps(request.Description.Data.Address, 1) ||
+                _imageLookupTraceEntries.Count >= 256)
+                return;
+
+            var description = request.Description;
+            var message = $"ImageLookup shader=0x{program.Hash:X16} stage={program.Stage} image={index} indirectRoot={image.IndirectRoot} " +
+                $"address=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} type={description.Type} tile={description.TileMode} " +
+                $"extent={description.Extent.Width}x{description.Extent.Height}x{description.Extent.Depth} levels={description.Resources.Levels} layers={description.Resources.Layers} format={description.PixelFormat} " +
+                $"view={request.View} words={string.Join(',', words.Select(word => word.ToString("X8")))}";
+            if (!_imageLookupTraceEntries.Add(message)) return;
+            Console.Error.WriteLine($"[GPU][TRACE] {message}");
+            if (_imageLookupTraceEntries.Count == 256)
+                Console.Error.WriteLine("[GPU][TRACE] ImageLookup limit=256. Further entries are omitted.");
+        }
+
         // Render-state discovery for one shader image; the view is acquired later with the draw.
         private TextureResource ResolveImageBinding(ImageResource image, uint[] words, ShaderProgramInfo program, int index)
         {
@@ -127,6 +147,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (Gpu.Images.ImageClearTrace.Enabled)
             {
                 Gpu.Images.ImageTraceRange.NoteFollowedImage(program.Hash, index, request.Description.Data.Address, request.Description.Data.Size);
+                TraceImageLookup(image, words, program, index, request);
                 _imageCache.TraceTextureBinding(program.Hash, index, words, request);
             }
             _imageCache.SynchronizeColorMetadata(request);

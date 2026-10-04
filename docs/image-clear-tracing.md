@@ -5,6 +5,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 # Image clear tracing
 
+## Image lookup failures
+
+Set `SHARPEMU_TRACE_IMAGE_CLEARS=1` and select an address with
+`SHARPEMU_TRACE_IMAGE_RANGE`. `ImageLookup` records matching texture requests
+before cache lookup, including expanded indirect candidates. Each entry includes
+the shader, slot, indirect root, descriptor words, image layout, and view.
+The range must contain the image base address. Followed ranges also apply.
+The trace writes at most 256 distinct requests per presenter and reports the limit.
+It writes immediately, so a cache lookup failure does not require normal shutdown.
+This diagnostic does not change image selection or overlap handling.
+
 ## Invalid texture layers
 
 An out-of-range texture base layer includes the shader hash, image slot,
@@ -12,6 +23,8 @@ decoded descriptor type and depth, shader image shape, and eight descriptor
 words in the fatal message. No trace switch or address filter is required.
 The renderer still rejects the invalid view. Descriptor history from normal
 shutdown is not available when the process stops through `FailFast`.
+
+## Image history
 
 Set `SHARPEMU_TRACE_IMAGE_CLEARS=1` before launch to inspect Vulkan color-target and volume clear decisions.
 The default is off. Full AGC logging, shader dumps, and RenderDoc are not required.
