@@ -181,6 +181,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         RenderHostLimits IRenderHost.Limits => _renderHostLimits;
 
+        bool IRenderHost.SupportsNativeRectangles => _supportsFillRectangle;
+
         IImageFormatSupport IRenderHost.FormatSupport => _deviceInfo;
 
         public bool IsRecording
