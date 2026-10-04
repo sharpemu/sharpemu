@@ -4649,23 +4649,27 @@ public static partial class Gen5SpirvTranslator
                 whenTrue,
                 whenFalse);
 
+        // The four bytes at a byte address span at most two words, so one funnel shift of those
+        // two words is the whole value. Reading each byte from its own bounds-checked word load
+        // (four loads, four range tests and a byte assembly) costs twice as much for the same
+        // result: a word outside the buffer reads zero either way, so the bytes it would have
+        // contributed stay zero, and the formatted-load fallback does this per component.
         private uint LoadUnalignedBufferWord(int bindingIndex, uint byteAddress)
         {
-            var result = UInt(0);
-            for (uint index = 0; index < 4; index++)
-            {
-                var address = index == 0
-                    ? byteAddress
-                    : IAdd(byteAddress, UInt(index));
-                var dwordAddress = ShiftRightLogical(address, UInt(2));
-                var bitOffset = ShiftLeftLogical(BitwiseAnd(address, UInt(3)), UInt(3));
-                var value = BitwiseAnd(
-                    ShiftRightLogical(LoadBufferWord(bindingIndex, dwordAddress), bitOffset),
-                    UInt(0xFF));
-                result = BitwiseOr(result, ShiftLeftLogical(value, UInt(index * 8)));
-            }
-
-            return result;
+            var dwordAddress = ShiftRightLogical(byteAddress, UInt(2));
+            var bitOffset = ShiftLeftLogical(BitwiseAnd(byteAddress, UInt(3)), UInt(3));
+            var low = LoadBufferWord(bindingIndex, dwordAddress);
+            var high = LoadBufferWord(bindingIndex, IAdd(dwordAddress, UInt(1)));
+            // A shift by the word width is undefined, so the aligned case keeps the low word.
+            var spanning = BitwiseOr(
+                ShiftRightLogical(low, bitOffset),
+                ShiftLeftLogical(high, _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(32), bitOffset)));
+            return _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                IsNotZero(bitOffset),
+                spanning,
+                low);
         }
 
         private uint LoadSubdwordBufferValue(
