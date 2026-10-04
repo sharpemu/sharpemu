@@ -73,4 +73,54 @@ public sealed class ScalarBitReplicationDeviceTests(HeadlessVulkanFixture fixtur
         Assert.Equal(input & 1u, BinaryPrimitives.ReadUInt32LittleEndian(runner.ReadBack(output, 8, 4)));
         harness.AssertNoValidationMessages();
     }
+
+    public static IEnumerable<object[]> QuadMaskInputs()
+    {
+        foreach (uint waveSize in new uint[] { 32, 64 })
+        foreach (uint destination in new uint[] { 20, 106 })
+        {
+            yield return [0UL, destination, waveSize];
+            yield return [ulong.MaxValue, destination, waveSize];
+            for (var bit = 0; bit < 64; bit++) yield return [1UL << bit, destination, waveSize];
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(QuadMaskInputs))]
+    public void QuadMaskReducesBothHalvesAndSetsScc(ulong input, uint destination, uint waveSize)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan)) return;
+        var (plan, resources, layout) = Prepare(Program([
+            MoveScalar(0, destination, (uint)input),
+            MoveScalar(4, destination + 1, (uint)(input >> 32)),
+            Sopc(8, "SCmpEqU32", Operand(0u), Operand(input == 0 ? 0u : 1u)),
+            Sop1(12, "SQuadmaskB64", destination, Gen5Operand.Scalar(destination)),
+            MoveVectorFromScalar(16, 2, destination),
+            MoveVectorFromScalar(20, 3, destination + 1),
+            Sop2(24, "SCselectB32", 22, Operand(1u), Operand(0u)),
+            MoveVectorFromScalar(28, 4, 22),
+            BufferAccess(32, "BufferStoreDwordx2", 4, 0, 2, 2),
+            BufferAccess(40, "BufferStoreDword", 4, 8, 1, 4),
+            EndProgram(48),
+        ]));
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = 1, ThreadCountX = 1, WaveSize = waveSize,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var output = runner.CreateBuffer(256);
+        var registers = new uint[256];
+        registers[6] = 256;
+        harness.Run(() => runner.Dispatch(registers,
+            new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [output] }, 1));
+        ulong expected = 0;
+        for (var quad = 0; quad < 16; quad++)
+            if (((input >> (quad * 4)) & 15) != 0) expected |= 1UL << quad;
+        Assert.Equal(expected, BinaryPrimitives.ReadUInt64LittleEndian(runner.ReadBack(output, 0, 8)));
+        Assert.Equal(input == 0 ? 0u : 1u, BinaryPrimitives.ReadUInt32LittleEndian(runner.ReadBack(output, 8, 4)));
+        harness.AssertNoValidationMessages();
+    }
 }
