@@ -236,39 +236,58 @@ public sealed partial class ResourceTracker
         return new DescriptorSource { Dwords = dwords };
     }
 
-    private uint PossibleBits(ScalarValue value)
+    private uint PossibleBits(ScalarValue value, int depth = 0)
     {
+        // Unresolved operation cycles and deep graphs keep an unknown bound.
+        if (depth >= 128)
+        {
+            return uint.MaxValue;
+        }
+
         if (value.Kind == ScalarValueKind.Phi)
         {
             var invariant = _graph.ResolveInvariantPhi(value);
-            return invariant is null ? uint.MaxValue : PossibleBits(invariant);
+            return invariant is null ? uint.MaxValue : PossibleBits(invariant, depth + 1);
         }
+
         if (value.IsConstant)
         {
             return value.Type == ScalarValueType.U32 ? value.ConstantU32 : uint.MaxValue;
         }
 
+        if (value.Kind == ScalarValueKind.Select)
+        {
+            return PossibleBits(value.Operands[1], depth + 1) | PossibleBits(value.Operands[2], depth + 1);
+        }
+
         if (value.Kind != ScalarValueKind.Operation)
         {
-            if (value.Kind == ScalarValueKind.Select)
-                return PossibleBits(value.Operands[1]) | PossibleBits(value.Operands[2]);
             return uint.MaxValue;
         }
 
         return value.Operation switch
         {
-            ScalarOperation.And32 => PossibleBits(value.Operands[0]) & PossibleBits(value.Operands[1]),
-            ScalarOperation.Or32 => PossibleBits(value.Operands[0]) | PossibleBits(value.Operands[1]),
+            ScalarOperation.And32 => PossibleBits(value.Operands[0], depth + 1) & PossibleBits(value.Operands[1], depth + 1),
+            ScalarOperation.Or32 => PossibleBits(value.Operands[0], depth + 1) | PossibleBits(value.Operands[1], depth + 1),
             ScalarOperation.ShiftLeft32 when value.Operands[1].IsConstant =>
-                PossibleBits(value.Operands[0]) << (int)(value.Operands[1].ConstantU32 & 31),
+                PossibleBits(value.Operands[0], depth + 1) << (int)(value.Operands[1].ConstantU32 & 31),
             _ => uint.MaxValue,
         };
     }
 
     private ScalarValue CanonicalizeSampleAdjustDword3(ScalarValue value)
     {
-        for (;;)
+        var original = value;
+        for (var depth = 0; depth < 128; depth++)
         {
+            if (value.Kind == ScalarValueKind.Phi)
+            {
+                var invariant = _graph.ResolveInvariantPhi(value);
+                if (invariant is null)
+                    return value;
+                value = invariant;
+            }
+
             if (value.Kind != ScalarValueKind.Operation || value.Operation != ScalarOperation.Or32)
             {
                 return value;
@@ -296,6 +315,8 @@ public sealed partial class ResourceTracker
                 return value;
             }
         }
+        // Keep unresolved operation cycles and deep graphs unchanged.
+        return original;
     }
 
     private bool ValidateSource(DescriptorSource source, out uint badDword) => ValidateSource(source, out badDword, out _);
