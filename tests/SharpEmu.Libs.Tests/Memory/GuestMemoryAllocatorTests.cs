@@ -203,18 +203,33 @@ public sealed class GuestMemoryAllocatorTests
         Assert.Equal([alignedAddress + 0x1000], host.FreedAddresses);
     }
 
-    [Fact]
-    public void AddressSearchSkipsLargeHostView()
+    [Theory]
+    [InlineData(HostRegionState.Committed)]
+    [InlineData(HostRegionState.Reserved)]
+    public void AddressSearchSkipsLargeHostView(HostRegionState state)
     {
         if (OperatingSystem.IsMacOS())
             return;
 
         const ulong viewStart = 0x1_0000_0000;
         const ulong viewSize = 0x4_0000_0000;
-        using var memory = new PhysicalVirtualMemory(new FakeHostMemory(viewStart, viewSize));
+        using var memory = new PhysicalVirtualMemory(new FakeHostMemory(viewStart, viewSize, state));
 
         Assert.True(memory.TryAllocateAtOrAbove(viewStart, 0x1000, false, 0x1000, out var address));
         Assert.Equal(viewStart + viewSize, address);
+    }
+
+    [Fact]
+    public void AddressSearchUsesOwnedReservedTail()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        const ulong start = 0x0000008001600000;
+        using var memory = new PhysicalVirtualMemory(new GranularityAwareHostMemory());
+        Assert.True(memory.TryAllocateAtExact(start, 0x1000, false, out _));
+        Assert.True(memory.TryAllocateAtOrAbove(start, 0x2000, false, 0x1000, out var address));
+        Assert.Equal(start + 0x1000, address);
     }
 
     [Fact]
@@ -457,7 +472,8 @@ public sealed class GuestMemoryAllocatorTests
         public void Dispose() { }
     }
 
-    private sealed class FakeHostMemory(ulong occupiedStart = 0, ulong occupiedSize = 0) : IHostMemory
+    private sealed class FakeHostMemory(ulong occupiedStart = 0, ulong occupiedSize = 0,
+        HostRegionState occupiedState = HostRegionState.Committed) : IHostMemory
     {
         public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
             occupiedSize != 0 && desiredAddress >= occupiedStart && desiredAddress - occupiedStart < occupiedSize
@@ -487,7 +503,7 @@ public sealed class GuestMemoryAllocatorTests
             if (occupiedSize != 0 && address >= occupiedStart && address - occupiedStart < occupiedSize)
             {
                 info = new HostRegionInfo(occupiedStart, occupiedStart, occupiedSize,
-                    HostRegionState.Committed, 0x1000, HostPageProtection.ReadWrite, 4, 4);
+                    occupiedState, 0x1000, HostPageProtection.ReadWrite, 4, 4);
                 return true;
             }
             info = default;

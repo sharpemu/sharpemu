@@ -915,6 +915,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return false;
     }
 
+    private static int _allocationSearchTraceCount;
+
     public bool TryAllocateAtOrAbove(
         ulong desiredAddress,
         ulong size,
@@ -932,6 +934,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         var effectiveAlignment = Math.Max(PageSize, alignment == 0 ? PageSize : alignment);
         var requestedCursor = AlignUp(desiredAddress, effectiveAlignment);
         var cursor = GetAllocationSearchCursor(desiredAddress, requestedCursor, effectiveAlignment, executable);
+        var traceSearch = Environment.GetEnvironmentVariable("SHARPEMU_LOG_VMEM") == "1" &&
+            Interlocked.Increment(ref _allocationSearchTraceCount) <= 64;
+        var rejectedCandidates = 0;
+        if (traceSearch)
+            Console.Error.WriteLine($"[VMEM][ALLOC_SEARCH] start=0x{desiredAddress:X16} cursor=0x{cursor:X16} " +
+                $"size=0x{alignedSize:X} alignment=0x{effectiveAlignment:X} executable={executable}");
 
         // macOS needs alignment over-allocation; Linux uses exact-address search.
         if (OperatingSystem.IsMacOS())
@@ -977,13 +985,23 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
             if (TryAllocateAtExact(cursor, alignedSize, executable, out actualAddress))
             {
+                if (traceSearch)
+                    Console.Error.WriteLine($"[VMEM][ALLOC_SEARCH] result=allocated address=0x{actualAddress:X16} " +
+                        $"attempt={attempt} rejected={rejectedCandidates}");
                 UpdateAllocationSearchCursor(desiredAddress, effectiveAlignment, executable, actualAddress + alignedSize);
                 return true;
             }
 
             // Skip occupied host views after the ownership-aware allocation attempt fails.
-            if (_hostMemory.Query(cursor, out var hostRegion) &&
-                hostRegion.State == HostRegionState.Committed &&
+            var hostRegionKnown = _hostMemory.Query(cursor, out var hostRegion);
+            rejectedCandidates++;
+            if (traceSearch && (rejectedCandidates <= 4 || attempt == 0xffff))
+                Console.Error.WriteLine($"[VMEM][ALLOC_SEARCH] result=rejected candidate=0x{cursor:X16} attempt={attempt} " +
+                    $"host_known={hostRegionKnown} state={hostRegion.State} base=0x{hostRegion.BaseAddress:X16} " +
+                    $"size=0x{hostRegion.RegionSize:X} allocation_base=0x{hostRegion.AllocationBase:X16} protection=0x{hostRegion.RawProtection:X}");
+            if (hostRegionKnown &&
+                (hostRegion.State == HostRegionState.Committed ||
+                 (hostRegion.State == HostRegionState.Reserved && !OwnsAllocationReservation(hostRegion.AllocationBase))) &&
                 hostRegion.BaseAddress <= cursor &&
                 hostRegion.RegionSize <= ulong.MaxValue - hostRegion.BaseAddress)
             {
@@ -1000,7 +1018,26 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             cursor = AlignUp(cursor + effectiveAlignment, effectiveAlignment);
         }
 
+        if (traceSearch)
+            Console.Error.WriteLine($"[VMEM][ALLOC_SEARCH] result=exhausted start=0x{desiredAddress:X16} " +
+                $"cursor=0x{cursor:X16} rejected={rejectedCandidates}");
         return false;
+    }
+
+    private bool OwnsAllocationReservation(ulong allocationBase)
+    {
+        _gate.EnterReadLock();
+        try
+        {
+            lock (_fixedAllocationGate)
+            {
+                return _fixedGranuleReservationBases.Contains(allocationBase) || IsTrackedRegionBase(allocationBase);
+            }
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
     }
 
     private void ReleaseUntrackedAllocation(ulong address)
