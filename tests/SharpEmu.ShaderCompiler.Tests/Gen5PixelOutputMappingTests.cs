@@ -52,9 +52,9 @@ public sealed class Gen5PixelOutputMappingTests
             }
             var load = Assert.Single(instructions, instruction =>
                 instruction.Opcode == SpirvOp.Load && instruction.Operands[1] == packedValue);
-            var address = Assert.Single(instructions, instruction =>
-                instruction.Opcode == SpirvOp.AccessChain && instruction.Operands[1] == load.Operands[2]);
-            Assert.Equal((uint)(component >> 1), constants[address.Operands[^1]]);
+            var name = Assert.Single(instructions, instruction =>
+                instruction.Opcode == SpirvOp.Name && instruction.Operands[0] == load.Operands[2]);
+            Assert.Equal($"v{component >> 1}", DecodeString(name.Operands[1..]));
         }
         Assert.DoesNotContain(instructions, instruction => instruction.Opcode is SpirvOp.ConvertFToU or SpirvOp.ConvertFToS);
         Assert.DoesNotContain(instructions, instruction => instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] == 62);
