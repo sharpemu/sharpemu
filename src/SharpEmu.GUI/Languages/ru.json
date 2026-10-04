@@ -1,5 +1,6 @@
 ﻿{
   "_languageName": "Русский",
+  "Options.Env.SkipRt.Desc": "Skip compute shaders that use ray tracing. Off by default.\nThis can remove effects or cause incorrect graphics. Restart the game after a change.",
   "Options.Env.StrictCompute.Desc": "Останавливать при отказах шейдеров вычисления и отрисовки (по умолчанию).\nОтключите, чтобы пропускать эти операции. Возможны пропавшие изображения, ошибки и зависания. После изменения перезапустите игру.",
   "Options.Env.PerformanceProfile.Desc": "Записывать время выполнения операций и FPS со следующего запуска игры.\nЭто может снизить производительность.",
   "Options.Env.PerformanceFrameTrace.Desc": "Сохранять последние 4096 интервалов показа кадров и записывать их в журнал при завершении.\nТребуется профилирование производительности. Закройте игру обычным способом, чтобы сохранить трассировку.",

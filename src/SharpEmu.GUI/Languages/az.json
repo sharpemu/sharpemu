@@ -1,5 +1,6 @@
 {
   "_languageName": "Azərbaycanca",
+  "Options.Env.SkipRt.Desc": "Skip compute shaders that use ray tracing. Off by default.\nThis can remove effects or cause incorrect graphics. Restart the game after a change.",
 
   "Page.Library": "Kitabxana",
   "Page.Options": "Parametrlər",
