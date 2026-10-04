@@ -39,6 +39,18 @@ public static partial class Gen5ShaderTranslator
                 Volatile.Write(ref _programs, next);
             }
         }
+
+        public bool Remove(ulong entryAddress)
+        {
+            lock (_gate)
+            {
+                if (!_programs.ContainsKey(entryAddress)) return false;
+                var next = new Dictionary<ulong, FusedShaderParts>(_programs);
+                next.Remove(entryAddress);
+                Volatile.Write(ref _programs, next);
+                return true;
+            }
+        }
     }
 
     private sealed record FusedShaderParts(
@@ -82,6 +94,11 @@ public static partial class Gen5ShaderTranslator
             entryHeaderAddress,
             continuationAddress,
             continuationHeaderAddress));
+    }
+
+    public static bool UnregisterFusedProgram(CpuContext ctx, ulong entryAddress)
+    {
+        return GetFusedPrograms(ctx.Memory).Remove(entryAddress);
     }
 
     // The continuation registered for an entry address, when the guest joined two code objects.
