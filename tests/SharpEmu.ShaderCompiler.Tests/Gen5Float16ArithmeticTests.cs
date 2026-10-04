@@ -55,6 +55,20 @@ public sealed class Gen5Float16ArithmeticTests
     }
 
     [Fact]
+    public void ScalarQuadMaskDecodesAndCompilesBothBackends()
+    {
+        var program = Decode([0xBEEA2D6Au, SEndpgm]);
+        var instruction = program.Instructions[0];
+        Assert.Equal("SQuadmaskB64", instruction.Opcode);
+        Assert.Equal(2u, instruction.DestinationWidth);
+        Assert.Equal(106u, instruction.Destinations[0].Value);
+        Assert.Equal(106u, instruction.Sources[0].Value);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+        Assert.True(SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.TryCompileProgram(request, out _, out error), error);
+    }
+
+    [Fact]
     public void Float16FusedAddLiteralConsumesLiteralAndCompiles()
     {
         var program = Decode([0x700608F5u, 0xDEAD3800u, SEndpgm]);
