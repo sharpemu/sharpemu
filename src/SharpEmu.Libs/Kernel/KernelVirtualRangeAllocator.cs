@@ -9,6 +9,7 @@ namespace SharpEmu.Libs.Kernel;
 
 internal static class KernelVirtualRangeAllocator
 {
+    private static int _failureTraceCount;
     public static bool TryReserve(
         CpuContext ctx,
         ulong desiredAddress,
@@ -27,6 +28,7 @@ internal static class KernelVirtualRangeAllocator
             return false;
         }
 
+        var phase = "resolve";
         try
         {
             if (!TryResolveAddressSpace(ctx.Memory, out var addressSpace))
@@ -35,6 +37,7 @@ internal static class KernelVirtualRangeAllocator
                 return false;
             }
 
+            phase = "search";
             if (allowSearch &&
                 addressSpace.TryAllocateAtOrAbove(desiredAddress, length, executable, alignment, out var searchedAddress) &&
                 searchedAddress != 0)
@@ -48,6 +51,7 @@ internal static class KernelVirtualRangeAllocator
             // below is all-or-nothing and fails outright on partial overlap, leaving
             // the untouched pages unmapped for the guest to fault into. Fill the free
             // pages directly instead.
+            phase = "back-fixed-range";
             if (backPartialOverlap &&
                 addressSpace.TryBackFixedRange(desiredAddress, length, executable))
             {
@@ -55,6 +59,7 @@ internal static class KernelVirtualRangeAllocator
                 return true;
             }
 
+            phase = "allocate-at";
             var allocated = addressSpace.AllocateAt(desiredAddress, length, executable, allowAllocateAtAlternative);
             if (allocated == 0)
             {
@@ -65,12 +70,19 @@ internal static class KernelVirtualRangeAllocator
             mappedAddress = allocated;
             return true;
         }
-        catch
+        catch (Exception error)
         {
             // Expected when a fixed-address request cannot be satisfied on
             // this host; the caller falls back or reports the failure.
             Console.Error.WriteLine(
                 $"[LOADER][TRACE] {traceName}: no host mapping at 0x{desiredAddress:X16} len=0x{length:X}");
+            if (Environment.GetEnvironmentVariable("SHARPEMU_LOG_VMEM") == "1" &&
+                System.Threading.Interlocked.Increment(ref _failureTraceCount) <= 32)
+            {
+                Console.Error.WriteLine($"[VMEM][ALLOC_FAILURE] phase={phase} name={traceName} " +
+                    $"address=0x{desiredAddress:X16} size=0x{length:X} alignment=0x{alignment:X} " +
+                    $"search={allowSearch} alternative={allowAllocateAtAlternative} executable={executable} exception={error}");
+            }
             return false;
         }
     }
