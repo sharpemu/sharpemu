@@ -104,7 +104,19 @@ internal static unsafe partial class VulkanVideoPresenter
                 imageCount = Math.Min(imageCount, capabilities.MaxImageCount);
             }
 
+
             var compositeAlpha = ChooseCompositeAlpha(capabilities.SupportedCompositeAlpha);
+            var requestedImageUsage =
+    ImageUsageFlags.TransferDstBit |
+    ImageUsageFlags.TransferSrcBit |
+    ImageUsageFlags.ColorAttachmentBit;
+            var imageUsage = requestedImageUsage & capabilities.SupportedUsageFlags;
+            if (imageUsage != requestedImageUsage)
+            {
+                Console.Error.WriteLine(
+                    $"[VideoOut][WARN] Surface does not support all requested swapchain usage flags; " +
+                    $"requested={requestedImageUsage}, supported={capabilities.SupportedUsageFlags}, using={imageUsage}");
+            }
             var createInfo = new SwapchainCreateInfoKHR
             {
                 SType = StructureType.SwapchainCreateInfoKhr,
@@ -114,10 +126,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 ImageColorSpace = surfaceFormat.ColorSpace,
                 ImageExtent = _extent,
                 ImageArrayLayers = 1,
-                ImageUsage =
-                    ImageUsageFlags.TransferDstBit |
-                    ImageUsageFlags.TransferSrcBit |
-                    ImageUsageFlags.ColorAttachmentBit,
+                ImageUsage = imageUsage,
                 ImageSharingMode = SharingMode.Exclusive,
                 PreTransform = capabilities.CurrentTransform,
                 CompositeAlpha = compositeAlpha,
