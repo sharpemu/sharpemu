@@ -352,6 +352,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         var meshShaders = meshFeatures.MeshShader && vulkan13Features.ComputeFullSubgroups && dynamicRendering;
         var enabledFeatures = new PhysicalDeviceFeatures
         {
+            GeometryShader = baseFeatures.GeometryShader,
             SampleRateShading = baseFeatures.SampleRateShading,
             SamplerAnisotropy = baseFeatures.SamplerAnisotropy,
             ShaderStorageImageExtendedFormats = baseFeatures.ShaderStorageImageExtendedFormats,

@@ -79,7 +79,7 @@ internal sealed class PresenterUnderTest : IDisposable
         {
             "_batchResources", "_batchRetireBuffers", "_pendingGuestSubmissions",
             "_deferredGuestImageVersionDestroys",
-            "_pipelineEntries", "_shaderModules", "_shaderModuleSpirvBytes",
+            "_pipelineEntries", "_shaderModules", "_shaderModuleSpirvBytes", "_rectangleStageCode",
             "_preparedTextures", "_barriersAfterRendering", "_feedbackSnapshotPool",
         })
         {
