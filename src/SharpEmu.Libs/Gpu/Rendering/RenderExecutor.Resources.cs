@@ -251,7 +251,7 @@ public sealed partial class RenderExecutor
         var vertexBuffers = AcquireVertexBuffers(vertexInput);
         var indexBuffer = AcquireIndexBuffer(in indexSource);
         var indirectArguments = emission.IndirectArgumentsAddress != 0
-            ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, IndexedIndirectArgumentsSize, isWritten: false)
+            ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, emission.Indexed ? IndexedIndirectArgumentsSize : AutoIndirectArgumentsSize, isWritten: false)
             : default;
         DropUnwrittenColorTargets(context, ref state, pixelProgram);
         state.Rendering = AcquireAttachments(ref state);
@@ -314,7 +314,14 @@ public sealed partial class RenderExecutor
         {
             // Uploads and shader writes end with barriers to all commands, so the
             // indirect read sees them.
-            _host.DrawIndexedIndirect(indirectArguments);
+            if (emission.Indexed)
+            {
+                _host.DrawIndexedIndirect(indirectArguments);
+            }
+            else
+            {
+                _host.DrawIndirect(indirectArguments);
+            }
         }
         else
         {

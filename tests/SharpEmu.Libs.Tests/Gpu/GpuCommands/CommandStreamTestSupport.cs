@@ -180,6 +180,8 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public bool ResolvesIndirectDrawOnGpu { get; set; }
 
+    public bool ResolvesNonIndexedIndirectDrawOnGpu { get; set; }
+
     public void OnQueueReset(int queueId) => Calls.Add($"queue_reset {queueId}");
 
     public Exception Fatal(string message) => new CommandStreamFatalException(message);

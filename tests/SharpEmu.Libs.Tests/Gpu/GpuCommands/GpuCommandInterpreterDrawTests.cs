@@ -127,6 +127,24 @@ public sealed class GpuCommandInterpreterDrawTests
     }
 
     [Fact]
+    public void NonIndexedIndirectDraws_LeaveArgumentsOnTheGpuWhenTheHostCan()
+    {
+        var runner = new StreamRunner();
+        runner.Host.ResolvesNonIndexedIndirectDrawOnGpu = true;
+        runner.Host.WriteWords(Arguments, new uint[] { 9, 3, 1, 2 });
+
+        runner.Run(SetBase(Arguments, dispatch: false), StreamRunner.Packet(PacketOpcode.DrawIndirect, 0, 0, 0, 2));
+
+        var auto = Assert.Single(runner.Host.AutoDraws);
+        Assert.Equal((Arguments, DrawOffsetSource.IndirectArguments), (auto.IndirectArgumentsAddress, auto.OffsetSource));
+        Assert.DoesNotContain(runner.Host.GuestReads, address => address >= Arguments && address < Arguments + 16);
+
+        // A later draw that inherits the instance count reads it then.
+        runner.Run(StreamRunner.Packet(PacketOpcode.DrawIndexAuto, 5, 0));
+        Assert.Equal(3u, runner.Host.AutoDraws[1].InstanceCount);
+    }
+
+    [Fact]
     public void IndexedIndirectDraws_LeaveArgumentsOnTheGpuWhenTheHostCan()
     {
         var runner = new StreamRunner();

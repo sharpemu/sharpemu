@@ -493,6 +493,9 @@ internal static unsafe partial class VulkanVideoPresenter
         // SHARPEMU_CPU_INDIRECT_DRAW=1 reads the arguments back on the CPU as before.
         public bool ResolvesIndirectDrawOnGpu => !_cpuIndirectDraw;
 
+        // RenderExecutor records non-indexed indirect draws with vkCmdDrawIndirect.
+        public bool ResolvesNonIndexedIndirectDrawOnGpu => !_cpuIndirectDraw;
+
         private static readonly bool _cpuIndirectDraw = string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_CPU_INDIRECT_DRAW"), "1", StringComparison.Ordinal);
 

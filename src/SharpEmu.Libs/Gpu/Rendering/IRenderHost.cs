@@ -153,6 +153,10 @@ public interface IRenderHost
     void DrawIndexedIndirect(BufferBinding arguments) =>
         throw new NotSupportedException("The render host does not draw from indirect arguments.");
 
+    // One draw whose counts the GPU reads from the buffer (VkDrawIndirectCommand layout).
+    void DrawIndirect(BufferBinding arguments) =>
+        throw new NotSupportedException("The render host does not draw from indirect arguments.");
+
     void Dispatch(uint groupsX, uint groupsY, uint groupsZ);
 
     // Executes a dispatch from three uint32 group counts in guest memory when the backend can

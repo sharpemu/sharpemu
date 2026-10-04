@@ -38,7 +38,10 @@ public readonly record struct DrawAutoArguments(
     uint InstanceCount,
     uint FirstVertex,
     uint FirstInstance,
-    DrawOffsetSource OffsetSource);
+    DrawOffsetSource OffsetSource,
+    // Nonzero when the counts are still in guest memory at this address, laid out as
+    // (vertexCount, instanceCount, firstVertex, firstInstance); the other counts are then 1/0.
+    ulong IndirectArgumentsAddress = 0);
 
 public enum EndOfPipeWriteKind
 {
@@ -135,6 +138,9 @@ public interface ICommandStreamHost
     // True when an indexed indirect draw may be handed over with its arguments still in
     // guest memory (DrawIndexedArguments.IndirectArgumentsAddress).
     bool ResolvesIndirectDrawOnGpu => false;
+
+    // The host also draws non-indexed indirect draws from their arguments in guest memory.
+    bool ResolvesNonIndexedIndirectDrawOnGpu => false;
 
     // Called when a queue reset packet clears the processor.
     void OnQueueReset(int queueId);
