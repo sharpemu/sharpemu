@@ -475,6 +475,12 @@ internal static unsafe partial class VulkanVideoPresenter
             return false;
         }
 
+        ImageLayout? IRenderHost.DepthAttachmentLayout(in DepthAttachmentState depth)
+        {
+            var view = depth.Target.Target.Request.View;
+            return _imageCache.GetImage(depth.Image).UniformLayout(new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount));
+        }
+
         private BufferView NullStorageBuffer() => new(_bufferCache.GetBuffer(GuestBufferCache.NullBufferId).Handle, 0, NullStorageBufferBytes);
 
         // A storage buffer view on the cache buffer, aligned down with the adjustment carried in the memory offsets.

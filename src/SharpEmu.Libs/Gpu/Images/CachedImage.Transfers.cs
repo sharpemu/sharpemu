@@ -14,6 +14,14 @@ public sealed unsafe partial class CachedImage
 {
     private const AccessFlags WriteAccess = AccessFlags.TransferWriteBit | AccessFlags.ShaderWriteBit | AccessFlags.MemoryWriteBit;
     private const AccessFlags TransferAccess = AccessFlags.TransferReadBit | AccessFlags.TransferWriteBit;
+    private const AccessFlags AnyWriteAccess = WriteAccess | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit;
+
+    // Reads after reads in one layout need no barrier: the state keeps every reader, so the next
+    // writer still waits for all of them. (A sampled depth attachment followed by a draw that only
+    // tests depth would otherwise end the rendering scope.)
+    private static bool IsReadAfterRead(ImageAccessState state, ImageLayout layout, AccessFlags access) =>
+        state.Layout == layout && state.Layout != ImageLayout.Undefined && access != 0 && state.Access != 0 &&
+        (state.Access & AnyWriteAccess) == 0 && (access & AnyWriteAccess) == 0;
     private const AccessFlags MemoryAccess = AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit;
     private const ImageLayout ReadyLayout = ImageLayout.General;
     private const AccessFlags ReadyAccess = AccessFlags.ShaderReadBit | AccessFlags.TransferReadBit;
@@ -81,7 +89,11 @@ public sealed unsafe partial class CachedImage
 
                     var state = states[index];
                     var repeatedWrite = (state.Access & WriteAccess) != 0;
-                    if (state.Layout != layout || state.Access != access || repeatedWrite)
+                    if (IsReadAfterRead(state, layout, access))
+                    {
+                        states[index] = new ImageAccessState(state.Stage | stage, state.Access | access, layout);
+                    }
+                    else if (state.Layout != layout || state.Access != access || repeatedWrite)
                     {
                         barriers.Add(MakeBarrier(state, layout, access, level, 1, layer, 1));
                         sourceStages |= state.Stage;
@@ -104,12 +116,51 @@ public sealed unsafe partial class CachedImage
                 return (barriers, sourceStages);
             }
 
+            if (IsReadAfterRead(state, layout, access))
+            {
+                Backing.State = new ImageAccessState(state.Stage | stage, state.Access | access, layout);
+                return (barriers, sourceStages);
+            }
+
             barriers.Add(MakeBarrier(state, layout, access, 0, Vk.RemainingMipLevels, 0, Vk.RemainingArrayLayers));
             sourceStages |= state.Stage;
         }
 
         Backing.State = new ImageAccessState(stage, access, layout);
         return (barriers, sourceStages);
+    }
+
+    // The layout every subresource in the range is in, or null when they differ.
+    public ImageLayout? UniformLayout(SubresourceRange range)
+    {
+        var states = Backing.SubresourceStates;
+        if (states == null)
+        {
+            return Backing.State.Layout;
+        }
+
+        var layers = Description.Resources.Layers;
+        if (Description.IsVolume)
+        {
+            range = range with { BaseLayer = 0, LayerCount = 1 };
+        }
+
+        ImageLayout? layout = null;
+        for (var level = range.BaseLevel; level < range.BaseLevel + range.LevelCount; level++)
+        {
+            for (var layer = range.BaseLayer; layer < range.BaseLayer + range.LayerCount; layer++)
+            {
+                var index = (int)(level * layers + layer);
+                if (index >= states.Count || (layout is { } known && known != states[index].Layout))
+                {
+                    return null;
+                }
+
+                layout = states[index].Layout;
+            }
+        }
+
+        return layout;
     }
 
     public void Transition(ImageLayout layout, AccessFlags access, SubresourceRange? range, CommandBuffer command)
