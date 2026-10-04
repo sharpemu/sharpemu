@@ -223,9 +223,9 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         // A compute shader indexes a storage image in guest pixels and its dispatch grid does
         // not shrink with the host resolution, so a scaled image would be written with holes
         // (upscale) or redundantly (downscale). Such memory drops back to guest resolution.
-        if (result.IsValid && request.Role == ImageRole.StorageImage && _slots[result].IsScaled)
+        if (result.IsValid && request.ShaderWrite && _slots[result].IsScaled)
         {
-            result = ReplaceScaledForStorage(result);
+            result = ReplaceScaled(result);
         }
 
         if (!result.IsValid)
@@ -628,7 +628,18 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         return false;
     }
 
-    private ResourceSlotIdentifier ReplaceScaledForStorage(ResourceSlotIdentifier cachedImageIdentifier)
+    // Drops one image back to guest resolution for good; later images over the same guest
+    // memory are created unscaled too, so the decision cannot oscillate.
+    public void DemoteRenderScale(ResourceSlotIdentifier imageIdentifier)
+    {
+        using var held = _lock.Hold();
+        if (_slots[imageIdentifier].IsScaled)
+        {
+            ReplaceScaled(imageIdentifier);
+        }
+    }
+
+    private ResourceSlotIdentifier ReplaceScaled(ResourceSlotIdentifier cachedImageIdentifier)
     {
         var cached = _slots[cachedImageIdentifier];
         _unscaledRanges.Add(cached.Description.Data);

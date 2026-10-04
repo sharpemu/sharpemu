@@ -99,6 +99,13 @@ public interface IRenderHost
 
     void BindRenderTarget(ResourceSlotIdentifier image);
 
+    // The attachments of one pass must share a host resolution; a disagreement drops the
+    // scaled image back to guest resolution for good and the draw resolves its targets again.
+    void DemoteRenderScale(ResourceSlotIdentifier image);
+
+    // The host resolution multiplier of one cached image; one when it is at guest resolution.
+    float GetRenderScale(ResourceSlotIdentifier image);
+
     void ResetBindings();
 
     // Finds the image again when it changed, makes the view, sets the layout and resolves a metadata clear.

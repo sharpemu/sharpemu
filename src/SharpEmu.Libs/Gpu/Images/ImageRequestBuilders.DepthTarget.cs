@@ -26,15 +26,7 @@ public readonly record struct DepthTargetResolution(
     bool DepthClearEnabled,
     bool StencilClearEnabled,
     bool DepthWriteDisabled,
-    bool StencilWriteDisabled)
-{
-    // The host resolution of the attachment; render area, viewport and scissor follow it.
-    public float RenderScale => RenderScalePolicy.ScaleFor(Request.Description);
-
-    public uint HostWidth => RenderScalePolicy.ScaleLength(Width, RenderScale);
-
-    public uint HostHeight => RenderScalePolicy.ScaleLength(Height, RenderScale);
-}
+    bool StencilWriteDisabled);
 
 public static partial class ImageRequestBuilders
 {

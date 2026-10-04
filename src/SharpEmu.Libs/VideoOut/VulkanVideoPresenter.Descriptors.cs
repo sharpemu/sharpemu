@@ -122,6 +122,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var resolution = ImageRequestBuilders.Texture(words, ShapeOf(image));
             _ = BeginBatchedGuestCommands();
             var request = resolution.Request;
+            request.ShaderWrite = storage && (image.Written || image.Atomic);
             var imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
             resolution = resolution with { Request = request };
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);

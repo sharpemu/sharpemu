@@ -35,10 +35,10 @@ public sealed partial class RenderExecutor
     {
         if (state.ColorCount > 0 && state.Colors[0].Image.IsValid)
         {
-            return state.Colors[0].Resolution.RenderScale;
+            return state.Colors[0].RenderScale;
         }
 
-        return state.Depth.Image.IsValid ? state.Depth.Target.Target.RenderScale : 1f;
+        return state.Depth.Image.IsValid ? state.Depth.RenderScale : 1f;
     }
 
     // The dynamic state of a draw from the context bank and the resolved targets.

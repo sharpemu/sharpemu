@@ -12,6 +12,9 @@ public sealed class RenderScalePolicyTests
 {
     private const float Half = 0.5f;
 
+    // Without a device nothing can be resized; these tests ask about the geometry rules.
+    static RenderScalePolicyTests() => RenderScalePolicy.ConfigureFormatSupport(_ => true);
+
     private static ImageDescription ColorTarget(uint width = 1920, uint height = 1080)
     {
         var description = ImageDescription.Create();
@@ -100,13 +103,25 @@ public sealed class RenderScalePolicyTests
         compressed.GuestFormat = GuestPixelFormat.Bc7UNorm;
         Assert.Equal(1.0f, RenderScalePolicy.ScaleFor(compressed, Half));
 
-        var metadata = ColorTarget();
-        metadata.Metadata = new MetadataDescription { Kind = MetadataKind.Dcc, Range = new GuestSpan(0x40_0000, 0x1000) };
-        Assert.Equal(1.0f, RenderScalePolicy.ScaleFor(metadata, Half));
+        var htile = ColorTarget();
+        htile.PixelFormat = Format.D32Sfloat;
+        htile.GuestFormat = GuestPixelFormat.Bits32Float;
+        htile.TileMode = GuestTileMode.Depth;
+        htile.Metadata = new MetadataDescription { Kind = MetadataKind.Htile, Range = new GuestSpan(0x40_0000, 0x1000) };
+        Assert.Equal(1.0f, RenderScalePolicy.ScaleFor(htile, Half));
 
         var stencil = ColorTarget();
         stencil.Stencil = new GuestSpan(0x80_0000, 0x1000);
         Assert.Equal(1.0f, RenderScalePolicy.ScaleFor(stencil, Half));
+    }
+
+    // DCC describes guest bytes the host image never stores, so the backing can be any size.
+    [Fact]
+    public void ColourCompressionMetadataStillScales()
+    {
+        var description = ColorTarget();
+        description.Metadata = new MetadataDescription { Kind = MetadataKind.Dcc, Range = new GuestSpan(0x40_0000, 0x1000) };
+        Assert.Equal(Half, RenderScalePolicy.ScaleFor(description, Half));
     }
 
     [Fact]

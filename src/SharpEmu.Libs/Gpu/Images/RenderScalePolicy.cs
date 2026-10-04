@@ -114,7 +114,9 @@ public static class RenderScalePolicy
             return false;
         }
 
-        if (description.IsBlock || description.HasStencil || description.HasMetadata)
+        // DCC only describes guest bytes the host never stores, so a scaled backing keeps it
+        // meaningful. HTile encodes guest depth blocks the renderer reads back as clear state.
+        if (description.IsBlock || description.HasStencil || description.Metadata.Kind == MetadataKind.Htile)
         {
             return false;
         }
@@ -138,6 +140,7 @@ public static class RenderScalePolicy
             return false;
         }
 
-        return Volatile.Read(ref _formatSupport) is not { } supported || supported(description.PixelFormat);
+        // Only a backend that installed the predicate (the Vulkan device) can resize an image.
+        return Volatile.Read(ref _formatSupport) is { } supported && supported(description.PixelFormat);
     }
 }

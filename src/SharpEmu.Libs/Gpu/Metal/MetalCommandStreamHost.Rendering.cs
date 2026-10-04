@@ -280,6 +280,18 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         _ = image;
     }
 
+    // The Metal backend never scales an image, so its attachments always agree.
+    void IRenderHost.DemoteRenderScale(ResourceSlotIdentifier image)
+    {
+        _ = image;
+    }
+
+    float IRenderHost.GetRenderScale(ResourceSlotIdentifier image)
+    {
+        _ = image;
+        return 1f;
+    }
+
     // The records of one draw or dispatch live until the executor resets; the submitted copy owns its bytes.
     void IRenderHost.ResetBindings()
     {

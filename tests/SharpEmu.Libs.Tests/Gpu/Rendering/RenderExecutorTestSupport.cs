@@ -177,6 +177,10 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void BindRenderTarget(ResourceSlotIdentifier image) => Calls.Add($"bind_target {image.Index}");
 
+    public void DemoteRenderScale(ResourceSlotIdentifier image) => Calls.Add($"demote_scale {image.Index}");
+
+    public float GetRenderScale(ResourceSlotIdentifier image) => 1f;
+
     public void ResetBindings() => Calls.Add("reset_bindings");
 
     public ColorAttachmentAcquisition AcquireColorAttachment(in ColorTargetState target)
