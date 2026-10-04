@@ -39,6 +39,7 @@ internal static class IndexedDrawTrace
     }
 
     internal static bool Enabled => _selectedCount != 0;
+    internal static uint SelectedCount => _selectedCount;
 
     internal static Sample? Capture(uint count, uint indexType, ulong address, ReadGuestBytes read)
     {

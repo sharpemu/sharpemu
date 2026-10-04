@@ -464,6 +464,8 @@ public sealed partial class GpuCommandInterpreter
                 var aggregate = _selectedOcclusionCounter == 0 && _host.TryReadOcclusionCounter(QueueId, out hostCount);
                 var count = aggregate ? (hostCount - _occlusionCounterStart) & (readyBit - 1) : SyntheticOcclusionCounter;
                 var result = readyBit | count;
+                if (VisibilityResultTrace.Enabled)
+                    VisibilityResultTrace.Occlusion($"dump queue={QueueId} submit={SubmitId} address=0x{eventAddress:X16} counter={_selectedOcclusionCounter} aggregate={aggregate} host={hostCount} resetBase={_occlusionCounterStart} value={count} mask=0x{_occlusionDumpInstanceMask:X6} stride={_occlusionDumpStrideBytes}");
                 for (var depthBlock = 0u; depthBlock < 24u; depthBlock++)
                 {
                     if ((_occlusionDumpInstanceMask & (1u << (int)depthBlock)) != 0)

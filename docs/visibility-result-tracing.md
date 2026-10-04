@@ -8,6 +8,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
 Set `SHARPEMU_TRACE_VISIBILITY=1` before launch. The default is off.
 Full AGC logging, shader dumps, and RenderDoc are not required.
 
+`Visibility occlusion` connects native query begin, end, and completion records
+with a query ID. Begin records include the queue and depth-count control word.
+End records count recorded draw commands, including indirect and mesh commands.
+Selected draws count direct indexed commands that match `SHARPEMU_TRACE_DRAW_INDEX_COUNT`.
+Indirect argument values are not read for this trace. Completion records include
+sample counts and the cumulative queue total. Dump records include the guest
+destination, counter, reset base, host total, output value, mask, and stride.
+These records share the 8,192-detail limit. A truncated trace can have incomplete
+query groups. Recorded commands do not prove that samples passed the depth test.
+
 ```powershell
 $env:SHARPEMU_TRACE_VISIBILITY = '1'
 $env:SHARPEMU_TRACE_DRAW_INDEX_COUNT = '360'

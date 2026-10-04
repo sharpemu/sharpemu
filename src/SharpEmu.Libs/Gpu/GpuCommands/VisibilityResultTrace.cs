@@ -147,6 +147,12 @@ internal static class VisibilityResultTrace
         }
     }
 
+    internal static void Occlusion(string message)
+    {
+        if (!Enabled) return;
+        lock (_gate) Detail($"occlusion {message}");
+    }
+
     private static void Detail(string message)
     {
         if (++_detailCount <= 8192) Console.Error.WriteLine($"[GPU][TRACE] Visibility {message}");
