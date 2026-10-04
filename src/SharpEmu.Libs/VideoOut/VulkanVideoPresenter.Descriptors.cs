@@ -166,7 +166,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _ = BeginBatchedGuestCommands();
             var originalResolution = memo.Matches(words, _imageCache.LookupGeneration)
                 ? memo.OriginalResolution
-                : ImageRequestBuilders.Texture(words, ShapeOf(image));
+                : ImageRequestBuilders.Texture(words, ShapeOf(image), program.Hash, index);
             _imageCache.SynchronizeColorMetadata(originalResolution.Request);
             _ = BeginBatchedGuestCommands();
             TextureRequestResolution resolution;
