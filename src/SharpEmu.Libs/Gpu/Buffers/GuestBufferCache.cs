@@ -354,6 +354,27 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
         // Registered buffers are ordered and disjoint: walk only the ones the write overlaps.
         var end = guestAddress + (ulong)data.Length;
+        if (DeferHostWrites)
+        {
+            // When no GPU-written byte shares the written pages, the pages can simply turn
+            // CPU-dirty: every later GPU reader synchronizes CPU-dirty pages first (bound buffers
+            // on obtain, device-address programs at the next visibility point), so the bytes
+            // arrive in command order without a staging copy that ends the rendering scope.
+            var firstPage = guestAddress & ~(TrackerLayout.PageBytes - 1);
+            var pagesEnd = (end + TrackerLayout.PageBytes - 1) & ~(TrackerLayout.PageBytes - 1);
+            if (!_gpuModifiedRanges.Overlaps(firstPage, pagesEnd - firstPage) &&
+                !_tracker.HasGpuDirtyPages(firstPage, pagesEnd - firstPage))
+            {
+                if (IsRegionRegistered(guestAddress, (ulong)data.Length))
+                {
+                    _tracker.MarkCpuDirtyPages(guestAddress, (ulong)data.Length);
+                    NoteMemoryVisibilityPoint();
+                }
+
+                return;
+            }
+        }
+
         for (var index = _registry.FindFirstOverlappingIndex(guestAddress);
              index < _registry.RegisteredCount && _registry.GetRegisteredAddress(index) < end;
              index++)
@@ -372,6 +393,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             TouchBuffer(bufferIdentifier);
         }
     }
+
+    private static readonly bool DeferHostWrites =
+        Environment.GetEnvironmentVariable("SHARPEMU_DEFER_HOST_WRITES") != "0";
 
     public void FillBuffer(ulong guestAddress, ulong size, uint value, bool isGds)
     {
