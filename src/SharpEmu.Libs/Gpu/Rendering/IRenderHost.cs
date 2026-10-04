@@ -79,6 +79,14 @@ public interface IResourcePreparation : IDisposable
 // Everything the executor needs from the renderer, the caches and the pipeline objects.
 public interface IRenderHost
 {
+    int BeginImageSnapshot(IPreparedBindings? pixelBindings) => 0;
+
+    int BeginComputeImageSnapshot(IPreparedBindings bindings) => 0;
+
+    void EndComputeImageSnapshot(int sequence, IPreparedBindings bindings) { }
+
+    void EndImageSnapshot(int sequence, ReadOnlySpan<ColorTargetState> targets) { }
+
     // Records a draw's color-target base for the image-clear trace; see docs/image-clear-tracing.md.
     void TraceDrawTarget(string disposition, ulong address, ulong pixelShaderAddress, ulong vertexShaderAddress) { }
 

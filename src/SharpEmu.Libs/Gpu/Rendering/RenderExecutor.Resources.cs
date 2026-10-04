@@ -364,6 +364,7 @@ public sealed partial class RenderExecutor
             _host.PrepareMemoryWritingDraw();
         }
 
+        var imageSnapshot = _host.BeginImageSnapshot(pixelBindings);
         _host.BeginRendering(in state.Rendering);
         if (MeshDrawTrace.Active) MeshDrawTrace.Write("rendering", $"width={state.Rendering.Width} height={state.Rendering.Height} layers={state.Rendering.Layers} colors={state.ColorCount}");
         _host.BindPipeline(PipelineBindPoint.Graphics, in pipeline);
@@ -411,6 +412,7 @@ public sealed partial class RenderExecutor
         {
             EmitDraw(banks.UserConfig, vertexInput, in draw, in emission);
         }
+        _host.EndImageSnapshot(imageSnapshot, BoundColors(ref state));
         IndexedDrawTrace.Write(indexedTrace, "emitted", submitId, packetAddress);
         if (setAutoDebug)
         {

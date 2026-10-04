@@ -195,10 +195,12 @@ public sealed partial class RenderExecutor
                 physicalGroups[axisOrder[logical]] = logicalGroups[logical];
             }
 
+            var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
             if (indirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(indirectArgumentsAddress))
             {
                 _host.Dispatch(physicalGroups[0], physicalGroups[1], physicalGroups[2]);
             }
+            _host.EndComputeImageSnapshot(imageSnapshot, bindings);
             _host.ShaderAccessBarrier();
         }
 

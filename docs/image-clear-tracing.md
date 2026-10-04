@@ -30,6 +30,30 @@ words in the fatal message. No trace switch or address filter is required.
 The renderer still rejects the invalid view. Descriptor history from normal
 shutdown is not available when the process stops through `FailFast`.
 
+## Selected draw snapshots
+
+Set `SHARPEMU_SNAPSHOT_PIXEL_HASH` to a hexadecimal pixel shader hash before launch.
+The Vulkan renderer saves inputs before, and color outputs after, the first two
+matching draws. The default is off. RenderDoc and image-clear tracing are not required.
+Files are under `user/logs/image-snapshots/<session>` beside the executable.
+Each tightly packed `.bin` file has a `.json` manifest with format, extent,
+guest address, byte size, and scheduler tick. Input numbers are shader image indices.
+
+The diagnostic supports single-sample, single-layer, single-mip cached images in
+R16 float, R32 float, RGBA16 float, and RGBA32 float formats, up to 128 MiB each.
+Unsupported images produce a warning instead of a partial pixel dump. Host movie
+images and images with separate subresource states are not supported.
+Copies use private download buffers and are saved after GPU completion. They do
+not publish data to guest memory. Copies split rendering scopes and affect timing;
+do not use this mode for performance comparisons. Close normally to save pending copies.
+
+`SHARPEMU_SNAPSHOT_COMPUTE_HASH` selects the first two matching Vulkan compute
+dispatches. It saves every bound image before dispatch and storage images after
+dispatch. It uses the same limits and output directory as draw snapshots.
+Filenames include `compute`, the dispatch sequence, phase, and shader image index.
+The pixel and compute selectors have separate two-operation limits. Both are off
+by default. Buffer contents and dispatch arguments are not included in image dumps.
+
 ## Image history
 
 Set `SHARPEMU_TRACE_IMAGE_CLEARS=1` before launch to inspect Vulkan color-target and volume clear decisions.
