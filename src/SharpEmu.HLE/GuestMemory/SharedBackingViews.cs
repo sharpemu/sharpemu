@@ -700,7 +700,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
     {
         if (Volatile.Read(ref _copyAccessBlocked) != 0) return false;
         Interlocked.Increment(ref _activeAccesses);
-        if (Volatile.Read(ref _copyAccessBlocked) == 0 && !Volatile.Read(ref _disposed) && _backing != null)
+        if (Volatile.Read(ref _copyAccessBlocked) == 0 && !_disposed && _backing != null)
         {
             return true;
         }
