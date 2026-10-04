@@ -9,6 +9,33 @@ namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 
 public sealed class MeshDrawPlannerTests
 {
+    [Theory]
+    [InlineData(32u)]
+    [InlineData(64u)]
+    public void FusedPointInputKeepsTriangleOutput(uint waveSize)
+    {
+        var banks = Banks();
+        banks.Context.ShaderStages = 0x20u | (waveSize == 32 ? 1u << 22 : 0);
+        banks.Context.ShaderInterface.MaxOutputPerSubgroup = 216;
+        banks.Context.ShaderInterface.GeometryMaxVerticesOut = 72;
+        banks.UserConfig.PrimitiveType = 1;
+        banks.UserConfig.GeometryEngineControl.PrimitiveGroupSize = 3;
+        banks.UserConfig.GeometryEngineControl.VertexGroupSize = 24;
+        var plan = Assert.IsType<MeshDrawPlan>(Create(banks, Limits with { MaxInvocations = 256, MaxWorkGroupSizeX = 256 }));
+        Assert.True(plan.Geometry.InputPointList);
+        Assert.False(plan.Geometry.InputTriangleStrip);
+        Assert.Equal(3u, plan.Geometry.InputPrimitiveCountPerWorkgroup);
+        Assert.Equal(3u, plan.Geometry.InputVertexCountPerWorkgroup);
+        Assert.Equal(216u, plan.Geometry.OutputVertexCapacity);
+        Assert.Equal(210u, plan.Geometry.OutputPrimitiveCapacity);
+        var pointKey = new List<uint>();
+        var triangleKey = new List<uint>();
+        var configuration = new SharpEmu.Libs.Gpu.Rendering.MeshDrawConfiguration { Geometry = plan.Geometry };
+        StageStaticKey.Build(configuration, 0, pointKey);
+        StageStaticKey.Build(configuration with { Geometry = plan.Geometry with { InputPointList = false } }, 0, triangleKey);
+        Assert.False(pointKey.SequenceEqual(triangleKey));
+    }
+
     private static readonly MeshShaderLimits Limits = new(128, 256, 256, 32768,
         65535, 65535, 65535, 128, 32768, 32768, 32, 32, 128);
 
