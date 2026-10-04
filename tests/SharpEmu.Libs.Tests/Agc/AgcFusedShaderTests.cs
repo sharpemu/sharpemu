@@ -455,6 +455,39 @@ public sealed class AgcFusedShaderTests
             program.Instructions.Select(static instruction => instruction.Opcode));
     }
 
+    [Fact]
+    public void CreateShader_RediscoversFusedPairWhenAddressesAreReused()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1_0000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var header = BaseAddress + 0x100;
+        var code = BaseAddress + 0x1000;
+        var backHeader = code + 0x80;
+        WriteUInt32(memory, header, 0x34333231);
+        WriteUInt32(memory, header + 4, 0x18);
+        WriteUInt32(memory, header + 0x44, 8);
+        WriteByte(memory, header + ShaderTypeOffset, GsFront);
+        WriteWords(memory, code, 0xBF800000, 0xBE802000);
+        WriteUInt32(memory, backHeader, 0x34333231);
+        WriteUInt32(memory, backHeader + 4, 0x18);
+        WriteUInt32(memory, backHeader + 0x44, 8);
+        WriteByte(memory, backHeader + ShaderTypeOffset, GsBack);
+
+        foreach (var continuation in new[] { code + 0x200, code + 0x300, code + 0x300 })
+        {
+            WriteUInt64(memory, backHeader + ShaderCodeOffset, continuation);
+            WriteWords(memory, continuation, 0xBF800000, 0xBF810000);
+            context[CpuRegister.Rdi] = 0;
+            context[CpuRegister.Rsi] = header;
+            context[CpuRegister.Rdx] = code;
+            Assert.Equal(0, AgcExports.CreateShader(context));
+            Assert.True(Gen5ShaderTranslator.TryGetFusedProgramParts(context, code, out var actual, out _));
+            Assert.Equal(continuation, actual);
+            Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, code, out var program, out var error), error);
+            Assert.Equal(4, program.Instructions.Count);
+        }
+    }
+
     private static (FakeCpuMemory Memory, CpuContext Ctx) CreateGsPair()
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);

@@ -3,8 +3,6 @@
 
 using System.Buffers;
 using System.Buffers.Binary;
-using System.Collections.Concurrent;
-using System.Runtime.CompilerServices;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Kernel;
@@ -57,11 +55,6 @@ public static partial class AgcExports
     private const uint VgtGsOutPrimType = 0x29B;
     private const ulong ShaderSpecialVgtGsOutPrimTypeOffset = 0x20;
     private const ulong ShaderSpecialGeUserVgprEnOffset = 0x28;
-
-    private static readonly ConditionalWeakTable<
-        object,
-        ConcurrentDictionary<(ulong Code, ulong Header), byte>>
-        _embeddedFusedScanAttempts = new();
 
     private static long _createShaderTraceCount;
 
@@ -130,6 +123,10 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
+        if (Gen5ShaderTranslator.UnregisterFusedProgram(ctx, codeAddress))
+        {
+            TraceAgcShader($"agc.fused_shader_retired code=0x{codeAddress:X16} replacement_header=0x{headerAddress:X16}");
+        }
         _shaderHeadersByCode[codeAddress] = headerAddress;
 
         TryRegisterEmbeddedFusedProgram(ctx, codeAddress, headerAddress);
@@ -150,14 +147,6 @@ public static partial class AgcExports
     {
         if (!TryReadByte(ctx, entryHeaderAddress + ShaderTypeOffset, out var entryType) ||
             entryType is not (GsFrontShaderType or HsFrontShaderType))
-        {
-            return false;
-        }
-
-        var attempts = _embeddedFusedScanAttempts.GetValue(
-            ctx.Memory,
-            static _ => new ConcurrentDictionary<(ulong Code, ulong Header), byte>());
-        if (!attempts.TryAdd((entryCodeAddress, entryHeaderAddress), 0))
         {
             return false;
         }
