@@ -19,6 +19,21 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     private const ulong Base = 0x1_0000_0000;
 
     [Fact]
+    public void InvalidTextureLayerReportsDescriptorAndShaderContext()
+    {
+        using var fatal = new FatalScope();
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UNorm,
+            32, 32, GuestImageType.Color2D, baseArray: 1904);
+        var error = Assert.Throws<SchedulerFatalException>(() =>
+            ImageRequestBuilders.Texture(words, Sampled2D, 0x123456789ABCDEF0, 7));
+        Assert.Contains("baseLayer=1904 layers=1", error.Message);
+        Assert.Contains("shaderHash=0x123456789ABCDEF0 image=7", error.Message);
+        Assert.Contains("type=Color2D", error.Message);
+        Assert.Contains("shape=", error.Message);
+        Assert.Contains($"words={string.Join(',', words.Select(word => word.ToString("X8")))}", error.Message);
+    }
+
+    [Fact]
     public void EightBitUnsignedScaledTextureUsesUnormBackingWithShaderConversion()
     {
         Assert.Equal(ImageNumericClass.Float, GuestImageFormat.SampledNumericClass(GuestImageFormat.Format8Uscaled));

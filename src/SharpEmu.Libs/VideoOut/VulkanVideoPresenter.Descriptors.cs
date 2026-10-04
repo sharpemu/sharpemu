@@ -120,7 +120,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var storage = image.ResourceClass == ShaderCompiler.Resources.ImageResourceClass.Storage;
-            var resolution = ImageRequestBuilders.Texture(words, ShapeOf(image));
+            var resolution = ImageRequestBuilders.Texture(words, ShapeOf(image), program.Hash, index);
             _ = BeginBatchedGuestCommands();
             var request = resolution.Request;
             _imageCache.TraceTextureMetadata(request);
