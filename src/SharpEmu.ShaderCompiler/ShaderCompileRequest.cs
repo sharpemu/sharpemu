@@ -78,6 +78,12 @@ public readonly record struct MeshShaderConfiguration(
             .Concat(Enumerable.Range(0, Math.Max(requiredOutputCount, 0)).Select(location => (uint)location))
             .Distinct().Order().ToArray();
 
+    public static uint[] ParameterLocations(ShaderCompileRequest request) =>
+        request.MeshOutputLocationMask is { } mask
+            ? Enumerable.Range(0, 32).Where(location => (mask & (1u << location)) != 0)
+                .Select(location => (uint)location).ToArray()
+            : ParameterLocations(request.Program, request.RequiredVertexOutputCount);
+
     public ulong OutputMemoryBytes(int parameterCount, uint vertexGranularity, uint primitiveGranularity)
     {
         if (vertexGranularity == 0 || primitiveGranularity == 0)
@@ -215,6 +221,7 @@ public sealed class ShaderCompileRequest
     public IReadOnlyList<uint>? PixelInputCntl { get; init; }
 
     public int RequiredVertexOutputCount { get; init; }
+    public uint? MeshOutputLocationMask { get; init; }
     public IReadOnlyList<ShaderVertexInput> VertexInputs { get; init; } = [];
     public uint PositionExportControl { get; init; }
     public bool SupportsClipDistance { get; init; } = true;

@@ -37,6 +37,7 @@ public sealed class StageCompileOptions
 {
     public VertexInputInfo? VertexInfo { get; init; }
     public int RequiredVertexOutputCount { get; init; }
+    public uint? MeshOutputLocationMask { get; init; }
     public PixelInputInfo? PixelInfo { get; init; }
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];
     public uint PixelInputEnable { get; init; }
@@ -389,6 +390,8 @@ internal sealed class ShaderProgramCache
                 break;
             case ShaderStage.Mesh:
                 StageStaticKey.Build(options.MeshInfo ?? throw new ArgumentException("The mesh lookup has no mesh input info."), options.RequiredVertexOutputCount, _staticState);
+                _staticState.Add(options.MeshOutputLocationMask.HasValue ? 1u : 0u);
+                _staticState.Add(options.MeshOutputLocationMask.GetValueOrDefault());
                 break;
             default:
                 StageStaticKey.Build(options.ComputeInfo ?? throw new ArgumentException("The compute lookup has no compute input info."), _staticState);
@@ -592,7 +595,7 @@ internal sealed class ShaderProgramCache
         if (request.Mesh is { } mesh)
         {
             var limits = _host.MeshLimits;
-            var parameterLocations = MeshShaderConfiguration.ParameterLocations(request.Program, request.RequiredVertexOutputCount);
+            var parameterLocations = MeshShaderConfiguration.ParameterLocations(request);
             var parameterCount = parameterLocations.Length;
             var outputLocations = Math.Max(parameterCount + 3, parameterCount == 0 ? 0 : (int)parameterLocations[^1] + 1);
             if ((ulong)outputLocations * 4 > limits.MaxOutputComponents)
@@ -682,7 +685,7 @@ internal sealed class ShaderProgramCache
         CompiledShaderDump.Write(source.Label, source.Address, source.Hash, compiled, program);
         var id = ++_nextProgramId;
         var module = _host.CreateShaderModule(compiled, source.Stage, source.Hash, id);
-        var info = CreateProgramInfo(source, entry, resources, layout, request);
+        var info = CreateProgramInfo(source, entry, resources, layout, request, compiled.InputLocationMask);
         if (source.Stage == ShaderStage.Compute &&
             _host.ShaderPrewarm is { } prewarm &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var capture))
@@ -782,6 +785,7 @@ internal sealed class ShaderProgramCache
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     RequiredVertexOutputCount = options.RequiredVertexOutputCount,
                     PositionExportControl = info.Geometry.PositionExportControl,
+                    MeshOutputLocationMask = options.MeshOutputLocationMask,
                     ClipSpace = new ShaderClipSpaceTransform(
                         info.Geometry.ClipSpace.Enabled,
                         info.Geometry.ClipSpace.ScaleX,
@@ -946,7 +950,7 @@ internal sealed class ShaderProgramCache
         ProgramSourceEntry entry,
         SpecializedResourceInfo resources,
         BindingLayout layout,
-        ShaderCompileRequest request)
+        ShaderCompileRequest request, uint? inputLocationMask)
     {
         var info = resources.Info;
         var buffers = new BufferResourceInfo[info.Buffers.Count];
@@ -991,6 +995,7 @@ internal sealed class ShaderProgramCache
             UserDataBase = source.UserDataBase,
             UserDataCount = (uint)source.UserData.Length,
             ParameterExportMask = entry.Program.ParameterExportMask,
+            InputLocationMask = inputLocationMask,
             PixelColorExportMasks = entry.Program.PixelColorExportMasks,
             VertexOffsetScalarRegister = entry.EmbeddedFetch?.VertexOffsetScalarRegister ?? ShaderProgramInfo.NoScalarRegister,
             InstanceOffsetScalarRegister = entry.EmbeddedFetch?.InstanceOffsetScalarRegister ?? ShaderProgramInfo.NoScalarRegister,

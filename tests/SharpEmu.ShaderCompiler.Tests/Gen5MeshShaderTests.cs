@@ -12,6 +12,38 @@ namespace SharpEmu.ShaderCompiler.Tests;
 
 public sealed class Gen5MeshShaderTests
 {
+    [Theory]
+    [InlineData(null, 11, 41984ul)]
+    [InlineData(1501u, 8, 32768ul)]
+    [InlineData(0u, 0, 8192ul)]
+    public void MeshOutputDeclarationsMatchTheConsumerMask(uint? mask, int count, ulong bytes)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        for (uint location = 0; location < 11; location++)
+            instructions.Add(new Gen5ShaderInstruction(location * 8, Gen5ShaderEncoding.Exp, "Exp", [0, 0],
+                [Gen5Operand.Vector(0), Gen5Operand.Vector(0), Gen5Operand.Vector(0), Gen5Operand.Vector(0)], [],
+                new Gen5ExportControl(32 + location, 15, false, false, false)));
+        instructions.Add(ResourceTestProgram.EndProgram(88));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(ResourceTestProgram.Program([.. instructions]), ShaderStage.Mesh);
+        var mesh = new MeshShaderConfiguration(192, 160, 0, 3, 9, 0, false, 32);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            WaveSize = 64, LocalSizeX = 192, Mesh = mesh, MeshOutputLocationMask = mask,
+        };
+        var locations = MeshShaderConfiguration.ParameterLocations(request);
+        Assert.Equal(count, locations.Length);
+        Assert.Equal(bytes, mesh.OutputMemoryBytes(locations.Length, 32, 32));
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var words = new uint[shader.Spirv.Length / 4];
+        Buffer.BlockCopy(shader.Spirv, 0, words, 0, shader.Spirv.Length);
+        var declared = new List<uint>();
+        for (var offset = 5; offset < words.Length; offset += (int)(words[offset] >> 16))
+            if ((words[offset] & 65535) == (uint)SpirvOp.Decorate && words[offset + 2] == 30)
+                declared.Add(words[offset + 3]);
+        Assert.Equal(locations, declared.Order().ToArray());
+        ValidateWithInstalledSdk(shader.Spirv);
+    }
+
     [Fact]
     public void MeshUserPointerAndWaveInputUseSeparateInitialization()
     {

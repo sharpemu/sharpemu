@@ -128,6 +128,7 @@ public static partial class Gen5SpirvTranslator
         private readonly uint[] _pixelInputCntl;
         private readonly List<uint> _interfaces = [];
         private readonly Dictionary<uint, uint> _pixelInputs = [];
+        private uint _pixelInputLocationMask;
         private readonly Dictionary<uint, SpirvPixelOutput> _pixelOutputs = [];
         private readonly Dictionary<uint, uint> _vertexOutputs = [];
         private readonly Dictionary<uint, SpirvVertexInput> _vertexInputsByPc = [];
@@ -488,7 +489,10 @@ public static partial class Gen5SpirvTranslator
                 var attributeCount = _stage == Gen5SpirvStage.Vertex
                     ? (uint)_vertexOutputs.Count
                     : (uint)_pixelInputs.Count;
-                shader = new Gen5SpirvShader(_module.Build(), attributeCount);
+                shader = new Gen5SpirvShader(_module.Build(), attributeCount)
+                {
+                    InputLocationMask = _stage == Gen5SpirvStage.Pixel ? _pixelInputLocationMask : null,
+                };
                 return true;
             }
             catch (Exception exception)
@@ -976,6 +980,7 @@ public static partial class Gen5SpirvTranslator
                     }
 
                     _pixelInputs.Add(attribute, variable);
+                    _pixelInputLocationMask |= 1u << (int)locations[index];
                     _interfaces.Add(variable);
                 }
 

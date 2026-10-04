@@ -217,7 +217,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 vertexSource,
                 mesh is null
                     ? new StageCompileOptions { VertexInfo = vertexInfo, RequiredVertexOutputCount = (int)attributeCount }
-                    : new StageCompileOptions { MeshInfo = mesh, RequiredVertexOutputCount = (int)attributeCount },
+                    : new StageCompileOptions
+                    {
+                        MeshInfo = mesh, RequiredVertexOutputCount = (int)attributeCount,
+                        MeshOutputLocationMask = pixelSource is null ? 0u : pixelStage.Program?.InputLocationMask,
+                    },
                 ref pushDataCursor,
                 out vertexProgram,
                 out vertexStage))

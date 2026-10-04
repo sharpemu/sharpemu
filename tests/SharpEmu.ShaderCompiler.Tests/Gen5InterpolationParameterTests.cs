@@ -196,6 +196,7 @@ public sealed class Gen5InterpolationParameterTests
         var location = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
             instruction.Operands[0] == input && instruction.Operands[1] == (uint)SpirvDecoration.Location);
         Assert.Equal(1u, location.Operands[2]);
+        Assert.Equal(2u, shader.InputLocationMask);
         Assert.Equal(2, instructions.Count(instruction => instruction.Opcode == SpirvOp.AccessChain &&
             instruction.Operands[2] == input));
         ValidateWhenAvailable(shader.Spirv);
@@ -227,6 +228,7 @@ public sealed class Gen5InterpolationParameterTests
         var inputLocations = instructions.Where(instruction => instruction.Opcode == SpirvOp.Decorate &&
             instruction.Operands[1] == (uint)SpirvDecoration.Location && instruction.Operands[0] == input).ToArray();
         Assert.Equal(1u, Assert.Single(inputLocations).Operands[2]);
+        Assert.Equal(2u, shader.InputLocationMask);
         Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
             instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn && instruction.Operands[2] == (uint)SpirvBuiltIn.BaryCoordKhr);
         Assert.Equal(4, instructions.Count(instruction => instruction.Opcode == SpirvOp.AccessChain &&
