@@ -711,7 +711,19 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     [InlineData(1, 2)]
     [InlineData(2, 2)]
     [InlineData(3, 2)]
-    public void RectangleList_ThreeCornersCoverTheRectangleWithoutFetchingAFourthVertex(int omittedCorner, int drawKind)
+    [InlineData(0, 0, true)]
+    [InlineData(1, 0, true)]
+    [InlineData(2, 0, true)]
+    [InlineData(3, 0, true)]
+    [InlineData(0, 1, true)]
+    [InlineData(1, 1, true)]
+    [InlineData(2, 1, true)]
+    [InlineData(3, 1, true)]
+    [InlineData(0, 2, true)]
+    [InlineData(1, 2, true)]
+    [InlineData(2, 2, true)]
+    [InlineData(3, 2, true)]
+    public void RectangleList_ThreeCornersCoverTheRectangleWithoutFetchingAFourthVertex(int omittedCorner, int drawKind, bool geometryFallback = false)
     {
         if (!Ready()) return;
         if (!_vulkan.SupportsFillRectangle)
@@ -721,6 +733,13 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         }
 
         using var presenter = new PresenterUnderTest(_vulkan);
+        if (geometryFallback)
+        {
+            _vulkan.Vk.GetPhysicalDeviceFeatures(_vulkan.Physical, out var features);
+            Assert.True(features.GeometryShader);
+            presenter.SetField("_supportsFillRectangle", false);
+            presenter.SetField("_supportsRectangleGeometry", true);
+        }
         presenter.LoadRenderingCommands();
         var harness = presenter.Harness;
         var target = harness.MapBacked(0x10000, ReadWrite);

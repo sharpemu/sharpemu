@@ -128,6 +128,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _supportsDepthBounds;
         private bool _supportsShaderClipDistance;
         private bool _supportsFillRectangle;
+        private bool _supportsRectangleGeometry;
         private RenderHostLimits _renderHostLimits;
         private IGuestBackedSpace _guestBacking = null!;
 
@@ -181,7 +182,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         RenderHostLimits IRenderHost.Limits => _renderHostLimits;
 
-        bool IRenderHost.SupportsNativeRectangles => _supportsFillRectangle;
+        bool IRenderHost.SupportsNativeRectangles => _supportsFillRectangle || _supportsRectangleGeometry;
 
         IImageFormatSupport IRenderHost.FormatSupport => _deviceInfo;
 
@@ -996,7 +997,8 @@ internal static unsafe partial class VulkanVideoPresenter
             if (entry.RectangleVariant.Handle == 0)
             {
                 entry.RectangleVariant = CreateRenderPipeline(entry.Description!, PrimitiveTopology.TriangleList,
-                    entry.Layout, PolygonMode.FillRectangleNV);
+                    entry.Layout, _supportsFillRectangle ? PolygonMode.FillRectangleNV : PolygonMode.Fill,
+                    expandRectangles: !_supportsFillRectangle);
             }
 
             _vk.CmdBindPipeline(command, PipelineBindPoint.Graphics, entry.RectangleVariant);
@@ -1005,7 +1007,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // Rectangle2D consumes three vertices and fills their projected bounding box.
         // Native fill preserves their interpolants and does not fetch a made-up fourth vertex.
         private bool CanDrawNativeRectangles(uint vertexCount) =>
-            _supportsFillRectangle && vertexCount >= 3 && vertexCount % 3 == 0;
+            (_supportsFillRectangle || _supportsRectangleGeometry) && vertexCount >= 3 && vertexCount % 3 == 0;
 
         public void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance)
         {
@@ -1073,7 +1075,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var command = BeginBatchedGuestCommands();
             if (_boundGraphicsPipeline is { RectangleList: true } entry)
             {
-                if (_supportsFillRectangle)
+                if (_supportsFillRectangle || _supportsRectangleGeometry)
                 {
                     BindNativeRectangleList(entry, command);
                 }

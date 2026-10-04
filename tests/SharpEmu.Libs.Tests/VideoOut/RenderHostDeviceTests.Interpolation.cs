@@ -62,7 +62,9 @@ public sealed unsafe partial class RenderHostDeviceTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void RectangleList_PreservesInterpolationAndProvokingVertexOutsideTheInputTriangle(bool flat)
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void RectangleList_PreservesInterpolationAndProvokingVertexOutsideTheInputTriangle(bool flat, bool geometryFallback = false)
     {
         if (!Ready()) return;
         if (!_vulkan.SupportsFillRectangle || !_vulkan.SupportsFragmentShaderBarycentric)
@@ -72,6 +74,13 @@ public sealed unsafe partial class RenderHostDeviceTests
         }
 
         using var presenter = new PresenterUnderTest(_vulkan);
+        if (geometryFallback)
+        {
+            _vulkan.Vk.GetPhysicalDeviceFeatures(_vulkan.Physical, out var features);
+            Assert.True(features.GeometryShader);
+            presenter.SetField("_supportsFillRectangle", false);
+            presenter.SetField("_supportsRectangleGeometry", true);
+        }
         presenter.LoadRenderingCommands();
         var harness = presenter.Harness;
         var target = harness.MapBacked(0x10000, ReadWrite);

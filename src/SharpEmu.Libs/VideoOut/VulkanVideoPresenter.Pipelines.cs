@@ -57,6 +57,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private readonly Dictionary<ulong, ShaderModule> _shaderModules = new();
         private readonly Dictionary<ulong, int> _shaderModuleSpirvBytes = new();
+        private readonly Dictionary<ulong, byte[]> _rectangleStageCode = new();
         private readonly Dictionary<ulong, string> _shaderModuleCacheIdentities = new();
         private long _pipelineCreationMilliseconds;
         private KhrPushDescriptor _pushDescriptorApi = null!;
@@ -312,6 +313,8 @@ internal static unsafe partial class VulkanVideoPresenter
             SetDebugName(ObjectType.ShaderModule, module.Handle, $"SharpEmu {stage} 0x{hash:X16}");
             _shaderModules.Add(programId, module);
             _shaderModuleSpirvBytes[module.Handle] = shader.Payload.Length;
+            if (stage is ShaderStage.Vertex or ShaderStage.Pixel)
+                _rectangleStageCode[module.Handle] = shader.Payload;
             var identity = VulkanPipelineCacheStorage.CompiledShaderIdentity(shader.Payload);
             _shaderModuleCacheIdentities[module.Handle] = identity;
             if (stage == ShaderStage.Compute)
@@ -772,7 +775,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // One graphics pipeline for dynamic rendering: the attachment formats travel in the create info.
         private Pipeline CreateRenderPipeline(GraphicsPipelineDescription description, PrimitiveTopology topology, PipelineLayout layout,
-            PolygonMode polygonMode = PolygonMode.Fill)
+            PolygonMode polygonMode = PolygonMode.Fill, bool expandRectangles = false)
         {
             var parameters = description.StaticParameters;
             var rendering = description.Rendering;
@@ -783,10 +786,21 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"A graphics pipeline stage has no module: vertex=0x{vertexModule.Handle:X} pixel=0x{pixelModule.Handle:X}.");
             }
 
+            ShaderModule rectangleModule = default;
+            ShaderModule rectangleVertexModule = default;
+            ShaderModule rectanglePixelModule = default;
             var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
             try
             {
-                var shaderStages = stackalloc PipelineShaderStageCreateInfo[2];
+                if (expandRectangles)
+                {
+                    var geometryCode = RectangleGeometryShader.Create(_rectangleStageCode[vertexModule.Handle],
+                        pixelModule.Handle == 0 ? null : _rectangleStageCode[pixelModule.Handle], out var vertexCode, out var pixelCode);
+                    rectangleModule = CreateShaderModule(geometryCode);
+                    rectangleVertexModule = CreateShaderModule(vertexCode);
+                    if (pixelCode is not null) rectanglePixelModule = CreateShaderModule(pixelCode);
+                }
+                var shaderStages = stackalloc PipelineShaderStageCreateInfo[3];
                 var stageCount = 1u;
                 shaderStages[0] = new PipelineShaderStageCreateInfo
                 {
@@ -795,16 +809,26 @@ internal static unsafe partial class VulkanVideoPresenter
                         ? ShaderStageFlags.MeshBitExt : ShaderStageFlags.VertexBit,
                     Flags = description.VertexStage.Stage == ShaderStageKind.Mesh
                         ? PipelineShaderStageCreateFlags.RequireFullSubgroupsBit : 0,
-                    Module = vertexModule,
+                    Module = expandRectangles ? rectangleVertexModule : vertexModule,
                     PName = entryPoint,
                 };
+                if (rectangleModule.Handle != 0)
+                {
+                    shaderStages[stageCount++] = new PipelineShaderStageCreateInfo
+                    {
+                        SType = StructureType.PipelineShaderStageCreateInfo,
+                        Stage = ShaderStageFlags.GeometryBit,
+                        Module = rectangleModule,
+                        PName = entryPoint,
+                    };
+                }
                 if (pixelModule.Handle != 0)
                 {
                     shaderStages[stageCount++] = new PipelineShaderStageCreateInfo
                     {
                         SType = StructureType.PipelineShaderStageCreateInfo,
                         Stage = ShaderStageFlags.FragmentBit,
-                        Module = pixelModule,
+                        Module = expandRectangles ? rectanglePixelModule : pixelModule,
                         PName = entryPoint,
                     };
                 }
@@ -1005,6 +1029,9 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             finally
             {
+                if (rectangleModule.Handle != 0) _vk.DestroyShaderModule(_device, rectangleModule, null);
+                if (rectangleVertexModule.Handle != 0) _vk.DestroyShaderModule(_device, rectangleVertexModule, null);
+                if (rectanglePixelModule.Handle != 0) _vk.DestroyShaderModule(_device, rectanglePixelModule, null);
                 SilkMarshal.Free((nint)entryPoint);
             }
         }
@@ -1290,6 +1317,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _shaderModules.Clear();
+            _rectangleStageCode.Clear();
             _shaderModuleCacheIdentities.Clear();
         }
     }
