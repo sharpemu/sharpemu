@@ -5009,7 +5009,14 @@ public static partial class Gen5SpirvTranslator
             var sourceValue = GetRawSource(instruction, 0);
             var selectedLane = BitwiseAnd(GetRawSource(instruction, 1), UInt(LaneSelectMask));
 
-            if (_emulateWave64)
+            if (_emulateWave64 && instruction.Sources[0].Kind == Gen5OperandKind.VectorRegister &&
+                TryGetConstantLane(instruction, out var spillLane) &&
+                _laneSpillSlots.TryGetValue((instruction.Sources[0].Value, spillLane), out var spillSlot))
+            {
+                // A pure scalar spill slot: every invocation already holds the wave-uniform value.
+                StoreS(destination, Load(_uintType, spillSlot));
+            }
+            else if (_emulateWave64)
             {
                 // The selected guest lane can belong to another host subgroup.
                 // Read it even when the guest execution mask disables that lane.

@@ -7466,7 +7466,7 @@ public static partial class Gen5SpirvTranslator
             var slots = new List<(uint Register, uint Lane)>();
             if (_emulateWave64)
             {
-                return slots;
+                return FindPureLaneSpillSlots();
             }
 
             var ownsLaneZero = !UsesSubgroupOperations();
@@ -7483,6 +7483,70 @@ public static partial class Gen5SpirvTranslator
                     readRegisters.Contains(register) &&
                     TryGetConstantLane(instruction, out var lane) &&
                     (lane != 0 || !ownsLaneZero) &&
+                    !slots.Contains((register, lane)))
+                {
+                    slots.Add((register, lane));
+                }
+            }
+
+            return slots;
+        }
+
+        // Under wave64 emulation a lane read normally rendezvous with the other host subgroup through
+        // LDS and a workgroup barrier. A VGPR written only by constant-lane V_WRITELANE holds spilled
+        // scalars, which are wave-uniform, so every invocation can keep each written lane itself and a
+        // constant-lane V_READLANE needs no exchange. V_WRITELANE still updates the VGPR, so other
+        // reads of it are unaffected. Relative VGPR addressing could alias any register, so programs
+        // that use it keep the exchange.
+        private List<(uint Register, uint Lane)> FindPureLaneSpillSlots()
+        {
+            var slots = new List<(uint Register, uint Lane)>();
+            var instructions = _request.Program.Instructions;
+            if (instructions.Any(static instruction => instruction.Opcode.StartsWith("VMovrel", StringComparison.Ordinal)))
+            {
+                return slots;
+            }
+
+            var candidates = new HashSet<uint>();
+            var rejected = new HashSet<uint>();
+            foreach (var instruction in instructions)
+            {
+                var isWritelane = instruction.Opcode == "VWritelaneB32";
+                var isReadlane = instruction.Opcode == "VReadlaneB32";
+                for (var index = 0; index < instruction.Destinations.Count; index++)
+                {
+                    var operand = instruction.Destinations[index];
+                    if (operand.Kind != Gen5OperandKind.VectorRegister)
+                    {
+                        continue;
+                    }
+
+                    if (isWritelane && index == 0 && TryGetConstantLane(instruction, out _))
+                    {
+                        candidates.Add(operand.Value);
+                    }
+                    else
+                    {
+                        rejected.Add(operand.Value);
+                    }
+                }
+
+                // A variable lane read cannot use a slot; it keeps reading the VGPR, which V_WRITELANE
+                // still writes, so ordinary vector reads of the register stay exact as well.
+                if (isReadlane && instruction.Sources.Count > 0 &&
+                    instruction.Sources[0].Kind == Gen5OperandKind.VectorRegister &&
+                    !TryGetConstantLane(instruction, out _))
+                {
+                    rejected.Add(instruction.Sources[0].Value);
+                }
+            }
+
+            foreach (var instruction in instructions)
+            {
+                if (instruction.Opcode == "VWritelaneB32" &&
+                    TryGetVectorDestination(instruction, out var register) &&
+                    candidates.Contains(register) && !rejected.Contains(register) &&
+                    TryGetConstantLane(instruction, out var lane) &&
                     !slots.Contains((register, lane)))
                 {
                     slots.Add((register, lane));
