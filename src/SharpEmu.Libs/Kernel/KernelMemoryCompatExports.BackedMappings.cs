@@ -310,7 +310,8 @@ public static partial class KernelMemoryCompatExports
                 desired = FindAvailableMappingAddress(desired, length, alignment);
             if (desired == 0)
                 return false;
-            var held = requested == 0
+            // On Windows, search lower addresses before using the startup data reservation.
+            var held = requested == 0 && !OperatingSystem.IsWindows()
                 ? space.TryHoldAvailableRange(desired, length, alignment, out address)
                 : space.TryHoldRangeAtOrAbove(desired, length, alignment, out address);
             if (!held)
