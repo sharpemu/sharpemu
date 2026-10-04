@@ -709,6 +709,7 @@ public static class ResourceMaterializer
                     return false;
             }
 
+            inputs.TraceImageCandidate?.Invoke(image.Source, key, baseAddress, baseAddress + entry, candidate);
             if (!UsableImageCandidate(candidate, r128))
                 Array.Clear(candidate);
             probed.Add(candidate);

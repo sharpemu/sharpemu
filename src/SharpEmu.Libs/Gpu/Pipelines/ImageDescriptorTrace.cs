@@ -10,6 +10,23 @@ internal sealed class ImageDescriptorTrace
 {
     private static readonly RecentImageTrace _recent = new(512);
     private static readonly object _gate = new();
+    private readonly HashSet<string> _candidateEntries = new(StringComparer.Ordinal);
+
+    internal void RecordCandidate(ulong shaderHash, uint source, uint key, ulong heap, ulong address, ReadOnlySpan<uint> words)
+    {
+        if (!ImageClearTrace.Enabled || words.Length < 8 ||
+            !ImageTraceRange.Overlaps(new TextureDescriptorWords(words).BaseAddress, 1)) return;
+        lock (_candidateEntries)
+        {
+            if (_candidateEntries.Count >= 256) return;
+            var message = $"ImageCandidate shader=0x{shaderHash:X16} source={source} key={key} heap=0x{heap:X16} " +
+                $"descriptorAddress=0x{address:X16} words={string.Join(',', words.ToArray().Select(word => word.ToString("X8")))}";
+            if (!_candidateEntries.Add(message)) return;
+            Console.Error.WriteLine($"[GPU][TRACE] {message}");
+            if (_candidateEntries.Count == 256)
+                Console.Error.WriteLine("[GPU][TRACE] ImageCandidate limit=256. Further entries are omitted.");
+        }
+    }
 
     internal static void WriteHistory()
     {
