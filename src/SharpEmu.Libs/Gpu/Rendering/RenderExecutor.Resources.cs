@@ -217,8 +217,13 @@ public sealed partial class RenderExecutor
         IPreparedBindings? pixelBindings;
         try
         {
-            vertexBindings = PrepareBindings(vertexInput.Stage);
-            pixelBindings = state.PixelActive ? PrepareBindings(pixelInput.Stage) : null;
+            // The pixel program reads its position in host texels; the attachments say how
+            // many of those one guest pixel covers.
+            var attachmentScale = AttachmentRenderScale(in state);
+            vertexBindings = PrepareBindings(vertexInput.Stage with { AttachmentRenderScale = attachmentScale });
+            pixelBindings = state.PixelActive
+                ? PrepareBindings(pixelInput.Stage with { AttachmentRenderScale = attachmentScale })
+                : null;
         }
         catch (DrawImageTypeMismatchException rejection)
         {

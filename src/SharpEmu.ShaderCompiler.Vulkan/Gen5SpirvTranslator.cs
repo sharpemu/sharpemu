@@ -234,7 +234,9 @@ public static partial class Gen5SpirvTranslator
             SpirvImageDim Dimension = SpirvImageDim.Dim2D,
             uint ConversionFormat = 0,
             uint ShaderSwizzle = 0,
-            int EmulatedCompareFunction = -1);
+            int EmulatedCompareFunction = -1,
+            // The dense image resource index, which names this image's bit in the scaled-image mask.
+            uint ResourceIndex = 0);
 
         private readonly record struct SpirvVertexInput(
             uint Variable,
@@ -1260,7 +1262,7 @@ public static partial class Gen5SpirvTranslator
             }
             else if (_stage == Gen5SpirvStage.Pixel)
             {
-                var fragCoord = Load(_vec4Type, _fragCoordInput);
+                var fragCoord = ScalePixelPosition(Load(_vec4Type, _fragCoordInput));
                 EmitPixelInputState(fragCoord);
                 foreach (var output in _pixelOutputs.Values)
                 {
@@ -5204,6 +5206,12 @@ public static partial class Gen5SpirvTranslator
                                 _intType,
                                 size,
                                 component);
+                        // The game reasons about its own resolution; report the guest size.
+                        if (component < Math.Min(2u, ImageSpatialComponentCount(resource)))
+                        {
+                            signedValue = ScaleImageQuerySize(signedValue, resource);
+                        }
+
                         value = Bitcast(_uintType, signedValue);
                     }
                     else if (component == 3)
@@ -5265,6 +5273,7 @@ public static partial class Gen5SpirvTranslator
                 var coordinateComponentCount =
                     ImageCoordinateComponentCount(resource);
                 var coordinates = BuildIntegerCoordinates(
+                    resource,
                     image,
                     0,
                     coordinateComponentCount);
@@ -5334,6 +5343,7 @@ public static partial class Gen5SpirvTranslator
                     var isMax = instruction.Opcode == "ImageAtomicFmax";
                     var floatCoordinateCount = ImageCoordinateComponentCount(resource);
                     var floatCoordinates = BuildIntegerCoordinates(
+                        resource,
                         image,
                         0,
                         floatCoordinateCount);
@@ -5378,6 +5388,7 @@ public static partial class Gen5SpirvTranslator
                 var coordinateComponentCount =
                     ImageCoordinateComponentCount(resource);
                 var coordinates = BuildIntegerCoordinates(
+                    resource,
                     image,
                     0,
                     coordinateComponentCount);
@@ -5427,6 +5438,7 @@ public static partial class Gen5SpirvTranslator
                     var coordinateComponentCount =
                         ImageCoordinateComponentCount(resource);
                     var coordinates = BuildIntegerCoordinates(
+                        resource,
                         image,
                         0,
                         coordinateComponentCount);
@@ -5443,6 +5455,7 @@ public static partial class Gen5SpirvTranslator
                     var coordinateComponentCount =
                         ImageCoordinateComponentCount(resource);
                     var coordinates = BuildIntegerCoordinates(
+                        resource,
                         image,
                         0,
                         coordinateComponentCount);
@@ -6339,16 +6352,22 @@ public static partial class Gen5SpirvTranslator
         }
 
         private uint BuildIntegerCoordinates(
+            in SpirvImageResource resource,
             Gen5ImageControl image,
             int start,
             uint componentCount)
         {
+            // Only the two scaled axes move; an array layer or a volume slice is not a pixel.
+            var scaledComponents = start == 0 ? Math.Min(2, (int)ImageSpatialComponentCount(resource)) : 0;
             var components = new uint[checked((int)componentCount)];
             for (var component = 0; component < components.Length; component++)
             {
-                components[component] = Bitcast(
+                var value = Bitcast(
                     _intType,
                     LoadImageIntegerAddress(image, start + component));
+                components[component] = component < scaledComponents
+                    ? ScaleIntegerImageCoordinate(value, resource)
+                    : value;
             }
 
             if (componentCount == 1)
