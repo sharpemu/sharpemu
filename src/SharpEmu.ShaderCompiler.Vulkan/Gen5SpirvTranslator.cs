@@ -7814,6 +7814,25 @@ public static partial class Gen5SpirvTranslator
         {
             if (_waveLaneCount != 32)
             {
+                // The lane's bit lives in one of the two mask registers, so select that register
+                // and shift inside it. Composing the 64-bit mask and masking it with a 64-bit
+                // lane bit costs several times as much on a host that emulates 64-bit integers,
+                // and VCC and EXEC refresh their lane flag on every mask write.
+                if (_subgroupInvocationIdInput != 0 && _emulateWave64)
+                {
+                    var lane = GuestWaveLane();
+                    var word = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        _module.AddInstruction(SpirvOp.ULessThan, _boolType, lane, UInt(32)),
+                        LoadS(lowRegister),
+                        LoadS(lowRegister + 1));
+                    return IsNotZero(
+                        BitwiseAnd(
+                            ShiftRightLogical(word, BitwiseAnd(lane, UInt(31))),
+                            UInt(1)));
+                }
+
                 return IsWaveMaskActive(LoadS64(lowRegister));
             }
 
