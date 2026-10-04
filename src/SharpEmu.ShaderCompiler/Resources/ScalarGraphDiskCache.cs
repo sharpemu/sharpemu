@@ -9,7 +9,7 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 internal static class ScalarGraphDiskCache
 {
-    private const int Version = 3;
+    private const int Version = 4;
     private const int MaxEntryBytes = 32 * 1024 * 1024;
     private const long MaxCacheBytes = 256L * 1024 * 1024;
     private static readonly string CachePath = Environment.GetEnvironmentVariable("SHARPEMU_SHADER_ANALYSIS_CACHE_PATH") ??
