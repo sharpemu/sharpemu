@@ -40,21 +40,22 @@ internal static class GuestRedZonePatcher
         ArgumentNullException.ThrowIfNull(physicalMemory);
         ArgumentNullException.ThrowIfNull(programHeaders);
 
-        if ((!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS()) ||
+        if ((!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux()) ||
             RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
             return default;
         }
 
-        var protectRedZone = !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_RED_ZONE_PATCH"), "1", StringComparison.Ordinal);
+        var protectRedZone = (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()) &&
+            !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_RED_ZONE_PATCH"), "1", StringComparison.Ordinal);
         var splitVectorStores = RosettaVectorStorePatch.IsRequired;
-        var rewriteSha = ShaInstructionRewrite.IsRequired;
-        if (!protectRedZone && !splitVectorStores && !rewriteSha)
+        var rewriteInstructions = ShaInstructionRewrite.IsRequired || Sse4aExtractRewrite.IsRequired;
+        if (!protectRedZone && !splitVectorStores && !rewriteInstructions)
         {
             return default;
         }
 
-        var hostName = OperatingSystem.IsWindows() ? "Windows" : "macOS";
+        var hostName = OperatingSystem.IsWindows() ? "Windows" : OperatingSystem.IsMacOS() ? "macOS" : "Linux";
 
         if (!TryDecodeFunctionStarts(memory, programHeaders, imageBase, out var functionStarts))
         {
@@ -63,7 +64,7 @@ internal static class GuestRedZonePatcher
         }
 
         var sites = CollectPatchSites(
-            memory, programHeaders, imageBase, functionStarts, protectRedZone, splitVectorStores, rewriteSha, out var scan);
+            memory, programHeaders, imageBase, functionStarts, protectRedZone, splitVectorStores, rewriteInstructions, out var scan);
         if (sites.Count == 0)
         {
             Console.Error.WriteLine(
@@ -80,7 +81,8 @@ internal static class GuestRedZonePatcher
             requiredBytes = checked(requiredBytes + 32UL + (ulong)relocatedInstructionCount * (splitVectorStores ? 64UL : 32UL));
         }
         requiredBytes = AlignUp(checked(requiredBytes +
-            (ulong)scan.ShaInstructionCount * ShaInstructionRewrite.MaximumExpansionBytes), PageSize);
+            (ulong)scan.ShaInstructionCount * ShaInstructionRewrite.MaximumExpansionBytes +
+            (ulong)scan.ExtractCandidates * Sse4aExtractRewrite.MaximumExpansionBytes), PageSize);
         if (!TryAllocateTrampolines(
                 physicalMemory,
                 imageBase,
@@ -98,6 +100,7 @@ internal static class GuestRedZonePatcher
         var trampolineEnd = trampolineBase + requiredBytes;
         var patched = 0;
         var failed = 0;
+        var extractRewrites = 0;
         var previousEnd = 0UL;
         foreach (var site in sites)
         {
@@ -113,7 +116,7 @@ internal static class GuestRedZonePatcher
                 continue;
             }
 
-            if (!TryPatchSite(memory, site, ref trampolineCursor, trampolineEnd, splitVectorStores, rewriteSha))
+            if (!TryPatchSite(memory, site, ref trampolineCursor, trampolineEnd, splitVectorStores, rewriteInstructions))
             {
                 failed++;
                 continue;
@@ -121,6 +124,8 @@ internal static class GuestRedZonePatcher
 
             previousEnd = site.Address + (ulong)site.ByteLength;
             patched++;
+            extractRewrites += site.Instructions.Count(static instruction =>
+                Sse4aExtractRewrite.IsRequired && Sse4aExtractRewrite.CanRewrite(instruction));
         }
 
         var result = scan with
@@ -134,6 +139,7 @@ internal static class GuestRedZonePatcher
             StackRefusals = scan.StackRefusals,
             TooShortRefusals = scan.TooShortRefusals,
             TrampolineBytes = trampolineCursor - trampolineBase,
+            ExtractRewrites = extractRewrites,
         };
         Console.Error.WriteLine(
             $"[LOADER] {hostName} red-zone patch: functions={result.Functions} red_zone={result.RedZoneFunctions} " +
@@ -143,6 +149,12 @@ internal static class GuestRedZonePatcher
             $"stack_after={result.StackRefusals} too_short={result.TooShortRefusals}) " +
             $"rosetta_vector_stores={result.VectorStoreCount} sha_rewrites={result.ShaInstructionCount} " +
             $"trampolines=0x{trampolineBase:X16}+0x{result.TrampolineBytes:X}.");
+        if (Sse4aExtractRewrite.IsRequired)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER] {hostName} SSE4a EXTRQ rewrite: patched={extractRewrites} candidates={result.ExtractCandidates}.");
+        }
+
         return result;
     }
 
@@ -153,7 +165,7 @@ internal static class GuestRedZonePatcher
         IReadOnlyList<ulong> functionStarts,
         bool protectRedZone,
         bool splitVectorStores,
-        bool rewriteSha,
+        bool rewriteInstructions,
         out PatchResult result)
     {
         var sites = new List<PatchSite>();
@@ -164,6 +176,7 @@ internal static class GuestRedZonePatcher
         var unrelocatableSites = 0;
         var refusalCounts = new int[5];
         var shaInstructionCount = 0;
+        var extractCandidates = 0;
         var branchTargets = new HashSet<ulong>();
         var candidateFunctions = new List<(List<DecodedInstruction> Instructions, bool UsesRedZone)>();
 
@@ -220,7 +233,7 @@ internal static class GuestRedZonePatcher
                      (decoded.Any(static entry => entry.Instruction.MemoryBase == Register.RBP &&
                          unchecked((long)entry.Instruction.MemoryDisplacement64) < 0) &&
                       GuestStackFrameAnalysis.UsesFrameRedZone(decoded.Select(static entry => entry.Instruction).ToArray())));
-                if (!usesRedZone && !splitVectorStores && !rewriteSha)
+                if (!usesRedZone && !splitVectorStores && !rewriteInstructions)
                 {
                     continue;
                 }
@@ -236,14 +249,16 @@ internal static class GuestRedZonePatcher
         // Collect incoming branches from all functions and segments before replacing bytes.
         foreach (var (decoded, usesRedZone) in candidateFunctions)
         {
+            extractCandidates += decoded.Count(static entry =>
+                Sse4aExtractRewrite.IsRequired && Sse4aExtractRewrite.CanRewrite(entry.Instruction));
             // An unresolved indirect jump can enter the middle of a span.
             var groupInstructions = !decoded.Any(static entry => entry.Instruction.FlowControl == FlowControl.IndirectBranch);
             var lastSiteEnd = 0UL;
             for (var instructionIndex = 0; instructionIndex < decoded.Count; instructionIndex++)
             {
                 var instruction = decoded[instructionIndex].Instruction;
-                var isShaSite = rewriteSha && ShaInstructionRewrite.CanRewrite(instruction);
-                if (!isShaSite &&
+                var isRewriteSite = rewriteInstructions && CanRewriteInstruction(instruction);
+                if (!isRewriteSite &&
                     ((!usesRedZone && !(splitVectorStores && RosettaVectorStorePatch.RequiresStoreSplit(instruction))) ||
                      !IsFaultableGuestMemoryInstruction(instruction)))
                 {
@@ -270,9 +285,10 @@ internal static class GuestRedZonePatcher
                 {
                     vectorStoreCount += span.Instructions.Count(static instruction => RosettaVectorStorePatch.RequiresStoreSplit(instruction));
                 }
-                if (rewriteSha)
+                if (rewriteInstructions)
                 {
-                    shaInstructionCount += span.Instructions.Count(static instruction => ShaInstructionRewrite.CanRewrite(instruction));
+                    shaInstructionCount += span.Instructions.Count(static instruction =>
+                        ShaInstructionRewrite.IsRequired && ShaInstructionRewrite.CanRewrite(instruction));
                 }
                 if (!backward)
                 {
@@ -294,6 +310,7 @@ internal static class GuestRedZonePatcher
             StackRefusals = refusalCounts[(int)SpanRefusal.StackAfter],
             TooShortRefusals = refusalCounts[(int)SpanRefusal.TooShort],
             ShaInstructionCount = shaInstructionCount,
+            ExtractCandidates = extractCandidates,
         };
         return sites;
     }
@@ -446,7 +463,7 @@ internal static class GuestRedZonePatcher
         var coreEnd = -1;
         for (var index = 0; index < instructions.Count; index++)
         {
-            if (!IsFaultableGuestMemoryInstruction(instructions[index]))
+            if (!IsFaultableGuestMemoryInstruction(instructions[index]) && !CanRewriteInstruction(instructions[index]))
             {
                 continue;
             }
@@ -623,6 +640,21 @@ internal static class GuestRedZonePatcher
         return true;
     }
 
+    // Instructions replaced by a software expansion inside the trampoline.
+    internal static bool CanRewriteInstruction(in Instruction instruction) =>
+        (ShaInstructionRewrite.IsRequired && ShaInstructionRewrite.CanRewrite(instruction)) ||
+        (Sse4aExtractRewrite.IsRequired && Sse4aExtractRewrite.CanRewrite(instruction));
+
+    private static IList<Instruction> ExpandRewrites(IList<Instruction> instructions)
+    {
+        if (ShaInstructionRewrite.IsRequired)
+        {
+            instructions = ShaInstructionRewrite.Expand(instructions);
+        }
+
+        return Sse4aExtractRewrite.IsRequired ? Sse4aExtractRewrite.Expand(instructions) : instructions;
+    }
+
     private static bool IsRelocatableDirectBranch(in Instruction instruction) =>
         instruction.FlowControl is FlowControl.ConditionalBranch or FlowControl.UnconditionalBranch &&
         instruction.OpCount == 1 &&
@@ -737,7 +769,7 @@ internal static class GuestRedZonePatcher
         ref ulong trampolineCursor,
         ulong trampolineEnd,
         bool splitVectorStores,
-        bool rewriteSha)
+        bool rewriteInstructions)
     {
         // A span that starts before the faulting instruction may relocate an
         // RSP-relative access, which must run before the shift or it would read
@@ -758,9 +790,9 @@ internal static class GuestRedZonePatcher
             ? site.Instructions
             : site.Instructions.Skip(site.CoreStart).Take(site.CoreCount).ToList();
         var instructions = splitVectorStores ? RosettaVectorStorePatch.SplitVectorStores(core) : core;
-        if (rewriteSha)
+        if (rewriteInstructions)
         {
-            instructions = ShaInstructionRewrite.Expand(instructions);
+            instructions = ExpandRewrites(instructions);
         }
         var block = new InstructionBlock(writer, instructions, relocatedAddress);
         if (!BlockEncoder.TryEncode(64, block, out _, out _, BlockEncoderOptions.None))
@@ -930,6 +962,10 @@ internal static class GuestRedZonePatcher
         public int VectorStoreCount { get; init; }
 
         public int ShaInstructionCount { get; init; }
+
+        public int ExtractCandidates { get; init; }
+
+        public int ExtractRewrites { get; init; }
 
         public int PatchedSites { get; init; }
 
