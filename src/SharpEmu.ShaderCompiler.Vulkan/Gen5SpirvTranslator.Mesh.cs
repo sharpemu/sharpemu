@@ -83,7 +83,7 @@ public static partial class Gen5SpirvTranslator
             _meshCullOutput = DeclareMeshOutput(_boolType, mesh.OutputPrimitiveCapacity,
                 SpirvBuiltIn.CullPrimitiveExt, perPrimitive: true);
 
-            var locations = MeshShaderConfiguration.ParameterLocations(_request.Program, _requiredVertexOutputCount);
+            var locations = MeshShaderConfiguration.ParameterLocations(_request);
             foreach (var location in locations)
             {
                 var output = _module.AddGlobalVariable(
@@ -546,6 +546,10 @@ public static partial class Gen5SpirvTranslator
                      _meshParameters.TryGetValue(export.Target - 32, out var parameter))
             {
                 destination = parameter.Value;
+            }
+            else if (export.Target is >= 32 and < 64 && _request.MeshOutputLocationMask.HasValue)
+            {
+                return true;
             }
             else
             {

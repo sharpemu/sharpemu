@@ -18,4 +18,7 @@ public enum Gen5SpirvStage
 
 public sealed record Gen5SpirvShader(
     byte[] Spirv,
-    uint AttributeCount);
+    uint AttributeCount)
+{
+    public uint? InputLocationMask { get; init; }
+}
