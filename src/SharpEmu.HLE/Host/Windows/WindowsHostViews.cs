@@ -27,7 +27,6 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
     private const uint PAGE_EXECUTE_READWRITE = 0x40;
     private const uint PAGE_EXECUTE_WRITECOPY = 0x80;
     private const uint SEC_COMMIT = 0x8000000;
-    private const uint FILE_MAP_READ_WRITE = 0x6;
     private static readonly nint InvalidHandle = -1;
 
     public WindowsHostViews()
@@ -56,7 +55,14 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
             return false;
         }
 
-        var alias = FailAliasMapForTests ? null : MapViewOfFile(handle, FILE_MAP_READ_WRITE, 0, 0, (nuint)size);
+        // Keep the host alias above the guest mapping range.
+        var requirements = new MemoryAddressRequirements
+        {
+            LowestStartingAddress = (void*)(WindowsGuestAddressReservation.DataStart + WindowsGuestAddressReservation.DataSize),
+        };
+        var parameter = new MemoryExtendedParameter { Type = 1, Pointer = &requirements };
+        var alias = FailAliasMapForTests ? null : MapViewOfFile3(
+            handle, GetCurrentProcess(), null, 0, (nuint)size, 0, PAGE_READWRITE, &parameter, 1);
         if (alias == null)
         {
             CloseHandle(handle);
@@ -341,8 +347,20 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial nint CreateFileMappingW(nint file, void* attributes, uint protect, uint maximumSizeHigh, uint maximumSizeLow, ushort* name);
 
-    [LibraryImport("kernel32.dll", SetLastError = true)]
-    private static partial void* MapViewOfFile(nint fileMapping, uint desiredAccess, uint offsetHigh, uint offsetLow, nuint bytesToMap);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryAddressRequirements
+    {
+        public void* LowestStartingAddress;
+        public void* HighestEndingAddress;
+        public nuint Alignment;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryExtendedParameter
+    {
+        public ulong Type;
+        public void* Pointer;
+    }
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

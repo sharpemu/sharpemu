@@ -22,6 +22,19 @@ public sealed unsafe class HostViewMemoryTests
     private const uint MEM_COMMIT = 0x1000;
     private const uint MEM_RESERVE = 0x2000;
 
+    [Fact]
+    public void WindowsBackingAliasStaysAboveTheGuestMappingRange()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+
+        var views = HostViewMemory.Create();
+        using var backing = CreateBacking(views);
+        Assert.True(backing.AliasBase >= 0xFC_0000_0000UL);
+        Assert.Equal(0UL, backing.AliasBase % views.Granularity);
+        *(ulong*)backing.AliasBase = Marker;
+        Assert.Equal(Marker, *(ulong*)backing.AliasBase);
+    }
+
     private static uint QueryState(ulong address)
     {
         Assert.NotEqual((nuint)0, VirtualQuery((void*)address, out var info, (nuint)sizeof(MemoryBasicInformation)));
