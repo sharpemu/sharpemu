@@ -64,6 +64,10 @@ public sealed record HostVideoOptions
 
     public GuestDisplayResolution GuestResolution { get; init; } = GuestDisplayResolution.Hd;
 
+    // Host resolution multiplier of the guest render targets the scaling rules accept.
+    // One renders every target at the size the game asked for.
+    public float RenderScale { get; init; } = 1.0f;
+
     public int DisplayIndex { get; init; }
 
     public int RefreshRate { get; init; }
@@ -87,11 +91,20 @@ public sealed record HostVideoOptions
     internal bool CanUseHdr(bool displayHdrEnabled, bool surfaceSupportsHdr, bool autoAllowed) =>
         surfaceSupportsHdr && (HdrMode == HostHdrMode.On || HdrMode == HostHdrMode.Auto && autoAllowed && displayHdrEnabled);
 
+    public const float MinimumRenderScale = 0.25f;
+    public const float MaximumRenderScale = 2.0f;
+
+    // Rounds to a hundredth so the GUI, the command line and the environment agree bit for bit;
+    // the renderer compares scales for equality when it decides whether two images alias.
+    public static float NormalizeRenderScale(float scale) =>
+        !float.IsFinite(scale) ? 1.0f : MathF.Round(Math.Clamp(scale, MinimumRenderScale, MaximumRenderScale), 2);
+
     public HostVideoOptions Normalize() => this with
     {
         Width = Math.Clamp(Width, 640, 16384),
         Height = Math.Clamp(Height, 360, 16384),
         GuestResolution = Enum.IsDefined(GuestResolution) ? GuestResolution : GuestDisplayResolution.Hd,
+        RenderScale = NormalizeRenderScale(RenderScale),
         DisplayIndex = Math.Max(0, DisplayIndex),
         RefreshRate = Math.Clamp(RefreshRate, 0, 1000),
         HdrMode = Enum.IsDefined(HdrMode) ? HdrMode : HostHdrMode.Auto,
@@ -115,6 +128,7 @@ public static class HostVideoHost
     {
         var normalized = options.Normalize();
         Volatile.Write(ref _currentOptions, normalized);
+        Gpu.Images.RenderScalePolicy.Configure(normalized.RenderScale);
         var configured = VulkanVideoPresenter.TryConfigureVideo(normalized) &
                          MetalVideoPresenter.TryConfigureVideo(normalized);
         if (configured)

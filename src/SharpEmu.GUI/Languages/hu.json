@@ -222,6 +222,8 @@
   "Options.Resolution.Desc": "Kezdeti ablakméret vagy kizárólagos teljes képernyős felbontás.",
   "Options.GuestResolution.Label": "A játék megjelenítési módja",
   "Options.GuestResolution.Desc": "A játéknak jelzett képernyőfelbontás. Alapértelmezés: 1080p. A belső renderelési felbontást a játék választja; a rögzített felbontású játékok figyelmen kívül hagyhatják ezt a beállítást.",
+  "Options.RenderScale.Label": "Belső felbontás skálázása",
+  "Options.RenderScale.Desc": "A gazdagép felbontásszorzója a játék képernyőméretű rendercéljaira. 100% alatt a képminőséget cseréli sebességre, 100% fölött fordítva. Az árnyéktérképek, a keresőtáblák, a tömörített textúrák és a compute shaderek által írt felületek mindig natív méretükben maradnak.",
   "Options.Display.Label": "Kijelző",
   "Options.Display.Desc": "A középre igazításhoz és teljes képernyőhöz használt monitor.",
   "Options.RefreshRate.Label": "Frissítési gyakoriság",

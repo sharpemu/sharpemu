@@ -28,6 +28,8 @@ public sealed class PerGameSettings
 
     public string? GuestResolution { get; set; }
 
+    public float? RenderScale { get; set; }
+
     public int? DisplayIndex { get; set; }
 
     public int? RefreshRate { get; set; }
@@ -55,6 +57,7 @@ public sealed class PerGameSettings
         WindowMode is null &&
         Resolution is null &&
         GuestResolution is null &&
+        RenderScale is null &&
         DisplayIndex is null &&
         RefreshRate is null &&
         ScalingMode is null &&
@@ -151,6 +154,12 @@ public sealed class PerGameSettings
         if (string.Equals(GuestResolution, global.GuestResolution, StringComparison.OrdinalIgnoreCase))
         {
             GuestResolution = null;
+        }
+
+        if (RenderScale is { } renderScale &&
+            GuiSettings.NormalizeRenderScale(renderScale) == GuiSettings.NormalizeRenderScale(global.RenderScale))
+        {
+            RenderScale = null;
         }
 
         if (DisplayIndex == global.DisplayIndex)
@@ -281,6 +290,7 @@ public sealed record EffectiveLaunchSettings(
     string WindowMode,
     string Resolution,
     string GuestResolution,
+    float RenderScale,
     int DisplayIndex,
     int RefreshRate,
     string ScalingMode,
@@ -299,6 +309,7 @@ public sealed record EffectiveLaunchSettings(
         perGame?.WindowMode ?? global.WindowMode,
         perGame?.Resolution ?? global.Resolution,
         GuiSettings.NormalizeGuestResolution(perGame?.GuestResolution ?? global.GuestResolution),
+        GuiSettings.NormalizeRenderScale(perGame?.RenderScale ?? global.RenderScale),
         Math.Max(0, perGame?.DisplayIndex ?? global.DisplayIndex),
         Math.Clamp(perGame?.RefreshRate ?? global.RefreshRate, 0, 1000),
         perGame?.ScalingMode ?? global.ScalingMode,

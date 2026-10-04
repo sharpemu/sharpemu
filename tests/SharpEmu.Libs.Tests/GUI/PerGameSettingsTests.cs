@@ -24,6 +24,32 @@ public sealed class PerGameSettingsTests
         Assert.Equal("3840x2160", EffectiveLaunchSettings.Resolve(global, game).GuestResolution);
     }
 
+    [Fact]
+    public void RenderScaleDefaultsToNativeAndCanBeOverriddenPerGame()
+    {
+        var global = new GuiSettings();
+        Assert.Equal(1.0f, EffectiveLaunchSettings.Resolve(global, null).RenderScale);
+        var game = new PerGameSettings { RenderScale = 0.5f };
+        game.RemoveInheritedValues(global);
+        Assert.False(game.IsEmpty);
+        var restored = PerGameSettings.NormalizeFromJson(System.Text.Json.JsonSerializer.Serialize(game));
+        Assert.Equal(0.5f, EffectiveLaunchSettings.Resolve(global, restored).RenderScale);
+        global.RenderScale = 0.5f;
+        game.RemoveInheritedValues(global);
+        Assert.True(game.IsEmpty);
+        Assert.Equal(0.5f, EffectiveLaunchSettings.Resolve(global, game).RenderScale);
+    }
+
+    [Theory]
+    [InlineData(0f, 0.25f)]
+    [InlineData(100f, 2.0f)]
+    [InlineData(float.NaN, 1.0f)]
+    public void OutOfRangeRenderScaleIsClamped(float value, float expected)
+    {
+        Assert.Equal(expected, EffectiveLaunchSettings.Resolve(
+            new GuiSettings(), new PerGameSettings { RenderScale = value }).RenderScale);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

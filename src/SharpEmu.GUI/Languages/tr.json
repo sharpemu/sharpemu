@@ -65,6 +65,8 @@
   "Options.Resolution.Desc": "Başlangıç pencere boyutu veya özel tam ekran çözünürlüğü.",
   "Options.GuestResolution.Label": "Oyunun ekran modu",
   "Options.GuestResolution.Desc": "Oyuna bildirilen ekran çözünürlüğü. Varsayılan 1080p’dir. Dahili işleme çözünürlüğünü oyun seçer; sabit çözünürlüklü oyunlar bu ayarı yok sayabilir.",
+  "Options.RenderScale.Label": "Dahili çözünürlük ölçeği",
+  "Options.RenderScale.Desc": "Oyunun ekran boyutundaki işleme hedeflerine uygulanan ana makine çözünürlük çarpanı. %100'ün altında görüntü kalitesi hıza takas edilir, üzerinde ise tersi olur. Gölge haritaları, arama tabloları, sıkıştırılmış dokular ve hesaplama gölgelendiricilerinin yazdığı yüzeyler her zaman kendi boyutlarında kalır.",
   "Options.Display.Label": "Ekran",
   "Options.Display.Desc": "Ortalama ve tam ekran için kullanılan monitör.",
   "Options.RefreshRate.Label": "Yenileme hızı",

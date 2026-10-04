@@ -75,6 +75,23 @@ public sealed class GuiSettings
     internal static string NormalizeGuestResolution(string? value) =>
         string.Equals(value, "3840x2160", StringComparison.OrdinalIgnoreCase) ? "3840x2160" : "1920x1080";
 
+    // Host resolution multiplier of the render targets the renderer is allowed to scale.
+    public float RenderScale { get; set; } = 1.0f;
+
+    internal static float NormalizeRenderScale(float value) =>
+        SharpEmu.Libs.VideoOut.HostVideoOptions.NormalizeRenderScale(value);
+
+    internal static readonly string[] RenderScaleChoices = ["50%", "75%", "100%", "125%", "150%", "200%"];
+
+    internal static string RenderScaleText(float value) =>
+        ((int)MathF.Round(NormalizeRenderScale(value) * 100)).ToString(System.Globalization.CultureInfo.InvariantCulture) + "%";
+
+    internal static float ParseRenderScale(string? text) =>
+        int.TryParse(text?.TrimEnd('%'), System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture, out var percent)
+            ? NormalizeRenderScale(percent / 100.0f)
+            : 1.0f;
+
     public int DisplayIndex { get; set; }
 
     public int RefreshRate { get; set; }
@@ -187,6 +204,7 @@ public sealed class GuiSettings
         settings.WindowMode = NormalizeChoice(settings.WindowMode, "Windowed", "Borderless", "Exclusive");
         settings.Resolution = NormalizeResolution(settings.Resolution);
         settings.GuestResolution = NormalizeGuestResolution(settings.GuestResolution);
+        settings.RenderScale = NormalizeRenderScale(settings.RenderScale);
         settings.ScalingMode = NormalizeChoice(settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         settings.HdrMode = NormalizeChoice(settings.HdrMode, "Auto", "On", "Off");
         settings.BinkPlaybackMode = NormalizeChoice(settings.BinkPlaybackMode, "Guest", "Host", "Skip");

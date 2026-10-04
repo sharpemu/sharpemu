@@ -221,6 +221,8 @@
   "Options.Resolution.Desc": "초기 창 크기 또는 독점 전체 화면 해상도.",
   "Options.GuestResolution.Label": "게임 디스플레이 모드",
   "Options.GuestResolution.Desc": "게임에 전달하는 화면 해상도입니다. 기본값은 1080p입니다. 내부 렌더링 해상도는 게임이 결정하며, 해상도가 고정된 게임은 이 설정을 무시할 수 있습니다.",
+  "Options.RenderScale.Label": "내부 해상도 배율",
+  "Options.RenderScale.Desc": "게임의 화면 크기 렌더 타깃에 적용되는 호스트 해상도 배율입니다. 100% 미만은 화질을 속도와 맞바꾸고 100% 초과는 그 반대입니다. 섀도 맵, 룩업 테이블, 압축 텍스처, 컴퓨트 셰이더가 쓰는 표면은 항상 원래 크기를 유지합니다.",
   "Options.Display.Label": "디스플레이",
   "Options.Display.Desc": "가운데 배치와 전체 화면에 사용할 모니터.",
   "Options.RefreshRate.Label": "새로 고침 빈도",

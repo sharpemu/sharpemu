@@ -222,6 +222,8 @@
   "Options.Resolution.Desc": "Tamaño inicial de la ventana o resolución de pantalla completa exclusiva.",
   "Options.GuestResolution.Label": "Modo de pantalla del juego",
   "Options.GuestResolution.Desc": "Resolución de pantalla comunicada al juego. El valor predeterminado es 1080p. El juego elige su resolución interna de renderizado; los juegos con resolución fija pueden ignorar este ajuste.",
+  "Options.RenderScale.Label": "Escala de resolución interna",
+  "Options.RenderScale.Desc": "Multiplicador de resolución del anfitrión aplicado a los destinos de renderizado del tamaño de la pantalla. Por debajo del 100 % se cambia calidad de imagen por velocidad; por encima, lo contrario. Los mapas de sombras, las tablas de consulta, las texturas comprimidas y las superficies escritas por sombreadores de cómputo conservan siempre su tamaño nativo.",
   "Options.Display.Label": "Pantalla",
   "Options.Display.Desc": "Monitor utilizado para centrar y mostrar a pantalla completa.",
   "Options.RefreshRate.Label": "Frecuencia de actualización",

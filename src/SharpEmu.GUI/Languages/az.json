@@ -76,6 +76,8 @@
   "Options.Resolution.Desc": "Pəncərənin başlanğıc ölçüsü və ya eksklüziv tam ekranın təsvir ölçüsü.",
   "Options.GuestResolution.Label": "Oyunun ekran rejimi",
   "Options.GuestResolution.Desc": "Oyuna bildirilən ekran təsvir ölçüsü. Standart 1080p-dir. Daxili render ölçüsünü oyun seçir; sabit ölçülü oyunlar bu ayarı nəzərə almaya bilər.",
+  "Options.RenderScale.Label": "Daxili təsvir ölçüsü əmsalı",
+  "Options.RenderScale.Desc": "Oyunun ekran ölçüsündəki render hədəflərinə tətbiq olunan host təsvir ölçüsü vuruğu. 100%-dən aşağı təsvir keyfiyyətini sürətə dəyişir, yuxarı isə əksinə. Kölgə xəritələri, axtarış cədvəlləri, sıxılmış teksturlar və hesablama şeyderlərinin yazdığı səthlər həmişə öz ölçüsündə qalır.",
   "Options.Display.Label": "Ekran",
   "Options.Display.Desc": "Pəncərənin mərkəzə yerləşdirilməsi və tam ekran üçün istifadə olunan monitor.",
   "Options.RefreshRate.Label": "Yenilənmə tezliyi",

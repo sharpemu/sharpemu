@@ -864,6 +864,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                     Classes="optionValue"
                                     VerticalAlignment="Center" />
                         </local:SettingRow>
+                        <local:SettingRow x:Name="GameRenderScaleRow"
+                                          Classes="optionRow"
+                                          Label="{Binding [Options.RenderScale.Label], Source={x:Static local:Localization.Instance}}"
+                                          Description="{Binding [Options.RenderScale.Desc], Source={x:Static local:Localization.Instance}}">
+                          <ComboBox x:Name="GameRenderScaleBox"
+                                    Classes="optionValue"
+                                    VerticalAlignment="Center" />
+                        </local:SettingRow>
                         <local:SettingRow x:Name="GameDisplayRow"
                                           Classes="optionRow"
                                           Label="{Binding [Options.Display.Label],
@@ -1503,6 +1511,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Label="{Binding [Options.GuestResolution.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.GuestResolution.Desc], Source={x:Static local:Localization.Instance}}">
                         <ComboBox x:Name="GuestResolutionBox" Classes="optionValue" VerticalAlignment="Center" />
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="RenderScaleRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.RenderScale.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.RenderScale.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ComboBox x:Name="RenderScaleBox" Classes="optionValue" VerticalAlignment="Center" />
                       </local:SettingRow>
                       <local:SettingRow x:Name="DisplayRow"
                                         Classes="optionRow"

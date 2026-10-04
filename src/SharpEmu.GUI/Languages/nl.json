@@ -221,6 +221,8 @@
   "Options.Resolution.Desc": "Initiële venstergrootte of resolutie voor exclusief volledig scherm.",
   "Options.GuestResolution.Label": "Weergavemodus van het spel",
   "Options.GuestResolution.Desc": "Schermresolutie die aan het spel wordt doorgegeven. Standaard 1080p. Het spel kiest de interne renderresolutie; spellen met een vaste resolutie kunnen deze instelling negeren.",
+  "Options.RenderScale.Label": "Interne resolutieschaal",
+  "Options.RenderScale.Desc": "Hostresolutievermenigvuldiger voor de schermgrote rendertargets van het spel. Onder 100% ruil je beeldkwaliteit in voor snelheid; boven 100% andersom. Schaduwkaarten, opzoektabellen, gecomprimeerde texturen en door compute-shaders beschreven oppervlakken behouden altijd hun oorspronkelijke grootte.",
   "Options.Display.Label": "Beeldscherm",
   "Options.Display.Desc": "Monitor die wordt gebruikt voor centrering en volledig scherm.",
   "Options.RefreshRate.Label": "Verversingssnelheid",

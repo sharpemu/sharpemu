@@ -87,6 +87,8 @@
   "Options.Resolution.Desc": "Algne akna suurus või eksklusiivse täisekraani eraldusvõime.",
   "Options.GuestResolution.Label": "Mängu kuvarežiim",
   "Options.GuestResolution.Desc": "Mängule teatatud ekraani eraldusvõime. Vaikimisi 1080p. Mäng valib sisemise renderduse eraldusvõime; fikseeritud eraldusvõimega mängud võivad seda sätet eirata.",
+  "Options.RenderScale.Label": "Sisemise eraldusvõime skaala",
+  "Options.RenderScale.Desc": "Hosti eraldusvõime kordaja mängu ekraanisuuruste renderdussihtide jaoks. Alla 100% vahetab pildikvaliteedi kiiruse vastu, üle 100% vastupidi. Varjukaardid, otsingutabelid, pakitud tekstuurid ja arvutusvarjundajate kirjutatud pinnad jäävad alati oma algsesse suurusesse.",
   "Options.Display.Label": "Kuvar",
   "Options.Display.Desc": "Monitor, mida kasutatakse tsentreerimiseks ja täisekraanrežiimiks.",
   "Options.RefreshRate.Label": "Värskendussagedus",

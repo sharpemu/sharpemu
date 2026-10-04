@@ -323,6 +323,8 @@ public partial class MainWindow : Window
         DisplayBox.SelectionChanged += (_, _) => OnHostDisplayChanged();
         ResolutionBox.SelectionChanged += (_, _) => OnHostResolutionChanged();
         GuestResolutionBox.SelectionChanged += (_, _) => _settings.GuestResolution = SelectedComboText(GuestResolutionBox, "1920x1080");
+        RenderScaleBox.SelectionChanged += (_, _) =>
+            _settings.RenderScale = GuiSettings.ParseRenderScale(SelectedComboText(RenderScaleBox, "100%"));
         RefreshRateBox.SelectionChanged += (_, _) => OnHostRefreshRateChanged();
         ScalingModeBox.SelectionChanged += (_, _) => _settings.ScalingMode = SelectedComboText(ScalingModeBox, "Fit");
         VSyncToggle.IsCheckedChanged += (_, _) => _settings.VSync = VSyncToggle.IsChecked == true;
@@ -1251,6 +1253,7 @@ public partial class MainWindow : Window
         WindowModeBox.ItemsSource = _windowModeChoices;
         ScalingModeBox.ItemsSource = _scalingModeChoices;
         GuestResolutionBox.ItemsSource = new[] { "1920x1080", "3840x2160" };
+        RenderScaleBox.ItemsSource = GuiSettings.RenderScaleChoices;
         HdrModeBox.ItemsSource = _hdrModeChoices;
         BinkPlaybackBox.ItemsSource = _binkPlaybackChoices;
         OverlayModeBox.ItemsSource = _overlayModeChoices;
@@ -1327,6 +1330,7 @@ public partial class MainWindow : Window
         ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         VSyncToggle.IsChecked = _settings.VSync;
         GuestResolutionBox.SelectedItem = GuiSettings.NormalizeGuestResolution(_settings.GuestResolution);
+        RenderScaleBox.SelectedItem = GuiSettings.RenderScaleText(_settings.RenderScale);
         HdrModeBox.SelectedIndex = ChoiceIndex(_settings.HdrMode, "Auto", "On", "Off");
         OverlayEnabledToggle.IsChecked = _settings.OverlayEnabled;
         OverlayModeBox.SelectedIndex = ChoiceIndex(_settings.OverlayMode, "Full", "Minimal", "TitleBar");
@@ -2781,6 +2785,8 @@ public partial class MainWindow : Window
         arguments.Add($"--window-mode={launch.Settings.WindowMode.ToLowerInvariant()}");
         arguments.Add($"--resolution={launch.Settings.Resolution}");
         arguments.Add($"--guest-resolution={launch.Settings.GuestResolution}");
+        arguments.Add(
+            $"--render-scale={launch.Settings.RenderScale.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
         arguments.Add($"--display={launch.Settings.DisplayIndex}");
         arguments.Add($"--refresh-rate={launch.Settings.RefreshRate}");
         arguments.Add($"--scaling={launch.Settings.ScalingMode.ToLowerInvariant()}");
