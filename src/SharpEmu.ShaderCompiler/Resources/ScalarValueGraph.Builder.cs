@@ -1896,6 +1896,7 @@ public sealed partial class ScalarValueGraph
             Reset();
         }
 
+        [System.Diagnostics.CodeAnalysis.MemberNotNull(nameof(Exec), nameof(Vcc), nameof(Scc), nameof(CarryOut))]
         public void Reset()
         {
             var undefined = _graph.Undefined(ScalarValueType.U32);
