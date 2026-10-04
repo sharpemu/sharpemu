@@ -7,6 +7,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 ## Scope
 
+`SHARPEMU_SNAPSHOT_COMPUTE_HASH` selects the first two matching Vulkan dispatches
+for image snapshots before and after execution. See [image snapshots](image-clear-tracing.md#selected-draw-snapshots).
+
+`SHARPEMU_SNAPSHOT_PIXEL_HASH` selects the first two Vulkan draws with a matching
+pixel shader hash for input/output image snapshots. It is off by default. See
+[selected draw snapshots](image-clear-tracing.md#selected-draw-snapshots) for limits and output paths.
+
 This list contains each `SHARPEMU_*` environment variable in the repository that the GUI does not show.
 The GUI exposes these variables on its **Options** and **Game options** pages:
 `SHARPEMU_BTHID_UNAVAILABLE`, `SHARPEMU_CRASH_CAPTURE`, `SHARPEMU_DEFAULT_PROFILE`,
