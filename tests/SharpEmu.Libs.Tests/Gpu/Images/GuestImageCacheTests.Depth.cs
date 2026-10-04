@@ -16,6 +16,43 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 // Depth and stencil overlaps, buffer synchronization from images, and layered conversions.
 public sealed unsafe partial class GuestImageCacheTests
 {
+    [Theory]
+    [InlineData(8ul, 4u, 1u)]
+    [InlineData(4ul, 2u, 2u)]
+    public void StencilAssociation_SeparatesChangedRangeOrExtent(ulong stencilSize, uint width, uint height)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var stencilAddress = address + 0x10000;
+        var original = AsDepthTarget(LinearRequest(address, 16, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new Extent3D(4, 1, 1), 1, 4, 1), Format.D32SfloatS8Uint);
+        original.Description.Stencil = new GuestSpan(stencilAddress, 4);
+        original.View = original.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        var originalIdentifier = harness.Acquire(ref original);
+        harness.MarkGpuWritten(originalIdentifier);
+        var originalAssociation = harness.ProxyAt(stencilAddress, 4);
+        var originalRecord = harness.Image(originalAssociation);
+        Assert.True(originalRecord.IsWatched);
+
+        var replacement = AsDepthTarget(LinearRequest(address + 0x4000, 16, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new Extent3D(width, height, 1), 1, 4, 1), Format.D32SfloatS8Uint);
+        replacement.Description.Stencil = new GuestSpan(stencilAddress, stencilSize);
+        replacement.View = replacement.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        var replacementIdentifier = harness.Find(ref replacement);
+        harness.Worker.Run(() => harness.Images.AssociateStencilForTest(replacementIdentifier, replacement.Description.Stencil));
+        var associations = harness.Images.FindImagesInRangeForTest(stencilAddress, stencilSize, false);
+        var replacementAssociation = Assert.Single(associations, identifier =>
+            harness.Image(identifier).DepthOwner == replacementIdentifier);
+
+        Assert.NotEqual(originalAssociation, replacementAssociation);
+        Assert.Equal(originalIdentifier, originalRecord.DepthOwner);
+        Assert.Equal(original.Description.Stencil, originalRecord.Description.Data);
+        Assert.True(originalRecord.IsWatched);
+        Assert.Equal(replacement.Description.Stencil, harness.Image(replacementAssociation).Description.Data);
+        Assert.Equal(replacement.Description.Extent, harness.Image(replacementAssociation).Description.Extent);
+    }
+
     [Fact]
     public void StencilAssociation_ReleasesFormerImageWriteProtection()
     {
