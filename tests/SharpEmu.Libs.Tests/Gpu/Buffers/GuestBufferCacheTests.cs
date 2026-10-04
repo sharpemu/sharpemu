@@ -24,6 +24,21 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     private const ulong Page = GuestBufferCache.CachingPageSize;
 
     [Fact]
+    public void DownloadRingAcceptsFiftyMiBReservation()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        harness.Worker.Run(() =>
+        {
+            var download = harness.Cache.GetUtilityBuffer(GpuBufferUsage.Download);
+            Assert.True(download.TryMap(50UL * 1024 * 1024, out var offset, 256));
+            Assert.Equal(0UL, offset);
+            download.Commit();
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void UnalignedImageObtainUploadsTheWholeDirtyPageToItsBufferOwner()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
