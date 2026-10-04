@@ -206,6 +206,21 @@ public sealed class RenderExecutorStateTests : IDisposable
     }
 
     [Fact]
+    public void ScaledScissorRoundsOutwardAndStaysInsideTheAttachment()
+    {
+        // A guest rectangle keeps its host coverage: the edges round outward, so no guest
+        // pixel the game asked for is clipped away by the mapping itself.
+        Assert.Equal(new ScissorRectangle(5, 2, 51, 29), RenderExecutor.ScaleScissor(new ScissorRectangle(11, 5, 101, 57), 0.5f, 64, 36));
+        Assert.Equal(new ScissorRectangle(22, 10, 202, 114), RenderExecutor.ScaleScissor(new ScissorRectangle(11, 5, 101, 57), 2f, 256, 144));
+
+        // Rounding outward must not push the rectangle past the attachment.
+        Assert.Equal(new ScissorRectangle(0, 0, 32, 18), RenderExecutor.ScaleScissor(new ScissorRectangle(0, 0, 65, 37), 0.5f, 32, 18));
+
+        // An empty scissor stays empty rather than growing a row.
+        Assert.Equal(new ScissorRectangle(5, 5, 5, 5), RenderExecutor.ScaleScissor(new ScissorRectangle(10, 10, 10, 10), 0.5f, 64, 36));
+    }
+
+    [Fact]
     public void Scissor_ClipRectangleRulesIntersectTheSelectedRectangles()
     {
         var viewport = new ScreenViewportRegisters { ScreenScissorRight = 100, ScreenScissorBottom = 100 };
