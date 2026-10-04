@@ -374,9 +374,29 @@ public sealed class KernelBackedMemoryTests
             (ulong)method.Invoke(null, [ulong.MaxValue - 0x3FFF, alignment, alignment])!);
     }
 
+    [Fact]
+    public void UnhintedAddressSearchPreservesPlatformAllocationOrder()
+    {
+        using var test = new BackedKernelMemory();
+        var backing = new AddressSearchRecorder();
+        var method = typeof(KernelMemoryCompatExports).GetMethod("TrySelectBackingAddress",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        object[] arguments = [backing, 0UL, 0x4000UL, 0x4000UL, 0UL, 0UL, false];
+
+        Assert.True((bool)method.Invoke(null, arguments)!);
+        Assert.Equal(!OperatingSystem.IsWindows(), backing.PreferredOwnedReservation);
+        Assert.Single(backing.SearchStarts);
+    }
+
     private sealed class AddressSearchRecorder : IGuestBackedSpace
     {
+        public bool PreferredOwnedReservation { get; private set; }
         public List<ulong> SearchStarts { get; } = [];
+        public bool TryHoldAvailableRange(ulong searchStart, ulong size, ulong alignment, out ulong address)
+        {
+            PreferredOwnedReservation = true;
+            return TryHoldRangeAtOrAbove(searchStart, size, alignment, out address);
+        }
         public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address)
         {
             SearchStarts.Add(searchStart);
