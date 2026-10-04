@@ -293,6 +293,16 @@ public sealed unsafe partial class CachedImage
 
     public void UploadFromBuffer(ReadOnlySpan<BufferImageCopy> copies, VkBuffer buffer, ulong offset, ulong size)
     {
+        // Guest bytes describe guest geometry, so a scaled image receives them through its
+        // guest-resolution twin and takes the result as a blit.
+        if (IsScaled)
+        {
+            var twin = GuestSizedTwin();
+            twin.UploadFromBuffer(copies, buffer, offset, size);
+            BlitFrom(twin);
+            return;
+        }
+
         var command = BeginTransfer(copies, buffer, size);
         var sanitized = SanitizeUploadCopies(copies);
         var uploadCopies = sanitized is null ? copies : sanitized.AsSpan();
@@ -311,6 +321,12 @@ public sealed unsafe partial class CachedImage
 
     public void DownloadToBuffer(ReadOnlySpan<BufferImageCopy> copies, VkBuffer buffer, ulong offset, ulong size)
     {
+        if (IsScaled)
+        {
+            AtGuestResolution().DownloadToBuffer(copies, buffer, offset, size);
+            return;
+        }
+
         var command = BeginTransfer(copies, buffer, size);
         var bufferBarrier = BufferBarrier(buffer, offset, size, MemoryAccess, AccessFlags.TransferWriteBit);
         var (imageBarriers, sourceStages) = GetBarriers(ImageLayout.TransferSrcOptimal, AccessFlags.TransferReadBit, PipelineStageFlags.TransferBit, null);
@@ -349,6 +365,11 @@ public sealed unsafe partial class CachedImage
     // Copies every shared mip level of the source; stencil is never copied here.
     public void CopyFrom(CachedImage source)
     {
+        if (TryCopyAcrossScales(source, static (destination, origin) => destination.CopyFrom(origin)))
+        {
+            return;
+        }
+
         if (source.Backing.Samples != Backing.Samples)
         {
             throw SubmissionScheduler.Fatal($"An image copy needs equal sample counts: source={source.Backing.Samples} destination={Backing.Samples}.");
@@ -418,6 +439,13 @@ public sealed unsafe partial class CachedImage
     // Resolves or copies one mip of the source into one mip of this single-sample image.
     public void ResolveFrom(CachedImage source, in SubresourceRange sourceRange, in SubresourceRange destinationRange)
     {
+        var fromRange = sourceRange;
+        var toRange = destinationRange;
+        if (TryCopyAcrossScales(source, (destination, origin) => destination.ResolveFrom(origin, fromRange, toRange)))
+        {
+            return;
+        }
+
         if (Backing.Samples != 1 || source.Backing.ImageType != ImageType.Type2D || Backing.ImageType != ImageType.Type2D ||
             sourceRange.LevelCount != 1 || destinationRange.LevelCount != 1 ||
             sourceRange.BaseLevel >= source.Backing.MipLevels || destinationRange.BaseLevel >= Backing.MipLevels ||
@@ -434,16 +462,18 @@ public sealed unsafe partial class CachedImage
         var destinationHeight = Math.Max(Backing.Extent.Height >> (int)destinationRange.BaseLevel, 1);
         var copy = source.Backing.Samples == 1;
         var formatsAgree = copy ? ViewFormatRules.AreCompatible(source.Backing.Format, Backing.Format) : source.Backing.Format == Backing.Format;
-        if (layers == 0 || Description.Extent.Width > sourceWidth || Description.Extent.Height > sourceHeight ||
-            Description.Extent.Width > destinationWidth || Description.Extent.Height > destinationHeight || !formatsAgree)
+        // The resolve moves host texels, so the guest extent crosses into this image's resolution.
+        var resolveExtent = RenderScalePolicy.ScaleExtent(Description.Extent, RenderScale);
+        if (layers == 0 || resolveExtent.Width > sourceWidth || resolveExtent.Height > sourceHeight ||
+            resolveExtent.Width > destinationWidth || resolveExtent.Height > destinationHeight || !formatsAgree)
         {
             throw SubmissionScheduler.Fatal(
-                $"The resolve extent or formats do not agree: extent={Description.Extent.Width}x{Description.Extent.Height} source={sourceWidth}x{sourceHeight} destination={destinationWidth}x{destinationHeight} layers={layers} sourceFormat={(int)source.Backing.Format} destinationFormat={(int)Backing.Format}.");
+                $"The resolve extent or formats do not agree: extent={resolveExtent.Width}x{resolveExtent.Height} source={sourceWidth}x{sourceHeight} destination={destinationWidth}x{destinationHeight} layers={layers} sourceFormat={(int)source.Backing.Format} destinationFormat={(int)Backing.Format}.");
         }
 
         var resolvedSource = sourceRange with { LayerCount = layers };
         var resolvedDestination = destinationRange with { LayerCount = layers };
-        var extent = new Extent3D(Description.Extent.Width, Description.Extent.Height, 1);
+        var extent = new Extent3D(resolveExtent.Width, resolveExtent.Height, 1);
         _scheduler.EndRendering();
         var command = new CommandBuffer(_scheduler.Current.Handle);
         source.Transition(ImageLayout.TransferSrcOptimal, AccessFlags.TransferReadBit, resolvedSource, command);
@@ -464,6 +494,13 @@ public sealed unsafe partial class CachedImage
 
     public void CopyDepthStencilFrom(CachedImage source, in SubresourceRange range, in Extent3D extent, ImageAspectFlags aspects)
     {
+        var copyRange = range;
+        var copyExtent = extent;
+        if (TryCopyAcrossScales(source, (destination, origin) => destination.CopyDepthStencilFrom(origin, copyRange, copyExtent, aspects)))
+        {
+            return;
+        }
+
         var requested = aspects & (ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit);
         var available = ViewFormatRules.FullAspects(Backing.Format);
         if (requested == 0 || (requested & ~available) != 0 || source.Backing.Format != Backing.Format ||
@@ -561,6 +598,11 @@ public sealed unsafe partial class CachedImage
 
     private void CopyThroughBuffer(CachedImage source, GpuBuffer buffer, ImageAspectFlags sourceAspect, ImageAspectFlags destinationAspect)
     {
+        if (TryCopyAcrossScales(source, (destination, origin) => destination.CopyThroughBuffer(origin, buffer, sourceAspect, destinationAspect)))
+        {
+            return;
+        }
+
         if (buffer.Handle.Handle == 0 || source.Backing.Samples != 1 || Backing.Samples != 1)
         {
             throw SubmissionScheduler.Fatal($"A copy through a buffer needs single-sample images and a buffer: sourceSamples={source.Backing.Samples} destinationSamples={Backing.Samples}.");
@@ -630,6 +672,11 @@ public sealed unsafe partial class CachedImage
     // Copies a whole standalone image into one mip and layer of this image.
     public void CopyMipFrom(CachedImage source, uint mip, uint layer)
     {
+        if (TryCopyAcrossScales(source, (destination, origin) => destination.CopyMipFrom(origin, mip, layer)))
+        {
+            return;
+        }
+
         if (source.Backing.Samples != Backing.Samples || mip >= Backing.MipLevels || layer >= Backing.Layers)
         {
             throw SubmissionScheduler.Fatal($"The mip copy target is invalid: mip={mip} layer={layer} levels={Backing.MipLevels} layers={Backing.Layers} sourceSamples={source.Backing.Samples} destinationSamples={Backing.Samples}.");
@@ -678,6 +725,11 @@ public sealed unsafe partial class CachedImage
     // Copies a rectangle of the source's first mip into one mip of this image, at its origin.
     public void CopyRegionFrom(CachedImage source, uint sourceX, uint sourceY, uint mip, uint width, uint height)
     {
+        if (TryCopyAcrossScales(source, (destination, origin) => destination.CopyRegionFrom(origin, sourceX, sourceY, mip, width, height)))
+        {
+            return;
+        }
+
         if (mip >= Backing.MipLevels || sourceX + width > source.Backing.Extent.Width || sourceY + height > source.Backing.Extent.Height)
         {
             throw SubmissionScheduler.Fatal(

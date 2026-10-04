@@ -62,9 +62,26 @@ public static class RenderScalePolicy
         return Math.Clamp(scaled, 1u, 32768u);
     }
 
+    // The guest-pixel extent the clip-disable vertex transform maps onto. Dividing the device
+    // limit by an upscale keeps the host viewport (reference x scale) inside that limit while
+    // the transform the vertex program bakes stays scale independent.
+    public static uint ClipSpaceReferenceExtent(uint limit)
+    {
+        var scale = Scale;
+        return scale <= 1.0f ? limit : Math.Max(1u, (uint)(limit / scale));
+    }
+
     public static Extent3D ScaleExtent(Extent3D extent, float scale) => scale == 1.0f
         ? extent
         : new Extent3D(ScaleLength(extent.Width, scale), ScaleLength(extent.Height, scale), extent.Depth);
+
+    private static Func<Format, bool>? _formatSupport;
+
+    // Installed once with the device: a scaled image is resized with vkCmdBlitImage whenever
+    // guest bytes or a differently scaled alias cross into it, so a format that cannot blit
+    // must keep its guest resolution.
+    public static void ConfigureFormatSupport(Func<Format, bool> supportsScaledResize) =>
+        Volatile.Write(ref _formatSupport, supportsScaledResize);
 
     public static float ScaleFor(in ImageDescription description) => ScaleFor(description, Scale);
 
@@ -116,6 +133,11 @@ public static class RenderScalePolicy
 
         // A square target at screen size is a cube face or a shadow atlas far more often
         // than it is a scene buffer.
-        return description.Extent.Width != description.Extent.Height;
+        if (description.Extent.Width == description.Extent.Height)
+        {
+            return false;
+        }
+
+        return Volatile.Read(ref _formatSupport) is not { } supported || supported(description.PixelFormat);
     }
 }
