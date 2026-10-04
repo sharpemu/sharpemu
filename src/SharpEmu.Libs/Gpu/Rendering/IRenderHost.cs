@@ -93,6 +93,8 @@ public interface IRenderHost
 
     RenderHostLimits Limits { get; }
 
+    bool SupportsNativeRectangles => false;
+
     IImageFormatSupport FormatSupport { get; }
 
     // True while a command buffer is recording.
