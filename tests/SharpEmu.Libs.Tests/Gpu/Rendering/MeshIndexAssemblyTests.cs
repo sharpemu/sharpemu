@@ -8,6 +8,23 @@ namespace SharpEmu.Libs.Tests.Gpu.Rendering;
 
 public sealed class MeshIndexAssemblyTests
 {
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(2u)]
+    [InlineData(4u)]
+    public void PointsPreserveShortListsAndRestartBoundaries(uint width)
+    {
+        var bytes = new byte[5 * width];
+        uint[] values = [7, 3, 255, 4, 7];
+        for (var index = 0; index < values.Length; index++) bytes[index * width] = (byte)values[index];
+        var output = new uint[5];
+        var count = MeshIndexAssembly.ExpandPoints(bytes, output, width, -2, true, 255);
+        Assert.Equal(new uint[] { 5, 1, 2, 5 }, output.AsSpan(0, count).ToArray());
+        Assert.Equal(5, MeshIndexAssembly.ExpandPoints(bytes, output, width, 0, false, 255));
+        Assert.Equal(values, output);
+        Assert.Equal(1, MeshIndexAssembly.ExpandPoints(bytes.AsSpan(0, (int)width), output, width, 0, false, 0));
+    }
+
     [Fact]
     public void TriangleListPreservesRepeatedIndicesAndSignedBaseVertex()
     {

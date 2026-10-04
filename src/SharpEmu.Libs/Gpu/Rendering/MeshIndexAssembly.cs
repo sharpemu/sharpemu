@@ -7,6 +7,29 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 
 internal static class MeshIndexAssembly
 {
+    internal static int ExpandPoints(ReadOnlySpan<byte> indices, Span<uint> output, uint elementSize,
+        int baseVertex, bool restartEnabled, uint restartIndex)
+    {
+        _ = GetMaximumCount(indices.Length, elementSize, false);
+        if (output.Length < indices.Length / (int)elementSize)
+            throw new ArgumentException("The index output is too small.", nameof(output));
+        var mask = elementSize == 1 ? byte.MaxValue : elementSize == 2 ? ushort.MaxValue : uint.MaxValue;
+        restartIndex &= mask;
+        var written = 0;
+        for (var offset = 0; offset < indices.Length; offset += (int)elementSize)
+        {
+            var index = elementSize switch
+            {
+                1 => indices[offset],
+                2 => BinaryPrimitives.ReadUInt16LittleEndian(indices[offset..]),
+                _ => BinaryPrimitives.ReadUInt32LittleEndian(indices[offset..]),
+            };
+            if (restartEnabled && index == restartIndex) continue;
+            output[written++] = unchecked(index + (uint)baseVertex);
+        }
+        return written;
+    }
+
     internal static int GetMaximumCount(int byteCount, uint elementSize, bool triangleStrip)
     {
         if (elementSize is not (1 or 2 or 4) || byteCount < 0 || byteCount % elementSize != 0)
