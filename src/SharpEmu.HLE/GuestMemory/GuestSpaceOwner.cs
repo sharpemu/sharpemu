@@ -128,7 +128,11 @@ public sealed class GuestSpaceOwner : IDisposable
                     return true;
                 var mappedRange = FindMappedRangeAtOrBelow(end - 1);
                 if (mappedRange.Size != 0 && mappedRange.Address + mappedRange.Size > address)
+                {
+                    ReservationDiagnostics.Record("owned-overlap", address, size, Granularity,
+                        mappedRange.Address, mappedRange.Size);
                     return false;
+                }
 
                 // Keep owned placeholders. Reserve only the gaps between them.
                 additions = new List<(ulong Address, ulong Size)>();

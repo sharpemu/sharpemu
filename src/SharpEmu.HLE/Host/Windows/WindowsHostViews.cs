@@ -84,6 +84,8 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
         var ptr = VirtualAlloc2(GetCurrentProcess(), (void*)address, (nuint)size, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, null, 0);
         if (ptr == null)
         {
+            ReservationDiagnostics.Record("native-reserve-failed", address, size, Granularity,
+                error: Marshal.GetLastPInvokeError());
             return 0;
         }
 

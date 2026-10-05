@@ -396,6 +396,16 @@ Each variable writes data to files.
 
 Each variable records timings or counts.
 
+With `SHARPEMU_PROFILE_PERFORMANCE=1`, the memory report includes
+`[PERF][RESERVATION_TOTAL]` call counts and inclusive query times by stage.
+`[PERF][RESERVATION_DETAIL]` records owned overlaps, native reservation failures,
+and Windows allocation/page queries. Details include range bounds and available
+native error values. Each report keeps at most four distinct samples per stage
+and 32 overall. Totals include omitted samples; `omitted_calls` counts calls
+excluded from the detail samples. Each report resets the counters. Query success
+records the native result, not whether the caller accepts the returned bounds.
+These records use the existing switch; no separate variable is required.
+
 | Variable | Value | Function | Code that reads it |
 | --- | --- | --- | --- |
 | `SHARPEMU_LOG_AUDIO_QUEUE` | `1` | Writes one `[PERF][AUDIO]` line per second for each SDL audio stream. The line shows the queue depth in milliseconds, the submit rate, the fill percentage and the drops. The emulator reads the value one time at start. | `SdlHostAudio.cs` |

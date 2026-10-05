@@ -11,6 +11,45 @@ namespace SharpEmu.Libs.Tests.Memory.GuestMemory;
 public sealed class GuestMemoryProfileTests
 {
     [Fact]
+    public void ReservationDetailsKeepTotalsAcrossSampleLimitsAndReset()
+    {
+        ReservationDiagnostics.WriteReport();
+        using var output = new StringWriter();
+        var previous = Console.Error;
+        try
+        {
+            Console.SetError(output);
+            for (var stage = 0; stage < 10; stage++)
+                for (ulong address = 0; address < 6; address++)
+                    ReservationDiagnostics.Record($"test-stage-{stage}", address);
+            ReservationDiagnostics.Record("test-stage-0", 0);
+            ReservationDiagnostics.WriteReport();
+            var report = output.ToString();
+            if (ReservationDiagnostics.Enabled)
+            {
+                var lines = report.Split('\n');
+                Assert.Equal(32, lines.Count(line => line.StartsWith("[PERF][RESERVATION_DETAIL] stage=")));
+                Assert.Equal(4, lines.Count(line => line.StartsWith("[PERF][RESERVATION_DETAIL] stage=test-stage-0 ")));
+                Assert.Contains("[PERF][RESERVATION_TOTAL] stage=test-stage-0 calls=7", report);
+                Assert.Contains("[PERF][RESERVATION_DETAIL] omitted_calls=28", report);
+                Assert.Contains("success=False calls=2", report);
+                Assert.Equal(10, lines.Count(line => line.StartsWith("[PERF][RESERVATION_TOTAL]")));
+            }
+            else
+            {
+                Assert.Empty(report);
+            }
+            output.GetStringBuilder().Clear();
+            ReservationDiagnostics.WriteReport();
+            Assert.Empty(output.ToString());
+        }
+        finally
+        {
+            Console.SetError(previous);
+        }
+    }
+
+    [Fact]
     public void ReadbackDetailsSeparateCallersForTheSameRange()
     {
         var measurements = new GuestMemoryProfile.ReadbackMeasurements();

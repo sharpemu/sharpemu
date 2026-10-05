@@ -226,6 +226,7 @@ public static class GuestMemoryProfile
         if (!Enabled)
             return;
         var snapshot = Counters.TakeSnapshot();
+        ReservationDiagnostics.WriteReport();
         long unmapCalls;
         ulong requestedBytes, originalBytes, leftBytes, rightBytes, maximumOriginalBytes;
         lock (UnmapSizeGate)
