@@ -1988,7 +1988,7 @@ public static class KernelPthreadCompatExports
                     break;
                 }
 
-                var waitDuration = TimeSpan.FromMilliseconds(10);
+                var waitMilliseconds = 10;
                 if (timed)
                 {
                     var remaining = GetRemainingTimeout(deadline);
@@ -1998,13 +1998,14 @@ public static class KernelPthreadCompatExports
                         break;
                     }
 
-                    if (remaining < waitDuration)
-                    {
-                        waitDuration = remaining;
-                    }
+                    // Monitor.Wait truncates to whole milliseconds, so a sub-millisecond remainder
+                    // became a zero timeout and the wait spun until the deadline. UE's game thread
+                    // waits for the render fence in 1 ms slices, which kept a core busy. A timed wait
+                    // may wake late, so round up instead.
+                    waitMilliseconds = (int)Math.Min(waitMilliseconds, Math.Ceiling(remaining.TotalMilliseconds));
                 }
 
-                _ = Monitor.Wait(state.SyncRoot, waitDuration);
+                _ = Monitor.Wait(state.SyncRoot, waitMilliseconds);
                 if (waiter.CompletionState == 0 &&
                     timed &&
                     GetRemainingTimeout(deadline) <= TimeSpan.Zero)

@@ -112,8 +112,9 @@ public static class KernelSyncOnAddressCompatExports
                                 break;
                             }
 
-                            var remaining = TimeSpan.FromSeconds(
-                                remainingTicks / (double)Stopwatch.Frequency);
+                            // Whole milliseconds, rounded up: a truncated sub-millisecond wait spins.
+                            var remaining = (int)Math.Min(int.MaxValue,
+                                Math.Ceiling(remainingTicks * 1000.0 / Stopwatch.Frequency));
                             Monitor.Wait(_hostGate, remaining);
                         }
                     }
