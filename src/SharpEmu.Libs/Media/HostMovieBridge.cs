@@ -255,9 +255,19 @@ internal static class HostMovieBridge
             info.FramesPerSecondNumerator + "/" + info.FramesPerSecondDenominator + " fps.");
     }
 
-    private static MovieMode ResolveMode()
+    internal static string GetPlaybackModeName(string? configured) => ResolveMode(configured) switch
     {
-        var configured = Environment.GetEnvironmentVariable("SHARPEMU_BINK_MODE");
+        MovieMode.Native => "HOST",
+        MovieMode.Dummy => "DUMMY",
+        MovieMode.Skip => "SKIP",
+        _ => "GUEST",
+    };
+
+    private static MovieMode ResolveMode() =>
+        ResolveMode(Environment.GetEnvironmentVariable("SHARPEMU_BINK_MODE"));
+
+    private static MovieMode ResolveMode(string? configured)
+    {
         if (string.Equals(configured, "dummy", StringComparison.OrdinalIgnoreCase))
         {
             return MovieMode.Dummy;
