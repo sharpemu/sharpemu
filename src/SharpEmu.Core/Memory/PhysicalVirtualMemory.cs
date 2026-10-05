@@ -22,6 +22,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private readonly object _guestAllocationGate = new();
     private readonly object _allocationSearchHintGate = new();
     private readonly List<MemoryRegion> _regions = new();
+    private readonly AllocationGapTree _allocationGaps = new();
     private readonly Dictionary<(ulong DesiredAddress, ulong Alignment, bool Executable), ulong> _allocationSearchHints = new();
     private readonly ConcurrentDictionary<ulong, ProgramHeaderFlags> _pageProtections = new();
     private bool _disposed;
@@ -1051,6 +1052,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 if (_regions[i].VirtualAddress == address)
                 {
                     allocationSize = _regions[i].Size;
+                    _allocationGaps.Remove(_regions[i].VirtualAddress);
                     _regions.RemoveAt(i);
                     break;
                 }
@@ -1442,17 +1444,13 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     break;
                 }
 
-                var candidate = start + padding;
+                var candidate = _allocationGaps.Find(start + padding, size, alignment, limit);
+                if (candidate == 0)
+                    break;
                 if (reservedCandidate != 0 && candidate >= reservedCandidate)
                 {
                     address = reservedCandidate;
                     return true;
-                }
-                var occupiedRegion = FindRegion(candidate, 1);
-                if (occupiedRegion is not null)
-                {
-                    start = occupiedRegion.VirtualAddress + occupiedRegion.Size;
-                    continue;
                 }
                 if (TryReserveBackingRange(candidate, size))
                 {
@@ -1575,6 +1573,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     break;
                 if (!region.IsBackedView)
                     continue;
+                _allocationGaps.Remove(region.VirtualAddress);
                 _regions.RemoveAt(index);
                 if (region.VirtualAddress < address)
                 {
@@ -1796,6 +1795,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                         _fixedGranuleReservationBases.Add(WindowsGuestAddressReservation.ImageStart);
                     _backedSpace?.ReleaseAddressRanges();
                     _regions.Clear();
+                    _allocationGaps.Clear();
                     _pageProtections.Clear();
                     lock (_allocationSearchHintGate)
                     {
@@ -2658,6 +2658,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             if (mergePrevious && mergeNext)
             {
                 previous!.Size += region.Size + next!.Size;
+                _allocationGaps.Remove(next.VirtualAddress);
+                _allocationGaps.Set(previous.VirtualAddress, previous.Size);
                 _regions.RemoveAt(low);
                 return;
             }
@@ -2665,18 +2667,22 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             if (mergePrevious)
             {
                 previous!.Size += region.Size;
+                _allocationGaps.Set(previous.VirtualAddress, previous.Size);
                 return;
             }
 
             if (mergeNext)
             {
-                next!.VirtualAddress = region.VirtualAddress;
+                _allocationGaps.Remove(next!.VirtualAddress);
+                next.VirtualAddress = region.VirtualAddress;
                 next.Size += region.Size;
+                _allocationGaps.Set(next.VirtualAddress, next.Size);
                 return;
             }
         }
 
         _regions.Insert(low, region);
+        _allocationGaps.Set(region.VirtualAddress, region.Size);
     }
 
     private bool TryGetOverlappingRegionEnd(ulong address, ulong size, out ulong overlapEnd)

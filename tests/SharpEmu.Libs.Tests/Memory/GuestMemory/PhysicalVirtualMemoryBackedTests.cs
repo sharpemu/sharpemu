@@ -329,6 +329,23 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
     }
 
     [Fact]
+    public void OrderedSearchReusesLowerGapAfterPartialUnmap()
+    {
+        if (!Supported) return;
+        var host = HostViewMemory.Create();
+        var size = HoleSize(host);
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var address = ProbeGuestAddress(host, 4 * size);
+        Assert.True(memory.TryHoldRange(address, 4 * size));
+        Assert.True(memory.TryMapBacked(address, 3 * size, 0, GuestPageProtection.Read, out _));
+        Assert.True(memory.TryHoldRangeAtOrAbove(address, size, size, out var tail));
+        Assert.Equal(address + 3 * size, tail);
+        Assert.True(memory.TryUnmapBacked(address + size, size));
+        Assert.True(memory.TryHoldRangeAtOrAbove(address, size, size, out var lower));
+        Assert.Equal(address + size, lower);
+    }
+
+    [Fact]
     public void PartialUnmapPreservesTheRemainingRegions()
     {
         if (!Supported) return;
