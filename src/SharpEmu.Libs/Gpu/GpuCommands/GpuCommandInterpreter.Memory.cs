@@ -3,6 +3,7 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.GpuCommands.Packets;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
@@ -10,6 +11,7 @@ namespace SharpEmu.Libs.Gpu.GpuCommands;
 public sealed partial class GpuCommandInterpreter
 {
     private const uint DmaSkippedDestination = 0x3022C;
+    private const uint LodStatsWithoutCounters = 1;
 
     // Destination selectors 1, 2, 4 and 5 are memory; registers and GDS are not supported.
     internal void WriteData(ulong destination, ReadOnlySpan<uint> source, uint writeControl)
@@ -367,12 +369,12 @@ public sealed partial class GpuCommandInterpreter
         var destination = (payload[1] & 0xFFFF_FFC0u) | ((ulong)payload[2] << 32);
         if (destination != 0 && bufferSize != 0)
         {
-            // The statistics buffer is zeroed and its first dword marks it as valid.
-            var zeros = new byte[bufferSize];
-            WriteBytes(destination, zeros);
+            var report = new byte[bufferSize];
+            var hasCounters = MipStatistics.Shared.TryWriteReport(report);
+            WriteBytes(destination, report);
             if (bufferSize >= sizeof(uint))
             {
-                WriteDword(destination, 1);
+                WriteDword(destination, hasCounters ? MipStatistics.FirstCounterOffset : LodStatsWithoutCounters);
             }
         }
 

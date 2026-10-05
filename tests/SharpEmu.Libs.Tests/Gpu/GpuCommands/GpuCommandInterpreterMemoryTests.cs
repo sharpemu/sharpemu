@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Images;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.GpuCommands;
@@ -248,6 +249,17 @@ public sealed class GpuCommandInterpreterMemoryTests
 
         Assert.Equal(1UL, runner.Host.ReadQword(Label));
         Assert.Equal(0UL, runner.Host.ReadQword(Label + 8));
+    }
+
+    [Fact]
+    public void GetLodStats_PointsAFullReportAtItsCounters()
+    {
+        var runner = new StreamRunner();
+
+        runner.Run(StreamRunner.Packet(PacketOpcode.GetLodStats, MipStatistics.ReportBytes, StreamRunner.Low(Data), StreamRunner.High(Data), 0));
+
+        Assert.Equal(MipStatistics.FirstCounterOffset, runner.Host.ReadDword(Data));
+        Assert.Equal(255u, runner.Host.ReadDword(Data + MipStatistics.FirstCounterOffset + 255 * 8) >> 24);
     }
 
     [Fact]

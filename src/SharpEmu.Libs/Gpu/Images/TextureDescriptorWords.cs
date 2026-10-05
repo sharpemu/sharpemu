@@ -68,6 +68,10 @@ public readonly struct TextureDescriptorWords
 
     public uint MinLodWarning => (Fields[5] >> 8) & 0xFFF;
 
+    public bool MipStatsEnabled => ((Fields[5] >> 25) & 0x1) == 1;
+
+    public uint MipStatsSlot => (Fields[6] >> 0) & 0xFF;
+
     public bool MsaaDepth => ((Fields[6] >> 10) & 0x1) == 1;
 
     public bool WriteCompress => ((Fields[6] >> 20) & 0x1) == 1;

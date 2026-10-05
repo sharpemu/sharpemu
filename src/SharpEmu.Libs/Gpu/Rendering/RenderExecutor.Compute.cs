@@ -157,7 +157,7 @@ public sealed partial class RenderExecutor
                 Thread.Sleep(1);
             }
 
-            var bindings = _host.PrepareBindings(input.Stage);
+            var bindings = PrepareBindings(input.Stage);
             if (program.UsesDeviceAddresses)
             {
                 _host.PrepareDeviceAddresses();
