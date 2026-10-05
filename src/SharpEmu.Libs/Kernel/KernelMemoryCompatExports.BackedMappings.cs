@@ -332,6 +332,8 @@ public static partial class KernelMemoryCompatExports
     // Skip kernel reservations before asking the host to reserve a candidate.
     private static ulong FindAvailableMappingAddress(ulong desired, ulong length, ulong alignment)
     {
+        if (_mappedRegions.TryFindAvailableAddress(desired, length, alignment, out var available))
+            return available;
         var padding = (alignment - desired % alignment) % alignment;
         if (padding > ulong.MaxValue - desired)
             return 0;
