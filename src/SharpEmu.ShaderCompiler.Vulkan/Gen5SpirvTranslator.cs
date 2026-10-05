@@ -1468,6 +1468,8 @@ public static partial class Gen5SpirvTranslator
             // need LDS phase ordering when reads and writes span basic blocks.
             var synchronizeSharedMemory = _emulateWave64 && halfMaskPlan is null;
             var sharedMemoryPhase = SharedMemoryPhase.None;
+            // A wait in another block may or may not have run before this one.
+            _vectorMemoryWaited = null;
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
                 var instruction = _request.Program.Instructions[index];
@@ -2145,10 +2147,15 @@ public static partial class Gen5SpirvTranslator
             {
                 return true;
             }
+            if (instruction.Opcode == "SWaitcnt")
+            {
+                NoteWaitCount(instruction);
+                return true;
+            }
+
             if (instruction.Opcode is
                 "SNop" or
                 "SSetregB32" or
-                "SWaitcnt" or
                 "SInstPrefetch" or
                 "STtraceData" or
                 // Wave scheduling priority hint; no effect on results.
@@ -2165,11 +2172,17 @@ public static partial class Gen5SpirvTranslator
             {
                 if (_stage == Gen5SpirvStage.Compute)
                 {
-                    // s_waitcnt vmcnt(0) + s_barrier also publishes buffer and image
-                    // stores to the workgroup: AcquireRelease over uniform, workgroup
-                    // and image memory.
+                    // s_barrier orders execution; what it publishes is whatever the guest
+                    // waited for first. s_waitcnt vmcnt(0) before it means buffer and image
+                    // stores are being published to the workgroup, so the barrier carries
+                    // AcquireRelease over uniform, workgroup and image memory. A barrier that
+                    // only follows lgkmcnt(0) publishes LDS, and ordering device memory there
+                    // costs a cache flush the guest never asked for: UE's FFT bloom
+                    // convolution barriers 48 times per group, every one of them lgkmcnt-only.
                     var workgroup = UInt(2);
-                    var semantics = UInt(0x8 | 0x40 | 0x100 | 0x800);
+                    var semantics = UInt(_vectorMemoryWaited == false
+                        ? 0x8u | 0x100u
+                        : 0x8u | 0x40u | 0x100u | 0x800u);
                     _module.AddStatement(
                         SpirvOp.ControlBarrier,
                         workgroup,
@@ -8333,6 +8346,35 @@ public static partial class Gen5SpirvTranslator
             }
 
             return _halfMaskPlan;
+        }
+
+        // Null until a wait is seen in the current block; then true once any wait in the block
+        // drained vector memory (vmcnt(0), or vscnt(0), which is what covers stores on GFX10),
+        // which is how the guest publishes buffer and image stores before a barrier. It stays
+        // true for the rest of the block: a later LDS-only wait does not unpublish them.
+        private bool? _vectorMemoryWaited;
+
+        private void NoteWaitCount(Gen5ShaderInstruction instruction)
+        {
+            if (instruction.Words.Count == 0)
+            {
+                return;
+            }
+
+            var word = instruction.Words[0];
+            if (instruction.Encoding == Gen5ShaderEncoding.Sopk)
+            {
+                // SOPK waits name one counter: 0x17 vscnt, 0x18 vmcnt, 0x19 expcnt, 0x1A lgkmcnt.
+                var counter = (word >> 23) & 0x1Fu;
+                var drainsVectorMemory = counter is 0x17 or 0x18 && (word & 0xFFFFu) == 0;
+                _vectorMemoryWaited = _vectorMemoryWaited == true || drainsVectorMemory;
+                return;
+            }
+
+            // SOPP S_WAITCNT packs vmcnt across bits [3:0] and [15:14].
+            var immediate = word & 0xFFFFu;
+            var vectorCount = (immediate & 0xFu) | (((immediate >> 14) & 0x3u) << 4);
+            _vectorMemoryWaited = _vectorMemoryWaited == true || vectorCount == 0;
         }
 
         private void EmitWave64Barrier()
