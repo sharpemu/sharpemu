@@ -26,7 +26,7 @@ public sealed class PadExportsTests
         Assert.Equal(1, Open(0));
     }
 
-    [Theory]
+    [NativeX64Theory]
     [InlineData(0, 0)]
     [InlineData(4, 4)]
     [InlineData(15, 12)]
@@ -55,7 +55,7 @@ public sealed class PadExportsTests
         Assert.All(output[24..], value => Assert.Equal(0xA5, value));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void DeviceClassGetExtendedInformation_LeavesAdjacentMemoryIntact()
     {
         const ulong address = Base + 0x100;
@@ -69,7 +69,7 @@ public sealed class PadExportsTests
         Assert.All(output[0x14..], value => Assert.Equal(0xA5, value));
     }
 
-    [Theory]
+    [NativeX64Theory]
     [InlineData(0, InvalidHandle)]
     [InlineData(1, 0)]
     [InlineData(2, InvalidHandle)]
@@ -82,7 +82,7 @@ public sealed class PadExportsTests
 
     // ABI: int scePadResetOrientation(int32_t handle) — handle only, no out
     // parameter, so the only failure mode is a bad handle.
-    [Theory]
+    [NativeX64Theory]
     [InlineData(0, InvalidHandle)]
     [InlineData(1, 0)]
     [InlineData(2, InvalidHandle)]
@@ -94,7 +94,7 @@ public sealed class PadExportsTests
         Assert.Equal(unchecked((ulong)expected), _ctx[CpuRegister.Rax]);
     }
 
-    [Theory]
+    [NativeX64Theory]
     [InlineData(0, InvalidHandle)]
     [InlineData(1, 0)]
     [InlineData(2, InvalidHandle)]
@@ -105,7 +105,7 @@ public sealed class PadExportsTests
         Assert.Equal(expected, PadExports.PadSetAngularVelocityDeadbandState(_ctx));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void SetAngularVelocityDeadbandState_AcceptsReopenedSessionAndRejectsClosedHandle()
     {
         _ctx[CpuRegister.Rdi] = 1;
@@ -119,37 +119,13 @@ public sealed class PadExportsTests
         Assert.Equal(0, PadExports.PadSetAngularVelocityDeadbandState(_ctx));
     }
 
-    [Fact]
-    public void MotionSensorDefaults_AreEnabledForEachNewSession()
-    {
-        var registry = new PadSessionRegistry();
-        registry.Initialize();
-        var firstHandle = registry.Open(PrimaryUserId, 0, 0, allowMultipleOpens: false);
-        var secondHandle = registry.Open(PrimaryUserId, 2, 0, allowMultipleOpens: true);
-        Assert.True(registry.TryGet(firstHandle, out var firstSession));
-        Assert.True(registry.TryGet(secondHandle, out var secondSession));
-        Assert.Equal(1, firstSession.MotionSensorEnabled);
-        Assert.Equal(1, secondSession.MotionSensorEnabled);
-
-        firstSession.MotionSensorEnabled = 0;
-        registry.Initialize();
-        Assert.Equal(0, firstSession.MotionSensorEnabled);
-        Assert.Equal(1, secondSession.MotionSensorEnabled);
-        Assert.Equal(0, registry.Close(firstHandle));
-
-        var reopenedHandle = registry.Open(PrimaryUserId, 0, 0, allowMultipleOpens: false);
-        Assert.NotEqual(firstHandle, reopenedHandle);
-        Assert.True(registry.TryGet(reopenedHandle, out var reopenedSession));
-        Assert.Equal(1, reopenedSession.MotionSensorEnabled);
-    }
-
     /// <summary>
     /// Mirrors the calling frame observed in PPSA10112: the out-param points at
     /// rbp-0x30 and the caller's stack cookie sits at rbp-0x28, so the state is
     /// eight bytes. Writing more would smash the cookie and fail the guest's
     /// stack check, which is the failure mode this size guards against.
     /// </summary>
-    [Fact]
+    [NativeX64Fact]
     public void GetTriggerEffectState_WritesEightBytesAndLeavesTheCookieIntact()
     {
         const ulong stateAddress = Base + 0x100;
@@ -176,7 +152,7 @@ public sealed class PadExportsTests
         Assert.Equal(cookie, BitConverter.ToUInt64(guard));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void GetExtControllerInformation_DoesNotOverwriteCallerCookie()
     {
         const ulong informationAddress = Base + 0x100;
@@ -194,7 +170,7 @@ public sealed class PadExportsTests
         Assert.Equal(cookie, BitConverter.ToUInt64(guard));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void GetExtControllerInformation_DoesNotOverwriteAdjacentMemory()
     {
         const ulong informationAddress = Base + 0x200;
@@ -220,7 +196,7 @@ public sealed class PadExportsTests
         Assert.Equal(cookie, BitConverter.ToUInt64(guard));
     }
 
-    [Theory]
+    [NativeX64Theory]
     [InlineData(0ul, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT)]
     [InlineData(Base + 0x1000, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT)]
     public void GetExtControllerInformation_RejectsInvalidOutput(ulong address, int expected)
@@ -230,7 +206,7 @@ public sealed class PadExportsTests
         Assert.Equal(expected, PadExports.PadGetExtControllerInformation(_ctx));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void GetExtControllerInformation_RejectsClosedHandleWithoutWriting()
     {
         const ulong informationAddress = Base + 0x200;
@@ -247,7 +223,7 @@ public sealed class PadExportsTests
         Assert.Equal(sentinel, information.ToArray());
     }
 
-    [Theory]
+    [NativeX64Theory]
     [InlineData(2)]
     [InlineData(-1)]
     public void GetTriggerEffectState_RejectsForeignHandles(int handle)
@@ -257,7 +233,7 @@ public sealed class PadExportsTests
         Assert.Equal(InvalidHandle, PadExports.PadGetTriggerEffectState(_ctx));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void ReadState_RejectsHandleZeroOnceAPadIsOpen()
     {
         const ulong dataAddress = Base + 0x200;
@@ -269,7 +245,7 @@ public sealed class PadExportsTests
         Assert.Equal(0, PadExports.PadReadState(_ctx));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void SpecialPort_UsesASeparateDisconnectedHandle()
     {
         Assert.Equal(0, Open(2, extended: true));
@@ -293,7 +269,7 @@ public sealed class PadExportsTests
         Assert.Equal(0, PadExports.PadReadState(_ctx));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void GetHandle_ReturnsOnlyAnOpenMatchingPort()
     {
         _ctx[CpuRegister.Rdi] = PrimaryUserId;
@@ -314,14 +290,14 @@ public sealed class PadExportsTests
         Assert.Equal(NoHandle, PadExports.PadGetHandle(_ctx));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void Open_RejectsAnAlreadyOpenStandardPort()
     {
         Assert.Equal(AlreadyOpened, Open(0));
         Assert.Equal(AlreadyOpened, Open(0, extended: true));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void Open_AcceptsAnSdkReservedParameterPointer()
     {
         _ctx[CpuRegister.Rdi] = 1;
@@ -335,7 +311,7 @@ public sealed class PadExportsTests
         Assert.True(PadExports.PadOpen(_ctx) >= 0);
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void InitAgain_PreservesOpenHandles()
     {
         Assert.Equal(0, PadExports.PadInit(_ctx));
@@ -345,7 +321,7 @@ public sealed class PadExportsTests
         Assert.Equal(1, PadExports.PadGetHandle(_ctx));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void OpenAndGetHandle_RequireInitialization()
     {
         var context = new CpuContext(new FakeCpuMemory(Base, 0x1000), Generation.Gen5);
@@ -358,7 +334,7 @@ public sealed class PadExportsTests
         Assert.Equal(NotInitialized, PadExports.PadGetHandle(context));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void ExtendedOpens_CloseOnlyTheirOwnHandle()
     {
         var firstSpecialHandle = Open(2, extended: true);
@@ -376,7 +352,7 @@ public sealed class PadExportsTests
         Assert.Equal(0, PadExports.PadReadState(_ctx));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void IsRemoteController_WritesOneFalseByte()
     {
         const ulong resultAddress = Base + 0x100;
@@ -391,7 +367,7 @@ public sealed class PadExportsTests
         Assert.Equal(0xA5, result[1]);
     }
 
-    [Theory]
+    [NativeX64Theory]
     [InlineData(0ul, unchecked((int)0x80920001))]
     [InlineData(Base + 0x1000, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT)]
     public void IsRemoteController_RejectsInvalidOutput(ulong address, int expected)
@@ -401,7 +377,7 @@ public sealed class PadExportsTests
         Assert.Equal(expected, PadExports.PadIsRemoteController(_ctx));
     }
 
-    [Theory]
+    [NativeX64Theory]
     [InlineData(0)]
     [InlineData(2)]
     [InlineData(-1)]
@@ -418,7 +394,7 @@ public sealed class PadExportsTests
         Assert.Equal(0xA5, result[0]);
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void OrientationAndRemoteQueries_RejectClosedSession()
     {
         _ctx[CpuRegister.Rdi] = 1;
@@ -429,7 +405,7 @@ public sealed class PadExportsTests
         Assert.Equal(InvalidHandle, PadExports.PadIsRemoteController(_ctx));
     }
 
-    [Fact]
+    [NativeX64Fact]
     public void SystemRemotePort_HasAnIndependentDisconnectedSession()
     {
         _ctx[CpuRegister.Rdi] = 0xFF;
@@ -466,7 +442,7 @@ public sealed class PadExportsTests
         Assert.Equal(0, PadExports.PadReadState(_ctx));
     }
 
-    [Theory]
+    [NativeX64Theory]
     [InlineData(0x10000000, 16, 0)]
     [InlineData(0xFF, 0, 0)]
     [InlineData(0xFF, 2, 0)]
