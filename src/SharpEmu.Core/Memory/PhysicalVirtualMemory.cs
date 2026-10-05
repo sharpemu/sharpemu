@@ -216,6 +216,14 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private sealed class CrossPlatformHostMemory : IHostMemory
     {
         public static readonly CrossPlatformHostMemory Instance = new();
+        private static readonly IHostMemory? AllocationQueryHost =
+            OperatingSystem.IsWindows() ? new WindowsHostMemory() : null;
+
+        public bool TryQueryAllocation(ulong address, out HostAddressRange range)
+        {
+            range = default;
+            return AllocationQueryHost is not null && AllocationQueryHost.TryQueryAllocation(address, out range);
+        }
 
         public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
             unchecked((ulong)HostMemory.Alloc(
@@ -1467,6 +1475,13 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 }
 
                 start = candidate + GuestMemoryLayout.GuestPage;
+                if (OperatingSystem.IsWindows() && TryQueryReservationAllocation(candidate, out var allocation) &&
+                    allocation.Address <= candidate && allocation.Size > candidate - allocation.Address &&
+                    allocation.Address < limit && allocation.Size <= limit - allocation.Address)
+                {
+                    start = Math.Max(start, allocation.Address + allocation.Size);
+                    continue;
+                }
                 if (OperatingSystem.IsWindows() && QueryReservationAddress(candidate, out var info) &&
                     info.BaseAddress <= candidate && info.BaseAddress < limit &&
                     info.RegionSize <= limit - info.BaseAddress)
@@ -1498,6 +1513,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     {
         using var queryProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.ReservationHostQuery);
         return _hostMemory.Query(address, out info);
+    }
+
+    private bool TryQueryReservationAllocation(ulong address, out HostAddressRange range)
+    {
+        using var queryProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.ReservationHostQuery);
+        return _hostMemory.TryQueryAllocation(address, out range);
     }
 
     public bool TryMapBacked(ulong address, ulong size, ulong backingOffset,
