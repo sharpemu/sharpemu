@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.SystemService;
+using System.Buffers.Binary;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.SystemService;
@@ -49,5 +50,25 @@ public sealed class SystemServiceExportsTests
         Span<byte> flag = stackalloc byte[1];
         Assert.True(memory.TryRead(MemoryBase, flag));
         Assert.Equal(1, flag[0]);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(400)]
+    public void ParamGetIntReturnsConfiguredSystemLanguage(int parameterId)
+    {
+        var memory = new FakeCpuMemory(MemoryBase, sizeof(int));
+        var context = new CpuContext(memory, Generation.Gen5)
+        {
+            [CpuRegister.Rdi] = unchecked((ulong)parameterId),
+            [CpuRegister.Rsi] = MemoryBase,
+        };
+        SystemServiceExports.ConfigureApplicationInfo(null, 19);
+
+        Assert.Equal(0, SystemServiceExports.SystemServiceParamGetInt(context));
+
+        Span<byte> value = stackalloc byte[sizeof(int)];
+        Assert.True(memory.TryRead(MemoryBase, value));
+        Assert.Equal(19, BinaryPrimitives.ReadInt32LittleEndian(value));
     }
 }

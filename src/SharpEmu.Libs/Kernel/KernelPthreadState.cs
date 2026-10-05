@@ -118,6 +118,11 @@ internal static class KernelPthreadState
         var name = $"Thread-{uniqueId:X}";
         _currentThreadHandle = AllocateThreadHandle(uniqueId, name);
         _currentThreadUniqueId = uniqueId;
+
+        // Let the native pthread_getspecific stub answer on host threads the
+        // guest scheduler does not own, using the very handle this method just
+        // made authoritative for them.
+        GuestFastPath.BindHostThread(_currentThreadHandle);
     }
 
     private static ulong AllocateThreadHandle(ulong uniqueId, string name)

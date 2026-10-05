@@ -13,6 +13,9 @@ public partial class MainWindow
 {
     private static readonly string[] GameEnvironmentToggleNames =
     [
+        "SHARPEMU_PROFILE_PERFORMANCE",
+        "SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE",
+        StrictComputeSettings.VariableName,
         "SHARPEMU_BTHID_UNAVAILABLE",
         "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
         "SHARPEMU_WRITABLE_APP0",
@@ -21,8 +24,9 @@ public partial class MainWindow
         "SHARPEMU_LOG_DIRECT_MEMORY",
         "SHARPEMU_LOG_IO",
         "SHARPEMU_LOG_NP",
-        "SHARPEMU_GUEST_IMAGE_CPU_SYNC",
         "SHARPEMU_RENDERDOC",
+        "SHARPEMU_VK_DISABLE_IMPLICITS",
+        "SHARPEMU_CRASH_CAPTURE",
     ];
 
     private readonly List<string> _gameEnvironmentPassthrough = new();
@@ -42,6 +46,8 @@ public partial class MainWindow
         GameWindowModeBox.ItemsSource = _windowModeChoices;
         GameScalingModeBox.ItemsSource = _scalingModeChoices;
         GameHdrModeBox.ItemsSource = _hdrModeChoices;
+        GameOverlayModeBox.ItemsSource = _overlayModeChoices;
+        GameOverlayCornerBox.ItemsSource = _overlayCornerChoices;
 
         var navigationButtons = GameOptionsNavigationButtons();
         for (var index = 0; index < navigationButtons.Length; index++)
@@ -110,6 +116,9 @@ public partial class MainWindow
         GameScalingModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameVSyncToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
         GameHdrModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
+        GameOverlayEnabledToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
+        GameOverlayModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
+        GameOverlayCornerBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         foreach (var (_, toggle) in GameEnvironmentToggles())
         {
             toggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
@@ -142,6 +151,7 @@ public partial class MainWindow
             !string.IsNullOrWhiteSpace(game.TitleId);
 
         _isGameSettingsOpen = true;
+        UpdateEmbeddedConsoleVisibility();
         SetGameOptionsPagesSpan(coversConsoleRow: true);
         SetGameOptionsOpenClass(BackdropLayer, active: true);
         SetGameOptionsOpenClass(CarouselHost, active: true);
@@ -161,6 +171,7 @@ public partial class MainWindow
         }
 
         _isGameSettingsOpen = false;
+        UpdateEmbeddedConsoleVisibility();
         SetGameOptionsPagesSpan(coversConsoleRow: false);
         SetGameOptionsNavigationIndicator(_gameOptionsIndicatorIndex, animate: false);
         _gameSettingsTitleId = null;
@@ -206,6 +217,9 @@ public partial class MainWindow
                 effective.ScalingMode,
                 "Fit");
             GameVSyncToggle.IsChecked = effective.VSync;
+            GameOverlayEnabledToggle.IsChecked = effective.OverlayEnabled;
+            GameOverlayModeBox.SelectedItem = FindChoice(_overlayModeChoices, effective.OverlayMode, "TitleBar");
+            GameOverlayCornerBox.SelectedItem = FindChoice(_overlayCornerChoices, effective.OverlayCorner, "TopRight");
             GameHdrModeBox.SelectedItem = FindChoice(
                 _hdrModeChoices,
                 effective.HdrMode,
@@ -235,9 +249,7 @@ public partial class MainWindow
 
             foreach (var (name, toggle) in GameEnvironmentToggles())
             {
-                toggle.IsChecked = IsEnvironmentEnabled(
-                    effective.EnvironmentToggles,
-                    name);
+                toggle.IsChecked = IsEnvironmentEnabled(effective.EnvironmentToggles, name);
             }
         }
         finally
@@ -272,7 +284,11 @@ public partial class MainWindow
             ScalingMode = SelectedComboText(GameScalingModeBox, "Fit"),
             VSync = GameVSyncToggle.IsChecked == true,
             HdrMode = SelectedComboText(GameHdrModeBox, "Auto"),
+            OverlayEnabled = GameOverlayEnabledToggle.IsChecked == true,
+            OverlayMode = SelectedComboText(GameOverlayModeBox, "TitleBar"),
+            OverlayCorner = SelectedComboText(GameOverlayCornerBox, "TopRight"),
             EnvironmentToggles = BuildGameEnvironmentEntries(),
+            CustomEnvironmentVariables = PerGameSettings.Load(_gameSettingsTitleId)?.CustomEnvironmentVariables,
         };
         settings.RemoveInheritedValues(_settings);
         settings.Save(_gameSettingsTitleId);
@@ -369,7 +385,9 @@ public partial class MainWindow
         var entries = new List<string>(_gameEnvironmentPassthrough);
         foreach (var (name, toggle) in GameEnvironmentToggles())
         {
-            if (toggle.IsChecked == true)
+            if (name == StrictComputeSettings.VariableName)
+                StrictComputeSettings.SetEnabled(entries, toggle.IsChecked == true);
+            else if (toggle.IsChecked == true)
             {
                 entries.Add(name);
             }
@@ -387,10 +405,9 @@ public partial class MainWindow
         ?? choices.First(choice =>
             string.Equals(choice.Value, fallback, StringComparison.OrdinalIgnoreCase));
 
-    private static bool IsEnvironmentEnabled(
-        IEnumerable<string> entries,
-        string name)
+    private static bool IsEnvironmentEnabled(IEnumerable<string> entries, string name)
     {
+        if (name == StrictComputeSettings.VariableName) return StrictComputeSettings.IsEnabled(entries);
         foreach (var entry in entries)
         {
             var parts = entry.Split('=', 2, StringSplitOptions.TrimEntries);
@@ -444,7 +461,7 @@ public partial class MainWindow
 
     private void SetGameOptionsPagesSpan(bool coversConsoleRow)
     {
-        Grid.SetRowSpan(PagesHost, coversConsoleRow ? 2 : 1);
+        Grid.SetRowSpan(PagesHost, coversConsoleRow ? 3 : 1);
     }
 
     private Button[] GameOptionsNavigationButtons() =>
@@ -474,6 +491,9 @@ public partial class MainWindow
 
     private (string Name, ToggleSwitch Toggle)[] GameEnvironmentToggles() =>
     [
+        ("SHARPEMU_PROFILE_PERFORMANCE", GamePerformanceProfileToggle),
+        ("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE", GamePerformanceFrameTraceToggle),
+        (StrictComputeSettings.VariableName, GameStrictComputeToggle),
         ("SHARPEMU_BTHID_UNAVAILABLE", GameEnvBthidToggle),
         ("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD", GameEnvLoopGuardToggle),
         ("SHARPEMU_WRITABLE_APP0", GameEnvWritableApp0Toggle),
@@ -482,9 +502,9 @@ public partial class MainWindow
         ("SHARPEMU_LOG_DIRECT_MEMORY", GameEnvLogDirectMemoryToggle),
         ("SHARPEMU_LOG_IO", GameEnvLogIoToggle),
         ("SHARPEMU_LOG_NP", GameEnvLogNpToggle),
-        ("SHARPEMU_GUEST_IMAGE_CPU_SYNC", GameEnvGuestImageCpuSyncToggle),
-        ("SHARPEMU_FORCE_SUBMIT_ORPHAN_PREAMBLES", GameEnvForceSubmitOrphanPreamblesToggle),
         ("SHARPEMU_RENDERDOC", GameEnvRenderDocToggle),
+        ("SHARPEMU_VK_DISABLE_IMPLICITS", GameEnvDisableVkImplicitLayersToggle),
+        ("SHARPEMU_CRASH_CAPTURE", GameCrashDumpToggle),
     ];
 
     private static void SetGameOptionsOpenClass(Control control, bool active) =>

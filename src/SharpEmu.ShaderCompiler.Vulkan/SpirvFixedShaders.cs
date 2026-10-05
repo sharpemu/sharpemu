@@ -420,58 +420,21 @@ public static class SpirvFixedShaders
         return module.Build();
     }
 
-    /// <summary>
-    /// Compute kernel that deswizzles RDNA2 tiled surfaces at 4 bytes/element into
-    /// a linear output buffer — one GPU thread per texel, one dispatch-Z layer per
-    /// array slice. Mirrors <c>GnmTiling.GetDetileParams</c> so it is bit-identical
-    /// to the CPU fallback for both supported equation families:
-    /// <code>
-    ///   z = layer;
-    ///   inBlock = equation == BlockTable            // modes 1/4/8
-    ///             ? blockTable[(y % blockHeight) * blockWidth + (x % blockWidth)]
-    ///             : xTerm[x &amp; xMask] ^ yTerm[y &amp; yMask];   // ExactXor 5/9/24/27
-    ///   src = z * srcSliceElements
-    ///         + (y / blockHeight * blocksPerRow + x / blockWidth) * blockElements
-    ///         + inBlock;
-    ///   out[z * width * height + y * width + x] = tiled[src];
-    /// </code>
-    /// Each array slice is an independently tiled 2D surface; the caller packs the
-    /// slices contiguously in the tiled buffer (stride <c>srcSliceElements</c>) and
-    /// the output ends up layer-major, matching a single multi-layer
-    /// buffer-&gt;image copy. For a non-arrayed texture the caller dispatches a
-    /// single Z layer with <c>srcSliceElements</c> unused (z == 0).
-    ///
-    /// The term tables hold ELEMENT offsets. For ExactXor the caller pre-shifts the
-    /// byte-unit GetDetileParams terms right by log2(bytesPerElement) (exact at 4bpp
-    /// since the equation's low two byte-offset bits are 0); for BlockTable the
-    /// GetDetileParams block table is already in element units. Binding 1 carries
-    /// xTerm (ExactXor) OR blockTable (BlockTable) — the two equations index
-    /// different-sized buffers, so the kernel branches and evaluates exactly one.
-    ///
-    /// width/height are ELEMENT dims (for block-compressed formats a 4x4 block is
-    /// one element). Each element spans uintsPerElement = bpp/4 words (4bpp -> 1,
-    /// 8bpp -> 2, 16bpp -> 4); the X dispatch is widened by that factor so each
-    /// thread copies one word (elemX = gidX / upe, word = gidX % upe). 1/2 bpp are
-    /// sub-word and stay on the CPU.
-    ///
-    /// Descriptor set 0: binding 0 = tiled uint[], 1 = xTerm/blockTable uint[],
-    /// 2 = yTerm uint[], 3 = out uint[]. Push constants (11 x uint, offset i*4):
-    /// width, height, blockWidth, blockHeight, blockElements, blocksPerRow,
-    /// xMask, yMask, srcSliceElements, equation (0 = ExactXor, 1 = BlockTable),
-    /// uintsPerElement. Local size 8x8x1; dispatch X = ceil(width*upe/8),
-    /// Y = ceil(height/8), Z = arrayLayers.
-    /// </summary>
-    public static byte[] CreateDetileCompute()
+    // Read and clear binding 0. Write the count and 64-bit page addresses to binding 1.
+    // Use 64 threads per group, with one thread per 32-page word.
+    public static byte[] CreateFaultBufferProcess()
     {
+        const uint cachingPageBits = 14;
+        const uint maxPageFaults = 1024;
+
         var module = new SpirvModuleBuilder();
         module.AddCapability(SpirvCapability.Shader);
+        var glsl = module.ImportExtInst("GLSL.std.450");
 
         var voidType = module.TypeVoid();
         var boolType = module.TypeBool();
         var uintType = module.TypeInt(32, signed: false);
         var uvec3Type = module.TypeVector(uintType, 3);
-
-        // One shared Block-decorated storage-buffer struct: struct { uint data[]; }.
         var runtimeArray = module.TypeRuntimeArray(uintType);
         module.AddDecoration(runtimeArray, SpirvDecoration.ArrayStride, 4);
         var bufferStruct = module.TypeStruct(runtimeArray);
@@ -489,163 +452,81 @@ public static class SpirvFixedShaders
             return variable;
         }
 
-        var tiledVar = MakeBuffer(0, "tiled");
-        var xTermVar = MakeBuffer(1, "xTerm");
-        var yTermVar = MakeBuffer(2, "yTerm");
-        var outVar = MakeBuffer(3, "outLinear");
-
-        // Push constants: struct { uint p0..p10; }, each member at offset i*4.
-        var pushStruct = module.TypeStruct(
-            uintType, uintType, uintType, uintType, uintType, uintType,
-            uintType, uintType, uintType, uintType, uintType);
-        module.AddDecoration(pushStruct, SpirvDecoration.Block);
-        for (uint member = 0; member < 11; member++)
-        {
-            module.AddMemberDecoration(pushStruct, member, SpirvDecoration.Offset, member * 4);
-        }
-
-        var pushPtrType = module.TypePointer(SpirvStorageClass.PushConstant, pushStruct);
-        var pushMemberPtrType = module.TypePointer(SpirvStorageClass.PushConstant, uintType);
-        var pushVar = module.AddGlobalVariable(pushPtrType, SpirvStorageClass.PushConstant);
-        module.AddName(pushVar, "pc");
-
+        var faultVar = MakeBuffer(0, "fault_buffer");
+        var downloadVar = MakeBuffer(1, "download_buffer");
         var inputUvec3Ptr = module.TypePointer(SpirvStorageClass.Input, uvec3Type);
         var gidVar = module.AddGlobalVariable(inputUvec3Ptr, SpirvStorageClass.Input);
         module.AddName(gidVar, "gid");
         module.AddDecoration(gidVar, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.GlobalInvocationId);
 
-        var uintConst = new uint[11];
-        for (uint value = 0; value < 11; value++)
-        {
-            uintConst[value] = module.Constant(uintType, value);
-        }
+        uint UInt(uint value) => module.Constant(uintType, value);
 
         var functionType = module.TypeFunction(voidType);
         var main = module.BeginFunction(voidType, functionType);
         module.AddName(main, "main");
-        module.AddLabel();
-
+        var entry = module.AddLabel();
         var gid = module.AddInstruction(SpirvOp.Load, uvec3Type, gidVar);
-        var gidX = module.AddInstruction(SpirvOp.CompositeExtract, uintType, gid, 0);
-        var y = module.AddInstruction(SpirvOp.CompositeExtract, uintType, gid, 1);
-        var z = module.AddInstruction(SpirvOp.CompositeExtract, uintType, gid, 2);
+        var id = module.AddInstruction(SpirvOp.CompositeExtract, uintType, gid, 0);
+        var wordPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, faultVar, UInt(0), id);
+        var firstWord = module.AddInstruction(SpirvOp.Load, uintType, wordPtr);
+        module.AddStatement(SpirvOp.Store, wordPtr, UInt(0));
+        var baseBit = module.AddInstruction(SpirvOp.IMul, uintType, id, UInt(32));
 
-        uint PushField(uint index)
-        {
-            var pointer = module.AddInstruction(
-                SpirvOp.AccessChain, pushMemberPtrType, pushVar, uintConst[index]);
-            return module.AddInstruction(SpirvOp.Load, uintType, pointer);
-        }
+        var header = module.AllocateId();
+        var body = module.AllocateId();
+        var store = module.AllocateId();
+        var exit = module.AllocateId();
+        var afterStore = module.AllocateId();
+        var continueLabel = module.AllocateId();
+        var merge = module.AllocateId();
+        var nextWord = module.AllocateId();
+        module.AddStatement(SpirvOp.Branch, header);
 
-        // width/height are ELEMENT dims (for BC, a 4x4 block is one element). Each
-        // element spans uintsPerElement 32-bit words (bpp/4: 4bpp->1, 8bpp->2,
-        // 16bpp->4). The X dispatch is widened by uintsPerElement so each thread
-        // copies exactly one word: elemX = gidX / upe, wordIndex = gidX % upe.
-        var width = PushField(0);
-        var height = PushField(1);
-        var blockWidth = PushField(2);
-        var blockHeight = PushField(3);
-        var blockElements = PushField(4);
-        var blocksPerRow = PushField(5);
-        var xMask = PushField(6);
-        var yMask = PushField(7);
-        var srcSliceElements = PushField(8);
-        var equation = PushField(9);
-        var uintsPerElement = PushField(10);
+        module.AddLabel(header);
+        var word = module.AddInstruction(SpirvOp.Phi, uintType, firstWord, entry, nextWord, continueLabel);
+        var hasBits = module.AddInstruction(SpirvOp.INotEqual, boolType, word, UInt(0));
+        module.AddStatement(SpirvOp.LoopMerge, merge, continueLabel, 0);
+        module.AddStatement(SpirvOp.BranchConditional, hasBits, body, merge);
 
-        var elemX = module.AddInstruction(SpirvOp.UDiv, uintType, gidX, uintsPerElement);
-        var elemXTimesUpe = module.AddInstruction(SpirvOp.IMul, uintType, elemX, uintsPerElement);
-        var wordIndex = module.AddInstruction(SpirvOp.ISub, uintType, gidX, elemXTimesUpe);
+        module.AddLabel(body);
+        var countPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, downloadVar, UInt(0), UInt(0));
+        var previous = module.AddInstruction(SpirvOp.AtomicIAdd, uintType, countPtr, UInt(1), UInt(0), UInt(1));
+        var storeIndex = module.AddInstruction(SpirvOp.IAdd, uintType, previous, UInt(1));
+        var fits = module.AddInstruction(SpirvOp.ULessThan, boolType, storeIndex, UInt(maxPageFaults));
+        module.AddStatement(SpirvOp.SelectionMerge, afterStore, 0);
+        module.AddStatement(SpirvOp.BranchConditional, fits, store, exit);
 
-        var xInRange = module.AddInstruction(SpirvOp.ULessThan, boolType, elemX, width);
-        var yInRange = module.AddInstruction(SpirvOp.ULessThan, boolType, y, height);
-        var inRange = module.AddInstruction(SpirvOp.LogicalAnd, boolType, xInRange, yInRange);
+        module.AddLabel(exit);
+        // Keep requests that did not fit for the next fault scan.
+        module.AddStatement(SpirvOp.Store, wordPtr, word);
+        module.AddStatement(SpirvOp.Return);
 
-        var bodyLabel = module.AllocateId();
-        var mergeLabel = module.AllocateId();
-        module.AddStatement(SpirvOp.SelectionMerge, mergeLabel, 0);
-        module.AddStatement(SpirvOp.BranchConditional, inRange, bodyLabel, mergeLabel);
+        module.AddLabel(store);
+        var bit = module.AddInstruction(SpirvOp.ExtInst, uintType, glsl, 73, word);
+        var wordMinusOne = module.AddInstruction(SpirvOp.ISub, uintType, word, UInt(1));
+        // The phi in the loop header names this result before it is emitted.
+        module.AddStatement(SpirvOp.BitwiseAnd, uintType, nextWord, word, wordMinusOne);
+        var page = module.AddInstruction(SpirvOp.IAdd, uintType, baseBit, bit);
+        var low = module.AddInstruction(SpirvOp.ShiftLeftLogical, uintType, page, UInt(cachingPageBits));
+        var high = module.AddInstruction(SpirvOp.ShiftRightLogical, uintType, page, UInt(32 - cachingPageBits));
+        var lowIndex = module.AddInstruction(SpirvOp.IMul, uintType, storeIndex, UInt(2));
+        var highIndex = module.AddInstruction(SpirvOp.IAdd, uintType, lowIndex, UInt(1));
+        var lowPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, downloadVar, UInt(0), lowIndex);
+        module.AddStatement(SpirvOp.Store, lowPtr, low);
+        var highPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, downloadVar, UInt(0), highIndex);
+        module.AddStatement(SpirvOp.Store, highPtr, high);
+        module.AddStatement(SpirvOp.Branch, afterStore);
 
-        module.AddLabel(bodyLabel);
-
-        // blockIdx = (y / blockHeight) * blocksPerRow + (elemX / blockWidth)
-        var yDiv = module.AddInstruction(SpirvOp.UDiv, uintType, y, blockHeight);
-        var blockRow = module.AddInstruction(SpirvOp.IMul, uintType, yDiv, blocksPerRow);
-        var xDiv = module.AddInstruction(SpirvOp.UDiv, uintType, elemX, blockWidth);
-        var blockIdx = module.AddInstruction(SpirvOp.IAdd, uintType, blockRow, xDiv);
-
-        // off (element offset within the block) = equation == BlockTable
-        //   ? blockTable[(y % blockHeight) * blockWidth + (elemX % blockWidth)]
-        //   : xTerm[elemX & xMask] ^ yTerm[y & yMask]
-        // Binding 1 (xTermVar) doubles as the block table; the two equations index
-        // different-sized buffers, so exactly one branch executes (no OOB read).
-        var isBlockTable = module.AddInstruction(SpirvOp.INotEqual, boolType, equation, uintConst[0]);
-        var xorLabel = module.AllocateId();
-        var tableLabel = module.AllocateId();
-        var offMergeLabel = module.AllocateId();
-        module.AddStatement(SpirvOp.SelectionMerge, offMergeLabel, 0);
-        module.AddStatement(SpirvOp.BranchConditional, isBlockTable, tableLabel, xorLabel);
-
-        // ExactXor: xTerm[elemX & xMask] ^ yTerm[y & yMask]
-        module.AddLabel(xorLabel);
-        var xIdx = module.AddInstruction(SpirvOp.BitwiseAnd, uintType, elemX, xMask);
-        var xPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, xTermVar, uintConst[0], xIdx);
-        var xTerm = module.AddInstruction(SpirvOp.Load, uintType, xPtr);
-        var yIdx = module.AddInstruction(SpirvOp.BitwiseAnd, uintType, y, yMask);
-        var yPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, yTermVar, uintConst[0], yIdx);
-        var yTerm = module.AddInstruction(SpirvOp.Load, uintType, yPtr);
-        var offXor = module.AddInstruction(SpirvOp.BitwiseXor, uintType, xTerm, yTerm);
-        module.AddStatement(SpirvOp.Branch, offMergeLabel);
-
-        // BlockTable: blockTable[inY * blockWidth + inX], inX/inY = position in block
-        module.AddLabel(tableLabel);
-        var blockXBase = module.AddInstruction(SpirvOp.IMul, uintType, xDiv, blockWidth);
-        var inX = module.AddInstruction(SpirvOp.ISub, uintType, elemX, blockXBase);
-        var blockYBase = module.AddInstruction(SpirvOp.IMul, uintType, yDiv, blockHeight);
-        var inY = module.AddInstruction(SpirvOp.ISub, uintType, y, blockYBase);
-        var rowInBlock = module.AddInstruction(SpirvOp.IMul, uintType, inY, blockWidth);
-        var tableIdx = module.AddInstruction(SpirvOp.IAdd, uintType, rowInBlock, inX);
-        var tablePtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, xTermVar, uintConst[0], tableIdx);
-        var offTable = module.AddInstruction(SpirvOp.Load, uintType, tablePtr);
-        module.AddStatement(SpirvOp.Branch, offMergeLabel);
-
-        module.AddLabel(offMergeLabel);
-        var off = module.AddInstruction(SpirvOp.Phi, uintType, offXor, xorLabel, offTable, tableLabel);
-
-        // srcElem = z * srcSliceElements + blockIdx * blockElements + off  (in elements)
-        // srcWord = srcElem * uintsPerElement + wordIndex
-        var srcSliceBase = module.AddInstruction(SpirvOp.IMul, uintType, z, srcSliceElements);
-        var blockBase = module.AddInstruction(SpirvOp.IMul, uintType, blockIdx, blockElements);
-        var srcInSlice = module.AddInstruction(SpirvOp.IAdd, uintType, blockBase, off);
-        var srcElem = module.AddInstruction(SpirvOp.IAdd, uintType, srcSliceBase, srcInSlice);
-        var srcElemWords = module.AddInstruction(SpirvOp.IMul, uintType, srcElem, uintsPerElement);
-        var src = module.AddInstruction(SpirvOp.IAdd, uintType, srcElemWords, wordIndex);
-        var srcPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, tiledVar, uintConst[0], src);
-        var word = module.AddInstruction(SpirvOp.Load, uintType, srcPtr);
-
-        // dstElem = z * width * height + y * width + elemX  (in elements)
-        // dstWord = dstElem * uintsPerElement + wordIndex
-        var sliceElements = module.AddInstruction(SpirvOp.IMul, uintType, width, height);
-        var dstSliceBase = module.AddInstruction(SpirvOp.IMul, uintType, z, sliceElements);
-        var rowBase = module.AddInstruction(SpirvOp.IMul, uintType, y, width);
-        var dstRow = module.AddInstruction(SpirvOp.IAdd, uintType, rowBase, elemX);
-        var dstElem = module.AddInstruction(SpirvOp.IAdd, uintType, dstSliceBase, dstRow);
-        var dstElemWords = module.AddInstruction(SpirvOp.IMul, uintType, dstElem, uintsPerElement);
-        var dstIdx = module.AddInstruction(SpirvOp.IAdd, uintType, dstElemWords, wordIndex);
-        var dstPtr = module.AddInstruction(SpirvOp.AccessChain, uintStoragePtr, outVar, uintConst[0], dstIdx);
-        module.AddStatement(SpirvOp.Store, dstPtr, word);
-
-        module.AddStatement(SpirvOp.Branch, mergeLabel);
-        module.AddLabel(mergeLabel);
+        module.AddLabel(afterStore);
+        module.AddStatement(SpirvOp.Branch, continueLabel);
+        module.AddLabel(continueLabel);
+        module.AddStatement(SpirvOp.Branch, header);
+        module.AddLabel(merge);
         module.AddStatement(SpirvOp.Return);
         module.EndFunction();
 
-        module.AddExecutionMode(main, SpirvExecutionMode.LocalSize, 8, 8, 1);
-        module.AddEntryPoint(
-            SpirvExecutionModel.GLCompute,
-            main,
-            "main",
-            [gidVar, tiledVar, xTermVar, yTermVar, outVar, pushVar]);
+        module.AddExecutionMode(main, SpirvExecutionMode.LocalSize, 64, 1, 1);
+        module.AddEntryPoint(SpirvExecutionModel.GLCompute, main, "main", [gidVar, faultVar, downloadVar]);
         return module.Build();
     }
 }

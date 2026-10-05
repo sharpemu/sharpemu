@@ -7,7 +7,7 @@ using SharpEmu.HLE;
 namespace SharpEmu.Libs.Gpu.Metal;
 
 // Draw textures decoded from guest memory are cached across draws keyed by
-// their full descriptor identity, mirroring the Vulkan presenter's texture
+// their content identity, mirroring the Vulkan presenter's texture
 // cache: once an identity is marked cached, the AGC submit thread skips the
 // guest-memory read/detile/copy entirely (shipping empty texels) and the
 // render thread serves the cached MTLTexture — for scenes that sample large
@@ -26,9 +26,9 @@ internal static partial class MetalVideoPresenter
 
     /// <summary>Identities the AGC submit thread may skip texel copies for.
     /// Read from the submit thread, written by the render thread.</summary>
-    private static readonly ConcurrentDictionary<TextureContentIdentity, byte> _cachedDrawTextureIdentities = new();
+    private static readonly ConcurrentDictionary<TextureCacheLookupIdentity, byte> _cachedDrawTextureIdentities = new();
 
-    internal static bool IsTextureContentCached(in TextureContentIdentity identity) =>
+    internal static bool IsTextureContentCached(in TextureCacheLookupIdentity identity) =>
         _cachedDrawTextureIdentities.ContainsKey(identity);
 
     /// <summary>Builds the same identity the AGC layer checks before skipping
@@ -43,7 +43,11 @@ internal static partial class MetalVideoPresenter
         texture.DstSelect,
         texture.TileMode,
         texture.Pitch,
-        texture.Sampler);
+        texture.ArrayedView,
+        Math.Max(texture.ArrayLayers, 1),
+        texture.Type,
+        texture.Depth,
+        ResourceMipLevels: texture.ResourceMipLevels);
 
     /// <summary>Storage textures are shader-writable on the GPU, so their
     /// content identity is not stable. CPU rewrites of protected/CPU-backed
@@ -54,8 +58,18 @@ internal static partial class MetalVideoPresenter
         !texture.IsStorage &&
         !texture.IsFallback;
 
-    private static bool TryGetCachedDrawTexture(GuestDrawTexture texture, out nint handle) =>
-        _drawTextureCache.TryGetValue(GetDrawTextureIdentity(texture), out handle);
+    private static bool TryGetCachedDrawTexture(GuestDrawTexture texture, out nint handle)
+    {
+        var content = GetDrawTextureIdentity(texture);
+        if (!_drawTextureCache.TryGetValue(content, out handle))
+        {
+            return false;
+        }
+
+        _cachedDrawTextureIdentities[
+            new TextureCacheLookupIdentity(content, texture.Sampler)] = 0;
+        return true;
+    }
 
     private static void CacheDrawTexture(GuestDrawTexture texture, nint handle)
     {
@@ -67,10 +81,17 @@ internal static partial class MetalVideoPresenter
 
         _ = MetalNative.Send(handle, MetalNative.Selector("retain"));
         _drawTextureCache[key] = handle;
-        _cachedDrawTextureIdentities[key] = 0;
-        // No GuestImageWriteTracker.Track: watch-only cache registrations
-        // widened the managed-write hot path. CPU-backed / protected images
-        // own dirty notifications used for eviction.
+        var sourceByteCount = texture.SourceByteCount != 0
+            ? texture.SourceByteCount
+            : (ulong)(texture.TiledSource?.Length ?? texture.RgbaPixels.Length);
+        GuestImageWriteTracker.Track(
+            texture.Address,
+            sourceByteCount,
+            Volatile.Read(ref _executingGuestWorkSequence),
+            "metal.texture-cache",
+            protect: false);
+        _cachedDrawTextureIdentities[
+            new TextureCacheLookupIdentity(key, texture.Sampler)] = 0;
     }
 
     /// <summary>
@@ -79,11 +100,6 @@ internal static partial class MetalVideoPresenter
     /// </summary>
     private static void DrainGuestImageCpuSync(nint device)
     {
-        if (!GuestImageWriteTracker.Enabled)
-        {
-            return;
-        }
-
         _ = Interlocked.Exchange(ref _cpuWrittenGuestImageSyncRequested, 0);
 
         HashSet<ulong>? dirtyAddresses = null;
@@ -190,6 +206,10 @@ internal static partial class MetalVideoPresenter
 
         if (_drawTextureCache.Count > MaxCachedDrawTextures)
         {
+            var watchedAddresses = _drawTextureCache.Keys
+                .Select(static key => key.Address)
+                .Distinct()
+                .ToArray();
             foreach (var entry in _drawTextureCache)
             {
                 MetalNative.SendVoid(entry.Value, MetalNative.Selector("release"));
@@ -197,6 +217,10 @@ internal static partial class MetalVideoPresenter
 
             _drawTextureCache.Clear();
             _cachedDrawTextureIdentities.Clear();
+            foreach (var address in watchedAddresses)
+            {
+                GuestImageWriteTracker.UntrackWatchOnly(address);
+            }
             if (dirtyAddresses is not null)
             {
                 foreach (var address in dirtyAddresses)
@@ -223,8 +247,22 @@ internal static partial class MetalVideoPresenter
             {
                 if (_drawTextureCache.Remove(key, out var handle))
                 {
-                    _cachedDrawTextureIdentities.TryRemove(key, out _);
+                    foreach (var identity in _cachedDrawTextureIdentities.Keys)
+                    {
+                        if (identity.Content == key)
+                        {
+                            _cachedDrawTextureIdentities.TryRemove(identity, out _);
+                        }
+                    }
                     MetalNative.SendVoid(handle, MetalNative.Selector("release"));
+                }
+            }
+
+            foreach (var address in evicted.Select(static key => key.Address).Distinct())
+            {
+                if (!_drawTextureCache.Keys.Any(key => key.Address == address))
+                {
+                    GuestImageWriteTracker.UntrackWatchOnly(address);
                 }
             }
         }

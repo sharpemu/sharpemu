@@ -20,6 +20,7 @@ public static class KernelPthreadExtendedCompatExports
     private const ulong NativeGuestStackSize = 0x20_0000UL;
     private const ulong NativeGuestStackStride = 0x100_0000UL;
     private const int DefaultInheritSched = 4;
+    private const int DefaultSoloSched = 0;
     private const int DefaultSchedPolicy = 1;
     private const int DefaultSchedPriority = DefaultThreadPriority;
     private const ulong SyntheticRwlockHandleBase = 0x00006003_0000_0000;
@@ -38,18 +39,22 @@ public static class KernelPthreadExtendedCompatExports
     private static readonly bool _strictRwlockWriterPreference =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_STRICT_RWLOCK_WRITER_PREFERENCE"), "1", StringComparison.Ordinal);
 
-    private static readonly ConcurrentDictionary<ulong, ConcurrentDictionary<int, ulong>> _threadLocalSpecific = new();
+    // pthread-specific values live in GuestFastPath's native per-thread tables
+    // so the emitted pthread_getspecific stub and this managed path read exactly
+    // the same storage.
 
     internal static void GetThreadStartScheduling(
         CpuContext ctx,
         ulong attrAddress,
         out int priority,
-        out ulong affinityMask)
+        out ulong affinityMask,
+        out ulong stackSize)
     {
         if (attrAddress == 0)
         {
             priority = DefaultThreadPriority;
             affinityMask = DefaultThreadAffinityMask;
+            stackSize = DefaultStackSize;
             return;
         }
 
@@ -59,6 +64,7 @@ public static class KernelPthreadExtendedCompatExports
             var attributes = GetOrCreateAttrStateLocked(resolvedAddress);
             priority = attributes.SchedPriority;
             affinityMask = attributes.AffinityMask;
+            stackSize = attributes.StackSize;
         }
     }
 
@@ -189,7 +195,8 @@ public static class KernelPthreadExtendedCompatExports
         ulong GuardSize,
         int InheritSched,
         int SchedPolicy,
-        int SchedPriority)
+        int SchedPriority,
+        int SoloSched)
     {
         public static PthreadAttrState Default =>
             new(
@@ -200,7 +207,8 @@ public static class KernelPthreadExtendedCompatExports
                 DefaultGuardSize,
                 DefaultInheritSched,
                 DefaultSchedPolicy,
-                DefaultSchedPriority);
+                DefaultSchedPriority,
+                DefaultSoloSched);
     }
 
     [SysAbiExport(
@@ -860,6 +868,59 @@ public static class KernelPthreadExtendedCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    [SysAbiExport(
+        Nid = "Dk6FC-TI+7Q",
+        ExportName = "scePthreadAttrSetsolosched",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadAttrSetsolosched(CpuContext ctx)
+    {
+        var attrAddress = ctx[CpuRegister.Rdi];
+        var soloSched = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (attrAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        lock (_stateGate)
+        {
+            var state = GetOrCreateAttrStateLocked(attrAddress);
+            _attrStates[attrAddress] = state with { SoloSched = soloSched };
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "9RnL-m0+diQ",
+        ExportName = "scePthreadAttrGetsolosched",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadAttrGetsolosched(CpuContext ctx)
+    {
+        var attrAddress = ctx[CpuRegister.Rdi];
+        var outSoloSchedAddress = ctx[CpuRegister.Rsi];
+        if (attrAddress == 0 || outSoloSchedAddress == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        PthreadAttrState state;
+        lock (_stateGate)
+        {
+            state = GetOrCreateAttrStateLocked(attrAddress);
+        }
+
+        if (!TryWriteInt32(ctx, outSoloSchedAddress, state.SoloSched))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     /// <summary>
     /// The POSIX-named alias of <see cref="PthreadAttrGetschedparam"/>. libKernel
     /// exports the same routine under two NIDs; middleware compiled against the
@@ -1154,12 +1215,20 @@ public static class KernelPthreadExtendedCompatExports
         PthreadRwlockTryLockCore(ctx, ctx[CpuRegister.Rdi], write: false);
 
     [SysAbiExport(
+        Nid = "bIHoZCTomsI",
+        ExportName = "scePthreadRwlockTrywrlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadRwlockTrywrlock(CpuContext ctx) =>
+        PthreadRwlockTryLockCore(ctx, ctx[CpuRegister.Rdi], write: true);
+
+    [SysAbiExport(
         Nid = "XhWHn6P5R7U",
         ExportName = "pthread_rwlock_trywrlock",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int PosixPthreadRwlockTrywrlock(CpuContext ctx) =>
-        PthreadRwlockTryLockCore(ctx, ctx[CpuRegister.Rdi], write: true);
+        PthreadRwlockTrywrlock(ctx);
 
     /// <summary>
     /// Non-blocking counterpart of <see cref="PthreadRwlockLockCore"/>: acquires
@@ -1385,10 +1454,7 @@ public static class KernelPthreadExtendedCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        foreach (var values in _threadLocalSpecific.Values)
-        {
-            values.TryRemove(key, out _);
-        }
+        GuestFastPath.ClearKeyEverywhere(key);
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1416,10 +1482,7 @@ public static class KernelPthreadExtendedCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        var values = _threadLocalSpecific.GetOrAdd(
-            currentThreadHandle,
-            static _ => new ConcurrentDictionary<int, ulong>());
-        values[key] = value;
+        GuestFastPath.SetSpecific(currentThreadHandle, key, value);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -1440,20 +1503,13 @@ public static class KernelPthreadExtendedCompatExports
     {
         var key = unchecked((int)ctx[CpuRegister.Rdi]);
         var currentThreadHandle = KernelPthreadState.GetCurrentThreadHandle();
-        ulong value = 0;
         if (!_tlsKeys.ContainsKey(key))
         {
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        if (_threadLocalSpecific.TryGetValue(currentThreadHandle, out var values) &&
-            values.TryGetValue(key, out var storedValue))
-        {
-            value = storedValue;
-        }
-
-        ctx[CpuRegister.Rax] = value;
+        ctx[CpuRegister.Rax] = GuestFastPath.GetSpecific(currentThreadHandle, key);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -1484,7 +1540,7 @@ public static class KernelPthreadExtendedCompatExports
         }
 
         var threadHandle = KernelPthreadState.GetCurrentThreadHandle();
-        if (!_threadLocalSpecific.TryGetValue(threadHandle, out var values))
+        if (!GuestFastPath.HasThreadValues(threadHandle))
         {
             return;
         }
@@ -1492,7 +1548,7 @@ public static class KernelPthreadExtendedCompatExports
         for (var iteration = 0; iteration < PthreadDestructorIterations; iteration++)
         {
             var ranAny = false;
-            foreach (var entry in values)
+            foreach (var entry in GuestFastPath.SnapshotThreadValues(threadHandle))
             {
                 var value = entry.Value;
                 if (value == 0 ||
@@ -1504,7 +1560,7 @@ public static class KernelPthreadExtendedCompatExports
 
                 // Clear before invoking, per POSIX, so a destructor that
                 // re-sets the key is handled on the next iteration.
-                if (!values.TryUpdate(entry.Key, 0, value))
+                if (!GuestFastPath.TryClearSpecific(threadHandle, entry.Key, value))
                 {
                     continue;
                 }
@@ -1527,7 +1583,7 @@ public static class KernelPthreadExtendedCompatExports
             }
         }
 
-        _threadLocalSpecific.TryRemove(threadHandle, out _);
+        GuestFastPath.ReleaseThread(threadHandle);
     }
 
     private static int PthreadRwlockLockCore(CpuContext ctx, ulong rwlockAddress, bool write)

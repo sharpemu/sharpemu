@@ -73,6 +73,7 @@ public enum SpirvOp : ushort
     ConvertFToS = 110,
     ConvertSToF = 111,
     ConvertUToF = 112,
+    ConvertUToPtr = 120,
     UConvert = 113,
     SConvert = 114,
     FConvert = 115,
@@ -143,6 +144,7 @@ public enum SpirvOp : ushort
     BitCount = 205,
     ControlBarrier = 224,
     MemoryBarrier = 225,
+    AtomicLoad = 227,
     AtomicExchange = 229,
     AtomicCompareExchange = 230,
     AtomicIIncrement = 232,
@@ -183,9 +185,19 @@ public enum SpirvOp : ushort
 public enum SpirvCapability : uint
 {
     Shader = 1,
+    InterpolationFunction = 52,
+    FragmentBarycentricKhr = 5284,
+    ClipDistance = 32,
+    CullDistance = 33,
+    SampledImageArrayDynamicIndexing = 29,
+    StorageImageArrayDynamicIndexing = 31,
+    SampleRateShading = 35,
+    Sampled1D = 43,
+    Image1D = 44,
     Float16 = 9,
     Float64 = 10,
     Int64 = 11,
+    Int64Atomics = 12,
     Int16 = 22,
     ImageGatherExtended = 25,
     StorageImageExtendedFormats = 49,
@@ -196,7 +208,11 @@ public enum SpirvCapability : uint
     GroupNonUniformVote = 62,
     GroupNonUniformBallot = 64,
     GroupNonUniformShuffle = 65,
+    ShaderLayer = 5253,
+    ShaderViewportIndex = 5254,
+    ShaderViewportIndexLayerExt = 5254,
     RuntimeDescriptorArray = 5302,
+    PhysicalStorageBufferAddresses = 5347,
 }
 
 public enum SpirvStorageClass : uint
@@ -211,6 +227,7 @@ public enum SpirvStorageClass : uint
     PushConstant = 9,
     Image = 11,
     StorageBuffer = 12,
+    PhysicalStorageBuffer = 5349,
 }
 
 public enum SpirvExecutionModel : uint
@@ -234,19 +251,28 @@ public enum SpirvDecoration : uint
     BuiltIn = 11,
     NoPerspective = 13,
     Flat = 14,
+    PerVertexKhr = 5285,
     Location = 30,
     Binding = 33,
     DescriptorSet = 34,
     Offset = 35,
     NoContraction = 42,
+    NonWritable = 24,
 }
 
 public enum SpirvBuiltIn : uint
 {
     Position = 0,
+    PointSize = 1,
+    ClipDistance = 3,
+    CullDistance = 4,
+    Layer = 9,
+    ViewportIndex = 10,
     VertexIndex = 42,
     InstanceIndex = 43,
     FragCoord = 15,
+    BaryCoordKhr = 5286,
+    BaryCoordNoPerspKhr = 5287,
     FrontFacing = 17,
     WorkgroupId = 26,
     LocalInvocationId = 27,
@@ -254,6 +280,9 @@ public enum SpirvBuiltIn : uint
     LocalInvocationIndex = 29,
     SubgroupSize = 36,
     SubgroupLocalInvocationId = 41,
+    SampleId = 18,
+    SampleMask = 20,
+    FragDepth = 22,
 }
 
 public enum SpirvImageDim : uint
@@ -345,11 +374,14 @@ public sealed class SpirvModuleBuilder
     private readonly Dictionary<uint, uint> _runtimeArrayTypes = [];
     private readonly Dictionary<string, uint> _functionTypes = [];
     private readonly Dictionary<(uint Type, ulong Value), uint> _constants = [];
+    // The value of every 32-bit integer and boolean constant, for folding instructions over them.
+    private readonly Dictionary<uint, uint> _scalarConstantValues = [];
     private readonly HashSet<SpirvCapability> _declaredCapabilities = [];
     private readonly Dictionary<string, uint> _extInstImports = [];
     private uint _nextId = 1;
     private uint? _voidType;
     private uint? _boolType;
+    private uint? _samplerType;
 
     public uint AllocateId() => _nextId++;
 
@@ -379,6 +411,23 @@ public sealed class SpirvModuleBuilder
 
     public void SetLogicalGlsl450MemoryModel() =>
         Emit(_memoryModel, SpirvOp.MemoryModel, 0, 1);
+
+    // PhysicalStorageBuffer64 addressing with the GLSL450 memory model, for device-address loads.
+    public void SetPhysicalStorageBuffer64MemoryModel() =>
+        Emit(_memoryModel, SpirvOp.MemoryModel, 5348, 1);
+
+    public uint TypeSampler()
+    {
+        if (_samplerType.HasValue)
+        {
+            return _samplerType.Value;
+        }
+
+        var id = AllocateId();
+        Emit(_typesConstantsGlobals, SpirvOp.TypeSampler, id);
+        _samplerType = id;
+        return id;
+    }
 
     public void AddEntryPoint(
         SpirvExecutionModel model,
@@ -636,6 +685,7 @@ public sealed class SpirvModuleBuilder
             type,
             id);
         _constants.Add(key, id);
+        _scalarConstantValues[id] = value ? 1u : 0u;
         return id;
     }
 
@@ -650,6 +700,11 @@ public sealed class SpirvModuleBuilder
         var id = AllocateId();
         Emit(_typesConstantsGlobals, SpirvOp.Constant, type, id, value);
         _constants.Add(key, id);
+        if (IsInt32Type(type))
+        {
+            _scalarConstantValues[id] = value;
+        }
+
         return id;
     }
 
@@ -769,7 +824,146 @@ public sealed class SpirvModuleBuilder
     }
 
     public uint AddInstruction(SpirvOp opcode, uint resultType, params uint[] operands) =>
-        EmitResult(_functions, opcode, resultType, operands);
+        TryFold(opcode, resultType, operands, out var folded)
+            ? folded
+            : EmitResult(_functions, opcode, resultType, operands);
+
+    private bool IsInt32Type(uint type) =>
+        (_integerTypes.TryGetValue((32, false), out var unsignedType) && unsignedType == type) ||
+        (_integerTypes.TryGetValue((32, true), out var signedType) && signedType == type);
+
+    private bool IsBoolType(uint type) => _boolType == type;
+
+    private bool TryConstant(uint id, out uint value) => _scalarConstantValues.TryGetValue(id, out value);
+
+    // The value of a 32-bit integer or boolean constant id.
+    public bool TryGetConstantValue(uint id, out uint value) => TryConstant(id, out value);
+
+    // Folds pure 32-bit integer and boolean instructions whose inputs are known constants, and
+    // selections on a known condition, so translation-time constants (specialized descriptor
+    // formats, swizzles, strides) do not reach the driver as runtime work.
+    private bool TryFold(SpirvOp opcode, uint resultType, uint[] operands, out uint result)
+    {
+        result = 0;
+        switch (opcode)
+        {
+            case SpirvOp.Select when operands.Length == 3 && IsBoolScalarConstant(operands[0], out var condition):
+                result = condition ? operands[1] : operands[2];
+                return true;
+            case SpirvOp.LogicalAnd when IsBoolType(resultType) && operands.Length == 2:
+                if (IsBoolScalarConstant(operands[0], out var leftAnd))
+                {
+                    result = leftAnd ? operands[1] : ConstantBool(false);
+                    return true;
+                }
+
+                if (IsBoolScalarConstant(operands[1], out var rightAnd))
+                {
+                    result = rightAnd ? operands[0] : ConstantBool(false);
+                    return true;
+                }
+
+                return false;
+            case SpirvOp.LogicalOr when IsBoolType(resultType) && operands.Length == 2:
+                if (IsBoolScalarConstant(operands[0], out var leftOr))
+                {
+                    result = leftOr ? ConstantBool(true) : operands[1];
+                    return true;
+                }
+
+                if (IsBoolScalarConstant(operands[1], out var rightOr))
+                {
+                    result = rightOr ? ConstantBool(true) : operands[0];
+                    return true;
+                }
+
+                return false;
+            case SpirvOp.LogicalNot when IsBoolType(resultType) && operands.Length == 1 && IsBoolScalarConstant(operands[0], out var negated):
+                result = ConstantBool(!negated);
+                return true;
+        }
+
+        var resultIsInt = IsInt32Type(resultType);
+        var resultIsBool = IsBoolType(resultType);
+        if ((!resultIsInt && !resultIsBool) || operands.Length is < 1 or > 3)
+        {
+            return false;
+        }
+
+        Span<uint> values = stackalloc uint[operands.Length];
+        for (var index = 0; index < operands.Length; index++)
+        {
+            if (!TryConstant(operands[index], out values[index]))
+            {
+                return false;
+            }
+        }
+
+        uint folded;
+        bool? foldedBool = null;
+        switch (opcode)
+        {
+            case SpirvOp.IAdd when operands.Length == 2: folded = values[0] + values[1]; break;
+            case SpirvOp.ISub when operands.Length == 2: folded = values[0] - values[1]; break;
+            case SpirvOp.IMul when operands.Length == 2: folded = values[0] * values[1]; break;
+            case SpirvOp.BitwiseAnd when operands.Length == 2: folded = values[0] & values[1]; break;
+            case SpirvOp.BitwiseOr when operands.Length == 2: folded = values[0] | values[1]; break;
+            case SpirvOp.BitwiseXor when operands.Length == 2: folded = values[0] ^ values[1]; break;
+            case SpirvOp.Not when operands.Length == 1: folded = ~values[0]; break;
+            case SpirvOp.ShiftLeftLogical when operands.Length == 2 && values[1] < 32: folded = values[0] << (int)values[1]; break;
+            case SpirvOp.ShiftRightLogical when operands.Length == 2 && values[1] < 32: folded = values[0] >> (int)values[1]; break;
+            case SpirvOp.ShiftRightArithmetic when operands.Length == 2 && values[1] < 32: folded = (uint)((int)values[0] >> (int)values[1]); break;
+            case SpirvOp.BitFieldUExtract when operands.Length == 3 && values[1] + (ulong)values[2] <= 32:
+                folded = values[2] == 0 ? 0u : (uint)((values[0] >> (int)values[1]) & (values[2] == 32 ? uint.MaxValue : (1u << (int)values[2]) - 1));
+                break;
+            case SpirvOp.IEqual when operands.Length == 2: foldedBool = values[0] == values[1]; folded = 0; break;
+            case SpirvOp.INotEqual when operands.Length == 2: foldedBool = values[0] != values[1]; folded = 0; break;
+            case SpirvOp.ULessThan when operands.Length == 2: foldedBool = values[0] < values[1]; folded = 0; break;
+            case SpirvOp.ULessThanEqual when operands.Length == 2: foldedBool = values[0] <= values[1]; folded = 0; break;
+            case SpirvOp.UGreaterThan when operands.Length == 2: foldedBool = values[0] > values[1]; folded = 0; break;
+            case SpirvOp.UGreaterThanEqual when operands.Length == 2: foldedBool = values[0] >= values[1]; folded = 0; break;
+            case SpirvOp.SLessThan when operands.Length == 2: foldedBool = (int)values[0] < (int)values[1]; folded = 0; break;
+            case SpirvOp.SLessThanEqual when operands.Length == 2: foldedBool = (int)values[0] <= (int)values[1]; folded = 0; break;
+            case SpirvOp.SGreaterThan when operands.Length == 2: foldedBool = (int)values[0] > (int)values[1]; folded = 0; break;
+            case SpirvOp.SGreaterThanEqual when operands.Length == 2: foldedBool = (int)values[0] >= (int)values[1]; folded = 0; break;
+            case SpirvOp.LogicalEqual when operands.Length == 2: foldedBool = values[0] == values[1]; folded = 0; break;
+            case SpirvOp.LogicalNotEqual when operands.Length == 2: foldedBool = values[0] != values[1]; folded = 0; break;
+            default:
+                return false;
+        }
+
+        if (foldedBool is { } boolean)
+        {
+            if (!resultIsBool)
+            {
+                return false;
+            }
+
+            result = ConstantBool(boolean);
+            return true;
+        }
+
+        if (!resultIsInt)
+        {
+            return false;
+        }
+
+        result = Constant(resultType, folded);
+        return true;
+    }
+
+    private bool IsBoolScalarConstant(uint id, out bool value)
+    {
+        value = false;
+        if (_boolType is not { } boolType || !TryConstant(id, out var raw) ||
+            !_constants.TryGetValue((boolType, raw), out var constantId) || constantId != id)
+        {
+            return false;
+        }
+
+        value = raw != 0;
+        return true;
+    }
 
     public void AddStatement(SpirvOp opcode, params uint[] operands) =>
         Emit(_functions, opcode, operands);

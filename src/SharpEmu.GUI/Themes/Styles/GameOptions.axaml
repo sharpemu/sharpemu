@@ -28,7 +28,7 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="Opacity" Value="1" />
   </Style>
 
-  <Style Selector="StackPanel.selectedDetailsHost">
+  <Style Selector="Grid.selectedDetailsHost">
     <Setter Property="RenderTransform" Value="translateY(0px)" />
     <Setter Property="Opacity" Value="1" />
   </Style>
@@ -47,7 +47,7 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="Opacity" Value="0" />
   </Style>
 
-  <Style Selector="StackPanel.selectedDetailsHost.gameOptionsOpen">
+  <Style Selector="Grid.selectedDetailsHost.gameOptionsOpen">
     <Setter Property="RenderTransform" Value="translateY(-28px)" />
     <Setter Property="Opacity" Value="0" />
   </Style>
@@ -109,26 +109,17 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="CornerRadius" Value="20" />
   </Style>
 
-  <Style Selector="StackPanel.selectedDetailsHost">
-    <Setter Property="Spacing" Value="18" />
-  </Style>
-
   <Style Selector="TextBlock.selectedGameTitle">
-    <Setter Property="FontSize" Value="42" />
+    <Setter Property="FontSize" Value="28" />
   </Style>
 
-  <Style Selector="StackPanel.selectedDetailsHost.gridLayout">
-    <Setter Property="Spacing" Value="12" />
-  </Style>
-
-  <Style Selector="StackPanel.selectedDetailsHost.gridLayout TextBlock.selectedGameTitle">
+  <Style Selector="Grid.selectedDetailsHost.gridLayout TextBlock.selectedGameTitle">
     <Setter Property="FontSize" Value="26" />
   </Style>
 
   <Style Selector="Border.selectedDetailsDivider">
     <Setter Property="Height" Value="1" />
-    <Setter Property="MinWidth" Value="440" />
-    <Setter Property="Margin" Value="0,0,0,18" />
+    <Setter Property="Margin" Value="0,10,0,0" />
     <Setter Property="HorizontalAlignment" Value="Stretch" />
     <Setter Property="Background">
       <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
@@ -140,15 +131,15 @@ Contextual per-game options reveal, actions, and selected-game motion.
     </Setter>
   </Style>
 
-  <Style Selector="StackPanel.selectedDetailsHost.gridLayout Button.playButton">
+  <Style Selector="Grid.selectedDetailsHost Button.playButton">
     <Setter Property="MinHeight" Value="44" />
     <Setter Property="MinWidth" Value="168" />
     <Setter Property="Padding" Value="28,10" />
     <Setter Property="FontSize" Value="15" />
   </Style>
 
-  <Style Selector="StackPanel.selectedDetailsHost.gridLayout Button.optionsCircle,
-                   StackPanel.selectedDetailsHost.gridLayout ToggleButton.optionsCircle">
+  <Style Selector="Grid.selectedDetailsHost Button.optionsCircle,
+                   Grid.selectedDetailsHost ToggleButton.optionsCircle">
     <Setter Property="Width" Value="44" />
     <Setter Property="Height" Value="44" />
     <Setter Property="CornerRadius" Value="22" />

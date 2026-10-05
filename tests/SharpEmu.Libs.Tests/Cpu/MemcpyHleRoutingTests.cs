@@ -14,6 +14,7 @@ public sealed class MemcpyHleRoutingTests
 {
     private const string MemcpyNid = "Q3VBxCXhUHs";
     private const string MemsetNid = "QrZZdJ8XsX0";
+    private const string StrcasecmpNid = "AV6ipCNa4Rw";
     private const string RdtscNid = "-2IRUCO--PM";
 
     [Fact]
@@ -35,6 +36,16 @@ public sealed class MemcpyHleRoutingTests
     }
 
     [Fact]
+    public void IsHlePreferredNid_LetsStrcasecmpUseItsIntrinsic()
+    {
+        // Demon's Souls calls strcasecmp ~2M times while loading; the HLE round
+        // trip cost ~13s. The intrinsic reproduces the HLE null-argument answer.
+        Assert.False(
+            InvokeIsHlePreferredNid(StrcasecmpNid),
+            $"strcasecmp ({StrcasecmpNid}) should use its null-safe intrinsic stub.");
+    }
+
+    [Fact]
     public void TryCreateNativeImportIntrinsic_DoesNotClaimMemcpy()
     {
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
@@ -50,6 +61,25 @@ public sealed class MemcpyHleRoutingTests
             "the intrinsic stub before the trampoline, so without an IsHlePreferredNid guard here " +
             "the intrinsic claims memcpy and the HLE routing never takes effect.");
         Assert.Equal(0, address);
+    }
+
+    [Fact]
+    public void TryCreateNativeImportIntrinsic_ClaimsStrcasecmp()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+        {
+            return;
+        }
+
+        var claimed = InvokeTryCreateNativeImportIntrinsic(StrcasecmpNid, out var address);
+
+        Assert.True(claimed, $"strcasecmp ({StrcasecmpNid}) should receive its intrinsic stub.");
+        Assert.NotEqual(0, address);
+
+        unsafe
+        {
+            Assert.True(HostMemory.Free((void*)address, 0, HostMemory.MEM_RELEASE));
+        }
     }
 
     [Fact]

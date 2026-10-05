@@ -31,6 +31,20 @@ public sealed class PadExportsTests
         Assert.Equal(expected, PadExports.PadSetTiltCorrectionState(_ctx));
     }
 
+    // ABI: int scePadResetOrientation(int32_t handle) — handle only, no out
+    // parameter, so the only failure mode is a bad handle.
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(1, 0)]
+    [InlineData(2, InvalidHandle)]
+    [InlineData(-1, InvalidHandle)]
+    public void ResetOrientation_ValidatesHandle(int handle, int expected)
+    {
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+        Assert.Equal(expected, PadExports.PadResetOrientation(_ctx));
+        Assert.Equal(unchecked((ulong)expected), _ctx[CpuRegister.Rax]);
+    }
+
     /// <summary>
     /// Mirrors the calling frame observed in PPSA10112: the out-param points at
     /// rbp-0x30 and the caller's stack cookie sits at rbp-0x28, so the state is
@@ -64,6 +78,24 @@ public sealed class PadExportsTests
         Assert.Equal(cookie, BitConverter.ToUInt64(guard));
     }
 
+    [Fact]
+    public void GetExtControllerInformation_DoesNotOverwriteCallerCookie()
+    {
+        const ulong informationAddress = Base + 0x100;
+        const ulong cookieAddress = informationAddress + 0x30;
+        const ulong cookie = 0xC0DEC0DECAFEBA00UL;
+
+        Assert.True(_memory.TryWrite(cookieAddress, BitConverter.GetBytes(cookie)));
+        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rsi] = informationAddress;
+
+        Assert.Equal(0, PadExports.PadGetExtControllerInformation(_ctx));
+
+        Span<byte> guard = stackalloc byte[8];
+        Assert.True(_memory.TryRead(cookieAddress, guard));
+        Assert.Equal(cookie, BitConverter.ToUInt64(guard));
+    }
+
     [Theory]
     [InlineData(2)]
     [InlineData(-1)]
@@ -72,5 +104,32 @@ public sealed class PadExportsTests
         _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
         _ctx[CpuRegister.Rsi] = Base + 0x100;
         Assert.Equal(InvalidHandle, PadExports.PadGetTriggerEffectState(_ctx));
+    }
+
+    [NativeX64Fact]
+    public void ReadState_RejectsHandleZeroOnceAPadIsOpen()
+    {
+        const ulong dataAddress = Base + 0x200;
+        try
+        {
+            PadExports.PadInit(_ctx);
+            _ctx[CpuRegister.Rdi] = 0x10000000;
+            _ctx[CpuRegister.Rsi] = 0;
+            _ctx[CpuRegister.Rdx] = 0;
+            _ctx[CpuRegister.Rcx] = 0;
+            Assert.Equal(1, PadExports.PadOpen(_ctx));
+
+            _ctx[CpuRegister.Rdi] = 0;
+            _ctx[CpuRegister.Rsi] = dataAddress;
+            Assert.Equal(InvalidHandle, PadExports.PadReadState(_ctx));
+
+            _ctx[CpuRegister.Rdi] = 1;
+            _ctx[CpuRegister.Rsi] = dataAddress;
+            Assert.Equal(0, PadExports.PadReadState(_ctx));
+        }
+        finally
+        {
+            PadExports.ResetOpenedPadForTests();
+        }
     }
 }

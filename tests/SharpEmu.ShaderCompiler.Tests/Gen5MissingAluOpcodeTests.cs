@@ -7,6 +7,7 @@ using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
+using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
 namespace SharpEmu.ShaderCompiler.Tests;
 
@@ -25,20 +26,9 @@ public sealed class Gen5MissingAluOpcodeTests
 
         Assert.Equal(["SAbsdiffI32", "SEndpgm"], program.Instructions.Select(i => i.Opcode));
 
-        var state = new Gen5ShaderState(program, [], null);
-        var scalarRegisters = new uint[256];
-        var evaluation = new Gen5ShaderEvaluation(scalarRegisters, scalarRegisters, [], []);
-
-        Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
-                out var shader,
-                out var error),
-            error);
+        var (plan, resources, layout) = Prepare(program);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
 
         var opcodes = ReadOpcodes(shader.Spirv);
         // SAbsdiffI32 should emit signed subtraction (ISub) and SAbs
@@ -59,25 +49,13 @@ public sealed class Gen5MissingAluOpcodeTests
 
         Assert.Equal(["SMulHiI32", "SEndpgm"], program.Instructions.Select(i => i.Opcode));
 
-        var state = new Gen5ShaderState(program, [], null);
-        var scalarRegisters = new uint[256];
-        var evaluation = new Gen5ShaderEvaluation(scalarRegisters, scalarRegisters, [], []);
-
-        Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
-                out var shader,
-                out var error),
-            error);
+        var (plan, resources, layout) = Prepare(program);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
 
         var opcodes = ReadOpcodes(shader.Spirv);
-        // SMulHiI32 should multiply 64-bit signed integers and shift right arithmetic
-        Assert.Contains((ushort)SpirvOp.IMul, opcodes);
-        Assert.Contains((ushort)SpirvOp.ShiftRightArithmetic, opcodes);
+        // SMulHiI32 uses the high half of a signed extended multiply.
+        Assert.Contains((ushort)SpirvOp.SMulExtended, opcodes);
     }
 
     [Fact]
@@ -92,20 +70,9 @@ public sealed class Gen5MissingAluOpcodeTests
 
         Assert.Equal(["VSadU32", "SEndpgm"], program.Instructions.Select(i => i.Opcode));
 
-        var state = new Gen5ShaderState(program, [], null);
-        var scalarRegisters = new uint[256];
-        var evaluation = new Gen5ShaderEvaluation(scalarRegisters, scalarRegisters, [], []);
-
-        Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
-                out var shader,
-                out var error),
-            error);
+        var (plan, resources, layout) = Prepare(program);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
 
         var opcodes = ReadOpcodes(shader.Spirv);
         // VSadU32 calculates abs difference + accumulator

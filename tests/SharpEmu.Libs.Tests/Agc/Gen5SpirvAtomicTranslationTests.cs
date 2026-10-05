@@ -4,13 +4,14 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
-// End-to-end pipeline tests: synthetic GFX10 program -> decode -> scalar evaluation -> SPIR-V.
-// Each test asserts the expected OpAtomic* instructions land in the emitted module.
+// Checks atomic instructions after decoding and resource-plan compilation.
 public sealed class Gen5SpirvAtomicTranslationTests
 {
     private const ulong ShaderAddress = 0x1_0000_0000;
@@ -21,7 +22,7 @@ public sealed class Gen5SpirvAtomicTranslationTests
     {
         // BUFFER_ATOMIC_UMAX v1, BUFFER_ATOMIC_CMPSWAP v[1:2], BUFFER_ATOMIC_INC v1,
         // all against the V# in s[0:3].
-        var opcodes = CompileCompute(
+        var opcodes = CompileComputeOpcodes(
             [
                 0xE0E04008, 0x80000100,
                 0xE0C44000, 0x80000100,
@@ -34,11 +35,45 @@ public sealed class Gen5SpirvAtomicTranslationTests
         Assert.Contains((ushort)SpirvOp.AtomicIIncrement, opcodes);
     }
 
+    [Theory]
+    [InlineData(0xE0FC4000u, SpirvOp.FOrdLessThan)]
+    [InlineData(0xE1004000u, SpirvOp.FOrdGreaterThan)]
+    public void BufferFloatAtomics_EmitCompareExchangeLoop(uint word, SpirvOp compareOp)
+    {
+        var opcodes = CompileComputeOpcodes(
+            [word, 0x80000100],
+            BufferDescriptorRegisters());
+
+        Assert.Contains((ushort)SpirvOp.AtomicLoad, opcodes);
+        Assert.Contains((ushort)SpirvOp.AtomicCompareExchange, opcodes);
+        Assert.Contains((ushort)compareOp, opcodes);
+    }
+
+    [Fact]
+    public void BufferAtomicOrX2_EmitsAtomicOr()
+    {
+        var opcodes = CompileComputeOpcodes(
+            [0xE1684000, 0x80000100],
+            BufferDescriptorRegisters());
+
+        Assert.Contains((ushort)SpirvOp.AtomicOr, opcodes);
+    }
+
+    [Fact]
+    public void BufferAtomicSwapX2_EmitsAtomicExchange()
+    {
+        var opcodes = CompileComputeOpcodes(
+            [0xE1404000, 0x80000100],
+            BufferDescriptorRegisters());
+
+        Assert.Contains((ushort)SpirvOp.AtomicExchange, opcodes);
+    }
+
     [Fact]
     public void DataShareAtomics_EmitAtomicOpcodes()
     {
         // DS_ADD_RTN_U32 v3, v0, v1; DS_CMPST_RTN_B32 v3, v0, v1, v2; DS_MAX_U32 v0, v1.
-        var opcodes = CompileCompute(
+        var opcodes = CompileComputeOpcodes(
             [
                 0xD8800000, 0x03000100,
                 0xD8C00000, 0x03020100,
@@ -52,15 +87,77 @@ public sealed class Gen5SpirvAtomicTranslationTests
     }
 
     [Fact]
+    public void DataShareSingleAddressOffset_UsesBothEncodedBytes()
+    {
+        // DS_WRITE_B32 v0, v1 offset:0x0808.
+        var spirv = CompileComputeSpirv(
+            [0xD8340808, 0x00000100],
+            new Dictionary<uint, uint>());
+
+        Assert.True(ContainsConstant(spirv, 0x0808u));
+    }
+
+    [Fact]
+    public void DataShareWaveCounters_EmitOneWaveAtomicAndBroadcast()
+    {
+        var opcodes = CompileComputeOpcodes(
+            [
+                0xD8F80014, 0x07000000,
+                0xD8F40014, 0x08000000,
+            ],
+            new Dictionary<uint, uint>());
+
+        Assert.Contains((ushort)SpirvOp.AtomicIAdd, opcodes);
+        Assert.Contains((ushort)SpirvOp.AtomicISub, opcodes);
+        Assert.Contains((ushort)SpirvOp.BitCount, opcodes);
+        Assert.Contains((ushort)SpirvOp.GroupNonUniformShuffle, opcodes);
+        Assert.Contains((ushort)SpirvOp.ShiftRightLogical, opcodes);
+        Assert.Contains((ushort)SpirvOp.ULessThan, opcodes);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DataShareWaveCounters_InVertexStageUseWaveCountAndBroadcast(bool global)
+    {
+        var gdsBit = global ? 1u << 17 : 0u;
+        var opcodes = CompileVertexOpcodes(
+            [
+                0xD8F80014 | gdsBit, 0x07000000,
+                0xD8F40014 | gdsBit, 0x08000000,
+            ]);
+
+        // GDS uses shared atomics; graphics LDS uses private storage.
+        // Each active lane receives the value from before the update.
+        Assert.Contains((ushort)SpirvOp.GroupNonUniformBallot, opcodes);
+        Assert.Contains((ushort)SpirvOp.BitCount, opcodes);
+        Assert.Contains((ushort)SpirvOp.GroupNonUniformShuffle, opcodes);
+        Assert.Contains((ushort)SpirvOp.IAdd, opcodes);
+        if (global)
+        {
+            Assert.Contains((ushort)SpirvOp.AtomicIAdd, opcodes);
+            Assert.Contains((ushort)SpirvOp.AtomicISub, opcodes);
+        }
+        else
+        {
+            Assert.Contains((ushort)SpirvOp.ISub, opcodes);
+            Assert.DoesNotContain((ushort)SpirvOp.AtomicIAdd, opcodes);
+            Assert.DoesNotContain((ushort)SpirvOp.AtomicISub, opcodes);
+        }
+    }
+
+    [Fact]
     public void ImageAtomicAdd_EmitsTexelPointerAndAtomicAdd()
     {
         // IMAGE_ATOMIC_ADD v2, v[0:1], s[4:11] dmask:0x1 dim:2D glc against an R32ui T#.
-        var opcodes = CompileCompute(
+        var opcodes = CompileComputeOpcodes(
             [0xF0442100, 0x00010200],
             new Dictionary<uint, uint>
             {
-                // Descriptor word1 dataFormat (bits 28:20) = 20 selects R32ui/Uint.
+                // A one-pixel unsigned image with identity component selection.
+                [4] = (uint)(BufferAddress >> 8),
                 [5] = 20u << 20,
+                [7] = (9u << 28) | 0xFACu,
             });
 
         Assert.Contains((ushort)SpirvOp.ImageTexelPointer, opcodes);
@@ -76,47 +173,49 @@ public sealed class Gen5SpirvAtomicTranslationTests
         [3] = 0,
     };
 
-    private static HashSet<ushort> CompileCompute(
+    private static HashSet<ushort> CompileComputeOpcodes(
         uint[] programWords,
-        Dictionary<uint, uint> userDataSgprs)
+        Dictionary<uint, uint> userDataRegisters) =>
+        CollectOpcodes(CompileComputeSpirv(programWords, userDataRegisters));
+
+    private static byte[] CompileComputeSpirv(
+        uint[] programWords,
+        Dictionary<uint, uint> userDataRegisters)
     {
         var memory = new FakeCpuMemory(ShaderAddress, 0x2000);
-        var ctx = new CpuContext(memory, Generation.Gen5);
+        var context = new CpuContext(memory, Generation.Gen5);
         Gen5ShaderAtomicDecodeTests.WriteProgram(memory, ShaderAddress, programWords);
-        // COMPUTE_PGM_RSRC2 advertises 16 user SGPRs; the user data words at
-        // COMPUTE_USER_DATA_0 + index seed s[0..15] for the scalar evaluator.
-        var shaderRegisters = new Dictionary<uint, uint>
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, ShaderAddress, out var program, out var error), error);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, 1, 0, 16);
+        var userData = new uint[16];
+        foreach (var (registerIndex, value) in userDataRegisters)
         {
-            [Gen5ShaderAtomicDecodeTests.ComputePgmRsrc2Register] = 16u << 1,
-        };
-        foreach (var (sgpr, value) in userDataSgprs)
-        {
-            shaderRegisters[Gen5ShaderAtomicDecodeTests.ComputeUserDataRegister + sgpr] = value;
+            userData[registerIndex] = value;
         }
 
-        Assert.True(
-            Gen5ShaderTranslator.TryCreateState(
-                ctx,
-                ShaderAddress,
-                0,
-                shaderRegisters,
-                Gen5ShaderAtomicDecodeTests.ComputeUserDataRegister,
-                out var state,
-                out var error),
-            error);
-        Assert.True(
-            Gen5ShaderScalarEvaluator.TryEvaluate(ctx, state, out var evaluation, out error),
-            error);
-        Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
-                out var shader,
-                out error),
-            error);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, ResourceTestProgram.Inputs(userData),
+            ref snapshot, ref specialization, out var failure), failure.ToString());
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        var layout = BindingLayout.Allocate(resources.Info,
+            BindingLayout.CollectUserDataRegisters(program, 0, 16),
+            BindingLayout.UsesGlobalDataShare(program),
+            ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
+            BindingLayout.ReadsShaderBase(program), 0);
+        var request = new ShaderCompileRequest(plan, resources, layout);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out error), error);
+        return shader.Spirv;
+    }
+
+    private static HashSet<ushort> CompileVertexOpcodes(uint[] programWords)
+    {
+        var memory = new FakeCpuMemory(ShaderAddress, 0x2000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        Gen5ShaderAtomicDecodeTests.WriteProgram(memory, ShaderAddress, programWords);
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, ShaderAddress, out var program, out var error), error);
+        var request = ResourceTestProgram.Request(program, ShaderStage.Vertex, userDataCount: 16);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out error), error);
         return CollectOpcodes(shader.Spirv);
     }
 
@@ -133,5 +232,26 @@ public sealed class Gen5SpirvAtomicTranslationTests
         }
 
         return opcodes;
+    }
+
+    private static bool ContainsConstant(byte[] spirv, uint expected)
+    {
+        for (var offset = 5 * sizeof(uint); offset + sizeof(uint) <= spirv.Length;)
+        {
+            var word = BinaryPrimitives.ReadUInt32LittleEndian(
+                spirv.AsSpan(offset, sizeof(uint)));
+            var wordCount = Math.Max((int)(word >> 16), 1);
+            if ((ushort)word == (ushort)SpirvOp.Constant &&
+                wordCount >= 4 &&
+                BinaryPrimitives.ReadUInt32LittleEndian(
+                    spirv.AsSpan(offset + (3 * sizeof(uint)), sizeof(uint))) == expected)
+            {
+                return true;
+            }
+
+            offset += wordCount * sizeof(uint);
+        }
+
+        return false;
     }
 }

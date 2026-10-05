@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Ampr;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Threading;
 
@@ -16,7 +17,12 @@ public static class KernelAprCompatExports
     private static readonly bool _traceApr =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AMPR"), "1", StringComparison.Ordinal);
 
-    private readonly record struct AprSubmission(ulong CommandBuffer, ulong Priority, ulong ResultAddress);
+    private readonly record struct AprSubmission(
+        ulong CommandBuffer,
+        ulong Priority,
+        ulong ResultAddress,
+        int ExecutionResult,
+        uint ErrorOffset);
 
     [SysAbiExport(
         Nid = "ASoW5WE-UPo",
@@ -41,20 +47,24 @@ public static class KernelAprCompatExports
             submissionId = unchecked((uint)Interlocked.Increment(ref _nextSubmissionId));
         }
 
-        _submittedCommandBuffers[submissionId] = new AprSubmission(commandBuffer, priority, resultAddress);
-
-        var completionResult = AmprExports.CompleteCommandBuffer(ctx, commandBuffer);
+        var completionResult = AmprExports.CompleteCommandBuffer(
+            ctx,
+            commandBuffer,
+            out var executionResult,
+            out var errorOffset);
         if (completionResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {
             return completionResult;
         }
+        _submittedCommandBuffers[submissionId] =
+            new AprSubmission(commandBuffer, priority, resultAddress, executionResult, errorOffset);
 
         if (outSubmissionId != 0 && !ctx.TryWriteUInt32(outSubmissionId, submissionId))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        if (resultAddress != 0 && !TryWriteAprResult(ctx, resultAddress))
+        if (resultAddress != 0 && !TryWriteAprResult(ctx, resultAddress, executionResult, errorOffset))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -80,7 +90,12 @@ public static class KernelAprCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        // Completion output was written when the command was submitted.
+        if (submission.ResultAddress != 0 &&
+            !TryWriteAprResult(ctx, submission.ResultAddress, submission.ExecutionResult, submission.ErrorOffset))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
         TraceApr(ctx, "wait", submissionId, submission.CommandBuffer, waitArg1, waitArg2);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -99,13 +114,17 @@ public static class KernelAprCompatExports
         }
 
         var submissionId = unchecked((uint)Interlocked.Increment(ref _nextSubmissionId));
-        _submittedCommandBuffers[submissionId] = new AprSubmission(commandBuffer, ctx[CpuRegister.Rsi], ResultAddress: 0);
-
-        var completionResult = AmprExports.CompleteCommandBuffer(ctx, commandBuffer);
+        var completionResult = AmprExports.CompleteCommandBuffer(
+            ctx,
+            commandBuffer,
+            out var executionResult,
+            out var errorOffset);
         if (completionResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {
             return completionResult;
         }
+        _submittedCommandBuffers[submissionId] =
+            new AprSubmission(commandBuffer, ctx[CpuRegister.Rsi], 0, executionResult, errorOffset);
 
         TraceApr(ctx, "submit", submissionId, commandBuffer, ctx[CpuRegister.Rsi], 0);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -126,13 +145,17 @@ public static class KernelAprCompatExports
         }
 
         var submissionId = unchecked((uint)Interlocked.Increment(ref _nextSubmissionId));
-        _submittedCommandBuffers[submissionId] = new AprSubmission(commandBuffer, ctx[CpuRegister.Rsi], ResultAddress: 0);
-
-        var completionResult = AmprExports.CompleteCommandBuffer(ctx, commandBuffer);
+        var completionResult = AmprExports.CompleteCommandBuffer(
+            ctx,
+            commandBuffer,
+            out var executionResult,
+            out var errorOffset);
         if (completionResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {
             return completionResult;
         }
+        _submittedCommandBuffers[submissionId] =
+            new AprSubmission(commandBuffer, ctx[CpuRegister.Rsi], 0, executionResult, errorOffset);
 
         if (!ctx.TryWriteUInt32(outSubmissionId, submissionId))
         {
@@ -143,23 +166,15 @@ public static class KernelAprCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    // Success stub: the argument layout is unknown and callers tolerate the
-    // empty answer (Quake streams fine), so no output payload is written until
-    // the real signature is reversed.
-    [SysAbiExport(
-        Nid = "WvEu7yl3Ivg",
-        ExportName = "sceKernelAprGetFileSize",
-        Target = Generation.Gen4 | Generation.Gen5,
-        LibraryName = "libKernel")]
-    public static int KernelAprGetFileSize(CpuContext ctx)
-    {
-        return ctx.SetReturn(0);
-    }
-
-    private static bool TryWriteAprResult(CpuContext ctx, ulong resultAddress)
+    private static bool TryWriteAprResult(
+        CpuContext ctx,
+        ulong resultAddress,
+        int executionResult,
+        uint errorOffset)
     {
         Span<byte> result = stackalloc byte[sizeof(ulong)];
-        result.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(result, executionResult);
+        BinaryPrimitives.WriteUInt32LittleEndian(result[sizeof(int)..], errorOffset);
         return ctx.Memory.TryWrite(resultAddress, result);
     }
 

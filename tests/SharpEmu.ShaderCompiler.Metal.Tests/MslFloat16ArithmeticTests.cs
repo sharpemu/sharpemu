@@ -24,7 +24,7 @@ public sealed class MslFloat16ArithmeticTests
             StoreScalarResourceBase: 0,
             StoreBackingBytes: 0);
 
-        var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
 
         Assert.Contains("as_type<half>", shader.Source, StringComparison.Ordinal);
         Assert.Contains("fmin(", shader.Source, StringComparison.Ordinal);

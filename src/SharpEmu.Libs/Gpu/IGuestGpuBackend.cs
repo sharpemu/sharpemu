@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Gpu;
@@ -25,50 +26,8 @@ internal interface IGuestGpuBackend
     /// <summary>Starts the presenter (window + device) once; safe to call repeatedly.</summary>
     void EnsureStarted(uint width, uint height);
 
-    // Shader compilation. The optional base/index parameters describe how a multi-stage
-    // draw lays both stages' resources into one flat per-role slot space (buffers,
-    // images, scalar-spill slots); each backend maps those slots to its own API binding
-    // model. -1 keeps the emitter's single-stage defaults.
-
-    bool TryCompileVertexShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        out IGuestCompiledShader? shader,
-        out string error,
-        int globalBufferBase = 0,
-        int totalGlobalBufferCount = -1,
-        int imageBindingBase = 0,
-        int scalarRegisterBufferIndex = -1,
-        int requiredVertexOutputCount = 0,
-        ulong storageBufferOffsetAlignment = 1);
-
-    bool TryCompilePixelShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        IReadOnlyList<Gen5PixelOutputBinding> outputs,
-        out IGuestCompiledShader? shader,
-        out string error,
-        int globalBufferBase = 0,
-        int totalGlobalBufferCount = -1,
-        int imageBindingBase = 0,
-        int scalarRegisterBufferIndex = -1,
-        uint pixelInputEnable = 0,
-        uint pixelInputAddress = 0,
-        IReadOnlyList<uint>? pixelInputCntl = null,
-        ulong storageBufferOffsetAlignment = 1);
-
-    bool TryCompileComputeShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        uint localSizeX,
-        uint localSizeY,
-        uint localSizeZ,
-        out IGuestCompiledShader? shader,
-        out string error,
-        int totalGlobalBufferCount = -1,
-        int initialScalarBufferIndex = -1,
-        uint waveLaneCount = 32,
-        ulong storageBufferOffsetAlignment = 1);
+    // Compiles one permutation of a program over its resource plan and binding layout.
+    bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error);
 
     /// <summary>Returns the backend's no-color-output fragment shader.</summary>
     IGuestCompiledShader GetDepthOnlyFragmentShader();
@@ -81,6 +40,43 @@ internal interface IGuestGpuBackend
     /// <summary>Presents a recognized fixed-function guest draw (see GuestDrawKind).</summary>
     void SubmitGuestDraw(GuestDrawKind drawKind, uint width, uint height);
 
+
+    // A video-out export flip: the presenter captures the buffer and marks the request presented.
+    bool TrySubmitGuestImage(
+        int videoOutHandle,
+        int displayBufferIndex,
+        ulong address,
+        uint width,
+        uint height,
+        uint pitchInPixel,
+        ulong flipRequestId);
+
+    // Enqueues a guest command stream; queue 0 is graphics, 0x20 to 0x57 are the compute owners.
+    void SubmitCommandStream(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots);
+
+    // Marks the frame boundary; off the worker it first waits for the accepted submissions.
+    IdleOutcome SubmitDone(ICpuMemory memory);
+
+    /// <summary>Registers a display buffer with its guest texture format tag.</summary>
+    void RegisterKnownDisplayBuffer(ulong address, uint guestFormat);
+
+    /// <summary>Format/numberType are raw guest texture descriptor codes.</summary>
+    bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType);
+
+    /// <summary>Counts a guest shader translation for the perf overlay.</summary>
+    void CountShaderCompilation();
+
+    (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters();
+
+    /// <summary>Asks a running presenter to close its window.</summary>
+    void RequestClose();
+}
+
+// A backend that keeps CPU snapshots of guest images; the AGC layer feeds it pixels and
+// mirrored writes. A backend with a guest image store reads guest memory itself.
+internal interface IGuestImageSnapshotBackend
+{
+    bool TrySubmitGuestImageBlit(GuestRenderTarget source, GuestRenderTarget destination);
     void SubmitTranslatedDraw(
         IGuestCompiledShader pixelShader,
         IReadOnlyList<GuestDrawTexture> textures,
@@ -110,7 +106,8 @@ internal interface IGuestGpuBackend
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null,
         ulong shaderAddress = 0,
-        int baseVertex = 0);
+        int baseVertex = 0,
+        IReadOnlyList<GuestStageBindings>? stageBindings = null);
 
     void SubmitOffscreenTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -127,7 +124,8 @@ internal interface IGuestGpuBackend
         GuestRenderState? renderState = null,
         GuestDepthTarget? depthTarget = null,
         ulong shaderAddress = 0,
-        int baseVertex = 0);
+        int baseVertex = 0,
+        IReadOnlyList<GuestStageBindings>? stageBindings = null);
 
     void SubmitStorageTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -156,72 +154,20 @@ internal interface IGuestGpuBackend
         bool writesGlobalMemory,
         uint threadCountX = uint.MaxValue,
         uint threadCountY = uint.MaxValue,
-        uint threadCountZ = uint.MaxValue);
+        uint threadCountZ = uint.MaxValue,
+        GuestStageBindings? stageBindings = null);
+    // Global data share transfers queue in stream order behind the draws before them.
+    long SubmitGlobalDataShareFill(ulong offset, ulong size, byte value);
 
-    bool TrySubmitGuestImage(
-        ulong address,
-        uint width,
-        uint height,
-        uint pitchInPixel);
+    long SubmitGlobalDataShareCopyFromGuest(ulong offset, byte[] bytes);
 
-    bool TrySubmitOrderedGuestImageFlip(
-        int videoOutHandle,
-        int displayBufferIndex,
-        ulong address,
-        uint width,
-        uint height,
-        uint pitchInPixel);
+    long SubmitGlobalDataShareCopyToGuest(ulong guestAddress, ulong offset, ulong size);
 
-    /// <summary>Registers a display buffer with its guest texture format tag.</summary>
-    void RegisterKnownDisplayBuffer(ulong address, uint guestFormat);
+    // Valid after a GPU synchronization: the words the queued transfers and shaders left.
+    void ReadGlobalDataShare(Span<uint> destination, uint wordOffset, uint wordCount);
 
-    /// <summary>Format/numberType are raw guest texture descriptor codes.</summary>
-    bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType);
-
-    bool TrySubmitGuestImageBlit(
-        ulong sourceAddress,
-        uint sourceWidth,
-        uint sourceHeight,
-        uint sourceFormat,
-        uint sourceNumberType,
-        ulong destinationAddress,
-        uint destinationWidth,
-        uint destinationHeight,
-        uint destinationFormat,
-        uint destinationNumberType);
-
-    /// <summary>
-    /// Whether the backend supports the guest render-target format, and how its pixel
-    /// outputs are typed. Deliberately does not expose the backend's native format —
-    /// the guest codes cross the seam and each backend maps them internally.
-    /// </summary>
-    bool TryGetRenderTargetOutputKind(uint dataFormat, uint numberType, out Gen5PixelOutputKind outputKind);
-
-    // Guest work ordering. AGC submissions execute on a single backend consumer in
-    // logical guest-queue order; sequences returned here are backend work tickets.
-    // A backend without a running presenter returns 0 from the Submit* methods and
-    // callers fall back to executing inline.
-
-    /// <summary>Scopes subsequent submissions on this thread to a named guest queue.</summary>
-    IDisposable EnterGuestQueue(string queueName, ulong submissionId);
-
-    /// <summary>Enqueues an action at its exact position in the current guest queue;
-    /// returns its work sequence, or 0 when nothing could be enqueued.</summary>
-    long SubmitOrderedGuestAction(Action action, string debugName);
-
-    /// <summary>Preserves sceAgcDcbWaitUntilSafeForRendering in queue order.</summary>
-    long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex);
-
-    /// <summary>Blocks until the given work sequence completes; false on timeout,
-    /// close, or a non-positive sequence.</summary>
-    bool WaitForGuestWork(long workSequence, int timeoutMilliseconds = Timeout.Infinite);
-
-    /// <summary>Sequence currently executing on the guest-work consumer; diagnostics only.</summary>
-    long CurrentGuestWorkSequenceForDiagnostics { get; }
-
-    // Guest image lifecycle beyond presentation: CPU-visible seeding, writes, and
-    // extent queries the AGC layer uses to keep guest memory and backend images
-    // coherent. Addresses and formats are always raw guest values.
+    // A record that completes after every earlier record and the GPU work they committed.
+    long SubmitGpuSynchronization(string debugName);
 
     /// <summary>Whether the image exists on the backend or an already-queued upload
     /// owns its initialization (a pending image may skip a duplicate upload but is
@@ -265,21 +211,9 @@ internal interface IGuestGpuBackend
 
     /// <summary>Whether the backend's texture cache already holds this content; lets
     /// the AGC layer skip copying texels out of guest memory on every draw.</summary>
-    bool IsTextureContentCached(in TextureContentIdentity identity);
+    bool IsTextureContentCached(in TextureCacheLookupIdentity identity);
 
     /// <summary>Guest memory handle for backend self-healing (cache misses re-read
     /// texels directly instead of showing a fallback pattern).</summary>
     void AttachGuestMemory(ICpuMemory memory);
-
-    /// <summary>Alignment the AGC layer must apply to storage-buffer offsets before
-    /// they cross the seam.</summary>
-    ulong GuestStorageBufferOffsetAlignment { get; }
-
-    /// <summary>Counts a guest shader translation for the perf overlay.</summary>
-    void CountShaderCompilation();
-
-    (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters();
-
-    /// <summary>Asks a running presenter to close its window.</summary>
-    void RequestClose();
 }

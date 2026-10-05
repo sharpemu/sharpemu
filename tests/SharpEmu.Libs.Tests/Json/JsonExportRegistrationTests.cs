@@ -16,6 +16,7 @@ public sealed class JsonExportRegistrationTests
     private static readonly (string Nid, string Name)[] ExpectedExports =
     {
         ("qBMjqyBn3OM", "_ZN3sce4Json5ValueC1Ev"),
+        ("fSb2oQTNrgA", "_ZN3sce4Json5ValueC1ERKS1_"),
         ("5yHuiWXo2gg", "_ZN3sce4Json5Value3setEb"),
         ("QxVVYhP-mvg", "_ZN3sce4Json5Value3setEl"),
         ("SIe1ZmW7e7s", "_ZN3sce4Json5Value3setEm"),
@@ -45,6 +46,59 @@ public sealed class JsonExportRegistrationTests
             Assert.Equal(name, export.Name);
             Assert.Equal("libSceJson", export.LibraryName);
         }
+    }
+
+    [Fact]
+    public void DispatchValueCopyConstructor_PreservesValueAfterSourceIsDestroyed()
+    {
+        JsonObjectHeap.ResetForTests();
+        var manager = CreateRegisteredManager();
+        const ulong source = 0x1_0000_0000;
+        const ulong destination = source + 0x100;
+        var ctx = new CpuContext(new FakeCpuMemory(source, 0x1000), Generation.Gen5);
+        ctx[CpuRegister.Rdi] = source;
+        ctx[CpuRegister.Rsi] = unchecked((ulong)-42L);
+        JsonValueExports.ValueIntegerConstructor(ctx);
+        ctx[CpuRegister.Rdi] = destination;
+        ctx[CpuRegister.Rsi] = source;
+        Assert.True(manager.TryDispatch("fSb2oQTNrgA", ctx, out var result));
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.Equal(destination, ctx[CpuRegister.Rax]);
+        ctx[CpuRegister.Rdi] = source;
+        JsonExports.ValueDestructor(ctx);
+        Assert.Equal(-42L, JsonObjectHeap.Values[destination].Integer);
+        ctx[CpuRegister.Rdi] = destination;
+        JsonExports.ValueGetType(ctx);
+        Assert.Equal(2UL, ctx[CpuRegister.Rax]);
+        Assert.True(ctx.TryReadUInt64(destination + 0x10, out var integer));
+        Assert.Equal(unchecked((ulong)-42L), integer);
+    }
+
+    [Fact]
+    public void ValueCopyConstructor_CopiesParsedObjectInsteadOfDefaultConstructorShadow()
+    {
+        JsonObjectHeap.ResetForTests();
+        const ulong source = 0x1_0000_0000;
+        const ulong destination = source + 0x100;
+        const ulong text = source + 0x200;
+        var memory = new FakeCpuMemory(source, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        ctx[CpuRegister.Rdi] = source;
+        JsonExports.ValueConstructor(ctx);
+        memory.WriteCString(text, "{\"a\":1,\"b\":[2,3]}");
+        ctx[CpuRegister.Rsi] = text;
+        ctx[CpuRegister.Rdx] = 17;
+        Assert.Equal(0, JsonExports.ParserParseBuffer(ctx));
+        ctx[CpuRegister.Rdi] = destination;
+        ctx[CpuRegister.Rsi] = source;
+        Assert.Equal(0, JsonExports.ValueCopyConstructor(ctx));
+        ctx[CpuRegister.Rdi] = source;
+        JsonExports.ValueDestructor(ctx);
+        ctx[CpuRegister.Rdi] = destination;
+        JsonExports.ValueGetType(ctx);
+        Assert.Equal(7UL, ctx[CpuRegister.Rax]);
+        JsonExports.ValueCount(ctx);
+        Assert.Equal(2UL, ctx[CpuRegister.Rax]);
     }
 
     [Fact]

@@ -1,11 +1,99 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Reflection;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Pthread;
+
+[CollectionDefinition(Name, DisableParallelization = true)]
+public sealed class PthreadExceptionStateCollection
+{
+    public const string Name = "PthreadExceptionState";
+}
+
+[Collection(PthreadExceptionStateCollection.Name)]
+public sealed class PthreadMutexExceptionTests
+{
+    [Fact]
+    public void HostMutexWaitDeliversExceptionWithoutGrantingOwnership()
+    {
+        const ulong mutexAddress = 0x6_0000_0100;
+        var memory = new PthreadMutexSemanticsTests.AllocatingCpuMemory(0x6_0000_0000, 0x4000);
+        var ownerContext = new CpuContext(memory, Generation.Gen5);
+        ownerContext[CpuRegister.Rdi] = mutexAddress;
+        Assert.True(ownerContext.TryWriteUInt64(mutexAddress, 1));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(ownerContext));
+        using var exceptionDelivered = new ManualResetEventSlim();
+        using var acquired = new ManualResetEventSlim();
+        var scheduler = DispatchProxy.Create<IGuestThreadScheduler, ExceptionWaitScheduler>();
+        var proxy = (ExceptionWaitScheduler)(object)scheduler;
+        var waiterThreadId = 0;
+        var deliveryThreadId = 0;
+        proxy.DeliverException = context =>
+        {
+            deliveryThreadId = Environment.CurrentManagedThreadId;
+            Assert.Equal(mutexAddress, context[CpuRegister.Rdi]);
+            exceptionDelivered.Set();
+        };
+        var previousScheduler = GuestThreadExecution.Scheduler;
+        var lockResult = -1;
+        var unlockResult = -1;
+        Exception? failure = null;
+        var waiter = new Thread(() =>
+        {
+            try
+            {
+                waiterThreadId = Environment.CurrentManagedThreadId;
+                var context = new CpuContext(memory, Generation.Gen5);
+                context[CpuRegister.Rdi] = mutexAddress;
+                lockResult = KernelPthreadCompatExports.PthreadMutexLock(context);
+                acquired.Set();
+                unlockResult = KernelPthreadCompatExports.PthreadMutexUnlock(context);
+            }
+            catch (Exception error)
+            {
+                failure = error;
+            }
+        }) { IsBackground = true };
+        try
+        {
+            GuestThreadExecution.Scheduler = scheduler;
+            waiter.Start();
+            Assert.True(exceptionDelivered.Wait(TimeSpan.FromSeconds(5)));
+            Assert.False(acquired.IsSet);
+            Assert.Equal(waiterThreadId, deliveryThreadId);
+        }
+        finally
+        {
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(ownerContext));
+            var joined = waiter.Join(TimeSpan.FromSeconds(5));
+            GuestThreadExecution.Scheduler = previousScheduler;
+            Assert.True(joined);
+        }
+        Assert.Null(failure);
+        Assert.Equal(0, lockResult);
+        Assert.Equal(0, unlockResult);
+    }
+
+    public class ExceptionWaitScheduler : DispatchProxy
+    {
+        public Action<CpuContext>? DeliverException { get; set; }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod?.Name == nameof(IGuestThreadScheduler.DeliverPendingGuestExceptionIfReady))
+            {
+                DeliverException!((CpuContext)args![0]!);
+                return null;
+            }
+            throw new NotSupportedException(targetMethod?.Name);
+        }
+    }
+
+}
 
 public sealed class PthreadMutexSemanticsTests
 {
@@ -281,7 +369,62 @@ public sealed class PthreadMutexSemanticsTests
         Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
     }
 
-    private sealed class AllocatingCpuMemory : ICpuMemory, IGuestMemoryAllocator
+    [Fact]
+    public void OpaqueObjects_AreReleasedAfterDestroy()
+    {
+        const ulong memoryBase = 0x1_0012_0000;
+        const ulong objectAddress = memoryBase + 0x100;
+        var memory = new RecyclingCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        for (var iteration = 0; iteration < 4; iteration++)
+        {
+            context[CpuRegister.Rdi] = objectAddress;
+            context[CpuRegister.Rsi] = 0;
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexInit(context));
+            Assert.Equal(1, memory.OutstandingAllocations);
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexDestroy(context));
+            Assert.Equal(0, memory.OutstandingAllocations);
+
+            context[CpuRegister.Rdi] = objectAddress;
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadCondInit(context));
+            Assert.Equal(1, memory.OutstandingAllocations);
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadCondDestroy(context));
+            Assert.Equal(0, memory.OutstandingAllocations);
+
+            context[CpuRegister.Rdi] = objectAddress;
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexattrInit(context));
+            Assert.Equal(1, memory.OutstandingAllocations);
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexattrDestroy(context));
+            Assert.Equal(0, memory.OutstandingAllocations);
+        }
+    }
+
+    [Fact]
+    public void OpaqueObjects_AreReleasedWhenCallerHandleWriteFails()
+    {
+        const ulong memoryBase = 0x1_0013_0000;
+        const ulong invalidObjectAddress = memoryBase + 0x2000;
+        var memory = new RecyclingCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var memoryFault = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+
+        for (var iteration = 0; iteration < 4; iteration++)
+        {
+            context[CpuRegister.Rdi] = invalidObjectAddress;
+            context[CpuRegister.Rsi] = 0;
+            Assert.Equal(memoryFault, KernelPthreadCompatExports.PthreadMutexInit(context));
+            Assert.Equal(0, memory.OutstandingAllocations);
+
+            Assert.Equal(memoryFault, KernelPthreadCompatExports.PthreadCondInit(context));
+            Assert.Equal(0, memory.OutstandingAllocations);
+
+            Assert.Equal(memoryFault, KernelPthreadCompatExports.PthreadMutexattrInit(context));
+            Assert.Equal(0, memory.OutstandingAllocations);
+        }
+    }
+
+    internal sealed class AllocatingCpuMemory : ICpuMemory, IGuestMemoryAllocator
     {
         private readonly ulong _baseAddress;
         private readonly byte[] _storage;
@@ -333,6 +476,87 @@ public sealed class PthreadMutexSemanticsTests
 
         public bool TryFreeGuestMemory(ulong address) =>
             address >= _baseAddress && address < _baseAddress + (ulong)_storage.Length;
+
+        private bool TryResolve(ulong virtualAddress, int length, out int offset)
+        {
+            offset = 0;
+            if (virtualAddress < _baseAddress)
+            {
+                return false;
+            }
+
+            var relative = virtualAddress - _baseAddress;
+            if (relative + (ulong)length > (ulong)_storage.Length)
+            {
+                return false;
+            }
+
+            offset = (int)relative;
+            return true;
+        }
+    }
+
+    private sealed class RecyclingCpuMemory : ICpuMemory, IGuestMemoryAllocator
+    {
+        private readonly ulong _baseAddress;
+        private readonly byte[] _storage;
+        private readonly ulong _allocationAddress;
+        private bool _allocated;
+
+        public RecyclingCpuMemory(ulong baseAddress, int size)
+        {
+            _baseAddress = baseAddress;
+            _storage = new byte[size];
+            _allocationAddress = baseAddress + 0x800;
+        }
+
+        public int OutstandingAllocations => _allocated ? 1 : 0;
+
+        public bool TryRead(ulong virtualAddress, Span<byte> destination)
+        {
+            if (!TryResolve(virtualAddress, destination.Length, out var offset))
+            {
+                return false;
+            }
+
+            _storage.AsSpan(offset, destination.Length).CopyTo(destination);
+            return true;
+        }
+
+        public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source)
+        {
+            if (!TryResolve(virtualAddress, source.Length, out var offset))
+            {
+                return false;
+            }
+
+            source.CopyTo(_storage.AsSpan(offset, source.Length));
+            return true;
+        }
+
+        public bool TryAllocateGuestMemory(ulong size, ulong alignment, out ulong address)
+        {
+            if (_allocated || size > 0x100 || alignment > 0x10)
+            {
+                address = 0;
+                return false;
+            }
+
+            _allocated = true;
+            address = _allocationAddress;
+            return true;
+        }
+
+        public bool TryFreeGuestMemory(ulong address)
+        {
+            if (!_allocated || address != _allocationAddress)
+            {
+                return false;
+            }
+
+            _allocated = false;
+            return true;
+        }
 
         private bool TryResolve(ulong virtualAddress, int length, out int offset)
         {

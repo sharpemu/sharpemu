@@ -3,6 +3,7 @@
 
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
+using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 
 namespace SharpEmu.ShaderCompiler.Metal.Tests;
@@ -57,20 +58,12 @@ public sealed class Gen5MslF16CompareTests
             [Gen5Operand.Vector(0), Gen5Operand.Vector(1)],
             [],
             null);
-        var state = new Gen5ShaderState(
-            new Gen5ShaderProgram(0x1000, [compare]),
-            [],
-            null);
-        var scalars = new uint[256];
-        var evaluation = new Gen5ShaderEvaluation(scalars, scalars, [], []);
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            new Gen5ShaderProgram(0x1000, [compare]), ShaderStage.Compute, localSizeX: 1);
 
         Assert.True(
-            Gen5MslTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
+            Gen5MslTranslator.TryCompileProgram(
+                request,
                 out var shader,
                 out var error),
             error);

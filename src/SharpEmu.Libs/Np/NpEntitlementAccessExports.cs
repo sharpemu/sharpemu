@@ -23,15 +23,22 @@ public static class NpEntitlementAccessExports
 
     private const int NpEntitlementAccessErrorParameter = unchecked((int)0x817D0002);
     private const int NpEntitlementAccessErrorNoEntitlement = unchecked((int)0x817D0007);
+    private const int EntitlementKeySize = 16;
 
-    // Offline add-on entitlements titles query through NpEntitlementAccess.
+    // Offline entitlements queried by titles through NpEntitlementAccess.
     // GTA V Enhanced (PPSA04264) gates Story Mode on these three labels; without
     // them the frontend offers "Buy GTAV Story Mode" despite a full dump.
+    // Ghost of Yotei (PPSA26344) separately checks its application and base
+    // game entitlements before it creates the frontend.  These represent the
+    // locally installed main package only; optional editions and add-ons remain
+    // unowned.
     private static readonly AddcontEntitlement[] OwnedAddcontEntitlements =
     [
         new("85y-je", PackageTypePsal, DownloadStatusInstalled),
         new("5d5c48", PackageTypePsal, DownloadStatusInstalled),
         new("_mtqu6", PackageTypePsal, DownloadStatusInstalled),
+        new("GHOST2APP0000000", PackageTypePsal, DownloadStatusInstalled),
+        new("GHOST2BASE000000", PackageTypePsal, DownloadStatusInstalled),
     ];
 
     private readonly record struct AddcontEntitlement(
@@ -191,6 +198,40 @@ public static class NpEntitlementAccessExports
         TraceNpEntitlementAccess(
             $"get_addcont_info service={ctx[CpuRegister.Rdi]} label='{label}' -> no entitlement");
         return ctx.SetReturn(NpEntitlementAccessErrorNoEntitlement);
+    }
+
+    [SysAbiExport(
+        Nid = "5LiMEPuW0DQ",
+        ExportName = "sceNpEntitlementAccessGetEntitlementKey",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessGetEntitlementKey(CpuContext ctx)
+    {
+        var labelAddress = ctx[CpuRegister.Rsi];
+        var keyAddress = ctx[CpuRegister.Rdx];
+        if (labelAddress == 0 || keyAddress == 0)
+        {
+            return ctx.SetReturn(NpEntitlementAccessErrorParameter);
+        }
+
+        Span<byte> labelBytes = stackalloc byte[EntitlementLabelSize];
+        if (!ctx.Memory.TryRead(labelAddress, labelBytes))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        var label = ReadEntitlementLabel(labelBytes);
+        Span<byte> key = stackalloc byte[EntitlementKeySize];
+        key.Clear();
+        if (!ctx.Memory.TryWrite(keyAddress, key))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return ctx.SetReturn(OwnedAddcontEntitlements.Any(entitlement =>
+            string.Equals(label, entitlement.Label, StringComparison.Ordinal))
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : NpEntitlementAccessErrorNoEntitlement);
     }
 
     private static bool TryWriteAddcontEntitlementInfo(

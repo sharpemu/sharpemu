@@ -24,7 +24,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
-    <!-- SharpEmu.Core's stall watchdog reads GpuWaitRegistry for diagnostics. -->
+    <!-- The runtime reads internal load-progress diagnostics. -->
     <InternalsVisibleTo Include="SharpEmu.Core" />
   </ItemGroup>
 
@@ -35,6 +35,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageReference Include="Silk.NET.Vulkan" />
     <PackageReference Include="Silk.NET.Vulkan.Extensions.EXT" />
     <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />
+    <PackageReference Include="SkiaSharp" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux" />
+    <PackageReference Include="System.IO.Hashing" />
   </ItemGroup>
 
   <PropertyGroup>

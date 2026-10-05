@@ -15,6 +15,26 @@ namespace SharpEmu.Libs.Tests.Memory;
 // fake IHostMemory implementations that refuse full Allocate for huge sizes.
 public sealed class PhysicalVirtualMemoryTests
 {
+    [Fact]
+    public void FreeHostRangesSkipTakenAndTooSmallRegionsAndStayInsideTheWindow()
+    {
+        var host = new ScriptedRegionHostMemory(
+            (0x10000, 0x22000, HostRegionState.Committed),
+            (0x32000, 0xC000, HostRegionState.Free),       // its aligned start 0x40000 is past its end
+            (0x3E000, 0x12000, HostRegionState.Reserved),
+            (0x50000, 0x21000, HostRegionState.Free),      // holds 0x50000 and nothing else aligned
+            (0x71000, 0x1F000, HostRegionState.Committed),
+            (0x90000, 0x40000, HostRegionState.Free));
+        using var memory = new PhysicalVirtualMemory(host);
+
+        Assert.Equal(new ulong[] { 0x50000, 0x90000 },
+            memory.EnumerateFreeHostRanges(0x10000, 0xA2000, 0x2000, 0x10000).ToArray());
+        Assert.Equal(new ulong[] { 0x60000 },
+            memory.EnumerateFreeHostRanges(0x51000, 0x71000, 0x2000, 0x10000).ToArray());
+        // The window end cuts the last free region below the requested size.
+        Assert.Empty(memory.EnumerateFreeHostRanges(0x72000, 0x91000, 0x2000, 0x10000));
+    }
+
     // 1. Lazy commit: a reserve-only region has its pages committed on demand
     //    when read; freshly committed pages read as zero.
     [Fact]
@@ -60,6 +80,35 @@ public sealed class PhysicalVirtualMemoryTests
     }
 
     [Fact]
+    public void EnsureRangeCommittedBacksOnlyTheMappedWindow()
+    {
+        using var host = new LazyZeroedHostMemory();
+        using var memory = new PhysicalVirtualMemory(host);
+
+        var address = memory.AllocateAt(0, (4UL << 30) + 0x1000, executable: false);
+        host.CommitCalls.Clear();
+
+        var mappedAddress = address + 0x0800_0000UL;
+        Assert.True(memory.TryEnsureRangeCommitted(mappedAddress, 0x3000));
+
+        Assert.Equal(
+            [
+                (mappedAddress, 0x1000UL, HostPageProtection.ReadWrite),
+                (mappedAddress + 0x1000, 0x1000UL, HostPageProtection.ReadWrite),
+                (mappedAddress + 0x2000, 0x1000UL, HostPageProtection.ReadWrite),
+            ],
+            host.CommitCalls);
+    }
+
+    [Fact]
+    public void EnsureRangeCommittedRejectsAnUnallocatedWindow()
+    {
+        using var memory = new PhysicalVirtualMemory(new FakeHostMemory());
+
+        Assert.False(memory.TryEnsureRangeCommitted(0x0001_0000, 0x1000));
+    }
+
+    [Fact]
     public void TryCopyHandlesOverlappingIdentityMappedRanges()
     {
         using var host = new LazyZeroedHostMemory();
@@ -73,6 +122,25 @@ public sealed class PhysicalVirtualMemoryTests
         Span<byte> result = stackalloc byte[6];
         Assert.True(memory.TryRead(address, result));
         Assert.Equal(new byte[] { 1, 2, 1, 2, 3, 4 }, result.ToArray());
+    }
+
+    [Fact]
+    public void TryCompareDistinguishesMismatchFromAccessFailure()
+    {
+        using var host = new ReadableHostMemory();
+        using var memory = new PhysicalVirtualMemory(host);
+        var address = memory.AllocateAt(0, 0x1000, executable: false);
+        Assert.NotEqual(0UL, address);
+        Assert.True(memory.TryWrite(address, new byte[] { 1, 2, 3, 4 }));
+
+        Assert.True(memory.TryCompare(address, new byte[] { 1, 2, 3, 4 }, out var equal));
+        Assert.True(equal);
+
+        Assert.True(memory.TryCompare(address, new byte[] { 1, 2, 3, 5 }, out equal));
+        Assert.False(equal);
+
+        Assert.False(memory.TryCompare(ulong.MaxValue - 0x1000, new byte[4], out equal));
+        Assert.False(equal);
     }
 
     [Fact]
@@ -258,6 +326,75 @@ public sealed class PhysicalVirtualMemoryTests
         }
     }
 
+    private sealed unsafe class ReadableHostMemory : IHostMemory, IDisposable
+    {
+        private readonly void* _allocation;
+        private readonly ulong _address;
+
+        public ReadableHostMemory()
+        {
+            _allocation = System.Runtime.InteropServices.NativeMemory.AllocZeroed(0x2000);
+            _address = ((ulong)_allocation + 0xFFF) & ~0xFFFUL;
+        }
+
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
+            _address;
+
+        public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) =>
+            _address;
+
+        public bool Commit(ulong address, ulong size, HostPageProtection protection) => true;
+
+        public bool Free(ulong address) => true;
+
+        public bool Protect(
+            ulong address,
+            ulong size,
+            HostPageProtection protection,
+            out uint rawOldProtection)
+        {
+            rawOldProtection = 0x04;
+            return true;
+        }
+
+        public bool ProtectRaw(
+            ulong address,
+            ulong size,
+            uint rawProtection,
+            out uint rawOldProtection)
+        {
+            rawOldProtection = 0x04;
+            return true;
+        }
+
+        public bool Query(ulong address, out HostRegionInfo info)
+        {
+            if (address >= _address && address < _address + 0x1000)
+            {
+                info = new HostRegionInfo(
+                    _address,
+                    _address,
+                    0x1000,
+                    HostRegionState.Committed,
+                    RawState: 0x1000,
+                    HostPageProtection.ReadWrite,
+                    RawProtection: 0x04,
+                    RawAllocationProtection: 0x04);
+                return true;
+            }
+
+            info = default;
+            return false;
+        }
+
+        public void FlushInstructionCache(ulong address, ulong size)
+        {
+        }
+
+        public void Dispose() =>
+            System.Runtime.InteropServices.NativeMemory.Free(_allocation);
+    }
+
     // Minimal host memory for free-list tests: Allocate honours the desired
     // address (or a fallback), everything else succeeds as a no-op. The guest
     // allocation arena never dereferences, so no real backing is required.
@@ -294,5 +431,37 @@ public sealed class PhysicalVirtualMemoryTests
         public void FlushInstructionCache(ulong address, ulong size)
         {
         }
+    }
+
+    // Answers Query from a fixed region map; nothing else is used.
+    private sealed class ScriptedRegionHostMemory : IHostMemory
+    {
+        private readonly (ulong Base, ulong Size, HostRegionState State)[] _regions;
+
+        public ScriptedRegionHostMemory(params (ulong Base, ulong Size, HostRegionState State)[] regions) => _regions = regions;
+
+        public bool Query(ulong address, out HostRegionInfo info)
+        {
+            foreach (var (start, size, state) in _regions)
+            {
+                if (address >= start && address < start + size)
+                {
+                    var page = address & ~0xFFFUL;
+                    info = new HostRegionInfo(page, start, start + size - page, state, 0, HostPageProtection.NoAccess, 0, 0);
+                    return true;
+                }
+            }
+
+            info = default;
+            return false;
+        }
+
+        public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) => 0;
+        public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) => 0;
+        public bool Commit(ulong address, ulong size, HostPageProtection protection) => false;
+        public bool Free(ulong address) => false;
+        public bool Protect(ulong address, ulong size, HostPageProtection protection, out uint rawOldProtection) { rawOldProtection = 0; return false; }
+        public bool ProtectRaw(ulong address, ulong size, uint rawProtection, out uint rawOldProtection) { rawOldProtection = 0; return false; }
+        public void FlushInstructionCache(ulong address, ulong size) { }
     }
 }

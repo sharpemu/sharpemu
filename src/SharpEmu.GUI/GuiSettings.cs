@@ -42,10 +42,21 @@ public sealed class GuiSettings
 
     public string LibraryLayout { get; set; } = "Carousel";
 
+    public double EmbeddedConsoleHeight { get; set; } = 240;
+    public double ConsoleWindowWidth { get; set; } = 980;
+    public double ConsoleWindowHeight { get; set; } = 620;
+    public int? ConsoleWindowLeft { get; set; }
+    public int? ConsoleWindowTop { get; set; }
+    public bool ConsoleWindowMaximized { get; set; }
+
     public string? EmulatorPath { get; set; }
 
     /// <summary>UI language, matching a file code under Languages/ (e.g. "en", "tr").</summary>
     public string Language { get; set; } = "en";
+
+    public string ConsoleType { get; set; } = "PS5";
+
+    public string ConsoleLanguage { get; set; } = "EnglishUS";
 
     /// <summary>Default text-entry profile exposed to games.</summary>
     public string DefaultProfile { get; set; } = "Sharp";
@@ -69,8 +80,14 @@ public sealed class GuiSettings
 
     public string HdrMode { get; set; } = "Auto";
 
+    public bool OverlayEnabled { get; set; } = true;
+    public string OverlayCorner { get; set; } = "TopRight";
+    public string OverlayMode { get; set; } = "TitleBar";
+
     /// <summary>Names of SHARPEMU_* switches set to "1" in the emulator's environment at launch.</summary>
-    public List<string> EnvironmentToggles { get; set; } = new();
+    public List<string> EnvironmentToggles { get; set; } = ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"];
+
+    public string BinkPlaybackMode { get; set; } = "Guest";
 
     /// <summary>Internal render resolution scale (1.0 = native, 0.5 = half).</summary>
     public double RenderResolutionScale { get; set; } = 1.0;
@@ -114,7 +131,7 @@ public sealed class GuiSettings
 
         settings.GameFolders = FilterNullOrEmpty(settings.GameFolders);
         settings.ExcludedGames = FilterNullOrEmpty(settings.ExcludedGames);
-        settings.EnvironmentToggles = FilterNullOrEmpty(settings.EnvironmentToggles);
+        settings.EnvironmentToggles = FilterNullOrEmpty(settings.EnvironmentToggles ?? ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"]);
         settings.LogLevel ??= "Info";
         settings.Language ??= "en";
         var legacyProfile = settings.EnvironmentToggles
@@ -130,17 +147,58 @@ public sealed class GuiSettings
         settings.DefaultProfile = NormalizeDefaultProfile(
             legacyProfile is { Length: 2 } ? legacyProfile[1] : settings.DefaultProfile);
         settings.DiscordClientId ??= "1525606762248540221";
-        if (settings.RenderResolutionScale <= 0 || settings.RenderResolutionScale > 2.0)
-        {
-            settings.RenderResolutionScale = 1.0;
-        }
         settings.LibraryLayout = NormalizeChoice(settings.LibraryLayout, "Carousel", "Grid");
+        settings.ConsoleType = NormalizeChoice(settings.ConsoleType, "PS5");
+        settings.ConsoleLanguage = NormalizeChoice(
+            settings.ConsoleLanguage,
+            "EnglishUS",
+            "Japanese",
+            "French",
+            "SpanishSpain",
+            "German",
+            "Italian",
+            "Dutch",
+            "PortuguesePortugal",
+            "Russian",
+            "Korean",
+            "ChineseTraditional",
+            "ChineseSimplified",
+            "Finnish",
+            "Swedish",
+            "Danish",
+            "Norwegian",
+            "Polish",
+            "PortugueseBrazil",
+            "EnglishUK",
+            "Turkish",
+            "SpanishLatinAmerica",
+            "Arabic",
+            "FrenchCanada",
+            "Czech",
+            "Hungarian",
+            "Greek",
+            "Romanian",
+            "Thai",
+            "Vietnamese",
+            "Indonesian",
+            "Ukrainian");
         settings.WindowMode = NormalizeChoice(settings.WindowMode, "Windowed", "Borderless", "Exclusive");
         settings.Resolution = NormalizeResolution(settings.Resolution);
         settings.ScalingMode = NormalizeChoice(settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         settings.HdrMode = NormalizeChoice(settings.HdrMode, "Auto", "On", "Off");
+        settings.BinkPlaybackMode = NormalizeChoice(settings.BinkPlaybackMode, "Guest", "Host", "Skip");
+        settings.OverlayCorner = NormalizeChoice(settings.OverlayCorner, "TopRight", "TopLeft", "BottomRight", "BottomLeft");
+        settings.OverlayMode = NormalizeChoice(settings.OverlayMode, "TitleBar", "Full", "Minimal");
         settings.DisplayIndex = Math.Max(0, settings.DisplayIndex);
         settings.RefreshRate = Math.Clamp(settings.RefreshRate, 0, 1000);
+        settings.EmbeddedConsoleHeight = NormalizeConsoleSize(settings.EmbeddedConsoleHeight, 240, 120);
+        settings.ConsoleWindowWidth = NormalizeConsoleSize(settings.ConsoleWindowWidth, 980, 520);
+        settings.ConsoleWindowHeight = NormalizeConsoleSize(settings.ConsoleWindowHeight, 620, 320);
+        if (!settings.ConsoleWindowLeft.HasValue || !settings.ConsoleWindowTop.HasValue)
+        {
+            settings.ConsoleWindowLeft = null;
+            settings.ConsoleWindowTop = null;
+        }
 
         return settings;
     }
@@ -159,6 +217,9 @@ public sealed class GuiSettings
     private static string NormalizeChoice(string? value, string fallback, params string[] choices) =>
         choices.Prepend(fallback).FirstOrDefault(
             choice => string.Equals(choice, value, StringComparison.OrdinalIgnoreCase)) ?? fallback;
+
+    private static double NormalizeConsoleSize(double value, double fallback, double minimum) =>
+        double.IsFinite(value) && value >= minimum ? Math.Min(value, 16384) : fallback;
 
     private static string NormalizeResolution(string? value)
     {

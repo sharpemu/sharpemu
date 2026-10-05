@@ -1,6 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
 
@@ -12,119 +15,26 @@ namespace SharpEmu.Libs.Gpu.Metal;
 /// surface (presentation, guest images, ordered flips, translated draws, and
 /// compute) with no Vulkan, MoltenVK, or windowing-library dependency.
 /// </summary>
-internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
+internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapshotBackend
 {
+    // Only a backend with CPU image snapshots arms the guest image write tracker.
+    public MetalGuestGpuBackend() => SharpEmu.HLE.GuestImageWriteTracker.Configure(true);
+
     public string BackendName => "Metal";
+
 
     private static readonly IGuestCompiledShader DepthOnlyFragmentShader =
         new MetalCompiledGuestShader(new Gen5MslShader(
             MslFixedShaders.CreateDepthOnlyFragment(),
             "depth_only_fs",
             Gen5MslStage.Pixel,
-            [],
-            [],
-            AttributeCount: 0,
-            []));
+            AttributeCount: 0));
 
-    public bool TryCompileVertexShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        out IGuestCompiledShader? shader,
-        out string error,
-        int globalBufferBase = 0,
-        int totalGlobalBufferCount = -1,
-        int imageBindingBase = 0,
-        int scalarRegisterBufferIndex = -1,
-        int requiredVertexOutputCount = 0,
-        ulong storageBufferOffsetAlignment = 1)
+
+    public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)
     {
         shader = null;
-        if (!Gen5MslTranslator.TryCompileVertexShader(
-                state,
-                evaluation,
-                out var compiled,
-                out error,
-                globalBufferBase,
-                totalGlobalBufferCount,
-                imageBindingBase,
-                scalarRegisterBufferIndex,
-                requiredVertexOutputCount,
-                storageBufferOffsetAlignment))
-        {
-            return false;
-        }
-
-        shader = new MetalCompiledGuestShader(compiled);
-        return true;
-    }
-
-    public bool TryCompilePixelShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        IReadOnlyList<Gen5PixelOutputBinding> outputs,
-        out IGuestCompiledShader? shader,
-        out string error,
-        int globalBufferBase = 0,
-        int totalGlobalBufferCount = -1,
-        int imageBindingBase = 0,
-        int scalarRegisterBufferIndex = -1,
-        uint pixelInputEnable = 0,
-        uint pixelInputAddress = 0,
-        IReadOnlyList<uint>? pixelInputCntl = null,
-        ulong storageBufferOffsetAlignment = 1)
-    {
-        shader = null;
-        if (!Gen5MslTranslator.TryCompilePixelShader(
-                state,
-                evaluation,
-                outputs,
-                out var compiled,
-                out error,
-                globalBufferBase,
-                totalGlobalBufferCount,
-                imageBindingBase,
-                scalarRegisterBufferIndex,
-                pixelInputEnable,
-                pixelInputAddress,
-                pixelInputCntl,
-                storageBufferOffsetAlignment))
-        {
-            return false;
-        }
-
-        shader = new MetalCompiledGuestShader(compiled);
-        return true;
-    }
-
-    public bool TryCompileComputeShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        uint localSizeX,
-        uint localSizeY,
-        uint localSizeZ,
-        out IGuestCompiledShader? shader,
-        out string error,
-        int totalGlobalBufferCount = -1,
-        int initialScalarBufferIndex = -1,
-        uint waveLaneCount = 32,
-        ulong storageBufferOffsetAlignment = 1)
-    {
-        shader = null;
-        // Wave64 compute is emulated by the translator: cross-lane ops bridge
-        // the two 32-wide Apple simdgroups of a guest wave through threadgroup
-        // scratch, and wave-agnostic kernels run per-thread unchanged.
-        if (!Gen5MslTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                localSizeX,
-                localSizeY,
-                localSizeZ,
-                out var compiled,
-                out error,
-                totalGlobalBufferCount,
-                initialScalarBufferIndex,
-                waveLaneCount,
-                storageBufferOffsetAlignment))
+        if (!Gen5MslTranslator.TryCompileProgram(request, out var compiled, out error))
         {
             return false;
         }
@@ -136,18 +46,6 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public IGuestCompiledShader GetDepthOnlyFragmentShader() =>
         DepthOnlyFragmentShader;
 
-    public bool TryGetRenderTargetOutputKind(uint dataFormat, uint numberType, out Gen5PixelOutputKind outputKind)
-    {
-        if (MetalGuestFormats.TryDecodeRenderTargetFormat(dataFormat, numberType, out var format))
-        {
-            outputKind = format.OutputKind;
-            return true;
-        }
-
-        outputKind = default;
-        return false;
-    }
-
     public void EnsureStarted(uint width, uint height) =>
         MetalVideoPresenter.EnsureStarted(width, height);
 
@@ -158,26 +56,73 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         MetalVideoPresenter.Submit(bgraFrame, width, height);
 
     public bool TrySubmitGuestImage(
-        ulong address,
-        uint width,
-        uint height,
-        uint pitchInPixel) =>
-        MetalVideoPresenter.TrySubmitGuestImage(address, width, height, pitchInPixel);
-
-    public bool TrySubmitOrderedGuestImageFlip(
         int videoOutHandle,
         int displayBufferIndex,
         ulong address,
         uint width,
         uint height,
-        uint pitchInPixel) =>
-        MetalVideoPresenter.TrySubmitOrderedGuestImageFlip(
-            videoOutHandle,
-            displayBufferIndex,
-            address,
-            width,
-            height,
-            pitchInPixel);
+        uint pitchInPixel,
+        ulong flipRequestId)
+    {
+        // With a command stream the flip queues behind the graphics submissions before it.
+        CommandStreamQueue? commandStream;
+        lock (_commandStreamGate)
+        {
+            commandStream = _commandStream;
+        }
+
+        if (commandStream is not null)
+        {
+            return commandStream.TryEnqueueFlipPreparation(videoOutHandle, displayBufferIndex, flipRequestId);
+        }
+
+        var submitted = MetalVideoPresenter.TrySubmitGuestImage(address, width, height, pitchInPixel);
+        if (submitted)
+        {
+            VideoOut.VideoOutExports.MarkFlipPresented(flipRequestId);
+        }
+
+        return submitted;
+    }
+
+    // The worker runs the interpreter and retries blocked submissions.
+    private readonly object _commandStreamGate = new();
+    private CommandStreamQueue? _commandStream;
+    private CommandStreamWorker? _commandStreamWorker;
+
+    private CommandStreamQueue EnsureCommandStream(ICpuMemory memory)
+    {
+        lock (_commandStreamGate)
+        {
+            if (_commandStream is { } existing)
+            {
+                return existing;
+            }
+
+            var host = new MetalCommandStreamHost(memory, this, this);
+            var queue = new CommandStreamQueue(host);
+            host.AttachQueue(queue);
+            _commandStreamWorker = new CommandStreamWorker(queue, host, static () => false, cancelBlockedAtStop: true, "SharpEmu Metal command stream");
+            _commandStreamWorker.Start();
+            _commandStream = queue;
+            return queue;
+        }
+    }
+
+    public void SubmitCommandStream(ICpuMemory memory, uint queue, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
+    {
+        var commandStream = EnsureCommandStream(memory);
+        if (queue == 0)
+        {
+            commandStream.EnqueueGraphics(address, dwordCount, submissionId, geometrySnapshots);
+        }
+        else
+        {
+            commandStream.EnqueueCompute(queue, address, dwordCount, submissionId, geometrySnapshots);
+        }
+    }
+
+    public IdleOutcome SubmitDone(ICpuMemory memory) => EnsureCommandStream(memory).Done();
 
     public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat) =>
         MetalVideoPresenter.RegisterKnownDisplayBuffer(address, guestFormat);
@@ -185,28 +130,18 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public bool IsGpuGuestImageAvailable(ulong address, uint format, uint numberType) =>
         MetalVideoPresenter.IsGuestImageAvailable(address, format, numberType);
 
-    public bool TrySubmitGuestImageBlit(
-        ulong sourceAddress,
-        uint sourceWidth,
-        uint sourceHeight,
-        uint sourceFormat,
-        uint sourceNumberType,
-        ulong destinationAddress,
-        uint destinationWidth,
-        uint destinationHeight,
-        uint destinationFormat,
-        uint destinationNumberType) =>
+    public bool TrySubmitGuestImageBlit(GuestRenderTarget source, GuestRenderTarget destination) =>
         MetalVideoPresenter.TrySubmitGuestImageBlit(
-            sourceAddress,
-            sourceWidth,
-            sourceHeight,
-            sourceFormat,
-            sourceNumberType,
-            destinationAddress,
-            destinationWidth,
-            destinationHeight,
-            destinationFormat,
-            destinationNumberType);
+            source.Address,
+            source.Width,
+            source.Height,
+            source.Format,
+            source.NumberType,
+            destination.Address,
+            destination.Width,
+            destination.Height,
+            destination.Format,
+            destination.NumberType);
 
     public void SubmitGuestDraw(GuestDrawKind drawKind, uint width, uint height) =>
         MetalVideoPresenter.SubmitGuestDraw(drawKind, width, height);
@@ -254,7 +189,8 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         IReadOnlyList<GuestVertexBuffer>? vertexBuffers = null,
         GuestRenderState? renderState = null,
         ulong shaderAddress = 0,
-        int baseVertex = 0) =>
+        int baseVertex = 0,
+        IReadOnlyList<GuestStageBindings>? stageBindings = null) =>
         MetalVideoPresenter.SubmitDepthOnlyTranslatedDraw(
             Msl(pixelShader),
             textures,
@@ -269,7 +205,8 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
             vertexBuffers,
             renderState,
             shaderAddress,
-            baseVertex);
+            baseVertex,
+            stageBindings);
 
     public void SubmitOffscreenTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -286,7 +223,8 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         GuestRenderState? renderState = null,
         GuestDepthTarget? depthTarget = null,
         ulong shaderAddress = 0,
-        int baseVertex = 0) =>
+        int baseVertex = 0,
+        IReadOnlyList<GuestStageBindings>? stageBindings = null) =>
         MetalVideoPresenter.SubmitOffscreenTranslatedDraw(
             Msl(pixelShader),
             textures,
@@ -302,7 +240,8 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
             renderState,
             depthTarget,
             shaderAddress,
-            baseVertex);
+            baseVertex,
+            stageBindings);
 
     public void SubmitStorageTranslatedDraw(
         IGuestCompiledShader pixelShader,
@@ -344,14 +283,12 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         bool writesGlobalMemory,
         uint threadCountX = uint.MaxValue,
         uint threadCountY = uint.MaxValue,
-        uint threadCountZ = uint.MaxValue)
+        uint threadCountZ = uint.MaxValue,
+        GuestStageBindings? stageBindings = null)
     {
-        // The translated kernel bakes its threadgroup size; localSize and
-        // isIndirect are already folded in by the AGC layer before submission.
-        _ = localSizeX;
-        _ = localSizeY;
-        _ = localSizeZ;
-        _ = isIndirect;
+        // The translated kernel bakes its threadgroup size and thread bounds;
+        // localSize, isIndirect and the thread counts are folded in before submission.
+        _ = (localSizeX, localSizeY, localSizeZ, isIndirect, threadCountX, threadCountY, threadCountZ);
         return MetalVideoPresenter.SubmitComputeDispatch(
             shaderAddress,
             Msl(computeShader),
@@ -364,27 +301,25 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
             baseGroupY,
             baseGroupZ,
             writesGlobalMemory,
-            threadCountX,
-            threadCountY,
-            threadCountZ);
+            stageBindings);
     }
 
     private long _perfShaderCompilations;
 
-    public IDisposable EnterGuestQueue(string queueName, ulong submissionId) =>
-        MetalVideoPresenter.EnterGuestQueue(queueName, submissionId);
+    public long SubmitGlobalDataShareFill(ulong offset, ulong size, byte value) =>
+        MetalVideoPresenter.SubmitGlobalDataShareFill(offset, size, value);
 
-    public long SubmitOrderedGuestAction(Action action, string debugName) =>
-        MetalVideoPresenter.SubmitOrderedGuestAction(action, debugName);
+    public long SubmitGlobalDataShareCopyFromGuest(ulong offset, byte[] bytes) =>
+        MetalVideoPresenter.SubmitGlobalDataShareCopyFromGuest(offset, bytes);
 
-    public long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex) =>
-        MetalVideoPresenter.SubmitOrderedGuestFlipWait(videoOutHandle, displayBufferIndex);
+    public long SubmitGlobalDataShareCopyToGuest(ulong guestAddress, ulong offset, ulong size) =>
+        MetalVideoPresenter.SubmitGlobalDataShareCopyToGuest(guestAddress, offset, size);
 
-    public bool WaitForGuestWork(long workSequence, int timeoutMilliseconds = Timeout.Infinite) =>
-        MetalVideoPresenter.WaitForGuestWork(workSequence, timeoutMilliseconds);
+    public void ReadGlobalDataShare(Span<uint> destination, uint wordOffset, uint wordCount) =>
+        MetalVideoPresenter.ReadGlobalDataShare(destination, wordOffset, wordCount);
 
-    public long CurrentGuestWorkSequenceForDiagnostics =>
-        MetalVideoPresenter.CurrentGuestWorkSequenceForDiagnostics;
+    public long SubmitGpuSynchronization(string debugName) =>
+        MetalVideoPresenter.SubmitOrderedGpuWait(debugName);
 
     public bool IsGuestImageUploadKnown(ulong address, uint format, uint numberType) =>
         MetalVideoPresenter.IsGuestImageUploadKnown(address, format, numberType);
@@ -410,7 +345,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
     public IReadOnlyList<(ulong Address, uint Width, uint Height, ulong ByteCount)> GetGuestImageExtents() =>
         MetalVideoPresenter.GetGuestImageExtents();
 
-    public bool IsTextureContentCached(in TextureContentIdentity identity) =>
+    public bool IsTextureContentCached(in TextureCacheLookupIdentity identity) =>
         MetalVideoPresenter.IsTextureContentCached(identity);
 
     public void AttachGuestMemory(SharpEmu.HLE.ICpuMemory memory) =>
@@ -418,7 +353,6 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
 
     // Over-alignment is always valid, and 256 covers every Metal buffer-offset
     // requirement (Intel Macs need 256 for constant buffers; Apple GPUs less).
-    public ulong GuestStorageBufferOffsetAlignment => 256;
 
     public void CountShaderCompilation() =>
         Interlocked.Increment(ref _perfShaderCompilations);
@@ -429,7 +363,18 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend
         return (draws, drawMs, pipelines, Interlocked.Exchange(ref _perfShaderCompilations, 0));
     }
 
-    public void RequestClose() =>
+    // The worker drains before the presenter closes, so its last flips still reach the queue.
+    public void RequestClose()
+    {
+        CommandStreamWorker? worker;
+        lock (_commandStreamGate)
+        {
+            worker = _commandStreamWorker;
+        }
+
+        worker?.Stop();
+        Console.Error.WriteLine($"[LOADER][PERF] {ShaderCacheCounters.Summary()}");
         MetalVideoPresenter.RequestClose();
+    }
 
 }

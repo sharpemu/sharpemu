@@ -9,12 +9,12 @@ Demon's Souls plays Bink 2 (.bk2) files through a Bink implementation linked
 directly into eboot.bin. It does not use libSceVideodec, therefore an HLE video
 decoder cannot observe or replace those frames.
 
-SharpEmu observes successful guest .bk2 opens and, when a Bink decoder is
-available, presents its decoded BGRA frames at the normal guest-flip boundary.
-This preserves the game's own timing and lets the host Vulkan presenter display
-the movie without trying to execute the PS5-specific Bink GPU decode path.
+By default, SharpEmu leaves Bink decoding to the implementation linked into
+the game (`SHARPEMU_BINK_MODE=guest`).
 
-The default path decodes by calling FFmpeg's own C API directly from managed
+Set `SHARPEMU_BINK_MODE=native` to use the optional host bridge. It observes
+guest .bk2 opens and presents decoded frames at the guest-flip boundary. The
+host path decodes by calling FFmpeg's C API directly from managed
 code (`src/SharpEmu.Libs/Bink/FfmpegNativeBinkFrameSource.cs`, via the
 [FFmpeg.AutoGen](https://github.com/Ruslan-B/FFmpeg.AutoGen) P/Invoke
 bindings) against a custom FFmpeg build
@@ -24,26 +24,13 @@ libraries come from. No proprietary RAD SDK is needed to build or run
 SharpEmu, and there is no C/C++ code of SharpEmu's own involved in decoding
 -- SharpEmu.CLI.csproj only downloads a prebuilt release archive.
 
-Set `SHARPEMU_BINK_MODE=guest` to leave decoding to the Bink implementation
-statically linked into the game instead. Set `skip` only when explicitly
-testing a title whose cinematics are optional.
+Set `SHARPEMU_BINK_MODE=skip` only when explicitly testing a title whose
+cinematics are optional.
 
 Set SHARPEMU_BINK_MODE=dummy to retain the open and show a built-in,
 non-decoded placeholder frame. This requires no SDK, but is a visual diagnostic
 only; it does not decode the movie or alter its game logic.
-SHARPEMU_BINK_MODE=native is equivalent to the default and mainly useful for
-being explicit about it.
-
-The experimental `SHARPEMU_BINK_MODE=ffmpeg` override is unrelated to the
-default path above: instead of calling into FFmpeg in-process, it spawns a
-standalone `ffmpeg` executable and reads raw frames from its stdout
-(`src/SharpEmu.Libs/Bink/FfmpegBinkFrameSource.cs`). SharpEmu searches
-`SHARPEMU_FFMPEG_PATH`, the executable directory, its `ffmpeg` subdirectory,
-and then `PATH` (plus a couple of common Homebrew paths on macOS). That
-`ffmpeg` build must contain a Bink 2 decoder itself; a stock FFmpeg build that
-only recognizes the Bink container is not sufficient. Most users want the
-default `native` mode instead, which always has Bink 2 support since it's
-built against `ffmpeg-core` specifically.
+`SHARPEMU_BINK_MODE=ffmpeg` is an alias for `native`.
 
 ## Supplying the FFmpeg libraries
 

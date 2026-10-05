@@ -12,8 +12,9 @@ namespace SharpEmu.Libs.Media;
 ///
 /// Such a game never imports libSceVideodec or sceAvPlayer, so no HLE export
 /// can see its movie frames. Kernel file opens identify the active movie and
-/// the presenter requests BGRA frames from <see cref="FfmpegVideoDecoder"/> —
-/// the same decoder sceAvPlayer uses, so every format is handled in one place.
+/// the presenter requests frames from <see cref="FfmpegVideoDecoder"/> — the
+/// same decoder sceAvPlayer uses, so every format is handled in one place.
+/// Frames reach the presenter as <see cref="HostMovieYuv420"/> planes.
 /// </summary>
 internal static class HostMovieBridge
 {
@@ -42,9 +43,13 @@ internal static class HostMovieBridge
     private static byte[]? _frameBuffer;
     private static bool _frameBufferPresented;
     private static MediaFramePlayback? _playback;
+    private static Timer? _playbackWatchdog;
     private static long _frameSerial;
     private static uint _presentationWidth = MaxHostVideoWidth;
     private static uint _presentationHeight = MaxHostVideoHeight;
+    // TimedOutMoviePaths.Count, readable without Gate: every guest file read asks
+    // whether its file timed out, and almost none ever does.
+    private static int _timedOutMovieCount;
 
     internal static bool IsHostPlaybackActive
     {
@@ -131,6 +136,20 @@ internal static class HostMovieBridge
         out long frameSerial,
         out string hostPath)
     {
+        // The render thread asks before every draw and dispatch. With no movie attached
+        // it must not queue on Gate behind guest file reads (Demon's Souls: ~15 % of the
+        // render thread blocked here). A movie attached meanwhile is picked up next call.
+        if (Volatile.Read(ref _playback) is null && Volatile.Read(ref _frameBuffer) is null)
+        {
+            pixels = [];
+            width = 0;
+            height = 0;
+            advanced = false;
+            frameSerial = Volatile.Read(ref _frameSerial);
+            hostPath = string.Empty;
+            return false;
+        }
+
         lock (Gate)
         {
             pixels = [];
@@ -229,7 +248,7 @@ internal static class HostMovieBridge
             return;
         }
 
-        AttachPlaybackLocked(hostPath, info, source);
+        AttachPlaybackLocked(hostPath, info, new HostMovieYuv420Decoder(source));
         Console.Error.WriteLine(
             "[LOADER][INFO] Bink2 bridge attached: " + Path.GetFileName(hostPath) + " " +
             info.Width + "x" + info.Height + " @ " +
@@ -264,11 +283,7 @@ internal static class HostMovieBridge
             return MovieMode.Native;
         }
 
-        // Native is the default: FfmpegVideoDecoder.TryOpen degrades gracefully
-        // (falls back to the guest's own decode, logging one informational line)
-        // if the FFmpeg libraries SharpEmu.CLI.csproj downloads next to the
-        // executable are genuinely unavailable, so defaulting to it is safe.
-        return MovieMode.Native;
+        return MovieMode.Guest;
     }
 
     private static void AttachDummyMovieLocked(string hostPath)
@@ -284,9 +299,13 @@ internal static class HostMovieBridge
         CloseActiveLocked();
         _activePath = hostPath;
         _activeInfo = info;
-        _frameBuffer = GC.AllocateUninitializedArray<byte>(GetFrameBufferLength(info));
+        var bgra = GC.AllocateUninitializedArray<byte>(GetFrameBufferLength(info));
+        FillDummyFrame(bgra, info.Width, info.Height);
+        _frameBuffer = GC.AllocateUninitializedArray<byte>(
+            HostMovieYuv420.FrameLength(info.Width, info.Height));
+        HostMovieYuv420.ConvertFromBgra(bgra, info.Width, info.Height, _frameBuffer);
         _frameBufferPresented = false;
-        FillDummyFrame(_frameBuffer, info.Width, info.Height);
+        ArmPlaybackWatchdogLocked(hostPath);
         Console.Error.WriteLine(
             "[LOADER][INFO] Bink dummy attached: " + Path.GetFileName(hostPath) + " " +
             info.Width + "x" + info.Height + ".");
@@ -301,6 +320,54 @@ internal static class HostMovieBridge
         _activePath = hostPath;
         _activeInfo = info;
         _playback = new MediaFramePlayback(decoder);
+        ArmPlaybackWatchdogLocked(hostPath);
+    }
+
+    private static void ArmPlaybackWatchdogLocked(string hostPath)
+    {
+        _playbackWatchdog?.Dispose();
+        var timeout = TryReadBinkInfo(hostPath, out var info)
+            ? GetPlaybackWatchdogTimeout(info)
+            : TimeSpan.FromSeconds(150);
+        _playbackWatchdog = new Timer(
+            static state =>
+            {
+                var path = (string)state!;
+                lock (Gate)
+                {
+                    if (!string.Equals(_activePath, path, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return;
+                    }
+
+                    Console.Error.WriteLine(
+                        "[LOADER][WARN] Bink2 host watchdog expired for " +
+                        Path.GetFileName(path) + "; advancing to the next movie.");
+                    TimedOutMoviePaths.Add(path);
+                    Volatile.Write(ref _timedOutMovieCount, TimedOutMoviePaths.Count);
+                    CloseActiveLocked();
+                    AttachNextQueuedMovieLocked();
+                }
+            },
+            hostPath,
+            timeout,
+            Timeout.InfiniteTimeSpan);
+    }
+
+    // Must outlast the whole movie: Demon's Souls ships a 171 s intro and 756 s credits.
+    internal static TimeSpan GetPlaybackWatchdogTimeout(Bink2MovieInfo info)
+    {
+        if (info.FrameCount == 0 ||
+            info.FramesPerSecondNumerator == 0 ||
+            info.FramesPerSecondDenominator == 0)
+        {
+            return TimeSpan.FromSeconds(150);
+        }
+
+        var duration = (double)info.FrameCount *
+            info.FramesPerSecondDenominator /
+            info.FramesPerSecondNumerator;
+        return TimeSpan.FromSeconds(Math.Max(90, duration + 60));
     }
 
     internal static bool TryReadBinkInfo(string path, out Bink2MovieInfo info)
@@ -319,6 +386,7 @@ internal static class HostMovieBridge
             info = new Bink2MovieInfo(
                 BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(0x14, 4)),
                 BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(0x18, 4)),
+                BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(8, 4)),
                 BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(0x1C, 4)),
                 BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(0x20, 4)));
             return info.FramesPerSecondNumerator != 0 &&
@@ -349,6 +417,8 @@ internal static class HostMovieBridge
 
     private static void CloseActiveLocked()
     {
+        _playbackWatchdog?.Dispose();
+        _playbackWatchdog = null;
         _playback?.Dispose();
         _playback = null;
         _activePath = null;
@@ -364,6 +434,7 @@ internal static class HostMovieBridge
     [StructLayout(LayoutKind.Sequential)]
     internal readonly struct Bink2MovieInfo
     {
+        public readonly uint FrameCount;
         public readonly uint Width;
         public readonly uint Height;
         public readonly uint FramesPerSecondNumerator;
@@ -372,13 +443,24 @@ internal static class HostMovieBridge
         internal Bink2MovieInfo(
             uint width,
             uint height,
+            uint frameCount,
             uint framesPerSecondNumerator,
             uint framesPerSecondDenominator)
         {
             Width = width;
             Height = height;
+            FrameCount = frameCount;
             FramesPerSecondNumerator = framesPerSecondNumerator;
             FramesPerSecondDenominator = framesPerSecondDenominator;
+        }
+
+        internal Bink2MovieInfo(
+            uint width,
+            uint height,
+            uint framesPerSecondNumerator,
+            uint framesPerSecondDenominator)
+            : this(width, height, 0, framesPerSecondNumerator, framesPerSecondDenominator)
+        {
         }
     }
 
@@ -393,6 +475,21 @@ internal static class HostMovieBridge
     private static readonly Queue<string> PendingMoviePaths = new();
     private static readonly HashSet<string> PendingMoviePathSet =
         new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> TimedOutMoviePaths =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    internal static bool ShouldForceGuestMovieEof(string hostPath)
+    {
+        if (Volatile.Read(ref _timedOutMovieCount) == 0)
+        {
+            return false;
+        }
+
+        lock (Gate)
+        {
+            return TimedOutMoviePaths.Contains(hostPath);
+        }
+    }
     private static void AttachNextQueuedMovieLocked()
     {
         while (PendingMoviePaths.Count > 0)
@@ -475,6 +572,8 @@ internal static class HostMovieBridge
     {
         lock (Gate)
         {
+            TimedOutMoviePaths.Remove(hostPath);
+            Volatile.Write(ref _timedOutMovieCount, TimedOutMoviePaths.Count);
             if (PendingMoviePathSet.Remove(hostPath))
             {
                 var retained = PendingMoviePaths

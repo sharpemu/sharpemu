@@ -34,7 +34,7 @@ concurrency:
 jobs:
   init:
     name: Init
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       release-name: ${{ steps.vars.outputs.release-name }}
       release-tag: ${{ steps.vars.outputs.release-tag }}
@@ -71,7 +71,7 @@ jobs:
   reuse:
     name: REUSE Compliance
     needs: init
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -80,7 +80,7 @@ jobs:
         uses: fsfe/reuse-action@v6
 
   build:
-    name: Build Archive
+    name: Build win-x64
     needs:
       - init
       - reuse
@@ -138,7 +138,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-26.04
             rid: linux-x64
           - os: macos-latest
             rid: osx-x64
@@ -227,7 +227,7 @@ jobs:
     # Versioned releases are immutable and tag-driven. Branch and manual runs
     # still produce Actions artifacts without modifying a published release.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
     steps:

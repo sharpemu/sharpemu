@@ -11,6 +11,7 @@ public static class NpManagerExports
     private const int NpTitleIdSize = 16;
     private const int NpTitleSecretSize = 128;
     private const int NpErrorInvalidArgument = unchecked((int)0x80550003);
+    private static int _nextNpRequestId;
 
     [SysAbiExport(
         Nid = "3Zl8BePTh9Y",
@@ -21,6 +22,48 @@ public static class NpManagerExports
     {
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(Nid = "eiqMCt9UshI", ExportName = "sceNpCreateAsyncRequest", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
+    public static int NpCreateAsyncRequest(CpuContext ctx) => SetReturn(ctx, NextRequestId());
+
+    [SysAbiExport(Nid = "KfGZg2y73oM", ExportName = "sceNpCheckNpReachability", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
+    public static int NpCheckNpReachability(CpuContext ctx) =>
+        SetReturn(ctx, unchecked((int)ctx[CpuRegister.Rdi]) > 0 ? (int)OrbisGen2Result.ORBIS_GEN2_OK : NpErrorInvalidArgument);
+
+    [SysAbiExport(Nid = "GpLQDNKICac", ExportName = "sceNpCreateRequest", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
+    public static int NpCreateRequest(CpuContext ctx) => SetReturn(ctx, NextRequestId());
+
+    [SysAbiExport(Nid = "OzKvTvg3ZYU", ExportName = "sceNpAbortRequest", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
+    public static int NpAbortRequest(CpuContext ctx) => SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+
+    [SysAbiExport(Nid = "uqcPJLWL08M", ExportName = "sceNpPollAsync", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
+    public static int NpPollAsync(CpuContext ctx)
+    {
+        var requestId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var resultAddress = ctx[CpuRegister.Rsi];
+        if (requestId <= 0)
+        {
+            return SetReturn(ctx, NpErrorInvalidArgument);
+        }
+
+        if (resultAddress != 0)
+        {
+            Span<byte> result = stackalloc byte[sizeof(int)];
+            BinaryPrimitives.WriteInt32LittleEndian(result, 0);
+            if (!ctx.Memory.TryWrite(resultAddress, result))
+            {
+                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    private static int NextRequestId()
+    {
+        var id = Interlocked.Increment(ref _nextNpRequestId) & 0x7FFF_FFFF;
+        return id == 0 ? 1 : id;
     }
 
     [SysAbiExport(
@@ -215,6 +258,26 @@ public static class NpManagerExports
         BinaryPrimitives.WriteUInt32LittleEndian(state, 0); // Unavailable while offline.
         return ctx.Memory.TryWrite(stateAddress, state)
             ? SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_OK)
+            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
+        Nid = "Oad3rvY-NJQ",
+        ExportName = "sceNpHasSignedUp",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpManager")]
+    public static int NpHasSignedUp(CpuContext ctx)
+    {
+        var resultAddress = ctx[CpuRegister.Rsi];
+        if (resultAddress == 0 || unchecked((int)ctx[CpuRegister.Rdi]) == -1)
+        {
+            return SetReturn(ctx, NpErrorInvalidArgument);
+        }
+
+        Span<byte> signedUp = stackalloc byte[1];
+        signedUp[0] = 0; // No online account is configured in the offline profile.
+        return ctx.Memory.TryWrite(resultAddress, signedUp)
+            ? SetReturn(ctx, 0)
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 

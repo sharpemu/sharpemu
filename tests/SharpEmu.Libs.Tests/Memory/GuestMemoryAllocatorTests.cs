@@ -136,6 +136,30 @@ public sealed class GuestMemoryAllocatorTests
         Assert.True(memory.IsAccessible(baseAddress, 0x10000));
     }
 
+    [Theory]
+    [InlineData(0x0000UL, 0x6000UL)]
+    [InlineData(0x1000UL, 0x2000UL)]
+    [InlineData(0x5000UL, 0x2000UL)]
+    public void FixedAllocationRejectsCommittedOverlap(ulong offset, ulong size)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var memory = new PhysicalVirtualMemory(new GranularityAwareHostMemory());
+        const ulong baseAddress = 0x0000008001600000;
+        memory.AllocateAt(baseAddress, 0x6000, executable: true, allowAlternative: false);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            memory.AllocateAt(baseAddress + offset, size, executable: true, allowAlternative: false));
+        Assert.False(memory.TryAllocateAtExact(baseAddress + offset, size, true, out var actualAddress));
+        Assert.Equal(0UL, actualAddress);
+        Assert.Single(memory.SnapshotRegions());
+        Assert.True(memory.IsAccessible(baseAddress + 0x5000, 8));
+        Assert.False(memory.IsAccessible(baseAddress + 0x6000, 1));
+    }
+
     [Fact]
     public void TryBackFixedRangeSharesAHostGranuleAcrossCallsOnWindows()
     {

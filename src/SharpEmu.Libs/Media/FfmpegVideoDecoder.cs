@@ -84,7 +84,8 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
         string path,
         uint maximumWidth,
         uint maximumHeight,
-        out FfmpegVideoDecoder? source)
+        out FfmpegVideoDecoder? source,
+        bool enableAudio = true)
     {
         source = null;
         EnsureRootPathInitialized();
@@ -151,25 +152,30 @@ internal sealed unsafe class FfmpegVideoDecoder : IMediaFrameDecoder
                 frameRate = new AVRational { num = 30, den = 1 };
             }
 
-            var audioStreamIndex = TryOpenAudioDecoder(
-                formatContext,
-                out audioCodecContext,
-                out var audioOutputSampleRate);
-            if (audioStreamIndex >= 0 && audioCodecContext is not null)
+            var audioStreamIndex = -1;
+            var audioOutputSampleRate = 0;
+            if (enableAudio)
             {
-                try
+                audioStreamIndex = TryOpenAudioDecoder(
+                    formatContext,
+                    out audioCodecContext,
+                    out audioOutputSampleRate);
+                if (audioStreamIndex >= 0 && audioCodecContext is not null)
                 {
-                    audioStream = HostPlatform.Current.Audio.OpenStereoPcm16Stream(
-                        checked((uint)audioOutputSampleRate));
-                }
-                catch (Exception exception) when (exception is InvalidOperationException or
-                                                     ArgumentOutOfRangeException)
-                {
-                    Console.Error.WriteLine(
-                        $"[LOADER][WARN] Bink audio output unavailable: {exception.Message}");
-                    ffmpeg.avcodec_free_context(&audioCodecContext);
-                    audioStreamIndex = -1;
-                    audioOutputSampleRate = 0;
+                    try
+                    {
+                        audioStream = HostPlatform.Current.Audio.OpenStereoPcm16Stream(
+                            checked((uint)audioOutputSampleRate));
+                    }
+                    catch (Exception exception) when (exception is InvalidOperationException or
+                                                         ArgumentOutOfRangeException)
+                    {
+                        Console.Error.WriteLine(
+                            $"[LOADER][WARN] Bink audio output unavailable: {exception.Message}");
+                        ffmpeg.avcodec_free_context(&audioCodecContext);
+                        audioStreamIndex = -1;
+                        audioOutputSampleRate = 0;
+                    }
                 }
             }
 

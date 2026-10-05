@@ -133845,6 +133845,7 @@ sceKernelWriteRemapIntoPrtCommand
 sceKernelWriteRemapWithGpuMaskIdCommand
 sceKernelWriteSdkEventLog
 sceKernelWriteSdkEventLogV
+sceKernelWriteThrottlingStatus
 sceKernelWriteUnmapCommand
 sceKernelWriteUnmapToPrtCommand
 sceKernelWriteWaitOnAddressCommand
@@ -154456,3 +154457,6 @@ sceNpEAAccessInitialize
 sceNpEAAccessTerminate
 sceNpHasEAAccessSubscription
 sceNpHasEAAccessSubscriptionAbortRequest
+sceAgcAddPrimStateRegisters
+sceVoiceQoSSetMode
+sceVoiceQoSTerminate

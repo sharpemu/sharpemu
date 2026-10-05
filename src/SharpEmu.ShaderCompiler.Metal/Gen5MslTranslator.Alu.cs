@@ -102,6 +102,32 @@ public static partial class Gen5MslTranslator
                         Temp("uint", ShuffleLane(value, lane)));
                     return true;
                 }
+                case "VMovrelsB32":
+                {
+                    if (instruction.Control is not null ||
+                        instruction.Destinations.Count == 0 ||
+                        instruction.Destinations[0].Kind != Gen5OperandKind.VectorRegister ||
+                        instruction.Sources.Count < 2 ||
+                        instruction.Sources[0].Kind != Gen5OperandKind.VectorRegister ||
+                        instruction.Sources[1].Kind != Gen5OperandKind.ScalarRegister)
+                    {
+                        error = "VMovrelsB32 expects an unmodified VGPR source and M0";
+                        return false;
+                    }
+
+                    var baseRegister = instruction.Sources[0].Value;
+                    var relativeRegister = Temp(
+                        "uint",
+                        $"{baseRegister}u + ({RawSource(instruction, 1)})");
+                    var selectedRegister = Temp(
+                        "uint",
+                        $"{relativeRegister} < {VectorRegisterFileCount}u ? " +
+                        $"{relativeRegister} : {baseRegister}u");
+                    StoreVector(
+                        instruction.Destinations[0].Value,
+                        $"v[{selectedRegister}]");
+                    return true;
+                }
                 case "VWritelaneB32":
                 {
                     // vdst[lane(src1)] = src0; a writelane lands regardless of EXEC.
@@ -116,15 +142,15 @@ public static partial class Gen5MslTranslator
                 }
                 case "VCndmaskB32":
                 {
-                    // dst = mask-bit(lane) ? src1 : src0. Sources are raw (no
-                    // float modifiers), matching the SPIR-V translator; the mask
-                    // is VCC for VOP2 and an explicit SGPR operand for VOP3.
+                    // dst = mask-bit(lane) ? src1 : src0. VOP3 abs/neg act on the
+                    // sign bit, matching the SPIR-V translator; the mask is VCC
+                    // for VOP2 and an explicit SGPR operand for VOP3.
                     var mask = instruction.Sources.Count > 2
                         ? MaskBitExpression(instruction.Sources[2])
                         : "vcc";
                     StoreVector(
                         DestinationVector(instruction),
-                        $"({mask}) ? ({RawSource(instruction, 1)}) : ({RawSource(instruction, 0)})");
+                        $"({mask}) ? ({SignModifiedSource(instruction, 1)}) : ({SignModifiedSource(instruction, 0)})");
                     return true;
                 }
             }
@@ -177,6 +203,10 @@ public static partial class Gen5MslTranslator
                 // form is fma(src0, src1, src2) exactly like the SPIR-V translator.
                 "VFmaF32" or "VMadF32" or "VMadAkF32" or "VMadMkF32" or "VFmaAkF32" or "VFmaMkF32" =>
                     FloatResult(instruction, $"fma({F(instruction, 0)}, {F(instruction, 1)}, {F(instruction, 2)})"),
+                "VFmaF16" or "VFmaMkF16" or "VFmaAkF16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"fma({F16(instruction, 0)}, {F16(instruction, 1)}, {F16(instruction, 2)})"),
                 "VFmacF32" or "VMacF32" =>
                     FloatResult(instruction, $"fma({F(instruction, 0)}, {F(instruction, 1)}, as_type<float>(v[{destination}]))"),
                 "VFloorF32" => FloatResult(instruction, $"floor({F(instruction, 0)})"),
@@ -186,6 +216,21 @@ public static partial class Gen5MslTranslator
                 "VFractF32" => FloatResult(instruction, $"fract({F(instruction, 0)})"),
                 "VSqrtF32" => FloatResult(instruction, $"sqrt({F(instruction, 0)})"),
                 "VRsqF32" => FloatResult(instruction, $"rsqrt({F(instruction, 0)})"),
+                "VRcpF16" => Float16Result(instruction, destination, $"(1.0f / {F16(instruction, 0)})"),
+                "VSqrtF16" => Float16Result(instruction, destination, $"sqrt({F16(instruction, 0)})"),
+                "VLogF16" => Float16Result(instruction, destination, $"log2({F16(instruction, 0)})"),
+                "VExpF16" => Float16Result(instruction, destination, $"exp2({F16(instruction, 0)})"),
+                "VFloorF16" => Float16Result(instruction, destination, $"floor({F16(instruction, 0)})"),
+                "VCeilF16" => Float16Result(instruction, destination, $"ceil({F16(instruction, 0)})"),
+                "VTruncF16" => Float16Result(instruction, destination, $"trunc({F16(instruction, 0)})"),
+                "VRndneF16" => Float16Result(instruction, destination, $"rint({F16(instruction, 0)})"),
+                "VFractF16" => Float16Result(instruction, destination, $"fract({F16(instruction, 0)})"),
+                "VSinF16" => Float16Result(instruction, destination, $"sin({F16(instruction, 0)} * {TauLiteral})"),
+                "VCosF16" => Float16Result(instruction, destination, $"cos({F16(instruction, 0)} * {TauLiteral})"),
+                "VRsqF16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"rsqrt({F16(instruction, 0)})"),
                 "VRcpF32" or "VRcpIflagF32" => FloatResult(instruction, $"(1.0f / {F(instruction, 0)})"),
                 "VLogF32" => FloatResult(instruction, $"log2({F(instruction, 0)})"),
                 "VExpF32" => FloatResult(instruction, $"exp2({F(instruction, 0)})"),
@@ -194,6 +239,12 @@ public static partial class Gen5MslTranslator
                 "VCosF32" => FloatResult(instruction, $"cos({F(instruction, 0)} * {TauLiteral})"),
                 "VLdexpF32" =>
                     FloatResult(instruction, $"ldexp({F(instruction, 0)}, as_type<int>({RawSource(instruction, 1)}))"),
+                "VMin3F16" => Float16Result(instruction, destination,
+                    $"fmin(fmin({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)})"),
+                "VMax3F16" => Float16Result(instruction, destination,
+                    $"fmax(fmax({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)})"),
+                "VMed3F16" => Float16Result(instruction, destination,
+                    $"fmax(fmin({F16(instruction, 0)}, {F16(instruction, 1)}), fmin(fmax({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)}))"),
                 "VMin3F32" =>
                     FloatResult(instruction, $"fmin(fmin({F(instruction, 0)}, {F(instruction, 1)}), {F(instruction, 2)})"),
                 "VMax3F32" =>
@@ -205,6 +256,8 @@ public static partial class Gen5MslTranslator
                 "VCvtF32I32" => FloatResult(instruction, $"(float)as_type<int>({RawSource(instruction, 0)})"),
                 "VCvtF32U32" => FloatResult(instruction, $"(float)({RawSource(instruction, 0)})"),
                 "VCvtU32F32" => $"(uint)({F(instruction, 0)})",
+                "VCvtU16F16" =>
+                    $"(uint)clamp(trunc(isnan({F16(instruction, 0)}) ? 0.0f : {F16(instruction, 0)}), 0.0f, 65535.0f)",
                 "VCvtI32F32" => AsUInt($"(int)({F(instruction, 0)})"),
                 // RPI rounds toward positive infinity; FLR toward negative.
                 "VCvtRpiI32F32" => AsUInt($"(int)ceil({F(instruction, 0)})"),
@@ -223,6 +276,11 @@ public static partial class Gen5MslTranslator
                     EmitCvtPkU8F32(instruction),
                 "VCvtPkrtzF16F32" =>
                     EmitCvtPkrtzF16F32(instruction),
+                "VCvtPkU16U32" =>
+                    $"(min({RawSource(instruction, 0)}, 65535u) | (min({RawSource(instruction, 1)}, 65535u) << 16u))",
+                "VCvtPkI16I32" =>
+                    $"((as_type<uint>(clamp(as_type<int>({RawSource(instruction, 0)}), -32768, 32767)) & 0xFFFFu) | " +
+                    $"(as_type<uint>(clamp(as_type<int>({RawSource(instruction, 1)}), -32768, 32767)) << 16u))",
                 "VCvtPknormI16F32" =>
                     $"pack_float_to_snorm2x16(float2({F(instruction, 0)}, {F(instruction, 1)}))",
                 "VCvtPknormU16F32" =>
@@ -235,6 +293,8 @@ public static partial class Gen5MslTranslator
                     $"(({RawSource(instruction, 0)}) - ({RawSource(instruction, 1)}))",
                 "VSubrevU32" or "VSubrevI32" =>
                     $"(({RawSource(instruction, 1)}) - ({RawSource(instruction, 0)}))",
+                "VMulI32I24" =>
+                    EmitSignedMultiply24(instruction),
                 // The SPIR-V translator treats the U24 multiply as a full 32-bit
                 // multiply (only the Hi/Mad forms mask); mirror it exactly.
                 "VMulLoU32" or "VMulLoI32" or "VMulU32U24" =>
@@ -251,6 +311,8 @@ public static partial class Gen5MslTranslator
                     $"(((({RawSource(instruction, 0)}) & 0xFFFFu) * (({RawSource(instruction, 1)}) & 0xFFFFu)) + ({RawSource(instruction, 2)}))",
                 "VAdd3U32" =>
                     $"(({RawSource(instruction, 0)}) + ({RawSource(instruction, 1)}) + ({RawSource(instruction, 2)}))",
+                "VXadU32" =>
+                    $"((({RawSource(instruction, 0)}) ^ ({RawSource(instruction, 1)})) + ({RawSource(instruction, 2)}))",
                 "VSadU32" =>
                     $"((max({RawSource(instruction, 0)}, {RawSource(instruction, 1)}) - min({RawSource(instruction, 0)}, {RawSource(instruction, 1)})) + ({RawSource(instruction, 2)}))",
                 "VAddLshlU32" =>
@@ -280,6 +342,7 @@ public static partial class Gen5MslTranslator
                 "VAndB32" => $"(({RawSource(instruction, 0)}) & ({RawSource(instruction, 1)}))",
                 "VOrB32" => $"(({RawSource(instruction, 0)}) | ({RawSource(instruction, 1)}))",
                 "VXorB32" => $"(({RawSource(instruction, 0)}) ^ ({RawSource(instruction, 1)}))",
+                "VXor3B32" => $"(({RawSource(instruction, 0)}) ^ ({RawSource(instruction, 1)}) ^ ({RawSource(instruction, 2)}))",
                 "VXnorB32" => $"~(({RawSource(instruction, 0)}) ^ ({RawSource(instruction, 1)}))",
                 "VNotB32" => $"~({RawSource(instruction, 0)})",
                 "VAndOrB32" =>
@@ -292,6 +355,7 @@ public static partial class Gen5MslTranslator
                 "VLshlrevB32" => $"(({RawSource(instruction, 1)}) << (({RawSource(instruction, 0)}) & 31u))",
                 "VLshrB32" => $"(({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))",
                 "VLshrrevB32" => $"(({RawSource(instruction, 1)}) >> (({RawSource(instruction, 0)}) & 31u))",
+                "VLshrrevB64" => EmitLshrrevB64(instruction, destination),
                 "VAshrI32" =>
                     AsUInt($"(as_type<int>({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))"),
                 "VAshrrevI32" =>
@@ -300,6 +364,10 @@ public static partial class Gen5MslTranslator
                     $"extract_bits({RawSource(instruction, 0)}, ({RawSource(instruction, 1)}) & 31u, ({RawSource(instruction, 2)}) & 31u)",
                 "VBfiB32" =>
                     $"((({RawSource(instruction, 0)}) & ({RawSource(instruction, 1)})) | (~({RawSource(instruction, 0)}) & ({RawSource(instruction, 2)})))",
+                "VAlignbitB32" =>
+                    $"uint(((ulong({RawSource(instruction, 0)}) << 32) | ulong({RawSource(instruction, 1)})) >> (({RawSource(instruction, 2)}) & 31u))",
+                "VAlignbyteB32" =>
+                    $"uint(((ulong({RawSource(instruction, 0)}) << 32) | ulong({RawSource(instruction, 1)})) >> ((({RawSource(instruction, 2)}) & 3u) * 8u))",
                 "VBfmB32" =>
                     $"(((1u << (({RawSource(instruction, 0)}) & 31u)) - 1u) << (({RawSource(instruction, 1)}) & 31u))",
                 "VBfrevB32" => $"reverse_bits({RawSource(instruction, 0)})",
@@ -371,8 +439,10 @@ public static partial class Gen5MslTranslator
                     }
                     case "VSubbU32":
                     case "VSubbrevU32":
+                    case "VSubCoCiU32":
+                    case "VSubrevCoCiU32":
                     {
-                        var reverse = instruction.Opcode == "VSubbrevU32";
+                        var reverse = instruction.Opcode is "VSubbrevU32" or "VSubrevCoCiU32";
                         var left = Temp("uint", RawSource(instruction, reverse ? 1 : 0));
                         var right = Temp("uint", RawSource(instruction, reverse ? 0 : 1));
                         var borrowIn = instruction.Sources.Count > 2
@@ -417,6 +487,22 @@ public static partial class Gen5MslTranslator
 
             StoreVector(destination, result);
             return true;
+        }
+
+        private string EmitSignedMultiply24(Gen5ShaderInstruction instruction)
+        {
+            var signedLeft = $"(as_type<int>(({RawSource(instruction, 0)}) << 8u) >> 8)";
+            var signedRight = $"(as_type<int>(({RawSource(instruction, 1)}) << 8u) >> 8)";
+            // Unsigned multiplication preserves the low result bits on overflow.
+            return $"({AsUInt(signedLeft)} * {AsUInt(signedRight)})";
+        }
+
+        private string EmitLshrrevB64(Gen5ShaderInstruction instruction, uint destination)
+        {
+            var shift = Temp("uint", $"({RawSource(instruction, 0)}) & 63u");
+            var shifted = Temp("ulong", $"({RawSource64(instruction, 1)}) >> {shift}");
+            StoreVector(destination + 1, $"(uint)({shifted} >> 32)");
+            return $"(uint){shifted}";
         }
 
         private string EmitCvtPkU8F32(Gen5ShaderInstruction instruction)
@@ -680,7 +766,12 @@ public static partial class Gen5MslTranslator
             }
             else
             {
-                var signed = opcode.EndsWith("I32", StringComparison.Ordinal);
+                var signed16 = opcode.EndsWith("I16", StringComparison.Ordinal);
+                var signed = signed16 ||
+                    opcode.EndsWith("I32", StringComparison.Ordinal) ||
+                    opcode.EndsWith("I64", StringComparison.Ordinal);
+                var wide = opcode.EndsWith("I64", StringComparison.Ordinal) ||
+                    opcode.EndsWith("U64", StringComparison.Ordinal);
                 var op = TrimCompare(opcode) switch
                 {
                     "Eq" => "==",
@@ -697,9 +788,15 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
+                var left = wide ? RawSource64(instruction, 0) : RawSource(instruction, 0);
+                var right = wide ? RawSource64(instruction, 1) : RawSource(instruction, 1);
                 condition = signed
-                    ? $"(as_type<int>({RawSource(instruction, 0)}) {op} as_type<int>({RawSource(instruction, 1)}))"
-                    : $"(({RawSource(instruction, 0)}) {op} ({RawSource(instruction, 1)}))";
+                    ? signed16
+                        ? $"(int(short(({left}) & 0xFFFFu)) {op} int(short(({right}) & 0xFFFFu)))"
+                        : wide
+                        ? $"(as_type<long>({left}) {op} as_type<long>({right}))"
+                        : $"(as_type<int>({left}) {op} as_type<int>({right}))"
+                    : $"(({left}) {op} ({right}))";
             }
 
             // Only EXEC-enabled lanes can pass; balloting the raw condition
@@ -977,14 +1074,21 @@ public static partial class Gen5MslTranslator
                 var immediate = unchecked((uint)(short)(instruction.Words[0] & 0xFFFF));
                 if (instruction.Opcode.StartsWith("SCmpk", StringComparison.Ordinal))
                 {
+                    // The unsigned compares take SIMM16 zero-extended; only the signed ones sign-extend it.
+                    if (instruction.Opcode.EndsWith("U32", StringComparison.Ordinal))
+                    {
+                        immediate = instruction.Words[0] & 0xFFFF;
+                    }
+
                     return TryEmitScalarCompareK(instruction, destination, immediate, out error);
                 }
 
+                var current = ScalarExpression(destination);
                 var value = instruction.Opcode switch
                 {
                     "SMovkI32" => FormatUInt(immediate),
-                    "SAddkI32" => $"({ScalarExpression(destination)} + {FormatUInt(immediate)})",
-                    "SMulkI32" => $"({ScalarExpression(destination)} * {FormatUInt(immediate)})",
+                    "SAddkI32" => $"({current} + {FormatUInt(immediate)})",
+                    "SMulkI32" => $"({current} * {FormatUInt(immediate)})",
                     _ => string.Empty,
                 };
                 if (value.Length == 0)
@@ -993,21 +1097,77 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                StoreScalar(destination, Temp("uint", value));
+                var stored = Temp("uint", value);
+                // RDNA2 ISA: S_ADDK_I32 writes SCC = signed overflow, exactly like
+                // S_ADD_I32. S_MOVK_I32 and S_MULK_I32 leave SCC alone.
+                if (instruction.Opcode == "SAddkI32")
+                {
+                    var addend = FormatUInt(immediate);
+                    Line(
+                        $"scc = ((~({current} ^ {addend}) & ({current} ^ {stored})) >> 31) != 0u;");
+                }
+
+                StoreScalar(destination, stored);
                 return true;
             }
 
             if (instruction.Opcode == "SGetpcB64")
             {
-                var pc = _state.Program.Address +
-                    instruction.Pc +
-                    (ulong)(instruction.Words.Count * sizeof(uint));
-                StoreScalar(destination, FormatUInt((uint)pc));
-                StoreScalar(destination + 1, FormatUInt((uint)(pc >> 32)));
+                {
+                    // The shader base is pushed per draw; the program offset is added to it.
+                    var (baseLow, baseHigh) = ShaderBaseWords();
+                    var offset = unchecked(instruction.ProgramOffset + (ulong)(instruction.Words.Count * sizeof(uint)));
+                    var address = Temp("ulong", $"((ulong){baseLow} | ((ulong){baseHigh} << 32)) + {offset}ul");
+                    StoreScalar(destination, $"(uint){address}");
+                    StoreScalar(destination + 1, $"(uint)({address} >> 32)");
+                    return true;
+                }
+            }
+
+            if (instruction.Opcode is "SQuadmaskB32" or "SQuadmaskB64")
+            {
+                var wide = instruction.Opcode == "SQuadmaskB64";
+                var source = Temp(wide ? "ulong" : "uint", wide ? RawSource64(instruction, 0) : RawSource(instruction, 0));
+                var result = Temp("uint", "0u");
+                for (var quad = 0; quad < (wide ? 16 : 8); quad++)
+                    Line($"{result} |= (({source} >> {quad * 4}) & 15{(wide ? "ul" : "u")}) != 0 ? {1u << quad}u : 0u;");
+                StoreScalar(destination, result);
+                if (wide) StoreScalar(destination + 1, "0u");
+                Line($"scc = {result} != 0u;");
+                return true;
+            }
+
+            if (instruction.Opcode == "SBcnt1I32B64")
+            {
+                var wide = Temp("ulong", RawSource64(instruction, 0));
+                var bitCountResult = Temp("uint", $"(uint)popcount({wide})");
+                StoreScalar(destination, bitCountResult);
+                Line($"scc = {bitCountResult} != 0u;");
+                return true;
+            }
+
+            if (instruction.Opcode == "SFF1I32B64")
+            {
+                var wide = Temp("ulong", RawSource64(instruction, 0));
+                var result = Temp(
+                    "uint",
+                    $"{wide} == 0ul ? 0xFFFFFFFFu : (uint)ctz({wide})");
+                StoreScalar(destination, result);
+                return true;
+            }
+
+            if (instruction.Opcode == "SFlbitI32B64")
+            {
+                var wide = Temp("ulong", RawSource64(instruction, 0));
+                var result = Temp(
+                    "uint",
+                    $"{wide} == 0ul ? 0xFFFFFFFFu : (uint)clz({wide})");
+                StoreScalar(destination, result);
                 return true;
             }
 
             if (instruction.Opcode.EndsWith("B64", StringComparison.Ordinal) ||
+                instruction.Opcode == "SAshrI64" ||
                 instruction.Opcode is "SBfeU64" or "SBfeI64")
             {
                 return TryEmitScalar64(instruction, destination, out error);
@@ -1061,6 +1221,24 @@ public static partial class Gen5MslTranslator
                     Line($"scc = {result} != 0u;");
                     return true;
                 }
+                case "SAbsI32":
+                {
+                    var sign = Temp("uint", $"0u - ({left} >> 31u)");
+                    var result = Temp("uint", $"({left} ^ {sign}) - {sign}");
+                    StoreScalar(destination, result);
+                    Line($"scc = {result} != 0u;");
+                    return true;
+                }
+                case "SWqmB32":
+                {
+                    var quadAny = Temp(
+                        "uint",
+                        $"({left} | ({left} >> 1) | ({left} >> 2) | ({left} >> 3)) & 0x11111111u");
+                    var result = Temp("uint", $"{quadAny} * 0xFu");
+                    StoreScalar(destination, result);
+                    Line($"scc = {result} != 0u;");
+                    return true;
+                }
                 case "SBrevB32":
                 {
                     var result = Temp("uint", $"reverse_bits({left})");
@@ -1081,9 +1259,13 @@ public static partial class Gen5MslTranslator
                         "uint",
                         $"{left} == 0u ? 0xFFFFFFFFu : (uint)ctz({left})");
                     StoreScalar(destination, result);
-                    Line($"scc = {result} != 0u;");
                     return true;
                 }
+                case "SBitset0B32":
+                    StoreScalar(
+                        destination,
+                        $"{ScalarExpression(destination)} & ~(1u << ({left} & 31u))");
+                    return true;
                 case "SBitset1B32":
                     StoreScalar(
                         destination,
@@ -1117,6 +1299,14 @@ public static partial class Gen5MslTranslator
                 case "SSubI32":
                     resultExpression = $"({left} - {right})";
                     sccStatement = $"(((({left} ^ {right})) & ({left} ^ RESULT)) >> 31) != 0u";
+                    break;
+                case "SAddF32":
+                    resultExpression = $"as_type<uint>(as_type<float>({left}) + as_type<float>({right}))";
+                    sccStatement = string.Empty;
+                    break;
+                case "SSubF32":
+                    resultExpression = $"as_type<uint>(as_type<float>({left}) - as_type<float>({right}))";
+                    sccStatement = string.Empty;
                     break;
                 case "SAddcU32":
                 {
@@ -1290,6 +1480,15 @@ public static partial class Gen5MslTranslator
                 return false;
             }
 
+            if (instruction.Opcode is "SCmpEqU64" or "SCmpLgU64")
+            {
+                var wideLeft = Temp("ulong", RawSource64(instruction, 0));
+                var wideRight = Temp("ulong", RawSource64(instruction, 1));
+                var comparison = instruction.Opcode == "SCmpEqU64" ? "==" : "!=";
+                Line($"scc = {wideLeft} {comparison} {wideRight};");
+                return true;
+            }
+
             var left = Temp("uint", RawSource(instruction, 0));
             var right = Temp("uint", RawSource(instruction, 1));
             if (instruction.Opcode is "SBitcmp0B32" or "SBitcmp1B32")
@@ -1356,6 +1555,16 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
+
+            // S_SWAPPC_B64 is a dynamic call/return operation.  The Gen5
+            // translator has already linearized the reachable shader body,
+            // so there is no host program counter to exchange here.  Its
+            // single pair operand must not be treated as a binary 64-bit op.
+            if (instruction.Opcode == "SSwappcB64")
+            {
+                return true;
+            }
+
             var left = Temp("ulong", RawSource64(instruction, 0));
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
@@ -1413,12 +1622,15 @@ public static partial class Gen5MslTranslator
                     value = $"({quadAny} * 0xFul)";
                     break;
                 }
-                case "SLshlB64" or "SLshrB64":
+                case "SLshlB64" or "SLshrB64" or "SAshrI64":
                 {
                     var shift = Temp("uint", $"({RawSource(instruction, 1)}) & 63u");
-                    value = instruction.Opcode == "SLshlB64"
-                        ? $"({left} << {shift})"
-                        : $"({left} >> {shift})";
+                    value = instruction.Opcode switch
+                    {
+                        "SLshlB64" => $"({left} << {shift})",
+                        "SLshrB64" => $"({left} >> {shift})",
+                        _ => $"(ulong)(as_type<long>({left}) >> {shift})",
+                    };
                     break;
                 }
                 case "SBfmB64":
@@ -1570,6 +1782,24 @@ public static partial class Gen5MslTranslator
             }
 
             return value;
+        }
+
+        private string SignModifiedSource(Gen5ShaderInstruction instruction, int sourceIndex)
+        {
+            var value = RawSource(instruction, sourceIndex);
+            if (instruction.Control is not Gen5Vop3Control control)
+            {
+                return value;
+            }
+
+            if ((control.AbsoluteMask & (1u << sourceIndex)) != 0)
+            {
+                value = $"(({value}) & 0x7FFFFFFFu)";
+            }
+
+            return (control.NegateMask & (1u << sourceIndex)) != 0
+                ? $"(({value}) ^ 0x80000000u)"
+                : value;
         }
 
         /// <summary>64-bit source: SGPR/VGPR pair, sign-extended inline, or zero-extended 32-bit.</summary>
