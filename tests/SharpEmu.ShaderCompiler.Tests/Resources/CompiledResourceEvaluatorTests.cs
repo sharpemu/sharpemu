@@ -20,8 +20,9 @@ public sealed class CompiledResourceEvaluatorTests
                 ScalarValue.UserData((uint)(index * 2)), ScalarValue.UserData((uint)(index * 2 + 1)))).ToArray();
             var value = ScalarValue.MakeOperation(operation, ScalarValueType.U64, operands);
             plan.DescriptorSources[0].Dwords[0] = value;
-            Assert.NotNull(plan.CompileEvaluatorNow());
-            Assert.True(plan.CompiledEvaluator.TryGetIndex(value, out _));
+            var compiledEvaluator = plan.CompileEvaluatorNow();
+            Assert.NotNull(compiledEvaluator);
+            Assert.True(compiledEvaluator.TryGetIndex(value, out _));
             for (var iteration = 0; iteration < cases.Length; iteration++)
             {
                 var input = Enumerable.Range(0, 4).Select(index => cases[(iteration + index * 3) % cases.Length]).ToArray();
@@ -46,8 +47,9 @@ public sealed class CompiledResourceEvaluatorTests
         var select = ScalarValue.Select(mask, ScalarValue.UserData(1), ScalarValue.Undefined(ScalarValueType.U32));
         var lane = ScalarValue.FirstLane(select, mask);
         plan.DescriptorSources[0].Dwords[0] = lane;
-        Assert.NotNull(plan.CompileEvaluatorNow());
-        Assert.True(plan.CompiledEvaluator.TryGetIndex(lane, out _));
+        var compiledEvaluator = plan.CompileEvaluatorNow();
+        Assert.NotNull(compiledEvaluator);
+        Assert.True(compiledEvaluator.TryGetIndex(lane, out _));
         using var scratch = RuntimeEvaluationScratch.Rent();
         var evaluator = new RuntimeValueEvaluator(scratch, plan, Inputs([0, 42]));
         Assert.False(evaluator.Evaluate(select, out _));
