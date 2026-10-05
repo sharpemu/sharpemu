@@ -80,6 +80,27 @@ internal sealed unsafe partial class WindowsHostMemory : IHostMemory
         FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)size);
     }
 
+    public bool TryQueryAllocation(ulong address, out HostAddressRange range)
+    {
+        range = default;
+        try
+        {
+            var success = QueryVirtualMemoryInformation(GetCurrentProcess(), (void*)address, 0,
+                out var info, (nuint)sizeof(MemoryRegionInformation), null);
+            if (!success ||
+                info.RegionSize == 0 || info.AllocationBase > address ||
+                info.RegionSize > ulong.MaxValue - info.AllocationBase ||
+                address - info.AllocationBase >= info.RegionSize)
+                return false;
+            range = new HostAddressRange(info.AllocationBase, info.RegionSize);
+            return true;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return false;
+        }
+    }
+
     private static uint ToNativeProtection(HostPageProtection protection) => protection switch
     {
         HostPageProtection.NoAccess => PAGE_NOACCESS,
@@ -149,5 +170,19 @@ internal sealed unsafe partial class WindowsHostMemory : IHostMemory
         public uint Protect;
         public uint Type;
         public uint Alignment2;
+    }
+
+    [LibraryImport("kernelbase.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool QueryVirtualMemoryInformation(void* process, void* address,
+        int informationClass, out MemoryRegionInformation info, nuint size, nuint* returned);
+
+    private struct MemoryRegionInformation
+    {
+        public ulong AllocationBase;
+        public uint AllocationProtect;
+        public uint Flags;
+        public ulong RegionSize;
+        public ulong CommitSize;
     }
 }
