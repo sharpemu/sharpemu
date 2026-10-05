@@ -9,6 +9,30 @@ namespace SharpEmu.Libs.Tests.Memory.GuestMemory;
 [Collection(AllocationMeasurementCollection.Name)]
 public sealed class ViewRecordTreeTests
 {
+    [Fact]
+    public void PublishedRootKeepsRecordsAcrossUpdatesAndClear()
+    {
+        var tree = new ViewRecordTree();
+        for (ulong address = 1; address <= 256; address++)
+            tree.Add(new ViewRecord(address, 1, address, SharpEmu.HLE.Host.HostPageProtection.ReadWrite));
+        var snapshot = tree.Snapshot;
+        for (ulong address = 1; address <= 256; address++)
+        {
+            if (address % 2 == 0)
+                tree.Remove(new ViewRecord(address, 1, 0, default));
+            else
+                tree[address] = new ViewRecord(address, 1, 999, default);
+        }
+        tree.Clear();
+        for (ulong address = 1; address <= 256; address++)
+        {
+            var record = ViewRecordTree.FindAtOrBelow(snapshot, address);
+            Assert.Equal(address, record.Address);
+            Assert.Equal(address, record.Offset);
+        }
+        Assert.Null(tree.Snapshot);
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(719)]

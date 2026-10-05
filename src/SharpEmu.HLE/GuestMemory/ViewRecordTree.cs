@@ -7,15 +7,17 @@ namespace SharpEmu.HLE.GuestMemory;
 
 internal sealed class ViewRecordTree : IEnumerable<ViewRecord>
 {
-    private sealed class Node(ViewRecord range)
+    internal sealed class Node(ViewRecord range, Node? left = null, Node? right = null)
     {
-        internal ViewRecord Range = range;
-        internal Node? Left;
-        internal Node? Right;
-        internal int Height = 1;
+        internal readonly ViewRecord Range = range;
+        internal readonly Node? Left = left;
+        internal readonly Node? Right = right;
+        internal readonly int Height = 1 + Math.Max(left?.Height ?? 0, right?.Height ?? 0);
     }
 
     private Node? _root;
+
+    internal Node? Snapshot => _root;
 
     public bool ContainsKey(ulong address)
     {
@@ -29,23 +31,17 @@ internal sealed class ViewRecordTree : IEnumerable<ViewRecord>
         {
             if (address != value.Address)
                 throw new ArgumentException("The key must match the view address.", nameof(address));
-            var current = _root;
-            while (current is not null)
-            {
-                if (address == current.Range.Address)
-                {
-                    current.Range = value;
-                    return;
-                }
-                current = address < current.Range.Address ? current.Left : current.Right;
-            }
-            Add(value);
+            var added = false;
+            _root = Insert(_root, value, ref added, replace: true);
         }
     }
 
     public ViewRecord FindAtOrBelow(ulong address)
+        => FindAtOrBelow(_root, address);
+
+    internal static ViewRecord FindAtOrBelow(Node? root, ulong address)
     {
-        var current = _root;
+        var current = root;
         var result = default(ViewRecord);
         while (current is not null)
         {
@@ -87,7 +83,7 @@ internal sealed class ViewRecordTree : IEnumerable<ViewRecord>
     public void Remove(ViewRecord range) => _root = RemoveNode(_root, range.Address);
     public void Clear() => _root = null;
 
-    private static Node Insert(Node? node, ViewRecord range, ref bool added)
+    private static Node Insert(Node? node, ViewRecord range, ref bool added, bool replace = false)
     {
         if (node is null)
         {
@@ -95,21 +91,20 @@ internal sealed class ViewRecordTree : IEnumerable<ViewRecord>
             return new Node(range);
         }
         if (range.Address < node.Range.Address)
-            node.Left = Insert(node.Left, range, ref added);
+            return Balance(new Node(node.Range, Insert(node.Left, range, ref added, replace), node.Right));
         else if (range.Address > node.Range.Address)
-            node.Right = Insert(node.Right, range, ref added);
+            return Balance(new Node(node.Range, node.Left, Insert(node.Right, range, ref added, replace)));
         else
-            return node;
-        return Balance(node);
+            return replace ? new Node(range, node.Left, node.Right) : node;
     }
 
     private static Node? RemoveNode(Node? node, ulong address)
     {
         if (node is null) return null;
         if (address < node.Range.Address)
-            node.Left = RemoveNode(node.Left, address);
+            return Balance(new Node(node.Range, RemoveNode(node.Left, address), node.Right));
         else if (address > node.Range.Address)
-            node.Right = RemoveNode(node.Right, address);
+            return Balance(new Node(node.Range, node.Left, RemoveNode(node.Right, address)));
         else
         {
             if (node.Left is null) return node.Right;
@@ -117,31 +112,25 @@ internal sealed class ViewRecordTree : IEnumerable<ViewRecord>
             var successor = node.Right;
             while (successor.Left is not null)
                 successor = successor.Left;
-            node.Range = successor.Range;
-            node.Right = RemoveNode(node.Right, successor.Range.Address);
+            return Balance(new Node(successor.Range, node.Left, RemoveNode(node.Right, successor.Range.Address)));
         }
-        return Balance(node);
     }
 
     private static int Height(Node? node) => node?.Height ?? 0;
 
-    private static void UpdateHeight(Node node) =>
-        node.Height = 1 + Math.Max(Height(node.Left), Height(node.Right));
-
     private static Node Balance(Node node)
     {
-        UpdateHeight(node);
         var difference = Height(node.Left) - Height(node.Right);
         if (difference > 1)
         {
             if (Height(node.Left!.Left) < Height(node.Left.Right))
-                node.Left = RotateLeft(node.Left);
+                node = new Node(node.Range, RotateLeft(node.Left), node.Right);
             return RotateRight(node);
         }
         if (difference < -1)
         {
             if (Height(node.Right!.Right) < Height(node.Right.Left))
-                node.Right = RotateRight(node.Right);
+                node = new Node(node.Range, node.Left, RotateRight(node.Right));
             return RotateLeft(node);
         }
         return node;
@@ -150,21 +139,13 @@ internal sealed class ViewRecordTree : IEnumerable<ViewRecord>
     private static Node RotateLeft(Node node)
     {
         var replacement = node.Right!;
-        node.Right = replacement.Left;
-        replacement.Left = node;
-        UpdateHeight(node);
-        UpdateHeight(replacement);
-        return replacement;
+        return new Node(replacement.Range, new Node(node.Range, node.Left, replacement.Left), replacement.Right);
     }
 
     private static Node RotateRight(Node node)
     {
         var replacement = node.Left!;
-        node.Left = replacement.Right;
-        replacement.Right = node;
-        UpdateHeight(node);
-        UpdateHeight(replacement);
-        return replacement;
+        return new Node(replacement.Range, replacement.Left, new Node(node.Range, replacement.Right, node.Right));
     }
 
     public IEnumerator<ViewRecord> GetEnumerator()

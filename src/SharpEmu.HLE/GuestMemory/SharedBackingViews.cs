@@ -28,11 +28,9 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
     private int _copyAccessBlocked;
     private volatile bool _disposed;
 
-    // Guest command writes and their reads by the render thread reach TryWriteBacking and
-    // TryReadBacking millions of times per second, a few bytes at a time, while views
-    // change rarely. Single-view accesses search this immutable copy of _views without
-    // the lock; every change to _views republishes it under the lock.
-    private ViewRecord[] _snapshot = [];
+    // Readers retain an immutable root. Updates copy only the affected tree branch.
+    private ViewRecordTree.Node? _snapshot;
+    private static readonly object EmptySnapshot = new();
 
     // Single-view accesses in flight; Dispose waits for them before releasing the alias.
     private int _activeAccesses;
@@ -473,29 +471,13 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
         var current = address;
         while (current < end)
         {
-            var low = 0;
-            var high = snapshot.Length - 1;
-            var found = -1;
-            while (low <= high)
-            {
-                var middle = low + ((high - low) >> 1);
-                if (snapshot[middle].Address <= current)
-                {
-                    found = middle;
-                    low = middle + 1;
-                }
-                else
-                {
-                    high = middle - 1;
-                }
-            }
-
-            if (found < 0 || current >= snapshot[found].Address + snapshot[found].Size)
+            var record = ViewRecordTree.FindAtOrBelow(snapshot, current);
+            if (record.Size == 0 || current >= record.Address + record.Size)
             {
                 return false;
             }
 
-            current = Math.Min(end, snapshot[found].Address + snapshot[found].Size);
+            current = Math.Min(end, record.Address + record.Size);
         }
 
         return true;
@@ -662,8 +644,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
     // Must be called under _lock after every change to _views.
     private void PublishSnapshot()
     {
-        var snapshot = _views.ToArray();
-        Volatile.Write(ref _snapshot, snapshot);
+        Volatile.Write(ref _snapshot, _views.Snapshot);
     }
 
     // Resolves an access that lies inside one view to its alias address and registers
@@ -694,7 +675,7 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
         return false;
     }
 
-    public object AliasSnapshot => Volatile.Read(ref _snapshot);
+    public object AliasSnapshot => (object?)Volatile.Read(ref _snapshot) ?? EmptySnapshot;
 
     public bool TryEnterAliasAccess()
     {
@@ -717,29 +698,12 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
         return size != 0 && ulong.MaxValue - address >= size && TryFindAlias(Volatile.Read(ref _snapshot), address, size, out target);
     }
 
-    private bool TryFindAlias(ViewRecord[] snapshot, ulong address, ulong size, out ulong target)
+    private bool TryFindAlias(ViewRecordTree.Node? snapshot, ulong address, ulong size, out ulong target)
     {
         target = 0;
-        var low = 0;
-        var high = snapshot.Length - 1;
-        var found = -1;
-        while (low <= high)
+        var record = ViewRecordTree.FindAtOrBelow(snapshot, address);
+        if (record.Size != 0 && !_disposed && _backing != null)
         {
-            var middle = low + ((high - low) >> 1);
-            if (snapshot[middle].Address <= address)
-            {
-                found = middle;
-                low = middle + 1;
-            }
-            else
-            {
-                high = middle - 1;
-            }
-        }
-
-        if (found >= 0 && !_disposed && _backing != null)
-        {
-            var record = snapshot[found];
             if (address + size <= record.Address + record.Size)
             {
                 var offset = record.Offset + address - record.Address;
