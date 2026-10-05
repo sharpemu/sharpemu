@@ -3978,10 +3978,22 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	public bool SupportsGuestContextTransfer => true;
 
+	// The handle and context this host thread registered last; a repeat registration (every
+	// scePthreadSelf on an external guest thread, tens of thousands a second) then skips the
+	// scheduler gate.
+	[ThreadStatic] private static ulong _registeredExternalHandle;
+	[ThreadStatic] private static CpuContext? _registeredExternalContext;
+
 	public void RegisterGuestThreadContext(ulong threadHandle, CpuContext context)
 	{
 		if (threadHandle == 0)
 		{
+			return;
+		}
+
+		if (_registeredExternalHandle == threadHandle && ReferenceEquals(_registeredExternalContext, context))
+		{
+			Volatile.Write(ref _currentExternalGuestThreadHandle, threadHandle);
 			return;
 		}
 
@@ -3998,15 +4010,19 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			{
 				existing.Context = context;
 				Volatile.Write(ref existing.HostThreadId, hostThreadId);
-				return;
+			}
+			else
+			{
+				_externalGuestThreads[threadHandle] = new ExternalGuestThreadState
+				{
+					Context = context,
+					Name = $"External-{threadHandle:X}",
+					HostThreadId = hostThreadId,
+				};
 			}
 
-			_externalGuestThreads[threadHandle] = new ExternalGuestThreadState
-			{
-				Context = context,
-				Name = $"External-{threadHandle:X}",
-				HostThreadId = hostThreadId,
-			};
+			_registeredExternalHandle = threadHandle;
+			_registeredExternalContext = context;
 		}
 	}
 
