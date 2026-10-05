@@ -63,6 +63,7 @@ public sealed class KernelMappingRangeTests
             var address = (ulong)random.NextInt64((long)currentAddress + 0x10000);
             var size = (ulong)random.Next(1, 0x40000);
             table.AssertQueryMatches(records, address, size);
+            table.AssertGapMatches(records, address, size, 0x4000);
         }
         table.AssertQueryMatches(records, records[2500].Address + 8, 0);
         table.AssertQueryMatches(records, ulong.MaxValue - 8, 16);
@@ -154,7 +155,25 @@ public sealed class KernelMappingRangeTests
             table.AssertDirectQueryMatches(expected, 0, 0x100000);
             table.AssertDirectQueryMatches(expected, (ulong)random.Next(0, 40) * 0x1000, length);
             table.AssertDirectQueryMatches(expected, 0x1000, 0);
+            table.AssertGapMatches(expected, address, length, 0x4000);
+            table.AssertGapMatches(expected, 0x1000, length, 0x1000);
         }
+    }
+
+    [Fact]
+    public void GapSearchPreservesInvalidRecordFallbackAndClear()
+    {
+        using var table = new MappingTableScope();
+        MappingRecord[] records =
+        [
+            new(0x1000, 0, 0, false, false, 0, 0, false),
+            new(ulong.MaxValue - 8, 16, 0, false, false, 0, 0, false),
+        ];
+        table.Set(records);
+        table.AssertGapMatches(records, 0x1000, 0x1000, 0x1000);
+        table.Set([]);
+        table.AssertGapMatches([], 0x1000, 0x1000, 0x1000);
+        table.AssertGapMatches([], ulong.MaxValue - 8, 16, 0x1000);
     }
 
     private readonly record struct MappingRecord(ulong Address, ulong Length, int Protection,
@@ -238,6 +257,37 @@ public sealed class KernelMappingRangeTests
             var actual = (Array)TableType.GetMethod("FindDirectOverlaps")!
                 .Invoke(_mappings, [start, length])!;
             Assert.Equal(expected, actual.Cast<object>().ToArray());
+        }
+
+        public void AssertGapMatches(IEnumerable<MappingRecord> records, ulong start, ulong size, ulong alignment)
+        {
+            var expected = Scan();
+            var actual = (ulong)OwnerType.GetMethod("FindAvailableMappingAddress",
+                BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [start, size, alignment])!;
+            Assert.Equal(expected, actual);
+
+            ulong Scan()
+            {
+                var padding = (alignment - start % alignment) % alignment;
+                if (padding > ulong.MaxValue - start)
+                    return 0;
+                var candidate = start + padding;
+                foreach (var record in records.OrderBy(record => record.Address))
+                {
+                    if (size > ulong.MaxValue - candidate)
+                        return 0;
+                    if (record.Address >= candidate + size)
+                        break;
+                    var end = unchecked(record.Address + record.Length);
+                    if (end <= candidate)
+                        continue;
+                    padding = (alignment - end % alignment) % alignment;
+                    if (padding > ulong.MaxValue - end)
+                        return 0;
+                    candidate = end + padding;
+                }
+                return size <= ulong.MaxValue - candidate ? candidate : 0;
+            }
         }
 
         private static object CreateNativeRecord(MappingRecord record) => RegionConstructor.Invoke(
