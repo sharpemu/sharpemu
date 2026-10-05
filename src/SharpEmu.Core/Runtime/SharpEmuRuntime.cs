@@ -87,6 +87,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
     public static ISharpEmuRuntime CreateDefault(SharpEmuRuntimeOptions options = default)
     {
+        Console.Error.WriteLine("[MEDIA][INFO] BINK VIDEO PLAYBACK MODE: " +
+            SharpEmu.Libs.Media.HostMovieBridge.GetPlaybackModeName(Environment.GetEnvironmentVariable("SHARPEMU_BINK_MODE")));
         var cpuExecutionOptions = new CpuExecutionOptions
         {
             CpuEngine = options.CpuEngine,
