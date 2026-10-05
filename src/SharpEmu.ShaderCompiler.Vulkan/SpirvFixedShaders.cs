@@ -426,6 +426,60 @@ public static class SpirvFixedShaders
     // compares both against the integer sequences the translator emits by default, and
     // only then lets the translator use these two ext instructions. 64 threads per group,
     // one per value; the input is padded to a multiple of 64 so no thread is out of range.
+    // Copies binding 0 to binding 1 with no bounds check at all, so a read past the descriptor
+    // range reaches the device and the caller can see what it returns.
+    public static byte[] CreateUncheckedBufferCopyProbe()
+    {
+        var module = new SpirvModuleBuilder();
+        module.AddCapability(SpirvCapability.Shader);
+
+        var voidType = module.TypeVoid();
+        var uintType = module.TypeInt(32, signed: false);
+        var uvec3Type = module.TypeVector(uintType, 3);
+        var runtimeArray = module.TypeRuntimeArray(uintType);
+        module.AddDecoration(runtimeArray, SpirvDecoration.ArrayStride, 4);
+        var bufferStruct = module.TypeStruct(runtimeArray);
+        module.AddDecoration(bufferStruct, SpirvDecoration.Block);
+        module.AddMemberDecoration(bufferStruct, 0, SpirvDecoration.Offset, 0);
+        var bufferPtrType = module.TypePointer(SpirvStorageClass.StorageBuffer, bufferStruct);
+        var uintStoragePtr = module.TypePointer(SpirvStorageClass.StorageBuffer, uintType);
+
+        uint MakeBuffer(uint binding, string name)
+        {
+            var variable = module.AddGlobalVariable(bufferPtrType, SpirvStorageClass.StorageBuffer);
+            module.AddName(variable, name);
+            module.AddDecoration(variable, SpirvDecoration.DescriptorSet, 0);
+            module.AddDecoration(variable, SpirvDecoration.Binding, binding);
+            return variable;
+        }
+
+        var inputVar = MakeBuffer(0, "probe_bounded_input");
+        var outputVar = MakeBuffer(1, "probe_output");
+        var inputUvec3Ptr = module.TypePointer(SpirvStorageClass.Input, uvec3Type);
+        var gidVar = module.AddGlobalVariable(inputUvec3Ptr, SpirvStorageClass.Input);
+        module.AddName(gidVar, "gid");
+        module.AddDecoration(gidVar, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.GlobalInvocationId);
+
+        var functionType = module.TypeFunction(voidType);
+        var main = module.BeginFunction(voidType, functionType);
+        module.AddName(main, "main");
+        module.AddLabel();
+        var gid = module.AddInstruction(SpirvOp.Load, uvec3Type, gidVar);
+        var id = module.AddInstruction(SpirvOp.CompositeExtract, uintType, gid, 0);
+        var sourcePtr = module.AddInstruction(
+            SpirvOp.AccessChain, uintStoragePtr, inputVar, module.Constant(uintType, 0), id);
+        var value = module.AddInstruction(SpirvOp.Load, uintType, sourcePtr);
+        var destinationPtr = module.AddInstruction(
+            SpirvOp.AccessChain, uintStoragePtr, outputVar, module.Constant(uintType, 0), id);
+        module.AddStatement(SpirvOp.Store, destinationPtr, value);
+        module.AddStatement(SpirvOp.Return);
+        module.EndFunction();
+
+        module.AddExecutionMode(main, SpirvExecutionMode.LocalSize, 64, 1, 1);
+        module.AddEntryPoint(SpirvExecutionModel.GLCompute, main, "main", [gidVar, inputVar, outputVar]);
+        return module.Build();
+    }
+
     public static byte[] CreateHalfConversionProbe()
     {
         var module = new SpirvModuleBuilder();

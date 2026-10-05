@@ -61,7 +61,7 @@ public sealed class ShaderPrewarmListTests : IDisposable
         Assert.True(
             ShaderProgramCache.TryCompilePrewarm(
                 record, code, new FakeShaderCompiler(Compile), host.SharedInt64AtomicsEnabled, host.ExecGuardElisionEnabled, host.NativeHalfConversionExact,
-                out var compiled, out var layout, out var error),
+                host.ZeroOutOfBoundsBufferReads, out var compiled, out var layout, out var error),
             error);
         Assert.NotNull(layout);
         Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);

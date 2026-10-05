@@ -94,6 +94,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         bool IShaderPipelineHost.NativeHalfConversionExact => NativeHalfConversionExact;
 
+        bool IShaderPipelineHost.ZeroOutOfBoundsBufferReads => ZeroOutOfBoundsBufferReads;
+
         RenderHostLimits IShaderPipelineHost.Limits => _renderHostLimits;
 
         SampleCountFlags IShaderPipelineHost.NoAttachmentSampleCounts => _noAttachmentSampleCounts;

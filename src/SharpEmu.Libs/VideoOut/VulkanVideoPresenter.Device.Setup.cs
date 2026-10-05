@@ -90,6 +90,7 @@ internal static unsafe partial class VulkanVideoPresenter
             CreateCommandResources();
             CreateGuestDrawResources();
             ProbeNativeHalfConversion();
+            ProbeZeroOutOfBoundsReads();
             _vulkanReady = true;
             AttachGuestGpuMemory();
             Console.Error.WriteLine(
@@ -712,6 +713,42 @@ internal static unsafe partial class VulkanVideoPresenter
         // once per device, before any guest shader is compiled, so the answer is constant for the
         // process. The spec does not promise it: MoltenVK reports RTE rounding and signed-zero /
         // Inf / NaN preservation for f16 yet not denorm preservation, so only the device can say.
+        // Never fatal - anything that goes wrong leaves the per-access checks in place. The probe
+        // reads out of range on purpose, so it only runs where the device promised a zero: without
+        // robustBufferAccess2 an out-of-range read is undefined and may fault the device.
+        private void ProbeZeroOutOfBoundsReads()
+        {
+            if (Interlocked.Exchange(ref _zeroOutOfBoundsReadsProbed, 1) != 0)
+            {
+                return;
+            }
+
+            var forced = ZeroOutOfBoundsReadProbe.ReadOverride();
+            if (forced is not null)
+            {
+                Volatile.Write(ref _zeroOutOfBoundsReads, forced.Value ? 1 : 0);
+                Console.Error.WriteLine(
+                    $"[VK][OOB] out-of-range buffer reads zero={forced.Value} mismatches=unprobed tested=0 " +
+                    "(SHARPEMU_ZERO_OOB_READS)");
+                return;
+            }
+
+            if (!_robustBufferAccess2Enabled)
+            {
+                Console.Error.WriteLine(
+                    "[VK][OOB] out-of-range buffer reads zero=False mismatches=unprobed tested=0 " +
+                    "note=robustBufferAccess2 is not enabled on this device");
+                return;
+            }
+
+            var result = ZeroOutOfBoundsReadProbe.Run(_deviceInfo, _scheduler, CurrentRecordingBuffer);
+            Volatile.Write(ref _zeroOutOfBoundsReads, result.Zeroed ? 1 : 0);
+            Console.Error.WriteLine(
+                $"[VK][OOB] out-of-range buffer reads zero={result.Zeroed} " +
+                $"mismatches={result.Mismatches} tested={result.Tested}" +
+                (result.Note is null ? string.Empty : $" note={result.Note}"));
+        }
+
         // Never fatal - anything that goes wrong leaves the exact emulation in place.
         private void ProbeNativeHalfConversion()
         {
@@ -1079,6 +1116,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 maintenance8Features.PNext = null;
                 robustness2Features.RobustBufferAccess2 =
                     supportsRobustBufferAccess2 && supportedFeatures.RobustBufferAccess;
+                // The feature only reaches the device when the robustness2 struct is chained.
+                _robustBufferAccess2Enabled = robustness2Features.RobustBufferAccess2 && supportsRobustness2;
                 robustness2Features.RobustImageAccess2 = supportsRobustImageAccess2;
                 robustness2Features.NullDescriptor = supportsNullDescriptor;
                 robustness2Features.PNext = supportsMaintenance8 ? &maintenance8Features : null;

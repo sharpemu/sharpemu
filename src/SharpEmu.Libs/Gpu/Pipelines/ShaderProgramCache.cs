@@ -594,6 +594,7 @@ internal sealed class ShaderProgramCache
         var enableGraphicsSubgroups = _host.GraphicsSubgroupOperationsEnabled;
         var sharedInt64Atomics = _host.SharedInt64AtomicsEnabled;
         var nativeHalfConversion = _host.NativeHalfConversionExact;
+        var zeroOutOfBoundsReads = _host.ZeroOutOfBoundsBufferReads;
         switch (source.Stage)
         {
             case ShaderStage.Vertex:
@@ -607,6 +608,7 @@ internal sealed class ShaderProgramCache
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
                     NativeHalfConversionExact = nativeHalfConversion,
+                    ZeroOutOfBoundsBufferReads = zeroOutOfBoundsReads,
                     RequiredVertexOutputCount = options.RequiredVertexOutputCount,
                     VertexInputs = entry.VertexInputs,
                     PositionExportControl = info.PositionExportControl,
@@ -635,6 +637,7 @@ internal sealed class ShaderProgramCache
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
                     NativeHalfConversionExact = nativeHalfConversion,
+                    ZeroOutOfBoundsBufferReads = zeroOutOfBoundsReads,
                     PixelOutputs = options.PixelOutputs,
                     PixelInputEnable = options.PixelInputEnable,
                     PixelCustomInterpolationMask = info.CustomInterpolationMask,
@@ -646,7 +649,7 @@ internal sealed class ShaderProgramCache
 
             default:
                 return BuildComputeRequest(entry.Plan, resources, layout, options.ComputeInfo!, options.ComputeSystemRegisters,
-                    sharedInt64Atomics, _host.ExecGuardElisionEnabled, nativeHalfConversion);
+                    sharedInt64Atomics, _host.ExecGuardElisionEnabled, nativeHalfConversion, zeroOutOfBoundsReads);
         }
     }
 
@@ -663,10 +666,11 @@ internal sealed class ShaderProgramCache
 
     private static ShaderCompileRequest BuildComputeRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout layout,
         ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision,
-        bool nativeHalfConversion) =>
+        bool nativeHalfConversion, bool zeroOutOfBoundsReads) =>
         new(plan, resources, layout)
         {
             NativeHalfConversionExact = nativeHalfConversion,
+            ZeroOutOfBoundsBufferReads = zeroOutOfBoundsReads,
             WaveSize = info.WaveSize,
             EnableExecGuardElision = info.WaveSize != 64 || execGuardElision,
             TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
@@ -680,7 +684,8 @@ internal sealed class ShaderProgramCache
         };
 
     internal static bool TryCompilePrewarm(ComputePrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
-        bool sharedInt64Atomics, bool execGuardElision, bool nativeHalfConversion, out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error)
+        bool sharedInt64Atomics, bool execGuardElision, bool nativeHalfConversion, bool zeroOutOfBoundsReads,
+        out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error)
     {
         compiled = null;
         layout = null;
@@ -697,7 +702,7 @@ internal sealed class ShaderProgramCache
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor,
                 record.Info.DispatchThreadDimensions);
             var request = BuildComputeRequest(plan, resources, layout, record.Info, record.SystemRegisters,
-                sharedInt64Atomics, execGuardElision, nativeHalfConversion);
+                sharedInt64Atomics, execGuardElision, nativeHalfConversion, zeroOutOfBoundsReads);
             return compiler.TryCompileProgram(request, out compiled, out error) && compiled is not null;
         }
         catch (Exception exception)
