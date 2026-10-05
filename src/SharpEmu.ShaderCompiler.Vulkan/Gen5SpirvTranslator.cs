@@ -71,6 +71,7 @@ public static partial class Gen5SpirvTranslator
         private readonly bool _usesPixelValidMask;
         private readonly bool _enableGraphicsSubgroupOperations;
         private readonly bool _nativeHalfConversionExact;
+        private readonly bool _zeroOutOfBoundsBufferReads;
         private readonly uint _waveLaneCount;
         private readonly bool _emulateWave64;
 
@@ -7466,6 +7467,14 @@ public static partial class Gen5SpirvTranslator
 
         private uint LoadBufferWord(int binding, uint dwordAddress)
         {
+            // With the device measured to return zero past the end of a descriptor range, the
+            // range test, the address clamp and the zero select only reproduce what the read
+            // already does. The guest expects zero there, and so the load stands alone.
+            if (_zeroOutOfBoundsBufferReads)
+            {
+                return Load(_uintType, BufferWordPointer(binding, dwordAddress));
+            }
+
             var inRange = IsBufferWordInRange(binding, dwordAddress);
             var safeAddress = _module.AddInstruction(
                 SpirvOp.Select,
