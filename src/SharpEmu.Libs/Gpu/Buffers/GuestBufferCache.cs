@@ -731,6 +731,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     }
 
     private Action<ulong, ulong>? _uploadDirtyBuffersInRange;
+
+    private static readonly bool PreserveHotPagesInSweeps =
+        Environment.GetEnvironmentVariable("SHARPEMU_BDA_SWEEP_REPROTECT_HOT") != "1";
     private bool _bdaVisibilityPending = true;
 
     private static readonly bool SweepBdaOnEveryDraw =
@@ -758,8 +761,10 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var buffer = _registry.GetBuffer(_registry.GetRegisteredIdentifier(index));
             var start = Math.Max(buffer.CpuAddress, guestAddress);
             var finish = Math.Min(buffer.CpuAddress + buffer.Size, end);
+            // Hot pages stay writable and are copied again on the next sweep: a few hundred KiB of
+            // ring memory per sweep costs far less than a protection fault per page per frame.
             if (start < finish && _tracker.MayHaveCpuDirtyPages(start, finish - start))
-                _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
+                _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: PreserveHotPagesInSweeps);
         }
     }
 
@@ -785,7 +790,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 // SynchronizeBuffer takes for this read-only call), and the block summary
                 // answers that without a lock for the common all-clean case.
                 if (_tracker.HasCpuDirtyPages(start, finish - start))
-                    _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
+                    _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: PreserveHotPagesInSweeps);
             }
         }
     }
