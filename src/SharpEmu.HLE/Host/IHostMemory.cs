@@ -44,5 +44,12 @@ public interface IHostMemory
 
     bool Query(ulong address, out HostRegionInfo info);
 
+    // This reports allocation bounds, not page protection or commit state.
+    bool TryQueryAllocation(ulong address, out HostAddressRange range)
+    {
+        range = default;
+        return false;
+    }
+
     void FlushInstructionCache(ulong address, ulong size);
 }

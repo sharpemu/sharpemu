@@ -13,9 +13,53 @@ namespace SharpEmu.Libs.Tests.Memory.GuestMemory;
 [Collection(GuestMemoryStateCollection.Name)]
 public sealed unsafe class PhysicalVirtualMemoryBackedTests
 {
+    [Fact]
+    public void DefaultHostForwardsAllocationQueriesAndReusesReleasedLowerGap()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var host = HostViewMemory.Create();
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var runtimeHost = (IHostMemory)typeof(PhysicalVirtualMemory)
+            .GetField("_hostMemory", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(memory)!;
+        var size = host.Granularity;
+        var start = ProbeGuestAddress(host, 4 * size);
+        Assert.Equal(start, PlatformMemory.Reserve(start, size, HostPageProtection.NoAccess));
+        var foreignHeld = true;
+        try
+        {
+            Assert.True(runtimeHost.TryQueryAllocation(start + 4096, out var allocation));
+            Assert.Equal(new HostAddressRange(start, size), allocation);
+            Assert.True(memory.TryHoldRangeAtOrAbove(start, size, size, out var selected));
+            Assert.Equal(start + size, selected);
+            Assert.True(PlatformMemory.Free(start));
+            foreignHeld = false;
+            Assert.False(runtimeHost.TryQueryAllocation(start, out _));
+            Assert.True(memory.TryHoldRangeAtOrAbove(start, size, size, out selected));
+            Assert.Equal(start, selected);
+        }
+        finally
+        {
+            if (foreignHeld) Assert.True(PlatformMemory.Free(start));
+        }
+    }
+
     private sealed class QueryCountingHostMemory(IHostMemory inner) : IHostMemory
     {
         public int QueryCount { get; set; }
+        public int AllocationQueryCount { get; set; }
+        public int AllocationQueryMode { get; init; }
+        public bool TryQueryAllocation(ulong address, out HostAddressRange range)
+        {
+            AllocationQueryCount++;
+            range = default;
+            if (AllocationQueryMode == 2)
+            {
+                range = new HostAddressRange(address, ulong.MaxValue);
+                return true;
+            }
+            return AllocationQueryMode == 1 && inner.TryQueryAllocation(address, out range);
+        }
         public bool RejectExecutableProtection { get; init; }
         public ulong Allocate(ulong address, ulong size, HostPageProtection protection) => inner.Allocate(address, size, protection);
         public ulong Reserve(ulong address, ulong size, HostPageProtection protection) => inner.Reserve(address, size, protection);
@@ -326,6 +370,40 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         Assert.Equal(higherAddress + size, selectedAddress);
         Assert.Equal(0, memoryHost.QueryCount);
         Assert.Equal(0UL, selectedAddress % host.Granularity);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void ForeignAllocationSearchPreservesLowerGapAfterRelease(int queryMode)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var host = HostViewMemory.Create();
+        var memoryHost = new QueryCountingHostMemory(PlatformMemory) { AllocationQueryMode = queryMode };
+        using var memory = new PhysicalVirtualMemory(memoryHost, host, BackingSize);
+        var size = host.Granularity;
+        var start = ProbeGuestAddress(host, 4 * size);
+        Assert.Equal(start, PlatformMemory.Reserve(start, size, HostPageProtection.NoAccess));
+        var foreignHeld = true;
+        try
+        {
+            Assert.True(memory.TryHoldRangeAtOrAbove(start, size, size, out var selected));
+            Assert.Equal(start + size, selected);
+            Assert.True(memoryHost.AllocationQueryCount > 0);
+            if (queryMode == 1)
+                Assert.Equal(0, memoryHost.QueryCount);
+            else
+                Assert.True(memoryHost.QueryCount > 0);
+            Assert.True(PlatformMemory.Free(start));
+            foreignHeld = false;
+            Assert.True(memory.TryHoldRangeAtOrAbove(start, size, size, out selected));
+            Assert.Equal(start, selected);
+        }
+        finally
+        {
+            if (foreignHeld) Assert.True(PlatformMemory.Free(start));
+        }
     }
 
     [Fact]
