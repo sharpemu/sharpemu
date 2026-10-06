@@ -5,6 +5,7 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime;
 using System.Text;
 using System.Linq;
 using SharpEmu.Core;
@@ -200,6 +201,7 @@ public sealed class SelfLoader : ISelfLoader
         {
             if (clearVirtualMemory)
             {
+                TryReleaseGcReservationOverlapping(imageBase);
                 if (!physicalVm.TryAllocateAtExact(imageBase, totalImageSize, executable: true, out var allocatedBase))
                 {
                     // Exact allocation failed — the host may have already claimed
@@ -469,6 +471,43 @@ public sealed class SelfLoader : ISelfLoader
         }
 
         return headers;
+    }
+
+    // The guest image must sit at a hardcoded base, but the CLR grows its own
+    // virtual reservation and can end up claiming that range first. Observed on a
+    // 16GB Windows host via VMMap: the GC reserved ~256GB starting near
+    // 0x7FFF0000, which covers the 0x800000000 the loader needs, so the very
+    // first allocation failed and the process died during init.
+    //
+    // A forced compacting collection can hand that reservation back, so give it one
+    // chance before declaring the address space lost. Runs once per image load.
+    //
+    // ponytail: best effort, not a guarantee - there is no CLR API that reliably
+    // shrinks the reservation, and on a genuinely busy address range this changes
+    // nothing. The real fix would be reserving the guest base before the GC grows,
+    // which means doing it at process startup rather than at load time.
+    private static void TryReleaseGcReservationOverlapping(ulong imageBase)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var previousLatency = GCSettings.LatencyMode;
+        try
+        {
+            // SustainedLowLatency keeps the GC from re-growing the reservation
+            // while the allocation attempt is in flight.
+            GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+            Console.Error.WriteLine(
+                $"[LOADER] Requested GC reservation release before claiming main image base " +
+                $"0x{imageBase:X16}; retrying exact allocation.");
+        }
+        finally
+        {
+            GCSettings.LatencyMode = previousLatency;
+        }
     }
 
     private static void MapLoadSegments(
