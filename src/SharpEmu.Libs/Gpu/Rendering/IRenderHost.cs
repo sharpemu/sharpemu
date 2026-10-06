@@ -126,6 +126,9 @@ public interface IRenderHost
 
     BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten);
 
+    void TraceVertexBuffer(ulong shaderHash, VertexAttributeResource attribute, VertexInputBuffer input,
+        BufferBinding binding, ulong requestedBytes, ulong acquiredBytes) { }
+
     // Copies host bytes into the stream ring for the current recording.
     BufferBinding UploadTransient(ReadOnlySpan<byte> data, uint alignment);
 

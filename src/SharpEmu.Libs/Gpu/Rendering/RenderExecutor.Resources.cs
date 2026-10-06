@@ -93,6 +93,8 @@ public sealed partial class RenderExecutor
 
         var prepared = new BufferBinding[buffers.Length];
         BufferBinding? nullBuffer = null;
+        Span<ulong> acquiredBytes = stackalloc ulong[buffers.Length];
+        acquiredBytes.Clear();
         for (var slot = 0; slot < buffers.Length; slot++)
         {
             ref readonly var vertex = ref buffers[slot];
@@ -120,6 +122,14 @@ public sealed partial class RenderExecutor
 
             ref readonly var owner = ref merged[found];
             prepared[slot] = new BufferBinding(owner.Binding.Handle, owner.Binding.Offset + vertex.Address - owner.BaseAddress);
+            acquiredBytes[slot] = owner.AcquiredEnd - vertex.Address;
+        }
+
+        foreach (var attribute in vertexInput.Attributes)
+        {
+            var slot = attribute.BufferIndex;
+            _host.TraceVertexBuffer(vertexInput.Stage.Program?.Hash ?? 0, attribute, buffers[slot],
+                prepared[slot], sizes[slot], acquiredBytes[slot]);
         }
 
         return prepared;
