@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Text;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
@@ -14,6 +15,71 @@ namespace SharpEmu.ShaderCompiler.Tests;
 
 public sealed class Gen5PixelOutputMappingTests
 {
+    [Theory]
+    [InlineData(true, 1u, 8u, true)]
+    [InlineData(true, 3u, 8u, true)]
+    [InlineData(false, 1u, 8u, false)]
+    [InlineData(true, 0u, 8u, false)]
+    [InlineData(true, 4u, 8u, false)]
+    [InlineData(true, 1u, 9u, false)]
+    public void DepthExportRequiresEnabledDepthComponent(bool enabled, uint mask, uint target, bool expected)
+    {
+        var code = CompilePixelProgram(Gen5ColorComponentMapping.Identity,
+            enableMask: mask, target: target, outputs: [], depthExportEnable: enabled);
+        var instructions = ReadInstructions(code);
+        var depth = instructions.Where(instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands.Length == 3 && instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn &&
+            instruction.Operands[2] == (uint)SpirvBuiltIn.FragDepth).ToArray();
+        Assert.Equal(expected ? 1 : 0, depth.Length);
+        Assert.Equal(expected, instructions.Any(instruction => instruction.Opcode == SpirvOp.ExecutionMode &&
+            instruction.Operands[1] == (uint)SpirvExecutionMode.DepthReplacing));
+        if (expected)
+        {
+            var variable = depth[0].Operands[0];
+            var stores = instructions.Where(instruction => instruction.Opcode == SpirvOp.Store &&
+                instruction.Operands[0] == variable).ToArray();
+            Assert.Equal(2, stores.Length);
+            var selected = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Select &&
+                instruction.Operands[1] == stores[1].Operands[1]);
+            Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.Load &&
+                instruction.Operands[1] == selected.Operands[4] && instruction.Operands[2] == variable);
+            Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.INotEqual &&
+                instruction.Operands[1] == selected.Operands[2]);
+            Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.Kill);
+        }
+        ValidateDepthModule(code);
+    }
+
+    private static void ValidateDepthModule(byte[] code)
+    {
+        var sdk = Environment.GetEnvironmentVariable("VULKAN_SDK");
+        if (string.IsNullOrEmpty(sdk)) return;
+        var executable = Path.Combine(sdk, OperatingSystem.IsWindows() ? "Bin/spirv-val.exe" : "bin/spirv-val");
+        Assert.True(File.Exists(executable), executable);
+        var path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllBytes(path, code);
+            var start = new ProcessStartInfo(executable)
+            {
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            start.ArgumentList.Add("--target-env");
+            start.ArgumentList.Add("vulkan1.2");
+            start.ArgumentList.Add(path);
+            using var process = Process.Start(start)!;
+            var error = process.StandardError.ReadToEnd();
+            process.WaitForExit();
+            Assert.True(process.ExitCode == 0, error);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData(Gen5PixelOutputKind.Uint, 3u)]
     [InlineData(Gen5PixelOutputKind.Uint, 12u)]
@@ -273,7 +339,8 @@ public sealed class Gen5PixelOutputMappingTests
         uint target = 0,
         IReadOnlyList<Gen5PixelOutputBinding>? outputs = null,
         IReadOnlyList<Gen5ShaderInstruction>? prefix = null,
-        bool enableGraphicsSubgroupOperations = true)
+        bool enableGraphicsSubgroupOperations = true,
+        bool depthExportEnable = false)
     {
         var prefixInstructions = prefix ?? [];
         var export = new Gen5ShaderInstruction(
@@ -307,6 +374,7 @@ public sealed class Gen5PixelOutputMappingTests
                     Gen5PixelOutputKind.Float,
                     componentMapping)],
             EnableGraphicsSubgroupOperations = enableGraphicsSubgroupOperations,
+            PixelDepthExportEnable = depthExportEnable,
         };
 
         Assert.True(
