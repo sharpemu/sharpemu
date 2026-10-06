@@ -290,6 +290,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public bool TryReadGuest(ulong address, Span<byte> destination)
         {
+            if (_bufferCache.TryReadCommandBacking(address, destination)) return true;
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandMemorySync))
             {
                 if (!_bufferCache.TrySynchronizeCpuRead(address, (ulong)destination.Length,

@@ -328,6 +328,18 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         return (owner, owner.Offset(guestAddress));
     }
 
+    // The command worker can read the stable backing alias without changing CPU page
+    // permissions. A GPU counter elsewhere on the same page is not a dependency of
+    // the packet bytes being decoded. Actual GPU-written bytes retain the slow path.
+    private static readonly bool CommandBackingReadsEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_COMMAND_BACKING_READS") != "0";
+
+    public bool TryReadCommandBacking(ulong address, Span<byte> destination) =>
+        CommandBackingReadsEnabled && destination.Length != 0 &&
+        !_gpuModifiedRanges.Overlaps(address, (ulong)destination.Length) &&
+        ImageCache is { } images && !images.HasGpuModifiedImageBytes(address, (ulong)destination.Length) &&
+        _backing.TryReadBacking(address, destination);
+
     public void WriteHostMemory(ulong guestAddress, ReadOnlySpan<byte> data)
     {
         if (guestAddress == 0 || data.IsEmpty || (ulong)data.Length > ulong.MaxValue - guestAddress)
