@@ -1573,6 +1573,16 @@ public static partial class Gen5SpirvTranslator
             var synchronizeSharedMemory = _emulateWave64 && halfMaskPlan is null && (blocks.Count == 1 ||
                 (_stage == Gen5SpirvStage.Compute && !_hasIndirectControlFlow &&
                     FindComputeDispatcherStart(blocks) == blocks.Count));
+            var lastWorkgroupBarrierIndex = -1;
+            if (!_emulateWave64 && _stage == Gen5SpirvStage.Compute && !_hasIndirectControlFlow &&
+                FindComputeDispatcherStart(blocks) == blocks.Count)
+            {
+                for (var index = block.StartIndex; index < block.EndIndex; index++)
+                {
+                    if (_request.Program.Instructions[index].Opcode == "SBarrier") lastWorkgroupBarrierIndex = index;
+                }
+            }
+            var passedWorkgroupBarrier = false;
             var sharedMemoryPhase = SharedMemoryPhase.None;
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
@@ -1595,16 +1605,25 @@ public static partial class Gen5SpirvTranslator
                     continue;
                 }
 
-                if (synchronizeSharedMemory)
+                if (synchronizeSharedMemory || lastWorkgroupBarrierIndex >= 0)
                 {
                     var nextPhase = instruction.Control is Gen5DataShareControl { Gds: false }
                         ? instruction.Opcode.StartsWith("DsRead", StringComparison.Ordinal) ? SharedMemoryPhase.Read
                         : instruction.Opcode.StartsWith("DsWrite", StringComparison.Ordinal) ? SharedMemoryPhase.Write : SharedMemoryPhase.None
                         : SharedMemoryPhase.None;
-                    if (instruction.Opcode == "SBarrier") sharedMemoryPhase = SharedMemoryPhase.None;
+                    if (instruction.Opcode == "SBarrier")
+                    {
+                        sharedMemoryPhase = SharedMemoryPhase.None;
+                        passedWorkgroupBarrier = true;
+                    }
                     if (nextPhase != SharedMemoryPhase.None)
                     {
-                        if (sharedMemoryPhase != SharedMemoryPhase.None && sharedMemoryPhase != nextPhase) EmitWave64Barrier();
+                        // Keep all shared reads complete before a reduction overwrites their source.
+                        // Existing barriers bound this straight-line workgroup region.
+                        var protectSharedReads = passedWorkgroupBarrier && index < lastWorkgroupBarrierIndex &&
+                            sharedMemoryPhase == SharedMemoryPhase.Read && nextPhase == SharedMemoryPhase.Write;
+                        if ((synchronizeSharedMemory && sharedMemoryPhase != SharedMemoryPhase.None &&
+                            sharedMemoryPhase != nextPhase) || protectSharedReads) EmitWave64Barrier();
                         sharedMemoryPhase = nextPhase;
                     }
                 }
