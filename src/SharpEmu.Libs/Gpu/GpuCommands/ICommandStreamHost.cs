@@ -62,8 +62,8 @@ public enum EndOfPipeWriteKind
     FlipWithInterruptWriteBack32,
 }
 
-// A completion the host records on the current command buffer. The label itself is
-// already in guest memory when this is recorded.
+// A completion the host records on the current command buffer. When
+// RecordsCompletionLabels is true, the host also records the label's GPU write.
 public readonly record struct EndOfPipeWrite(
     EndOfPipeWriteKind Kind,
     ulong SubmitId,
@@ -84,8 +84,20 @@ public interface ICommandStreamHost
 {
     ICpuMemory Memory { get; }
 
+    // The host records labels as GPU writes; the interpreter must not publish them early.
+    bool RecordsCompletionLabels => false;
+
+    // Later GPU commands execute after a recorded label. A matching paired GPU wait
+    // may be decoded without blocking the CPU worker or publishing the label early.
+    bool CanOrderCompletionWaitOnGpu => false;
+
+    bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source) => Memory.TryWrite(address, source);
+
     // Reads guest memory the GPU may have written; the host synchronizes GPU-owned pages first.
     bool TryReadGuest(ulong address, Span<byte> destination);
+
+    // A live synchronization signal may be polled without waiting for its GPU writer.
+    bool TryReadGuestSignal(ulong address, Span<byte> destination) => TryReadGuest(address, destination);
 
     // Runs commands other threads posted to this worker. Called before every packet.
     void RunPendingCommands();

@@ -583,6 +583,32 @@ public sealed unsafe partial class GuestImageCache
     }
 
     // Copies image data into the buffer without transferring GPU ownership to the buffer.
+    public void PreserveGpuContentsForBufferWrite(ulong address, ulong size)
+    {
+        using var held = _lock.Hold();
+        foreach (var identifier in FindImagesInRange(address, size, pageOverlap: false))
+        {
+            var image = _slots[identifier];
+            // CPU/buffer invalidation makes an older cached image non-authoritative.
+            // Copying it back would overwrite the newer buffer contents.
+            if (image.DepthOwner.IsValid || !CanReadBack(image) || image.BufferHoldsGpuContents)
+                continue;
+
+            var range = image.Description.Data;
+            // A complete overwrite has no old bytes to preserve.
+            if (address <= range.Address && size >= range.End - address)
+                continue;
+
+            var plan = PlanDownload(image);
+            if (!plan.Valid)
+                throw SubmissionScheduler.Fatal($"Cannot preserve an image for a partial buffer write: address=0x{range.Address:X16} size=0x{range.Size:X}.");
+
+            var (buffer, offset) = _bufferCache.ObtainBuffer(range.Address, range.Size, isWritten: true);
+            DownloadToBuffer(image, buffer, offset, range.Size, plan);
+            image.MarkBufferHoldsGpuContents();
+        }
+    }
+
     public bool TrySynchronizeBufferFromImage(GpuBuffer buffer, ulong address, ulong size)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageDownload);

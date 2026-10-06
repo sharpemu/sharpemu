@@ -43,10 +43,11 @@ internal sealed class PresenterUnderTest : IDisposable
     public const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     public static readonly Type PresenterType = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
 
-    public PresenterUnderTest(HeadlessVulkan vulkan, bool startScheduler = true)
+    public PresenterUnderTest(HeadlessVulkan vulkan, bool startScheduler = true, bool directGuestBuffers = false)
     {
         var forwarder = new SchedulerForwarder();
-        Harness = new CacheHarness(vulkan, hooks: new SchedulerHooks(forwarder, forwarder.Prepare, forwarder.Complete), startScheduler: startScheduler);
+        Harness = new CacheHarness(vulkan, hooks: new SchedulerHooks(forwarder, forwarder.Prepare, forwarder.Complete),
+            startScheduler: startScheduler, directGuestBuffers: directGuestBuffers);
         Samplers = new SamplerStore(vulkan.DeviceInfo);
         Instance = RuntimeHelpers.GetUninitializedObject(PresenterType);
         SetField("_vk", vulkan.Vk);

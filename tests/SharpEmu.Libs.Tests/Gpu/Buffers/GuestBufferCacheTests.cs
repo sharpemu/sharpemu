@@ -23,6 +23,27 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
 {
     private const ulong Page = GuestBufferCache.CachingPageSize;
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CommandWritePreservesUnwrittenGpuImagePixelsAndRefreshesTheImage(bool direct)
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || (direct && _vulkan!.DeviceInfo.ExternalMemoryHost == null)) return;
+        using var harness = new CacheHarness(_vulkan!, directGuestBuffers: direct);
+        var address = harness.MapBacked(Page, ReadWrite);
+        var request = Color32(address, 4);
+        var id = harness.Acquire(ref request);
+        harness.Worker.Run(() =>
+        {
+            Assert.True(harness.Images.TryClearImageFromBuffer(address, 16, 0x22222222));
+            harness.Cache.RecordCommandWrite(address + 4, BitConverter.GetBytes(0xABCDEF01u));
+        });
+        var refreshed = harness.Acquire(ref request);
+        Assert.Equal(Bytes(0x22222222u, 0xABCDEF01u, 0x22222222u, 0x22222222u),
+            harness.ReadImageBytes(harness.Image(refreshed)));
+        harness.Shutdown();
+    }
+
     [Fact]
     public void CommandBackingReadRejectsGpuImageBytesButAllowsCleanPageNeighbours()
     {
@@ -69,6 +90,378 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         });
     }
 
+    [Fact]
+    public void DirectGuestBufferFallsBackAcrossSeparateMappingsWithoutLosingWrites()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var harness = new CacheHarness(_vulkan, directGuestBuffers: true);
+        var address = harness.MapBacked(2 * Page, ReadWrite);
+        // Split one virtual span into distinct backing views, leaving a valid union.
+        Assert.True(harness.Memory.TryUnmapBacked(address + Page, Page));
+        Assert.True(harness.Memory.TryMapBacked(address + Page, Page, 3 * Page, ReadWrite, out _));
+        harness.Worker.Run(() =>
+        {
+            var (first, offset) = harness.Cache.ObtainBuffer(address, 4, true);
+            Assert.True(first.IsGuestImport);
+            first.Fill(offset, 4, 0x12345678);
+            var (merged, _) = harness.Cache.ObtainBuffer(address, 2 * Page, true);
+            Assert.False(merged.IsGuestImport);
+            merged.Fill(Page, 4, 0xABCDEF);
+            harness.Scheduler.Finish();
+        });
+        Assert.True(harness.Cache.TrySynchronizeCpuRead(address, 2 * Page));
+        Assert.Equal(new byte[] { 0x78, 0x56, 0x34, 0x12 }, harness.Read(address, 4));
+        Assert.Equal(new byte[] { 0xEF, 0xCD, 0xAB, 0 }, harness.Read(address + Page, 4));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void DirectGuestRegionBoundaryFallsBackAndReleasesBothImports()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        const ulong region = GuestBufferImportPool.RegionSize;
+        FailingBacking? backing = null;
+        using var harness = new CacheHarness(_vulkan, backingBytes: 2 * region,
+            backing: memory => backing = new FailingBacking(memory) { AllowAliases = true }, directGuestBuffers: true);
+        var address = harness.MapBacked(2 * Page, ReadWrite);
+        Assert.True(harness.Memory.TryUnmapBacked(address, 2 * Page));
+        Assert.True(harness.Memory.TryMapBacked(address, 2 * Page, region - Page, ReadWrite, out _));
+        harness.Worker.Run(() =>
+        {
+            var (first, firstOffset) = harness.Cache.ObtainBuffer(address, 4, true);
+            var (second, secondOffset) = harness.Cache.ObtainBuffer(address + Page, 4, true);
+            Assert.True(first.IsGuestImport);
+            Assert.True(second.IsGuestImport);
+            Assert.Equal(2, backing!.AliasLeases);
+            first.Fill(firstOffset, 4, 123);
+            second.Fill(secondOffset, 4, 456);
+            harness.Write(address + 16, BitConverter.GetBytes(789u));
+            var (merged, _) = harness.Cache.ObtainBuffer(address, 2 * Page, false);
+            Assert.False(merged.IsGuestImport);
+            harness.Scheduler.Finish();
+        });
+        Assert.Equal(123u, BitConverter.ToUInt32(harness.Read(address, 4)));
+        Assert.Equal(456u, BitConverter.ToUInt32(harness.Read(address + Page, 4)));
+        Assert.Equal(789u, BitConverter.ToUInt32(harness.Read(address + 16, 4)));
+        harness.Shutdown();
+        Assert.Equal(0, backing!.AliasLeases);
+    }
+
+    [Fact]
+    public void DirectGuestPreparedWritesFollowTheDrawAfterAnUploadSubmission()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var harness = new CacheHarness(_vulkan, directGuestBuffers: true);
+        var address = harness.MapBacked(Page, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            using var writes = harness.Cache.RetainPreparedWrites();
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address, 4, isWritten: true);
+            // Simulate another resource's upload draining the recording tick after
+            // the writable descriptor was bound, but before its dispatch is recorded.
+            harness.Scheduler.Finish();
+            var producer = harness.Scheduler.CurrentTick;
+            buffer.Fill(offset, 4, 0x12345678);
+            writes!.Record();
+            harness.Cache.SynchronizeCommandRead(address, 4);
+            Assert.True(harness.Scheduler.CurrentTick > producer);
+            Assert.Equal(0x12345678u, BitConverter.ToUInt32(harness.Read(address, 4)));
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void DirectGuestCommandWriteTracksTheProducerAfterAStagingWrap()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var harness = new CacheHarness(_vulkan, directGuestBuffers: true);
+        var address = harness.MapBacked(Page, ReadWrite);
+        byte[] expected = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        harness.Worker.Run(() =>
+        {
+            // Complete registration first; its BDA-table upload also uses staging.
+            _ = harness.Cache.FindBuffer(address, Page);
+            var staging = harness.Cache.GetUtilityBuffer(GpuBufferUsage.Upload);
+            Assert.True(staging.TryMap(staging.Size - 4, out _));
+            staging.Commit();
+            var before = harness.Scheduler.CurrentTick;
+            harness.Cache.RecordCommandWrite(address, expected);
+            Assert.True(harness.Scheduler.CurrentTick > before, "Staging must wrap into a new recording tick.");
+            var producer = harness.Scheduler.CurrentTick;
+            harness.Cache.SynchronizeCommandRead(address, (ulong)expected.Length);
+            Assert.True(harness.Scheduler.CurrentTick > producer, "The CPU read must wait for the actual copy producer.");
+            Assert.Equal(expected, harness.Read(address, expected.Length));
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void DirectGuestSignalPredictionUsesPhysicalAliasesAndRejectsShaderOverwrites()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var harness = new CacheHarness(_vulkan, directGuestBuffers: true);
+        var original = harness.MapBacked(Page, ReadWrite);
+        var alias = harness.MapBacked(Page, ReadWrite);
+        Assert.True(harness.Memory.TryUnmapBacked(alias, Page));
+        Assert.True(harness.Memory.TryMapBacked(alias, Page, 0, ReadWrite, out _));
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.RecordCompletionLabel(original, 123, false);
+            Span<byte> value = stackalloc byte[4];
+            Assert.True(harness.Cache.TryReadQueuedSignal(alias, value));
+            Assert.Equal(123u, BitConverter.ToUInt32(value));
+            var (buffer, offset) = harness.Cache.ObtainBuffer(alias, 4, true);
+            buffer.Fill(offset, 4, 456);
+            Assert.False(harness.Cache.TryReadQueuedSignal(original, value));
+            harness.Scheduler.Finish();
+            Assert.True(harness.Cache.TryReadDirectSignal(alias, value));
+            Assert.Equal(456u, BitConverter.ToUInt32(value));
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void DirectGuestSignalPollDoesNotSubmitOrWaitForItsProducer()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var harness = new CacheHarness(_vulkan, directGuestBuffers: true);
+        var address = harness.MapBacked(Page, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.RecordCompletionLabel(address, 123, false);
+            var recording = harness.Scheduler.CurrentTick;
+            Span<byte> bytes = stackalloc byte[4];
+            Assert.True(harness.Cache.TryReadDirectSignal(address, bytes));
+            Assert.Equal(0u, BitConverter.ToUInt32(bytes));
+            Assert.Equal(recording, harness.Scheduler.CurrentTick);
+            harness.Scheduler.Finish();
+            Assert.True(harness.Cache.TryReadDirectSignal(address, bytes));
+            Assert.Equal(123u, BitConverter.ToUInt32(bytes));
+        });
+    }
+
+    [Fact]
+    public void DirectGuestMergePreservesPendingWritesAndCpuNeighbours()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var harness = new CacheHarness(_vulkan, directGuestBuffers: true);
+        var address = harness.MapBacked(3 * Page, ReadWrite);
+        var merged = harness.Worker.Run(() =>
+        {
+            harness.Cache.RecordCommandWrite(address, BitConverter.GetBytes(123u));
+            harness.Cache.RecordCommandWrite(address + 2 * Page, BitConverter.GetBytes(456u));
+            var (buffer, _) = harness.Cache.ObtainBuffer(address, 3 * Page, false);
+            Assert.True(buffer.IsGuestImport);
+            harness.Write(address + Page, BitConverter.GetBytes(789u));
+            return buffer;
+        });
+        var bytes = harness.ReadBack(merged, merged.Offset(address), 3 * Page);
+        Assert.True(BitConverter.ToUInt32(bytes) == 123,
+            $"guest={BitConverter.ToUInt32(harness.Read(address, 4))} buffer={BitConverter.ToUInt32(bytes)} middle={BitConverter.ToUInt32(bytes.AsSpan((int)Page))} last={BitConverter.ToUInt32(bytes.AsSpan((int)(2 * Page)))} base={merged.CpuAddress:X} requested={address:X} size={merged.Size:X}");
+        Assert.Equal(123u, BitConverter.ToUInt32(bytes));
+        Assert.Equal(789u, BitConverter.ToUInt32(bytes.AsSpan((int)Page)));
+        Assert.Equal(456u, BitConverter.ToUInt32(bytes.AsSpan((int)(2 * Page))));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void DirectGuestAliasLeaseSurvivesRetirementAndReleasesAtShutdown()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        FailingBacking? backing = null;
+        using var harness = new CacheHarness(_vulkan,
+            backing: memory => backing = new FailingBacking(memory) { AllowAliases = true }, directGuestBuffers: true);
+        var address = harness.MapBacked(Page, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.RecordCommandWrite(address, BitConverter.GetBytes(123u));
+            Assert.Equal(1, backing!.AliasLeases);
+            Assert.True(harness.Memory.TryUnmapBacked(address, Page));
+            Assert.True(harness.Memory.TryMapBacked(address, Page, Page, ReadWrite, out _));
+            harness.Cache.RecordCommandWrite(address, BitConverter.GetBytes(456u));
+            // Both buffer views share one allocation and one backing lease.
+            Assert.Equal(1, backing.AliasLeases);
+            harness.Scheduler.Finish();
+            harness.Scheduler.RunCompletedOperations();
+            Assert.Equal(1, backing.AliasLeases);
+        });
+        harness.Shutdown();
+        Assert.Equal(0, backing!.AliasLeases);
+    }
+
+    [Fact]
+    public void DirectGuestUnsupportedBackingFallsBackWithoutHoldingALease()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        FailingBacking? backing = null;
+        using var harness = new CacheHarness(_vulkan!,
+            backing: memory => backing = new FailingBacking(memory), directGuestBuffers: true);
+        var address = harness.MapBacked(Page, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address, 4, true);
+            Assert.False(buffer.IsGuestImport);
+            buffer.Fill(offset, 4, 123);
+        });
+        Assert.True(harness.Cache.TrySynchronizeCpuRead(address, 4));
+        Assert.Equal(123u, BitConverter.ToUInt32(harness.Read(address, 4)));
+        harness.Shutdown();
+        Assert.Equal(0, backing!.AliasLeases);
+    }
+
+    [Fact]
+    public void DirectGuestGpuReadThroughAnotherAliasSeesPendingWritesWithoutACpuWait()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var harness = new CacheHarness(_vulkan, directGuestBuffers: true);
+        var original = harness.MapBacked(Page, ReadWrite);
+        var alias = harness.MapBacked(Page, ReadWrite);
+        Assert.True(harness.Memory.TryUnmapBacked(alias, Page));
+        Assert.True(harness.Memory.TryMapBacked(alias, Page, 0, ReadWrite, out _));
+        var source = harness.Worker.Run(() =>
+        {
+            harness.Cache.RecordCommandWrite(original, BitConverter.GetBytes(123u));
+            var recording = harness.Scheduler.CurrentTick;
+            var (buffer, _) = harness.Cache.ObtainBuffer(alias, 4, false);
+            Assert.True(buffer.IsGuestImport);
+            Assert.Equal(recording, harness.Scheduler.CurrentTick);
+            return buffer;
+        });
+        Assert.Equal(123u, BitConverter.ToUInt32(harness.ReadBack(source, source.Offset(alias), 4)));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void DirectGuestCommandReadThroughAnotherAliasWaitsForThePhysicalWriter()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var harness = new CacheHarness(_vulkan, directGuestBuffers: true);
+        var original = harness.MapBacked(Page, ReadWrite);
+        var alias = harness.MapBacked(Page, ReadWrite);
+        Assert.True(harness.Memory.TryUnmapBacked(alias, Page));
+        Assert.True(harness.Memory.TryMapBacked(alias, Page, 0, ReadWrite, out _));
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.RecordCommandWrite(original, new byte[] { 1, 2, 3, 4 });
+            Span<byte> bytes = stackalloc byte[4];
+            Assert.False(harness.Cache.TryReadCommandBacking(alias, bytes));
+            Assert.True(harness.Cache.HasGpuDirtyBytes(alias, 4));
+            var recording = harness.Scheduler.CurrentTick;
+            harness.Cache.TrySynchronizeCpuRead(alias, 4);
+            Assert.True(harness.Scheduler.CurrentTick > recording);
+            Assert.Equal(new byte[] { 1, 2, 3, 4 }, harness.Read(alias, 4));
+        });
+    }
+
+    [Fact]
+    public void DirectGuestRemapLeavesPendingWritesOnTheOldPhysicalBacking()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var harness = new CacheHarness(_vulkan, directGuestBuffers: true);
+        var address = harness.MapBacked(Page, ReadWrite);
+        var oldAlias = harness.MapBacked(Page, ReadWrite);
+        Assert.True(harness.Memory.TryUnmapBacked(oldAlias, Page));
+        Assert.True(harness.Memory.TryMapBacked(oldAlias, Page, 0, ReadWrite, out _));
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.RecordCommandWrite(address, BitConverter.GetBytes(0x11223344u));
+            Assert.True(harness.Memory.TryUnmapBacked(address, Page));
+            Assert.True(harness.Memory.TryMapBacked(address, Page, Page, ReadWrite, out _));
+            harness.Cache.RecordCommandWrite(address, BitConverter.GetBytes(0x55667788u));
+            harness.Cache.SynchronizeCommandRead(oldAlias, 4);
+            harness.Scheduler.Finish();
+            Assert.Equal(0x11223344u, BitConverter.ToUInt32(harness.Read(oldAlias, 4)));
+            Assert.Equal(0x55667788u, BitConverter.ToUInt32(harness.Read(address, 4)));
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void DirectGuestCommandReadDoesNotSubmitUnrelatedNeighbourWrite()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var harness = new CacheHarness(_vulkan, directGuestBuffers: true);
+        var address = harness.MapBacked(Page, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.RecordCommandWrite(address, new byte[] { 1, 2, 3, 4 });
+            harness.Scheduler.Finish();
+            harness.Cache.RecordCommandWrite(address + 16, new byte[] { 5, 6, 7, 8 });
+            var recording = harness.Scheduler.CurrentTick;
+            harness.Cache.SynchronizeCommandRead(address, 4);
+            Assert.Equal(recording, harness.Scheduler.CurrentTick);
+            Assert.Equal(new byte[] { 1, 2, 3, 4 }, harness.Read(address, 4));
+            harness.Cache.SynchronizeCommandRead(address + 16, 4);
+            Assert.True(harness.Scheduler.CurrentTick > recording);
+            Assert.Equal(new byte[] { 5, 6, 7, 8 }, harness.Read(address + 16, 4));
+        });
+    }
+
+    [Fact]
+    public void DirectGuestBufferSharesBytesWithoutProtectingCpuNeighbours()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var harness = new CacheHarness(_vulkan, directGuestBuffers: true);
+        var address = harness.MapBacked(Page, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address, 4, true);
+            Assert.True(buffer.IsGuestImport);
+            buffer.Fill(offset, 4, 0x12345678);
+            Assert.False(harness.Cache.HasGpuDirtyPages(address, Page));
+            Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(address));
+            // An unrelated CPU write before submission must not wait for any GPU work.
+            harness.Write(address + 16, new byte[] { 1, 2, 3, 4 });
+            harness.Scheduler.Finish();
+        });
+        Assert.Equal(new byte[] { 0x78, 0x56, 0x34, 0x12 }, harness.Read(address, 4));
+        Assert.Equal(new byte[] { 1, 2, 3, 4 }, harness.Read(address + 16, 4));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CompletionLabelWaitsForSubmissionAndFollowsEarlierGpuWrite(bool direct)
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || (direct && _vulkan!.DeviceInfo.ExternalMemoryHost == null)) return;
+        using var harness = new CacheHarness(_vulkan!, directGuestBuffers: direct);
+        var address = harness.MapBacked(Page, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address, 4, true);
+            buffer.Fill(offset, 4, 0x12345678);
+            harness.Cache.RecordCompletionLabel(address + 16, 0x1122334455667788, true);
+            Span<byte> before = stackalloc byte[8];
+            Assert.True(harness.Memory.TryReadBacking(address + 16, before));
+            Assert.Equal(new byte[8], before.ToArray());
+            harness.Scheduler.Finish();
+        });
+        Assert.True(harness.Cache.TrySynchronizeCpuRead(address, 24));
+        Assert.Equal(new byte[] { 0x78, 0x56, 0x34, 0x12 }, harness.Read(address, 4));
+        Assert.Equal(new byte[] { 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11 }, harness.Read(address + 16, 8));
+    }
+
+    [Fact]
+    public void DirectGuestImportIsReplacedWhenGuestAddressMapsDifferentBacking()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var harness = new CacheHarness(_vulkan, directGuestBuffers: true);
+        var address = harness.MapBacked(Page, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var original = harness.Cache.GetBuffer(harness.Cache.FindBuffer(address, Page));
+            Assert.True(original.IsGuestImport);
+            harness.Scheduler.Finish();
+            Assert.True(harness.Memory.TryUnmapBacked(address, Page));
+            Assert.True(harness.Memory.TryMapBacked(address, Page, Page, ReadWrite, out _));
+            var replacement = harness.Cache.GetBuffer(harness.Cache.FindBuffer(address, Page));
+            Assert.NotSame(original, replacement);
+            Assert.True(replacement.IsGuestImport);
+            replacement.Fill(0, 4, 0xABCDEF);
+            harness.Scheduler.Finish();
+        });
+        Assert.Equal(new byte[] { 0xEF, 0xCD, 0xAB, 0 }, harness.Read(address, 4));
+    }
 
     [Fact]
     public void UnalignedImageObtainUploadsTheWholeDirtyPageToItsBufferOwner()
@@ -344,6 +737,27 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     private sealed class FailingBacking(IGuestBackedSpace inner) : IGuestBackedSpace
     {
         public bool FailWrites { get; set; }
+        public bool AllowAliases { get; init; }
+        public int AliasLeases { get; private set; }
+        public object? BackingAliasSnapshot => inner.BackingAliasSnapshot;
+        public ulong BackingAliasBase => inner.BackingAliasBase;
+        public ulong BackingAliasSize => inner.BackingAliasSize;
+
+        public bool TryEnterBackingAliasAccess()
+        {
+            if (!AllowAliases || !inner.TryEnterBackingAliasAccess()) return false;
+            AliasLeases++;
+            return true;
+        }
+
+        public void ExitBackingAliasAccess()
+        {
+            AliasLeases--;
+            inner.ExitBackingAliasAccess();
+        }
+
+        public bool TryResolveBackingAlias(ulong address, ulong size, out ulong alias) =>
+            inner.TryResolveBackingAlias(address, size, out alias);
 
         public bool TryHoldRange(ulong address, ulong size) => inner.TryHoldRange(address, size);
 

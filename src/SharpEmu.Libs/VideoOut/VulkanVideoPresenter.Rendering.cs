@@ -48,6 +48,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private sealed class RenderPreparation(Presenter owner, IDisposable streamRetention) : IResourcePreparation
         {
             public List<PreparedStageBindings> Stages { get; } = new();
+            internal readonly GuestBufferCache.PreparedWrites? BufferWrites = owner._bufferCache.RetainPreparedWrites();
 
             // Host buffers that took an upload the ring could not hold; the committed draw owns them.
             public List<(VkBuffer Buffer, DeviceMemory Memory)> OverflowBuffers { get; } = new();
@@ -116,6 +117,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
                 finally
                 {
+                    BufferWrites?.Dispose();
                     foreach (var stage in Stages) owner.ReturnStageScratch(stage);
                     Stages.Clear();
                 }
@@ -935,7 +937,10 @@ internal static unsafe partial class VulkanVideoPresenter
         private void CountDraw()
         {
             if (_preparation is { } preparation)
+            {
+                preparation.BufferWrites?.Record();
                 preparation.CommandsRecorded = true;
+            }
             Interlocked.Increment(ref _perfDrawCount);
             PerfOverlay.RecordDraw();
             _batchDrawCount++;

@@ -28,7 +28,23 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        var value = is64Bit ? ReadQword(address) : ReadDword(address);
+        // WRITE_DATA followed by its own matching wait is a command-processor
+        // dependency. Its queued GPU copy need not retire before more commands can
+        // be decoded. A host that orders GPU completion writes also forwards a paired
+        // EOP wait: the following GPU work stays behind the label, while the guest CPU
+        // continues to see the old value until that release actually executes.
+        if (_host.RecordsCompletionLabels && TryReadOwnWrite(address, is64Bit, out var forwarded) &&
+            WaitOperation.TryCompare(forwarded, reference, mask, compareFunction, out var ownSatisfied) && ownSatisfied)
+        {
+            return;
+        }
+
+        Span<byte> signal = stackalloc byte[8];
+        if (!_host.TryReadGuestSignal(address, signal[..(is64Bit ? 8 : 4)]))
+            throw _host.Fatal($"The command stream cannot read guest memory: address=0x{address:X16} size={(is64Bit ? 8 : 4)}.");
+        var value = is64Bit
+            ? System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(signal)
+            : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(signal);
         if (!WaitOperation.TryCompare(value, reference, mask, compareFunction, out var satisfied))
         {
             throw _host.Fatal($"The wait compare function is unknown: function={compareFunction} address=0x{address:X16}.");

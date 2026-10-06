@@ -46,6 +46,71 @@ public sealed class GpuCommandInterpreterWaitTests
     private static uint[] Semaphore(ulong address, uint selection, bool writeSignal = false) =>
         StreamRunner.Packet(PacketOpcode.MemorySemaphore, StreamRunner.Low(address), StreamRunner.High(address), (selection << 29) | (writeSignal ? 1u << 20 : 0));
 
+    [Fact]
+    public void LiveGpuSignalSuspendsItsQueueWithoutForcingGpuReadback()
+    {
+        var runner = new StreamRunner();
+        runner.Host.PollSignals = true;
+        runner.Host.PendingGpuValues[Label] = 7;
+        Assert.Equal(SubmissionProgress.Blocked,
+            runner.Run(Wait32(3, Label, 7, uint.MaxValue), CreateInstanceCountPacket(3)));
+        Assert.True(runner.Host.PendingGpuValues.ContainsKey(Label));
+        Assert.DoesNotContain(Label, runner.Host.GuestReads);
+        runner.Host.WriteDword(Label, 7);
+        Assert.Equal(SubmissionProgress.Complete, runner.Run());
+        Assert.Equal(3u, runner.Interpreter.InstanceCount);
+    }
+
+    [Fact]
+    public void GpuOrderedCompletionWaitContinuesDecodingWithoutPublishingGuestLabel()
+    {
+        var runner = new StreamRunner();
+        runner.Host.RecordsCompletionLabels = true;
+        runner.Host.CanOrderCompletionWaitOnGpu = true;
+        runner.Host.BeforeGuestRead = address => Assert.NotEqual(Label, address);
+        var release = StreamRunner.Packet(PacketOpcode.ReleaseMemory, 0x28,
+            1u << 29, StreamRunner.Low(Label), StreamRunner.High(Label), 7, 0, 0);
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(release,
+            Wait32(3, Label, 7, uint.MaxValue), CreateInstanceCountPacket(3)));
+        Assert.Equal(0UL, runner.Host.ReadQword(Label));
+        Assert.Equal(3u, runner.Interpreter.InstanceCount);
+        Assert.Single(runner.Host.EndOfPipeWrites);
+    }
+
+    [Fact]
+    public void InterveningGpuWorkInvalidatesForwardedCompletionWait()
+    {
+        var runner = new StreamRunner();
+        runner.Host.RecordsCompletionLabels = true;
+        runner.Host.CanOrderCompletionWaitOnGpu = true;
+        var release = StreamRunner.Packet(PacketOpcode.ReleaseMemory, 0x28,
+            1u << 29, StreamRunner.Low(Label), StreamRunner.High(Label), 7, 0, 0);
+        Assert.Equal(SubmissionProgress.Blocked, runner.Run(release,
+            CreateInstanceCountPacket(3), Wait32(3, Label, 7, uint.MaxValue)));
+    }
+
+    [Fact]
+    public void CompletionHostForwardsPairedCommandWriteWithoutReadingPendingGpuCopy()
+    {
+        var runner = new StreamRunner();
+        runner.Host.RecordsCompletionLabels = true;
+        runner.Host.BeforeGuestRead = address => Assert.NotEqual(Label, address);
+        var write = StreamRunner.Packet(PacketOpcode.WriteData, 5u << 8,
+            StreamRunner.Low(Label), StreamRunner.High(Label), 7);
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(write, Wait32(3, Label, 7, uint.MaxValue)));
+    }
+
+    [Fact]
+    public void CompletionHostDoesNotForwardAnEndOfPipeLabel()
+    {
+        var runner = new StreamRunner();
+        runner.Host.RecordsCompletionLabels = true;
+        var release = StreamRunner.Packet(PacketOpcode.ReleaseMemory, 0x28,
+            1u << 29, StreamRunner.Low(Label), StreamRunner.High(Label), 7, 0, 0);
+        Assert.Equal(SubmissionProgress.Blocked, runner.Run(release, Wait32(3, Label, 7, uint.MaxValue)));
+        Assert.Contains(Label, runner.Host.GuestReads);
+    }
+
     [Theory]
     [InlineData(1u, 5u, 6u, true)]
     [InlineData(1u, 6u, 6u, false)]

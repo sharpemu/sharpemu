@@ -20,7 +20,7 @@ public sealed partial class GpuCommandInterpreter
 
     private static int _unknownGcrWarnings;
 
-    // The label is written to guest memory now; only the interrupt waits for the GPU.
+    // Hosts that record completion labels publish them in GPU command order.
     internal void WriteEndOfPipe(
         bool is64Bit,
         uint cachePolicy,
@@ -188,7 +188,7 @@ public sealed partial class GpuCommandInterpreter
                 if (is64Bit)
                 {
                     var clock = EndOfPipe.ReadReferenceClock();
-                    WriteQword(destination, clock);
+                    WriteImmediateLabel(destination, clock, true);
                     switch (cacheAction)
                     {
                         case 0x00:
@@ -218,9 +218,30 @@ public sealed partial class GpuCommandInterpreter
             $"index={eventIndex} bits={(is64Bit ? 64 : 32)} interrupt={interruptSelector} destination=0x{destination:X16}.");
     }
 
+    private void WriteImmediateLabel(ulong destination, ulong value, bool is64Bit)
+    {
+        // Forward only the paired command-processor wait when the host guarantees GPU
+        // ordering. The guest CPU still observes the label only after the GPU writes it.
+        if (_host.RecordsCompletionLabels)
+        {
+            _lastWriteLength = 0;
+            if (_host.CanOrderCompletionWaitOnGpu)
+            {
+                _lastWriteAddress = destination;
+                _lastWriteValue = value;
+                _lastWriteLength = is64Bit ? sizeof(ulong) : sizeof(uint);
+                _lastWritePacket = _packetSerial;
+            }
+            return;
+        }
+
+        if (is64Bit) WriteQword(destination, value);
+        else WriteDword(destination, (uint)value);
+    }
+
     private void Write32(ulong destination, uint value, bool withWriteBack, bool withInterrupt, int eventId, uint contextId)
     {
-        WriteDword(destination, value);
+        WriteImmediateLabel(destination, value, false);
         var kind = withInterrupt
             ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack32 : EndOfPipeWriteKind.Interrupt32)
             : (withWriteBack ? EndOfPipeWriteKind.WriteBack32 : EndOfPipeWriteKind.Write32);
@@ -229,7 +250,7 @@ public sealed partial class GpuCommandInterpreter
 
     private void Write64(ulong destination, ulong value, bool withWriteBack, bool withInterrupt, int eventId, uint contextId)
     {
-        WriteQword(destination, value);
+        WriteImmediateLabel(destination, value, true);
         var kind = withInterrupt
             ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack64 : EndOfPipeWriteKind.Interrupt64)
             : (withWriteBack ? EndOfPipeWriteKind.WriteBack64 : EndOfPipeWriteKind.Write64);
@@ -254,6 +275,7 @@ public sealed partial class GpuCommandInterpreter
         _host.ReadGds(words, wordOffset, wordCount);
         WriteBytes(destination, System.Runtime.InteropServices.MemoryMarshal.AsBytes<uint>(words));
         _host.RecordEndOfPipe(new EndOfPipeWrite(EndOfPipeWriteKind.GdsWrite32, SubmitId, destination, GdsWordOffset: wordOffset, GdsWordCount: wordCount));
+        if (_host.RecordsCompletionLabels) _host.FlushAndWait();
         if (withInterrupt)
         {
             _host.TriggerInterrupt(InterruptEventId, contextId);
@@ -261,9 +283,8 @@ public sealed partial class GpuCommandInterpreter
     }
 
     // Release-memory completions stay in the recording command buffer instead of
-    // submitting it at every packet: labels are already written to guest memory,
-    // only the interrupt waits for the GPU, and RunSlice submits the buffer when
-    // the slice ends or blocks, so every deferred interrupt still reaches the GPU.
+    // submitting it at every packet. RunSlice submits the buffer when the slice
+    // ends or blocks, so both recorded labels and deferred interrupts reach the GPU.
     // Submitting per packet produced ~430 tiny submissions per Astro Bot frame.
     // SHARPEMU_DEFER_RELEASE_FLUSH=0 restores the per-packet submit.
     private static readonly bool DeferReleaseFlush = !string.Equals(
@@ -491,7 +512,7 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        WriteDword(destination, value);
+        WriteImmediateLabel(destination, value, false);
         var flip = PendingFlip;
         var requestId = _host.PrepareFlip(flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
         _host.RecordEndOfPipe(new EndOfPipeWrite(
@@ -512,7 +533,7 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        WriteDword(destination, value);
+        WriteImmediateLabel(destination, value, false);
         var flip = PendingFlip;
         var requestId = _host.PrepareFlip(flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
         _host.RecordEndOfPipe(new EndOfPipeWrite(

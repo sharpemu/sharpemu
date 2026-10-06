@@ -27,6 +27,9 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public ICpuMemory Memory => GuestMemory;
 
+    public bool RecordsCompletionLabels { get; set; }
+    public bool CanOrderCompletionWaitOnGpu { get; set; }
+
     public List<string> Calls { get; } = new();
 
     public List<EndOfPipeWrite> EndOfPipeWrites { get; } = new();
@@ -58,6 +61,11 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     // Qword values the GPU owns; the synchronized read lands them in memory first, as a download would.
     public Dictionary<ulong, ulong> PendingGpuValues { get; } = new();
+
+    public bool PollSignals { get; set; }
+
+    public bool TryReadGuestSignal(ulong address, Span<byte> destination) =>
+        PollSignals ? GuestMemory.TryRead(address, destination) : TryReadGuest(address, destination);
 
     public bool TryReadGuest(ulong address, Span<byte> destination)
     {

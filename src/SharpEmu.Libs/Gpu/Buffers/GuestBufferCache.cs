@@ -42,6 +42,33 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private readonly IGpuQueueRelay _relay;
     private readonly GuestBufferUploader _uploader;
     private readonly bool _unifiedBuffers;
+    public bool DirectGuestBuffers { get; }
+    private object? _importMappingSnapshot;
+    private readonly GuestBufferWriteTimeline _directWrites = new();
+    private ulong _directRetirementTick;
+    private PreparedWrites? _preparedWrites;
+
+    // Descriptor preparation can submit while reserving uploads. Reapply the bound
+    // physical write ranges at the tick that actually records the draw/dispatch.
+    internal sealed class PreparedWrites(GuestBufferCache owner) : IDisposable
+    {
+        internal readonly HashSet<(ulong Alias, ulong Size)> Ranges = [];
+        internal void Record()
+        {
+            foreach (var (alias, size) in Ranges) owner.RecordDirectAliasWrite(alias, size);
+        }
+        public void Dispose()
+        {
+            if (ReferenceEquals(owner._preparedWrites, this)) owner._preparedWrites = null;
+        }
+    }
+
+    internal PreparedWrites? RetainPreparedWrites()
+    {
+        if (!DirectGuestBuffers) return null;
+        if (_preparedWrites != null) throw new InvalidOperationException("Buffer write preparation is already open.");
+        return _preparedWrites = new PreparedWrites(this);
+    }
     private readonly IGuestBackedSpace _backing;
     private readonly BdaFaultProcessor _faults;
     private readonly GpuBuffer _gds;
@@ -66,12 +93,14 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         IGpuQueueRelay relay,
         PageGuard pages,
         ICpuMemory guest,
-        IGuestBackedSpace backing)
+        IGuestBackedSpace backing, bool? directGuestBuffers = null)
     {
         _device = device;
         _scheduler = scheduler;
         _relay = relay;
         _backing = backing;
+        DirectGuestBuffers = (directGuestBuffers ?? Environment.GetEnvironmentVariable("SHARPEMU_DIRECT_GUEST_BUFFERS") == "1") &&
+            device.ExternalMemoryHost != null;
         _faults = new BdaFaultProcessor(device, scheduler, this, CachingPageBits, CachingPageCount);
         _unifiedBuffers = UnifiedBuffersEnabled && HasUnifiedMemoryType(device);
         _gds = new GpuBuffer(device, scheduler, GpuBufferUsage.Stream, 0, GpuBuffer.AllFlags, GdsBufferSize);
@@ -140,10 +169,14 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     public bool TrySynchronizeCpuRead(ulong address, ulong size) =>
         TrySynchronizeCpuRead(address, size, GuestMemoryProfile.ReadbackSource.CpuReadSynchronization);
 
-    public bool TrySynchronizeCpuRead(ulong address, ulong size, GuestMemoryProfile.ReadbackSource source) =>
-        !_tracker.MayHaveGpuDirtyPages(address, size) ||
-        !_tracker.HasGpuDirtyPages(address, size) ||
-        ReadMemoryOrAwaitShutdown(address, size, isWrite: false, source);
+    public bool TrySynchronizeCpuRead(ulong address, ulong size, GuestMemoryProfile.ReadbackSource source)
+    {
+        if (DirectGuestBuffers && _relay.IsGpuQueueThread)
+            SynchronizeCommandRead(address, size, source);
+        return !_tracker.MayHaveGpuDirtyPages(address, size) ||
+            !_tracker.HasGpuDirtyPages(address, size) ||
+            ReadMemoryOrAwaitShutdown(address, size, isWrite: false, source);
+    }
 
     // Lock-free on the GPU queue thread; see GuestPageTracker.MayHaveGpuDirtyPages.
     public bool MayHaveGpuDirtyPages(ulong address, ulong size) => _tracker.MayHaveGpuDirtyPages(address, size);
@@ -191,6 +224,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             throw SubmissionScheduler.Fatal("The buffer lookup range is invalid.");
         }
 
+        RefreshImportedMappings();
         var owner = _registry.FindContainingBuffer(guestAddress, size);
         if (owner.IsValid)
         {
@@ -209,7 +243,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             throw SubmissionScheduler.Fatal("A buffer request requires a command buffer that is recording.");
         }
 
-        if (!isWritten &&
+        RefreshImportedMappings();
+        if (!DirectGuestBuffers && !isWritten &&
             !_tracker.HasGpuDirtyPages(guestAddress, size) &&
             _tracker.HasCpuDirtyPages(guestAddress, size) &&
             (size <= CachingPageSize || (!isTexelBuffer && _tracker.IsCpuWriteHotRange(guestAddress, size))))
@@ -243,6 +278,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         if (isWritten)
         {
             buffer.NoteGpuWrite();
+            if (buffer.IsGuestImport) RecordDirectWrite(buffer, guestAddress, size);
             if (Diagnostics.DccWriterTrace.Enabled)
             {
                 Diagnostics.DccWriterTrace.Record(RequireImageCache(), guestAddress, size);
@@ -270,9 +306,16 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         var cpuModified = _tracker.HasCpuDirtyPages(guestAddress, size);
         var gpuModified = _tracker.HasGpuDirtyPages(guestAddress, size);
         var hasDirtyBufferSource = _gpuModifiedRanges.Overlaps(guestAddress, size);
-        _tracker.ValidateGpuDirtyOwnership(_gpuModifiedRanges, guestAddress, size, "image source");
+        if (!DirectGuestBuffers)
+            _tracker.ValidateGpuDirtyOwnership(_gpuModifiedRanges, guestAddress, size, "image source");
 
+        RefreshImportedMappings();
         var owner = FindOwner(guestAddress, size);
+        if (owner is { IsGuestImport: true })
+        {
+            TouchBuffer(owner);
+            return (owner, owner.Offset(guestAddress));
+        }
         if (hasDirtyBufferSource && owner == null)
         {
             if (!IsRegionRegistered(guestAddress, size))
@@ -337,14 +380,134 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     public bool TryReadCommandBacking(ulong address, Span<byte> destination) =>
         CommandBackingReadsEnabled && destination.Length != 0 &&
         !_gpuModifiedRanges.Overlaps(address, (ulong)destination.Length) &&
+        DirectWriteTick(address, (ulong)destination.Length) == 0 &&
         ImageCache is { } images && !images.HasGpuModifiedImageBytes(address, (ulong)destination.Length) &&
         _backing.TryReadBacking(address, destination);
+
+    // WAIT_REG_MEM polls a live coherent signal. An unmet condition suspends that
+    // guest queue; it must not drain the GPU and stall every other guest queue.
+    public bool TryReadQueuedSignal(ulong address, Span<byte> destination)
+    {
+        var size = (ulong)destination.Length;
+        if (!DirectGuestBuffers || size is not (4 or 8) ||
+            RequireImageCache().HasGpuModifiedImageBytes(address, size) ||
+            !_backing.TryResolveBackingAlias(address, size, out var alias) ||
+            !_directWrites.TryReadSignal(alias, size, _scheduler.CurrentTick, out var value)) return false;
+        if (size == 8) System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(destination, value);
+        else System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(destination, (uint)value);
+        return true;
+    }
+
+    public bool TryReadDirectSignal(ulong address, Span<byte> destination)
+    {
+        if (!DirectGuestBuffers || destination.IsEmpty) return false;
+        RefreshImportedMappings();
+        return !RequireImageCache().HasGpuModifiedImageBytes(address, (ulong)destination.Length) &&
+            FindOwner(address, (ulong)destination.Length) is { IsGuestImport: true } &&
+            _backing.TryReadBacking(address, destination);
+    }
+
+    // The command processor is an ordered consumer, unlike an independently running
+    // guest CPU thread. Its reads must see preceding shader and DMA writes.
+    public void SynchronizeCommandRead(ulong address, ulong size,
+        GuestMemoryProfile.ReadbackSource source = GuestMemoryProfile.ReadbackSource.CommandMemoryRead)
+    {
+        if (!DirectGuestBuffers || size == 0) return;
+        RefreshImportedMappings();
+        var writer = DirectWriteTick(address, size);
+        if (writer == 0) return;
+        var started = GuestMemoryProfile.ReadbackDetailsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        _scheduler.Wait(writer);
+        if (GuestMemoryProfile.ReadbackDetailsEnabled)
+            GuestMemoryProfile.RecordBufferReadback(address, size, false, 0,
+                System.Diagnostics.Stopwatch.GetTimestamp() - started, source);
+    }
+
+    // Track the stable backing address, so another guest VA for the same physical
+    // bytes observes the same producer. Guest remaps must not erase its dependency.
+    private void RecordDirectWrite(GpuBuffer buffer, ulong address, ulong size)
+    {
+        var alias = (ulong)buffer.MappedPointer + buffer.Offset(address);
+        _preparedWrites?.Ranges.Add((alias, size));
+        RecordDirectAliasWrite(alias, size);
+    }
+
+    private void RecordDirectAliasWrite(ulong alias, ulong size)
+    {
+        var tick = _scheduler.CurrentTick;
+        _directWrites.Record(alias, size, tick);
+        // A descriptor page may have been cached as clean through another guest VA.
+        Interlocked.Increment(ref _gpuModifiedVersion);
+        if (_directRetirementTick == tick) return;
+        _directRetirementTick = tick;
+        _scheduler.QueueCompletionAction(() => _directWrites.RetireThrough(tick));
+    }
+
+    private ulong DirectWriteTick(ulong address, ulong size) =>
+        DirectGuestBuffers && _backing.TryResolveBackingAlias(address, size, out var alias)
+            ? _directWrites.LastWriter(alias, size) : 0;
+
+    public void RecordCommandWrite(ulong address, ReadOnlySpan<byte> data)
+    {
+        if (data.IsEmpty) return;
+        PrepareCommandWrite(address, (ulong)data.Length);
+        var (buffer, _) = ObtainBuffer(address, (ulong)data.Length, isWritten: true);
+        WriteDataBuffer(buffer, address, data);
+        RecordSignalValue(buffer, address, data);
+    }
+
+    private void RecordSignalValue(GpuBuffer buffer, ulong address, ReadOnlySpan<byte> data)
+    {
+        if (!buffer.IsGuestImport || data.Length is not (4 or 8)) return;
+        var value = data.Length == 8
+            ? System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(data)
+            : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data);
+        _directWrites.RecordSignal((ulong)buffer.MappedPointer + buffer.Offset(address),
+            (ulong)data.Length, _scheduler.CurrentTick, value);
+    }
+
+    private void PrepareCommandWrite(ulong address, ulong size)
+    {
+        var images = RequireImageCache();
+        if (!images.QueryRegion(address, size).ImageBytes) return;
+        images.PreserveGpuContentsForBufferWrite(address, size);
+        images.InvalidateMemoryFromGpu(address, size);
+    }
+
+    // Unlike a command-processor CPU write, a completion label becomes visible only
+    // after all preceding GPU commands. The tracked path faults readers until ready.
+    public void RecordCompletionLabel(ulong guestAddress, ulong value, bool wide)
+    {
+        Span<byte> bytes = stackalloc byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
+        var size = wide ? 8UL : 4UL;
+        PrepareCommandWrite(guestAddress, size);
+        var (buffer, _) = ObtainBuffer(guestAddress, size, isWritten: true);
+        _scheduler.Current.EndRendering();
+        var release = new MemoryBarrier2
+        {
+            SType = StructureType.MemoryBarrier2,
+            SrcAccessMask = AccessFlags2.MemoryWriteBit,
+            DstAccessMask = AccessFlags2.HostReadBit | AccessFlags2.TransferWriteBit,
+        };
+        VulkanSynchronization.PipelineBarrier(_device.Vk, new CommandBuffer(_scheduler.Current.Handle),
+            PipelineStageFlags.AllCommandsBit, PipelineStageFlags.HostBit | PipelineStageFlags.TransferBit,
+            0, 1, &release, 0, null, 0, null);
+        WriteDataBuffer(buffer, guestAddress, bytes[..(int)size]);
+        RecordSignalValue(buffer, guestAddress, bytes[..(int)size]);
+    }
 
     public void WriteHostMemory(ulong guestAddress, ReadOnlySpan<byte> data)
     {
         if (guestAddress == 0 || data.IsEmpty || (ulong)data.Length > ulong.MaxValue - guestAddress)
         {
             throw SubmissionScheduler.Fatal("The host DMA write range is invalid.");
+        }
+
+        if (DirectGuestBuffers)
+        {
+            RecordCommandWrite(guestAddress, data);
+            return;
         }
 
         if (!_backing.TryWriteBacking(guestAddress, data))
@@ -448,7 +611,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         var bufferIdentifier = FindBuffer(guestAddress, size);
         var (destination, destinationOffset) = ObtainBuffer(guestAddress, size, true, true, bufferIdentifier);
         destination.Fill(destinationOffset, size, value);
-        if (images.OverlapsDccMetadata(guestAddress, size) && TryWriteFillToBacking(guestAddress, size, value))
+        if (!DirectGuestBuffers && images.OverlapsDccMetadata(guestAddress, size) && TryWriteFillToBacking(guestAddress, size, value))
         {
             _gpuModifiedRanges.Remove(guestAddress, size);
             var firstPage = guestAddress & ~(TrackerLayout.PageBytes - 1);
@@ -464,6 +627,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public void FillDccMetadata(ulong guestAddress, ulong size, uint value)
     {
+        if (DirectGuestBuffers)
+        {
+            FillBuffer(guestAddress, size, value, false);
+            return;
+        }
         if (guestAddress == 0 || (guestAddress & 3) != 0 || size == 0 || (size & 3) != 0 || size > ulong.MaxValue - guestAddress ||
             HasGpuDirtyBytes(guestAddress, size) || RequireImageCache().QueryRegion(guestAddress, size).ImageBytes)
         {
@@ -647,7 +815,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public bool HasGpuDirtyPages(ulong guestAddress, ulong size) => _tracker.HasGpuDirtyPages(guestAddress, size);
 
-    public bool HasGpuDirtyBytes(ulong guestAddress, ulong size) => _gpuModifiedRanges.Overlaps(guestAddress, size);
+    public bool HasGpuDirtyBytes(ulong guestAddress, ulong size) =>
+        _gpuModifiedRanges.Overlaps(guestAddress, size) || DirectWriteTick(guestAddress, size) != 0;
 
     public long GpuModifiedVersion => Volatile.Read(ref _gpuModifiedVersion);
 
@@ -681,6 +850,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public void PrepareBda(IReadOnlyCollection<GuestSpan> mapped, ulong mapping)
     {
+        RefreshImportedMappings();
         var traceAddress = GuestGpuMemoryHook.TraceAddress;
         var traceCovered = false;
         if (traceAddress != 0)
@@ -834,6 +1004,12 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 throw SubmissionScheduler.Fatal("The recency queue contains a deleted buffer.");
             }
 
+            if (buffer.IsGuestImport)
+            {
+                _gpuModifiedRanges.Remove(buffer.CpuAddress, buffer.Size);
+                DeleteBuffer(bufferIdentifier);
+                return ++retireCount == retirement.MaximumBufferCount;
+            }
             _tracker.ValidateGpuDirtyOwnership(_gpuModifiedRanges, buffer.CpuAddress, buffer.Size, "garbage collection");
             var dirty = _tracker.HasGpuDirtyPages(buffer.CpuAddress, buffer.Size);
             if (dirty && !retirement.DownloadDirtyBuffers)
@@ -1756,7 +1932,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         {
             var chunk = (int)Math.Min((ulong)source.Length, _staging.Size);
             var offset = _staging.Copy(source[..chunk], 4);
-            buffer.CopyFrom(_scheduler.Current, _staging, offset, buffer.Offset(address), (ulong)chunk, AccessFlags.HostWriteBit);
+            buffer.CopyFrom(_scheduler.Current, _staging, offset, buffer.Offset(address), (ulong)chunk, AccessFlags.HostWriteBit,
+                destinationAfter: AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit | AccessFlags.HostReadBit);
+            // Reserving staging can submit the tick recorded by ObtainBuffer. Track
+            // the copy's actual producer so a command read cannot retire it early.
+            if (buffer.IsGuestImport) RecordDirectWrite(buffer, address, (ulong)chunk);
             source = source[chunk..];
             address += (ulong)chunk;
         }
@@ -2014,6 +2194,22 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         batch.Clear();
     }
 
+    private void RefreshImportedMappings()
+    {
+        if (!DirectGuestBuffers || ReferenceEquals(_importMappingSnapshot, _backing.BackingAliasSnapshot)) return;
+        _importMappingSnapshot = _backing.BackingAliasSnapshot;
+        foreach (var id in _registry.SnapshotRegisteredIdentifiers())
+        {
+            var buffer = _registry.GetBuffer(id);
+            if (!buffer.HasCurrentGuestMapping())
+            {
+                _gpuModifiedRanges.Remove(buffer.CpuAddress, buffer.Size);
+                Interlocked.Increment(ref _gpuModifiedVersion);
+                DeleteBuffer(id);
+            }
+        }
+    }
+
     private OverlapSpan ResolveOverlaps(ulong guestAddress, ulong size)
     {
         var range = new BufferMergeRange(guestAddress, guestAddress + size);
@@ -2047,6 +2243,25 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             newBuffer.AddStreamScore(overlap.StreamScore + 1);
         }
 
+        if (newBuffer.IsGuestImport && overlap.IsGuestImport)
+        {
+            // The new VkBuffer aliases the old buffers within one imported allocation.
+            // Make their earlier writes available through the new buffer view.
+            _scheduler.Current.EndRendering();
+            var aliasBarrier = new MemoryBarrier2
+            {
+                SType = StructureType.MemoryBarrier2,
+                SrcAccessMask = AccessFlags2.MemoryWriteBit,
+                DstAccessMask = AccessFlags2.MemoryReadBit | AccessFlags2.MemoryWriteBit,
+            };
+            VulkanSynchronization.PipelineBarrier(_device.Vk, new CommandBuffer(_scheduler.Current.Handle),
+                PipelineStageFlags.AllCommandsBit, PipelineStageFlags.AllCommandsBit,
+                0, 1, &aliasBarrier, 0, null, 0, null);
+            if (overlap.LastGpuWriteTick != 0) newBuffer.NoteGpuWrite();
+            DeleteBuffer(overlappingBufferIdentifier);
+            return;
+        }
+
         newBuffer.CopyFrom(_scheduler.Current, overlap, 0, overlap.CpuAddress - newBuffer.CpuAddress, overlap.Size);
         DeleteBuffer(overlappingBufferIdentifier);
     }
@@ -2068,9 +2283,29 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             overlapping.Add(_registry.GetRegisteredIdentifier(index));
         }
 
-        var bufferIdentifier = _registry.AllocateBuffer(new GpuBuffer(
+        GpuBuffer? created = null;
+        // Do not drop mirrored ownership while a GPU copy is still in flight.
+        if (DirectGuestBuffers && overlapping.All(id => _registry.GetBuffer(id).IsGuestImport))
+        {
+            GpuBuffer.TryImportGuest(_device, _scheduler, _backing, overlap.Begin, overlap.End - overlap.Begin, out created);
+        }
+        created ??= new GpuBuffer(
             _device, _scheduler, _unifiedBuffers ? GpuBufferUsage.Unified : GpuBufferUsage.DeviceLocal, overlap.Begin,
-            GpuBuffer.AllFlags | BufferUsageFlags.ShaderDeviceAddressBit, overlap.End - overlap.Begin, allowSlab: true), overlap.Begin, overlap.End - overlap.Begin);
+            GpuBuffer.AllFlags | BufferUsageFlags.ShaderDeviceAddressBit, overlap.End - overlap.Begin, allowSlab: true);
+        if (!created.IsGuestImport && overlapping.Any(id => _registry.GetBuffer(id).IsGuestImport))
+        {
+            // A union spanning backing mappings may not be importable. Finish direct
+            // writers before returning to copy coherence, then seed from the backing.
+            _scheduler.Finish();
+            foreach (var id in overlapping)
+            {
+                var previous = _registry.GetBuffer(id);
+                if (!previous.IsGuestImport) continue;
+                _gpuModifiedRanges.Remove(previous.CpuAddress, previous.Size);
+                _tracker.MarkCpuDirtyPages(previous.CpuAddress, previous.Size);
+            }
+        }
+        var bufferIdentifier = _registry.AllocateBuffer(created, overlap.Begin, overlap.End - overlap.Begin);
         foreach (var oldId in overlapping)
         {
             MergeOverlappingBuffer(bufferIdentifier, oldId, !overlap.HasStreamLeap);
@@ -2084,6 +2319,16 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         bool preserveCpuWriteHotPages = true)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferDirtySynchronization);
+        if (buffer.IsGuestImport)
+        {
+            if (isTexelBuffer && RequireImageCache().TrySynchronizeBufferFromImage(buffer, guestAddress, size))
+            {
+                buffer.NoteGpuWrite();
+                RecordDirectWrite(buffer, guestAddress, size);
+                return true;
+            }
+            return false;
+        }
         var startedAt = BufferUploadProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         if ((!preserveCpuWriteHotPages && !isWritten && !isTexelBuffer && !_tracker.MayHaveCpuDirtyPages(guestAddress, size)) ||
             (isWritten && !isTexelBuffer && _gpuModifiedRanges.Contains(guestAddress, size)))
