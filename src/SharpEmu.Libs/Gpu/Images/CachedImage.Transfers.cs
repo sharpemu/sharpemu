@@ -40,9 +40,12 @@ public sealed unsafe partial class CachedImage
     };
 
     // Barriers for the requested state; a repeated write always gets a barrier.
+    private static readonly List<ImageMemoryBarrier2> NoBarriers = new(0);
+
     public (List<ImageMemoryBarrier2> Barriers, PipelineStageFlags SourceStages) GetBarriers(ImageLayout layout, AccessFlags access, PipelineStageFlags stage, SubresourceRange? range)
     {
-        var barriers = new List<ImageMemoryBarrier2>();
+        // Most requests need no barrier; the list exists only once one does. Callers never add to it.
+        List<ImageMemoryBarrier2>? barriers = null;
         PipelineStageFlags sourceStages = 0;
         if ((access & (WriteAccess | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit)) != 0)
         {
@@ -95,7 +98,7 @@ public sealed unsafe partial class CachedImage
                     }
                     else if (state.Layout != layout || state.Access != access || repeatedWrite)
                     {
-                        barriers.Add(MakeBarrier(state, layout, access, level, 1, layer, 1));
+                        (barriers ??= new List<ImageMemoryBarrier2>(1)).Add(MakeBarrier(state, layout, access, level, 1, layer, 1));
                         sourceStages |= state.Stage;
                         states[index] = new ImageAccessState(stage, access, layout);
                     }
@@ -113,21 +116,21 @@ public sealed unsafe partial class CachedImage
             var repeatedWrite = (state.Access & WriteAccess) != 0;
             if (state.Layout == layout && state.Access == access && !repeatedWrite)
             {
-                return (barriers, sourceStages);
+                return (barriers ?? NoBarriers, sourceStages);
             }
 
             if (IsReadAfterRead(state, layout, access))
             {
                 Backing.State = new ImageAccessState(state.Stage | stage, state.Access | access, layout);
-                return (barriers, sourceStages);
+                return (barriers ?? NoBarriers, sourceStages);
             }
 
-            barriers.Add(MakeBarrier(state, layout, access, 0, Vk.RemainingMipLevels, 0, Vk.RemainingArrayLayers));
+            (barriers ??= new List<ImageMemoryBarrier2>(1)).Add(MakeBarrier(state, layout, access, 0, Vk.RemainingMipLevels, 0, Vk.RemainingArrayLayers));
             sourceStages |= state.Stage;
         }
 
         Backing.State = new ImageAccessState(stage, access, layout);
-        return (barriers, sourceStages);
+        return (barriers ?? NoBarriers, sourceStages);
     }
 
     // The layout every subresource in the range is in, or null when they differ.
@@ -217,7 +220,7 @@ public sealed unsafe partial class CachedImage
 
     private void RecordBarriers(CommandBuffer command, PipelineStageFlags sourceStages, PipelineStageFlags destinationStages, BufferMemoryBarrier2* bufferBarrier, List<ImageMemoryBarrier2> imageBarriers)
     {
-        var images = imageBarriers.ToArray();
+        var images = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(imageBarriers);
         fixed (ImageMemoryBarrier2* imagePointer = images)
         {
             VulkanSynchronization.PipelineBarrier(_device.Vk,
