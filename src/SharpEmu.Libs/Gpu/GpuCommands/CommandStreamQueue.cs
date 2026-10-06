@@ -492,7 +492,7 @@ public sealed class CommandStreamQueue
             }
             else
             {
-                if (submission.Kind == CommandSubmissionKind.FrameBoundary)
+                if (submission!.Kind == CommandSubmissionKind.FrameBoundary)
                 {
                     _pendingBoundaries--;
                     _doneCount++;

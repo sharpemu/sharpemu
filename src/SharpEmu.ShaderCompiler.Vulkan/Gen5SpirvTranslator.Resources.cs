@@ -39,6 +39,21 @@ public static partial class Gen5SpirvTranslator
 
         if (request.Stage == ShaderStage.Pixel)
         {
+            if (request.PixelOutputs.Any(output => output.DualSourceAlpha) &&
+                (request.PixelOutputs.Count != 1 || request.PixelOutputs[0].Index != 0 ||
+                 request.PixelOutputs[0].HostLocation != 0 || request.PixelOutputs[0].Kind != Gen5PixelOutputKind.Float))
+            {
+                error = "synthetic alpha requires one floating-point primary output at location zero";
+                return false;
+            }
+            var dualSource = request.PixelOutputs.Any(output => output.Index != 0);
+            if (dualSource && (request.PixelOutputs.Count != 2 ||
+                request.PixelOutputs.Any(output => output.HostLocation != 0 || output.Kind != Gen5PixelOutputKind.Float) ||
+                !request.PixelOutputs.Select(output => output.Index).Order().SequenceEqual(new uint[] { 0, 1 })))
+            {
+                error = "dual-source pixel outputs require a primary and second source at host location zero with indices zero and one";
+                return false;
+            }
             if (request.PixelOutputs.Count > 8 || request.PixelOutputs.Any(output => output.GuestSlot > 7))
             {
                 error = "pixel outputs must contain at most eight guest slots in the 0..7 range";
