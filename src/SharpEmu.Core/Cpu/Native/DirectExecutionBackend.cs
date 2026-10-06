@@ -38,6 +38,28 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const int DefaultImportLoopGuardSeconds = 5;
 
+	// Win64 requires RSP % 16 == 0 at a `call`, so the callee sees 8 mod 16 after the
+	// return address is pushed. A stub therefore has to move the stack by an amount
+	// that lands on the right phase *for how it was entered*:
+	//
+	//   RedirectFrameSize - CreateWorkerAbortStub is entered by RIP redirect with no
+	//     return address pushed and RSP explicitly 16-aligned (managed VEH writes
+	//     Context.Rsp as hostRsp & ~0xF; the native trampoline does `and r8, ~0xF`).
+	//     Entry phase 0, so the frame must be 0 mod 16. 32 covers the shadow space;
+	//     the breadcrumb's own balanced sub/add 0x20 pair supplies WriteFile's 5th slot.
+	//
+	//   CallEntryFrameSize - the FastFail breadcrumb in the VEH trampoline is entered
+	//     BY CALL, so entry phase is 8. Its six register pushes (48 bytes) plus this
+	//     frame must bring the phase back to 0. 48 (pushes) + 72 = 120, and
+	//     8 + 120 = 128 = 0 mod 16. 72 also covers the locals, the highest of which
+	//     is the pushed Rip at +0x48.
+	//
+	// Getting this wrong is a latent trap rather than an immediate fault: these are
+	// hand-emitted stubs calling into kernel32, and kernel32 happens not to spill to
+	// an aligned slot on the paths taken. WinAbiFrameSizeTests pins the arithmetic.
+	private const byte RedirectFrameSize = 0x20;
+	private const byte CallEntryFrameSize = 0x48;
+
 	private readonly struct ImportStubEntry
 	{
 		public ulong Address { get; }
@@ -2802,8 +2824,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		byte* code = (byte*)ptr;
 		int offset = 0;
+		// This stub is entered by RIP redirect, never by call: both the managed VEH
+		// (DirectExecutionBackend.Exceptions.cs writes Context.Rsp as hostRsp & ~0xF)
+		// and the native trampoline (and r8, ~0xF) set RSP 16-aligned with no return
+		// address pushed. Win64 needs RSP % 16 == 0 AT the call, so the redirect-entry
+		// frame must move the stack by 0 mod 16 - 0x20, not the call-entry 0x28, which
+		// is 40 (8 mod 16) and would leave every Win64 call below 8 out of phase.
+		// 32 bytes still covers the shadow space; the breadcrumb's own balanced
+		// sub rsp,0x20 / add rsp,0x20 pair supplies WriteFile's 5th-argument slot.
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-		EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x28); // sub rsp, 0x28
+		EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, RedirectFrameSize); // sub rsp, 0x20
 		EmitByte(code, ref offset, 0xB9);
 		EmitUInt32(code, ref offset, _workerDoneEventTlsIndex); // mov ecx, tls
 		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
@@ -2975,9 +3005,14 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x50);
 			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x51);
 			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x52); // push r10 (Rip)
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-			EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x40); // sub rsp, 0x40 (hex buf @ +0x30)
-			EmitByte(code, ref offset, 0xB9); EmitUInt32(code, ref offset, unchecked((uint)-12));
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
+		// A VEH handler is entered BY CALL, so RSP is 8 mod 16 here. The six pushes
+		// (48) and this 0x48 (72) are both 8 mod 16, so they preserve the phase and
+		// leave RSP 8 mod 16 at every Win64 call below - 8 out of phase. Widening the
+		// frame to 72 flips it to 0 mod 16; the local slots keep their existing
+		// offsets because they are frame-relative, and the pushed Rip moves up with it.
+		EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, CallEntryFrameSize); // sub rsp, 0x48
+		EmitByte(code, ref offset, 0xB9); EmitUInt32(code, ref offset, unchecked((uint)-12));
 			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
 			*(nint*)(code + offset) = getStdHandle;
 			offset += sizeof(nint);
@@ -3007,10 +3042,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			offset += sizeof(nint);
 			EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
 
-			// Hex-encode Rip. Stack after sub 0x40: [rsp+0x40]=saved Rip (push r10).
-			EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8B);
-			EmitByte(code, ref offset, 0x54); EmitByte(code, ref offset, 0x24);
-			EmitByte(code, ref offset, 0x40); // mov r10, [rsp+0x40]
+		// Hex-encode Rip. Stack after sub 0x48: [rsp+0x48]=saved Rip (push r10).
+		EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8B);
+		EmitByte(code, ref offset, 0x54); EmitByte(code, ref offset, 0x24);
+		EmitByte(code, ref offset, 0x48); // mov r10, [rsp+0x48]
 			EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0xB8);
 			var hexDigitsAbsSlot = offset;
 			*(nint*)(code + offset) = 0;
@@ -3070,9 +3105,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
 			}
 
-			EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-			EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x40);
-			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5A); // pop r10
+		EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
+		EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, CallEntryFrameSize); // add rsp, 0x48
+		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5A); // pop r10
 			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x59);
 			EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x58);
 			EmitByte(code, ref offset, 0x5A);
