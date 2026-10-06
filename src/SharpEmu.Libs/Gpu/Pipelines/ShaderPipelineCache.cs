@@ -210,15 +210,22 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     }
 
     // One past the highest parameter location the pixel program reads, resolved as its translator does.
-    private static uint ReadVertexOutputCount(Gen5ShaderProgram pixelProgram, PixelInputInfo info)
-    {
-        var attributes = pixelProgram.Instructions
+    // The attributes a pixel program interpolates, ascending; scanned once per decoded program
+    // instead of on every draw.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Gen5ShaderProgram, uint[]> _interpolatedAttributes = new();
+
+    private static uint[] InterpolatedAttributes(Gen5ShaderProgram program) =>
+        _interpolatedAttributes.GetValue(program, static program => program.Instructions
             .Select(static instruction => instruction.Control)
             .OfType<Gen5InterpolationControl>()
             .Select(static control => control.Attribute)
             .Distinct()
             .Order()
-            .ToArray();
+            .ToArray());
+
+    private static uint ReadVertexOutputCount(Gen5ShaderProgram pixelProgram, PixelInputInfo info)
+    {
+        var attributes = InterpolatedAttributes(pixelProgram);
         if (attributes.Length == 0)
         {
             return 0;
@@ -237,16 +244,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     private static uint InterpolatedAttributeCount(Gen5ShaderProgram program)
     {
-        var maxAttribute = -1;
-        foreach (var instruction in program.Instructions)
-        {
-            if (instruction.Control is Gen5InterpolationControl interpolation)
-            {
-                maxAttribute = Math.Max(maxAttribute, (int)interpolation.Attribute);
-            }
-        }
-
-        return (uint)(maxAttribute + 1);
+        var attributes = InterpolatedAttributes(program);
+        return attributes.Length == 0 ? 0u : attributes[^1] + 1;
     }
 
     // The bound colour slots in order; each output mode names the kind the pixel program exports.
