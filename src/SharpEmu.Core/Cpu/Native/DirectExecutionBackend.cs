@@ -774,8 +774,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private int _lastAvTraceRepeatCount;
 
-	private long _lastProgressTimestamp;
-
 	private int _stallWatchdogTriggered;
 
 	private volatile bool _stallWatchdogStop;
@@ -6876,10 +6874,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	}
 
 
-	private void MarkExecutionProgress()
-	{
-		Volatile.Write(ref _lastProgressTimestamp, Stopwatch.GetTimestamp());
-	}
+	// Delegates to the cross-layer seam in SharpEmu.HLE so long-running HLE work
+	// in SharpEmu.Libs (e.g. AmprFileRegistry.EnsureApp0Indexed, which walks
+	// 156,250 files over ~95s on Astro Bot) can report that it is progressing
+	// rather than being mistaken for a genuine stall at the 20s threshold.
+	private void MarkExecutionProgress() => EmulationActivity.MarkProgress();
 
 	private static int GetStallWatchdogSeconds()
 	{
@@ -6943,7 +6942,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					LogStallWatchdogSnapshot();
 					Console.Error.Flush();
 				}
-				long num2 = Stopwatch.GetTimestamp() - Volatile.Read(ref _lastProgressTimestamp);
+				long num2 = EmulationActivity.TicksSinceProgress();
 				if (num2 < num)
 				{
 					continue;

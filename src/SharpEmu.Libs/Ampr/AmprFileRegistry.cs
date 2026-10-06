@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
+using SharpEmu.HLE;
 
 namespace SharpEmu.Libs.Ampr;
 
@@ -283,6 +284,11 @@ internal static class AmprFileRegistry
                     }
 
                     relatives.Add(relative);
+
+                    // This walk legitimately runs for ~95s over 156k files on a
+                    // real title, far past the 20s stall threshold. Report liveness
+                    // as it goes so the watchdog does not exit a progressing walk.
+                    EmulationActivity.MarkProgress();
                 }
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -309,6 +315,7 @@ internal static class AmprFileRegistry
                 {
                     var hostPath = Path.Combine(normalizedRoot, relative.Replace('/', Path.DirectorySeparatorChar));
                     RegisterApp0Relative(relative, hostPath);
+                    EmulationActivity.MarkProgress();
                 });
 
             lock (_indexGate)
