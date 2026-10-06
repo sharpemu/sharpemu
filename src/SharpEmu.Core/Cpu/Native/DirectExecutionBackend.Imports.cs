@@ -36,7 +36,17 @@ public sealed partial class DirectExecutionBackend
 
 	private readonly object _importResultLogSampleGate = new();
 	private readonly Dictionary<string, int> _importResultLogSamples = new(StringComparer.Ordinal);
+	private readonly object _importBackoffGate = new();
+	private readonly Dictionary<string, int> _importUnresolvedFailures = new(StringComparer.Ordinal);
 	private int _il2CppExceptionDiagnosticCount;
+
+	// #619: a title polling an unimplemented import spins the dispatcher as fast
+	// as the host allows, allocating a continuation per call - measured at ~9GB/min
+	// on Demon's Souls. Counting consecutive failures per NID and throttling past
+	// a threshold breaks the spin. The first threshold of calls is deliberately
+	// unthrottled so ordinary probing is untouched.
+	private const int UnresolvedImportBackoffThreshold = 256;
+	private const int MaxUnresolvedImportBackoffMs = 50;
 
 	private static ulong ImportDispatchGatewayManaged(nint backendHandle, int importIndex, nint argPackPtr)
 	{
@@ -585,6 +595,7 @@ public sealed partial class DirectExecutionBackend
 			if (!dispatchResolved)
 			{
 				LastError = "Missing HLE export for NID: " + importStubEntry.Nid;
+				ThrottleRepeatedUnresolvedImport(importStubEntry.Nid);
 				if (string.Equals(importStubEntry.Nid, "cfwBSQyr5Ys", StringComparison.Ordinal) &&
 					string.Equals(
 						Environment.GetEnvironmentVariable("SHARPEMU_LOG_IL2CPP_EXCEPTION"),
@@ -1710,6 +1721,49 @@ public sealed partial class DirectExecutionBackend
 			Environment.GetEnvironmentVariable("SHARPEMU_LOG_EXPECTED_IMPORT_RESULTS"),
 			"1",
 			StringComparison.Ordinal);
+
+	// ponytail: linear backoff capped at 50ms, applied per NID. The counter is
+	// never reset on success, so the success path stays lock-free; a NID that
+	// recovers and later fails once more pays one capped delay, which is
+	// invisible, and a NID that keeps failing is by definition being polled and
+	// 50ms is the right answer for a poll loop.
+	internal static int UnresolvedImportBackoffMs(int consecutiveFailures)
+	{
+		if (consecutiveFailures <= UnresolvedImportBackoffThreshold)
+		{
+			return 0;
+		}
+
+		return Math.Min(
+			MaxUnresolvedImportBackoffMs,
+			((consecutiveFailures - UnresolvedImportBackoffThreshold) / UnresolvedImportBackoffThreshold) + 1);
+	}
+
+	private void ThrottleRepeatedUnresolvedImport(string nid)
+	{
+		int failures;
+		lock (_importBackoffGate)
+		{
+			_importUnresolvedFailures.TryGetValue(nid, out failures);
+			failures++;
+			_importUnresolvedFailures[nid] = failures;
+		}
+
+		var delayMs = UnresolvedImportBackoffMs(failures);
+		if (delayMs == 0)
+		{
+			return;
+		}
+
+		if (failures == UnresolvedImportBackoffThreshold + 1)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][WARN] Unresolved import nid={nid} failed {failures} times; " +
+				$"throttling further repeats to at most {delayMs}ms apart to stop the retry storm.");
+		}
+
+		Thread.Sleep(delayMs);
+	}
 
 	private static bool IsExpectedFileProbeNotFoundNid(string nid) =>
 		nid is
