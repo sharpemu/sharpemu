@@ -1240,7 +1240,6 @@ public static partial class Gen5MslTranslator
                 {
                     var result = Temp("uint", $"reverse_bits({left})");
                     StoreScalar(destination, result);
-                    Line($"scc = {result} != 0u;");
                     return true;
                 }
                 case "SBitreplicateB64B32":
