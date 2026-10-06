@@ -154,7 +154,7 @@ public static partial class Gen5SpirvTranslator
         private readonly Dictionary<uint, uint> _vectorRegisterVariables = new();
         private uint _vectorRegisters;
         private (uint First, uint Last) _dynamicVectorRange;
-        private uint _packedHalfRegisters;
+        private readonly Dictionary<uint, uint> _packedHalfRegisterVariables = [];
         private uint _scc;
         private uint _vcc;
         private uint _exec;
@@ -7664,31 +7664,27 @@ public static partial class Gen5SpirvTranslator
             }
         }
 
-        private uint PackedHalfPointer(uint register) =>
-            _module.AddInstruction(
-                SpirvOp.AccessChain,
-                _privateVec2Pointer,
-                PackedHalfRegisters(),
-                UInt(register));
-
-        // Declared on first use when Private. AMD's compiler keeps an unused 4 KiB private
-        // array as a named .bss global: two stages then fail to link, and the driver copies
-        // the NOBITS section as file data and reads past the end of the ELF.
-        private uint PackedHalfRegisters()
+        // One variable per register, declared on first use. The packed-half shadow of the vector
+        // register file is only ever addressed by a constant register number, and a 512-entry
+        // private array is the shape that makes Metal keep the file in thread memory instead of
+        // registers - the same trap V_MOVREL hit. It also kept an unused 4 KiB private array as a
+        // named .bss global on AMD, where two stages then failed to link because the driver copied
+        // the NOBITS section as file data and read past the end of the ELF.
+        private uint PackedHalfPointer(uint register)
         {
-            if (_packedHalfRegisters != 0)
+            if (_packedHalfRegisterVariables.TryGetValue(register, out var variable))
             {
-                return _packedHalfRegisters;
+                return variable;
             }
 
-            var arrayType = _module.TypeArray(_vec2Type, VectorRegisterCount);
-            _packedHalfRegisters = _module.AddGlobalVariable(
-                _module.TypePointer(SpirvStorageClass.Private, arrayType),
+            variable = _module.AddGlobalVariable(
+                _privateVec2Pointer,
                 SpirvStorageClass.Private,
-                _module.ConstantNull(arrayType));
-            _interfaces.Add(_packedHalfRegisters);
-            _module.AddName(_packedHalfRegisters, "vgprPackedHalf");
-            return _packedHalfRegisters;
+                _module.ConstantNull(_vec2Type));
+            _packedHalfRegisterVariables.Add(register, variable);
+            _interfaces.Add(variable);
+            _module.AddName(variable, $"vgprPackedHalf{register}");
+            return variable;
         }
 
         private uint LoadS(uint register) => Load(_uintType, ScalarPointer(register));
