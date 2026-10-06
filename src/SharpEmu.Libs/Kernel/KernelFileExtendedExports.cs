@@ -42,11 +42,23 @@ public static partial class KernelMemoryCompatExports
         }
     }
 
+    // POSIX-named exports must not leak the 0x80xxxxxx ORBIS_GEN2 sentinel that
+    // the *Core helpers return: libc reads a negative result as failure and a
+    // large positive one as a valid fd/byte count, so the guest stores the
+    // sentinel as a handle and dereferences it later - the access violation seen
+    // when IL2CPP probes an absent file. The Core helpers already leave the
+    // POSIX value in RAX, so success is a plain 0 return. fd-based calls pass
+    // Ebadf; path-based calls keep the Enoent default.
+    private static int PosixResult(CpuContext ctx, int coreResult, int notFoundErrno = Enoent)
+        => coreResult == (int)OrbisGen2Result.ORBIS_GEN2_OK
+            ? 0
+            : PosixFailure(ctx, coreResult, notFoundErrno);
+
     // ---- Positional read/write (do not move the file offset) ----
 
     [SysAbiExport(Nid = "ezv-RSBNKqI", ExportName = "pread",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int PosixPread(CpuContext ctx) => KernelPreadCore(ctx);
+    public static int PosixPread(CpuContext ctx) => PosixResult(ctx, KernelPreadCore(ctx), Ebadf);
 
     [SysAbiExport(Nid = "+r3rMFwItV4", ExportName = "sceKernelPread",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
@@ -97,7 +109,7 @@ public static partial class KernelMemoryCompatExports
 
     [SysAbiExport(Nid = "C2kJ-byS5rM", ExportName = "pwrite",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int PosixPwrite(CpuContext ctx) => KernelPwriteCore(ctx);
+    public static int PosixPwrite(CpuContext ctx) => PosixResult(ctx, KernelPwriteCore(ctx), Ebadf);
 
     [SysAbiExport(Nid = "nKWi-N2HBV4", ExportName = "sceKernelPwrite",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
@@ -149,7 +161,7 @@ public static partial class KernelMemoryCompatExports
 
     [SysAbiExport(Nid = "juWbTNM+8hw", ExportName = "fsync",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int PosixFsync(CpuContext ctx) => KernelFsyncCore(ctx);
+    public static int PosixFsync(CpuContext ctx) => PosixResult(ctx, KernelFsyncCore(ctx), Ebadf);
 
     [SysAbiExport(Nid = "fTx66l5iWIA", ExportName = "sceKernelFsync",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
@@ -157,7 +169,7 @@ public static partial class KernelMemoryCompatExports
 
     [SysAbiExport(Nid = "KIbJFQ0I1Cg", ExportName = "fdatasync",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int PosixFdatasync(CpuContext ctx) => KernelFsyncCore(ctx);
+    public static int PosixFdatasync(CpuContext ctx) => PosixResult(ctx, KernelFsyncCore(ctx), Ebadf);
 
     [SysAbiExport(Nid = "30Rh4ixbKy4", ExportName = "sceKernelFdatasync",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
@@ -210,7 +222,7 @@ public static partial class KernelMemoryCompatExports
 
     [SysAbiExport(Nid = "ih4CD9-gghM", ExportName = "ftruncate",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int PosixFtruncate(CpuContext ctx) => KernelFtruncateCore(ctx);
+    public static int PosixFtruncate(CpuContext ctx) => PosixResult(ctx, KernelFtruncateCore(ctx), Ebadf);
 
     [SysAbiExport(Nid = "VW3TVZiM4-E", ExportName = "sceKernelFtruncate",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
@@ -246,7 +258,7 @@ public static partial class KernelMemoryCompatExports
 
     [SysAbiExport(Nid = "ayrtszI7GBg", ExportName = "truncate",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int PosixTruncate(CpuContext ctx) => KernelTruncateCore(ctx);
+    public static int PosixTruncate(CpuContext ctx) => PosixResult(ctx, KernelTruncateCore(ctx));
 
     [SysAbiExport(Nid = "WlyEA-sLDf0", ExportName = "sceKernelTruncate",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
@@ -294,7 +306,7 @@ public static partial class KernelMemoryCompatExports
 
     [SysAbiExport(Nid = "NN01qLRhiqU", ExportName = "rename",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int PosixRename(CpuContext ctx) => KernelRenameCore(ctx);
+    public static int PosixRename(CpuContext ctx) => PosixResult(ctx, KernelRenameCore(ctx));
 
     [SysAbiExport(Nid = "52NcYU9+lEo", ExportName = "sceKernelRename",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
@@ -363,7 +375,7 @@ public static partial class KernelMemoryCompatExports
         {
             if (!_openFiles.TryGetValue(fd, out var stream))
             {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+                return PosixFailure(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, Ebadf);
             }
 
             // POSIX dup shares the open file description (and offset), which is
@@ -386,7 +398,7 @@ public static partial class KernelMemoryCompatExports
         {
             if (!_openFiles.TryGetValue(oldFd, out var stream))
             {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+                return PosixFailure(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, Ebadf);
             }
 
             if (oldFd == newFd)
@@ -412,7 +424,7 @@ public static partial class KernelMemoryCompatExports
 
     [SysAbiExport(Nid = "8nY19bKoiZk", ExportName = "fcntl",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int PosixFcntl(CpuContext ctx) => KernelFcntlCore(ctx);
+    public static int PosixFcntl(CpuContext ctx) => PosixResult(ctx, KernelFcntlCore(ctx), Ebadf);
 
     [SysAbiExport(Nid = "SoZkxZkCHaw", ExportName = "sceKernelFcntl",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]

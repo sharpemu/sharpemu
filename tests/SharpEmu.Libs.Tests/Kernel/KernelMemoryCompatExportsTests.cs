@@ -216,6 +216,82 @@ public sealed class KernelMemoryCompatExportsTests
         Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
     }
 
+    // #491: the sibling POSIX exports in KernelFileExtendedExports.cs returned the
+    // raw 0x80xxxxxx ORBIS_GEN2 sentinel on failure. libc reads a negative result
+    // as failure and a large positive one as a valid fd, so the guest stored the
+    // sentinel as a handle and dereferenced it later.
+    [Fact]
+    public void PosixFdExports_BadFileDescriptorReturnsMinusOne()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const int bogusFd = 0x7EED;
+        var cases = new (string Name, Func<CpuContext, int> Invoke)[]
+        {
+            ("pread", c => KernelMemoryCompatExports.PosixPread(c)),
+            ("pwrite", c => KernelMemoryCompatExports.PosixPwrite(c)),
+            ("fsync", c => KernelMemoryCompatExports.PosixFsync(c)),
+            ("fdatasync", c => KernelMemoryCompatExports.PosixFdatasync(c)),
+            ("ftruncate", c => KernelMemoryCompatExports.PosixFtruncate(c)),
+            ("dup", c => KernelMemoryCompatExports.PosixDup(c)),
+            ("dup2", c => KernelMemoryCompatExports.PosixDup2(c)),
+        };
+
+        foreach (var (name, invoke) in cases)
+        {
+            var memory = new FakeCpuMemory(memoryBase, 0x1000);
+            var context = new CpuContext(memory, Generation.Gen5);
+            context[CpuRegister.Rdi] = unchecked((ulong)bogusFd);
+            context[CpuRegister.Rsi] = 0x100;   // buffer / newFd
+            context[CpuRegister.Rdx] = 16;      // length
+            context[CpuRegister.Rcx] = 0;       // pread offset
+
+            var result = invoke(context);
+
+            Assert.True(result == -1, $"{name} returned {result:X8} instead of -1");
+            Assert.Equal(ulong.MaxValue, context[CpuRegister.Rax]);
+        }
+
+        // fcntl takes the command in Rsi, which collides with the buffer argument
+        // the other exports use, so it gets its own register setup. F_DUPFD is 0.
+        var fcntlMemory = new FakeCpuMemory(memoryBase, 0x1000);
+        var fcntlContext = new CpuContext(fcntlMemory, Generation.Gen5);
+        fcntlContext[CpuRegister.Rdi] = unchecked((ulong)bogusFd);
+        fcntlContext[CpuRegister.Rsi] = 0;
+        fcntlContext[CpuRegister.Rdx] = 16;
+
+        var fcntlResult = KernelMemoryCompatExports.PosixFcntl(fcntlContext);
+
+        Assert.True(fcntlResult == -1, $"fcntl returned {fcntlResult:X8} instead of -1");
+        Assert.Equal(ulong.MaxValue, fcntlContext[CpuRegister.Rax]);
+    }
+
+    [Fact]
+    public void PosixTruncateAndRename_MissingPathReturnsMinusOne()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong pathAddress = memoryBase + 0x100;
+        const ulong otherPathAddress = memoryBase + 0x200;
+
+        var truncateMemory = new FakeCpuMemory(memoryBase, 0x1000);
+        var truncateContext = new CpuContext(truncateMemory, Generation.Gen5);
+        truncateMemory.WriteCString(pathAddress, "/__sharpemu_test_missing__/save.dat");
+        truncateContext[CpuRegister.Rdi] = pathAddress;
+        truncateContext[CpuRegister.Rsi] = 0;
+
+        Assert.Equal(-1, KernelMemoryCompatExports.PosixTruncate(truncateContext));
+        Assert.Equal(ulong.MaxValue, truncateContext[CpuRegister.Rax]);
+
+        var renameMemory = new FakeCpuMemory(memoryBase, 0x1000);
+        var renameContext = new CpuContext(renameMemory, Generation.Gen5);
+        renameMemory.WriteCString(pathAddress, "/__sharpemu_test_missing__/from.dat");
+        renameMemory.WriteCString(otherPathAddress, "/__sharpemu_test_missing__/to.dat");
+        renameContext[CpuRegister.Rdi] = pathAddress;
+        renameContext[CpuRegister.Rsi] = otherPathAddress;
+
+        Assert.Equal(-1, KernelMemoryCompatExports.PosixRename(renameContext));
+        Assert.Equal(ulong.MaxValue, renameContext[CpuRegister.Rax]);
+    }
+
     [Fact]
     public void KernelMkdir_GuestRootReturnsAlreadyExists()
     {
