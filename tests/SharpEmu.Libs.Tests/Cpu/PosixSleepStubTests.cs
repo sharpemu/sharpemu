@@ -11,7 +11,7 @@ namespace SharpEmu.Libs.Tests.Cpu;
 // more as well: macOS usleep rejects such lengths with EINVAL, which made the stub return at once.
 public sealed unsafe class PosixSleepStubTests
 {
-    [Theory]
+    [NativeX64Theory]
     [InlineData(1200u, 1.0, 4.0)]
     [InlineData(20u, 0.015, 1.0)]
     public void SleepStubSleepsForTheRequestedMilliseconds(uint milliseconds, double minSeconds, double maxSeconds)
