@@ -55,6 +55,7 @@ internal sealed class PresenterUnderTest : IDisposable
         SetField("_device", vulkan.Device);
         SetField("_supportsFragmentShaderBarycentric", vulkan.SupportsFragmentShaderBarycentric);
         SetField("_supportsFillRectangle", vulkan.SupportsFillRectangle);
+        SetField("_supportsShaderClipDistance", vulkan.SupportsClipDistance);
         SetField("_deviceInfo", vulkan.DeviceInfo);
         SetField("_scheduler", Harness.Scheduler);
         SetField("_relay", Harness.Worker.Relay);

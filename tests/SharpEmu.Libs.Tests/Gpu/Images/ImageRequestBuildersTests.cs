@@ -125,6 +125,33 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.True(description.Metadata.DccAlphaMsb);
     }
 
+    [Theory]
+    [InlineData(GuestImageType.Color2D, 1u, false)]
+    [InlineData(GuestImageType.Color3D, 32u, false)]
+    [InlineData(GuestImageType.Color2DArray, 4u, false)]
+    [InlineData(GuestImageType.Color2D, 1u, true)]
+    [InlineData(GuestImageType.Color3D, 32u, true)]
+    [InlineData(GuestImageType.Color2DArray, 4u, true)]
+    public void CompressedTexture_PreservesGenericDccAndNativeClearScopes(GuestImageType type, uint layers, bool nativeClear)
+    {
+        const ulong metadata = 0x1_2000_0000;
+        var format = nativeClear ? GuestPixelFormat.Bits8_8_8_8UNorm : GuestPixelFormat.Bits8_8_8_8UInt;
+        var words = RegisterWords.Texture(Base, format, 32, 32, type, GuestTileMode.RenderTarget, layers: layers);
+        words[6] |= (1u << 21) | (uint)(((metadata >> 8) & 0xFF) << 24);
+        words[7] = (uint)(metadata >> 16);
+        var shape = Sampled2D with
+        {
+            Volume = type == GuestImageType.Color3D,
+            Arrayed = type == GuestImageType.Color2DArray,
+            NumericClass = nativeClear ? TextureNumericClass.Float : TextureNumericClass.Uint,
+        };
+        var description = ImageRequestBuilders.Texture(words, shape).Request.Description;
+        Assert.Equal(MetadataKind.Dcc, description.Metadata.Kind);
+        Assert.Equal(metadata, description.Metadata.Range.Address);
+        Assert.Equal(nativeClear, description.Metadata.NativeColorClear);
+        Assert.Equal((ulong)layers * 0x1000, description.Metadata.Range.Size);
+    }
+
     private readonly HeadlessVulkan? _vulkan;
 
     public ImageRequestBuildersTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
