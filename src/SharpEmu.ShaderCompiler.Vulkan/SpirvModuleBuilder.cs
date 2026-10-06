@@ -259,6 +259,7 @@ public enum SpirvDecoration : uint
     Flat = 14,
     PerVertexKhr = 5285,
     Location = 30,
+    Index = 32,
     Binding = 33,
     DescriptorSet = 34,
     Offset = 35,

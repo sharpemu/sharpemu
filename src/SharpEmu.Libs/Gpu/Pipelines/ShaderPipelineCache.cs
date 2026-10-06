@@ -390,6 +390,19 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             });
         }
 
+        if (context.BlendControls[0].UsesSecondarySource && (context.ColorTargets[0].Info & (1u << 16)) == 0 &&
+            outputs.Any(output => output.GuestSlot == 0))
+        {
+            if (outputs.Count != 1 || outputs[0].Kind != Gen5PixelOutputKind.Float)
+            {
+                throw SubmissionScheduler.Fatal("Dual-source blending requires one floating-point color output.");
+            }
+
+            // The second export feeds target zero's blend unit, not another attachment.
+            outputs[0] = outputs[0] with { ExportTarget = 0 };
+            outputs.Add(outputs[0] with { GuestSlot = 1, ExportTarget = 1, BlendSourceIndex = 1 });
+        }
+
         return outputs.ToArray();
     }
 

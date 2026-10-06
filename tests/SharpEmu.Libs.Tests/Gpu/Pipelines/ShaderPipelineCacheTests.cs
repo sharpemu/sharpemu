@@ -45,6 +45,47 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.False(ordinary.SequenceEqual(ieee));
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void SecondaryBlendExportDoesNotRequireAnotherAttachment(bool enabled, bool bypass)
+    {
+        var guest = new PipelineTestGuest();
+        var vertexAddress = PipelineTestGuest.MemoryBase + 0x1000;
+        var pixelAddress = PipelineTestGuest.MemoryBase + 0x2000;
+        guest.RegisterProgram(vertexAddress, PipelineTestGuest.MemoryBase + 0x8000, PipelineTestGuest.EndProgram,
+            userDataAddress: PipelineTestGuest.MemoryBase + 0x9000);
+        guest.RegisterProgram(pixelAddress, PipelineTestGuest.MemoryBase + 0x8100, PipelineTestGuest.EndProgram);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = Banks();
+        banks.Shader.Vertex.ExportAddress = vertexAddress;
+        banks.Shader.Pixel.Address = pixelAddress;
+        banks.Context.BlendControls[0] = new BlendRegisters { Enable = enabled, ColorDestinationFactor = 15 };
+        if (bypass)
+        {
+            banks.Context.ColorTargets[0] = banks.Context.ColorTargets[0] with
+            {
+                Info = banks.Context.ColorTargets[0].Info | (1u << 16),
+            };
+        }
+        var mappings = Enumerable.Repeat(ColorComponentMap.Identity, 8).ToArray();
+        GraphicsPrograms Prepare() => cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel,
+            banks.Context.ShaderInterface, banks.Context, mappings, pixelActive: true, depthBound: false);
+        Assert.True(Prepare().Available);
+        var outputs = guest.Compiler.Requests[0].PixelOutputs;
+        Assert.Equal(enabled && !bypass ? 2 : 1, outputs.Count);
+        if (enabled && !bypass)
+        {
+            Assert.Equal(0u, outputs[1].HostLocation);
+            Assert.Equal(1u, outputs[1].BlendSourceIndex);
+            Assert.Equal(1u, outputs[1].ExportTarget);
+            banks.Context.BlendControls[0].Enable = false;
+            Assert.True(Prepare().Available);
+            Assert.Single(guest.Compiler.Requests.Last(request => request.Stage == SharpEmu.ShaderCompiler.Resources.ShaderStage.Pixel).PixelOutputs);
+        }
+    }
+
     [Fact]
     public void FusedMeshPointerUpdatesWithoutCompilingAnotherProgram()
     {

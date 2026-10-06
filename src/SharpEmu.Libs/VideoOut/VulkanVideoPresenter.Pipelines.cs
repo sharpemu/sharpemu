@@ -847,6 +847,16 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
 
                     var separateAlpha = parameters.GetSeparateAlphaBlend(index);
+                    var dualSource = parameters.GetBlendEnable(index) && !parameters.GetBlendBypass(index) &&
+                        (parameters.GetColorSourceBlend(index) is >= 15 and <= 18 ||
+                         parameters.GetColorDestinationBlend(index) is >= 15 and <= 18 ||
+                         (separateAlpha && (parameters.GetAlphaSourceBlend(index) is >= 15 and <= 18 ||
+                                            parameters.GetAlphaDestinationBlend(index) is >= 15 and <= 18)));
+                    if (dualSource && (!_supportsDualSourceBlend ||
+                        (uint)colorCount > _shaderDescriptorLimits.MaxFragmentDualSrcAttachments))
+                    {
+                        throw SubmissionScheduler.Fatal("The device cannot support the requested dual-source blend attachments.");
+                    }
                     blends[index] = new PipelineColorBlendAttachmentState
                     {
                         ColorWriteMask = ToVkColorWriteMask(mask),

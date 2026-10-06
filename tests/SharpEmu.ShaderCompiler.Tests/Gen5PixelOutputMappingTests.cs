@@ -153,6 +153,37 @@ public sealed class Gen5PixelOutputMappingTests
         Assert.Contains("(float)as_type<half2>(v[1])[1]", metal.Source);
     }
 
+    [Theory]
+    [InlineData(0u, 1u, true)]
+    [InlineData(1u, 1u, false)]
+    [InlineData(0u, 2u, false)]
+    public void DualSourceExportsShareLocationWithDistinctIndices(uint location, uint blendIndex, bool valid)
+    {
+        var exports = Enumerable.Range(0, 2).Select(index => new Gen5ShaderInstruction(
+            (uint)index * 8, Gen5ShaderEncoding.Exp, "Exp", [],
+            [Gen5Operand.Vector(0), Gen5Operand.Vector(1), Gen5Operand.Vector(2), Gen5Operand.Vector(3)],
+            [], new Gen5ExportControl((uint)index, 15, true, index == 1, true))).ToArray();
+        var program = ResourceTestProgram.Program([.. exports, ResourceTestProgram.EndProgram(16)]);
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelOutputs = [new(0, 0, Gen5PixelOutputKind.Float),
+                new(1, location, Gen5PixelOutputKind.Float) { BlendSourceIndex = blendIndex }],
+        };
+        Assert.Equal(valid, Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error));
+        Assert.Equal(valid, Gen5MslTranslator.TryCompileProgram(request, out var metal, out _));
+        if (!valid) return;
+        var instructions = ReadInstructions(shader.Spirv);
+        var secondary = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.Index && instruction.Operands[2] == 1).Operands[0];
+        Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands.SequenceEqual(new uint[] { secondary, (uint)SpirvDecoration.Location, 0 }));
+        Assert.True(instructions.Count(instruction => instruction.Opcode == SpirvOp.Store &&
+            instruction.Operands[0] == secondary) >= 2, error);
+        Assert.Contains("mrt1 [[color(0), index(1)]]", metal.Source);
+        ValidateDepthModule(shader.Spirv);
+    }
+
     private static ShaderCompileRequest CompressedPixelRequest(Gen5PixelOutputKind kind, uint enableMask)
     {
         var export = new Gen5ShaderInstruction(

@@ -39,6 +39,14 @@ public static partial class Gen5SpirvTranslator
 
         if (request.Stage == ShaderStage.Pixel)
         {
+            var dualSource = request.PixelOutputs.Any(output => output.BlendSourceIndex != 0);
+            if (dualSource && (request.PixelOutputs.Count != 2 ||
+                request.PixelOutputs.Any(output => output.HostLocation != 0 || output.Kind != Gen5PixelOutputKind.Float) ||
+                !request.PixelOutputs.Select(output => output.BlendSourceIndex).Order().SequenceEqual(new uint[] { 0, 1 })))
+            {
+                error = "dual-source pixel outputs require indices zero and one at host location zero";
+                return false;
+            }
             if (request.PixelOutputs.Count > 8 || request.PixelOutputs.Any(output => output.GuestSlot > 7))
             {
                 error = "pixel outputs must contain at most eight guest slots in the 0..7 range";
@@ -46,7 +54,7 @@ public static partial class Gen5SpirvTranslator
             }
 
             if (request.PixelOutputs.Select(output => output.GuestSlot).Distinct().Count() != request.PixelOutputs.Count ||
-                request.PixelOutputs.Select(output => output.HostLocation).Distinct().Count() != request.PixelOutputs.Count)
+                request.PixelOutputs.Select(output => (output.HostLocation, output.BlendSourceIndex)).Distinct().Count() != request.PixelOutputs.Count)
             {
                 error = "pixel output guest slots and host locations must be unique";
                 return false;

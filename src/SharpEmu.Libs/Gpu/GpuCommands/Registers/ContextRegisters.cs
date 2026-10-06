@@ -16,6 +16,12 @@ public struct BlendRegisters
     public bool SeparateAlpha = true;
     public bool Enable;
 
+    public readonly bool UsesSecondarySource => Enable &&
+        (IsSecondaryFactor(ColorSourceFactor) || IsSecondaryFactor(ColorDestinationFactor) ||
+         (SeparateAlpha && (IsSecondaryFactor(AlphaSourceFactor) || IsSecondaryFactor(AlphaDestinationFactor))));
+
+    private static bool IsSecondaryFactor(byte factor) => factor is >= 15 and <= 18;
+
     public BlendRegisters()
     {
     }

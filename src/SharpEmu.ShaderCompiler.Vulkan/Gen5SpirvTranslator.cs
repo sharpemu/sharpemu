@@ -1033,6 +1033,10 @@ public static partial class Gen5SpirvTranslator
                         variable,
                         SpirvDecoration.Location,
                         binding.HostLocation);
+                    if (binding.BlendSourceIndex != 0)
+                    {
+                        _module.AddDecoration(variable, SpirvDecoration.Index, binding.BlendSourceIndex);
+                    }
                     _pixelOutputs.Add(
                         binding.ExportTarget,
                         new SpirvPixelOutput(

@@ -391,6 +391,13 @@ internal sealed class ShaderProgramCache
                 break;
             case ShaderStage.Pixel:
                 StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), _staticState);
+                foreach (var output in options.PixelOutputs)
+                {
+                    _staticState.Add(output.GuestSlot);
+                    _staticState.Add(output.HostLocation);
+                    _staticState.Add(output.ExportTarget);
+                    _staticState.Add(output.BlendSourceIndex);
+                }
                 break;
             case ShaderStage.Mesh:
                 StageStaticKey.Build(options.MeshInfo ?? throw new ArgumentException("The mesh lookup has no mesh input info."), options.RequiredVertexOutputCount, _staticState);
