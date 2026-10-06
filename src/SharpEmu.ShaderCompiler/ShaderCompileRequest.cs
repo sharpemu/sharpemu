@@ -212,6 +212,7 @@ public sealed class ShaderCompileRequest
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
 
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];
+    public bool PixelDepthExportEnable { get; init; }
     public uint PixelInputEnable { get; init; }
     public uint PixelCustomInterpolationMask { get; init; }
 
