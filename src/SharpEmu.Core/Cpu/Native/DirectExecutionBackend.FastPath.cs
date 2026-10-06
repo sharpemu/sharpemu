@@ -261,23 +261,40 @@ public sealed unsafe partial class DirectExecutionBackend
 		return code;
 	}
 
+	// SHARPEMU_MEMCPY_MANAGED_MIN overrides the size from which guest memcpy takes the managed path.
+	internal static readonly int ManagedCopyMinimumBytes =
+		int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_MEMCPY_MANAGED_MIN"), out var minimum) && minimum > 0 ? minimum : 4096;
+
 	/// <summary>
 	/// memcpy/memmove(dst, src, n) as a forward <c>rep movsb</c>, returning dst. The libc
 	/// export copies with memmove semantics, so a destination that starts inside the source
 	/// (where a forward copy would read bytes it already overwrote) takes the managed path.
+	/// So does a copy of at least <see cref="ManagedCopyMinimumBytes"/>: the native copy takes
+	/// one write-tracking fault per GPU-watched page it writes, a signal round trip of about
+	/// 0.2 ms under Rosetta, while the managed copy marks the whole destination written first.
 	/// Only RAX, RCX, RSI, RDI and the flags change - all caller-saved - and the direction
 	/// flag is clear on entry per the SysV ABI.
 	/// </summary>
 	internal static List<byte> EmitGuestMemoryCopyStub(nint fallbackTrampoline)
 	{
-		var code = new List<byte>(40);
+		var code = new List<byte>(48);
+		var slowPathFixups = new List<int>();
 		// mov rcx, rdi / sub rcx, rsi / cmp rcx, rdx / jb slow: dst - src < n (unsigned) is
 		// exactly a destination in (src, src + n) or equal to src with a non-empty copy.
 		code.AddRange([0x48, 0x89, 0xF9, 0x48, 0x29, 0xF1, 0x48, 0x39, 0xD1, 0x72, 0x00]);
-		var slowPathFixup = code.Count - 1;
+		slowPathFixups.Add(code.Count - 1);
+		// cmp rdx, imm32 / jae slow
+		code.AddRange([0x48, 0x81, 0xFA]);
+		code.AddRange(BitConverter.GetBytes(ManagedCopyMinimumBytes));
+		code.AddRange([0x73, 0x00]);
+		slowPathFixups.Add(code.Count - 1);
 		// mov rax, rdi / mov rcx, rdx / rep movsb / ret
 		code.AddRange([0x48, 0x89, 0xF8, 0x48, 0x89, 0xD1, 0xF3, 0xA4, 0xC3]);
-		code[slowPathFixup] = checked((byte)(code.Count - (slowPathFixup + 1)));
+		foreach (var fixup in slowPathFixups)
+		{
+			code[fixup] = checked((byte)(code.Count - (fixup + 1)));
+		}
+
 		// jmp qword [rip+0] with the absolute trampoline address after it.
 		code.AddRange([0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]);
 		code.AddRange(BitConverter.GetBytes((long)fallbackTrampoline));
