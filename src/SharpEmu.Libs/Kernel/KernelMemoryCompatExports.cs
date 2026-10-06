@@ -5116,10 +5116,64 @@ public static partial class KernelMemoryCompatExports
                 continue;
             }
 
-            resolved.Add(segment);
+            resolved.Add(EncodeHostPathSegment(segment));
         }
 
         return string.Join(Path.DirectorySeparatorChar, resolved);
+    }
+
+    // Windows rejects these characters in a filename outright. The guest runs
+    // FreeBSD semantics, so a title may legitimately use them - "rg_ac_Arcade
+    // Spirits: The New Challengers_0.dat" is a real save name - and translating
+    // it verbatim silently truncates at the first invalid character, so the
+    // title writes "rg_ac_Arcade Spirits" and then faults on reopen after a
+    // restart. Percent-encoding keeps the guest->host mapping one-to-one, unlike
+    // substituting '_', which would silently merge "foo:bar" with the distinct
+    // "foo_bar". Windows only: Linux and macOS accept every one of these.
+    // Separators are encoded too even though the caller splits them off first,
+    // so this stays safe if a future caller hands it an un-split path.
+    internal static string EncodeHostPathSegment(string segment) =>
+        OperatingSystem.IsWindows() ? EncodeWindowsPathSegment(segment) : segment;
+
+    internal static string EncodeWindowsPathSegment(string segment)
+    {
+        StringBuilder? encoded = null;
+        for (var index = 0; index < segment.Length; index++)
+        {
+            var ch = segment[index];
+            var replacement = ch switch
+            {
+                // '%' is encoded first so the mapping stays injective and an
+                // already-encoded-looking name cannot forge another one.
+                '%' => "%25",
+                '<' => "%3C",
+                '>' => "%3E",
+                ':' => "%3A",
+                '"' => "%22",
+                '/' => "%2F",
+                '\\' => "%5C",
+                '|' => "%7C",
+                '?' => "%3F",
+                '*' => "%2A",
+                _ when ch < ' ' => $"%{(int)ch:X2}",
+                _ => null,
+            };
+
+            if (replacement is null)
+            {
+                encoded?.Append(ch);
+                continue;
+            }
+
+            if (encoded is null)
+            {
+                encoded = new StringBuilder(segment.Length + 8).Append(segment, 0, index);
+            }
+
+            encoded.Append(replacement);
+        }
+
+        return encoded?.ToString() ?? segment;
     }
 
     // Combines a mount-relative guest path onto a built-in mount root and
