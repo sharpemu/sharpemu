@@ -275,7 +275,7 @@ internal sealed class ShaderProgramCache
             BuildStaticState(source.Stage, options);
             var probe = new ProgramKeyProbe(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
                 source.ContinuationAddressOffset, CollectionsMarshal.AsSpan(_staticState));
-            _programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out entry);
+            _programs.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out key, out entry);
         }
         var sourceWasCached = entry is not null;
         if (RenderTrace.Enabled && RenderTrace.Pipeline())
@@ -348,7 +348,7 @@ internal sealed class ShaderProgramCache
             {
                 var caller = entry.Program with { Address = source.Address };
                 var library = ShaderCallLibrary.Read(caller, entry.Plan.Memory, snapshot, _host.TryReadCleanGuestWord);
-                var linkedKey = (key, library.Identity);
+                var linkedKey = (key ?? throw new InvalidOperationException("The cached shader has no program key."), library.Identity);
                 if (!_linkedPrograms.TryGetValue(linkedKey, out var linked))
                 {
                     var program = Gen5ShaderCallLinker.Link(caller, library.Calls);
@@ -435,6 +435,14 @@ internal sealed class ShaderProgramCache
                 break;
             case ShaderStage.Pixel:
                 StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), _staticState);
+                foreach (var output in options.PixelOutputs)
+                {
+                    _staticState.Add(output.GuestSlot);
+                    _staticState.Add(output.HostLocation);
+                    _staticState.Add(output.ExportTarget);
+                    _staticState.Add(output.Index);
+                    _staticState.Add(output.DualSourceAlpha ? 1u : 0u);
+                }
                 break;
             case ShaderStage.Mesh:
                 StageStaticKey.Build(options.MeshInfo ?? throw new ArgumentException("The mesh lookup has no mesh input info."), options.RequiredVertexOutputCount, _staticState);

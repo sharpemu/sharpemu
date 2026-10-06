@@ -427,18 +427,22 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             });
         }
 
-        // Dual-source blending reads its second source from the export after target 0's,
-        // as the hardware pairs MRT0 and MRT1. It shares target 0's location as index 1.
-        if (_host.SupportsDualSourceBlend && UsesSecondBlendSource(context.BlendControls[0]) &&
-            outputs.Count == 1 && outputs[0].GuestSlot == 0 && outputs[0].ExportTarget < ContextRegisters.ColorTargetCount)
+        if (context.BlendControls[0].UsesSecondarySource && (context.ColorTargets[0].Info & (1u << 16)) == 0 &&
+            outputs.Any(output => output.GuestSlot == 0))
         {
-            var first = outputs[0];
-            outputs.Add(new Gen5PixelOutputBinding(1, first.HostLocation, first.Kind, first.ComponentMapping)
+            if (outputs.Count != 1 || outputs[0].Kind != Gen5PixelOutputKind.Float)
             {
-                ExportTarget = first.ExportTarget + 1,
-                Index = 1,
-            });
-            // Key the compiled program by the second source as well.
+                throw SubmissionScheduler.Fatal("Dual-source blending requires one floating-point color output.");
+            }
+            if (NeedsDualSourceAlpha(context, 0, outputMappings[0]))
+            {
+                throw SubmissionScheduler.Fatal("Dual-source blending cannot also export an unmapped source alpha.");
+            }
+
+            // EXP1 supplies the second source for target zero, not a second attachment.
+            outputs[0] = outputs[0] with { ExportTarget = 0 };
+            outputs.Add(outputs[0] with { GuestSlot = 1, ExportTarget = 1, Index = 1 });
+            outputModes[0] = (byte)(((uint)outputs[0].Kind + 1) | 0x10u);
             outputModes[1] = DualSourceOutputMode;
         }
 
@@ -460,9 +464,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // BLEND_SRC1_COLOR, BLEND_ONE_MINUS_SRC1_COLOR, BLEND_SRC1_ALPHA, BLEND_ONE_MINUS_SRC1_ALPHA.
     internal static bool UsesSecondBlendSource(in BlendRegisters blend)
     {
-        static bool Second(byte factor) => factor is >= 15 and <= 18;
-        return blend.Enable && (Second(blend.ColorSourceFactor) || Second(blend.ColorDestinationFactor) ||
-            Second(blend.AlphaSourceFactor) || Second(blend.AlphaDestinationFactor));
+        return blend.UsesSecondarySource;
     }
 
     // Marks a pixel output mode whose program also writes its alpha to the dual-source output.
@@ -865,7 +867,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             // A target the pixel program never exports keeps its contents, as on hardware; the
             // host output would otherwise write an undefined value (e.g. depth-only passes that
             // leave a color target bound and export only to the null target).
-            var exportTarget = PixelExportRouting.ExportForSlot(context.ShaderInterface, color.Slot);
+            var exportTarget = color.Slot == 0 && context.BlendControls[0].UsesSecondarySource &&
+                (context.ColorTargets[0].Info & (1u << 16)) == 0
+                ? 0 : PixelExportRouting.ExportForSlot(context.ShaderInterface, color.Slot);
             var exported = pixelStage is not null &&
                 (exportTarget >= 0 && ((pixelStage.PixelColorExportMasks >> (exportTarget * 4)) & 0xFu) != 0);
             var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.RenderTargetMaskForSlot(color.Slot)) : 0;

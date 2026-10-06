@@ -83,4 +83,25 @@ public sealed class Gen5DualSourceBlendTests
         Assert.False(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error));
         Assert.Contains("second source", error, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void SyntheticAlphaCannotReplaceExplicitSecondSource()
+    {
+        var request = Request(
+            new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float) { DualSourceAlpha = true },
+            new Gen5PixelOutputBinding(1, 0, Gen5PixelOutputKind.Float) { Index = 1 });
+        Assert.False(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error));
+        Assert.Contains("synthetic alpha", error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MetalReportsUnsupportedSyntheticAlpha()
+    {
+        var request = Request(new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)
+        {
+            DualSourceAlpha = true,
+        });
+        Assert.False(SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
+        Assert.Contains("synthetic dual-source alpha", error, StringComparison.Ordinal);
+    }
 }

@@ -45,6 +45,54 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.False(ordinary.SequenceEqual(ieee));
     }
 
+    [Theory]
+    [InlineData(false, false, 0)]
+    [InlineData(true, false, 0)]
+    [InlineData(true, true, 0)]
+    [InlineData(false, false, 3)]
+    [InlineData(true, false, 3)]
+    [InlineData(true, true, 3)]
+    public void SecondaryBlendExportDoesNotRequireAnotherAttachment(bool enabled, bool bypass, int packedExport)
+    {
+        var guest = new PipelineTestGuest();
+        var vertexAddress = PipelineTestGuest.MemoryBase + 0x1000;
+        var pixelAddress = PipelineTestGuest.MemoryBase + 0x2000;
+        guest.RegisterProgram(vertexAddress, PipelineTestGuest.MemoryBase + 0x8000, PipelineTestGuest.EndProgram,
+            userDataAddress: PipelineTestGuest.MemoryBase + 0x9000);
+        guest.RegisterProgram(pixelAddress, PipelineTestGuest.MemoryBase + 0x8100, PipelineTestGuest.EndProgram);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = Banks();
+        Array.Clear(banks.Context.ShaderInterface.TargetOutputModes);
+        banks.Context.ShaderInterface.TargetOutputModes[packedExport] = 1;
+        banks.Context.ShaderInterface.ColorShaderMask = 15;
+        banks.Shader.Vertex.ExportAddress = vertexAddress;
+        banks.Shader.Pixel.Address = pixelAddress;
+        banks.Context.BlendControls[0] = new BlendRegisters { Enable = enabled, ColorDestinationFactor = 15 };
+        if (bypass)
+        {
+            banks.Context.ColorTargets[0] = banks.Context.ColorTargets[0] with
+            {
+                Info = banks.Context.ColorTargets[0].Info | (1u << 16),
+            };
+        }
+        var mappings = Enumerable.Repeat(ColorComponentMap.Identity, 8).ToArray();
+        GraphicsPrograms Prepare() => cache.GetGraphicsPrograms(banks.Shader.Vertex, banks.Shader.Pixel,
+            banks.Context.ShaderInterface, banks.Context, mappings, pixelActive: true, depthBound: false);
+        Assert.True(Prepare().Available);
+        var outputs = guest.Compiler.Requests[0].PixelOutputs;
+        Assert.Equal(enabled && !bypass ? 2 : 1, outputs.Count);
+        Assert.Equal(enabled && !bypass ? 0u : (uint)packedExport, outputs[0].ExportTarget);
+        if (enabled && !bypass)
+        {
+            Assert.Equal(0u, outputs[1].HostLocation);
+            Assert.Equal(1u, outputs[1].Index);
+            Assert.Equal(1u, outputs[1].ExportTarget);
+            banks.Context.BlendControls[0].Enable = false;
+            Assert.True(Prepare().Available);
+            Assert.Single(guest.Compiler.Requests.Last(request => request.Stage == SharpEmu.ShaderCompiler.Resources.ShaderStage.Pixel).PixelOutputs);
+        }
+    }
+
     [Fact]
     public void FusedMeshPointerUpdatesWithoutCompilingAnotherProgram()
     {
@@ -295,10 +343,21 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         var blend = new BlendRegisters
         {
             Enable = enable, ColorSourceFactor = colorSource, ColorDestinationFactor = colorDestination,
-            AlphaSourceFactor = alphaSource, AlphaDestinationFactor = alphaDestination,
+            AlphaSourceFactor = alphaSource, AlphaDestinationFactor = alphaDestination, SeparateAlpha = true,
         };
 
         Assert.Equal(expected, ShaderPipelineCache.UsesSecondBlendSource(blend));
+    }
+
+    [Fact]
+    public void SecondBlendSourceIgnoresDormantAlphaFactors()
+    {
+        var blend = new BlendRegisters
+        {
+            Enable = true, ColorSourceFactor = 1, AlphaSourceFactor = 17, AlphaDestinationFactor = 18,
+            SeparateAlpha = false,
+        };
+        Assert.False(ShaderPipelineCache.UsesSecondBlendSource(blend));
     }
 
     [Fact]
@@ -478,12 +537,31 @@ public sealed class ShaderPipelineCacheTests : IDisposable
     [Theory]
     [InlineData(0x0u, 0x0u)]
     [InlineData(0xFu, 0xFu)]
-    public void ColorTarget_TheProgramNeverExports_IsNotWritten(uint exportMasks, uint expectedMask)
+    [InlineData(0xFu, 0xFu, true, false)]
+    [InlineData(0xF000u, 0x0u, true, false)]
+    [InlineData(0xFu, 0x0u, true, true)]
+    [InlineData(0xF000u, 0xFu, true, true)]
+    public void ColorTarget_TheProgramNeverExports_IsNotWritten(uint exportMasks, uint expectedMask,
+        bool dualSource = false, bool bypass = false)
     {
         // Astro Bot's depth-only pattern pass keeps a color target bound but exports only to
         // the null target; writing the undefined host output drew a rectangle over the movie.
         var banks = Banks();
         banks.Context.RenderTargetMask = 0xF;
+        if (dualSource)
+        {
+            Array.Clear(banks.Context.ShaderInterface.TargetOutputModes);
+            banks.Context.ShaderInterface.TargetOutputModes[3] = 1;
+            banks.Context.ShaderInterface.ColorShaderMask = 15;
+            banks.Context.BlendControls[0] = new BlendRegisters { Enable = true, ColorSourceFactor = 15 };
+            if (bypass)
+            {
+                banks.Context.ColorTargets[0] = banks.Context.ColorTargets[0] with
+                {
+                    Info = banks.Context.ColorTargets[0].Info | (1u << 16),
+                };
+            }
+        }
         var programs = Programs(pixelStage: Stage(new ShaderProgramInfo { Stage = ShaderStageKind.Pixel, PixelColorExportMasks = exportMasks }));
         var resolution = new ColorTargetResolution(
             default, 0x1000, 0x10000, new Extent2D(64, 64), 0, 0, 1, ColorComponentMap.Identity, false, false, default);
