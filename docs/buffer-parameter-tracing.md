@@ -13,6 +13,18 @@ Set `SHARPEMU_TRACE_BUFFER_SHADER` to the hexadecimal shader hash.
 Set `SHARPEMU_TRACE_BUFFER_SLOT` to the zero-based buffer resource slot.
 Both selections must match before the diagnostic reads memory.
 
+For vertex input, the same slot variable selects the semantic attribute ID,
+not the merged vertex binding slot. `VertexBufferParameter` lines are limited
+to 64 samples per presenter. They include the resolved descriptor words,
+stride, record count, format, bounds mode, requested size, available acquired
+range, host binding, and 16 bytes from guest backing and the mapped stream.
+Descriptor words include the attribute format and address adjustments.
+The acquired range can include merged attributes. It is not a per-attribute
+upload count. Stream samples can include bytes outside the requested range;
+this is intentional so a short upload is visible. Device-local data reports
+`unavailable`. No GPU download or wait is added. Samples are not atomic with
+guest writes or GPU execution. Component count is not a byte count.
+
 Each `BufferParameter` line records the submission tick, guest address, buffer handle,
 buffer offset, range size, write access, and the first 128 bytes at most.
 The trace stops after 16,384 samples per presenter.
