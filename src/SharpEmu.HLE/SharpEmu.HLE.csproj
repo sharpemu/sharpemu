@@ -41,8 +41,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <SharpEmuAerolibTaskAssembly>$(MSBuildThisFileDirectory)..\..\artifacts\bin\$(Configuration)\netstandard2.0\SharpEmu.SourceGenerators.dll</SharpEmuAerolibTaskAssembly>
   </PropertyGroup>
 
+  <!-- Runtime="NET" is required: without it MSBuild out-of-proc TaskHostFactory
+       loads the netstandard2.0 task in the .NET Framework host and fails MSB4061
+       ("The type must be supplied by the runtime") on newer .NET 10 SDKs. -->
   <UsingTask TaskName="SharpEmu.SourceGenerators.GenerateAerolibBinaryTask"
              TaskFactory="TaskHostFactory"
+             Runtime="NET"
              AssemblyFile="$(SharpEmuAerolibTaskAssembly)" />
 
   <!-- Runs after ResolveProjectReferences (which builds the task assembly) and before
