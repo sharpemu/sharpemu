@@ -5,6 +5,7 @@ using System.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
@@ -38,10 +39,22 @@ public sealed partial class RenderExecutor
         }
 
         Span<VertexBufferRange> ranges = stackalloc VertexBufferRange[VertexInputInfo.MaxBuffers];
-        var rangeCount = 0;
-        foreach (ref readonly var vertex in buffers.AsSpan())
+        Span<ulong> sizes = stackalloc ulong[buffers.Length];
+        for (var slot = 0; slot < buffers.Length; slot++) sizes[slot] = buffers[slot].Size;
+        foreach (var attribute in vertexInput.Attributes)
         {
-            var size = vertex.Size;
+            var slot = attribute.BufferIndex;
+            var descriptor = attribute.Descriptor;
+            if (buffers[slot].Stride != 0 || descriptor.RecordCount == 0 || descriptor.OutOfBounds != 2) continue;
+            // This bounds mode tests only whether the record count is nonzero.
+            // Constant attributes still need the full format extent.
+            sizes[slot] = Math.Max(sizes[slot], (ulong)attribute.OffsetBytes + VertexAttributeFormats.StorageByteSize(descriptor));
+        }
+        var rangeCount = 0;
+        for (var slot = 0; slot < buffers.Length; slot++)
+        {
+            ref readonly var vertex = ref buffers[slot];
+            var size = sizes[slot];
             if (size == 0)
             {
                 continue;
@@ -83,7 +96,7 @@ public sealed partial class RenderExecutor
         for (var slot = 0; slot < buffers.Length; slot++)
         {
             ref readonly var vertex = ref buffers[slot];
-            if (vertex.Size == 0)
+            if (sizes[slot] == 0)
             {
                 nullBuffer ??= _host.NullBuffer;
                 prepared[slot] = nullBuffer.Value;

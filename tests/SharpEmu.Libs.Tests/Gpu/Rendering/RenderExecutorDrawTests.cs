@@ -672,6 +672,38 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains("bind_vertex 100:100,100:0,101:0,1:0,100:180", _host.Calls);
     }
 
+    [Theory]
+    [InlineData(0u, 1u, 2u, 74u, 0u, 12ul)]
+    [InlineData(0u, 1u, 2u, 74u, 4u, 16ul)]
+    [InlineData(0u, 1u, 2u, 29u, 0u, 4ul)]
+    [InlineData(0u, 1u, 2u, 50u, 0u, 4ul)]
+    [InlineData(0u, 0u, 2u, 74u, 0u, 0ul)]
+    [InlineData(0u, 1u, 0u, 74u, 0u, 1ul)]
+    [InlineData(0u, 1u, 1u, 74u, 0u, 1ul)]
+    [InlineData(0u, 1u, 3u, 74u, 0u, 1ul)]
+    [InlineData(16u, 2u, 2u, 74u, 0u, 32ul)]
+    public void ConstantVertexRange_CoversTheFormatOnlyWhenBoundsPermitIt(
+        uint stride, uint records, uint bounds, uint format, uint offset, ulong expected)
+    {
+        var defaults = Programs();
+        var descriptor = new BufferDescriptorWords((uint)(VertexBase + offset),
+            (uint)(VertexBase >> 32) | (stride << 16), records, (bounds << 28) | (format << 12) | 0x3AC);
+        _pipelines.Graphics = new GraphicsPrograms
+        {
+            Vertex = defaults.Vertex, Pixel = defaults.Pixel, PixelInput = defaults.PixelInput,
+            VertexInput = new VertexInputInfo
+            {
+                Stage = defaults.VertexInput.Stage,
+                Buffers = [new VertexInputBuffer(VertexBase, stride, records)],
+                Attributes = [new VertexAttributeResource(descriptor, 0, 3, 11, 0, 0, offset)],
+            },
+        };
+        _executor.DrawAuto(1, Banks(), Auto(3));
+        var obtains = _host.Calls.Where(call => call.StartsWith("obtain", StringComparison.Ordinal)).ToArray();
+        if (expected == 0) Assert.Empty(obtains);
+        else Assert.Equal($"obtain {VertexBase:X} {expected:X} written=False -> 100:0", Assert.Single(obtains));
+    }
+
     [Fact]
     public void VertexRanges_ClampToTheMappedSizeAndFailForAnAddressOutsideTheAcquiredRange()
     {

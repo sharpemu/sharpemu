@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Pipelines;
@@ -15,6 +16,18 @@ public static class VertexAttributeFormats
     private static int _narrowingLines;
     private static int _acceptedFormat113Lines;
     private static int _acceptedFormat121Lines;
+
+    public static uint StorageByteSize(in BufferDescriptorWords descriptor)
+    {
+        if (descriptor.Format == AcceptedSignedShortPairFormat) return 16;
+        if (descriptor.Format == AcceptedHalfPairFormat) return 4;
+        if (Gfx10UnifiedFormat.TryDecode(descriptor.Format, out var dataFormat, out _))
+        {
+            var bytes = Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, 4);
+            if (bytes != 0) return bytes;
+        }
+        throw SubmissionScheduler.Fatal($"The vertex buffer format is unknown: format={descriptor.Format}.");
+    }
 
     // The format and its component count; false when the descriptor format is unknown.
     public static bool TryResolve(in BufferDescriptorWords descriptor, uint usedComponents, out Format format, out uint size)
