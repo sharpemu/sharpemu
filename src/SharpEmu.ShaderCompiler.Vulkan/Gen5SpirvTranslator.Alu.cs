@@ -2947,7 +2947,6 @@ public static partial class Gen5SpirvTranslator
                 case "SBrevB32":
                     result = _module.AddInstruction(SpirvOp.BitReverse, _uintType, left);
                     StoreS(destination, result);
-                    Store(_scc, IsNotZero(result));
                     return true;
                 case "SBitreplicateB64B32":
                 {
