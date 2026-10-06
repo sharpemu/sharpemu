@@ -1563,6 +1563,18 @@ public static partial class Gen5SpirvTranslator
             var block = blocks[blockIndex];
             if (_stage != Gen5SpirvStage.Mesh) _waveLowering.BeginBlock();
             _savedLaneValues.Clear();
+            var lastWorkgroupBarrierIndex = -1;
+            if ((_waveLaneCount != 64 || (ulong)_localSizeX * _localSizeY * _localSizeZ != 64) &&
+                _stage == Gen5SpirvStage.Compute && !_hasIndirectControlFlow &&
+                FindComputeDispatcherStart(blocks) == blocks.Count)
+            {
+                for (var index = block.StartIndex; index < block.EndIndex; index++)
+                {
+                    if (_request.Program.Instructions[index].Opcode == "SBarrier") lastWorkgroupBarrierIndex = index;
+                }
+            }
+            var passedWorkgroupBarrier = false;
+            var pendingSharedReads = false;
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
                 var instruction = _request.Program.Instructions[index];
@@ -1570,6 +1582,27 @@ public static partial class Gen5SpirvTranslator
                 if (IsBranch(instruction.Opcode) || instruction.Opcode == "SEndpgm")
                 {
                     continue;
+                }
+
+                if (lastWorkgroupBarrierIndex >= 0)
+                {
+                    if (instruction.Opcode == "SBarrier")
+                    {
+                        pendingSharedReads = false;
+                        passedWorkgroupBarrier = true;
+                    }
+                    if (instruction.Control is Gen5DataShareControl { Gds: false })
+                    {
+                        if (instruction.Opcode.StartsWith("DsRead", StringComparison.Ordinal)) pendingSharedReads = true;
+                        else if (instruction.Opcode.StartsWith("DsWrite", StringComparison.Ordinal))
+                        {
+                            // Existing convergent guest barriers bound this workgroup region.
+                            // Finish its LDS reads before a write can replace their source.
+                            if (passedWorkgroupBarrier && index < lastWorkgroupBarrierIndex && pendingSharedReads)
+                                EmitWave64Barrier();
+                            pendingSharedReads = false;
+                        }
+                    }
                 }
 
                 _execKnownFull = IsExecKnownFull(instruction.Pc);

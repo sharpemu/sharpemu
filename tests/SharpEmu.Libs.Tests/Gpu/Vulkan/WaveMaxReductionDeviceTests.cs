@@ -18,6 +18,53 @@ namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 // 31 and 63. The result bounds a sample loop, so a wrong maximum can hang the GPU.
 public sealed class WaveMaxReductionDeviceTests(HeadlessVulkanFixture fixture) : IClassFixture<HeadlessVulkanFixture>
 {
+    [Theory]
+    [InlineData(32u)]
+    [InlineData(64u)]
+    public void BoundedSharedReadsSurviveOtherWaveWrites(uint waveSize)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        void Add(Gen5ShaderInstruction instruction)
+        {
+            instructions.Add(instruction with { Pc = pc });
+            pc += 8;
+        }
+        Add(Vop2(0, "VLshlrevB32", 5, Operand(2), Gen5Operand.Vector(0)));
+        Add(Vop2(0, "VAddU32", 1, Operand(1), Gen5Operand.Vector(0)));
+        Add(DataShare(0, "DsWriteB32", false, [Gen5Operand.Vector(5), Gen5Operand.Vector(1)], []));
+        Add(new(0, Gen5ShaderEncoding.Sopp, "SBarrier", [0u], [], [], null));
+        Add(Vop2(0, "VXorB32", 6, Operand(512), Gen5Operand.Vector(5)));
+        Add(DataShare(0, "DsReadB32", false, [Gen5Operand.Vector(6)], [2]));
+        Add(MoveVector(0, 3, 0));
+        Add(DataShare(0, "DsWriteB32", false, [Gen5Operand.Vector(5), Gen5Operand.Vector(3)], []));
+        Add(new(0, Gen5ShaderEncoding.Sopp, "SBarrier", [0u], [], [], null));
+        Add(BufferAccess(0, "BufferStoreDword", 4, vectorData: 2, offsetEnabled: true, vectorAddress: 5));
+        Add(EndProgram(0));
+        var (plan, resources, layout) = Prepare(Program([.. instructions]));
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = 256, ThreadCountX = 256, WaveSize = waveSize, LocalDataShareDwords = 256,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var output = runner.CreateBuffer(1024);
+        var registers = new uint[256];
+        registers[6] = 1024;
+        for (var repeat = 0; repeat < 4; repeat++)
+        {
+            harness.Run(() => runner.Dispatch(registers,
+                new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [output] }, 1));
+            var result = runner.ReadBack(output, 0, 1024);
+            for (var lane = 0; lane < 256; lane++)
+                Assert.Equal((uint)((lane ^ 128) + 1), BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(lane * 4)));
+        }
+        harness.AssertNoValidationMessages();
+    }
+
     private static readonly uint[] Reduction =
     [
         0x280404FA, 0xFF011102, // v_max_u32_dpp v2, v2, v2 row_shr:1
