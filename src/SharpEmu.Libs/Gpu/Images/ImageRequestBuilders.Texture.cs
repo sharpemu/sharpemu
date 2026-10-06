@@ -333,14 +333,14 @@ public static partial class ImageRequestBuilders
             type is GuestImageType.Color2D or GuestImageType.Color2DArray or GuestImageType.Color3D &&
             NativeColorClear.TryDecode(0x40, viewFormat, !descriptor.DccAlphaOnMostSignificantBits, out _))
         {
-            var metadataAddress = descriptor.MetadataAddress << 8;
+            var clearMetadataAddress = descriptor.MetadataAddress << 8;
             var sliceSize = NativeColorClear.SliceSize(width, height, description.BytesPerBlock);
             var metadataSize = sliceSize * description.TransferLayers;
-            if (metadataAddress != 0 && (metadataAddress & 4095) == 0 && sliceSize != 0 &&
-                metadataSize <= ulong.MaxValue - metadataAddress)
+            if (clearMetadataAddress != 0 && (clearMetadataAddress & 4095) == 0 && sliceSize != 0 &&
+                metadataSize <= ulong.MaxValue - clearMetadataAddress)
             {
                 description.Metadata.Kind = MetadataKind.Dcc;
-                description.Metadata.Range = new GuestSpan(metadataAddress, metadataSize);
+                description.Metadata.Range = new GuestSpan(clearMetadataAddress, metadataSize);
                 description.Metadata.NativeColorClear = true;
                 description.Metadata.ColorAlphaOnLeastSignificantBits = !descriptor.DccAlphaOnMostSignificantBits;
                 description.Metadata.ColorMetadataBaseLayer = volume ? 0 : view.BaseLayer;

@@ -37,11 +37,13 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         SamplerAnisotropy = features.SamplerAnisotropy;
         StorageImageExtendedFormats = features.ShaderStorageImageExtendedFormats;
         ShaderInt64 = features.ShaderInt64;
+        SupportsClipDistance = features.ShaderClipDistance;
         SupportsDynamicRendering = dynamicRendering;
     }
 
     // Dynamic rendering support required by the presenter's render host.
     public bool SupportsDynamicRendering { get; }
+    public bool SupportsClipDistance { get; }
     public bool SupportsFragmentShaderBarycentric { get; private init; }
     public bool SupportsFillRectangle { get; private init; }
     public bool SupportsMeshShaders { get; private init; }
