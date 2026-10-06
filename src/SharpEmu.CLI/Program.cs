@@ -686,6 +686,7 @@ internal static partial class Program
                 if (i + 1 < args.Count &&
                     !string.IsNullOrWhiteSpace(args[i + 1]) &&
                     !args[i + 1].StartsWith("--", StringComparison.Ordinal) &&
+                    !IsFullscreenAlias(args[i + 1]) &&
                     ShouldConsumeLogFilePath(args, i + 1))
                 {
                     path = args[i + 1];
@@ -776,7 +777,8 @@ internal static partial class Program
         {
             var argument = args[i];
             if (string.IsNullOrWhiteSpace(argument) ||
-                argument.StartsWith("--", StringComparison.Ordinal))
+                argument.StartsWith("--", StringComparison.Ordinal) ||
+                IsFullscreenAlias(argument))
             {
                 continue;
             }
@@ -799,7 +801,8 @@ internal static partial class Program
         {
             var argument = args[i];
             if (!string.IsNullOrWhiteSpace(argument) &&
-                !argument.StartsWith("--", StringComparison.Ordinal))
+                !argument.StartsWith("--", StringComparison.Ordinal) &&
+                !IsFullscreenAlias(argument))
             {
                 return true;
             }
@@ -1010,7 +1013,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [-f|--fullscreen] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1109,6 +1112,11 @@ internal static partial class Program
                     runtimeOptions = default;
                     return false;
                 }
+                continue;
+            }
+            if (IsFullscreenAlias(argument))
+            {
+                windowModeOverride = HostWindowMode.ExclusiveFullscreen;
                 continue;
             }
             if (TrySplitOption(argument, "--window-mode", out var windowModeText))
@@ -1284,6 +1292,7 @@ internal static partial class Program
                 if (i + 1 < args.Length &&
                     !string.IsNullOrWhiteSpace(args[i + 1]) &&
                     !args[i + 1].StartsWith("--", StringComparison.Ordinal) &&
+                    !IsFullscreenAlias(args[i + 1]) &&
                     ShouldConsumeLogFilePath(args, i + 1))
                 {
                     logFilePath = args[++i];
@@ -1476,6 +1485,13 @@ internal static partial class Program
         };
         return Enum.IsDefined(mode);
     }
+
+    // Stand-in for "--window-mode fullscreen", so launching straight into
+    // fullscreen does not need the two-token form. The single-dash spellings have
+    // to be recognised by TryFindEbootPathToken and ShouldConsumeLogFilePath as
+    // well, or "-f" would be taken as the eboot path instead of as a flag.
+    private static bool IsFullscreenAlias(string argument) =>
+        argument is "-f" or "--f" or "-fullscreen" or "--fullscreen";
 
     private static bool TryParseSystemLanguage(string value, out int language)
     {
