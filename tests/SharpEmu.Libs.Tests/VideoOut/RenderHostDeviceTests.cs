@@ -723,7 +723,20 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     [InlineData(1, 2, true)]
     [InlineData(2, 2, true)]
     [InlineData(3, 2, true)]
-    public void RectangleList_ThreeCornersCoverTheRectangleWithoutFetchingAFourthVertex(int omittedCorner, int drawKind, bool geometryFallback = false)
+    [InlineData(0, 0, false, 4u, 2u)]
+    [InlineData(0, 1, false, 4u, 2u)]
+    [InlineData(0, 2, false, 4u, 2u)]
+    [InlineData(0, 0, true, 4u, 2u)]
+    [InlineData(0, 1, true, 4u, 2u)]
+    [InlineData(0, 2, true, 4u, 2u)]
+    [InlineData(0, 0, false, 5u, 2u)]
+    [InlineData(0, 1, false, 5u, 2u)]
+    [InlineData(0, 2, false, 5u, 2u)]
+    [InlineData(0, 0, true, 5u, 2u)]
+    [InlineData(0, 1, true, 5u, 2u)]
+    [InlineData(0, 2, true, 5u, 2u)]
+    public void RectangleList_ThreeCornersCoverTheRectangleWithoutFetchingAFourthVertex(int omittedCorner, int drawKind,
+        bool geometryFallback = false, uint drawCount = 3, uint instanceCount = 1)
     {
         if (!Ready()) return;
         if (!_vulkan.SupportsFillRectangle)
@@ -755,21 +768,22 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         banks.UserConfig.PrimitiveType = 7;
         banks.Context.ShaderInterface.GeometryOutputPrimitiveType = 3;
         var executor = new RenderExecutor(presenter.RenderHost,
-            new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices));
+            new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices, vertexCount: drawCount));
         if (drawKind != 0)
         {
             var indices = harness.MapBacked(0x10000, ReadWrite);
-            harness.Write(indices, Bytes((ushort)0, (ushort)1, (ushort)2));
+            harness.Write(indices, Bytes((ushort)0, (ushort)1, (ushort)2, (ushort)3, (ushort)4));
             var indirectArguments = drawKind == 2 ? harness.MapBacked(0x10000, ReadWrite) : 0;
             if (indirectArguments != 0)
-                harness.Write(indirectArguments, Bytes(3u, 1u, 0u, 0u, 0u));
+                harness.Write(indirectArguments, Bytes(drawCount, instanceCount, 0u, 0u, 0u));
             presenter.Run(() => executor.DrawIndexed(1, banks,
-                new DrawIndexedArguments(0, 0, VertexCount, indices, 0, 1, 0, 0, DrawOffsetSource.Packet,
+                new DrawIndexedArguments(0, 0, drawCount, indices, 0, instanceCount, 0, 0, DrawOffsetSource.Packet,
                     IndirectArgumentsAddress: indirectArguments)));
         }
         else
         {
-            presenter.Run(() => executor.DrawAuto(1, banks, Draw()));
+            presenter.Run(() => executor.DrawAuto(1, banks,
+                new DrawAutoArguments(0, 0, drawCount, instanceCount, 0, 0, DrawOffsetSource.Packet)));
         }
 
         presenter.Run(() => presenter.InvokeMethod("FlushBatchedGuestCommands"));

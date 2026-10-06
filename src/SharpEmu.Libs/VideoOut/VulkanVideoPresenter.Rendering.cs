@@ -1004,10 +1004,8 @@ internal static unsafe partial class VulkanVideoPresenter
             _vk.CmdBindPipeline(command, PipelineBindPoint.Graphics, entry.RectangleVariant);
         }
 
-        // Rectangle2D consumes three vertices and fills their projected bounding box.
-        // Native fill preserves their interpolants and does not fetch a made-up fourth vertex.
-        private bool CanDrawNativeRectangles(uint vertexCount) =>
-            (_supportsFillRectangle || _supportsRectangleGeometry) && vertexCount >= 3 && vertexCount % 3 == 0;
+        // Rectangle assembly consumes groups of three and discards incomplete trailing groups.
+        private bool CanDrawNativeRectangles => _supportsFillRectangle || _supportsRectangleGeometry;
 
         public void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance)
         {
@@ -1016,7 +1014,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var count = vertexCount;
             if (_boundGraphicsPipeline is { RectangleList: true } entry)
             {
-                if (CanDrawNativeRectangles(vertexCount))
+                if (CanDrawNativeRectangles)
                 {
                     BindNativeRectangleList(entry, command);
                 }
@@ -1051,7 +1049,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var command = BeginBatchedGuestCommands();
             if (_boundGraphicsPipeline is { RectangleList: true } entry)
             {
-                if (CanDrawNativeRectangles(indexCount))
+                if (CanDrawNativeRectangles)
                 {
                     BindNativeRectangleList(entry, command);
                 }
@@ -1075,7 +1073,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var command = BeginBatchedGuestCommands();
             if (_boundGraphicsPipeline is { RectangleList: true } entry)
             {
-                if (_supportsFillRectangle || _supportsRectangleGeometry)
+                if (CanDrawNativeRectangles)
                 {
                     BindNativeRectangleList(entry, command);
                 }

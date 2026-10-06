@@ -490,11 +490,6 @@ public sealed partial class RenderExecutor
 
                 if (_host.SupportsNativeRectangles)
                 {
-                    if (draw.Count % 3 != 0)
-                    {
-                        throw _host.Fatal($"A rectangle list needs complete groups of three vertices: count={draw.Count}.");
-                    }
-
                     // Keep guest vertex IDs unchanged; the host fills each three-vertex rectangle.
                     _host.Draw(draw.Count, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);
                     break;

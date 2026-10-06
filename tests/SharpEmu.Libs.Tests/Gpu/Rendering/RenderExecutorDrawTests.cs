@@ -749,12 +749,18 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains($"draw {count} 2 9 4", _host.Calls);
     }
 
-    [Fact]
-    public void LegacyRectangleList_NativeFillRejectsIncompleteGroups()
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(2u)]
+    [InlineData(4u)]
+    [InlineData(5u)]
+    [InlineData(7u)]
+    [InlineData(8u)]
+    public void LegacyRectangleList_NativeFillPreservesIncompleteGroups(uint count)
     {
         _host.SupportsNativeRectangles = true;
-        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(4)));
-        Assert.Contains("count=4", fatal.Message);
+        _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(count, instances: 2));
+        Assert.Contains($"draw {count} 2 0 0", _host.Calls);
     }
 
     [Fact]
