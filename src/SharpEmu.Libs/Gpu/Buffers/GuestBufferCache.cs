@@ -41,6 +41,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private readonly SubmissionScheduler _scheduler;
     private readonly IGpuQueueRelay _relay;
     private readonly GuestBufferUploader _uploader;
+    private readonly bool _unifiedBuffers;
     private readonly IGuestBackedSpace _backing;
     private readonly BdaFaultProcessor _faults;
     private readonly GpuBuffer _gds;
@@ -72,6 +73,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         _relay = relay;
         _backing = backing;
         _faults = new BdaFaultProcessor(device, scheduler, this, CachingPageBits, CachingPageCount);
+        _unifiedBuffers = UnifiedBuffersEnabled && HasUnifiedMemoryType(device);
         _gds = new GpuBuffer(device, scheduler, GpuBufferUsage.Stream, 0, GpuBuffer.AllFlags, GdsBufferSize);
         _bdaPageTable = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, BdaPageTableSize);
         _tracker = new GuestPageTracker(pages);
@@ -1182,6 +1184,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         public required bool IsWrite { get; init; }
         public required GuestMemoryProfile.ReadbackSource Source { get; init; }
         public required long Started { get; init; }
+
+        // Read from the buffers' own host mappings once the writer tick retires; no copy was recorded.
+        public bool Mapped { get; init; }
     }
 
     private PendingDownload? BeginReadMemoryOnGpu(ulong guestAddress, ulong size, bool isWrite, GuestMemoryProfile.ReadbackSource source,
@@ -1205,6 +1210,53 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         {
             NoteHotReadback(guestAddress, size);
         }
+        if (copies.Count != 0 && _unifiedBuffers && AreMapped(copies, out var writer))
+        {
+            if (writer == 0 || _scheduler.IsTickComplete(writer))
+            {
+                ApplyMappedRead(copies, windowBegin, windowEnd, guestAddress, size, isWrite, readbackStarted, source);
+                return null;
+            }
+
+            if (allowPending && writer < _scheduler.CurrentTick)
+            {
+                // A guest thread had to wait for this writer: submit later writes to the window right
+                // after their command, so the next wait ends with them instead of with their whole batch.
+                NoteHotReadback(guestAddress, size);
+
+                // The writer is already submitted: wait for it alone, not for the work queued after it.
+                var mappedTicks = new ulong[copies.Count];
+                for (var index = 0; index < copies.Count; index++)
+                {
+                    mappedTicks[index] = copies[index].Buffer.LastGpuWriteTick;
+                    copies[index].Buffer.RetainForeignRead();
+                }
+
+                return new PendingDownload
+                {
+                    Mapped = true,
+                    MainQueueTick = writer,
+                    Copies = copies,
+                    WriteTicks = mappedTicks,
+                    WindowBegin = windowBegin,
+                    WindowEnd = windowEnd,
+                    GuestAddress = guestAddress,
+                    Size = size,
+                    IsWrite = isWrite,
+                    Source = source,
+                    Started = readbackStarted,
+                };
+            }
+
+            if (!allowPending)
+            {
+                // On the command worker: submit the writer if it is still recording, then read the mapping.
+                _scheduler.Wait(writer);
+                ApplyMappedRead(copies, windowBegin, windowEnd, guestAddress, size, isWrite, readbackStarted, source);
+                return null;
+            }
+        }
+
         if (copies.Count != 0 && allowPending && TryBeginDownloadAsync(copies, out var ticket, out var writeTicks))
         {
             foreach (var copy in copies)
@@ -1326,6 +1378,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private bool CompleteReadMemoryOnGpu(PendingDownload pending, bool retrySynchronously)
     {
         using var readbackScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.BufferReadback);
+        if (pending.Mapped)
+        {
+            return CompleteMappedRead(pending, retrySynchronously);
+        }
+
         if (pending.Ticket is null)
         {
             return CompleteMainQueueRead(pending, retrySynchronously);
@@ -1370,6 +1427,103 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             }
 
             RecordReadback(pending.WindowBegin, pending.WindowEnd, pending.IsWrite, copies, pending.Started, pending.Source);
+            return true;
+        }
+        finally
+        {
+            foreach (var copy in pending.Copies)
+            {
+                copy.Buffer.ReleaseForeignRead();
+            }
+        }
+    }
+
+    // Guest buffers live in host-visible device memory on unified-memory devices (Apple GPUs), so a
+    // readback can copy straight out of the buffer once the last GPU write to it retired. That skips
+    // the copy command at the tail of the queue and the wait for every draw recorded after the writer.
+    // SHARPEMU_UNIFIED_BUFFERS=0 keeps device-local buffers and copy readbacks.
+    private static readonly bool UnifiedBuffersEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_UNIFIED_BUFFERS") != "0";
+
+    private static bool HasUnifiedMemoryType(GpuDeviceInfo device)
+    {
+        const MemoryPropertyFlags unified = MemoryPropertyFlags.DeviceLocalBit | MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit;
+        for (uint index = 0; index < device.MemoryTypeCount; index++)
+        {
+            if ((device.GetMemoryTypeFlags(index) & unified) == unified)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool AreMapped(List<DownloadPiece> copies, out ulong writer)
+    {
+        writer = 0;
+        foreach (var copy in copies)
+        {
+            if (copy.Buffer.MappedPointer == null || !copy.Buffer.IsCoherent)
+            {
+                return false;
+            }
+
+            writer = Math.Max(writer, copy.Buffer.LastGpuWriteTick);
+        }
+
+        return true;
+    }
+
+    private void ApplyMappedRead(List<DownloadPiece> copies, ulong windowBegin, ulong windowEnd, ulong guestAddress, ulong size,
+        bool isWrite, long started, GuestMemoryProfile.ReadbackSource source)
+    {
+        foreach (var copy in copies)
+        {
+            var bytes = new ReadOnlySpan<byte>(copy.Buffer.MappedPointer + copy.SourceOffset, checked((int)copy.Size));
+            if (!_backing.TryWriteBacking(copy.Address, bytes))
+            {
+                throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copy.Address:X16} size=0x{copy.Size:X16}");
+            }
+
+            _gpuModifiedRanges.Remove(copy.Address, copy.Size);
+        }
+
+        _tracker.ClearGpuDirtyPages(windowBegin, windowEnd - windowBegin);
+        if (isWrite)
+        {
+            _tracker.MarkCpuDirtyPages(guestAddress, size);
+        }
+
+        MappedReadbacks++;
+        RecordReadback(windowBegin, windowEnd, isWrite, copies, started, source);
+    }
+
+    // Readbacks served from a buffer's own mapping, without a copy command.
+    internal long MappedReadbacks { get; private set; }
+
+    internal bool UnifiedBuffers => _unifiedBuffers;
+
+    private bool CompleteMappedRead(PendingDownload pending, bool retrySynchronously)
+    {
+        try
+        {
+            if (!IsPendingDownloadCurrent(pending))
+            {
+                if (retrySynchronously)
+                {
+                    PendingReadbacksRetried++;
+                    Interlocked.Increment(ref _reportedRetried);
+                    ReadMemoryOnGpu(pending.GuestAddress, pending.Size, pending.IsWrite, pending.Source);
+                }
+
+                return false;
+            }
+
+            PendingReadbacksApplied++;
+            Interlocked.Increment(ref _reportedApplied);
+            ApplyMappedRead(pending.Copies, pending.WindowBegin, pending.WindowEnd, pending.GuestAddress, pending.Size,
+                pending.IsWrite, pending.Started, pending.Source);
             return true;
         }
         finally
@@ -1850,7 +2004,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         var bufferIdentifier = _registry.AllocateBuffer(new GpuBuffer(
-            _device, _scheduler, GpuBufferUsage.DeviceLocal, overlap.Begin,
+            _device, _scheduler, _unifiedBuffers ? GpuBufferUsage.Unified : GpuBufferUsage.DeviceLocal, overlap.Begin,
             GpuBuffer.AllFlags | BufferUsageFlags.ShaderDeviceAddressBit, overlap.End - overlap.Begin, allowSlab: true), overlap.Begin, overlap.End - overlap.Begin);
         foreach (var oldId in overlapping)
         {

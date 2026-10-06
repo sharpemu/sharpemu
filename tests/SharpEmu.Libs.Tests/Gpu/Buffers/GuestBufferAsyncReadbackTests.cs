@@ -75,6 +75,64 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
         harness.Shutdown();
     }
 
+    // On a unified-memory device a read of a retired GPU write copies straight out of the buffer's
+    // own mapping: no copy command, no pending readback.
+    [Fact]
+    public void AReadOfARetiredWriteComesFromTheUnifiedMapping()
+    {
+        if (_vulkan is null || !GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        using var fatal = new FatalScope();
+        if (!harness.Cache.UnifiedBuffers)
+        {
+            harness.Shutdown();
+            return;
+        }
+
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        GpuWrite(harness, address, 0x0BADF00D);
+        harness.Worker.Run(() => harness.Scheduler.Wait(harness.Scheduler.Flush()));
+
+        Assert.True(harness.Cache.DownloadToCpu(address + 8, 4));
+
+        Assert.False(harness.Cache.HasGpuDirtyBytes(address, 0x100));
+        Assert.Equal(0x0BADF00Du, BitConverter.ToUInt32(harness.Read(address + 0x80, 4)));
+        Assert.Equal(1L, harness.Cache.MappedReadbacks);
+        Assert.Equal(0L, harness.Cache.PendingReadbacksApplied);
+        harness.Shutdown();
+    }
+
+    // A read while the writer is submitted but still running waits for that submission only, then
+    // reads the mapping; a write recorded after the read was issued is picked up by the next read.
+    [Fact]
+    public void AReadOfASubmittedWriteWaitsForItAndReadsTheUnifiedMapping()
+    {
+        if (_vulkan is null || !GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        using var fatal = new FatalScope();
+        if (!harness.Cache.UnifiedBuffers)
+        {
+            harness.Shutdown();
+            return;
+        }
+
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        GpuWrite(harness, address, 0x12345678);
+        SubmitBatch(harness);
+
+        Assert.True(harness.Cache.DownloadToCpu(address, 4));
+
+        Assert.Equal(0x12345678u, BitConverter.ToUInt32(harness.Read(address + 0xFC, 4)));
+        Assert.Equal(1L, harness.Cache.MappedReadbacks);
+        Assert.False(harness.Cache.HasGpuDirtyBytes(address, 0x100));
+
+        GpuWrite(harness, address, 0x9ABCDEF0);
+        SubmitBatch(harness);
+        Assert.True(harness.Cache.DownloadToCpu(address, 4));
+        Assert.Equal(0x9ABCDEF0u, BitConverter.ToUInt32(harness.Read(address + 0x10, 4)));
+        harness.Shutdown();
+    }
+
     private static void GpuWrite(CacheHarness harness, ulong address, uint value) => harness.Worker.Run(() =>
     {
         var (buffer, offset) = harness.Cache.ObtainBuffer(address, 0x100, isWritten: true);
