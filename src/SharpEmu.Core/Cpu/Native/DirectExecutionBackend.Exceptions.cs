@@ -20,6 +20,7 @@ public sealed partial class DirectExecutionBackend
 	private static int _lazyCommitTraceCount;
 	private static int _guestAllocatorHoleRecoveries;
 	private static int _auxiliaryThreadExecuteFaultRecoveries;
+	private static int _segmentTlsFaultRecoveries;
 	private static int _auxiliaryThreadExecuteFaultSkips;
 	private nint _workerAbortStack;
 	private const uint WorkerAbortStackSize = 0x10000u;
@@ -133,6 +134,14 @@ public sealed partial class DirectExecutionBackend
 			}
 			if (exceptionCode == 3221225477u &&
 				TryRecoverGuestAllocatorHole(exceptionRecord, contextRecord, rip))
+			{
+				return -1;
+			}
+			// Before the GPU and auxiliary-thread cases: an unpatched fs:/gs:[0] load
+			// faults on address 0, and the auxiliary-thread path force-exits the
+			// worker rather than recovering it.
+			if (exceptionCode == 3221225477u &&
+				TryRecoverSegmentThreadPointerLoad(contextRecord, rip))
 			{
 				return -1;
 			}
@@ -670,6 +679,92 @@ public sealed partial class DirectExecutionBackend
 		};
 		return kind != FaultKind.Unknown
 			&& GuestGpuMemoryHook.TryResolveFault(kind, exceptionRecord->ExceptionInformation[1]);
+	}
+
+	// #789: the ahead-of-time TLS load patcher can miss an instruction, and an
+	// unpatched thread-pointer load is fatal with no second chance. Guest code
+	// emits "66 66 66 64 48 8B 04 25 00 00 00 00" - three operand-size prefixes
+	// (LLVM's TLS general-dynamic relaxation padding), the FS segment override,
+	// then mov rax, fs:[0]. The host's FS base is 0, so that reads linear
+	// address 0 and faults; God of War, Minecraft and EA UFC 5 all die on the
+	// byte-identical instruction.
+	//
+	// The decode is deliberately the same shape as TryPatchTlsLoadInstruction's,
+	// and the value written is the same TlsGetValue(_guestTlsBaseTlsIndex) the
+	// patcher would have produced - this is the patcher's semantics applied late,
+	// not a new interpretation of what fs:[0] means.
+	private unsafe bool TryRecoverSegmentThreadPointerLoad(void* contextRecord, ulong rip)
+	{
+		if (_guestTlsBaseTlsIndex == uint.MaxValue || rip < 0x10000)
+		{
+			return false;
+		}
+
+		var opcode = new byte[MinTlsPatchInstructionBytes];
+		if (!TryReadExecutableBytes(rip, opcode) ||
+			!TryDecodeSegmentThreadPointerLoad(opcode, out var destinationRegister))
+		{
+			return false;
+		}
+
+		WriteCtxU64(
+			contextRecord,
+			CTX_RAX + (destinationRegister * 8),
+			unchecked((ulong)TlsGetValue(_guestTlsBaseTlsIndex)));
+		WriteCtxU64(contextRecord, CTX_RIP, rip + MinTlsPatchInstructionBytes);
+
+		var recovery = Interlocked.Increment(ref _segmentTlsFaultRecoveries);
+		if (recovery <= 4)
+		{
+			Console.Error.WriteLine(
+				$"[LOADER][INFO] Recovered unpatched {(opcode[0] == 0x64 ? "fs" : "gs")}:[0] " +
+				$"thread-pointer load #{recovery} at rip=0x{rip:X16} -> " +
+				$"guest TLS base; the ahead-of-time TLS patch pass missed it.");
+		}
+
+		return true;
+	}
+
+	// Decodes the absolute segment-relative thread-pointer load
+	// "<fs|gs>:[0]" (mov r64, fs:[0]) and reports its destination register.
+	// Deliberately the same shape as TryPatchTlsLoadInstruction's matcher: this
+	// is the patcher's decode applied at fault time, not a new interpretation.
+	internal static bool TryDecodeSegmentThreadPointerLoad(byte[] opcode, out int destinationRegister)
+	{
+		destinationRegister = 0;
+		if (opcode.Length < MinTlsPatchInstructionBytes)
+		{
+			return false;
+		}
+
+		// 0x64 is FS, 0x65 is GS. Anything else is not a segment-relative load.
+		if (opcode[0] != 0x64 && opcode[0] != 0x65)
+		{
+			return false;
+		}
+
+		// REX.W (0x48) or REX.W+R (0x4C), whose REX.R bit extends the destination;
+		// mod=00 rm=100 with SIB 0x25 and a zero disp32, i.e. the absolute
+		// fs:/gs:[0] form and nothing else. A non-zero displacement is a different
+		// TLS access the patcher does not model.
+		if ((opcode[1] & 0xFB) != 0x48 ||
+			opcode[2] != 0x8B ||
+			(opcode[3] & 0xC7) != 0x04 ||
+			opcode[4] != 0x25 ||
+			BitConverter.ToInt32(opcode, 5) != 0)
+		{
+			return false;
+		}
+
+		var decoded = ((opcode[3] >> 3) & 7) | ((opcode[1] & 4) != 0 ? 8 : 0);
+		if (decoded == 4)
+		{
+			// RSP has no ModRM.reg encoding in this form.
+			return false;
+		}
+
+		destinationRegister = decoded;
+		return true;
 	}
 
 	private unsafe static bool TryRecoverGuestAllocatorHole(
