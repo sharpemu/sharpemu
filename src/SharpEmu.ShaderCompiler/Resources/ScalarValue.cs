@@ -225,11 +225,11 @@ public static class ScalarValueEquivalence
     // also draw each operand from the same predecessor block.
     public static bool Equivalent(MemoryAccessTable memory, ScalarValue left, ScalarValue right)
     {
-        var visited = new List<(ScalarValue, ScalarValue)>();
+        var visited = new HashSet<(ScalarValue, ScalarValue)>();
         return Equivalent(memory, left, right, visited);
     }
 
-    private static bool Equivalent(MemoryAccessTable memory, ScalarValue left, ScalarValue right, List<(ScalarValue, ScalarValue)> visited)
+    private static bool Equivalent(MemoryAccessTable memory, ScalarValue left, ScalarValue right, HashSet<(ScalarValue, ScalarValue)> visited)
     {
         // An undefined value is never equivalent, not even to itself.
         if (left.IsUndefined || right.IsUndefined)
@@ -274,12 +274,12 @@ public static class ScalarValueEquivalence
             return true;
         }
 
-        if (visited.Any(pair => ReferenceEquals(pair.Item1, left) && ReferenceEquals(pair.Item2, right)))
+        // ScalarValue equality uses reference identity. Keep each ordered pair once.
+        if (!visited.Add((left, right)))
         {
             return true;
         }
 
-        visited.Add((left, right));
         if (left.Kind == ScalarValueKind.FirstLane && left.Payload != right.Payload)
         {
             return false;
