@@ -1492,6 +1492,50 @@ public static partial class Gen5SpirvTranslator
                     }
                 }
 
+                // A run of plain vector ALU writes shares one EXEC test: inside the branch no lane
+                // is masked off, so each write stores straight into its register instead of
+                // selecting against the old value, and the old values stop being live across the
+                // whole run. Only the join needs them.
+                var runLength = ExecRunLength(block, halfMaskPlan, index);
+                if (runLength >= ExecRunMinimum)
+                {
+                    var last = index + runLength - 1;
+                    var failed = false;
+                    var runFailure = string.Empty;
+                    EmitConditional(Load(_boolType, _exec), () =>
+                    {
+                        for (var inner = index; inner <= last && !failed; inner++)
+                        {
+                            var run = _request.Program.Instructions[inner];
+                            _execKnownFull = true;
+                            _emittingPc = run.Pc;
+                            var ok = TryEmitInstruction(run, out var runError);
+                            _emittingPc = null;
+                            _execKnownFull = false;
+                            if (!ok)
+                            {
+                                runFailure = $"pc=0x{run.Pc:X} {run.Opcode}: {runError}";
+                                failed = true;
+                                return;
+                            }
+
+                            CapturePixelVgprs(run);
+                            CapturePixelVgprPoints(run);
+                            MarkPixelPath(run);
+                            CapturePixelExec(run);
+                        }
+                    });
+
+                    if (failed)
+                    {
+                        error = runFailure;
+                        return false;
+                    }
+
+                    index = last;
+                    continue;
+                }
+
                 _execKnownFull = IsExecKnownFull(instruction.Pc);
                 _emittingPc = instruction.Pc;
                 var emitted = TryEmitInstruction(instruction, out error);
@@ -1511,6 +1555,59 @@ public static partial class Gen5SpirvTranslator
 
             if (synchronizeSharedMemory && sharedMemoryPhase != SharedMemoryPhase.None) EmitWave64Barrier();
             return true;
+        }
+
+
+        // SHARPEMU_EXEC_RUN=0 turns the shared EXEC test off; SHARPEMU_EXEC_RUN_MIN sets how many
+        // instructions a run needs before the branch pays for itself.
+        private static readonly bool ExecRunGrouping =
+            Environment.GetEnvironmentVariable("SHARPEMU_EXEC_RUN") != "0";
+
+        private static readonly int ExecRunMinimum =
+            ExecRunGrouping && int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_EXEC_RUN_MIN"), out var minimum) && minimum >= 2
+                ? minimum
+                : ExecRunGrouping ? DefaultExecRunMinimum : int.MaxValue;
+
+        // Six measured best on Silent Hill's volumetric fog: shorter runs pay for the branch more
+        // often than they save, longer ones leave the short runs guarded.
+        private const int DefaultExecRunMinimum = 6;
+
+        // How many instructions from startIndex may share one EXEC test. The run stops at anything
+        // the wave as a whole has to run even where this lane is masked off: every scalar result
+        // (SALU is not EXEC masked on the hardware, and each invocation keeps its own copy of the
+        // scalar registers), every cross-lane read, every memory or LDS access, and every point the
+        // half-mask plan wants a mask exchange or a barrier emitted before.
+        private int ExecRunLength(ShaderBlock block, Ir.Gen5Wave64HalfMaskPlan? halfMaskPlan, int startIndex)
+        {
+            // Compute only. The same grouping measured 28% slower on Silent Hill's deferred
+            // lighting pixel program (11.0 -> 14.1 ms per scope): a pixel wave already runs with
+            // helper lanes and an extra branch per run costs it more than the selects it removes.
+            if (!ExecRunGrouping || _stage != Gen5SpirvStage.Compute)
+            {
+                return 0;
+            }
+
+            var instructions = _request.Program.Instructions;
+            var length = 0;
+            for (var index = startIndex; index < block.EndIndex; index++)
+            {
+                var instruction = instructions[index];
+                if (length != 0 && halfMaskPlan is not null &&
+                    (halfMaskPlan.ExactPairsBefore.ContainsKey(instruction.Pc) ||
+                     halfMaskPlan.SharedMemoryBarriersBefore.Contains(instruction.Pc)))
+                {
+                    break;
+                }
+
+                if (!Ir.Gen5ExecRunAnalysis.IsExecMaskedVectorAlu(instruction))
+                {
+                    break;
+                }
+
+                length++;
+            }
+
+            return length;
         }
 
         // Stores the next dispatcher block (or ends the program) for a block's terminator.
