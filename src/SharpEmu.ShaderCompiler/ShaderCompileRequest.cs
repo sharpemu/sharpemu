@@ -166,6 +166,34 @@ public sealed class ShaderCompileRequest
     public uint ScratchDwords { get; init; }
     public bool EnableGraphicsSubgroupOperations { get; init; } = true;
 
+    // The target's native compute subgroup size, or 0 when unknown. A guest
+    // workgroup declared wave64 that the hardware can execute as a single native
+    // 64-wide subgroup does not need the software wave64-over-two-wave32 bridge.
+    // Defaults to 0 (unknown) so the conservative bridge stays the default until a
+    // host reports what it actually has.
+    public uint NativeComputeSubgroupSize { get; init; }
+
+    /// <summary>
+    /// Whether a guest wave64 compute workgroup has to be bridged in software
+    /// (wave64-over-two-wave32, shared-memory lane shuffles) because the target
+    /// cannot execute it as one native 64-wide subgroup.
+    /// </summary>
+    /// <remarks>
+    /// Takes the stage as a bool because Gen5SpirvStage lives in the Vulkan
+    /// translator, which references this assembly, not the other way round.
+    /// A <see cref="NativeComputeSubgroupSize"/> of 0 means "host did not report",
+    /// and keeps the conservative bridge.
+    /// </remarks>
+    public static bool RequiresSoftwareWave64(
+        bool isComputeStage,
+        uint waveLaneCount,
+        ulong totalWorkgroupSize,
+        uint nativeComputeSubgroupSize) =>
+        isComputeStage &&
+        waveLaneCount == 64 &&
+        totalWorkgroupSize == 64 &&
+        nativeComputeSubgroupSize < waveLaneCount;
+
     // The device supports 64-bit integer atomics on workgroup memory
     // (VkPhysicalDeviceFeatures.shaderSharedInt64Atomics). When set, the LDS
     // 64-bit atomics are emitted as real 64-bit atomics instead of a pair of

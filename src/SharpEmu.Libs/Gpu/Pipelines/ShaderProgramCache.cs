@@ -572,6 +572,7 @@ internal sealed class ShaderProgramCache
                 Info = options.ComputeInfo!,
                 SystemRegisters = options.ComputeSystemRegisters,
                 Specialization = specialization.Clone(),
+                NativeComputeWave64 = _host.ComputeWave64Supported,
             });
         }
 
@@ -643,7 +644,7 @@ internal sealed class ShaderProgramCache
 
             default:
                 return BuildComputeRequest(entry.Plan, resources, layout, options.ComputeInfo!, options.ComputeSystemRegisters,
-                    sharedInt64Atomics, _host.ExecGuardElisionEnabled);
+                    sharedInt64Atomics, _host.ExecGuardElisionEnabled, _host.ComputeWave64Supported);
         }
     }
 
@@ -659,7 +660,8 @@ internal sealed class ShaderProgramCache
             usesDispatchThreadLimits: usesDispatchThreadLimits);
 
     private static ShaderCompileRequest BuildComputeRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout layout,
-        ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision) =>
+        ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision,
+        bool nativeComputeWave64) =>
         new(plan, resources, layout)
         {
             WaveSize = info.WaveSize,
@@ -672,6 +674,7 @@ internal sealed class ShaderProgramCache
             LocalSizeX = Math.Max(info.ThreadsX, 1),
             LocalSizeY = Math.Max(info.ThreadsY, 1),
             LocalSizeZ = Math.Max(info.ThreadsZ, 1),
+            NativeComputeSubgroupSize = nativeComputeWave64 ? 64u : 0u,
         };
 
     internal static bool TryCompilePrewarm(ComputePrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
@@ -692,7 +695,7 @@ internal sealed class ShaderProgramCache
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor,
                 record.Info.DispatchThreadDimensions);
             var request = BuildComputeRequest(plan, resources, layout, record.Info, record.SystemRegisters,
-                sharedInt64Atomics, execGuardElision);
+                sharedInt64Atomics, execGuardElision, record.NativeComputeWave64);
             return compiler.TryCompileProgram(request, out compiled, out error) && compiled is not null;
         }
         catch (Exception exception)

@@ -116,7 +116,16 @@ public static partial class Gen5SpirvTranslator
             _localSizeY = Math.Max(request.LocalSizeY, 1);
             _localSizeZ = Math.Max(request.LocalSizeZ, 1);
             _physicalAxisOfLogical = ComputeWorkgroupAxisOrder(_localSizeX, _localSizeY, _localSizeZ);
-            _emulateWave64 = _stage == Gen5SpirvStage.Compute && _waveLaneCount == 64 && (ulong)_localSizeX * _localSizeY * _localSizeZ == 64;
+            // A 64-thread compute workgroup needs the software wave64-over-two-wave32
+            // bridge only when the hardware cannot run it as one native 64-wide
+            // subgroup. On RDNA the default compute subgroup size is already 64, so
+            // the bridge is pure overhead there; when the host does not report a
+            // size we keep emulating, which is the previous behaviour.
+            _emulateWave64 = ShaderCompileRequest.RequiresSoftwareWave64(
+                _stage == Gen5SpirvStage.Compute,
+                _waveLaneCount,
+                (ulong)_localSizeX * _localSizeY * _localSizeZ,
+                request.NativeComputeSubgroupSize);
             _requiredVertexOutputCount = request.RequiredVertexOutputCount;
             _pixelInputEnable = request.PixelInputEnable;
             _pixelInputAddress = request.PixelInputAddress;

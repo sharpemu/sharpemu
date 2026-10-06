@@ -135,6 +135,10 @@ internal sealed class ComputePrewarmRecord
     public Gen5ComputeSystemRegisters? SystemRegisters { get; init; }
     public required ResourceSpecialization Specialization { get; init; }
 
+    // Captured when the record is taken so a prewarmed shader compiles the same
+    // way the live path would; see ShaderCompileRequest.NativeComputeSubgroupSize.
+    public bool NativeComputeWave64 { get; init; }
+
     public (ulong Hash, uint CodeSize, ulong Address) CodeKey => (Hash, CodeSize, Address);
 }
 
