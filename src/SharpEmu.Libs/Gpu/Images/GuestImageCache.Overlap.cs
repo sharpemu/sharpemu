@@ -421,9 +421,7 @@ public sealed partial class GuestImageCache
             }
 
             PrepareCopyTarget(replacement);
-            // The conversion renders at the destination's guest extent, and a multisample
-            // destination never scales, so a scaled source contributes its guest-sized twin.
-            _blit.Reinterpret(cached.AtGuestResolution(), replacement);
+            _blit.Reinterpret(cached, replacement);
             TakeGpuOwnership(replacement);
         }
         else

@@ -70,8 +70,6 @@ public static partial class Gen5SpirvTranslator
         private readonly IReadOnlyList<Gen5PixelOutputBinding> _pixelOutputBindings;
         private readonly bool _usesPixelValidMask;
         private readonly bool _enableGraphicsSubgroupOperations;
-        private readonly bool _nativeHalfConversionExact;
-        private readonly bool _zeroOutOfBoundsBufferReads;
         private readonly uint _waveLaneCount;
         private readonly bool _emulateWave64;
 
@@ -156,7 +154,7 @@ public static partial class Gen5SpirvTranslator
         private readonly Dictionary<uint, uint> _vectorRegisterVariables = new();
         private uint _vectorRegisters;
         private (uint First, uint Last) _dynamicVectorRange;
-        private readonly Dictionary<uint, uint> _packedHalfRegisterVariables = [];
+        private uint _packedHalfRegisters;
         private uint _scc;
         private uint _vcc;
         private uint _exec;
@@ -174,7 +172,6 @@ public static partial class Gen5SpirvTranslator
         private uint _storageBlockPointer;
         private uint _storageUintPointer;
         private uint _lds;
-        private uint _ldsWritten;
         private uint _ldsElementPointer;
         private uint _lds64ElementPointer;
         private uint _ldsDwordMask;
@@ -234,9 +231,7 @@ public static partial class Gen5SpirvTranslator
             SpirvImageDim Dimension = SpirvImageDim.Dim2D,
             uint ConversionFormat = 0,
             uint ShaderSwizzle = 0,
-            int EmulatedCompareFunction = -1,
-            // The dense image resource index, which names this image's bit in the scaled-image mask.
-            uint ResourceIndex = 0);
+            int EmulatedCompareFunction = -1);
 
         private readonly record struct SpirvVertexInput(
             uint Variable,
@@ -777,24 +772,14 @@ public static partial class Gen5SpirvTranslator
             var ldsPointer = _module.TypePointer(storageClass, ldsArrayType);
             _ldsElementPointer = _module.TypePointer(storageClass, _uintType);
             _lds64ElementPointer = _module.TypePointer(storageClass, _ulongType);
-            // A private array must read zero where this invocation has not written, but
-            // zero-initializing it costs every invocation the whole array: Metal keeps a
-            // dynamically indexed private array in stack memory, so an NGG vertex shader
-            // cleared 8 KiB per vertex. A written-dword bitmap clears 1/32 of that, and
-            // LdsPointer zeroes a slot the first time it is addressed.
-            _lds = _module.AddGlobalVariable(ldsPointer, storageClass);
+            _lds = storageClass == SpirvStorageClass.Workgroup
+                ? _module.AddGlobalVariable(ldsPointer, storageClass)
+                : _module.AddGlobalVariable(
+                    ldsPointer,
+                    storageClass,
+                    _module.ConstantNull(ldsArrayType));
             _module.AddName(_lds, "lds");
             _interfaces.Add(_lds);
-            if (storageClass == SpirvStorageClass.Private)
-            {
-                var bitmapType = _module.TypeArray(_uintType, (arrayDwordCount + 31) / 32);
-                _ldsWritten = _module.AddGlobalVariable(
-                    _module.TypePointer(SpirvStorageClass.Private, bitmapType),
-                    SpirvStorageClass.Private,
-                    _module.ConstantNull(bitmapType));
-                _module.AddName(_ldsWritten, "ldsWritten");
-                _interfaces.Add(_ldsWritten);
-            }
         }
 
         internal static SpirvImageFormat DecodeStorageImageFormat(
@@ -1262,7 +1247,7 @@ public static partial class Gen5SpirvTranslator
             }
             else if (_stage == Gen5SpirvStage.Pixel)
             {
-                var fragCoord = ScalePixelPosition(Load(_vec4Type, _fragCoordInput));
+                var fragCoord = Load(_vec4Type, _fragCoordInput);
                 EmitPixelInputState(fragCoord);
                 foreach (var output in _pixelOutputs.Values)
                 {
@@ -1468,14 +1453,10 @@ public static partial class Gen5SpirvTranslator
             var block = blocks[blockIndex];
             var halfMaskPlan = HalfMaskPlan();
             // One guest wave can span two host subgroups. Keep its shared-memory phases ordered.
-            // The half-mask plan's barriers only order its own mask exchanges, not the program's
-            // LDS traffic: with phase ordering off under the plan, UE's FFT bloom (wave64, 512
-            // threads, LDS butterflies) read half-written rows and blurred Silent Hill's whole
-            // post chain into a flat haze.
-            var synchronizeSharedMemory = _emulateWave64;
+            // The half-mask plan inserts its own barriers; other wave64 programs also
+            // need LDS phase ordering when reads and writes span basic blocks.
+            var synchronizeSharedMemory = _emulateWave64 && halfMaskPlan is null;
             var sharedMemoryPhase = SharedMemoryPhase.None;
-            // A wait in another block may or may not have run before this one.
-            _vectorMemoryWaited = null;
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
                 var instruction = _request.Program.Instructions[index];
@@ -1511,50 +1492,6 @@ public static partial class Gen5SpirvTranslator
                     }
                 }
 
-                // A run of plain vector ALU writes shares one EXEC test: inside the branch no lane
-                // is masked off, so each write stores straight into its register instead of
-                // selecting against the old value, and the old values stop being live across the
-                // whole run. Only the join needs them.
-                var runLength = ExecRunLength(block, halfMaskPlan, index);
-                if (runLength >= ExecRunMinimum)
-                {
-                    var last = index + runLength - 1;
-                    var failed = false;
-                    var runFailure = string.Empty;
-                    EmitConditional(Load(_boolType, _exec), () =>
-                    {
-                        for (var inner = index; inner <= last && !failed; inner++)
-                        {
-                            var run = _request.Program.Instructions[inner];
-                            _execKnownFull = true;
-                            _emittingPc = run.Pc;
-                            var ok = TryEmitInstruction(run, out var runError);
-                            _emittingPc = null;
-                            _execKnownFull = false;
-                            if (!ok)
-                            {
-                                runFailure = $"pc=0x{run.Pc:X} {run.Opcode}: {runError}";
-                                failed = true;
-                                return;
-                            }
-
-                            CapturePixelVgprs(run);
-                            CapturePixelVgprPoints(run);
-                            MarkPixelPath(run);
-                            CapturePixelExec(run);
-                        }
-                    });
-
-                    if (failed)
-                    {
-                        error = runFailure;
-                        return false;
-                    }
-
-                    index = last;
-                    continue;
-                }
-
                 _execKnownFull = IsExecKnownFull(instruction.Pc);
                 _emittingPc = instruction.Pc;
                 var emitted = TryEmitInstruction(instruction, out error);
@@ -1574,59 +1511,6 @@ public static partial class Gen5SpirvTranslator
 
             if (synchronizeSharedMemory && sharedMemoryPhase != SharedMemoryPhase.None) EmitWave64Barrier();
             return true;
-        }
-
-
-        // SHARPEMU_EXEC_RUN=0 turns the shared EXEC test off; SHARPEMU_EXEC_RUN_MIN sets how many
-        // instructions a run needs before the branch pays for itself.
-        private static readonly bool ExecRunGrouping =
-            Environment.GetEnvironmentVariable("SHARPEMU_EXEC_RUN") != "0";
-
-        private static readonly int ExecRunMinimum =
-            ExecRunGrouping && int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_EXEC_RUN_MIN"), out var minimum) && minimum >= 2
-                ? minimum
-                : ExecRunGrouping ? DefaultExecRunMinimum : int.MaxValue;
-
-        // Six measured best on Silent Hill's volumetric fog: shorter runs pay for the branch more
-        // often than they save, longer ones leave the short runs guarded.
-        private const int DefaultExecRunMinimum = 6;
-
-        // How many instructions from startIndex may share one EXEC test. The run stops at anything
-        // the wave as a whole has to run even where this lane is masked off: every scalar result
-        // (SALU is not EXEC masked on the hardware, and each invocation keeps its own copy of the
-        // scalar registers), every cross-lane read, every memory or LDS access, and every point the
-        // half-mask plan wants a mask exchange or a barrier emitted before.
-        private int ExecRunLength(ShaderBlock block, Ir.Gen5Wave64HalfMaskPlan? halfMaskPlan, int startIndex)
-        {
-            // Compute only. The same grouping measured 28% slower on Silent Hill's deferred
-            // lighting pixel program (11.0 -> 14.1 ms per scope): a pixel wave already runs with
-            // helper lanes and an extra branch per run costs it more than the selects it removes.
-            if (!ExecRunGrouping || _stage != Gen5SpirvStage.Compute)
-            {
-                return 0;
-            }
-
-            var instructions = _request.Program.Instructions;
-            var length = 0;
-            for (var index = startIndex; index < block.EndIndex; index++)
-            {
-                var instruction = instructions[index];
-                if (length != 0 && halfMaskPlan is not null &&
-                    (halfMaskPlan.ExactPairsBefore.ContainsKey(instruction.Pc) ||
-                     halfMaskPlan.SharedMemoryBarriersBefore.Contains(instruction.Pc)))
-                {
-                    break;
-                }
-
-                if (!Ir.Gen5ExecRunAnalysis.IsExecMaskedVectorAlu(instruction))
-                {
-                    break;
-                }
-
-                length++;
-            }
-
-            return length;
         }
 
         // Stores the next dispatcher block (or ends the program) for a block's terminator.
@@ -2250,15 +2134,10 @@ public static partial class Gen5SpirvTranslator
             {
                 return true;
             }
-            if (instruction.Opcode == "SWaitcnt")
-            {
-                NoteWaitCount(instruction);
-                return true;
-            }
-
             if (instruction.Opcode is
                 "SNop" or
                 "SSetregB32" or
+                "SWaitcnt" or
                 "SInstPrefetch" or
                 "STtraceData" or
                 // Wave scheduling priority hint; no effect on results.
@@ -2275,17 +2154,11 @@ public static partial class Gen5SpirvTranslator
             {
                 if (_stage == Gen5SpirvStage.Compute)
                 {
-                    // s_barrier orders execution; what it publishes is whatever the guest
-                    // waited for first. s_waitcnt vmcnt(0) before it means buffer and image
-                    // stores are being published to the workgroup, so the barrier carries
-                    // AcquireRelease over uniform, workgroup and image memory. A barrier that
-                    // only follows lgkmcnt(0) publishes LDS, and ordering device memory there
-                    // costs a cache flush the guest never asked for: UE's FFT bloom
-                    // convolution barriers 48 times per group, every one of them lgkmcnt-only.
+                    // s_waitcnt vmcnt(0) + s_barrier also publishes buffer and image
+                    // stores to the workgroup: AcquireRelease over uniform, workgroup
+                    // and image memory.
                     var workgroup = UInt(2);
-                    var semantics = UInt(_vectorMemoryWaited == false
-                        ? 0x8u | 0x100u
-                        : 0x8u | 0x40u | 0x100u | 0x800u);
+                    var semantics = UInt(0x8 | 0x40 | 0x100 | 0x800);
                     _module.AddStatement(
                         SpirvOp.ControlBarrier,
                         workgroup,
@@ -2810,30 +2683,11 @@ public static partial class Gen5SpirvTranslator
             var index = BitwiseAnd(
                 ShiftRightLogical(addressWithOffset, UInt(2)),
                 UInt(_ldsDwordMask));
-            var pointer = _module.AddInstruction(
+            return _module.AddInstruction(
                 SpirvOp.AccessChain,
                 _ldsElementPointer,
                 _lds,
                 index);
-            if (_ldsWritten != 0)
-            {
-                var wordPointer = _module.AddInstruction(
-                    SpirvOp.AccessChain,
-                    _privateUintPointer,
-                    _ldsWritten,
-                    ShiftRightLogical(index, UInt(5)));
-                var bit = ShiftLeftLogical(UInt(1), BitwiseAnd(index, UInt(31)));
-                var word = Load(_uintType, wordPointer);
-                var unwritten = _module.AddInstruction(
-                    SpirvOp.IEqual, _boolType, BitwiseAnd(word, bit), UInt(0));
-                EmitConditional(unwritten, () =>
-                {
-                    Store(pointer, UInt(0));
-                    Store(wordPointer, BitwiseOr(word, bit));
-                });
-            }
-
-            return pointer;
         }
 
         private void StoreLds(uint pointer, uint value)
@@ -4023,85 +3877,21 @@ public static partial class Gen5SpirvTranslator
                 ShiftRightLogical(descriptorWord3, UInt(12)),
                 UInt(0x7F));
             var (dataFormat, numberFormat) = DecodeGfx10BufferFormat(unifiedFormat);
-            var one = Gfx10FormatOne(numberFormat);
 
-            // Dword-aligned 32-bit components whose number format keeps the raw bits (most
-            // vertex streams) load one word per component; every other format takes the
-            // generic byte-wise decode. The descriptor is uniform, so the branch never diverges.
-            var wordCount = UInt(0);
-            wordCount = SelectUInt(dataFormat, 4, UInt(1), wordCount);
-            wordCount = SelectUInt(dataFormat, 11, UInt(2), wordCount);
-            wordCount = SelectUInt(dataFormat, 13, UInt(3), wordCount);
-            wordCount = SelectUInt(dataFormat, 14, UInt(4), wordCount);
-            var rawBits = _module.AddInstruction(
-                SpirvOp.LogicalOr, _boolType,
-                _module.AddInstruction(SpirvOp.IEqual, _boolType, numberFormat, UInt(7)),
-                _module.AddInstruction(
-                    SpirvOp.LogicalOr, _boolType,
-                    _module.AddInstruction(SpirvOp.IEqual, _boolType, numberFormat, UInt(4)),
-                    _module.AddInstruction(SpirvOp.IEqual, _boolType, numberFormat, UInt(5))));
-            var wordPath = _module.AddInstruction(
-                SpirvOp.LogicalAnd, _boolType,
-                _module.AddInstruction(
-                    SpirvOp.LogicalAnd, _boolType,
-                    _module.AddInstruction(SpirvOp.INotEqual, _boolType, wordCount, UInt(0)),
-                    rawBits),
-                _module.AddInstruction(
-                    SpirvOp.IEqual, _boolType, BitwiseAnd(byteAddress, UInt(3)), UInt(0)));
+            var canonical = new uint[4];
+            var componentBounds = new uint[4];
+            for (var component = 0; component < canonical.Length; component++)
+            {
+                canonical[component] = LoadGfx10BufferFormatComponent(
+                    bindingIndex,
+                    byteAddress,
+                    dataFormat,
+                    numberFormat,
+                    component,
+                    out componentBounds[component]);
+            }
 
-            EmitConditional(
-                wordPath,
-                () =>
-                {
-                    var dwordAddress = ShiftRightLogical(byteAddress, UInt(2));
-                    var canonical = new uint[4];
-                    var componentBounds = new uint[4];
-                    for (uint component = 0; component < 4; component++)
-                    {
-                        var address = component == 0 ? dwordAddress : IAdd(dwordAddress, UInt(component));
-                        var present = _module.AddInstruction(
-                            SpirvOp.ULessThan, _boolType, UInt(component), wordCount);
-                        canonical[component] = _module.AddInstruction(
-                            SpirvOp.Select, _uintType, present,
-                            LoadBufferWord(bindingIndex, address),
-                            component == 3 ? one : UInt(0));
-                        componentBounds[component] = _module.AddInstruction(
-                            SpirvOp.LogicalOr, _boolType,
-                            _module.AddInstruction(SpirvOp.LogicalNot, _boolType, present),
-                            IsBufferWordInRange(bindingIndex, address));
-                    }
-
-                    StoreBufferFormatComponents(descriptorWord3, vectorData, componentCount, one, canonical, componentBounds);
-                },
-                () =>
-                {
-                    var canonical = new uint[4];
-                    var componentBounds = new uint[4];
-                    for (var component = 0; component < canonical.Length; component++)
-                    {
-                        canonical[component] = LoadGfx10BufferFormatComponent(
-                            bindingIndex,
-                            byteAddress,
-                            dataFormat,
-                            numberFormat,
-                            component,
-                            out componentBounds[component]);
-                    }
-
-                    StoreBufferFormatComponents(descriptorWord3, vectorData, componentCount, one, canonical, componentBounds);
-                });
-        }
-
-        // Applies the descriptor swizzle to the memory components; only selected memory
-        // components contribute to the shared bounds check.
-        private void StoreBufferFormatComponents(
-            uint descriptorWord3,
-            uint vectorData,
-            uint componentCount,
-            uint one,
-            uint[] canonical,
-            uint[] componentBounds)
-        {
+            // Only selected memory components contribute to the shared bounds check.
             var selectors = new uint[componentCount];
             var inBounds = _module.ConstantBool(true);
             for (uint destination = 0; destination < componentCount; destination++)
@@ -4121,6 +3911,7 @@ public static partial class Gen5SpirvTranslator
                 inBounds = _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, inBounds, selectedInBounds);
             }
 
+            var one = Gfx10FormatOne(numberFormat);
             for (uint destination = 0; destination < componentCount; destination++)
             {
                 var selector = selectors[destination];
@@ -4794,27 +4585,23 @@ public static partial class Gen5SpirvTranslator
                 whenTrue,
                 whenFalse);
 
-        // The four bytes at a byte address span at most two words, so one funnel shift of those
-        // two words is the whole value. Reading each byte from its own bounds-checked word load
-        // (four loads, four range tests and a byte assembly) costs twice as much for the same
-        // result: a word outside the buffer reads zero either way, so the bytes it would have
-        // contributed stay zero, and the formatted-load fallback does this per component.
         private uint LoadUnalignedBufferWord(int bindingIndex, uint byteAddress)
         {
-            var dwordAddress = ShiftRightLogical(byteAddress, UInt(2));
-            var bitOffset = ShiftLeftLogical(BitwiseAnd(byteAddress, UInt(3)), UInt(3));
-            var low = LoadBufferWord(bindingIndex, dwordAddress);
-            var high = LoadBufferWord(bindingIndex, IAdd(dwordAddress, UInt(1)));
-            // A shift by the word width is undefined, so the aligned case keeps the low word.
-            var spanning = BitwiseOr(
-                ShiftRightLogical(low, bitOffset),
-                ShiftLeftLogical(high, _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(32), bitOffset)));
-            return _module.AddInstruction(
-                SpirvOp.Select,
-                _uintType,
-                IsNotZero(bitOffset),
-                spanning,
-                low);
+            var result = UInt(0);
+            for (uint index = 0; index < 4; index++)
+            {
+                var address = index == 0
+                    ? byteAddress
+                    : IAdd(byteAddress, UInt(index));
+                var dwordAddress = ShiftRightLogical(address, UInt(2));
+                var bitOffset = ShiftLeftLogical(BitwiseAnd(address, UInt(3)), UInt(3));
+                var value = BitwiseAnd(
+                    ShiftRightLogical(LoadBufferWord(bindingIndex, dwordAddress), bitOffset),
+                    UInt(0xFF));
+                result = BitwiseOr(result, ShiftLeftLogical(value, UInt(index * 8)));
+            }
+
+            return result;
         }
 
         private uint LoadSubdwordBufferValue(
@@ -5206,12 +4993,6 @@ public static partial class Gen5SpirvTranslator
                                 _intType,
                                 size,
                                 component);
-                        // The game reasons about its own resolution; report the guest size.
-                        if (component < Math.Min(2u, ImageSpatialComponentCount(resource)))
-                        {
-                            signedValue = ScaleImageQuerySize(signedValue, resource);
-                        }
-
                         value = Bitcast(_uintType, signedValue);
                     }
                     else if (component == 3)
@@ -5273,7 +5054,6 @@ public static partial class Gen5SpirvTranslator
                 var coordinateComponentCount =
                     ImageCoordinateComponentCount(resource);
                 var coordinates = BuildIntegerCoordinates(
-                    resource,
                     image,
                     0,
                     coordinateComponentCount);
@@ -5343,7 +5123,6 @@ public static partial class Gen5SpirvTranslator
                     var isMax = instruction.Opcode == "ImageAtomicFmax";
                     var floatCoordinateCount = ImageCoordinateComponentCount(resource);
                     var floatCoordinates = BuildIntegerCoordinates(
-                        resource,
                         image,
                         0,
                         floatCoordinateCount);
@@ -5388,7 +5167,6 @@ public static partial class Gen5SpirvTranslator
                 var coordinateComponentCount =
                     ImageCoordinateComponentCount(resource);
                 var coordinates = BuildIntegerCoordinates(
-                    resource,
                     image,
                     0,
                     coordinateComponentCount);
@@ -5438,7 +5216,6 @@ public static partial class Gen5SpirvTranslator
                     var coordinateComponentCount =
                         ImageCoordinateComponentCount(resource);
                     var coordinates = BuildIntegerCoordinates(
-                        resource,
                         image,
                         0,
                         coordinateComponentCount);
@@ -5455,7 +5232,6 @@ public static partial class Gen5SpirvTranslator
                     var coordinateComponentCount =
                         ImageCoordinateComponentCount(resource);
                     var coordinates = BuildIntegerCoordinates(
-                        resource,
                         image,
                         0,
                         coordinateComponentCount);
@@ -6352,22 +6128,16 @@ public static partial class Gen5SpirvTranslator
         }
 
         private uint BuildIntegerCoordinates(
-            in SpirvImageResource resource,
             Gen5ImageControl image,
             int start,
             uint componentCount)
         {
-            // Only the two scaled axes move; an array layer or a volume slice is not a pixel.
-            var scaledComponents = start == 0 ? Math.Min(2, (int)ImageSpatialComponentCount(resource)) : 0;
             var components = new uint[checked((int)componentCount)];
             for (var component = 0; component < components.Length; component++)
             {
-                var value = Bitcast(
+                components[component] = Bitcast(
                     _intType,
                     LoadImageIntegerAddress(image, start + component));
-                components[component] = component < scaledComponents
-                    ? ScaleIntegerImageCoordinate(value, resource)
-                    : value;
             }
 
             if (componentCount == 1)
@@ -6497,30 +6267,6 @@ public static partial class Gen5SpirvTranslator
                 SpirvOp.ConvertSToF,
                 spatialFloatType,
                 texelOffset);
-            // The instruction's offset is in guest texels. Convert it to host texels
-            // before normalizing by the host mip extent. Array layers and depth are
-            // never scaled; the per-image mask also preserves unscaled bindings.
-            if (UsesRenderScale)
-            {
-                var factor = LoadImageScaleFactor(resource, ImageCoordinateFactorDword);
-                if (spatialComponentCount == 1)
-                {
-                    offsetFloat = _module.AddInstruction(SpirvOp.FMul, _floatType, offsetFloat, factor);
-                }
-                else
-                {
-                    var components = new uint[checked((int)spatialComponentCount)];
-                    for (uint component = 0; component < spatialComponentCount; component++)
-                    {
-                        var value = _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, offsetFloat, component);
-                        components[component] = component < 2
-                            ? _module.AddInstruction(SpirvOp.FMul, _floatType, value, factor)
-                            : value;
-                    }
-                    offsetFloat = _module.AddInstruction(SpirvOp.CompositeConstruct, spatialFloatType, components);
-                }
-            }
-
             var normalizedOffset = _module.AddInstruction(
                 SpirvOp.FDiv,
                 spatialFloatType,
@@ -7652,14 +7398,6 @@ public static partial class Gen5SpirvTranslator
 
         private uint LoadBufferWord(int binding, uint dwordAddress)
         {
-            // With the device measured to return zero past the end of a descriptor range, the
-            // range test, the address clamp and the zero select only reproduce what the read
-            // already does. The guest expects zero there, and so the load stands alone.
-            if (_zeroOutOfBoundsBufferReads)
-            {
-                return Load(_uintType, BufferWordPointer(binding, dwordAddress));
-            }
-
             var inRange = IsBufferWordInRange(binding, dwordAddress);
             var safeAddress = _module.AddInstruction(
                 SpirvOp.Select,
@@ -7728,7 +7466,7 @@ public static partial class Gen5SpirvTranslator
             var slots = new List<(uint Register, uint Lane)>();
             if (_emulateWave64)
             {
-                return FindPureLaneSpillSlots();
+                return slots;
             }
 
             var ownsLaneZero = !UsesSubgroupOperations();
@@ -7745,70 +7483,6 @@ public static partial class Gen5SpirvTranslator
                     readRegisters.Contains(register) &&
                     TryGetConstantLane(instruction, out var lane) &&
                     (lane != 0 || !ownsLaneZero) &&
-                    !slots.Contains((register, lane)))
-                {
-                    slots.Add((register, lane));
-                }
-            }
-
-            return slots;
-        }
-
-        // Under wave64 emulation a lane read normally rendezvous with the other host subgroup through
-        // LDS and a workgroup barrier. A VGPR written only by constant-lane V_WRITELANE holds spilled
-        // scalars, which are wave-uniform, so every invocation can keep each written lane itself and a
-        // constant-lane V_READLANE needs no exchange. V_WRITELANE still updates the VGPR, so other
-        // reads of it are unaffected. Relative VGPR addressing could alias any register, so programs
-        // that use it keep the exchange.
-        private List<(uint Register, uint Lane)> FindPureLaneSpillSlots()
-        {
-            var slots = new List<(uint Register, uint Lane)>();
-            var instructions = _request.Program.Instructions;
-            if (instructions.Any(static instruction => instruction.Opcode.StartsWith("VMovrel", StringComparison.Ordinal)))
-            {
-                return slots;
-            }
-
-            var candidates = new HashSet<uint>();
-            var rejected = new HashSet<uint>();
-            foreach (var instruction in instructions)
-            {
-                var isWritelane = instruction.Opcode == "VWritelaneB32";
-                var isReadlane = instruction.Opcode == "VReadlaneB32";
-                for (var index = 0; index < instruction.Destinations.Count; index++)
-                {
-                    var operand = instruction.Destinations[index];
-                    if (operand.Kind != Gen5OperandKind.VectorRegister)
-                    {
-                        continue;
-                    }
-
-                    if (isWritelane && index == 0 && TryGetConstantLane(instruction, out _))
-                    {
-                        candidates.Add(operand.Value);
-                    }
-                    else
-                    {
-                        rejected.Add(operand.Value);
-                    }
-                }
-
-                // A variable lane read cannot use a slot; it keeps reading the VGPR, which V_WRITELANE
-                // still writes, so ordinary vector reads of the register stay exact as well.
-                if (isReadlane && instruction.Sources.Count > 0 &&
-                    instruction.Sources[0].Kind == Gen5OperandKind.VectorRegister &&
-                    !TryGetConstantLane(instruction, out _))
-                {
-                    rejected.Add(instruction.Sources[0].Value);
-                }
-            }
-
-            foreach (var instruction in instructions)
-            {
-                if (instruction.Opcode == "VWritelaneB32" &&
-                    TryGetVectorDestination(instruction, out var register) &&
-                    candidates.Contains(register) && !rejected.Contains(register) &&
-                    TryGetConstantLane(instruction, out var lane) &&
                     !slots.Contains((register, lane)))
                 {
                     slots.Add((register, lane));
@@ -7990,27 +7664,31 @@ public static partial class Gen5SpirvTranslator
             }
         }
 
-        // One variable per register, declared on first use. The packed-half shadow of the vector
-        // register file is only ever addressed by a constant register number, and a 512-entry
-        // private array is the shape that makes Metal keep the file in thread memory instead of
-        // registers - the same trap V_MOVREL hit. It also kept an unused 4 KiB private array as a
-        // named .bss global on AMD, where two stages then failed to link because the driver copied
-        // the NOBITS section as file data and read past the end of the ELF.
-        private uint PackedHalfPointer(uint register)
+        private uint PackedHalfPointer(uint register) =>
+            _module.AddInstruction(
+                SpirvOp.AccessChain,
+                _privateVec2Pointer,
+                PackedHalfRegisters(),
+                UInt(register));
+
+        // Declared on first use when Private. AMD's compiler keeps an unused 4 KiB private
+        // array as a named .bss global: two stages then fail to link, and the driver copies
+        // the NOBITS section as file data and reads past the end of the ELF.
+        private uint PackedHalfRegisters()
         {
-            if (_packedHalfRegisterVariables.TryGetValue(register, out var variable))
+            if (_packedHalfRegisters != 0)
             {
-                return variable;
+                return _packedHalfRegisters;
             }
 
-            variable = _module.AddGlobalVariable(
-                _privateVec2Pointer,
+            var arrayType = _module.TypeArray(_vec2Type, VectorRegisterCount);
+            _packedHalfRegisters = _module.AddGlobalVariable(
+                _module.TypePointer(SpirvStorageClass.Private, arrayType),
                 SpirvStorageClass.Private,
-                _module.ConstantNull(_vec2Type));
-            _packedHalfRegisterVariables.Add(register, variable);
-            _interfaces.Add(variable);
-            _module.AddName(variable, $"vgprPackedHalf{register}");
-            return variable;
+                _module.ConstantNull(arrayType));
+            _interfaces.Add(_packedHalfRegisters);
+            _module.AddName(_packedHalfRegisters, "vgprPackedHalf");
+            return _packedHalfRegisters;
         }
 
         private uint LoadS(uint register) => Load(_uintType, ScalarPointer(register));
@@ -8042,25 +7720,6 @@ public static partial class Gen5SpirvTranslator
         {
             if (_waveLaneCount != 32)
             {
-                // The lane's bit lives in one of the two mask registers, so select that register
-                // and shift inside it. Composing the 64-bit mask and masking it with a 64-bit
-                // lane bit costs several times as much on a host that emulates 64-bit integers,
-                // and VCC and EXEC refresh their lane flag on every mask write.
-                if (_subgroupInvocationIdInput != 0 && _emulateWave64)
-                {
-                    var lane = GuestWaveLane();
-                    var word = _module.AddInstruction(
-                        SpirvOp.Select,
-                        _uintType,
-                        _module.AddInstruction(SpirvOp.ULessThan, _boolType, lane, UInt(32)),
-                        LoadS(lowRegister),
-                        LoadS(lowRegister + 1));
-                    return IsNotZero(
-                        BitwiseAnd(
-                            ShiftRightLogical(word, BitwiseAnd(lane, UInt(31))),
-                            UInt(1)));
-                }
-
                 return IsWaveMaskActive(LoadS64(lowRegister));
             }
 
@@ -8346,15 +8005,6 @@ public static partial class Gen5SpirvTranslator
                 ? value
                 : _module.AddInstruction(SpirvOp.GroupNonUniformShuffle, _uintType, UInt(3), value, lane);
 
-        // DPP row/quad operations and PERMLANE16 never cross a 32-lane half-wave.
-        // Guest lanes 32..63 belong to the second host subgroup on 32-lane devices;
-        // using those guest indices directly in OpGroupNonUniformShuffle is undefined.
-        // Preserve the current physical half on devices whose subgroup is wider than 32.
-        private uint ShuffleHalfWaveLane(uint value, uint guestLane) =>
-            _subgroupInvocationIdInput == 0 ? value : ShuffleLane(value,
-                BitwiseOr(BitwiseAnd(Load(_uintType, _subgroupInvocationIdInput), UInt(0xFFFF_FFE0)),
-                    BitwiseAnd(guestLane, UInt(31))));
-
         private uint CurrentLaneBit()
         {
             if (_subgroupInvocationIdInput == 0)
@@ -8570,35 +8220,6 @@ public static partial class Gen5SpirvTranslator
             }
 
             return _halfMaskPlan;
-        }
-
-        // Null until a wait is seen in the current block; then true once any wait in the block
-        // drained vector memory (vmcnt(0), or vscnt(0), which is what covers stores on GFX10),
-        // which is how the guest publishes buffer and image stores before a barrier. It stays
-        // true for the rest of the block: a later LDS-only wait does not unpublish them.
-        private bool? _vectorMemoryWaited;
-
-        private void NoteWaitCount(Gen5ShaderInstruction instruction)
-        {
-            if (instruction.Words.Count == 0)
-            {
-                return;
-            }
-
-            var word = instruction.Words[0];
-            if (instruction.Encoding == Gen5ShaderEncoding.Sopk)
-            {
-                // SOPK waits name one counter: 0x17 vscnt, 0x18 vmcnt, 0x19 expcnt, 0x1A lgkmcnt.
-                var counter = (word >> 23) & 0x1Fu;
-                var drainsVectorMemory = counter is 0x17 or 0x18 && (word & 0xFFFFu) == 0;
-                _vectorMemoryWaited = _vectorMemoryWaited == true || drainsVectorMemory;
-                return;
-            }
-
-            // SOPP S_WAITCNT packs vmcnt across bits [3:0] and [15:14].
-            var immediate = word & 0xFFFFu;
-            var vectorCount = (immediate & 0xFu) | (((immediate >> 14) & 0x3u) << 4);
-            _vectorMemoryWaited = _vectorMemoryWaited == true || vectorCount == 0;
         }
 
         private void EmitWave64Barrier()

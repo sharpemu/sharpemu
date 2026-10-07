@@ -76,20 +76,6 @@ public readonly record struct DepthStencilState(
             : ImageLayout.DepthAttachmentOptimal;
     }
 
-    // A sampled attachment needs the read-only layouts; a draw that writes needs the writable
-    // one. A draw that neither samples nor writes keeps the read-only layout it is already in,
-    // so sampling and depth-testing draws can alternate inside one rendering scope.
-    public static ImageLayout AttachmentLayoutFor(DepthStencilState state, Format format, bool sampled, ImageLayout? current)
-    {
-        var readOnly = state.AttachmentLayout(format);
-        if (sampled)
-        {
-            return readOnly;
-        }
-
-        return state.IsReadOnly(format) && current == readOnly ? readOnly : WritableAttachmentLayout(format);
-    }
-
     public ImageLayout AttachmentLayout(Format format)
     {
         var available = ViewFormatRules.DepthAspects(format);

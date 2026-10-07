@@ -38,10 +38,7 @@ public readonly record struct DrawAutoArguments(
     uint InstanceCount,
     uint FirstVertex,
     uint FirstInstance,
-    DrawOffsetSource OffsetSource,
-    // Nonzero when the counts are still in guest memory at this address, laid out as
-    // (vertexCount, instanceCount, firstVertex, firstInstance); the other counts are then 1/0.
-    ulong IndirectArgumentsAddress = 0);
+    DrawOffsetSource OffsetSource);
 
 public enum EndOfPipeWriteKind
 {
@@ -107,13 +104,6 @@ public interface ICommandStreamHost
 
     void CopyBuffer(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds);
 
-    // A satisfied wait packet or a command-processor memory write: CPU writes released by the
-    // waited-on value, or the written bytes, must become visible to the commands that follow,
-    // the same as at the start of a submission slice.
-    void NoteMemoryVisibilityPoint()
-    {
-    }
-
     void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount);
 
     void RecordEndOfPipe(in EndOfPipeWrite write);
@@ -145,9 +135,6 @@ public interface ICommandStreamHost
     // True when an indexed indirect draw may be handed over with its arguments still in
     // guest memory (DrawIndexedArguments.IndirectArgumentsAddress).
     bool ResolvesIndirectDrawOnGpu => false;
-
-    // The host also draws non-indexed indirect draws from their arguments in guest memory.
-    bool ResolvesNonIndexedIndirectDrawOnGpu => false;
 
     // Called when a queue reset packet clears the processor.
     void OnQueueReset(int queueId);

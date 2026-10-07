@@ -24,53 +24,6 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     private const ulong Page = GuestBufferCache.CachingPageSize;
 
     [Fact]
-    public void CommandBackingReadRejectsGpuImageBytesButAllowsCleanPageNeighbours()
-    {
-        if (!GatePrerequisites.Ready(_vulkan)) return;
-        using var harness = new CacheHarness(_vulkan!);
-        var address = harness.MapBacked(Page, ReadWrite);
-        harness.Write(address + 64, new byte[] { 1, 2, 3, 4 });
-        var request = Color32(address, 4);
-        var id = harness.Acquire(ref request);
-        harness.Worker.Run(() =>
-        {
-            Assert.True(harness.Images.TryClearImageFromBuffer(address, 16, 0x22222222));
-            Assert.True(harness.Image(id).IsGpuModified);
-            var tick = harness.Scheduler.CurrentTick;
-            Span<byte> bytes = stackalloc byte[4];
-            Assert.False(harness.Cache.TryReadCommandBacking(address, bytes));
-            Assert.True(harness.Cache.TryReadCommandBacking(address + 64, bytes));
-            Assert.Equal(new byte[] { 1, 2, 3, 4 }, bytes.ToArray());
-            Assert.Equal(tick, harness.Scheduler.CurrentTick);
-        });
-    }
-
-    [Fact]
-    public void CommandBytesNextToPendingGpuCounterDoNotWaitOrUnprotectThePage()
-    {
-        if (!GatePrerequisites.Ready(_vulkan)) return;
-        using var harness = new CacheHarness(_vulkan!);
-        var address = harness.MapBacked(Page, ReadWrite);
-        harness.Write(address + 16, new byte[] { 1, 2, 3, 4 });
-        harness.Worker.Run(() =>
-        {
-            var (buffer, offset) = harness.Cache.ObtainBuffer(address, 4, isWritten: true);
-            buffer.Fill(offset, 4, 123);
-            var tick = harness.Scheduler.CurrentTick;
-            var protection = harness.Protection(address);
-            Span<byte> bytes = stackalloc byte[4];
-            Assert.True(harness.Cache.TryReadCommandBacking(address + 16, bytes));
-            Assert.Equal(new byte[] { 1, 2, 3, 4 }, bytes.ToArray());
-            Assert.False(harness.Cache.TryReadCommandBacking(address, bytes));
-            Assert.False(harness.Cache.TryReadCommandBacking(address - 2, bytes));
-            Assert.Equal(tick, harness.Scheduler.CurrentTick);
-            Assert.Equal(protection, harness.Protection(address));
-            Assert.True(harness.Cache.HasGpuDirtyPages(address, 4));
-        });
-    }
-
-
-    [Fact]
     public void UnalignedImageObtainUploadsTheWholeDirtyPageToItsBufferOwner()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
@@ -674,12 +627,7 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         var address = harness.MapBacked(0x10000, ReadWrite);
         var (buffer, _) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x8000, isWritten: false));
 
-        harness.Worker.Run(() =>
-        {
-            harness.Cache.WriteHostMemory(address + 0x1000, Pattern(0x100, 7));
-            // Deferred host writes become visible when a command acquires its buffer.
-            harness.Cache.PrepareBda([new GuestSpan(address, 0x10000)]);
-        });
+        harness.Worker.Run(() => harness.Cache.WriteHostMemory(address + 0x1000, Pattern(0x100, 7)));
 
         Assert.Equal(Pattern(0x100, 7), harness.Read(address + 0x1000, 0x100));
         Assert.Equal(Pattern(0x100, 7), harness.ReadBack(buffer, 0x1000, 0x100));
@@ -806,8 +754,8 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
             harness.Write(address, expected);
             harness.Worker.Run(() =>
             {
-                harness.Cache.NoteMemoryVisibilityPoint();
                 harness.Cache.PrepareBda([new GuestSpan(address, size)]);
+                Assert.False(harness.Cache.HasCpuDirtyPages(address, size));
                 Assert.False(harness.Cache.HasGpuDirtyPages(address, size));
                 harness.Cache.PrepareBda([new GuestSpan(address, size)]);
             });
@@ -840,11 +788,7 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         });
         Assert.Equal(Bytes(0x12345678u), harness.ReadBack(buffer, offset, 4));
         Assert.True(harness.Cache.TrySynchronizeCpuRead(address, size));
-        harness.Worker.Run(() =>
-        {
-            harness.Cache.NoteMemoryVisibilityPoint();
-            harness.Cache.PrepareBda([new GuestSpan(address, size)]);
-        });
+        harness.Worker.Run(() => harness.Cache.PrepareBda([new GuestSpan(address, size)]));
 
         var expected = Pattern((int)size, 7);
         await Task.Run(() =>
@@ -852,44 +796,8 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
             Assert.True(harness.Store.MarkCpuWrite(address, size));
             harness.Write(address, expected);
         });
-        harness.Worker.Run(() =>
-        {
-            harness.Cache.NoteMemoryVisibilityPoint();
-            harness.Cache.PrepareBda([new GuestSpan(address, size)]);
-        });
+        harness.Worker.Run(() => harness.Cache.PrepareBda([new GuestSpan(address, size)]));
         Assert.False(harness.Cache.HasCpuDirtyPages(address, size));
-        Assert.Equal(expected, harness.ReadBack(buffer, offset, size));
-        harness.Shutdown();
-    }
-
-    [Fact]
-    public void DeviceAddressVisibilityPointRefreshesHotPagesWithoutAnotherWriteFault()
-    {
-        if (!GatePrerequisites.Ready(_vulkan)) return;
-        using var harness = new CacheHarness(_vulkan);
-        var address = harness.MapBacked(0x20000, ReadWrite);
-        const ulong size = 0x8000;
-        var (buffer, offset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, size, false));
-        for (var write = 1; write <= 3; write++)
-        {
-            Assert.True(harness.Store.MarkCpuWrite(address, size));
-            harness.Write(address, Pattern((int)size, (byte)write));
-            harness.Worker.Run(() =>
-            {
-                harness.Cache.NoteMemoryVisibilityPoint();
-                harness.Cache.PrepareBda([new GuestSpan(address, size)]);
-            });
-        }
-
-        Assert.True(harness.Cache.HasCpuDirtyPages(address, size));
-        var expected = Pattern((int)size, 9);
-        // A permanently writable hot page changes without another protection fault.
-        harness.Write(address, expected);
-        harness.Worker.Run(() =>
-        {
-            harness.Cache.NoteMemoryVisibilityPoint();
-            harness.Cache.PrepareBda([new GuestSpan(address, size)]);
-        });
         Assert.Equal(expected, harness.ReadBack(buffer, offset, size));
         harness.Shutdown();
     }

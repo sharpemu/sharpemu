@@ -315,7 +315,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         var programs = Programs(pixelStage: Stage(new ShaderProgramInfo { Stage = ShaderStageKind.Pixel, PixelColorExportMasks = exportMasks }));
         var resolution = new ColorTargetResolution(
             default, 0x1000, 0x10000, new Extent2D(64, 64), 0, 0, 1, ColorComponentMap.Identity, false, false, default);
-        ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1), 1f)];
+        ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1))];
         var rendering = new RenderingState { Samples = 1, ColorAttachmentCount = 1 };
         rendering.ColorAttachments[0] = new RenderingAttachment(
             default, ImageLayout.ColorAttachmentOptimal, Format.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
@@ -335,7 +335,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         var programs = Programs();
         var resolution = new ColorTargetResolution(
             default, 0x1000, 0x10000, new Extent2D(64, 64), 0, 0, 1, ColorComponentMap.Identity, false, false, default);
-        ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1), 1f)];
+        ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1))];
         var rendering = new RenderingState { Samples = 1, ColorAttachmentCount = 1 };
         rendering.ColorAttachments[0] = new RenderingAttachment(
             default, ImageLayout.ColorAttachmentOptimal, Format.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);

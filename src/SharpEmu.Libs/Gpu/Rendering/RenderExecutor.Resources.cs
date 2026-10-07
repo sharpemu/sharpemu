@@ -217,13 +217,8 @@ public sealed partial class RenderExecutor
         IPreparedBindings? pixelBindings;
         try
         {
-            // The pixel program reads its position in host texels; the attachments say how
-            // many of those one guest pixel covers.
-            var attachmentScale = AttachmentRenderScale(in state);
-            vertexBindings = PrepareBindings(vertexInput.Stage with { AttachmentRenderScale = attachmentScale });
-            pixelBindings = state.PixelActive
-                ? PrepareBindings(pixelInput.Stage with { AttachmentRenderScale = attachmentScale })
-                : null;
+            vertexBindings = PrepareBindings(vertexInput.Stage);
+            pixelBindings = state.PixelActive ? PrepareBindings(pixelInput.Stage) : null;
         }
         catch (DrawImageTypeMismatchException rejection)
         {
@@ -256,7 +251,7 @@ public sealed partial class RenderExecutor
         var vertexBuffers = AcquireVertexBuffers(vertexInput);
         var indexBuffer = AcquireIndexBuffer(in indexSource);
         var indirectArguments = emission.IndirectArgumentsAddress != 0
-            ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, emission.Indexed ? IndexedIndirectArgumentsSize : AutoIndirectArgumentsSize, isWritten: false)
+            ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, IndexedIndirectArgumentsSize, isWritten: false)
             : default;
         DropUnwrittenColorTargets(context, ref state, pixelProgram);
         state.Rendering = AcquireAttachments(ref state);
@@ -319,14 +314,7 @@ public sealed partial class RenderExecutor
         {
             // Uploads and shader writes end with barriers to all commands, so the
             // indirect read sees them.
-            if (emission.Indexed)
-            {
-                _host.DrawIndexedIndirect(indirectArguments);
-            }
-            else
-            {
-                _host.DrawIndirect(indirectArguments);
-            }
+            _host.DrawIndexedIndirect(indirectArguments);
         }
         else
         {

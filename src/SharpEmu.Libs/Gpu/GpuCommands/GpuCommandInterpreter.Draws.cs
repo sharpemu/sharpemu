@@ -103,16 +103,6 @@ public sealed partial class GpuCommandInterpreter
 
     private void DrawIndirectArguments(ulong packetAddress, uint opcode, ulong argumentsAddress, bool indexed)
     {
-        if (!indexed && _host.ResolvesNonIndexedIndirectDrawOnGpu)
-        {
-            // The host reads the four arguments on the GPU, so a GPU-written argument buffer
-            // costs no wait for the GPU here; it reads them itself when the draw needs counts.
-            _deferredInstanceCountAddress = argumentsAddress + 4;
-            _host.DrawAuto(SubmitId, new DrawAutoArguments(packetAddress, opcode, 1, 1, 0, 0,
-                DrawOffsetSource.IndirectArguments, argumentsAddress));
-            return;
-        }
-
         if (!indexed)
         {
             var vertexCount = ReadDword(argumentsAddress);

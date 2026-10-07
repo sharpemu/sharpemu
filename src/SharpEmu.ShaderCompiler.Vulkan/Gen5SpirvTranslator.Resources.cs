@@ -111,8 +111,6 @@ public static partial class Gen5SpirvTranslator
                 _stage == Gen5SpirvStage.Pixel &&
                 request.Program.Instructions.Any(static instruction => instruction.Control is Gen5ExportControl { ValidMask: true });
             _enableGraphicsSubgroupOperations = _stage == Gen5SpirvStage.Compute || request.EnableGraphicsSubgroupOperations;
-            _nativeHalfConversionExact = request.NativeHalfConversionExact;
-            _zeroOutOfBoundsBufferReads = request.ZeroOutOfBoundsBufferReads;
             _waveLaneCount = request.WaveSize == 64 ? 64u : 32u;
             _localSizeX = Math.Max(request.LocalSizeX, 1);
             _localSizeY = Math.Max(request.LocalSizeY, 1);
@@ -418,11 +416,6 @@ public static partial class Gen5SpirvTranslator
         // A bounds-checked dword of a storage block; outside the block reads zero.
         private uint LoadBlockWord(uint block, uint dwordIndex)
         {
-            if (_zeroOutOfBoundsBufferReads)
-            {
-                return Load(_uintType, BlockWordPointer(block, dwordIndex));
-            }
-
             var length = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, block, 0);
             var inRange = _module.AddInstruction(SpirvOp.ULessThan, _boolType, dwordIndex, length);
             var safeIndex = _module.AddInstruction(SpirvOp.Select, _uintType, inRange, dwordIndex, UInt(0));
@@ -1597,8 +1590,7 @@ public static partial class Gen5SpirvTranslator
                 imageClass.Dimension,
                 imageInfo.ConversionFormat,
                 imageInfo.ShaderSwizzle,
-                imageInfo.EmulatedCompareFunction,
-                (uint)resourceIndex);
+                imageInfo.EmulatedCompareFunction);
             dstSelect = imageInfo.ShaderSwizzle;
             return true;
         }

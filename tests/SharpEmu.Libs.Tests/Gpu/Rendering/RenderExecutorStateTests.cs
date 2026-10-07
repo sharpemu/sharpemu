@@ -206,21 +206,6 @@ public sealed class RenderExecutorStateTests : IDisposable
     }
 
     [Fact]
-    public void ScaledScissorRoundsOutwardAndStaysInsideTheAttachment()
-    {
-        // A guest rectangle keeps its host coverage: the edges round outward, so no guest
-        // pixel the game asked for is clipped away by the mapping itself.
-        Assert.Equal(new ScissorRectangle(5, 2, 51, 29), RenderExecutor.ScaleScissor(new ScissorRectangle(11, 5, 101, 57), 0.5f, 64, 36));
-        Assert.Equal(new ScissorRectangle(22, 10, 202, 114), RenderExecutor.ScaleScissor(new ScissorRectangle(11, 5, 101, 57), 2f, 256, 144));
-
-        // Rounding outward must not push the rectangle past the attachment.
-        Assert.Equal(new ScissorRectangle(0, 0, 32, 18), RenderExecutor.ScaleScissor(new ScissorRectangle(0, 0, 65, 37), 0.5f, 32, 18));
-
-        // An empty scissor stays empty rather than growing a row.
-        Assert.Equal(new ScissorRectangle(5, 5, 5, 5), RenderExecutor.ScaleScissor(new ScissorRectangle(10, 10, 10, 10), 0.5f, 64, 36));
-    }
-
-    [Fact]
     public void Scissor_ClipRectangleRulesIntersectTheSelectedRectangles()
     {
         var viewport = new ScreenViewportRegisters { ScreenScissorRight = 100, ScreenScissorBottom = 100 };
@@ -335,25 +320,6 @@ public sealed class RenderExecutorStateTests : IDisposable
         Assert.Equal((0u, 64u, 64u), (rendering.ColorAttachmentCount, rendering.Width, rendering.Height));
         Assert.Equal(Format.D32Sfloat, rendering.DepthFormat);
         Assert.Contains("create_graphics_pipeline colors=0 depth=True topology=TriangleList restart=False", _pipelines.Calls);
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void Attachments_DisabledColorBufferIgnoresStaleTargetsAndPreservesDepthEffects(bool exportsDepth)
-    {
-        var banks = Banks(withDepth: true);
-        banks.Context.ColorControl = ColorControlRegisters.Decode(0);
-        banks.Context.ColorTargets[0] = RegisterWords.Color(ColorBase, 32, 32);
-        banks.Context.ShaderInterface.DepthShaderControl = new DepthShaderControlRegisters { DepthExportEnable = exportsDepth };
-
-        _executor.DrawIndexed(1, banks, Indexed(3));
-
-        var rendering = Assert.Single(_host.BegunRenderings);
-        Assert.Equal((0u, 64u, 64u), (rendering.ColorAttachmentCount, rendering.Width, rendering.Height));
-        Assert.Equal(Format.D32Sfloat, rendering.DepthFormat);
-        Assert.Equal(exportsDepth, Assert.Single(_pipelines.PipelineRequests).PixelActive);
-        Assert.True(Assert.Single(_host.DynamicStates).DepthWriteEnabled);
     }
 
     [Theory]

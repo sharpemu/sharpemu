@@ -19,9 +19,6 @@ public struct ImageRequest
     public ImageViewDescription View;
     public ImageRole Role;
 
-    // The bound program stores into this image, rather than only reading it.
-    public bool ShaderWrite;
-
     public ImageRequest(in ImageDescription description, in ImageViewDescription view, ImageRole role)
     {
         Description = description;

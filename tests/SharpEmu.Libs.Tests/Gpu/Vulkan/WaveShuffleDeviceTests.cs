@@ -17,16 +17,12 @@ public sealed class WaveShuffleDeviceTests(HeadlessVulkanFixture fixture, ITestO
     : IClassFixture<HeadlessVulkanFixture>
 {
     [Theory]
-    [InlineData("Dpp8", 32)]
-    [InlineData("Dpp8", 64)]
-    [InlineData("Dpp16", 32)]
-    [InlineData("Dpp16", 64)]
-    [InlineData("Permlane16", 32)]
-    [InlineData("Permlane16", 64)]
-    [InlineData("Permlanex16", 32)]
-    [InlineData("Permlanex16", 64)]
-    [InlineData("Reduction", 64)]
-    public void WaveShuffle_PreservesEachHalf(string operation, uint waveSize)
+    [InlineData("Dpp8")]
+    [InlineData("Dpp16")]
+    [InlineData("Permlane16")]
+    [InlineData("Permlanex16")]
+    [InlineData("Reduction")]
+    public void Wave64Shuffle_PreservesUpperHalf(string operation)
     {
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
@@ -83,7 +79,7 @@ public sealed class WaveShuffleDeviceTests(HeadlessVulkanFixture fixture, ITestO
         var (plan, resources, layout) = Prepare(Program([.. instructions]));
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
-            LocalSizeX = 8, LocalSizeY = waveSize / 8, ThreadCountX = 8, ThreadCountY = waveSize / 8, WaveSize = waveSize,
+            LocalSizeX = 8, LocalSizeY = 8, ThreadCountX = 8, ThreadCountY = 8, WaveSize = 64,
         };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         using var harness = new ImageTestHarness(vulkan);
@@ -94,7 +90,7 @@ public sealed class WaveShuffleDeviceTests(HeadlessVulkanFixture fixture, ITestO
         harness.Run(() => runner.Dispatch(registers,
             new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [result] }, 1));
         var actual = runner.ReadBack(result, 0, 256);
-        for (uint lane = 0; lane < waveSize; lane++)
+        for (uint lane = 0; lane < 64; lane++)
         {
             var expected = operation switch
             {
@@ -108,6 +104,6 @@ public sealed class WaveShuffleDeviceTests(HeadlessVulkanFixture fixture, ITestO
             Assert.Equal(expected, BinaryPrimitives.ReadUInt32LittleEndian(actual.AsSpan((int)lane * 4)));
         }
         harness.AssertNoValidationMessages();
-        output.WriteLine($"Verified wave{waveSize} {operation} on {vulkan.DeviceName}.");
+        output.WriteLine($"Verified {operation} on {vulkan.DeviceName}.");
     }
 }

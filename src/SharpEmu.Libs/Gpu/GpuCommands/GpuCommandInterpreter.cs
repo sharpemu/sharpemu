@@ -443,8 +443,6 @@ public sealed partial class GpuCommandInterpreter
         {
             throw _host.Fatal($"The command stream cannot write guest memory: address=0x{address:X16} size={source.Length}.");
         }
-        // Later commands in this stream may read the bytes through device addresses.
-        _host.NoteMemoryVisibilityPoint();
         _lastWriteLength = 0;
         if (source.Length is sizeof(uint) or sizeof(ulong))
         {

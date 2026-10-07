@@ -62,7 +62,14 @@ internal static class ScalarGraphDiskCache
                     Directory.CreateDirectory(directory);
                     // Keep a bounded cache across compiler versions too. No live
                     // analysis objects or guest memory are retained by the cache.
-                    EvictOldest(directory, stream.Length + 32);
+                    var entries = new DirectoryInfo(directory).GetFiles("*.graph").OrderBy(f => f.LastWriteTimeUtc).ToArray();
+                    var total = entries.Sum(f => f.Length) + stream.Length + 32;
+                    foreach (var entry in entries)
+                    {
+                        if (total <= MaxCacheBytes) break;
+                        total -= entry.Length;
+                        entry.Delete();
+                    }
                     var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
                     try
                     {
@@ -72,8 +79,6 @@ internal static class ScalarGraphDiskCache
                             file.Write(bytes);
                         }
                         File.Move(temporary, path, true);
-                        _entries!.Enqueue((path, stream.Length + 32));
-                        _totalBytes += stream.Length + 32;
                     }
                     finally { File.Delete(temporary); }
                 }
@@ -82,30 +87,6 @@ internal static class ScalarGraphDiskCache
         }
         catch (Exception error) when (IsCacheFailure(error)) { }
         return graph;
-    }
-
-    // The entries of the cache directory, oldest first, and their total size. The directory is
-    // listed once per process: a new build misses on every shader, and listing it per miss cost
-    // more than the analysis it saved. Caller holds WriteLock.
-    private static string? _entriesDirectory;
-    private static Queue<(string Path, long Bytes)>? _entries;
-    private static long _totalBytes;
-
-    private static void EvictOldest(string directory, long incoming)
-    {
-        if (_entries is null || _entriesDirectory != directory)
-        {
-            var files = new DirectoryInfo(directory).GetFiles("*.graph").OrderBy(f => f.LastWriteTimeUtc).ToArray();
-            _entries = new Queue<(string Path, long Bytes)>(files.Select(f => (f.FullName, f.Length)));
-            _totalBytes = files.Sum(f => f.Length);
-            _entriesDirectory = directory;
-        }
-
-        while (_totalBytes + incoming > MaxCacheBytes && _entries.TryDequeue(out var entry))
-        {
-            _totalBytes -= entry.Bytes;
-            File.Delete(entry.Path);
-        }
     }
 
     internal static string Key(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,

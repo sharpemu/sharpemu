@@ -739,31 +739,6 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page);
     }
 
-    [NativePageProtectionFact]
-    public void NestedUploadOnAnotherTrackerKeepsTheOuterRollbackState()
-    {
-        using var other = new GuestPageTrackerTests();
-        var address = Allocate(1);
-        var otherAddress = other.Allocate(1);
-        Assert.Throws<InvalidOperationException>(() =>
-            _tracker.ForEachUploadRange(address, Page, false, NoRange, () =>
-            {
-                other._tracker.ForEachUploadRange(otherAddress, Page, false, NoRange, NoUpload);
-                throw new InvalidOperationException("outer upload failed");
-            }));
-
-        Assert.True(_tracker.HasCpuDirtyPages(address, Page));
-        Assert.True(IsWritable(address));
-        Assert.False(other._tracker.HasCpuDirtyPages(otherAddress, Page));
-        var uploaded = 0;
-        _tracker.ForEachUploadRange(address, Page, false, (_, _) => uploaded++, NoUpload);
-        Assert.Equal(1, uploaded);
-        _tracker.UntrackMemory(address, Page);
-        Release(address, Page);
-        other._tracker.UntrackMemory(otherAddress, Page);
-        other.Release(otherAddress, Page);
-    }
-
     [NativePageProtectionTheory]
     [InlineData(false, true)]
     [InlineData(true, true)]

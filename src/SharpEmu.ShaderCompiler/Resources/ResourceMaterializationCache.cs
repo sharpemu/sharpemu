@@ -37,7 +37,6 @@ public sealed class ResourceMaterializationCache
     private static long _totalStale;
     private static long _totalStaleUnreadable;
     private static long _totalRefreshes;
-    private static long _totalBypassed;
 
     [ThreadStatic]
     private static bool _readingTable;
@@ -48,11 +47,6 @@ public sealed class ResourceMaterializationCache
         private set => _readingTable = value;
     }
 
-    private const int ProbationLookups = 64;
-    // A plan keeps using the cache while at least one lookup in this many hits.
-    private const int MinimumHitShare = 8;
-
-    public long Bypassed { get; private set; }
     public long Hits { get; private set; }
     public long Misses { get; private set; }
     public long Uncacheable { get; private set; }
@@ -67,10 +61,9 @@ public sealed class ResourceMaterializationCache
         var stale = Interlocked.Exchange(ref _totalStale, 0);
         var staleUnreadable = Interlocked.Exchange(ref _totalStaleUnreadable, 0);
         var refreshes = Interlocked.Exchange(ref _totalRefreshes, 0);
-        var bypassed = Interlocked.Exchange(ref _totalBypassed, 0);
         var total = hits + misses;
         return FormattableString.Invariant(
-            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} bypassed={bypassed} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% {RawReadPrefetch.TakeReport()}");
+            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% {RawReadPrefetch.TakeReport()}");
     }
 
     public bool Materialize(
@@ -81,17 +74,6 @@ public sealed class ResourceMaterializationCache
         ref ResourceSpecialization specialization,
         out ResourceMaterializationFailure failure)
     {
-        // Most draws of a plan whose user data points at per-draw constants never repeat their
-        // inputs; recording their reads and storing entries then costs more than a plain walk.
-        // Such a plan materializes directly and probes the cache again on every 64th draw.
-        var lookups = ++plan.CacheLookups;
-        if (lookups > ProbationLookups && plan.CacheHits * MinimumHitShare < lookups && (lookups & 63) != 0)
-        {
-            Bypassed++;
-            Interlocked.Increment(ref _totalBypassed);
-            return ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out failure);
-        }
-
         var key = KeyOf(plan, inputs);
         var found = TryFind(key, plan, inputs, out var cached);
         if (found)
@@ -112,7 +94,6 @@ public sealed class ResourceMaterializationCache
                     }
 
                     Hits++;
-                    plan.CacheHits++;
                     Interlocked.Increment(ref _totalHits);
                     snapshot = variant.Snapshot;
                     specialization = variant.Specialization;
@@ -126,7 +107,6 @@ public sealed class ResourceMaterializationCache
             if (TryRefreshTable(key, cached, plan, inputs, residentReader, out var refreshed))
             {
                 TableRefreshes++;
-                plan.CacheHits++;
                 Interlocked.Increment(ref _totalRefreshes);
                 snapshot = refreshed.Snapshot;
                 specialization = refreshed.Specialization;

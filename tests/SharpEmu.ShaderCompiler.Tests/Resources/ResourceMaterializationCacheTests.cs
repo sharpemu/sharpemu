@@ -88,39 +88,6 @@ public sealed class ResourceMaterializationCacheTests
     }
 
     [Fact]
-    public void APlanWhoseInputsNeverRepeatStopsRecordingButKeepsItsResults()
-    {
-        var plan = Plan();
-        var heap = new Heap();
-        var cache = new ResourceMaterializationCache();
-        for (var draw = 0u; draw < 200; draw++)
-        {
-            Assert.True(Run(cache, plan, heap, [0x1000, 0], out var snapshot, out _, shaderBase: 0x10000 + draw * 0x100));
-            var reference = new ResourceSnapshot();
-            var referenceSpecialization = new ResourceSpecialization();
-            Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: heap.Read, shaderBase: 0x10000 + draw * 0x100),
-                ref reference, ref referenceSpecialization));
-            Assert.Equal(reference.Images.Select(image => image.ToArray()), snapshot.Images.Select(image => image.ToArray()));
-        }
-
-        Assert.True(cache.Bypassed > 100);
-        Assert.Equal(0, cache.Hits);
-    }
-
-    [Fact]
-    public void APlanThatKeepsHittingKeepsTheCache()
-    {
-        var plan = Plan();
-        var heap = new Heap();
-        var cache = new ResourceMaterializationCache();
-        for (var draw = 0; draw < 200; draw++)
-            Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _));
-
-        Assert.Equal(0, cache.Bypassed);
-        Assert.Equal(199, cache.Hits);
-    }
-
-    [Fact]
     public void AChangedDescriptorWordMaterializesAgain()
     {
         var plan = Plan();

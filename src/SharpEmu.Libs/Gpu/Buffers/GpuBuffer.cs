@@ -149,9 +149,6 @@ public unsafe class GpuBuffer : IDisposable
 
     public bool IsCoherent { get; }
 
-    // The host mapping of the whole buffer, or null for memory the host cannot map.
-    public byte* MappedPointer => _mapped;
-
     public GpuBufferUsage Usage { get; }
 
     public ulong CpuAddress { get; }
@@ -342,7 +339,6 @@ public unsafe class GpuBuffer : IDisposable
         var (required, preferred, avoided) = usage switch
         {
             GpuBufferUsage.DeviceLocal => (MemoryPropertyFlags.None, MemoryPropertyFlags.DeviceLocalBit, MemoryPropertyFlags.None),
-            GpuBufferUsage.Unified => (MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit | MemoryPropertyFlags.DeviceLocalBit, MemoryPropertyFlags.HostCachedBit, MemoryPropertyFlags.None),
             GpuBufferUsage.Upload => (MemoryPropertyFlags.HostVisibleBit, MemoryPropertyFlags.HostCoherentBit, MemoryPropertyFlags.DeviceLocalBit),
             GpuBufferUsage.Download => (MemoryPropertyFlags.HostVisibleBit, MemoryPropertyFlags.HostCoherentBit | MemoryPropertyFlags.HostCachedBit, MemoryPropertyFlags.DeviceLocalBit),
             _ => (MemoryPropertyFlags.HostVisibleBit, MemoryPropertyFlags.HostCoherentBit | MemoryPropertyFlags.DeviceLocalBit, MemoryPropertyFlags.None),

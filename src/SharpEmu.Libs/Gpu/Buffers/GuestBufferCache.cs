@@ -41,7 +41,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private readonly SubmissionScheduler _scheduler;
     private readonly IGpuQueueRelay _relay;
     private readonly GuestBufferUploader _uploader;
-    private readonly bool _unifiedBuffers;
     private readonly IGuestBackedSpace _backing;
     private readonly BdaFaultProcessor _faults;
     private readonly GpuBuffer _gds;
@@ -73,7 +72,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         _relay = relay;
         _backing = backing;
         _faults = new BdaFaultProcessor(device, scheduler, this, CachingPageBits, CachingPageCount);
-        _unifiedBuffers = UnifiedBuffersEnabled && HasUnifiedMemoryType(device);
         _gds = new GpuBuffer(device, scheduler, GpuBufferUsage.Stream, 0, GpuBuffer.AllFlags, GdsBufferSize);
         _bdaPageTable = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, BdaPageTableSize);
         _tracker = new GuestPageTracker(pages);
@@ -328,18 +326,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         return (owner, owner.Offset(guestAddress));
     }
 
-    // The command worker can read the stable backing alias without changing CPU page
-    // permissions. A GPU counter elsewhere on the same page is not a dependency of
-    // the packet bytes being decoded. Actual GPU-written bytes retain the slow path.
-    private static readonly bool CommandBackingReadsEnabled =
-        Environment.GetEnvironmentVariable("SHARPEMU_COMMAND_BACKING_READS") != "0";
-
-    public bool TryReadCommandBacking(ulong address, Span<byte> destination) =>
-        CommandBackingReadsEnabled && destination.Length != 0 &&
-        !_gpuModifiedRanges.Overlaps(address, (ulong)destination.Length) &&
-        ImageCache is { } images && !images.HasGpuModifiedImageBytes(address, (ulong)destination.Length) &&
-        _backing.TryReadBacking(address, destination);
-
     public void WriteHostMemory(ulong guestAddress, ReadOnlySpan<byte> data)
     {
         if (guestAddress == 0 || data.IsEmpty || (ulong)data.Length > ulong.MaxValue - guestAddress)
@@ -354,27 +340,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
         // Registered buffers are ordered and disjoint: walk only the ones the write overlaps.
         var end = guestAddress + (ulong)data.Length;
-        if (DeferHostWrites)
-        {
-            // When no GPU-written byte shares the written pages, the pages can simply turn
-            // CPU-dirty: every later GPU reader synchronizes CPU-dirty pages first (bound buffers
-            // on obtain, device-address programs at the next visibility point), so the bytes
-            // arrive in command order without a staging copy that ends the rendering scope.
-            var firstPage = guestAddress & ~(TrackerLayout.PageBytes - 1);
-            var pagesEnd = (end + TrackerLayout.PageBytes - 1) & ~(TrackerLayout.PageBytes - 1);
-            if (!_gpuModifiedRanges.Overlaps(firstPage, pagesEnd - firstPage) &&
-                !_tracker.HasGpuDirtyPages(firstPage, pagesEnd - firstPage))
-            {
-                if (IsRegionRegistered(guestAddress, (ulong)data.Length))
-                {
-                    _tracker.MarkCpuDirtyPages(guestAddress, (ulong)data.Length);
-                    NoteMemoryVisibilityPoint();
-                }
-
-                return;
-            }
-        }
-
         for (var index = _registry.FindFirstOverlappingIndex(guestAddress);
              index < _registry.RegisteredCount && _registry.GetRegisteredAddress(index) < end;
              index++)
@@ -393,9 +358,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             TouchBuffer(bufferIdentifier);
         }
     }
-
-    private static readonly bool DeferHostWrites =
-        Environment.GetEnvironmentVariable("SHARPEMU_DEFER_HOST_WRITES") != "0";
 
     public void FillBuffer(ulong guestAddress, ulong size, uint value, bool isGds)
     {
@@ -479,15 +441,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
     }
 
-    // The fill pattern staged per thread; DCC fills arrive with every compressed target clear.
-    [ThreadStatic]
-    private static uint[]? _fillPattern;
-
     private bool TryWriteFillToBacking(ulong guestAddress, ulong size, uint value)
     {
-        var values = (_fillPattern ??= new uint[4096]).AsSpan(0, (int)Math.Min(size / sizeof(uint), 4096));
-        values.Fill(value);
-        var bytes = MemoryMarshal.AsBytes(values);
+        var values = new uint[(int)Math.Min(size / sizeof(uint), 4096)];
+        Array.Fill(values, value);
+        var bytes = MemoryMarshal.AsBytes<uint>(values);
         for (ulong offset = 0; offset < size;)
         {
             var chunk = (int)Math.Min(size - offset, (ulong)bytes.Length);
@@ -703,28 +661,13 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 _bdaTouchMapping = mapping;
             }
 
-            // Device-address programs may read any mapped page, so CPU writes are swept into the
-            // buffers - but only at memory visibility points (a submission slice starting, a wait
-            // packet satisfied). A CPU write after the submission began carries no ordering
-            // guarantee for its commands, and sweeping on every draw would end the render pass
-            // for every page the guest streams while the stream is being translated.
-            // Hot pages remain writable, so later CPU writes need not advance CpuDirtyEpoch.
-            // Every visibility point must revisit their dirty ranges even with an unchanged epoch.
-            if (mapping != _bdaSweepMapping || _bdaVisibilityPending || SweepBdaOnEveryDraw)
+            var epoch = _tracker.CpuDirtyEpoch;
+            if (epoch != _bdaSweepEpoch || mapping != _bdaSweepMapping)
             {
-                BeginUploadBatch();
-                try
-                {
-                    foreach (var span in spans)
-                        _tracker.ForEachPossiblyCpuDirtyRange(span.Address, span.Size, _uploadDirtyBuffersInRange ??= UploadDirtyBuffersInRange);
-                }
-                finally
-                {
-                    EndUploadBatch();
-                }
-
+                foreach (var span in spans)
+                    _tracker.ForEachPossiblyCpuDirtyRange(span.Address, span.Size, _uploadDirtyBuffersInRange ??= UploadDirtyBuffersInRange);
+                _bdaSweepEpoch = epoch;
                 _bdaSweepMapping = mapping;
-                _bdaVisibilityPending = false;
             }
         }
 
@@ -735,15 +678,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     }
 
     private Action<ulong, ulong>? _uploadDirtyBuffersInRange;
-
-    private static readonly bool PreserveHotPagesInSweeps =
-        Environment.GetEnvironmentVariable("SHARPEMU_BDA_SWEEP_REPROTECT_HOT") != "1";
-    private bool _bdaVisibilityPending = true;
-
-    private static readonly bool SweepBdaOnEveryDraw =
-        Environment.GetEnvironmentVariable("SHARPEMU_BDA_SWEEP_EVERY_DRAW") == "1";
-
-    public void NoteMemoryVisibilityPoint() => _bdaVisibilityPending = true;
+    private long _bdaSweepEpoch = -1;
     private ulong _bdaSweepMapping;
 
     private void TouchBuffersInRange(ulong guestAddress, ulong size)
@@ -764,10 +699,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var buffer = _registry.GetBuffer(_registry.GetRegisteredIdentifier(index));
             var start = Math.Max(buffer.CpuAddress, guestAddress);
             var finish = Math.Min(buffer.CpuAddress + buffer.Size, end);
-            // Hot pages stay writable and are copied again on the next sweep: a few hundred KiB of
-            // ring memory per sweep costs far less than a protection fault per page per frame.
             if (start < finish && _tracker.MayHaveCpuDirtyPages(start, finish - start))
-                _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: PreserveHotPagesInSweeps);
+                _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
         }
     }
 
@@ -793,7 +726,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 // SynchronizeBuffer takes for this read-only call), and the block summary
                 // answers that without a lock for the common all-clean case.
                 if (_tracker.HasCpuDirtyPages(start, finish - start))
-                    _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: PreserveHotPagesInSweeps);
+                    _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
             }
         }
     }
@@ -963,45 +896,24 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 $"unsupported buffer readback from an asynchronous GPU completion, addr=0x{guestAddress:X16} size=0x{size:X16}");
         }
 
-        if (!_relay.IsGpuQueueThread && GuestReadsAwaitOffQueue && (AsyncReadback is not null || MainQueuePendingReads))
+        if (!_relay.IsGpuQueueThread && AsyncReadback is { } readback && GuestReadsAwaitOffQueue)
         {
-            // A GPU write that lands after the copy was recorded makes the read stale. Retrying
-            // synchronously stalls the command worker until the GPU drains, so re-issue the read and
-            // wait here again; only the last attempt falls back to the synchronous read.
-            for (var attempt = 1; ; attempt++)
+            PendingDownload? pending = null;
+            if (_relay.TryRunOnGpuQueue(() => pending = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending: true)))
             {
-                PendingDownload? pending = null;
-                if (!_relay.TryRunOnGpuQueue(() => pending = BeginReadMemoryOnGpu(guestAddress, size, isWrite, source, allowPending: true)))
-                {
-                    return AwaitShutdown();
-                }
-
                 if (pending is null)
                 {
                     return true;
                 }
 
-                if (pending.Ticket is { } ticket)
-                {
-                    (AsyncReadback ?? throw SubmissionScheduler.Fatal("The pending readback lost its queue.")).Wait(ticket);
-                }
-                else
-                {
-                    _scheduler.WaitForSubmittedTick(pending.MainQueueTick);
-                }
-
-                var finalAttempt = attempt >= PendingReadAttempts;
-                var applied = false;
-                if (!_relay.TryRunOnGpuQueue(() => applied = CompleteReadMemoryOnGpu(pending, retrySynchronously: finalAttempt)))
-                {
-                    return AwaitShutdown();
-                }
-
-                if (applied || finalAttempt)
+                readback.Wait(pending.Ticket);
+                if (_relay.TryRunOnGpuQueue(() => CompleteReadMemoryOnGpu(pending, retrySynchronously: true)))
                 {
                     return true;
                 }
             }
+
+            return AwaitShutdown();
         }
 
         var onQueue = _relay.IsGpuQueueThread;
@@ -1232,14 +1144,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     public static string TakeAsyncReadbackReport() => FormattableString.Invariant(
         $"[PERF][ASYNC_READBACK] applied={Interlocked.Exchange(ref _reportedApplied, 0)} retried={Interlocked.Exchange(ref _reportedRetried, 0)} eager_started={Interlocked.Exchange(ref _reportedEagerStarted, 0)} eager_used={Interlocked.Exchange(ref _reportedEagerUsed, 0)} eager_stale={Interlocked.Exchange(ref _reportedEagerStale, 0)}");
 
-    // Ticket is set when the readback queue carries the download; otherwise the main queue
-    // does, into MainQueueBuffer, and MainQueueTick is the submission the guest thread waits for.
     private sealed record PendingDownload
     {
-        public VulkanAsyncReadback.Ticket? Ticket { get; init; }
-        public ulong MainQueueTick { get; init; }
-        public GpuBuffer? MainQueueBuffer { get; init; }
-        public ulong[] MainQueueOffsets { get; init; } = [];
+        public required VulkanAsyncReadback.Ticket Ticket { get; init; }
         public required List<DownloadPiece> Copies { get; init; }
         public required ulong[] WriteTicks { get; init; }
         public required ulong WindowBegin { get; init; }
@@ -1249,9 +1156,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         public required bool IsWrite { get; init; }
         public required GuestMemoryProfile.ReadbackSource Source { get; init; }
         public required long Started { get; init; }
-
-        // Read from the buffers' own host mappings once the writer tick retires; no copy was recorded.
-        public bool Mapped { get; init; }
     }
 
     private PendingDownload? BeginReadMemoryOnGpu(ulong guestAddress, ulong size, bool isWrite, GuestMemoryProfile.ReadbackSource source,
@@ -1275,53 +1179,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         {
             NoteHotReadback(guestAddress, size);
         }
-        if (copies.Count != 0 && _unifiedBuffers && AreMapped(copies, out var writer))
-        {
-            if (writer == 0 || _scheduler.IsTickComplete(writer))
-            {
-                ApplyMappedRead(copies, windowBegin, windowEnd, guestAddress, size, isWrite, readbackStarted, source);
-                return null;
-            }
-
-            if (allowPending && writer < _scheduler.CurrentTick)
-            {
-                // A guest thread had to wait for this writer: submit later writes to the window right
-                // after their command, so the next wait ends with them instead of with their whole batch.
-                NoteHotReadback(guestAddress, size);
-
-                // The writer is already submitted: wait for it alone, not for the work queued after it.
-                var mappedTicks = new ulong[copies.Count];
-                for (var index = 0; index < copies.Count; index++)
-                {
-                    mappedTicks[index] = copies[index].Buffer.LastGpuWriteTick;
-                    copies[index].Buffer.RetainForeignRead();
-                }
-
-                return new PendingDownload
-                {
-                    Mapped = true,
-                    MainQueueTick = writer,
-                    Copies = copies,
-                    WriteTicks = mappedTicks,
-                    WindowBegin = windowBegin,
-                    WindowEnd = windowEnd,
-                    GuestAddress = guestAddress,
-                    Size = size,
-                    IsWrite = isWrite,
-                    Source = source,
-                    Started = readbackStarted,
-                };
-            }
-
-            if (!allowPending)
-            {
-                // On the command worker: submit the writer if it is still recording, then read the mapping.
-                _scheduler.Wait(writer);
-                ApplyMappedRead(copies, windowBegin, windowEnd, guestAddress, size, isWrite, readbackStarted, source);
-                return null;
-            }
-        }
-
         if (copies.Count != 0 && allowPending && TryBeginDownloadAsync(copies, out var ticket, out var writeTicks))
         {
             foreach (var copy in copies)
@@ -1334,31 +1191,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 Ticket = ticket,
                 Copies = copies,
                 WriteTicks = writeTicks,
-                WindowBegin = windowBegin,
-                WindowEnd = windowEnd,
-                GuestAddress = guestAddress,
-                Size = size,
-                IsWrite = isWrite,
-                Source = source,
-                Started = readbackStarted,
-            };
-        }
-
-        if (copies.Count != 0 && allowPending &&
-            TryBeginDownloadOnMainQueue(copies, out var mainTick, out var mainBuffer, out var mainOffsets, out var mainWriteTicks))
-        {
-            foreach (var copy in copies)
-            {
-                copy.Buffer.RetainForeignRead();
-            }
-
-            return new PendingDownload
-            {
-                MainQueueTick = mainTick,
-                MainQueueBuffer = mainBuffer,
-                MainQueueOffsets = mainOffsets,
-                Copies = copies,
-                WriteTicks = mainWriteTicks,
                 WindowBegin = windowBegin,
                 WindowEnd = windowEnd,
                 GuestAddress = guestAddress,
@@ -1384,75 +1216,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         return null;
     }
 
-    // Without a readback queue the main queue copies the pieces into a buffer of their own and
-    // submits at once; the guest thread then waits for that submission instead of the worker
-    // waiting for the whole GPU (a guest read of GPU-written memory otherwise idled the worker
-    // for tens of milliseconds, several times per frame in Silent Hill: The Short Message).
-    private bool TryBeginDownloadOnMainQueue(List<DownloadPiece> copies, out ulong tick, out GpuBuffer buffer, out ulong[] offsets, out ulong[] writeTicks)
-    {
-        tick = 0;
-        buffer = null!;
-        offsets = [];
-        writeTicks = [];
-        if (!MainQueuePendingReads || copies.Count == 0)
-        {
-            return false;
-        }
-
-        var ticks = new ulong[copies.Count];
-        var placements = new ulong[copies.Count];
-        var total = 0UL;
-        for (var index = 0; index < copies.Count; index++)
-        {
-            var written = copies[index].Buffer.LastGpuWriteTick;
-            if (written == 0)
-            {
-                return false;
-            }
-
-            ticks[index] = written;
-            placements[index] = total;
-            total += (copies[index].Size + BufferDownloadBatchPlanner.Alignment - 1) & ~(BufferDownloadBatchPlanner.Alignment - 1);
-        }
-
-        if (total > AsyncReadbackLimit)
-        {
-            return false;
-        }
-
-        buffer = new GpuBuffer(_device, _scheduler, GpuBufferUsage.Download, 0, BufferUsageFlags.TransferDstBit, total);
-        for (var index = 0; index < copies.Count; index++)
-        {
-            buffer.CopyFrom(
-                _scheduler.Current, copies[index].Buffer, copies[index].SourceOffset, placements[index], copies[index].Size,
-                AccessFlags.MemoryWriteBit, AccessFlags.None, AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit, AccessFlags.HostReadBit);
-        }
-
-        tick = _scheduler.Flush();
-        offsets = placements;
-        writeTicks = ticks;
-        return true;
-    }
-
-    private static readonly bool MainQueuePendingReads =
-        Environment.GetEnvironmentVariable("SHARPEMU_MAIN_QUEUE_PENDING_READS") != "0";
-
-    // Pending reads a guest thread re-issues before it lets the worker read synchronously.
-    private const int PendingReadAttempts = 4;
-
     private bool CompleteReadMemoryOnGpu(PendingDownload pending, bool retrySynchronously)
     {
         using var readbackScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.BufferReadback);
-        if (pending.Mapped)
-        {
-            return CompleteMappedRead(pending, retrySynchronously);
-        }
-
-        if (pending.Ticket is null)
-        {
-            return CompleteMainQueueRead(pending, retrySynchronously);
-        }
-
         var readback = AsyncReadback ?? throw SubmissionScheduler.Fatal("The pending readback lost its queue.");
         try
         {
@@ -1496,155 +1262,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
         finally
         {
-            foreach (var copy in pending.Copies)
-            {
-                copy.Buffer.ReleaseForeignRead();
-            }
-        }
-    }
-
-    // Guest buffers live in host-visible device memory on unified-memory devices (Apple GPUs), so a
-    // readback can copy straight out of the buffer once the last GPU write to it retired. That skips
-    // the copy command at the tail of the queue and the wait for every draw recorded after the writer.
-    // SHARPEMU_UNIFIED_BUFFERS=0 keeps device-local buffers and copy readbacks.
-    private static readonly bool UnifiedBuffersEnabled =
-        Environment.GetEnvironmentVariable("SHARPEMU_UNIFIED_BUFFERS") != "0";
-
-    private static bool HasUnifiedMemoryType(GpuDeviceInfo device)
-    {
-        const MemoryPropertyFlags unified = MemoryPropertyFlags.DeviceLocalBit | MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit;
-        for (uint index = 0; index < device.MemoryTypeCount; index++)
-        {
-            if ((device.GetMemoryTypeFlags(index) & unified) == unified)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static bool AreMapped(List<DownloadPiece> copies, out ulong writer)
-    {
-        writer = 0;
-        foreach (var copy in copies)
-        {
-            if (copy.Buffer.MappedPointer == null || !copy.Buffer.IsCoherent)
-            {
-                return false;
-            }
-
-            writer = Math.Max(writer, copy.Buffer.LastGpuWriteTick);
-        }
-
-        return true;
-    }
-
-    private void ApplyMappedRead(List<DownloadPiece> copies, ulong windowBegin, ulong windowEnd, ulong guestAddress, ulong size,
-        bool isWrite, long started, GuestMemoryProfile.ReadbackSource source)
-    {
-        foreach (var copy in copies)
-        {
-            var bytes = new ReadOnlySpan<byte>(copy.Buffer.MappedPointer + copy.SourceOffset, checked((int)copy.Size));
-            if (!_backing.TryWriteBacking(copy.Address, bytes))
-            {
-                throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copy.Address:X16} size=0x{copy.Size:X16}");
-            }
-
-            _gpuModifiedRanges.Remove(copy.Address, copy.Size);
-        }
-
-        _tracker.ClearGpuDirtyPages(windowBegin, windowEnd - windowBegin);
-        if (isWrite)
-        {
-            _tracker.MarkCpuDirtyPages(guestAddress, size);
-        }
-
-        MappedReadbacks++;
-        RecordReadback(windowBegin, windowEnd, isWrite, copies, started, source);
-    }
-
-    // Readbacks served from a buffer's own mapping, without a copy command.
-    internal long MappedReadbacks { get; private set; }
-
-    internal bool UnifiedBuffers => _unifiedBuffers;
-
-    private bool CompleteMappedRead(PendingDownload pending, bool retrySynchronously)
-    {
-        try
-        {
-            if (!IsPendingDownloadCurrent(pending))
-            {
-                if (retrySynchronously)
-                {
-                    PendingReadbacksRetried++;
-                    Interlocked.Increment(ref _reportedRetried);
-                    ReadMemoryOnGpu(pending.GuestAddress, pending.Size, pending.IsWrite, pending.Source);
-                }
-
-                return false;
-            }
-
-            PendingReadbacksApplied++;
-            Interlocked.Increment(ref _reportedApplied);
-            ApplyMappedRead(pending.Copies, pending.WindowBegin, pending.WindowEnd, pending.GuestAddress, pending.Size,
-                pending.IsWrite, pending.Started, pending.Source);
-            return true;
-        }
-        finally
-        {
-            foreach (var copy in pending.Copies)
-            {
-                copy.Buffer.ReleaseForeignRead();
-            }
-        }
-    }
-
-    private bool CompleteMainQueueRead(PendingDownload pending, bool retrySynchronously)
-    {
-        var buffer = pending.MainQueueBuffer ?? throw SubmissionScheduler.Fatal("The pending readback lost its buffer.");
-        try
-        {
-            if (!IsPendingDownloadCurrent(pending))
-            {
-                if (retrySynchronously)
-                {
-                    PendingReadbacksRetried++;
-                    Interlocked.Increment(ref _reportedRetried);
-                    ReadMemoryOnGpu(pending.GuestAddress, pending.Size, pending.IsWrite, pending.Source);
-                }
-
-                return false;
-            }
-
-            PendingReadbacksApplied++;
-            Interlocked.Increment(ref _reportedApplied);
-            var copies = pending.Copies;
-            buffer.Invalidate(0, buffer.Size);
-            for (var index = 0; index < copies.Count; index++)
-            {
-                var bytes = buffer.Mapped.Slice((int)pending.MainQueueOffsets[index], (int)copies[index].Size);
-                if (!_backing.TryWriteBacking(copies[index].Address, bytes))
-                {
-                    throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copies[index].Address:X16} size=0x{copies[index].Size:X16}");
-                }
-
-                _gpuModifiedRanges.Remove(copies[index].Address, copies[index].Size);
-            }
-
-            _tracker.ClearGpuDirtyPages(pending.WindowBegin, pending.WindowEnd - pending.WindowBegin);
-            if (pending.IsWrite)
-            {
-                _tracker.MarkCpuDirtyPages(pending.GuestAddress, pending.Size);
-            }
-
-            RecordReadback(pending.WindowBegin, pending.WindowEnd, pending.IsWrite, copies, pending.Started, pending.Source);
-            return true;
-        }
-        finally
-        {
-            // The guest thread waited for the submission, so the GPU is done with the buffer.
-            buffer.Dispose();
             foreach (var copy in pending.Copies)
             {
                 copy.Buffer.ReleaseForeignRead();
@@ -2069,7 +1686,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         var bufferIdentifier = _registry.AllocateBuffer(new GpuBuffer(
-            _device, _scheduler, _unifiedBuffers ? GpuBufferUsage.Unified : GpuBufferUsage.DeviceLocal, overlap.Begin,
+            _device, _scheduler, GpuBufferUsage.DeviceLocal, overlap.Begin,
             GpuBuffer.AllFlags | BufferUsageFlags.ShaderDeviceAddressBit, overlap.End - overlap.Begin, allowSlab: true), overlap.Begin, overlap.End - overlap.Begin);
         foreach (var oldId in overlapping)
         {
@@ -2096,11 +1713,20 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         profileScope.SwitchPhase(isWritten
             ? RenderPhaseProfile.Phase.BufferDirtySyncWritten
             : isTexelBuffer ? RenderPhaseProfile.Phase.BufferDirtySyncTexel : RenderPhaseProfile.Phase.BufferDirtySyncUpload);
-        var copies = _syncCopies ??= new List<BufferCopy>();
-        copies.Clear();
-        var sink = new UploadSink(_uploader, buffer, copies, guestAddress, size);
-        _tracker.ForEachUploadRange(guestAddress, size, isWritten, ref sink, preserveCpuWriteHotPages);
-        var source = sink.Source;
+        var copies = new List<BufferCopy>();
+        var totalSize = 0UL;
+        GpuBuffer? source = null;
+        _tracker.ForEachUploadRange(
+            guestAddress,
+            size,
+            isWritten,
+            (address, bytes) =>
+            {
+                copies.Add(new BufferCopy(totalSize, buffer.Offset(address), bytes));
+                totalSize += bytes;
+            },
+            () => source = _uploader.PrepareSource(buffer.CpuAddress, CollectionsMarshal.AsSpan(copies), totalSize, guestAddress, size),
+            preserveCpuWriteHotPages);
         if (source != null)
         {
             buffer.NoteGpuWrite();
@@ -2108,17 +1734,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             command.EndRendering();
             var native = new CommandBuffer(command.Handle);
             var vk = _device.Vk;
-            if (_uploadBatchActive)
-            {
-                OpenUploadBatch(native);
-                var batched = CollectionsMarshal.AsSpan(copies);
-                fixed (BufferCopy* pointer = batched)
-                {
-                    vk.CmdCopyBuffer(native, source.Handle, buffer.Handle, (uint)batched.Length, pointer);
-                }
-            }
-            else
-            {
             var before = new BufferMemoryBarrier2
             {
                 SType = StructureType.BufferMemoryBarrier2,
@@ -2145,7 +1760,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             VulkanSynchronization.PipelineBarrier(vk,
                 native, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit, DependencyFlags.ByRegionBit,
                 0, null, 1, &after, 0, null);
-            }
         }
 
         if (BufferUploadProfile.Enabled)
@@ -2154,7 +1768,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             ulong hotBytes = 0;
             foreach (var copy in copies)
                 hotBytes += _tracker.CountCpuWriteHotBytes(buffer.CpuAddress + copy.DstOffset, copy.Size);
-            BufferUploadProfile.Record(guestAddress, size, copies.Count, sink.TotalSize, hotBytes, elapsedTicks);
+            BufferUploadProfile.Record(guestAddress, size, copies.Count, totalSize, hotBytes, elapsedTicks);
         }
 
         if (isTexelBuffer)
@@ -2169,81 +1783,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         return false;
-    }
-
-    // A sweep uploads many buffers back to back: one global barrier before the first copy and one
-    // after the last replace a barrier pair per buffer, so the copies share one transfer pass.
-    private bool _uploadBatchActive;
-    private ulong _uploadBatchCommand;
-
-    private void BeginUploadBatch()
-    {
-        _uploadBatchActive = true;
-        _uploadBatchCommand = 0;
-    }
-
-    private void OpenUploadBatch(CommandBuffer native)
-    {
-        if (_uploadBatchCommand == (ulong)native.Handle)
-        {
-            return;
-        }
-
-        // A new command buffer (or the first copy) orders the copies after all earlier work.
-        var barrier = new MemoryBarrier2
-        {
-            SType = StructureType.MemoryBarrier2,
-            SrcAccessMask = AccessFlags2.MemoryReadBit | AccessFlags2.MemoryWriteBit,
-            DstAccessMask = AccessFlags2.TransferWriteBit,
-        };
-        VulkanSynchronization.PipelineBarrier(_device.Vk,
-            native, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.TransferBit, 0, 1, &barrier, 0, null, 0, null);
-        _uploadBatchCommand = (ulong)native.Handle;
-    }
-
-    private void EndUploadBatch()
-    {
-        _uploadBatchActive = false;
-        if (_uploadBatchCommand == 0)
-        {
-            return;
-        }
-
-        // Recorded on the current command buffer; submission order covers copies recorded on an
-        // earlier one.
-        var command = _scheduler.Current;
-        command.EndRendering();
-        var barrier = new MemoryBarrier2
-        {
-            SType = StructureType.MemoryBarrier2,
-            SrcAccessMask = AccessFlags2.TransferWriteBit,
-            DstAccessMask = AccessFlags2.MemoryReadBit | AccessFlags2.MemoryWriteBit,
-        };
-        VulkanSynchronization.PipelineBarrier(_device.Vk,
-            new CommandBuffer(command.Handle), PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit, 0, 1, &barrier, 0, null, 0, null);
-        _uploadBatchCommand = 0;
-    }
-
-    // The copies of one synchronization; the tracker forbids nesting, so one list per thread is reused.
-    [ThreadStatic]
-    private static List<BufferCopy>? _syncCopies;
-
-    // Collects a buffer's CPU-dirty runs as copies, then stages them while the tracker holds the regions.
-    private struct UploadSink(GuestBufferUploader uploader, GpuBuffer buffer, List<BufferCopy> copies, ulong guestAddress, ulong size)
-        : GuestPageTracker.IUploadRangeSink
-    {
-        public ulong TotalSize { get; private set; }
-
-        public GpuBuffer? Source { get; private set; }
-
-        public void Range(ulong address, ulong bytes)
-        {
-            copies.Add(new BufferCopy(TotalSize, buffer.Offset(address), bytes));
-            TotalSize += bytes;
-        }
-
-        public void Upload() =>
-            Source = uploader.PrepareSource(buffer.CpuAddress, CollectionsMarshal.AsSpan(copies), TotalSize, guestAddress, size);
     }
 
     private GpuBuffer? FindOwner(ulong guestAddress, ulong size)

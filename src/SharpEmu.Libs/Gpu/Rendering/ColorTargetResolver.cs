@@ -29,13 +29,6 @@ public static class ColorTargetResolver
     public static ColorTargetResolution? Resolve(ContextRegisters context, uint slot, uint drawLayerOffset, bool ignoreTargetMask, out uint resolvedSlot)
     {
         resolvedSlot = slot == FirstBoundSlot ? FirstBound(context) : slot;
-        // Disabling CB takes precedence over stale target addresses and masks.
-        // Depth-only passes may leave the preceding color targets bound.
-        if (context.ColorControl.Mode == 0)
-        {
-            return null;
-        }
-
         return ImageRequestBuilders.ColorTarget(in context.ColorTargets[resolvedSlot], context.RenderTargetMaskForSlot(resolvedSlot), drawLayerOffset, ignoreTargetMask);
     }
 }

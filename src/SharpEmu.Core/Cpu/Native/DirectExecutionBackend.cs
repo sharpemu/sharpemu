@@ -3978,11 +3978,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	public bool SupportsGuestContextTransfer => true;
 
-	// The handle and context this host thread registered last; a repeat registration (every
-	// scePthreadSelf on an external guest thread, tens of thousands a second) then skips the
-	// scheduler gate.
-	[ThreadStatic] private static ulong _registeredExternalHandle;
-	[ThreadStatic] private static CpuContext? _registeredExternalContext;
 	public bool TryGetGuestThreadStackBounds(
 		ulong threadHandle,
 		out ulong stackBase,
@@ -4017,12 +4012,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return;
 		}
 
-		if (_registeredExternalHandle == threadHandle && ReferenceEquals(_registeredExternalContext, context))
-		{
-			Volatile.Write(ref _currentExternalGuestThreadHandle, threadHandle);
-			return;
-		}
-
 		lock (_guestThreadGate)
 		{
 			_currentExternalGuestThreadHandle = threadHandle;
@@ -4036,19 +4025,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			{
 				existing.Context = context;
 				Volatile.Write(ref existing.HostThreadId, hostThreadId);
-			}
-			else
-			{
-				_externalGuestThreads[threadHandle] = new ExternalGuestThreadState
-				{
-					Context = context,
-					Name = $"External-{threadHandle:X}",
-					HostThreadId = hostThreadId,
-				};
+				return;
 			}
 
-			_registeredExternalHandle = threadHandle;
-			_registeredExternalContext = context;
+			_externalGuestThreads[threadHandle] = new ExternalGuestThreadState
+			{
+				Context = context,
+				Name = $"External-{threadHandle:X}",
+				HostThreadId = hostThreadId,
+			};
 		}
 	}
 
@@ -6397,15 +6382,19 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return GuestNativeCallExitReason.Exception;
 		}
 		const uint stubSize = 512u;
-		// The stub page and host-RSP slot are kept per host thread and nesting depth: allocating
-		// and releasing them on every resume cost an mmap/munmap pair and two acquisitions of the
-		// host-memory gate, which the GPU write tracker holds across its own protection changes.
-		var depth = _continuationDepth;
-		if (!TryAcquireContinuationStub(depth, stubSize, out var ptr, out var hostRspStorage, out reason))
+		void* ptr = VirtualAlloc(null, stubSize, 12288u, 4u);
+		if (ptr == null)
 		{
+			reason = "failed to allocate executable memory for guest thread stub";
 			return GuestNativeCallExitReason.Exception;
 		}
-		_continuationDepth = depth + 1;
+		void* hostRspStorage = NativeMemory.AllocZeroed((nuint)HostStackStateBytes);
+		if (hostRspStorage == null)
+		{
+			VirtualFree(ptr, 0u, 32768u);
+			reason = "failed to allocate writable host-RSP storage for guest continuation stub";
+			return GuestNativeCallExitReason.Exception;
+		}
 		var previousActiveBackend = _activeExecutionBackend;
 		var previousActiveContext = _activeCpuContext;
 		var previousSentinel = _activeEntryReturnSentinelRip;
@@ -6479,7 +6468,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				reason = $"failed to patch guest continuation return slot at 0x{returnSlotAddress:X16}";
 				return GuestNativeCallExitReason.Exception;
 			}
-			if (!ProtectContinuationStub(ptr, stubSize, executable: true))
+			uint oldProtect = default(uint);
+			if (!VirtualProtect(ptr, stubSize, 32u, &oldProtect))
 			{
 				reason = "failed to seal guest continuation stub execute-read";
 				return GuestNativeCallExitReason.Exception;
@@ -6539,84 +6529,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				previousForcedExit,
 				previousYieldRequested,
 				previousYieldReason);
-			_continuationDepth = depth;
+			NativeMemory.Free(hostRspStorage);
+			VirtualFree(ptr, 0u, 32768u);
 		}
 	}
-
-	[ThreadStatic] private static nint[]? _continuationStubPages;
-	[ThreadStatic] private static nint[]? _continuationHostRspSlots;
-	[ThreadStatic] private static int _continuationDepth;
-
-	// Returns this thread's stub page for the given nesting depth, writable and with a zeroed
-	// host-RSP slot; the first use at a depth allocates them, and they live as long as the thread.
-	private unsafe bool TryAcquireContinuationStub(int depth, uint stubSize, out void* stub, out void* hostRspStorage, out string? reason)
-	{
-		reason = null;
-		stub = null;
-		hostRspStorage = null;
-		var pages = _continuationStubPages ??= new nint[4];
-		var slots = _continuationHostRspSlots ??= new nint[4];
-		if (depth >= pages.Length)
-		{
-			Array.Resize(ref pages, depth + 2);
-			Array.Resize(ref slots, depth + 2);
-			_continuationStubPages = pages;
-			_continuationHostRspSlots = slots;
-		}
-
-		if (pages[depth] == 0)
-		{
-			var page = VirtualAlloc(null, stubSize, 12288u, 4u);
-			if (page == null)
-			{
-				reason = "failed to allocate executable memory for guest thread stub";
-				return false;
-			}
-
-			var slot = NativeMemory.AllocZeroed((nuint)HostStackStateBytes);
-			if (slot == null)
-			{
-				VirtualFree(page, 0u, 32768u);
-				reason = "failed to allocate writable host-RSP storage for guest continuation stub";
-				return false;
-			}
-
-			pages[depth] = (nint)page;
-			slots[depth] = (nint)slot;
-		}
-		else
-		{
-			if (!ProtectContinuationStub((void*)pages[depth], stubSize, executable: false))
-			{
-				reason = "failed to reopen guest continuation stub for writing";
-				return false;
-			}
-
-			NativeMemory.Clear((void*)slots[depth], (nuint)HostStackStateBytes);
-		}
-
-		stub = (void*)pages[depth];
-		hostRspStorage = (void*)slots[depth];
-		return true;
-	}
-
-	// The stub page is emulator-private, so on POSIX its protection changes bypass the tracked
-	// host-memory layer and its gate.
-	private static unsafe bool ProtectContinuationStub(void* stub, uint stubSize, bool executable)
-	{
-		if (OperatingSystem.IsWindows())
-		{
-			uint oldProtect = 0;
-			return VirtualProtect(stub, stubSize, executable ? 32u : 4u, &oldProtect);
-		}
-
-		var pageSize = (nint)Environment.SystemPageSize;
-		var page = (nint)stub & ~(pageSize - 1);
-		return PosixMprotect(page, (nuint)pageSize, executable ? 1 | 4 : 1 | 2) == 0;
-	}
-
-	[DllImport("libc", EntryPoint = "mprotect")]
-	private static extern int PosixMprotect(nint address, nuint length, int protection);
 
 	// The continuation trampoline is rebuilt on every blocked-thread resume.
 	// Keep its tiny writer on the stack: capturing local emit functions create a

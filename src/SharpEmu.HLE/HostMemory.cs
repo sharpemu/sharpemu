@@ -149,24 +149,12 @@ public static unsafe class HostMemory
         private static readonly object Gate = new();
         private static readonly SortedList<ulong, Region> Regions = new();
 
-        // The regions in address order, replaced under Gate whenever a region is added or removed.
-        // Queries read it without the lock: Protect holds Gate across its mprotect call, and GPU
-        // write tracking protects pages constantly, so a locked query (one per HLE call reading
-        // stack arguments) waited tens of microseconds behind those syscalls.
-        private static Region[] RegionSnapshot = [];
-
-        private static void PublishRegionsLocked() => Volatile.Write(ref RegionSnapshot, [.. Regions.Values]);
-
         private sealed class Region
         {
             public ulong Base;
             public ulong Size;
             public uint DefaultProtect;
             public Dictionary<ulong, uint>? PageProtects;
-
-            // The overridden pages in address order, so a query finds where a protection run ends
-            // without visiting every override: write tracking leaves tens of thousands of them.
-            public SortedSet<ulong>? OverridePages;
 
             public ulong End => Base + Size;
 
@@ -281,7 +269,6 @@ public static unsafe class HostMemory
                     Size = alignedSize,
                     DefaultProtect = protect
                 };
-                PublishRegionsLocked();
 
                 return (void*)result;
             }
@@ -301,7 +288,6 @@ public static unsafe class HostMemory
 
                 HostMemory.OnMappingChanged();
                 Regions.Remove((ulong)address);
-                PublishRegionsLocked();
                 return munmap((nint)address, (nuint)region.Size) == 0;
             }
         }
@@ -339,10 +325,6 @@ public static unsafe class HostMemory
         {
             info = default;
             var pageAddress = AlignDown((ulong)address, PageSize);
-            if (TryQueryUnlocked(pageAddress, ref info))
-            {
-                return (nuint)sizeof(BasicInfo);
-            }
 
             lock (Gate)
             {
@@ -358,37 +340,30 @@ public static unsafe class HostMemory
                     var pageProtects = region.PageProtects;
                     uint protect;
                     ulong runEnd;
-                    if (pageProtects is null || pageProtects.Count == 0 || region.OverridePages is not { } overridePages)
+                    if (pageProtects is null || pageProtects.Count == 0)
                     {
                         protect = region.DefaultProtect;
                         runEnd = region.End;
                     }
                     else if (pageProtects.TryGetValue(pageAddress, out protect))
                     {
-                        // Overrides run while the next page is overridden with the same protection.
                         runEnd = pageAddress + PageSize;
-                        foreach (var overrideAddress in runEnd < region.End ? overridePages.GetViewBetween(runEnd, region.End - 1) : [])
+                        while (runEnd < region.End &&
+                            pageProtects.TryGetValue(runEnd, out var nextProtect) &&
+                            nextProtect == protect)
                         {
-                            if (overrideAddress != runEnd || pageProtects[overrideAddress] != protect)
-                            {
-                                break;
-                            }
-
                             runEnd += PageSize;
                         }
                     }
                     else
                     {
-                        // The default protection runs to the next override.
                         protect = region.DefaultProtect;
                         runEnd = region.End;
-                        if (pageAddress + PageSize < region.End)
+                        foreach (var overrideAddress in pageProtects.Keys)
                         {
-                            // The first element only: a view's Count walks the whole view.
-                            foreach (var overrideAddress in overridePages.GetViewBetween(pageAddress + PageSize, region.End - 1))
+                            if (overrideAddress > pageAddress && overrideAddress < runEnd)
                             {
                                 runEnd = overrideAddress;
-                                break;
                             }
                         }
                     }
@@ -407,18 +382,12 @@ public static unsafe class HostMemory
                 // reported as a free block reaching to the next tracked region
                 // so scanning callers keep advancing.
                 var nextBase = ulong.MaxValue;
-                var keys = Regions.Keys;
-                for (int low = 0, high = keys.Count - 1; low <= high;)
+                foreach (var regionBase in Regions.Keys)
                 {
-                    var middle = low + ((high - low) >> 1);
-                    if (keys[middle] > pageAddress)
+                    if (regionBase > pageAddress)
                     {
-                        nextBase = keys[middle];
-                        high = middle - 1;
-                    }
-                    else
-                    {
-                        low = middle + 1;
+                        nextBase = regionBase;
+                        break;
                     }
                 }
 
@@ -445,56 +414,6 @@ public static unsafe class HostMemory
             }
 
             return false;
-        }
-
-        // Answers without Gate for untracked memory and for regions without per-page overrides;
-        // a region with overrides needs their dictionary, which only Gate protects. A concurrent
-        // Protect may land just before or after either way, as with the locked query.
-        private static bool TryQueryUnlocked(ulong pageAddress, ref BasicInfo info)
-        {
-            var regions = Volatile.Read(ref RegionSnapshot);
-            Region? candidate = null;
-            var nextBase = ulong.MaxValue;
-            for (int low = 0, high = regions.Length - 1; low <= high;)
-            {
-                var middle = low + ((high - low) >> 1);
-                if (regions[middle].Base <= pageAddress)
-                {
-                    candidate = regions[middle];
-                    low = middle + 1;
-                }
-                else
-                {
-                    nextBase = regions[middle].Base;
-                    high = middle - 1;
-                }
-            }
-
-            if (candidate is not null && pageAddress < candidate.End)
-            {
-                if (Volatile.Read(ref candidate.PageProtects) is { Count: > 0 })
-                {
-                    return false;
-                }
-
-                info.BaseAddress = pageAddress;
-                info.AllocationBase = candidate.Base;
-                info.AllocationProtect = candidate.DefaultProtect;
-                info.RegionSize = candidate.End - pageAddress;
-                info.State = MEM_COMMIT;
-                info.Protect = candidate.DefaultProtect;
-                info.Type = MEM_PRIVATE;
-                return true;
-            }
-
-            info.BaseAddress = pageAddress;
-            info.AllocationBase = 0;
-            info.AllocationProtect = PAGE_NOACCESS;
-            info.RegionSize = (nextBase == ulong.MaxValue ? pageAddress + PageSize : nextBase) - pageAddress;
-            info.State = MEM_FREE_STATE;
-            info.Protect = PAGE_NOACCESS;
-            info.Type = 0;
-            return true;
         }
 
         private static bool TryFindRegionLocked(ulong address, out Region region)
@@ -535,26 +454,20 @@ public static unsafe class HostMemory
             {
                 region.DefaultProtect = protect;
                 region.PageProtects = null;
-                region.OverridePages = null;
                 return;
             }
 
             region.PageProtects ??= new Dictionary<ulong, uint>();
-            region.OverridePages ??= new SortedSet<ulong>();
             var end = start + size;
             for (var pageAddress = start; pageAddress < end; pageAddress += PageSize)
             {
                 if (protect == region.DefaultProtect)
                 {
-                    if (region.PageProtects.Remove(pageAddress))
-                    {
-                        region.OverridePages.Remove(pageAddress);
-                    }
+                    region.PageProtects.Remove(pageAddress);
                 }
                 else
                 {
                     region.PageProtects[pageAddress] = protect;
-                    region.OverridePages.Add(pageAddress);
                 }
             }
         }

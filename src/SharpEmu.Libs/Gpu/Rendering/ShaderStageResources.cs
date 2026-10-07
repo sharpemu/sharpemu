@@ -80,9 +80,6 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
 
     public DispatchThreadLimits? ThreadLimits { get; init; }
 
-    // The host resolution of the attachments this draw writes; null outside a draw.
-    public float? AttachmentRenderScale { get; init; }
-
     public void WriteDispatchThreadLimits(Span<uint> shaderData)
     {
         if (Program?.Bindings is not { UsesDispatchThreadLimits: true } layout) return;
@@ -96,25 +93,6 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
         shaderData[offset + 1] = limits.Y;
         shaderData[offset + 2] = limits.Z;
     }
-
-    // The internal-resolution dwords: the factor that maps one guest pixel onto host texels,
-    // its reciprocal, which image resources the host holds at that factor, and the factor the
-    // pixel position is divided by so the program keeps reading guest pixels.
-    public void WriteRenderScale(Span<uint> shaderData, ulong scaledImages, float imageScale)
-    {
-        if (Program?.Bindings is not { UsesRenderScale: true } layout) return;
-        if (shaderData.Length != layout.ShaderDataDwordCount || !float.IsFinite(imageScale) || imageScale <= 0)
-        {
-            throw SubmissionScheduler.Fatal("The draw has invalid shader data or an invalid scale for its render scale dwords.");
-        }
-
-        var offset = (int)layout.RenderScaleDword;
-        shaderData[offset] = BitConverter.SingleToUInt32Bits(imageScale);
-        shaderData[offset + 1] = BitConverter.SingleToUInt32Bits(1.0f / imageScale);
-        shaderData[offset + 2] = (uint)scaledImages;
-        shaderData[offset + 3] = (uint)(scaledImages >> 32);
-        shaderData[offset + 4] = BitConverter.SingleToUInt32Bits(1.0f / (AttachmentRenderScale ?? 1.0f));
-    }
 }
 
 public readonly record struct DispatchThreadLimits(uint X, uint Y, uint Z);
@@ -122,9 +100,7 @@ public readonly record struct DispatchThreadLimits(uint X, uint Y, uint Z);
 // The vertex buffer words of one fetch slot as the vertex program declares them.
 public readonly record struct VertexInputBuffer(ulong Address, uint Stride, uint RecordCount, bool PerInstance = false)
 {
-    public uint MinimumFetchBytes { get; init; }
-
-    public ulong Size => Math.Max(Stride != 0 ? (ulong)Stride * RecordCount : RecordCount, MinimumFetchBytes);
+    public ulong Size => Stride != 0 ? (ulong)Stride * RecordCount : RecordCount;
 }
 
 // One attribute of the vertex tables: its buffer words, the registers it fills and its buffer slot.

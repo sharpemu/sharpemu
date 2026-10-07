@@ -31,11 +31,6 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public List<EndOfPipeWrite> EndOfPipeWrites { get; } = new();
 
-    // Satisfied waits and command-processor memory writes reported to the host.
-    public int VisibilityPoints { get; private set; }
-
-    public void NoteMemoryVisibilityPoint() => VisibilityPoints++;
-
     public List<ulong> GuestReads { get; } = new();
 
     public Action<ulong>? BeforeGuestRead { get; set; }
@@ -184,8 +179,6 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
     public bool ResolvesIndirectDispatchOnGpu { get; set; }
 
     public bool ResolvesIndirectDrawOnGpu { get; set; }
-
-    public bool ResolvesNonIndexedIndirectDrawOnGpu { get; set; }
 
     public void OnQueueReset(int queueId) => Calls.Add($"queue_reset {queueId}");
 

@@ -322,43 +322,20 @@ internal static unsafe class PosixHostStubs
 
     private static nint EmitSleep(byte* page, ref int offset)
     {
-        // void Sleep(DWORD milliseconds in ecx) -> nanosleep(&req, &rem), resumed on EINTR. usleep
-        // would be shorter, but macOS rejects usleep(>= 1 s) with EINVAL, and a signal (the
-        // runtime's thread activations, for one) cuts either short: a sleep that returned at once
-        // on an ignored error turned UE's idle HTTP thread into a hot spin.
-        var nanosleep = ResolveLibcExport("nanosleep");
-        var errorLocation = ResolveLibcExport(OperatingSystem.IsMacOS() ? "__error" : "__errno_location");
+        // void Sleep(DWORD milliseconds in ecx) -> usleep(microseconds in edi).
+        var usleep = ResolveLibcExport("usleep");
         var start = (nint)(page + offset);
         Emit(page, ref offset, 0x56);                                               // push rsi
         Emit(page, ref offset, 0x57);                                               // push rdi
-        Emit(page, ref offset, 0x53);                                               // push rbx
-        Emit(page, ref offset, 0x48, 0x83, 0xEC, 0x20);                             // sub rsp, 0x20: req at [rsp], rem at [rsp+16]
-        Emit(page, ref offset, 0x89, 0xC8);                                         // mov eax, ecx
-        Emit(page, ref offset, 0x31, 0xD2);                                         // xor edx, edx
-        Emit(page, ref offset, 0xB9, 0xE8, 0x03, 0x00, 0x00);                       // mov ecx, 1000
-        Emit(page, ref offset, 0xF7, 0xF1);                                         // div ecx: eax = seconds, edx = milliseconds
-        Emit(page, ref offset, 0x48, 0x89, 0x04, 0x24);                             // mov [rsp], rax (tv_sec)
-        Emit(page, ref offset, 0x69, 0xD2, 0x40, 0x42, 0x0F, 0x00);                 // imul edx, edx, 1000000
-        Emit(page, ref offset, 0x48, 0x89, 0x54, 0x24, 0x08);                       // mov [rsp+8], rdx (tv_nsec)
-        // loop:
-        Emit(page, ref offset, 0x48, 0x89, 0xE7);                                   // mov rdi, rsp
-        Emit(page, ref offset, 0x48, 0x8D, 0x74, 0x24, 0x10);                       // lea rsi, [rsp+16]
-        EmitMovRaxImm64(page, ref offset, nanosleep);                               // mov rax, imm64
+        Emit(page, ref offset, 0x48, 0x83, 0xEC, 0x08);                             // sub rsp, 8
+        Emit(page, ref offset, 0x89, 0xCF);                                         // mov edi, ecx
+        Emit(page, ref offset, 0x81, 0xFF, 0xFF, 0x0F, 0x00, 0x00);                 // cmp edi, 0xFFF
+        Emit(page, ref offset, 0x76, 0x05);                                         // jbe +5
+        Emit(page, ref offset, 0xBF, 0xFF, 0x0F, 0x00, 0x00);                       // mov edi, 0xFFF (cap at ~4s)
+        Emit(page, ref offset, 0x69, 0xFF, 0xE8, 0x03, 0x00, 0x00);                 // imul edi, edi, 1000
+        EmitMovRaxImm64(page, ref offset, usleep);                                  // mov rax, imm64
         Emit(page, ref offset, 0xFF, 0xD0);                                         // call rax
-        Emit(page, ref offset, 0x85, 0xC0);                                         // test eax, eax
-        Emit(page, ref offset, 0x74, 0x26);                                         // jz done
-        EmitMovRaxImm64(page, ref offset, errorLocation);                           // mov rax, imm64
-        Emit(page, ref offset, 0xFF, 0xD0);                                         // call rax
-        Emit(page, ref offset, 0x83, 0x38, 0x04);                                   // cmp dword [rax], EINTR
-        Emit(page, ref offset, 0x75, 0x15);                                         // jne done
-        Emit(page, ref offset, 0x48, 0x8B, 0x44, 0x24, 0x10);                       // mov rax, [rsp+16]
-        Emit(page, ref offset, 0x48, 0x89, 0x04, 0x24);                             // mov [rsp], rax
-        Emit(page, ref offset, 0x48, 0x8B, 0x44, 0x24, 0x18);                       // mov rax, [rsp+24]
-        Emit(page, ref offset, 0x48, 0x89, 0x44, 0x24, 0x08);                       // mov [rsp+8], rax
-        Emit(page, ref offset, 0xEB, 0xC2);                                         // jmp loop
-        // done:
-        Emit(page, ref offset, 0x48, 0x83, 0xC4, 0x20);                             // add rsp, 0x20
-        Emit(page, ref offset, 0x5B);                                               // pop rbx
+        Emit(page, ref offset, 0x48, 0x83, 0xC4, 0x08);                             // add rsp, 8
         Emit(page, ref offset, 0x5F);                                               // pop rdi
         Emit(page, ref offset, 0x5E);                                               // pop rsi
         Emit(page, ref offset, 0xC3);                                               // ret

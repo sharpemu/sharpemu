@@ -48,25 +48,17 @@ public sealed class CommandStreamWorkerTests
     [Fact]
     public void Worker_RetriesABlockedHeadAfterTheTimedWait()
     {
-        var (host, queue, worker) = NewWorker(cancelBlockedAtStop: true);
+        var (host, queue, worker) = NewWorker(cancelBlockedAtStop: false);
         host.WriteDword(Label, 0);
 
-        try
-        {
-            Enqueue(host, queue, 1, WaitEqual(Label, 1), CreateInstanceCountPacket(6));
-            // A loaded runner can start the worker after a fixed sleep has elapsed.
-            // Publish the signal only once the worker has actually blocked on it.
-            Assert.True(SpinWait.SpinUntil(() => queue.BlockedQueueCount == 1, TimeSpan.FromSeconds(5)));
-            host.WriteDword(Label, 1);
+        Enqueue(host, queue, 1, WaitEqual(Label, 1), CreateInstanceCountPacket(6));
+        Thread.Sleep(50);
+        host.WriteDword(Label, 1);
 
-            Assert.Equal(IdleOutcome.Completed, queue.WaitForIdle());
-            Assert.Equal(6u, queue.GetInterpreter(0).InstanceCount);
-            Assert.True(queue.BlockedRetries >= 1);
-        }
-        finally
-        {
-            worker.Stop();
-        }
+        Assert.Equal(IdleOutcome.Completed, queue.WaitForIdle());
+        Assert.Equal(6u, queue.GetInterpreter(0).InstanceCount);
+        Assert.True(queue.BlockedRetries >= 1);
+        worker.Stop();
     }
 
     [Fact]

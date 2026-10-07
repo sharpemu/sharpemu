@@ -73,11 +73,6 @@ public sealed unsafe partial class CachedImage : IDisposable
     private bool _bufferHoldsGpuContents;
 
     public ImageDescription Description;
-
-    // The host resolution multiplier of this image. Guest geometry in Description never
-    // changes; only the backing is larger or smaller, and guest bytes move through a
-    // guest-resolution twin (CachedImage.Transfers).
-    public readonly float RenderScale = 1.0f;
     public readonly ImageBacking Backing = new();
     public readonly List<CachedImageView> Views = new();
     public ImageUses Uses;
@@ -91,7 +86,7 @@ public sealed unsafe partial class CachedImage : IDisposable
     public int RecencyEntryIndex;
 
     public CachedImage(GpuDeviceInfo device, SubmissionScheduler scheduler, IGuestBackedSpace guestBacking, in ImageDescription description,
-        ImageBackingPool? pool = null, bool allowScaling = true)
+        ImageBackingPool? pool = null)
     {
         _device = device;
         _scheduler = scheduler;
@@ -99,7 +94,6 @@ public sealed unsafe partial class CachedImage : IDisposable
         _pool = pool;
         Description = description;
         Description.Validate();
-        RenderScale = allowScaling ? RenderScalePolicy.ScaleFor(Description) : 1.0f;
         _cpuDirty = !ImageDescription.IsEmptyRange(Description.Data) && Description.Metadata.Compression == DisplayCompression.Uncompressed;
         if (Description.PixelFormat == Format.Undefined)
         {
@@ -108,7 +102,7 @@ public sealed unsafe partial class CachedImage : IDisposable
 
         Backing.Format = Description.PixelFormat;
         Backing.ImageType = HostImageType(Description.Type);
-        Backing.Extent = RenderScalePolicy.ScaleExtent(Description.Extent, RenderScale);
+        Backing.Extent = Description.Extent;
         Backing.GuestPitch = Description.Pitch;
         Backing.Layers = Description.IsVolume ? 1 : Description.Resources.Layers;
         Backing.MipLevels = Description.Resources.Levels;
@@ -325,13 +319,6 @@ public sealed unsafe partial class CachedImage : IDisposable
 
         return usage;
     }
-
-    public bool IsScaled => RenderScale != 1.0f;
-
-    // Host-owned helpers - feedback snapshots, the stencil proxy, the guest-resolution twin -
-    // carry no guest placement and are created to match the image they mirror, so a copy
-    // between them and that image never crosses a resolution.
-    internal bool IsGuestPlaced => !ImageDescription.IsEmptyRange(Description.Data);
 
     public void AssociateDepth(ResourceSlotIdentifier depthImage) => DepthOwner = depthImage;
 
@@ -617,8 +604,6 @@ public sealed unsafe partial class CachedImage : IDisposable
     // Immediate destruction; the owner waits for GPU work before disposing.
     public void Dispose()
     {
-        _guestSizedTwin?.Dispose();
-        _guestSizedTwin = null;
         foreach (var cached in Views)
         {
             _device.Vk.DestroyImageView(_device.Device, cached.View, null);

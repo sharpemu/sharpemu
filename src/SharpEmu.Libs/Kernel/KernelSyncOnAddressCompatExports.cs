@@ -144,8 +144,7 @@ public static class KernelSyncOnAddressCompatExports
                 {
                     if (Volatile.Read(ref _wakeRequested) == 0)
                     {
-                        // Round up so a sub-millisecond remainder does not spin.
-                        Monitor.Wait(_hostGate, (int)Math.Ceiling(waitSlice.TotalMilliseconds));
+                        Monitor.Wait(_hostGate, waitSlice);
                     }
                 }
 

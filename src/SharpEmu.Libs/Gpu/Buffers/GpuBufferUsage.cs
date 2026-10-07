@@ -9,6 +9,4 @@ public enum GpuBufferUsage : byte
     Upload,
     Download,
     Stream,
-    // Device-local memory the host can map: guest buffers on unified-memory devices, read back without a copy.
-    Unified,
 }

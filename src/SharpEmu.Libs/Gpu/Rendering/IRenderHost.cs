@@ -99,13 +99,6 @@ public interface IRenderHost
 
     void BindRenderTarget(ResourceSlotIdentifier image);
 
-    // The attachments of one pass must share a host resolution; a disagreement drops the
-    // scaled image back to guest resolution for good and the draw resolves its targets again.
-    void DemoteRenderScale(ResourceSlotIdentifier image);
-
-    // The host resolution multiplier of one cached image; one when it is at guest resolution.
-    float GetRenderScale(ResourceSlotIdentifier image);
-
     void ResetBindings();
 
     // Finds the image again when it changed, makes the view, sets the layout and resolves a metadata clear.
@@ -147,9 +140,6 @@ public interface IRenderHost
     // Whether a texture bound for the draw being prepared reads the depth attachment's subresources.
     bool SamplesDepthAttachment(in DepthAttachmentState depth) => true;
 
-    // The layout the depth attachment's subresources are in now, or null when unknown or mixed.
-    ImageLayout? DepthAttachmentLayout(in DepthAttachmentState depth) => null;
-
     // The next draw stores to buffers or storage images; called before its BeginRendering.
     void PrepareMemoryWritingDraw() { }
 
@@ -161,10 +151,6 @@ public interface IRenderHost
 
     // One indexed draw whose counts the GPU reads from the buffer (VkDrawIndexedIndirectCommand layout).
     void DrawIndexedIndirect(BufferBinding arguments) =>
-        throw new NotSupportedException("The render host does not draw from indirect arguments.");
-
-    // One draw whose counts the GPU reads from the buffer (VkDrawIndirectCommand layout).
-    void DrawIndirect(BufferBinding arguments) =>
         throw new NotSupportedException("The render host does not draw from indirect arguments.");
 
     void Dispatch(uint groupsX, uint groupsY, uint groupsZ);

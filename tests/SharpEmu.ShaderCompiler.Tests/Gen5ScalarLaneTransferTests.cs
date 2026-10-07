@@ -322,56 +322,6 @@ public sealed class Gen5ScalarLaneTransferTests
         Assert.Equal(expectSlot, text.Contains("v86_lane3", StringComparison.Ordinal));
     }
 
-    [Theory]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    public void EmulatedWave64KeepsPureScalarSpillsWithoutAnExchange(bool vectorWrite, bool expectSlot)
-    {
-        // Wave64 on a 32-lane host reads another lane through LDS and a workgroup barrier. A VGPR
-        // that only V_WRITELANE writes holds wave-uniform spilled scalars, so its constant-lane
-        // reads need no exchange; once an ordinary instruction writes it, the exchange returns.
-        const ulong shaderAddress = 0x1000;
-        var memory = new TestCpuMemory(shaderAddress, 0x100);
-        var words = new List<uint>
-        {
-            0xD7610056, 0x0001047E, // v_writelane_b32 v86, s126, 2
-            0xD7610056, 0x0001067F, // v_writelane_b32 v86, s127, 3
-        };
-        if (vectorWrite)
-        {
-            words.Add(0x7EAC0280); // v_mov_b32 v86, 0
-        }
-
-        words.AddRange(
-        [
-            0xD7600000, 0x00010556, // v_readlane_b32 s0, v86, 2
-            0xD7600001, 0x00010756, // v_readlane_b32 s1, v86, 3
-            0xBF810000,             // s_endpgm
-        ]);
-        var shader = new byte[words.Count * sizeof(uint)];
-        for (var index = 0; index < words.Count; index++)
-        {
-            BinaryPrimitives.WriteUInt32LittleEndian(shader.AsSpan(index * sizeof(uint)), words[index]);
-        }
-
-        Assert.True(memory.TryWrite(shaderAddress, shader));
-        var ctx = new CpuContext(memory, Generation.Gen5);
-        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(ctx, shaderAddress, out var program, out var decodeError), decodeError);
-        var (plan, resources, layout) = ResourceTestProgram.Prepare(program);
-        var request = new ShaderCompileRequest(plan, resources, layout)
-        {
-            LocalSizeX = 64,
-            ThreadCountX = 64,
-            WaveSize = 64,
-        };
-        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var compiled, out var compileError), compileError);
-
-        var text = System.Text.Encoding.ASCII.GetString(compiled.Spirv);
-        Assert.Equal(expectSlot, text.Contains("v86_lane2", StringComparison.Ordinal));
-        Assert.Equal(expectSlot, text.Contains("v86_lane3", StringComparison.Ordinal));
-        Assert.Equal(!expectSlot, ReadSpirvOpcodes(compiled.Spirv).Contains((ushort)SpirvOp.ControlBarrier));
-    }
-
     private static Gen5ShaderInstruction ScalarInstruction(
         uint pc,
         Gen5ShaderEncoding encoding,

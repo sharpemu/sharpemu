@@ -519,19 +519,18 @@ public static partial class VideoOutExports
         }
 
         Span<byte> status = stackalloc byte[VideoOutOutputStatusSize];
-        WriteOutputStatus(status, HostVideoHost.CurrentOptions.GuestResolution, port.RefreshRate,
+        WriteOutputStatus(status, port.OutputWidth, port.OutputHeight, port.RefreshRate,
             HostVideoHost.IsHdrOutputSupported);
         return ctx.Memory.TryWrite(statusAddress, status)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
     }
 
-    internal static void WriteOutputStatus(Span<byte> status, GuestDisplayResolution resolution, uint refreshRate,
+    internal static void WriteOutputStatus(Span<byte> status, uint width, uint height, uint refreshRate,
         bool hdrOutputSupported)
     {
         status.Clear();
-        // Buffer registration describes a source image, not the connected display.
-        var resolutionClass = (int)resolution;
+        var resolutionClass = width >= 3840 || height >= 2160 ? 2 : 1;
         BinaryPrimitives.WriteInt32LittleEndian(status[0x00..0x04], resolutionClass);
         BinaryPrimitives.WriteInt32LittleEndian(status[0x04..0x08], hdrOutputSupported ? 2 : 1);
         // The status uses a refresh-rate code, not the frequency used for pacing.

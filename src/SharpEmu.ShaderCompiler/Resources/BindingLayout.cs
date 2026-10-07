@@ -337,21 +337,12 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public uint MemoryOffsetDword { get; init; }
     public uint MemoryOffsetCount { get; init; }
     public bool UsesDispatchThreadLimits { get; init; }
-
-    // The module reads the internal-resolution dwords: the factor that maps a guest pixel
-    // onto host texels, its reciprocal, the mask of scaled image resources and the factor
-    // the pixel position is divided by.
-    public bool UsesRenderScale { get; init; }
     public IReadOnlyList<uint> UserDataRegisters { get; init; } = [];
     public IReadOnlyList<DescriptorBinding> Descriptors { get; init; } = [];
 
-    public const uint RenderScaleDwordCount = 5;
-
     public uint DispatchThreadLimitsDword => MemoryOffsetDword + (MemoryOffsetCount + 3) / 4;
 
-    public uint RenderScaleDword => DispatchThreadLimitsDword + (UsesDispatchThreadLimits ? 3u : 0u);
-
-    public uint ShaderDataDwordCount => RenderScaleDword + (UsesRenderScale ? RenderScaleDwordCount : 0u);
+    public uint ShaderDataDwordCount => DispatchThreadLimitsDword + (UsesDispatchThreadLimits ? 3u : 0u);
 
     public bool UsesPushData => PushDataStartDword != PushData.NoStart;
 
@@ -570,14 +561,12 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         bool usesFlattenedTable,
         bool usesShaderBase,
         uint pushDataStartDword = 0,
-        bool usesDispatchThreadLimits = false,
-        bool usesRenderScale = false)
+        bool usesDispatchThreadLimits = false)
     {
         var shaderBaseDword = usesShaderBase ? (uint)userDataRegisters.Count : NoShaderBase;
         var memoryOffsetDword = (uint)userDataRegisters.Count + (usesShaderBase ? ShaderBaseDwordCount : 0);
         var memoryOffsetCount = (uint)info.Buffers.Count;
-        var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 + (usesDispatchThreadLimits ? 3u : 0u) +
-                               (usesRenderScale ? RenderScaleDwordCount : 0u);
+        var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 + (usesDispatchThreadLimits ? 3u : 0u);
         var pushStart = PushData.StartFor(pushDataStartDword, shaderDataDwords);
         var descriptors = new List<DescriptorBinding>();
         if (info.Buffers.Count != 0)
@@ -655,7 +644,6 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             MemoryOffsetDword = memoryOffsetDword,
             MemoryOffsetCount = memoryOffsetCount,
             UsesDispatchThreadLimits = usesDispatchThreadLimits,
-            UsesRenderScale = usesRenderScale,
             UserDataRegisters = userDataRegisters,
             Descriptors = descriptors,
         };
@@ -669,14 +657,13 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         MemoryOffsetDword == other.MemoryOffsetDword &&
         MemoryOffsetCount == other.MemoryOffsetCount &&
         UsesDispatchThreadLimits == other.UsesDispatchThreadLimits &&
-        UsesRenderScale == other.UsesRenderScale &&
         UserDataRegisters.SequenceEqual(other.UserDataRegisters) &&
         Descriptors.Count == other.Descriptors.Count &&
         Descriptors.Zip(other.Descriptors).All(pair => pair.First.Kind == pair.Second.Kind && pair.First.Resources.SequenceEqual(pair.Second.Resources));
 
     public override bool Equals(object? obj) => Equals(obj as BindingLayout);
 
-    public override int GetHashCode() => HashCode.Combine(PushDataStartDword, MemoryOffsetDword, MemoryOffsetCount, Descriptors.Count, UsesDispatchThreadLimits, UsesRenderScale);
+    public override int GetHashCode() => HashCode.Combine(PushDataStartDword, MemoryOffsetDword, MemoryOffsetCount, Descriptors.Count, UsesDispatchThreadLimits);
 }
 
 // Recomputes the layout an emitter was given from the same inputs and the same push
@@ -698,7 +685,7 @@ public static class BindingLayoutValidator
             throw new ResourcePlanException("Only a compute shader can use dispatch thread limits.");
         }
 
-        var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare, usesFlattenedTable, usesShaderBase, layout.AllocationCursor, layout.UsesDispatchThreadLimits, layout.UsesRenderScale);
+        var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare, usesFlattenedTable, usesShaderBase, layout.AllocationCursor, layout.UsesDispatchThreadLimits);
         if (!expected.Equals(layout))
         {
             throw new ResourcePlanException(

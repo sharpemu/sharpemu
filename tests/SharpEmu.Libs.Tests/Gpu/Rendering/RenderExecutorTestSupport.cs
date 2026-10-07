@@ -177,10 +177,6 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void BindRenderTarget(ResourceSlotIdentifier image) => Calls.Add($"bind_target {image.Index}");
 
-    public void DemoteRenderScale(ResourceSlotIdentifier image) => Calls.Add($"demote_scale {image.Index}");
-
-    public float GetRenderScale(ResourceSlotIdentifier image) => 1f;
-
     public void ResetBindings() => Calls.Add("reset_bindings");
 
     public ColorAttachmentAcquisition AcquireColorAttachment(in ColorTargetState target)
@@ -328,9 +324,6 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void DrawIndexedIndirect(BufferBinding arguments) =>
         Calls.Add($"draw_indexed_indirect {arguments.Handle:X}:{arguments.Offset:X}");
-
-    public void DrawIndirect(BufferBinding arguments) =>
-        Calls.Add($"draw_indirect {arguments.Handle:X}:{arguments.Offset:X}");
 
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ) => Calls.Add($"dispatch {groupsX} {groupsY} {groupsZ}");
 
@@ -504,7 +497,6 @@ internal static class RenderExecutorFixtures
     public const ulong ComputeShader = 0x2_0002_0000;
     public const uint PrimitiveTriangleList = 4;
     public const uint PrimitiveTriangleStrip = 6;
-    public const uint PrimitiveTriangleFan = 5;
 
     private static Exception Fatal(string message) => new RenderExecutorFatalException(message);
 

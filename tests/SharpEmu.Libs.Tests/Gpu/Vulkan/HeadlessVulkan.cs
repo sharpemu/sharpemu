@@ -128,9 +128,8 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         {
             return Create();
         }
-        catch (Exception exception)
+        catch (Exception)
         {
-            Console.Error.WriteLine($"[TEST][VULKAN] Device setup failed: {exception}");
             return null;
         }
     }
@@ -162,7 +161,6 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     public void Dispose()
     {
         Vk.DeviceWaitIdle(Device);
-        _deviceInfo?.Slabs.Destroy();
         Vk.DestroyDevice(Device, null);
         if (_debugUtils is { } debugUtils)
         {
@@ -217,33 +215,22 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         var appInfo = new ApplicationInfo { SType = StructureType.ApplicationInfo, ApiVersion = apiVersion };
         var validation = Environment.GetEnvironmentVariable(ValidationVariable) == "1";
         var layers = validation ? SilkMarshal.StringArrayToPtr(new[] { "VK_LAYER_KHRONOS_validation" }) : 0;
-        uint instanceExtensionCount = 0;
-        vk.EnumerateInstanceExtensionProperties((byte*)null, &instanceExtensionCount, null);
-        var instanceExtensions = new ExtensionProperties[instanceExtensionCount];
-        fixed (ExtensionProperties* pointer = instanceExtensions)
-            vk.EnumerateInstanceExtensionProperties((byte*)null, &instanceExtensionCount, pointer);
-        var portable = instanceExtensions.Any(extension =>
-            SilkMarshal.PtrToString((nint)extension.ExtensionName) == "VK_KHR_portability_enumeration");
-        var instanceNames = new List<string>();
-        if (validation) instanceNames.Add(ExtDebugUtils.ExtensionName);
-        if (portable) instanceNames.Add("VK_KHR_portability_enumeration");
-        var extensions = instanceNames.Count != 0 ? SilkMarshal.StringArrayToPtr(instanceNames.ToArray()) : 0;
+        var extensions = validation ? SilkMarshal.StringArrayToPtr(new[] { ExtDebugUtils.ExtensionName }) : 0;
         var instanceInfo = new InstanceCreateInfo
         {
             SType = StructureType.InstanceCreateInfo,
-            Flags = portable ? InstanceCreateFlags.EnumeratePortabilityBitKhr : 0,
             PApplicationInfo = &appInfo,
             EnabledLayerCount = validation ? 1u : 0u,
             PpEnabledLayerNames = (byte**)layers,
-            EnabledExtensionCount = (uint)instanceNames.Count,
+            EnabledExtensionCount = validation ? 1u : 0u,
             PpEnabledExtensionNames = (byte**)extensions,
         };
         var created = vk.CreateInstance(&instanceInfo, null, out var instance);
         if (validation)
         {
             SilkMarshal.Free(layers);
+            SilkMarshal.Free(extensions);
         }
-        if (extensions != 0) SilkMarshal.Free(extensions);
 
         if (created != Result.Success)
         {
@@ -381,7 +368,6 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             vulkan13Features.PNext = &barycentricFeatures;
         }
         var extensionNames = new List<string>();
-        if (HasDeviceExtensions(vk, physical, ["VK_KHR_portability_subset"])) extensionNames.Add("VK_KHR_portability_subset");
         if (dynamicRendering) extensionNames.AddRange(RenderingExtensionNames);
         if (barycentric) extensionNames.Add(barycentricExtension);
         const string fillRectangleExtension = "VK_NV_fill_rectangle";

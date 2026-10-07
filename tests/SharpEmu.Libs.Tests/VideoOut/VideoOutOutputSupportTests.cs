@@ -48,7 +48,7 @@ public sealed class VideoOutOutputSupportTests
         Assert.Equal(expectedHdr, supported);
 
         var bytes = Enumerable.Repeat((byte)0xA5, 0x32).ToArray();
-        VideoOutExports.WriteOutputStatus(bytes.AsSpan(1, 0x30), GuestDisplayResolution.UltraHd, 120, supported);
+        VideoOutExports.WriteOutputStatus(bytes.AsSpan(1, 0x30), 3840, 2160, 120, supported);
 
         Assert.Equal(0xA5, bytes[0]);
         Assert.Equal(0xA5, bytes[^1]);

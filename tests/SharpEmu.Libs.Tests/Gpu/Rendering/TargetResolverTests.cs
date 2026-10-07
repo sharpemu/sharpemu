@@ -235,25 +235,6 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
-    public void AttachmentLayoutFor_KeepsTheReadOnlyLayoutForDrawsThatOnlyTest()
-    {
-        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x10, DepthControl(CompareOp.Less, CompareOp.Always));
-        var writer = DepthTargetResolver.ResolveState(context, true, Fatal) with { StencilTestEnabled = false };
-        var tester = writer with { DepthWriteEnabled = false };
-        const Format format = Format.D32SfloatS8Uint;
-        var readOnly = ImageLayout.DepthStencilReadOnlyOptimal;
-
-        // A sampled attachment is read-only whatever it was in before.
-        Assert.Equal(readOnly, DepthStencilState.AttachmentLayoutFor(tester, format, sampled: true, ImageLayout.DepthStencilAttachmentOptimal));
-        // A test-only draw after a sampling draw stays read-only, so the scope continues.
-        Assert.Equal(readOnly, DepthStencilState.AttachmentLayoutFor(tester, format, sampled: false, readOnly));
-        // Otherwise the writable layout keeps toggling depth writes inside one scope.
-        Assert.Equal(ImageLayout.DepthStencilAttachmentOptimal, DepthStencilState.AttachmentLayoutFor(tester, format, sampled: false, ImageLayout.DepthStencilAttachmentOptimal));
-        Assert.Equal(ImageLayout.DepthStencilAttachmentOptimal, DepthStencilState.AttachmentLayoutFor(tester, format, sampled: false, null));
-        Assert.Equal(ImageLayout.DepthStencilAttachmentOptimal, DepthStencilState.AttachmentLayoutFor(writer, format, sampled: false, readOnly));
-    }
-
-    [Fact]
     public void DepthResolve_UsesTheBuilderThenAddsTheState()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
