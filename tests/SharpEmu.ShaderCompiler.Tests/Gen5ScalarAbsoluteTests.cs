@@ -54,12 +54,17 @@ public sealed class Gen5ScalarAbsoluteTests
             update, Sopc(40, "SCmpLgU32", Gen5Operand.Scalar(24), Operand(4)),
             Branch(44, "SCbranchScc1", -7), EndProgram(48));
 
+        if (changesMask)
+        {
+            Assert.Throws<ResourcePlanException>(() => Extract(program, userDataCount: 16));
+            return;
+        }
         var plan = Extract(program, userDataCount: 16);
         var registers = new uint[16];
         registers[8] = 6;
         registers[15] = 0xC0000123;
         Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(plan, plan.Info.Samplers[0].Source, Inputs(registers), out var result));
-        Assert.Equal(changesMask ? 0u : registers[15], result.Dwords[3]);
+        Assert.Equal(registers[15], result.Dwords[3]);
     }
 
     public static TheoryData<uint, uint, uint> QuadmaskValues => new()

@@ -804,7 +804,15 @@ public static class AjmExports
         return ctx.SetReturn(0);
     }
 
-    private static int AjmBatchJobDecodeCore(CpuContext ctx, bool multipleFrames)
+    [SysAbiExport(
+        Nid = "SJ3i0DXP8vg",
+        ExportName = "sceAjmBatchJobDecodeSplit",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobDecodeSplit(CpuContext ctx) =>
+        AjmBatchJobDecodeCore(ctx, multipleFrames: true, split: true);
+
+    private static int AjmBatchJobDecodeCore(CpuContext ctx, bool multipleFrames, bool split = false)
     {
         var infoAddress = ctx[CpuRegister.Rdi];
         var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
@@ -828,6 +836,19 @@ public static class AjmExports
                 0,
                 0,
                 0);
+        }
+        else if (split)
+        {
+            if (instance.Codec != Atrac9CodecType || instance.Atrac9 is null ||
+                !TryCollectBuffers(ctx, true, inputAddress, inputSize, out var inputs, out var inputLength) ||
+                !TryCollectBuffers(ctx, true, outputAddress, outputSize, out var outputs, out var outputLength))
+            {
+                result = new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
+            }
+            else
+            {
+                result = DecodeAtrac9Scattered(ctx, instance, inputs, inputLength, outputs, outputLength, multipleFrames);
+            }
         }
         else if (instance.Mp3 is not null)
         {

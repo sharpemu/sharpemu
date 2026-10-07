@@ -71,6 +71,74 @@ public sealed class Gen5ScalarBitClearTests
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
     }
 
+    [Theory]
+    [InlineData(false, 0u)]
+    [InlineData(false, 31u)]
+    [InlineData(false, 32u)]
+    [InlineData(false, 63u)]
+    [InlineData(false, 64u)]
+    [InlineData(false, 0xFFFFFFFFu)]
+    [InlineData(true, 0u)]
+    [InlineData(true, 31u)]
+    [InlineData(true, 32u)]
+    [InlineData(true, 63u)]
+    [InlineData(true, 64u)]
+    public void BitUpdates64PreserveTheOtherWord(bool set, uint selector)
+    {
+        const ulong initial = 0x80000001A5A5A5A5;
+        var program = Program(MoveScalar(0, 4, unchecked((uint)initial)), MoveScalar(4, 5, (uint)(initial >> 32)),
+            MoveScalar(8, 6, 16), MoveScalar(12, 7, 0), MoveScalar(16, 8, selector),
+            Decode(set ? 0xBE841E08u : 0xBE841C08u) with { Pc = 20 }, BufferLoad(24, 4), EndProgram(32));
+        var plan = Extract(program);
+        Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(plan, plan.Info.Buffers[0].Source,
+            Inputs([]), out var result));
+        var bit = 1ul << (int)(selector & 63);
+        var expected = set ? initial | bit : initial & ~bit;
+        Assert.Equal((uint)expected, result.Dwords[0]);
+        Assert.Equal((uint)(expected >> 32), result.Dwords[1]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BitUpdates64CollectBothDestinationWordsAndCompile(bool set)
+    {
+        var program = Program(Decode(set ? 0xBE881E0Au : 0xBE881C0Au), EndProgram(4));
+        var registers = BindingLayout.CollectUserDataRegisters(program, 0, 16);
+        Assert.Contains(8u, registers);
+        Assert.Contains(9u, registers);
+        Assert.Contains(10u, registers);
+        Assert.DoesNotContain(11u, registers);
+        var (plan, resources, layout) = Prepare(program);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(1u)]
+    [InlineData(0x80000000u)]
+    [InlineData(0xA5A5A5A5u)]
+    [InlineData(0xFFFFFFFFu)]
+    public void BitReplicationDoublesEverySourceBitAndCompilesOnBothBackends(uint source)
+    {
+        var program = Program(MoveScalar(0, 8, source), Decode(0xBE843B08u) with { Pc = 4 },
+            MoveScalar(8, 6, 16), MoveScalar(12, 7, 0), BufferLoad(16, 4), EndProgram(24));
+        var plan = Extract(program);
+        Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(plan, plan.Info.Buffers[0].Source,
+            Inputs([]), out var descriptor));
+        ulong expected = 0;
+        for (var bit = 0; bit < 32; bit++)
+            if ((source & (1u << bit)) != 0) expected |= 3ul << (bit * 2);
+        Assert.Equal((uint)expected, descriptor.Dwords[0]);
+        Assert.Equal((uint)(expected >> 32), descriptor.Dwords[1]);
+        var (compiledPlan, resources, layout) = Prepare(program);
+        var request = new ShaderCompileRequest(compiledPlan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
+    }
+
     public static Gen5ShaderProgram CreateReadbackProgram(bool emptyExecutionMask, bool overlapDestination, bool condition)
     {
         return Program(

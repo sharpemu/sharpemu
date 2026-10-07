@@ -134,7 +134,7 @@ public sealed unsafe partial class CachedImage
         // Attachment accesses inside one rendering scope are already ordered by rasterization
         // order, so a barrier that only repeats an attachment write in the same layout matters
         // only to what runs after the scope; it waits for the scope to end instead of ending it.
-        if (OnlyRepeatsAttachmentAccess(barriers) &&
+        if (Backing.SampleLocations is null && OnlyRepeatsAttachmentAccess(barriers) &&
             _scheduler.TryDeferUntilRenderingEnds(sourceStages == 0 ? PipelineStageFlags.TopOfPipeBit : sourceStages, stage, barriers))
         {
             return;
@@ -167,8 +167,19 @@ public sealed unsafe partial class CachedImage
     private void RecordBarriers(CommandBuffer command, PipelineStageFlags sourceStages, PipelineStageFlags destinationStages, BufferMemoryBarrier2* bufferBarrier, List<ImageMemoryBarrier2> imageBarriers)
     {
         var images = imageBarriers.ToArray();
+        fixed (SampleLocationEXT* locations = Backing.SampleLocations)
         fixed (ImageMemoryBarrier2* imagePointer = images)
         {
+            var locationInfo = new SampleLocationsInfoEXT
+            {
+                SType = StructureType.SampleLocationsInfoExt,
+                SampleLocationsPerPixel = SampleCountFlags.Count2Bit,
+                SampleLocationGridSize = new Extent2D(2, 2),
+                SampleLocationsCount = 8,
+                PSampleLocations = locations,
+            };
+            if (locations != null)
+                for (var index = 0; index < images.Length; index++) imagePointer[index].PNext = &locationInfo;
             VulkanSynchronization.PipelineBarrier(_device.Vk,
                 command, sourceStages == 0 ? PipelineStageFlags.TopOfPipeBit : sourceStages, destinationStages, DependencyFlags.ByRegionBit,
                 0, null, bufferBarrier == null ? 0u : 1u, bufferBarrier, (uint)images.Length, imagePointer);

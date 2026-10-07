@@ -34,6 +34,8 @@ public enum ScalarValueKind : byte
     ResourceTableWord,
     // The high dword of a GFX10 LDS/scratch aperture (payload: the inline operand).
     MemoryAperture,
+    // Logical dispatch axis (0..2). Wave-uniform, but not a CPU materialization value.
+    WorkgroupId,
 }
 
 // Operations a value node can apply to its operands. The validator accepts only the
@@ -264,7 +266,7 @@ public static class ScalarValueEquivalence
             return false;
         }
 
-        if (left.Kind is ScalarValueKind.Constant or ScalarValueKind.UserData or ScalarValueKind.ResourceTableWord or ScalarValueKind.MemoryAperture)
+        if (left.Kind is ScalarValueKind.Constant or ScalarValueKind.UserData or ScalarValueKind.ResourceTableWord or ScalarValueKind.MemoryAperture or ScalarValueKind.WorkgroupId)
         {
             return left.Payload == right.Payload;
         }

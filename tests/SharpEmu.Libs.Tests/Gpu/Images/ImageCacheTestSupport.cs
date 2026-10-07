@@ -148,6 +148,8 @@ internal static class ImageCacheTestSupport
         var extent = image.Backing.Extent;
         var layers = image.Backing.ImageType == ImageType.Type3D ? 1u : image.Backing.Layers;
         var bytesPerTexel = image.Description.BytesPerBlock;
+        if (image.Backing.Format is Format.R8G8B8A8Srgb or Format.R8G8B8A8Unorm)
+            bytesPerTexel = 4;
         if (aspect == ImageAspectFlags.DepthBit)
         {
             bytesPerTexel = DepthFormatRule.AspectTransferBytes(image.Backing.Format);

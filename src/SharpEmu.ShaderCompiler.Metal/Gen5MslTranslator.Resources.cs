@@ -724,7 +724,8 @@ public static partial class Gen5MslTranslator
             out uint dstSelect,
             out string mipLevel,
             out string error,
-            (uint Resource, uint Element)? fixedElement = null)
+            (uint Resource, uint Element)? fixedElement = null,
+            uint? fixedSampler = null)
         {
             error = string.Empty;
             texture = string.Empty;
@@ -814,6 +815,9 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
+                if (request.Resources.SamplerByImageMemoryIndex.TryGetValue((memoryIndex, (uint)resourceIndex, fixedSampler ?? entry.Sampler), out var candidateSampler))
+                    samplerIndex = candidateSampler;
+                else if (fixedSampler is { } selectedSampler) samplerIndex = selectedSampler;
                 samplerName = Temp("sampler", $"{ResourcesName}.samplers[{samplerIndex}]");
             }
 

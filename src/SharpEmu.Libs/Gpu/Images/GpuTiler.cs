@@ -91,6 +91,7 @@ public sealed unsafe class GpuTiler : IDisposable
     private Pipeline _d24ToD16;
     private Pipeline _d32ToD16;
     private Pipeline _swapBgra16;
+    private readonly Pipeline[] _narrowColorConversions = new Pipeline[4];
 
     public GpuTiler(GpuDeviceInfo device, SubmissionScheduler scheduler, GpuRingBuffer stream)
     {
@@ -146,6 +147,8 @@ public sealed unsafe class GpuTiler : IDisposable
         DestroyPipeline(_d24ToD16);
         DestroyPipeline(_d32ToD16);
         DestroyPipeline(_swapBgra16);
+        foreach (var pipeline in _narrowColorConversions)
+            DestroyPipeline(pipeline);
         _pools.Dispose();
         lock (_scratchGate)
         {
@@ -709,10 +712,29 @@ public sealed unsafe class GpuTiler : IDisposable
             pipeline = CreateComputePipeline(spirv, $"depth16 {direction} d32={useFloat32Depth}");
         }
 
-        var sourceElement = direction == DepthConversionDirection.Widen ? 2UL : 4UL;
-        var targetElement = direction == DepthConversionDirection.Widen ? 4UL : 2UL;
-        var sourceActive = layout.Width * sourceElement;
-        var targetActive = layout.Width * targetElement;
+        ConvertElements(source, target, pipeline, direction == DepthConversionDirection.Widen ? 2u : 4u,
+            direction == DepthConversionDirection.Widen ? 4u : 2u, layout);
+    }
+
+    public void ConvertNarrowColor(TilerBufferSpan source, TilerBufferSpan target, uint channels, bool widen, in DepthConversionLayout layout)
+    {
+        if (channels is not (1 or 2))
+            throw new ArgumentOutOfRangeException(nameof(channels));
+        var wideOffset = widen ? target.Offset : source.Offset;
+        var wideRow = widen ? layout.TargetRowStride : layout.SourceRowStride;
+        var wideSlice = widen ? layout.TargetSliceStride : layout.SourceSliceStride;
+        if (((wideOffset | wideRow | wideSlice) & 3) != 0)
+            throw SubmissionScheduler.Fatal("The RGBA color conversion storage must be dword aligned.");
+        ref var pipeline = ref _narrowColorConversions[(channels - 1) * 2 + (widen ? 0 : 1)];
+        if (pipeline.Handle == 0)
+            pipeline = CreateComputePipeline(TilerShaders.CreateNarrowColorConversion(channels, widen), $"narrow color channels={channels} widen={widen}");
+        ConvertElements(source, target, pipeline, widen ? channels : 4u, widen ? 4u : channels, layout);
+    }
+
+    private void ConvertElements(TilerBufferSpan source, TilerBufferSpan target, Pipeline pipeline, uint sourceElement, uint targetElement, in DepthConversionLayout layout)
+    {
+        var sourceActive = (ulong)layout.Width * sourceElement;
+        var targetActive = (ulong)layout.Width * targetElement;
         if (layout.Width == 0 || layout.SourceRowStride > uint.MaxValue || layout.TargetRowStride > uint.MaxValue)
         {
             throw SubmissionScheduler.Fatal($"The depth conversion layout is invalid: width={layout.Width} sourceRowStride={layout.SourceRowStride} targetRowStride={layout.TargetRowStride}.");

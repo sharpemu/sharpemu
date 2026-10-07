@@ -1808,6 +1808,7 @@ public static partial class Gen5ShaderTranslator
             0x40 => "ImageGather4",
             0x47 => "ImageGather4Lz",
             0x48 => "ImageGather4C",
+            0x4C => "ImageGather4CL",
             0x4E => "ImageGather4CBCl",
             0x4F => "ImageGather4CLz",
             0x57 => "ImageGather4LzO",
@@ -1862,6 +1863,10 @@ public static partial class Gen5ShaderTranslator
 
         return FinishDecode(name, $"unknown-vintrp op=0x{opcode:X1}", out error);
     }
+
+    private static bool HasDoubleVectorResult(string opcode) => opcode is
+        "VCvtF64I32" or "VCvtF64U32" or "VRcpF64" or "VRsqF64" or
+        "VSqrtF64" or "VMulF64" or "VFmaF64";
 
     private static bool FinishDecode(string name, string decodeError, out string error)
     {
@@ -2296,9 +2301,12 @@ public static partial class Gen5ShaderTranslator
                 // ordinary vector destination leaves every invocation with a
                 // different value and corrupts scalar addresses derived from
                 // lane data.
+                var vop1Destination = (word >> 17) & 0xFF;
                 destinations = opcode == "VReadfirstlaneB32"
                     ? [Gen5Operand.Scalar((word >> 17) & 0x7F)]
-                    : [Gen5Operand.Vector((word >> 17) & 0xFF)];
+                    : HasDoubleVectorResult(opcode)
+                        ? [Gen5Operand.Vector(vop1Destination), Gen5Operand.Vector(vop1Destination + 1)]
+                        : [Gen5Operand.Vector(vop1Destination)];
                 break;
             case Gen5ShaderEncoding.Vop2:
                 if (isDpp8)
@@ -2427,7 +2435,10 @@ public static partial class Gen5ShaderTranslator
                     Gen5Operand.Source((extra >> 9) & 0x1FF, literal),
                     Gen5Operand.Source((extra >> 18) & 0x1FF, literal),
                 ];
-                destinations = [Gen5Operand.Vector(word & 0xFF)];
+                var vop3Destination = word & 0xFF;
+                destinations = HasDoubleVectorResult(opcode)
+                    ? [Gen5Operand.Vector(vop3Destination), Gen5Operand.Vector(vop3Destination + 1)]
+                    : [Gen5Operand.Vector(vop3Destination)];
                 if (opcode == "VReadlaneB32")
                 {
                     // V_READLANE uses the VOP3A vdst byte even though the

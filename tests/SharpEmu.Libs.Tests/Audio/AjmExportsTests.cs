@@ -429,6 +429,88 @@ public sealed class AjmExportsTests : IDisposable
         return AjmExports.AjmModuleRegister(_ctx);
     }
 
+    [Fact]
+    public void BatchJobDecodeSplit_InvalidInstanceWritesResultThroughSeventhArgument()
+    {
+        const ulong resultAddress = MemoryBase + 0xB00;
+        const ulong outputAddress = MemoryBase + 0xC00;
+        InitializeBatch(BatchBufferAddress, 0x100, BatchInfoAddress);
+        WriteUInt64(outputAddress, 0x1122334455667788);
+        WriteUInt64(resultAddress + 32, 0x8877665544332211);
+        WriteStackArgs(resultAddress, 0, 0);
+        _ctx[CpuRegister.Rdi] = BatchInfoAddress;
+        _ctx[CpuRegister.Rsi] = uint.MaxValue;
+        _ctx[CpuRegister.Rdx] = MemoryBase + 0xD00;
+        _ctx[CpuRegister.Rcx] = 1;
+        _ctx[CpuRegister.R8] = outputAddress;
+        _ctx[CpuRegister.R9] = 1;
+
+        Assert.Equal(0, AjmExports.AjmBatchJobDecodeSplit(_ctx));
+        Assert.NotEqual(0u, ReadUInt32(resultAddress));
+        Assert.Equal(0u, ReadUInt32(resultAddress + 8));
+        Assert.Equal(0u, ReadUInt32(resultAddress + 12));
+        Assert.Equal(0UL, ReadUInt64(resultAddress + 16));
+        Assert.Equal(0u, ReadUInt32(resultAddress + 24));
+        Assert.Equal(0x1122334455667788UL, ReadUInt64(outputAddress));
+        Assert.Equal(0x8877665544332211UL, ReadUInt64(resultAddress + 32));
+    }
+
+    [Fact]
+    public void BatchJobDecodeSplit_GathersAFrameAndScattersPcmWithoutOverwritingBoundaries()
+    {
+        const ulong configAddress = MemoryBase + 0x600;
+        const ulong inputDescriptors = MemoryBase + 0x620;
+        const ulong outputDescriptors = MemoryBase + 0x660;
+        const ulong inputData = MemoryBase + 0x700;
+        const ulong outputData = MemoryBase + 0x800;
+        const ulong resultAddress = MemoryBase + 0xB00;
+        var contextId = Initialize();
+        Assert.Equal(0, RegisterCodec(contextId, 1));
+        Assert.Equal(0, CreateInstance(contextId, 1, 0x401, InstanceAddress));
+        var instanceId = ReadUInt32(InstanceAddress);
+        InitializeBatch(BatchBufferAddress, 0x100, BatchInfoAddress);
+        Assert.True(_memory.TryWrite(configAddress, new byte[] { 0xFE, 0x70, 0x17, 0xE0 }));
+        _ctx[CpuRegister.Rdi] = BatchInfoAddress;
+        _ctx[CpuRegister.Rsi] = instanceId;
+        _ctx[CpuRegister.Rdx] = configAddress;
+        _ctx[CpuRegister.Rcx] = 4;
+        _ctx[CpuRegister.R8] = resultAddress;
+        Assert.Equal(0, AjmExports.AjmBatchJobInitialize(_ctx));
+        Assert.Equal(0u, ReadUInt32(resultAddress));
+
+        var input = new byte[192];
+        new byte[] { 0x00, 0x84, 0x00, 0x40 }.CopyTo(input, 0);
+        Assert.True(_memory.TryWrite(inputData, input));
+        WriteUInt64(inputDescriptors, inputData);
+        WriteUInt64(inputDescriptors + 8, 2);
+        WriteUInt64(inputDescriptors + 16, inputData + 2);
+        WriteUInt64(inputDescriptors + 24, 190);
+        WriteUInt64(outputDescriptors, outputData);
+        WriteUInt64(outputDescriptors + 8, 128);
+        WriteUInt64(outputDescriptors + 16, outputData + 144);
+        WriteUInt64(outputDescriptors + 24, 384);
+        var sentinel = new byte[544];
+        Array.Fill(sentinel, (byte)0xCC);
+        Assert.True(_memory.TryWrite(outputData, sentinel));
+        _ctx[CpuRegister.Rsp] = MemoryBase + 0xF00;
+        WriteUInt64(MemoryBase + 0xF08, resultAddress);
+        _ctx[CpuRegister.Rdi] = BatchInfoAddress;
+        _ctx[CpuRegister.Rsi] = instanceId;
+        _ctx[CpuRegister.Rdx] = inputDescriptors;
+        _ctx[CpuRegister.Rcx] = 2;
+        _ctx[CpuRegister.R8] = outputDescriptors;
+        _ctx[CpuRegister.R9] = 2;
+        Assert.Equal(0, AjmExports.AjmBatchJobDecodeSplit(_ctx));
+        Assert.Equal(0u, ReadUInt32(resultAddress));
+        Assert.Equal(192u, ReadUInt32(resultAddress + 8));
+        Assert.Equal(512u, ReadUInt32(resultAddress + 12));
+        Assert.Equal(256UL, ReadUInt64(resultAddress + 16));
+        Assert.All(ReadBytes(outputData, 128), value => Assert.Equal(0, value));
+        Assert.All(ReadBytes(outputData + 128, 16), value => Assert.Equal(0xCC, value));
+        Assert.All(ReadBytes(outputData + 144, 384), value => Assert.Equal(0, value));
+        Assert.All(ReadBytes(outputData + 528, 16), value => Assert.Equal(0xCC, value));
+    }
+
     private int UnregisterCodec(uint contextId, uint codecType)
     {
         _ctx[CpuRegister.Rdi] = contextId;

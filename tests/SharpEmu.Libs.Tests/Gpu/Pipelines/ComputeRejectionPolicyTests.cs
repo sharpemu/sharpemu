@@ -35,7 +35,8 @@ public sealed class ComputeRejectionPolicyTests
             using var fatal = new FatalScope();
             var guest = new PipelineTestGuest();
             guest.RegisterProgram(CodeAddress, HeaderAddress, rejectPlan
-                ? [0x7E100500, 0xF42C0402, 0x10000000, 0xF0000108, 0x00040000, 0xBF810000]
+                // Adding one to the descriptor prevents the empty-buffer null proof.
+                ? [0x7E100500, 0xF42C0402, 0x10000000, 0x80108110, 0xF0000108, 0x00040000, 0xBF810000]
                 : PipelineTestGuest.EndProgram);
             if (!rejectPlan) guest.Compiler.Rejection = "The test instruction is not supported.";
             var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);

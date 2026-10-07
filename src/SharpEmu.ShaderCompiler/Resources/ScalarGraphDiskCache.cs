@@ -9,7 +9,7 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 internal static class ScalarGraphDiskCache
 {
-    private const int Version = 2;
+    private const int Version = 3;
     private const int MaxEntryBytes = 32 * 1024 * 1024;
     private const long MaxCacheBytes = 256L * 1024 * 1024;
     private static readonly string CachePath = Environment.GetEnvironmentVariable("SHARPEMU_SHADER_ANALYSIS_CACHE_PATH") ??
@@ -18,11 +18,12 @@ internal static class ScalarGraphDiskCache
     private static readonly object WriteLock = new();
 
     internal static ScalarValueGraph Build(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
-        IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize, string? cachePath = null)
+        IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize, string? cachePath = null,
+        Gen5ComputeSystemRegisters? computeSystemRegisters = null)
     {
         var directory = cachePath ?? CachePath;
-        if (directory == "0") return ScalarValueGraph.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize);
-        var key = Key(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize);
+        if (directory == "0") return ScalarValueGraph.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, computeSystemRegisters);
+        var key = Key(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, computeSystemRegisters);
         var path = Path.Combine(directory, key + ".graph");
         try
         {
@@ -45,7 +46,7 @@ internal static class ScalarGraphDiskCache
         }
         catch (Exception error) when (IsCacheFailure(error)) { }
 
-        var graph = ScalarValueGraph.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize);
+        var graph = ScalarValueGraph.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize, computeSystemRegisters);
         try
         {
             using var stream = new MemoryStream();
@@ -90,7 +91,7 @@ internal static class ScalarGraphDiskCache
     }
 
     internal static string Key(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
-        IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize)
+        IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize, Gen5ComputeSystemRegisters? computeSystemRegisters = null)
     {
         using var stream = new MemoryStream();
         using (var writer = new BinaryWriter(stream, Encoding.UTF8, true))
@@ -98,6 +99,14 @@ internal static class ScalarGraphDiskCache
             writer.Write(Version);
             writer.Write(typeof(ScalarValueGraph).Module.ModuleVersionId.ToByteArray());
             writer.Write(userDataBase); writer.Write(userDataCount); writer.Write(waveSize);
+            writer.Write(computeSystemRegisters.HasValue);
+            if (computeSystemRegisters is { } system)
+            {
+                writer.Write(system.WorkGroupXRegister ?? uint.MaxValue);
+                writer.Write(system.WorkGroupYRegister ?? uint.MaxValue);
+                writer.Write(system.WorkGroupZRegister ?? uint.MaxValue);
+                writer.Write(system.ThreadGroupSizeRegister ?? uint.MaxValue);
+            }
             var loads = fixedFunctionVertexLoads?.Order().ToArray() ?? [];
             writer.Write(loads.Length);
             foreach (var load in loads) writer.Write(load);

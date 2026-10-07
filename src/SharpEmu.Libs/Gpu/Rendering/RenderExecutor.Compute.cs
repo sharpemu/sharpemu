@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler.Vulkan;
@@ -51,6 +52,26 @@ public sealed partial class RenderExecutor
         }
 
         var useThreadDimensions = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0;
+        if (indirectArgumentsAddress != 0)
+        {
+            // Resource specialization needs the actual workgroup domain even when the
+            // command itself remains a native indirect dispatch. Synchronize GPU writes
+            // through the host reader before inspecting the argument buffer.
+            Span<byte> arguments = stackalloc byte[12];
+            if (!_host.TryReadGuest(indirectArgumentsAddress, arguments))
+            {
+                throw _host.Fatal($"The indirect dispatch arguments are unreadable: address=0x{indirectArgumentsAddress:X16}.");
+            }
+
+            groupsX = BinaryPrimitives.ReadUInt32LittleEndian(arguments);
+            groupsY = BinaryPrimitives.ReadUInt32LittleEndian(arguments[4..]);
+            groupsZ = BinaryPrimitives.ReadUInt32LittleEndian(arguments[8..]);
+            if (groupsX == 0 || groupsY == 0 || groupsZ == 0)
+            {
+                return;
+            }
+        }
+
         var computeProgram = _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator, groupsX, groupsY, groupsZ);
         if (computeProgram.Consumed)
         {
@@ -214,7 +235,7 @@ public sealed partial class RenderExecutor
         }
 
         var size = Math.Max(groupSize, 1u);
-        return (threads + size - 1) / size;
+        return (threads - 1) / size + 1;
     }
 
     private BufferDescriptorWords DecodeBufferDescriptor(ResourceSnapshot resources, int index)

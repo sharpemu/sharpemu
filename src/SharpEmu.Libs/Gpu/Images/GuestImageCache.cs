@@ -405,13 +405,13 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             var address = request.Description.Metadata.Range.Address;
             if (!_surfaceMetadata.TryGetValue(address, out var metadata))
             {
-                _surfaceMetadata.Add(address, new SurfaceMetadata { Kind = SurfaceMetadataKind.HTile, ClearMask = image.Description.HtileClearMask });
+                _surfaceMetadata.Add(address, new SurfaceMetadata { Kind = SurfaceMetadataKind.HTile, ClearMask = image.Description.HtileClearMask == uint.MaxValue ? System.Numerics.BigInteger.MinusOne : image.Description.HtileClearMask });
             }
             else if (metadata.Kind == SurfaceMetadataKind.PendingDcc)
             {
                 // A pending DCC fill uses the DCC encoding; it must not become HTile state.
                 metadata.Kind = SurfaceMetadataKind.HTile;
-                metadata.ClearMask = image.Description.HtileClearMask;
+                metadata.ClearMask = image.Description.HtileClearMask == uint.MaxValue ? System.Numerics.BigInteger.MinusOne : image.Description.HtileClearMask;
                 metadata.FillValue = 0xffffffff;
                 metadata.FillSize = 0;
             }

@@ -226,6 +226,23 @@ public static class DepthTargetResolver
     private static StencilOperations ConvertFace(byte fail, byte pass, byte depthFail, CompareOp compare,
         byte operationValue, ref StencilMasks masks, Func<string, Exception> fatal)
     {
+        if (masks.WriteMask != 0 && compare == CompareOp.Equal &&
+            (masks.WriteMask & ~masks.CompareMask) == 0 && fail == 0 &&
+            (pass == 0 || pass == ReplaceWithOperationValue) &&
+            (depthFail == 0 || depthFail == ReplaceWithOperationValue) &&
+            (pass == ReplaceWithOperationValue || depthFail == ReplaceWithOperationValue))
+        {
+            // The equal test fixes every written bit. Toggle only differing bits
+            // to produce the replacement without changing the comparison reference.
+            var invertMask = masks.WriteMask & (masks.Reference ^ operationValue);
+            masks = masks with { WriteMask = invertMask };
+            return new StencilOperations(
+                StencilOp.Keep,
+                pass == ReplaceWithOperationValue && invertMask != 0 ? StencilOp.Invert : StencilOp.Keep,
+                depthFail == ReplaceWithOperationValue && invertMask != 0 ? StencilOp.Invert : StencilOp.Keep,
+                compare);
+        }
+
         ReadOnlySpan<byte> operations = [fail, pass, depthFail];
         Span<StencilOp> converted = stackalloc StencilOp[3];
         var reference = masks.Reference;

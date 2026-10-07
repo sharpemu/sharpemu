@@ -2849,7 +2849,7 @@ public static partial class Gen5SpirvTranslator
                 case "SFlbitI32B32":
                 {
                     // Count leading zero bits, 0xFFFFFFFF when the source is zero.
-                    var msb = Ext(74, _uintType, left);
+                    var msb = Ext(75, _uintType, left);
                     var clz = _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(31), msb);
                     result = _module.AddInstruction(
                         SpirvOp.Select, _uintType, IsNotZero(left), clz, UInt(0xFFFFFFFFu));

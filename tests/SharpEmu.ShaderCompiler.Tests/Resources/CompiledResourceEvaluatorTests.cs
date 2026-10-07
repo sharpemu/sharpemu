@@ -10,6 +10,22 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 public sealed class CompiledResourceEvaluatorTests
 {
     [Fact]
+    public void ObservingAnUnfinishedPlanDoesNotCompileAnEmptyDescriptorTable()
+    {
+        var plan = ShaderResourcePlan.Extract(Program(BufferLoad(0, 0), EndProgram(8)),
+            ShaderStage.Compute, Hash, 0, 64, beforeResourceTracking: unfinished =>
+            {
+                Assert.Empty(unfinished.DescriptorSources);
+                Assert.Null(unfinished.CompiledEvaluator);
+                Assert.Null(unfinished.CompileEvaluatorNow());
+            });
+        var compiled = plan.CompileEvaluatorNow();
+        Assert.NotNull(compiled);
+        Assert.NotEmpty(plan.DescriptorSources);
+        Assert.Equal(plan.DescriptorSources.Count, compiled.SourceWords.Length);
+    }
+
+    [Fact]
     public void UniformOperationsMatchTheInterpreterWithFullWidthOperands()
     {
         ulong[] cases = [0, 1, 31, 32, 63, 64, uint.MaxValue, 0x80000000, 0x7FC00000, 0xFFFFFFFFFFFFFFFF, 0x8000000000000000];

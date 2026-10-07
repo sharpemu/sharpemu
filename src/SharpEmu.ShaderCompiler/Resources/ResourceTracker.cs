@@ -325,7 +325,22 @@ public sealed partial class ResourceTracker
         for (var candidate = 0; candidate < _sources.Count; candidate++)
         {
             var current = _sources[candidate];
-            if (current.DwordCount != source.DwordCount || !Equals(current.IndirectImage, source.IndirectImage))
+            if (current.DwordCount != source.DwordCount || !Equals(current.IndirectImage, source.IndirectImage) ||
+                !Equals(current.PackedPointer, source.PackedPointer) ||
+                (current.Workgroup is null) != (source.Workgroup is null) ||
+                current.Workgroup is { } workgroup && source.Workgroup is { } otherWorkgroup &&
+                    (!ReferenceEquals(workgroup.Input, otherWorkgroup.Input) ||
+                        (workgroup.Key is null) != (otherWorkgroup.Key is null) ||
+                        workgroup.Key is not null && !_graph.Equivalent(workgroup.Key, otherWorkgroup.Key!)) ||
+                current.ZeroExtentBufferSource != source.ZeroExtentBufferSource ||
+                current.RuntimeSamplerCountSource != source.RuntimeSamplerCountSource ||
+                current.RuntimeZeroCountGuardPc != source.RuntimeZeroCountGuardPc ||
+                current.SamplerSelectorMemoryIndex != source.SamplerSelectorMemoryIndex ||
+                (current.FiniteSamplerSources is null) != (source.FiniteSamplerSources is null) ||
+                current.FiniteSamplerSources is { } finiteSources && !finiteSources.SequenceEqual(source.FiniteSamplerSources!) ||
+                (current.EquivalentSamplerSources is null) != (source.EquivalentSamplerSources is null) ||
+                current.EquivalentSamplerSources is { } samplerSources &&
+                    !samplerSources.SequenceEqual(source.EquivalentSamplerSources!))
             {
                 continue;
             }
@@ -419,6 +434,16 @@ public sealed partial class ResourceTracker
         return false;
     }
 
+    private void TrackDeviceStoreValidation(int index, MemoryAccessInfo memory, ScalarValue handle)
+    {
+        if (!memory.Formatted || memory.Access != MemoryAccess.Write ||
+            !IndirectSelectorValues.PackedPointerDescriptor.TryCreateBufferFields(_plan, handle, out var fields)) return;
+        _info.DeviceStoreValidationSources[index] = InternSource(new DescriptorSource
+        {
+            Dwords = handle.Operands, PackedPointer = fields,
+        });
+    }
+
     private uint GetHandleSource(
         ScalarValue? handle,
         ScalarValueKind expected,
@@ -448,36 +473,58 @@ public sealed partial class ResourceTracker
         var controlDependent = false;
         if (nonContiguousImage || !ValidateSource(source, out badDword, out controlDependent))
         {
-            // A bindless image/sampler descriptor whose dwords resolve through a
-            // control-dependent phi (e.g. a hash-table/linear-probe material lookup, as seen
-            // in Ghost of Yotei) has no single compile-time source: real support needs
-            // GPU-side dynamic descriptor indexing, which this resource tracker doesn't
-            // implement. Rather than fail shader recompilation outright, degrade to a null
-            // descriptor for that one access and let it read as a null/black texture,
-            // mirroring KytyPS5's fallback for the same case (feat/shader-control-dependent-
-            // descriptor). Buffer/sampler-adjacent handles or any other validation failure
-            // still hard-fail, since those aren't safe to silently zero.
-            var dynamicImageFallback = expected is (ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle) &&
-                (controlDependent || HasUndefinedOrigin(source.Dwords[badDword], "BufferLoadFormat") ||
-                 (nonContiguousImage && source.Dwords.Any(dword => HasUndefinedOrigin(dword, "SAndB32"))));
-            if (dynamicImageFallback)
-            {
-                source = new DescriptorSource
-                {
-                    Dwords = Enumerable.Repeat(_graph.Constant(0u), (int)source.DwordCount).ToArray(),
-                };
-            }
-            else
-            {
-                throw Failure(
-                    pc,
-                    $"{memoryOpcode ?? "memory"} ({memoryAccess}) {expected} dword {badDword} is not a valid runtime value" +
-                        DescribeUndefinedLeaves(source.Dwords[badDword]) +
-                        $" (value: {DescribeValueShape(source.Dwords[badDword])})");
-            }
+            if (sampler && !sampleAdjust && IndirectSelectorValues.WorkgroupDescriptor.TryCreate(_plan,
+                    ScalarValue.Handle(ScalarValueKind.SamplerHandle, source.Dwords), null, out var workgroupSampler))
+                return InternSource(new DescriptorSource { Dwords = source.Dwords, Workgroup = workgroupSampler });
+            if (!sampleAdjust && IndirectSelectorValues.PackedPointerDescriptor.TryCreate(_plan, handle, out var packedPointer))
+                return InternSource(new DescriptorSource { Dwords = source.Dwords, PackedPointer = packedPointer });
+            if (expected == ScalarValueKind.SamplerHandle &&
+                TryMakeRuntimeSampler(handle, out var runtimeSamplerSource)) return runtimeSamplerSource;
+            if (expected == ScalarValueKind.SamplerHandle &&
+                TryMakeFiniteSampler(handle, source, out var finiteSamplerSource)) return finiteSamplerSource;
+            if (expected is ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle &&
+                TryMakeZeroExtentBufferSource(source, pc, out var emptyBufferSource))
+                return emptyBufferSource;
+
+            throw Failure(
+                pc,
+                $"{memoryOpcode ?? "memory"} ({memoryAccess}) {expected} dword {badDword} is not a valid runtime value" +
+                    DescribeUndefinedLeaves(source.Dwords[badDword]) +
+                    $" (value: {DescribeValueShape(source.Dwords[badDword])})");
         }
 
         return InternSource(source);
+    }
+
+    private bool TryMakeZeroExtentBufferSource(DescriptorSource source, uint pc, out uint sourceIndex)
+    {
+        sourceIndex = 0;
+        ScalarValue? bufferHandle = null;
+        var hasBufferRead = false;
+        foreach (var operand in source.Dwords)
+        {
+            var word = _graph.ResolveInvariantPhi(operand);
+            if (word is null) return false;
+            if (word.IsConstant && word.ConstantU32 == 0) continue;
+            if (word.Kind != ScalarValueKind.ScalarBufferWord || word.Operands.Length != 2)
+                return false;
+            var current = word.Operands[0];
+            if (bufferHandle is not null && !_graph.Equivalent(bufferHandle, current))
+                return false;
+            bufferHandle = current;
+            hasBufferRead = true;
+        }
+
+        if (!hasBufferRead || bufferHandle is null ||
+            !MakeRuntimeBufferSource(bufferHandle, pc, out var bufferSource, out _))
+            return false;
+
+        sourceIndex = InternSource(new DescriptorSource
+        {
+            Dwords = Enumerable.Repeat(_graph.Constant(0u), (int)source.DwordCount).ToArray(),
+            ZeroExtentBufferSource = bufferSource,
+        });
+        return true;
     }
 
     private string DescribeValueShape(ScalarValue value, int depth = 0)
@@ -536,8 +583,9 @@ public sealed partial class ResourceTracker
     // whose non-constant leaves are all reads from guest memory. This covers a
     // descriptor read straight from a device address and one read from the SRT
     // buffer at a dynamic offset, including the phi that merges an SRT read
-    // across a loop. A handle that is fully resolvable (constants and flattened
-    // table words only) is not a runtime descriptor and keeps the native binding.
+    // across a loop. Flattening a scalar load into a table word preserves its
+    // memory origin, including descriptors selected by a control-flow join.
+    // Host-resolvable handles still keep the native binding in the caller.
     private bool IsRuntimeDescriptorHandle(ScalarValue? handle, bool allowComputedWords = false)
     {
         if (handle is null || handle.Kind != ScalarValueKind.BufferHandle ||
@@ -666,7 +714,7 @@ public sealed partial class ResourceTracker
 
         try
         {
-            if (value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord)
+            if (value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord or ScalarValueKind.ResourceTableWord)
             {
                 return true;
             }
@@ -727,7 +775,8 @@ public sealed partial class ResourceTracker
     private uint AddImage(uint source, MemoryAccessInfo memory, uint pc)
     {
         var resourceClass = memory.ImageClass;
-        var mip = resourceClass == ImageResourceClass.Storage && memory.ImageHasMip ? ImageMipMode.DynamicStorage : ImageMipMode.None;
+        var mip = memory.Opcode == "ImageGather4CL" ? ImageMipMode.ExplicitLodGather :
+            resourceClass == ImageResourceClass.Storage && memory.ImageHasMip ? ImageMipMode.DynamicStorage : ImageMipMode.None;
         var depth = (memory.ImageSampleFlags & ImageSampleFlags.Compare) != 0;
         for (var index = 0; index < _info.Images.Count; index++)
         {
@@ -787,7 +836,25 @@ public sealed partial class ResourceTracker
         }
 
         _info.Samplers.Add(new SamplerResource { Source = source, FirstUsePc = pc });
-        return (uint)(_info.Samplers.Count - 1);
+        var root = (uint)(_info.Samplers.Count - 1);
+        if (_sources[(int)source].FiniteSamplerSources is { } candidates)
+        {
+            var samplers = new List<FiniteSamplerCandidate> { new(candidates[0].Offset, root) };
+            foreach (var candidate in candidates.Skip(1))
+            {
+                var candidateSource = InternSource(new DescriptorSource
+                {
+                    Dwords = Enumerable.Repeat(_graph.Constant(0u), 4).ToArray(),
+                    EquivalentSamplerSources = [candidate.Source],
+                });
+                var sampler = AddSampler(candidateSource, pc);
+                if (sampler == DescriptorConstants.NoIndex) return sampler;
+                samplers.Add(new(candidate.Offset, sampler));
+            }
+            _info.Samplers[(int)root].SelectorMemoryIndex = _sources[(int)source].SamplerSelectorMemoryIndex;
+            _info.Samplers[(int)root].Candidates = samplers;
+        }
+        return root;
     }
 
     private void AddSampledPair(uint image, uint sampler, uint pc)
@@ -942,6 +1009,7 @@ public sealed partial class ResourceTracker
                 if (memory.Kind == MemoryResourceKind.Buffer && IsDeviceLoadedBufferHandle(access.Handle))
                 {
                     memory.DeviceDescriptor = true;
+                    TrackDeviceStoreValidation(index, memory, access.Handle!);
                     _info.UsesDeviceAddresses = true;
                     return;
                 }
@@ -960,6 +1028,8 @@ public sealed partial class ResourceTracker
                 (memory.Kind == MemoryResourceKind.Buffer && IsDeviceLoadedBufferHandle(access.Handle)))
             {
                 memory.DeviceDescriptor = true;
+                if (memory.Kind == MemoryResourceKind.Buffer)
+                    TrackDeviceStoreValidation(index, memory, access.Handle!);
                 _info.UsesDeviceAddresses = true;
                 return;
             }
@@ -1075,6 +1145,8 @@ public sealed partial class ResourceTracker
             }
 
             AddSampledPair(image, sampler, memory.Pc);
+            if (_info.Samplers[(int)sampler].Candidates is { } candidates)
+                foreach (var candidate in candidates) AddSampledPair(image, candidate.Sampler, memory.Pc);
         }
 
         AddMemoryPatch(index, image, sampler, memory.NeedsSampler, memory.Pc);
@@ -1093,7 +1165,7 @@ public sealed partial class ResourceTracker
             for (var image = 0; image < _info.Images.Count; image++)
             {
                 var imageSource = _sources[(int)_info.Images[image].Source];
-                if (imageSource.DwordCount != 8 || imageSource.IndirectImage is not null)
+                if (imageSource.DwordCount != 8 || imageSource.IndirectImage is not null || imageSource.PackedPointer is not null)
                 {
                     continue;
                 }
@@ -1160,6 +1232,7 @@ public sealed partial class ResourceTracker
 
             if (TryMakeIndirectImage(handle, memory.Pc, out var plan) ||
                 TryMakeDenseIndirectImage(handle, memory.Pc, out plan) ||
+                TryMakeWorkgroupImage(handle, out plan) ||
                 TryMakeDirectImage(handle, out plan))
             {
                 _indirectImages.Add(plan);

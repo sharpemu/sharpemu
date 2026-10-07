@@ -161,8 +161,13 @@ public sealed class PixelInputInfo
     public bool KillEnable { get; init; }
     public bool DepthExportEnable { get; init; }
     public bool SampleMaskExportEnable { get; init; }
+    public uint MaskExportSamples { get; init; } = 1;
+    public uint RasterizationSamples { get; init; } = 1;
+    public uint? InterpolationSample { get; init; }
+    public IReadOnlyList<(float X, float Y)> CustomSampleOffsets { get; init; } = [];
     public bool SampleShading { get; init; }
     public bool EarlyDepth { get; init; }
+    public uint ShaderSampleExclusionMask { get; init; }
     public bool ExecuteOnNoop { get; init; }
     public ShaderStageResources Stage { get; set; }
 
@@ -178,6 +183,9 @@ public sealed class ComputeInputInfo
     public uint DispatchThreadsX { get; set; }
     public uint DispatchThreadsY { get; set; }
     public uint DispatchThreadsZ { get; set; }
+    public uint DispatchGroupsX { get; init; }
+    public uint DispatchGroupsY { get; init; }
+    public uint DispatchGroupsZ { get; init; }
     public bool GroupIdX { get; init; }
     public bool GroupIdY { get; init; }
     public bool GroupIdZ { get; init; }

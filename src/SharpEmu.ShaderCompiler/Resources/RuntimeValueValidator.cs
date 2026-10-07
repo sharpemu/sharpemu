@@ -95,6 +95,7 @@ public sealed class RuntimeValueValidator
         switch (value.Kind)
         {
             case ScalarValueKind.Undefined:
+            case ScalarValueKind.WorkgroupId:
                 return false;
             case ScalarValueKind.UserData:
                 return value.UserDataRegister >= _userDataBase && value.UserDataRegister - _userDataBase < _userDataCount;

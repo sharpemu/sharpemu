@@ -20,6 +20,27 @@ public sealed class RuntimeValueEvaluator
     private readonly List<ScalarValue> _visiting;
     private readonly CompiledResourceEvaluator? _compiled;
     private readonly CompiledValueCache _compiledValues;
+    private readonly ScalarValue? _workgroupInput;
+    private readonly uint _workgroupId;
+    private readonly ScalarValue? _loopCounter;
+    private readonly uint _loopValue;
+    private readonly Dictionary<ScalarValue, bool>? _loopAliases;
+
+    // Only bounded descriptor proofs supply a workgroup value. Ordinary host
+    // evaluation continues to reject this GPU input.
+    internal RuntimeValueEvaluator(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
+        ScalarValue workgroupInput, uint workgroupId, ScalarValue? loopCounter = null, uint loopValue = 0,
+        Dictionary<ScalarValue, bool>? loopAliases = null) : this(plan, inputs)
+    {
+        _workgroupInput = workgroupInput;
+        _workgroupId = workgroupId;
+        _loopCounter = loopCounter;
+        _loopValue = loopValue;
+        _loopAliases = loopCounter is null ? null : loopAliases ?? new();
+        // Proof evaluation substitutes one GPU workgroup input and must use the
+        // interpreter's bounded-read checks rather than the ordinary compiled path.
+        _compiled = null;
+    }
 
     public RuntimeValueEvaluator(
         ShaderResourcePlan plan,
@@ -81,6 +102,17 @@ public sealed class RuntimeValueEvaluator
     public bool EvaluateWide(ScalarValue value, out ulong result)
     {
         result = 0;
+        if (_loopCounter is not null && (ReferenceEquals(value, _loopCounter) ||
+            value.Kind == ScalarValueKind.Phi && IsLoopAlias(value)))
+        {
+            result = _loopValue;
+            return true;
+        }
+        if (value.Kind is ScalarValueKind.WorkgroupId or ScalarValueKind.FirstLane && ReferenceEquals(value, _workgroupInput))
+        {
+            result = _workgroupId;
+            return true;
+        }
         if (value.IsConstant)
         {
             result = value.Payload;
@@ -120,6 +152,14 @@ public sealed class RuntimeValueEvaluator
         return true;
     }
 
+    private bool IsLoopAlias(ScalarValue value)
+    {
+        if (_loopAliases!.TryGetValue(value, out var alias)) return alias;
+        alias = IndirectSelectorValues.IsLoopCounterAlias(value, _loopCounter!);
+        _loopAliases.Add(value, alias);
+        return alias;
+    }
+
     private bool Operand(ScalarValue value, int index, out ulong result) => EvaluateWide(value.Operands[index], out result);
 
     private bool EvaluateNode(ScalarValue value, out ulong result)
@@ -128,6 +168,7 @@ public sealed class RuntimeValueEvaluator
         switch (value.Kind)
         {
             case ScalarValueKind.Undefined:
+            case ScalarValueKind.WorkgroupId:
                 return false;
             case ScalarValueKind.MemoryAperture:
                 result = Gen5InlineConstants.DecodeAperture64((uint)value.Payload) >> 32;
@@ -215,6 +256,11 @@ public sealed class RuntimeValueEvaluator
             return false;
         }
 
+        var baseAddress = ((high << 32) | (uint)low) & AddressMask;
+        // Bounded workgroup proofs do not cover a wrapped shader-side byte sum.
+        // Decline it rather than bind the host's unwrapped memory address.
+        if (_workgroupInput is not null && value.Kind == ScalarValueKind.ScalarBufferWord &&
+            (ulong)memory.Offset + (uint)offset > uint.MaxValue) return false;
         ulong records = 0;
         if (value.Kind == ScalarValueKind.ScalarBufferWord &&
             (handle.Operands.Length != 4 ||
@@ -460,7 +506,18 @@ public sealed class RuntimeValueEvaluator
             var words = new uint[source.DwordCount];
             if (activeSources.Length == 0 || activeSources[sourceIndex])
             {
-                for (var index = 0; index < words.Length; index++)
+                if (source.Workgroup is { } workgroup)
+                {
+                    if (!workgroup.TryEvaluate(plan, inputs, out _, out var descriptors) || descriptors.Length == 0 ||
+                        workgroup.LoopCounter is null &&
+                        descriptors.Any(words => !words.AsSpan().SequenceEqual(descriptors[0]))) return false;
+                    words = descriptors[0];
+                }
+                else if (source.PackedPointer is { } packed)
+                {
+                    if (!packed.TryEvaluate(plan, inputs, out words)) return false;
+                }
+                else for (var index = 0; index < words.Length; index++)
                 {
                     if (!evaluator.EvaluateSourceWord((int)sourceIndex, index, out words[index]))
                     {

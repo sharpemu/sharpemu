@@ -232,6 +232,28 @@ public sealed class ShaderPipelineCacheTests : IDisposable
     }
 
     [Fact]
+    public void RenderingKeysDistinguishColorAndDepthSampleCounts()
+    {
+        PipelineRenderingState State(uint color, uint depth)
+        {
+            var state = new PipelineRenderingState { ColorCount = 1, DepthFormat = Format.D32Sfloat, DepthSamples = depth };
+            state.ColorFormats[0] = Format.R8G8B8A8Unorm;
+            state.ColorSamples[0] = color;
+            return state;
+        }
+        var entries = new Dictionary<PipelineRenderingState, int>
+        {
+            [State(1, 1)] = 1,
+            [State(1, 2)] = 2,
+            [State(2, 2)] = 3,
+        };
+        Assert.Equal(3, entries.Count);
+        Assert.Equal(1, entries[State(1, 1)]);
+        Assert.Equal(2, entries[State(1, 2)]);
+        Assert.Equal(3, entries[State(2, 2)]);
+    }
+
+    [Fact]
     public void TryCreateComputePipeline_ReportsTheHostCompileAndCachesTheResult()
     {
         var guest = new PipelineTestGuest();
@@ -379,6 +401,30 @@ public sealed class ShaderPipelineCacheTests : IDisposable
             programs.Vertex, programs.Pixel, SampleCountFlags.Count1Bit | SampleCountFlags.Count4Bit);
 
         Assert.Equal(expected, description.StaticParameters.SampleShadingEnable);
+    }
+
+    [Theory]
+    [InlineData(0xFFFFFFFFu, 0xFFFFFFFFu, true)]
+    [InlineData(0x00030003u, 0x00030003u, true)]
+    [InlineData(0xFFFFFFFEu, 0xFFFFFFFFu, false)]
+    [InlineData(0xFFFEFFFFu, 0xFFFFFFFFu, false)]
+    [InlineData(0xFFFFFFFFu, 0xFFFFFFFEu, false)]
+    [InlineData(0xFFFFFFFFu, 0xFFFEFFFFu, false)]
+    public void NativeTwoSampleRenderingRejectsRestrictedCoverage(uint firstRow, uint secondRow, bool supported)
+    {
+        using var fatalScope = new FatalScope();
+        var banks = Banks();
+        banks.Context.AntialiasingConfig.SampleCountLog2 = 1;
+        banks.Context.SampleCoverageMaskX0Y0X1Y0 = firstRow;
+        banks.Context.SampleCoverageMaskX0Y1X1Y1 = secondRow;
+        var programs = Programs();
+        var rendering = new RenderingState { Samples = 2 };
+        GraphicsPipelineDescription Describe() => ShaderPipelineCache.BuildGraphicsDescription(
+            [], default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering,
+            PrimitiveTopology.TriangleList, false, false, programs.Vertex, programs.Pixel,
+            SampleCountFlags.Count2Bit, nativeTwoSampleMixedSupported: true);
+        if (supported) Assert.Equal(2u, Describe().StaticParameters.Samples);
+        else Assert.Contains("restricted per-pixel coverage", Assert.Throws<SchedulerFatalException>(() => Describe()).Message);
     }
 
     [Fact]

@@ -10,6 +10,29 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 public sealed class ScalarGraphDiskCacheTests
 {
     [Fact]
+    public void DiskCacheSeparatesWorkgroupLayoutsAndPreservesAxisLeaves()
+    {
+        var program = Program(ScalarLoad(0, 0, 8, 4),
+            ScalarBufferLoad(8, 8, 16, dynamicOffsetRegister: 3), EndProgram(16));
+        var directory = Path.Combine(Path.GetTempPath(), "SharpEmu-workgroup-graph-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var layout = new Gen5ComputeSystemRegisters(3, null, null, null);
+            var first = ScalarGraphDiskCache.Build(program, 0, 3, null, 64, directory, layout);
+            var second = ScalarGraphDiskCache.Build(program, 0, 3, null, 64, directory, layout);
+            Assert.Equal(ScalarValueKind.WorkgroupId, second.Accesses[4]!.Read!.Operands[1].Kind);
+            Assert.Equal(0ul, second.Accesses[4]!.Read!.Operands[1].Payload);
+            Assert.Equal(first.Values.Count, second.Values.Count);
+            var key = ScalarGraphDiskCache.Key(program, 0, 3, null, 64, layout);
+            Assert.NotEqual(key, ScalarGraphDiskCache.Key(program, 0, 3, null, 64));
+            Assert.NotEqual(key, ScalarGraphDiskCache.Key(program, 0, 3, null, 64, new(null, 3, null, null)));
+            var different = ScalarGraphDiskCache.Build(program, 0, 3, null, 64, directory, new(null, 3, null, null));
+            Assert.Equal(1ul, different.Accesses[4]!.Read!.Operands[1].Payload);
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+    }
+
+    [Fact]
     public void SnapshotPreservesCyclesInterningAndInstructionProvenance()
     {
         var program = Program(ScalarLoad(0, 0, 4), EndProgram(8));
@@ -22,6 +45,8 @@ public sealed class ScalarGraphDiskCacheTests
         var scan = graph.FindLowestSetBit(graph.UserData(1), 12);
         graph.BranchConditions[4] = undefined;
         graph.BranchConditions[12] = scan;
+        graph.LaneSelectionMasks[12] = phi;
+        graph.InstructionExecutionMasks[12] = phi;
         using var stream = new MemoryStream();
         using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, true)) graph.WriteSnapshot(writer);
         stream.Position = 0;
@@ -35,6 +60,8 @@ public sealed class ScalarGraphDiskCacheTests
         Assert.True(restored.TryGetUndefinedOrigin(restored.BranchConditions[4], out var origin));
         Assert.Equal((4u, "unsupported"), origin);
         Assert.Same(restored.BranchConditions[12], restored.FindLowestSetBit(restored.UserData(1), 12));
+        Assert.Same(loop, restored.LaneSelectionMasks[12]);
+        Assert.Same(loop, restored.InstructionExecutionMasks[12]);
         Assert.Equal(graph.Accesses.Length, restored.Accesses.Length);
         Assert.NotSame(graph.Accesses[0]!.Read, restored.Accesses[0]!.Read);
         Assert.True(restored.Equivalent(graph.Accesses[0]!.Read!, restored.Accesses[0]!.Read!));

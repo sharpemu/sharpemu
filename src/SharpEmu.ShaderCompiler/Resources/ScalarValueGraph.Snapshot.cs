@@ -47,6 +47,10 @@ public sealed partial class ScalarValueGraph
         }
         writer.Write(BranchConditions.Count);
         foreach (var (pc, value) in BranchConditions) { writer.Write(pc); Reference(value); }
+        writer.Write(LaneSelectionMasks.Count);
+        foreach (var (pc, value) in LaneSelectionMasks) { writer.Write(pc); Reference(value); }
+        writer.Write(InstructionExecutionMasks.Count);
+        foreach (var (pc, value) in InstructionExecutionMasks) { writer.Write(pc); Reference(value); }
         writer.Write(_undefinedOrigins.Count);
         foreach (var (value, origin) in _undefinedOrigins)
         {
@@ -120,6 +124,10 @@ public sealed partial class ScalarValueGraph
             if (reader.ReadBoolean()) graph.Accesses[i] = new(Reference(), Reference(), Reference(), Reference(), Reference());
         var branches = Count();
         for (var i = 0; i < branches; i++) graph.BranchConditions.Add(reader.ReadUInt32(), Required());
+        var laneMasks = Count();
+        for (var i = 0; i < laneMasks; i++) graph.LaneSelectionMasks.Add(reader.ReadUInt32(), Required());
+        var executionMasks = Count();
+        for (var i = 0; i < executionMasks; i++) graph.InstructionExecutionMasks.Add(reader.ReadUInt32(), Required());
         var origins = Count(count);
         for (var i = 0; i < origins; i++) graph._undefinedOrigins.Add(Required(), (reader.ReadUInt32(), reader.ReadString()));
         var bitScans = Count(count);

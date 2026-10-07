@@ -45,6 +45,8 @@ internal interface IShaderPipelineHost
     ShaderPrewarmList? ShaderPrewarm => null;
     bool PerVertexPixelInputsSupported => true;
     bool ClipDistanceEnabled => false;
+    bool PostDepthCoverageSupported => false;
+    bool NativeTwoSampleMixedSupported => false;
 
     RenderHostLimits Limits { get; }
 
@@ -58,6 +60,18 @@ internal interface IShaderPipelineHost
 
     // Reads one guest dword only when no GPU work may still own the range.
     bool TryReadCleanGuestWord(ulong address, out uint word);
+    bool TrySynchronizeVertexDomain(ulong address, ulong size) => false;
+    bool TryReadPointSampledByteDomain(ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler,
+        uint channels, bool gathered, GuestWordReader cleanReader, out uint[] values)
+    {
+        values = [];
+        return false;
+    }
+    bool TryGetImageWriteRange(ReadOnlySpan<uint> image, out ulong address, out ulong size)
+    {
+        address = size = 0;
+        return false;
+    }
 
     // Copies guest bytes the CPU already holds, without synchronizing. False when the GPU
     // may own the range (or, for a clean read, when a clean word read would be refused);

@@ -50,6 +50,65 @@ public sealed class RenderExecutorComputeTests : IDisposable
         Assert.DoesNotContain("create_compute_pipeline", _pipelines.Calls);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void IndirectDispatch_UsesActualArgumentsForSpecialization(bool native)
+    {
+        _host.SupportsIndirectDispatch = native;
+        Assert.True(_host.GuestMemory.TryWrite(MetadataAddress,
+            new byte[] { 7, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0 }));
+
+        _executor.Dispatch(1, Banks(), 0, 0, 0, 0x41, MetadataAddress);
+
+        Assert.Equal((7u, 3u, 1u), _pipelines.LastDispatchDimensions);
+        Assert.Equal(1, _host.GuestReads);
+        Assert.Contains(native ? $"dispatch_indirect {MetadataAddress:X}" : "dispatch 7 3 1", _host.Calls);
+        if (native)
+            Assert.DoesNotContain("dispatch 7 3 1", _host.Calls);
+    }
+
+    [Theory]
+    [InlineData(0, 1, 1)]
+    [InlineData(1, 0, 1)]
+    [InlineData(1, 1, 0)]
+    public void EmptyIndirectDispatch_DoesNotCompileOrRecord(byte x, byte y, byte z)
+    {
+        _host.SupportsIndirectDispatch = true;
+        Assert.True(_host.GuestMemory.TryWrite(MetadataAddress,
+            new byte[] { x, 0, 0, 0, y, 0, 0, 0, z, 0, 0, 0 }));
+        _executor.Dispatch(1, Banks(), 0, 0, 0, 0x41, MetadataAddress);
+        Assert.Empty(_pipelines.Calls);
+        AssertNotDispatched();
+        Assert.DoesNotContain("end_rendering", _host.Calls);
+    }
+
+    [Fact]
+    public void IndirectThreadDimensions_AreReadBeforeConversion()
+    {
+        _host.SupportsIndirectDispatch = true;
+        _pipelines.Compute = ComputeProgram(threadDimensions: true, threadsX: 8, threadsY: 8);
+        var banks = Banks();
+        banks.Shader.Compute.ThreadsX = 8;
+        banks.Shader.Compute.ThreadsY = 8;
+        Assert.True(_host.GuestMemory.TryWrite(MetadataAddress,
+            new byte[] { 100, 0, 0, 0, 17, 0, 0, 0, 1, 0, 0, 0 }));
+
+        _executor.Dispatch(1, banks, 0, 0, 0, 0x61, MetadataAddress);
+
+        Assert.Equal((100u, 17u, 1u), _pipelines.LastDispatchDimensions);
+        AssertDispatched(13, 3, 1);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("dispatch_indirect", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void UnreadableIndirectArguments_FailBeforeProgramLookup()
+    {
+        Assert.Throws<RenderExecutorFatalException>(() =>
+            _executor.Dispatch(1, Banks(), 0, 0, 0, 0x41, ulong.MaxValue - 16));
+        Assert.Empty(_pipelines.Calls);
+    }
+
     [Fact]
     public void Dispatch_RecordsTheTailInOrder()
     {
@@ -81,8 +140,26 @@ public sealed class RenderExecutorComputeTests : IDisposable
     [InlineData(64u, 64u, 1u)]
     [InlineData(65u, 64u, 2u)]
     [InlineData(7u, 0u, 7u)]
+    [InlineData(uint.MaxValue, 64u, 67108864u)]
+    [InlineData(uint.MaxValue, uint.MaxValue, 1u)]
     public void GroupsFromThreads_RoundsUpAndTreatsZeroGroupSizeAsOne(uint threads, uint groupSize, uint expected) =>
         Assert.Equal(expected, RenderExecutor.GroupsFromThreads(threads, groupSize));
+
+    [Theory]
+    [InlineData(false, 100u, 17u, 1u)]
+    [InlineData(true, 13u, 3u, 1u)]
+    public void ResolvedComputeInputs_PreserveActualDispatchGroupBounds(bool threadDimensions, uint x, uint y, uint z)
+    {
+        var registers = new SharpEmu.Libs.Gpu.GpuCommands.Registers.ComputeStageRegisters
+        {
+            ThreadsX = 8, ThreadsY = 8, ThreadsZ = 1,
+        };
+        var shader = new SharpEmu.Libs.Gpu.Pipelines.RegisteredShader(0, 0, 0, 0, 0, 0, 0, 0, 0);
+        var input = SharpEmu.Libs.Gpu.Pipelines.ComputeStageInputResolver.Resolve(registers, shader,
+            threadDimensions ? 1u << 5 : 0, false, 100, 17, 1);
+        Assert.Equal((x, y, z), (input.DispatchGroupsX, input.DispatchGroupsY, input.DispatchGroupsZ));
+        Assert.Equal(threadDimensions ? 100u : 0u, input.DispatchThreadsX);
+    }
 
     [Fact]
     public void ThreadDimensionInitiator_ConvertsThreadsToGroupsAndRecordsTheThreadCounts()

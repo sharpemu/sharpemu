@@ -127,6 +127,9 @@ public static partial class Gen5SpirvTranslator
         private readonly List<uint> _interfaces = [];
         private readonly Dictionary<uint, uint> _pixelInputs = [];
         private readonly Dictionary<uint, SpirvPixelOutput> _pixelOutputs = [];
+        private uint _pixelSampleMaskOutput;
+        private uint _pixelInvocationCoverageInput;
+        private uint _pixelDepthOutput;
         private readonly Dictionary<uint, uint> _vertexOutputs = [];
         private readonly Dictionary<uint, SpirvVertexInput> _vertexInputsByPc = [];
         private uint _voidType;
@@ -254,6 +257,23 @@ public static partial class Gen5SpirvTranslator
             error = string.Empty;
             try
             {
+                if (_stage == Gen5SpirvStage.Pixel && _request.PixelDepthExportEnable && _request.EarlyFragmentTests)
+                {
+                    error = "pixel depth exports require late fragment tests";
+                    return false;
+                }
+                if (_stage == Gen5SpirvStage.Pixel && _request.PixelSampleMaskExportEnable)
+                {
+                    var exportSamples = _request.PixelMaskExportSamples;
+                    var rasterSamples = _request.PixelRasterizationSamples;
+                    if (exportSamples == 0 || rasterSamples == 0 || exportSamples > 16 || rasterSamples > 16 ||
+                        (exportSamples & (exportSamples - 1)) != 0 || (rasterSamples & (rasterSamples - 1)) != 0 ||
+                        (exportSamples != rasterSamples && !(exportSamples == 1 && rasterSamples == 2)))
+                    {
+                        error = $"unsupported pixel sample-mask export counts: export={exportSamples} raster={rasterSamples}";
+                        return false;
+                    }
+                }
                 if (Environment.GetEnvironmentVariable(
                         "SHARPEMU_TRACE_TITLE_INTERFACE") == "1" &&
                     _request.Program.Address is 0x0000000500780000ul or
@@ -302,6 +322,22 @@ public static partial class Gen5SpirvTranslator
                 var main = _module.BeginFunction(_voidType, functionType);
                 _module.AddName(main, "main");
                 _module.AddLabel();
+                if (_pixelInvocationCoverageInput != 0)
+                {
+                    var coveragePointer = _module.AddInstruction(SpirvOp.AccessChain,
+                        _module.TypePointer(SpirvStorageClass.Input, _intType),
+                        _pixelInvocationCoverageInput, UInt(0));
+                    var coverage = Bitcast(_uintType, Load(_intType, coveragePointer));
+                    var eligible = BitwiseAnd(coverage, UInt(~_request.PixelShaderSampleExclusionMask));
+                    var executeLabel = _module.AllocateId();
+                    var excludedLabel = _module.AllocateId();
+                    var execute = _module.AddInstruction(SpirvOp.INotEqual, _boolType, eligible, UInt(0));
+                    _module.AddStatement(SpirvOp.SelectionMerge, executeLabel, 0);
+                    _module.AddStatement(SpirvOp.BranchConditional, execute, executeLabel, excludedLabel);
+                    _module.AddLabel(excludedLabel);
+                    _module.AddStatement(SpirvOp.Kill);
+                    _module.AddLabel(executeLabel);
+                }
                 if (_stage == Gen5SpirvStage.Pixel &&
                     Environment.GetEnvironmentVariable(
                         "SHARPEMU_FORCE_TITLE_EARLY_COLOR") == "1" &&
@@ -521,6 +557,12 @@ public static partial class Gen5SpirvTranslator
                 if (_stage == Gen5SpirvStage.Pixel)
                 {
                     _module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
+                    if (_request.EarlyFragmentTests)
+                        _module.AddExecutionMode(main, SpirvExecutionMode.EarlyFragmentTests);
+                    if (_pixelInvocationCoverageInput != 0)
+                        _module.AddExecutionMode(main, SpirvExecutionMode.PostDepthCoverage);
+                    if (_pixelDepthOutput != 0)
+                        _module.AddExecutionMode(main, SpirvExecutionMode.DepthReplacing);
                 }
                 else if (_stage == Gen5SpirvStage.Compute)
                 {
@@ -1030,6 +1072,10 @@ public static partial class Gen5SpirvTranslator
                     {
                         _module.AddDecoration(variable, SpirvDecoration.Flat);
                     }
+                    else
+                    {
+                        DecorateSampleInterpolant(variable);
+                    }
 
                     _pixelInputs.Add(attribute, variable);
                     _interfaces.Add(variable);
@@ -1049,6 +1095,35 @@ public static partial class Gen5SpirvTranslator
                     (uint)SpirvBuiltIn.FragCoord);
                 _interfaces.Add(_fragCoordInput);
                 DeclarePixelSystemInputs();
+                if (_request.EarlyFragmentTests && (_request.PixelShaderSampleExclusionMask & 0xFFFFu) != 0)
+                {
+                    _module.AddExtension("SPV_KHR_post_depth_coverage");
+                    _module.AddCapability(SpirvCapability.SampleMaskPostDepthCoverage);
+                    _module.AddCapability(SpirvCapability.SampleRateShading);
+                    _pixelInvocationCoverageInput = _module.AddGlobalVariable(
+                        _module.TypePointer(SpirvStorageClass.Input, _module.TypeArray(_intType, 1)),
+                        SpirvStorageClass.Input);
+                    _module.AddDecoration(_pixelInvocationCoverageInput, SpirvDecoration.BuiltIn,
+                        (uint)SpirvBuiltIn.SampleMask);
+                    _interfaces.Add(_pixelInvocationCoverageInput);
+                }
+                if (_request.PixelDepthExportEnable)
+                {
+                    _pixelDepthOutput = _module.AddGlobalVariable(
+                        _module.TypePointer(SpirvStorageClass.Output, _floatType), SpirvStorageClass.Output);
+                    _module.AddDecoration(_pixelDepthOutput, SpirvDecoration.BuiltIn,
+                        (uint)SpirvBuiltIn.FragDepth);
+                    _interfaces.Add(_pixelDepthOutput);
+                }
+                if (_request.PixelSampleMaskExportEnable)
+                {
+                    var maskArray = _module.TypeArray(_intType, 1);
+                    _pixelSampleMaskOutput = _module.AddGlobalVariable(
+                        _module.TypePointer(SpirvStorageClass.Output, maskArray), SpirvStorageClass.Output);
+                    _module.AddDecoration(_pixelSampleMaskOutput, SpirvDecoration.BuiltIn,
+                        (uint)SpirvBuiltIn.SampleMask);
+                    _interfaces.Add(_pixelSampleMaskOutput);
+                }
 
                 var declaredPixelOutputs =
                     Environment.GetEnvironmentVariable(
@@ -1249,10 +1324,14 @@ public static partial class Gen5SpirvTranslator
             {
                 var fragCoord = Load(_vec4Type, _fragCoordInput);
                 EmitPixelInputState(fragCoord);
+                if (_pixelDepthOutput != 0)
+                    Store(_pixelDepthOutput, _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, fragCoord, 2));
                 foreach (var output in _pixelOutputs.Values)
                 {
                     Store(output.Variable, _module.ConstantNull(output.Type));
                 }
+                if (_pixelSampleMaskOutput != 0)
+                    Store(PixelSampleMaskOutputElement(), Bitcast(_intType, UInt(uint.MaxValue)));
             }
             else
             {
@@ -3015,7 +3094,7 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
-            var vector = Load(_vec4Type, input);
+            var vector = LoadOrdinaryInterpolant(input);
             var component = _module.AddInstruction(
                 SpirvOp.CompositeExtract,
                 _floatType,
@@ -3426,22 +3505,6 @@ public static partial class Gen5SpirvTranslator
             error = string.Empty;
             if (!_request.BufferCandidateTableByMemoryIndex.TryGetValue(memoryIndex, out var table))
             {
-                // A formatted load needs a statically known Vulkan view format.  Most
-                // runtime V#s prove a bounded SRT candidate set above, but a few Yotei
-                // material-lookup paths merge descriptors through control flow and have
-                // no finite, safe candidate table.  Do not reinterpret an arbitrary
-                // device address with a guessed format: a null read is the defined
-                // fallback, matching the bindless-image fallback in ResourceTracker.
-                if (instruction.Opcode.StartsWith("BufferLoadFormat", StringComparison.Ordinal))
-                {
-                    for (uint index = 0; index < control.DwordCount; index++)
-                    {
-                        StoreV(control.VectorData + index, UInt(0));
-                    }
-
-                    return true;
-                }
-
                 error = $"runtime buffer descriptor has no candidate table for {instruction.Opcode}";
                 return false;
             }
@@ -3557,6 +3620,19 @@ public static partial class Gen5SpirvTranslator
                     descriptorWord3,
                     control.VectorData,
                     control.DwordCount);
+                return true;
+            }
+
+            if ((instruction.Opcode is "BufferStoreFormatX" or "BufferStoreFormatXy" or
+                "BufferStoreFormatXyz" or "BufferStoreFormatXyzw") &&
+                _request.Resources.Info.DeviceStoreValidationSources.Keys.Any(index => _request.Memory[index].Pc == instruction.Pc))
+            {
+                var offset = IAdd(UInt(unchecked((uint)control.OffsetBytes)), vectorOffset);
+                var inRange = LogicalAnd(
+                    _module.AddInstruction(SpirvOp.ULessThan, _boolType, vectorIndex, LoadS(control.ScalarResource + 2)),
+                    _module.AddInstruction(SpirvOp.ULessThan, _boolType, offset, stride));
+                EmitExecConditional(() => EmitConditional(inRange, () =>
+                    EmitDeviceBufferFormatStore(baseAddress, byteAddress, descriptorWord3, control)));
                 return true;
             }
 
@@ -3740,6 +3816,76 @@ public static partial class Gen5SpirvTranslator
                 });
             });
             return true;
+        }
+
+        private void EmitDeviceBufferFormatStore(uint baseAddress, uint byteAddress,
+            uint descriptorWord3, Gen5BufferMemoryControl control)
+        {
+            var format = BitwiseAnd(ShiftRightLogical(descriptorWord3, UInt(12)), UInt(0x7F));
+            var (dataFormat, numberFormat) = DecodeGfx10BufferFormat(format);
+            // Materialization proves identity channels, matching component counts,
+            // linear addressing and OOB_SELECT=0 for every possible descriptor.
+            // The format is still decoded on-device, never frozen to one address.
+            for (uint layoutFormat = 1; layoutFormat <= 14; layoutFormat++)
+            {
+                var componentCount = Gfx10UnifiedFormat.ComponentCount(layoutFormat);
+                if (componentCount != control.DwordCount) continue;
+                var capturedFormat = layoutFormat;
+                EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, dataFormat, UInt(layoutFormat)), () =>
+                {
+                    var bytes = Gfx10UnifiedFormat.GetAccessByteSize(capturedFormat, componentCount);
+                    var element = new (uint Value, uint Mask)[(bytes + 3) / 4];
+                    for (var word = 0; word < element.Length; word++) element[word] = (UInt(0), 0);
+                    for (uint component = 0; component < componentCount; component++)
+                    {
+                        Gfx10UnifiedFormat.TryGetComponentLayout(capturedFormat, component, out var byteOffset, out var bitOffset, out var bits);
+                        var input = LoadV(control.VectorData + component);
+                        var encoded = input;
+                        if (bits != 32)
+                        {
+                            encoded = UInt(0);
+                            foreach (uint numeric in new uint[] { 0, 1, 2, 3, 4, 5, 7 })
+                                encoded = SelectUInt(numberFormat, numeric,
+                                    EncodeGfx10BufferComponent(input, bits, numeric, capturedFormat), encoded);
+                        }
+                        var index = (int)(byteOffset / 4);
+                        var shift = (byteOffset & 3) * 8 + bitOffset;
+                        var mask = bits == 32 ? uint.MaxValue : (1u << (int)bits) - 1;
+                        element[index] = (BitwiseOr(element[index].Value, ShiftLeftLogical(encoded, UInt(shift))),
+                            element[index].Mask | (mask << (int)shift));
+                    }
+                    StoreDeviceBufferElementBits(
+                        And64(IAdd64(baseAddress, Widen(byteAddress)), ULong(DeviceAddressMask)), element);
+                });
+            }
+        }
+
+        private void StoreDeviceBufferElementBits(uint address, IReadOnlyList<(uint Value, uint Mask)> element)
+        {
+            var alignment = Narrow(And64(address, ULong(3)));
+            var shift = ShiftLeftLogical(alignment, UInt(3));
+            var aligned = _module.AddInstruction(SpirvOp.IEqual, _boolType, shift, UInt(0));
+            var carryShift = _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(32), shift);
+            var first = And64(address, ULong(~3ul));
+            for (var index = 0; index <= element.Count; index++)
+            {
+                var value = UInt(0);
+                var mask = UInt(0);
+                if (index < element.Count)
+                {
+                    value = ShiftLeftLogical(BitwiseAnd(element[index].Value, UInt(element[index].Mask)), shift);
+                    mask = ShiftLeftLogical(UInt(element[index].Mask), shift);
+                }
+                if (index > 0)
+                {
+                    var previous = element[index - 1];
+                    value = BitwiseOr(value, _module.AddInstruction(SpirvOp.Select, _uintType, aligned, UInt(0),
+                        ShiftRightLogical(BitwiseAnd(previous.Value, UInt(previous.Mask)), carryShift)));
+                    mask = BitwiseOr(mask, _module.AddInstruction(SpirvOp.Select, _uintType, aligned, UInt(0),
+                        ShiftRightLogical(UInt(previous.Mask), carryShift)));
+                }
+                StoreDeviceMaskedWord(IAdd64(first, ULong((ulong)index * 4)), value, mask, _module.ConstantBool(true));
+            }
         }
 
         private void EmitDeviceBufferFormatLoad(
@@ -4886,9 +5032,40 @@ public static partial class Gen5SpirvTranslator
         private bool TryEmitImage(
             Gen5ShaderInstruction instruction,
             Gen5ImageControl image,
-            out string error)
+            out string error,
+            uint? fixedSampler = null)
         {
             error = string.Empty;
+            if (fixedSampler is null && _request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex) &&
+                _request.Resources.FiniteSamplersByMemoryIndex.TryGetValue(memoryIndex, out var finite))
+            {
+                if (finite.Candidates is not { Count: > 0 } candidates ||
+                    !_indirectKeyScratch.TryGetValue(finite.SelectorMemoryIndex, out var scratch))
+                {
+                    error = "finite sampler has no executed selector read";
+                    return false;
+                }
+                var key = Load(_uintType, scratch);
+                var emitted = true;
+                var caseError = string.Empty;
+                foreach (var group in candidates.GroupBy(candidate => candidate.Sampler))
+                {
+                    uint? condition = null;
+                    foreach (var candidate in group)
+                    {
+                        var matches = _module.AddInstruction(SpirvOp.IEqual, _boolType, key, UInt(candidate.Offset));
+                        condition = condition is { } previous
+                            ? _module.AddInstruction(SpirvOp.LogicalOr, _boolType, previous, matches) : matches;
+                    }
+                    EmitConditional(condition!.Value, () =>
+                    {
+                        if (!TryEmitImage(instruction, image, out caseError, group.Key)) emitted = false;
+                    });
+                    if (!emitted) break;
+                }
+                error = caseError;
+                return emitted;
+            }
             SpirvImageResource resource;
             uint imageObject;
             uint dstSelect;
@@ -4905,7 +5082,7 @@ public static partial class Gen5SpirvTranslator
                         EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, selector, UInt((uint)index)), () =>
                         {
                             if (!TryResolveLayoutImage(instruction, image, out var caseResource, out var caseImageObject, out var caseDstSelect, out caseError,
-                                    elementCase))
+                                    elementCase, fixedSampler))
                             {
                                 emitted = false;
                                 return;
@@ -4931,7 +5108,8 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
-                if (!TryResolveLayoutImage(instruction, image, out resource, out imageObject, out dstSelect, out error))
+                if (!TryResolveLayoutImage(instruction, image, out resource, out imageObject, out dstSelect, out error,
+                        fixedSampler: fixedSampler))
                 {
                     return false;
                 }
@@ -4956,6 +5134,13 @@ public static partial class Gen5SpirvTranslator
             out string error)
         {
             error = string.Empty;
+            if (resource.Multisampled &&
+                (instruction.Opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
+                 instruction.Opcode.StartsWith("ImageGather", StringComparison.Ordinal)))
+            {
+                error = $"{instruction.Opcode} requires multisample sampling semantics that are not supported";
+                return false;
+            }
             if (instruction.Opcode == "ImageGetResinfo")
             {
                 var sizeComponentCount = ImageCoordinateComponentCount(resource);
@@ -6308,6 +6493,10 @@ public static partial class Gen5SpirvTranslator
                 arrayOffset);
         }
 
+        private uint PixelSampleMaskOutputElement() => _module.AddInstruction(
+            SpirvOp.AccessChain, _module.TypePointer(SpirvStorageClass.Output, _intType),
+            _pixelSampleMaskOutput, UInt(0));
+
         private bool TryEmitExport(
             Gen5ShaderInstruction instruction,
             Gen5ExportControl export,
@@ -6328,6 +6517,40 @@ public static partial class Gen5SpirvTranslator
                 if (export.ValidMask && _pixelValidMaskActive != 0)
                 {
                     Store(_pixelValidMaskActive, Load(_boolType, _exec));
+                }
+
+                if (export.Target == 8)
+                {
+                    if (_pixelDepthOutput != 0 && (export.EnableMask & 1) != 0)
+                    {
+                        if (export.Compressed)
+                        {
+                            error = "compressed MRTZ cannot export floating-point depth";
+                            return false;
+                        }
+                        var depth = Bitcast(_floatType, LoadV(instruction.Sources[0].Value));
+                        Store(_pixelDepthOutput, _module.AddInstruction(SpirvOp.Select, _floatType,
+                            Load(_boolType, _exec), depth, Load(_floatType, _pixelDepthOutput)));
+                    }
+                    if (_pixelSampleMaskOutput != 0 && (export.EnableMask & 4) != 0)
+                    {
+                        // Compressed MRTZ packs the sample mask into Y[15:0]; it is
+                        // an integer mask, not a pair of half-precision colors.
+                        var mask = LoadV(instruction.Sources[export.Compressed ? 1 : 2].Value);
+                        if (export.Compressed)
+                            mask = BitwiseAnd(mask, UInt(0xFFFF));
+                        if (_request.PixelMaskExportSamples == 1 && _request.PixelRasterizationSamples == 2)
+                        {
+                            mask = _module.AddInstruction(SpirvOp.Select, _uintType,
+                                _module.AddInstruction(SpirvOp.INotEqual, _boolType,
+                                    BitwiseAnd(mask, UInt(1)), UInt(0)), UInt(3), UInt(0));
+                        }
+                        var pointer = PixelSampleMaskOutputElement();
+                        var value = _module.AddInstruction(SpirvOp.Select, _intType,
+                            Load(_boolType, _exec), Bitcast(_intType, mask), Load(_intType, pointer));
+                        Store(pointer, value);
+                    }
+                    return true;
                 }
 
                 if (!_pixelOutputs.TryGetValue(export.Target, out var output))

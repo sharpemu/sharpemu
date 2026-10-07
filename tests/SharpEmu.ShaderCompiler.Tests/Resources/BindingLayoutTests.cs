@@ -150,15 +150,15 @@ public sealed class BindingLayoutTests
     [Fact]
     public void ImageBindingAbi()
     {
-        Assert.Equal(45u, BindingLayout.ImageBindingCount);
+        Assert.Equal(51u, BindingLayout.ImageBindingCount);
         Assert.Equal(0u, (uint)DescriptorBindingKind.Buffers);
-        Assert.Equal(46u, (uint)DescriptorBindingKind.Samplers);
-        Assert.Equal(47u, (uint)DescriptorBindingKind.GlobalDataShare);
-        Assert.Equal(48u, (uint)DescriptorBindingKind.DeviceAddressPageTable);
-        Assert.Equal(49u, (uint)DescriptorBindingKind.FaultBuffer);
-        Assert.Equal(50u, (uint)DescriptorBindingKind.FlattenedResourceTable);
-        Assert.Equal(51u, (uint)DescriptorBindingKind.ShaderData);
-        Assert.Equal(52u, (uint)DescriptorBindingKind.Count);
+        Assert.Equal(52u, (uint)DescriptorBindingKind.Samplers);
+        Assert.Equal(53u, (uint)DescriptorBindingKind.GlobalDataShare);
+        Assert.Equal(54u, (uint)DescriptorBindingKind.DeviceAddressPageTable);
+        Assert.Equal(55u, (uint)DescriptorBindingKind.FaultBuffer);
+        Assert.Equal(56u, (uint)DescriptorBindingKind.FlattenedResourceTable);
+        Assert.Equal(57u, (uint)DescriptorBindingKind.ShaderData);
+        Assert.Equal(58u, (uint)DescriptorBindingKind.Count);
 
         ImageDimension[] sampledDimensions =
         [
@@ -178,6 +178,10 @@ public sealed class BindingLayoutTests
             Assert.Equal(BindingLayout.FirstImageBinding + index, (uint)kind!.Value);
             Assert.Equal(index, ImageDescriptorBinding.ArrayIndex(kind.Value));
             Assert.Equal(resourceClass, ImageDescriptorBinding.ResourceClass(kind.Value));
+            var described = ImageDescriptorBinding.Describe(kind.Value);
+            Assert.Equal(resourceClass, described.ResourceClass);
+            Assert.Equal(numericClass, described.NumericClass);
+            Assert.Equal(atomic, described.Atomic);
             Assert.Equal(BindingLayout.FirstImageBinding + index, BindingLayout.NativeBindingIndex(ShaderStage.Compute, kind.Value));
             Assert.Equal((uint)DescriptorBindingKind.Count + BindingLayout.FirstImageBinding + index, BindingLayout.NativeBindingIndex(ShaderStage.Pixel, kind.Value));
             index++;
@@ -214,6 +218,10 @@ public sealed class BindingLayoutTests
         CheckBinding(ImageResourceClass.Sampled, ImageNumericClass.Float, ImageDimension.Dim2DArray, false, depthCompare: true);
         CheckBinding(ImageResourceClass.Sampled, ImageNumericClass.Float, ImageDimension.Dim2D, false, cube: true, depthCompare: true);
 
+        foreach (var dimension in storageDimensions)
+            CheckBinding(ImageResourceClass.Storage, ImageNumericClass.Sint, dimension, false);
+        CheckBinding(ImageResourceClass.Storage, ImageNumericClass.Sint, ImageDimension.Dim2D, false, cube: true);
+
         Assert.Equal(BindingLayout.ImageBindingCount, index);
 
         static bool Invalid(ImageResource image) => ImageDescriptorBinding.ForImage(image) is null;
@@ -237,7 +245,10 @@ public sealed class BindingLayoutTests
         invalid.ResourceClass = ImageResourceClass.Storage;
         invalid.Atomic = false;
         invalid.NumericClass = ImageNumericClass.Sint;
+        Assert.False(Invalid(invalid));
+        invalid.Atomic = true;
         Assert.True(Invalid(invalid));
+        invalid.Atomic = false;
         invalid.NumericClass = ImageNumericClass.Float;
         invalid.Dimension = ImageDimension.Dim2DMsaa;
         Assert.True(Invalid(invalid));

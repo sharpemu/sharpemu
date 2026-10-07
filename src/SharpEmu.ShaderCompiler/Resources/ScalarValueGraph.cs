@@ -21,6 +21,8 @@ public sealed partial class ScalarValueGraph
     private readonly List<InternedValue> _internedValues = [];
     private readonly record struct InternedValue(ScalarValue Value, ulong Payload, ulong Identity, int Next);
     private readonly List<ScalarValue> _values = [];
+    internal Dictionary<uint, ScalarValue> LaneSelectionMasks { get; } = [];
+    internal Dictionary<uint, ScalarValue> InstructionExecutionMasks { get; } = [];
 
     private ScalarValueGraph(Gen5ShaderProgram program, IrControlFlowGraph controlFlow, MemoryAccessTable memory, uint userDataBase, uint userDataCount,
         uint waveSize)
@@ -60,12 +62,13 @@ public sealed partial class ScalarValueGraph
             : _invariantPhis.GetOrAdd(value, static (phi, memory) => ScalarValueEquivalence.ResolveInvariantPhi(memory, phi), Memory);
 
     public static ScalarValueGraph Build(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
-        IReadOnlySet<uint>? fixedFunctionVertexLoads = null, uint waveSize = 64)
+        IReadOnlySet<uint>? fixedFunctionVertexLoads = null, uint waveSize = 64,
+        Gen5ComputeSystemRegisters? computeSystemRegisters = null)
     {
         var controlFlow = IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance);
         var graph = new ScalarValueGraph(program, controlFlow, MemoryAccessTable.Build(program, fixedFunctionVertexLoads), userDataBase, userDataCount,
             waveSize);
-        new Builder(graph).Run();
+        new Builder(graph, computeSystemRegisters).Run();
         return graph;
     }
 
@@ -74,6 +77,8 @@ public sealed partial class ScalarValueGraph
     internal ScalarValue Constant(uint value) => Intern(ScalarValueKind.Constant, ScalarValueType.U32, value);
 
     internal ScalarValue MemoryAperture(uint operand) => Intern(ScalarValueKind.MemoryAperture, ScalarValueType.U32, operand);
+
+    internal ScalarValue WorkgroupId(uint axis) => Intern(ScalarValueKind.WorkgroupId, ScalarValueType.U32, axis);
 
     internal ScalarValue Constant(ulong value) => Intern(ScalarValueKind.Constant, ScalarValueType.U64, value);
 

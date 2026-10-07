@@ -20,9 +20,31 @@ public static partial class Gen5MslTranslator
         private bool TryEmitImage(
             Gen5ShaderInstruction instruction,
             Gen5ImageControl image,
-            out string error)
+            out string error,
+            uint? fixedSampler = null)
         {
             error = string.Empty;
+            if (fixedSampler is null && _request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex) &&
+                _request.Resources.FiniteSamplersByMemoryIndex.TryGetValue(memoryIndex, out var finite))
+            {
+                if (finite.Candidates is not { Count: > 0 } candidates ||
+                    !_indirectKeyScratch.TryGetValue(finite.SelectorMemoryIndex, out var scratch))
+                {
+                    error = "finite sampler has no executed selector read";
+                    return false;
+                }
+                foreach (var group in candidates.GroupBy(candidate => candidate.Sampler))
+                {
+                    Line($"if ({string.Join(" || ", group.Select(candidate => $"{scratch} == {candidate.Offset}u"))})");
+                    Line("{");
+                    _indent++;
+                    var emitted = TryEmitImage(instruction, image, out error, group.Key);
+                    _indent--;
+                    Line("}");
+                    if (!emitted) return false;
+                }
+                return true;
+            }
             if (instruction.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
             {
                 // Metal has no bound representation of GFX10's raw BVH
@@ -52,7 +74,7 @@ public static partial class Gen5MslTranslator
                         Line("{");
                         _indent++;
                         var emitted =
-                            TryResolveLayoutImage(instruction, image, out texture, out samplerName, out kind, out isStorage, out dstSelect, out mipLevel, out error, elements[index]) &&
+                            TryResolveLayoutImage(instruction, image, out texture, out samplerName, out kind, out isStorage, out dstSelect, out mipLevel, out error, elements[index], fixedSampler) &&
                             EmitImageOperation(instruction, image, texture, samplerName, kind, isStorage, dstSelect, mipLevel, out error);
                         _indent--;
                         Line("}");
@@ -70,7 +92,8 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                if (!TryResolveLayoutImage(instruction, image, out texture, out samplerName, out kind, out isStorage, out dstSelect, out mipLevel, out error))
+                if (!TryResolveLayoutImage(instruction, image, out texture, out samplerName, out kind, out isStorage, out dstSelect, out mipLevel, out error,
+                        fixedSampler: fixedSampler))
                 {
                     return false;
                 }

@@ -7,6 +7,11 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 // Reads one dword of guest memory; false when the address cannot be read.
 public delegate bool GuestWordReader(ulong address, out uint word);
+// Returns the complete guest allocation written through an image descriptor.
+public delegate bool GuestImageRangeReader(ReadOnlySpan<uint> image, out ulong address, out ulong size);
+public delegate bool GuestSampledByteDomainReader(ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler,
+    uint channels, bool gathered, GuestWordReader cleanReader, out uint[] values);
+public delegate bool FlatParameterDomainReader(uint attribute, uint channel, GuestWordReader cleanReader, out uint[] values);
 
 // What one draw supplies to materialise a plan: its user data, the shader base and
 // the two memory readers. The clean reader refuses memory the GPU may still own.
@@ -17,6 +22,10 @@ public sealed class ResourceRuntimeInputs
     public GuestWordReader? ReadMemory { get; init; }
     public GuestWordReader? ReadCleanMemory { get; init; }
     public ComputeSelectorState? ComputeState { get; init; }
+    public bool OtherStageMayWriteMemory { get; init; }
+    public GuestImageRangeReader? ReadImageWriteRange { get; init; }
+    public GuestSampledByteDomainReader? ReadPointSampledByteDomain { get; init; }
+    public FlatParameterDomainReader? ReadFlatParameterDomain { get; init; }
 
     // Told true before the flattened table's words are evaluated and false after, so a reader
     // wrapper can tell the words only the table reads from those the descriptors depend on.
@@ -33,6 +42,10 @@ public sealed class ResourceRuntimeInputs
         ReadMemory = reader,
         ReadCleanMemory = ReadCleanMemory,
         ComputeState = ComputeState,
+        OtherStageMayWriteMemory = OtherStageMayWriteMemory,
+        ReadImageWriteRange = ReadImageWriteRange,
+        ReadPointSampledByteDomain = ReadPointSampledByteDomain,
+        ReadFlatParameterDomain = ReadFlatParameterDomain,
         TablePhase = TablePhase,
         ReadResidentMemory = ReadResidentMemory,
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),
@@ -40,4 +53,5 @@ public sealed class ResourceRuntimeInputs
 }
 
 public readonly record struct ComputeSelectorState(uint WaveSize, uint ThreadsX, uint ThreadsY, uint ThreadsZ,
-    bool HasPartialWorkgroups, uint LocalDataShareDwords, int LocalInvocationIdComponents);
+    bool HasPartialWorkgroups, uint LocalDataShareDwords, int LocalInvocationIdComponents,
+    uint DispatchGroupsX = 0, uint DispatchGroupsY = 0, uint DispatchGroupsZ = 0);

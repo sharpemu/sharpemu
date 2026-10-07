@@ -283,9 +283,13 @@ public static partial class AgcExports
     public static int AcbJump(CpuContext ctx)
     {
         var acb = ctx[CpuRegister.Rdi];
-        var target = ctx[CpuRegister.Rsi];
-        var sizeDwords = (uint)ctx[CpuRegister.Rdx];
-        if (acb == 0)
+        var controlArgument = ctx[CpuRegister.Rsi];
+        var target = ctx[CpuRegister.Rdx];
+        var sizeDwords = ctx[CpuRegister.Rcx];
+        // The export places a zero control argument before the target and size.
+        // Other control values require a separately established packet encoding.
+        if (acb == 0 || controlArgument != 0 || sizeDwords > 0xFFFFFu ||
+            (target & 3) != 0 || (target >> 48) != 0)
         {
             return ReturnPointer(ctx, 0);
         }
@@ -293,7 +297,7 @@ public static partial class AgcExports
         const uint chainMode = 1;
         var control = 0x0F20_0000u |
                       (chainMode << 20) |
-                      (sizeDwords & 0xFFFFFu);
+                      (uint)sizeDwords;
         if (!TryAllocateCommandDwords(ctx, acb, 4, out var cmd) ||
             !ctx.TryWriteUInt32(cmd, Pm4(4, ItIndirectBuffer, RZero)) ||
             !ctx.TryWriteUInt32(cmd + 4, (uint)(target & 0xFFFF_FFFFUL)) ||

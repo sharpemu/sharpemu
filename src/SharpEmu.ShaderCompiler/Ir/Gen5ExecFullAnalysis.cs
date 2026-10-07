@@ -31,7 +31,17 @@ public static class Gen5ExecFullAnalysis
     }
 
     // Pcs of the instructions that start with a full EXEC.
-    public static IReadOnlySet<uint> Analyze(Gen5ShaderProgram program, bool wave32)
+    public static IReadOnlySet<uint> Analyze(Gen5ShaderProgram program, bool wave32) => AnalyzeCore(program, wave32, null);
+
+    // Instructions whose EXEC can only contain lanes initialized by one vector
+    // write. Joins require this on every path; unknown expansions decline it.
+    public static IReadOnlySet<uint> AnalyzeInitializedLanes(Gen5ShaderProgram program, uint initializationPc, bool wave32) =>
+        AnalyzeCore(program, wave32, initializationPc);
+
+    public static IReadOnlySet<uint> AnalyzeMatchingExecutionLanes(Gen5ShaderProgram program, uint referencePc, bool wave32) =>
+        AnalyzeCore(program, wave32, referencePc, allowSubsets: false);
+
+    private static IReadOnlySet<uint> AnalyzeCore(Gen5ShaderProgram program, bool wave32, uint? initializationPc, bool allowSubsets = true)
     {
         var instructions = program.Instructions;
         var result = new HashSet<uint>();
@@ -52,7 +62,35 @@ public static class Gen5ExecFullAnalysis
         }
 
         var states = new State[instructions.Count];
-        states[0] = new State(true, true, 0);
+        if (initializationPc.HasValue && !indexByPc.ContainsKey(initializationPc.Value)) return result;
+        // Quad expansion preserves a subset only when the initialization mask
+        // already contains complete quads. Require the same EXEC as immediately
+        // after a dominating WQM instruction, rather than assuming entry lanes.
+        var quadClosures = !initializationPc.HasValue || !allowSubsets ? [] :
+            Enumerable.Range(0, instructions.Count - 1).Where(index =>
+                instructions[index].Pc < initializationPc.Value &&
+                !instructions.Take(index).Any(instruction => Gen5IrBranchResolver.IsTerminator(instruction) ||
+                    Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out _)) &&
+                instructions[index] is { Opcode: "SWqmB64", Sources.Count: 1, Destinations.Count: 1 } wqm &&
+                wqm.Sources[0] == Gen5Operand.Scalar(ExecLow) && wqm.Destinations[0] == Gen5Operand.Scalar(ExecLow) &&
+                AnalyzeCore(program, wave32, instructions[index + 1].Pc, allowSubsets: false).Contains(initializationPc.Value)).ToArray();
+        var quadClosed = quadClosures.Length != 0;
+        UInt128 initialCopies = 0;
+        foreach (var index in quadClosures)
+        {
+            // The exact EXEC saved immediately before WQM is contained in its
+            // quad closure. Keep that fact only while both SGPR words survive.
+            if (instructions.Skip(index).Take(indexByPc[initializationPc!.Value] - index).Any(instruction =>
+                    Gen5IrBranchResolver.IsTerminator(instruction) || Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out _)) ||
+                index == 0 || instructions[index - 1] is not { Opcode: "SMovB64", Sources.Count: 1, Destinations.Count: 1 } save ||
+                save.Sources[0] != Gen5Operand.Scalar(ExecLow) || save.Destinations[0] is not
+                    { Kind: Gen5OperandKind.ScalarRegister, Value: < ExecLow } destination || (destination.Value & 1) != 0) continue;
+            var saved = new State(true, false, Bit(destination.Value) | Bit(destination.Value + 1));
+            for (var cursor = index; cursor < indexByPc[initializationPc!.Value]; cursor++)
+                saved = Transfer(instructions[cursor], saved, wave32, subset: true, relative: true, quadClosed: true);
+            initialCopies |= saved.FullCopies;
+        }
+        states[0] = new State(true, !initializationPc.HasValue, 0);
         var pending = new Queue<int>();
         var queued = new bool[instructions.Count];
         pending.Enqueue(0);
@@ -61,7 +99,9 @@ public static class Gen5ExecFullAnalysis
         {
             queued[index] = false;
             var instruction = instructions[index];
-            var output = Transfer(instruction, states[index], wave32);
+            var input = instruction.Pc == initializationPc ? new State(true, true, initialCopies) : states[index];
+            var output = Transfer(instruction, input, wave32, initializationPc.HasValue && allowSubsets,
+                initializationPc.HasValue, quadClosed);
             void Flow(int successor)
             {
                 var merged = State.Meet(states[successor], output);
@@ -104,7 +144,7 @@ public static class Gen5ExecFullAnalysis
 
         for (var index = 0; index < instructions.Count; index++)
         {
-            if (states[index].Reached && states[index].ExecFull)
+            if (states[index].Reached && (states[index].ExecFull || instructions[index].Pc == initializationPc))
             {
                 result.Add(instructions[index].Pc);
             }
@@ -113,7 +153,8 @@ public static class Gen5ExecFullAnalysis
         return result;
     }
 
-    private static State Transfer(Gen5ShaderInstruction instruction, State input, bool wave32)
+    private static State Transfer(Gen5ShaderInstruction instruction, State input, bool wave32, bool subset = false,
+        bool relative = false, bool quadClosed = false)
     {
         if (!input.Reached)
         {
@@ -125,6 +166,9 @@ public static class Gen5ExecFullAnalysis
         var opcode = instruction.Opcode;
         var sources = instruction.Sources;
         var destinations = instruction.Destinations;
+        // GFX10 VCMPX writes only EXEC; legacy SDWA/VOP3 destination bits
+        // must not invalidate an SGPR holding a saved execution mask.
+        var executionCompare = opcode.StartsWith("VCmpx", StringComparison.Ordinal);
         var wide = opcode.StartsWith('S') &&
             (opcode.EndsWith("B64", StringComparison.Ordinal) ||
              opcode.EndsWith("U64", StringComparison.Ordinal) ||
@@ -135,7 +179,7 @@ public static class Gen5ExecFullAnalysis
         var writesExec = false;
         foreach (var destination in destinations)
         {
-            if (destination.Kind != Gen5OperandKind.ScalarRegister)
+            if (destination.Kind != Gen5OperandKind.ScalarRegister || executionCompare)
             {
                 continue;
             }
@@ -147,7 +191,7 @@ public static class Gen5ExecFullAnalysis
             }
         }
 
-        var scalarDestination = instruction.Control switch
+        var scalarDestination = executionCompare ? null : instruction.Control switch
         {
             Gen5Vop3Control control => control.ScalarDestination,
             Gen5SdwaControl control => control.ScalarDestination,
@@ -198,7 +242,7 @@ public static class Gen5ExecFullAnalysis
                 switch (opcode)
                 {
                     case "SWqmB64" or "SWqmB32" when sources.Count == 1 && IsExec(sources[0]):
-                        nextExecFull = execFull;
+                        nextExecFull = execFull && (!relative || quadClosed);
                         break;
                     case "SMovB64" or "SMovB32" when sources.Count == 1:
                         nextExecFull = IsFullCopy(sources[0], copies, execFull, wide);
@@ -221,6 +265,27 @@ public static class Gen5ExecFullAnalysis
             }
         }
 
+        if (subset && writesExec)
+        {
+            nextExecFull = opcode.StartsWith("VCmpx", StringComparison.Ordinal) || opcode is "SAndSaveexecB64" or "SAndSaveexecB32"
+                ? execFull : false;
+            var onlyExec = destinations.Count == 1 && destinations[0] == Gen5Operand.Scalar(ExecLow);
+            if (onlyExec && (wide || wave32) && scalarDestination is null)
+            {
+                bool Known(int index) => sources.Count > index && IsFullCopy(sources[index], copies, execFull, wide);
+                nextExecFull = opcode switch
+                {
+                    "SMovB64" or "SMovB32" => Known(0),
+                    "SWqmB64" or "SWqmB32" => quadClosed && Known(0),
+                    "SAndB64" or "SAndB32" => Known(0) || Known(1),
+                    "SAndn2B64" or "SAndn2B32" => Known(0),
+                    "SAndn1B64" or "SAndn1B32" => Known(1),
+                    "SOrB64" or "SOrB32" => Known(0) && Known(1),
+                    _ => nextExecFull,
+                };
+            }
+        }
+
         if (opcode.Contains("Saveexec", StringComparison.Ordinal) && execFull && destinations.Count >= 1 &&
             destinations[0].Kind == Gen5OperandKind.ScalarRegister && destinations[0].Value < ExecLow)
         {
@@ -230,6 +295,23 @@ public static class Gen5ExecFullAnalysis
             {
                 nextCopies |= Bit(destinations[0].Value + 1);
             }
+        }
+
+        if (subset && !writesExec && destinations.Count == 1 &&
+            destinations[0] is { Kind: Gen5OperandKind.ScalarRegister, Value: < ExecLow } savedDestination && (wide || wave32))
+        {
+            bool Known(int index) => sources.Count > index && IsFullCopy(sources[index], copies, execFull, wide);
+            var known = opcode switch
+            {
+                "SMovB64" or "SMovB32" => Known(0),
+                "SAndB64" or "SAndB32" => Known(0) || Known(1),
+                "SAndn2B64" or "SAndn2B32" => Known(0),
+                "SAndn1B64" or "SAndn1B32" => Known(1),
+                "SOrB64" or "SOrB32" => Known(0) && Known(1),
+                "SWqmB64" or "SWqmB32" => quadClosed && Known(0),
+                _ => false,
+            };
+            if (known) nextCopies |= Bit(savedDestination.Value) | (wide ? Bit(savedDestination.Value + 1) : 0);
         }
 
         return new State(true, nextExecFull, nextCopies);

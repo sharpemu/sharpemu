@@ -111,6 +111,8 @@ internal static unsafe partial class VulkanVideoPresenter
             (13, 7, _) or (14, 7, _) => Format.R32G32B32A32Sfloat,
             (20, 0, _) => Format.R32Uint,
             (29, 0, _) or (4, 0, _) => Format.R32Sfloat,
+            (1, 6 or 9, _) => Format.R8Srgb,
+            (3, 6 or 9, _) => Format.R8G8Srgb,
             (1, 0, _) or (36, 0, _) => Format.R8Unorm,
             (1, 4, _) or (49, 0, _) => Format.R8Uint,
             (3, 0, _) => Format.R8G8Unorm,

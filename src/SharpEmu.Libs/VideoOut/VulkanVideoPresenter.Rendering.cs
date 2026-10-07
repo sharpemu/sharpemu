@@ -338,6 +338,38 @@ internal static unsafe partial class VulkanVideoPresenter
             _boundDepthLoadState = depth.LoadState;
         }
 
+        public void ConfigureDepthSampleLocations(in DepthAttachmentState depth, ReadOnlySpan<uint> words, ImageLayout layout, ImageAspectFlags writeAspects)
+        {
+            var image = _imageCache.GetImage(depth.Image);
+            if ((image.Backing.Flags & ImageCreateFlags.CreateSampleLocationsCompatibleDepthBitExt) == 0)
+                throw SubmissionScheduler.Fatal("Custom sample positions require a compatible depth image.");
+            var locations = new SampleLocationEXT[8];
+            for (var pixel = 0; pixel < 4; pixel++)
+                for (var sample = 0; sample < 2; sample++)
+                {
+                    var word = words[pixel * 4] >> (sample * 8);
+                    var x = (int)(word << 28) >> 28;
+                    var y = (int)(word << 24) >> 28;
+                    locations[pixel * 2 + sample] = new SampleLocationEXT((x + 8) / 16f, (y + 8) / 16f);
+                }
+            if (image.Backing.SampleLocations is null || !locations.AsSpan().SequenceEqual(image.Backing.SampleLocations))
+            {
+                if (!depth.LoadClear && (image.Backing.SampleLocations is not null ||
+                    image.Backing.State.Layout != ImageLayout.Undefined || image.Backing.SubresourceStates is not null))
+                    throw SubmissionScheduler.Fatal("Changing depth sample positions requires a guest depth clear.");
+                var view = depth.Target.Target.Request.View;
+                if (view.BaseLevel != 0 || view.LevelCount != image.Backing.MipLevels ||
+                    view.BaseLayer != 0 || view.LayerCount != image.Backing.Layers)
+                    throw SubmissionScheduler.Fatal("Changing depth sample positions requires a complete image view.");
+                EndRendering();
+                // The transition describes the positions of the previous depth writes.
+                TransitionDepthAttachment(in depth, layout, writeAspects);
+                image.Backing.SampleLocations = locations;
+                return;
+            }
+            TransitionDepthAttachment(in depth, layout, writeAspects);
+        }
+
         public BufferBinding NullBuffer => new(_bufferCache.GetBuffer(GuestBufferCache.NullBufferId).Handle.Handle, 0);
 
         public BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten)
@@ -908,6 +940,17 @@ internal static unsafe partial class VulkanVideoPresenter
             _nextDrawWritesMemory = true;
         }
 
+        public void PrepareGraphicsPipeline(in PipelineHandle pipeline)
+        {
+            if (!_supportsNativeTwoSampleMixed || _supportsVariableSampleLocations || !_renderingActive)
+                return;
+            var next = RequirePipelineEntry(in pipeline).Description;
+            var previous = _boundGraphicsPipeline?.Description;
+            if (next is not null && previous is not null && next.StaticParameters.Samples == 2 &&
+                previous.StaticParameters.Samples == 2 &&
+                !next.Rendering.SampleLocationWords.AsSpan().SequenceEqual(previous.Rendering.SampleLocationWords))
+                EndRendering();
+        }
         public void BindPipeline(PipelineBindPoint bindPoint, in PipelineHandle pipeline)
         {
             var entry = RequirePipelineEntry(in pipeline);

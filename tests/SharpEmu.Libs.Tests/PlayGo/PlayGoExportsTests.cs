@@ -18,6 +18,8 @@ public sealed class PlayGoStateCollection
 public sealed class PlayGoExportsTests : IDisposable
 {
     private const int BadChunkId = unchecked((int)0x80B2000C);
+    private const int BadHandle = unchecked((int)0x80B20009);
+    private const int NotSupportPlayGo = unchecked((int)0x80B2000E);
     private const byte LocusNotDownloaded = 0;
     private const byte LocusLocalFast = 3;
     private const ulong MemoryBase = 0x1_0000_0000;
@@ -67,13 +69,20 @@ public sealed class PlayGoExportsTests : IDisposable
     }
 
     [Theory]
+    [InlineData(UnusableMetadataKind.ScenarioOnly)]
     [InlineData(UnusableMetadataKind.DatOnly)]
     [InlineData(UnusableMetadataKind.MalformedChunkDefinitions)]
     [InlineData(UnusableMetadataKind.UnrecognizedChunkDefinitions)]
-    public void GetLocus_UnparseableMetadata_RemainsPermissive(UnusableMetadataKind metadataKind)
+    public void Open_UnusableChunkMap_ReportsUnsupportedWithoutPublishingHandle(UnusableMetadataKind metadataKind)
     {
         switch (metadataKind)
         {
+            case UnusableMetadataKind.ScenarioOnly:
+                var scenarioDirectory = Directory.CreateDirectory(Path.Combine(_app0Root, "sce_sys"));
+                File.WriteAllText(
+                    Path.Combine(scenarioDirectory.FullName, "playgo-scenario.json"),
+                    "{\"scenarioCount\":1,\"scenarios\":[{\"id\":0,\"type\":\"playmode\"}]}");
+                break;
             case UnusableMetadataKind.DatOnly:
                 var sceSys = Directory.CreateDirectory(Path.Combine(_app0Root, "sce_sys"));
                 File.WriteAllBytes(Path.Combine(sceSys.FullName, "playgo-chunk.dat"), [0x70, 0x6C, 0x67, 0x6F]);
@@ -90,10 +99,38 @@ public sealed class PlayGoExportsTests : IDisposable
                 throw new ArgumentOutOfRangeException(nameof(metadataKind), metadataKind, null);
         }
 
-        var handle = InitializeAndOpen();
+        Initialize();
+        Assert.True(_ctx.TryWriteUInt32(HandleAddress, 0xDEADBEEF));
+        _ctx[CpuRegister.Rdi] = HandleAddress;
+        _ctx[CpuRegister.Rsi] = 0;
+        Assert.Equal(NotSupportPlayGo, PlayGoExports.PlayGoOpen(_ctx));
+        Assert.True(_ctx.TryReadUInt32(HandleAddress, out var unchangedHandle));
+        Assert.Equal(0xDEADBEEFu, unchangedHandle);
+        Assert.Equal(BadHandle, GetLocus(1, [0]));
+    }
 
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [42]));
-        Assert.Equal(new byte[] { LocusLocalFast }, ReadLoci(1));
+    [Fact]
+    public void GetChunkId_ParsedChunkMap_EnumeratesOnlyDefinedIds()
+    {
+        File.WriteAllText(
+            Path.Combine(_app0Root, "playgo-chunkdefs.xml"),
+            "<playgo default_chunk=\"2\"><chunk id=\"2\"/><chunk id=\"7\"/></playgo>");
+        var handle = InitializeAndOpen();
+        const ulong outCount = MemoryBase + 0x500;
+        _ctx[CpuRegister.Rdi] = handle;
+        _ctx[CpuRegister.Rsi] = ChunkIdsAddress;
+        _ctx[CpuRegister.Rdx] = 8;
+        _ctx[CpuRegister.Rcx] = outCount;
+
+        Assert.Equal(0, PlayGoExports.PlayGoGetChunkId(_ctx));
+        Assert.True(_ctx.TryReadUInt32(outCount, out var count));
+        Assert.Equal(2u, count);
+        Assert.True(_ctx.TryReadUInt16(ChunkIdsAddress, out var first));
+        Assert.True(_ctx.TryReadUInt16(ChunkIdsAddress + 2, out var second));
+        Assert.Equal((ushort)2, first);
+        Assert.Equal((ushort)7, second);
+        Assert.Equal(0, GetLocus(handle, [first, second]));
+        Assert.Equal(new byte[] { LocusLocalFast, LocusLocalFast }, ReadLoci(2));
     }
 
     [Fact]
@@ -137,7 +174,7 @@ public sealed class PlayGoExportsTests : IDisposable
         Directory.Delete(_app0Root, recursive: true);
     }
 
-    private uint InitializeAndOpen()
+    private void Initialize()
     {
         Span<byte> initParams = stackalloc byte[16];
         BinaryPrimitives.WriteUInt64LittleEndian(initParams, InitBufferAddress);
@@ -148,7 +185,11 @@ public sealed class PlayGoExportsTests : IDisposable
         Assert.Equal(
             (int)OrbisGen2Result.ORBIS_GEN2_OK,
             PlayGoExports.PlayGoInitialize(_ctx));
+    }
 
+    private uint InitializeAndOpen()
+    {
+        Initialize();
         _ctx[CpuRegister.Rdi] = HandleAddress;
         _ctx[CpuRegister.Rsi] = 0;
         Assert.Equal(
@@ -202,6 +243,7 @@ public sealed class PlayGoExportsTests : IDisposable
 
     public enum UnusableMetadataKind
     {
+        ScenarioOnly,
         DatOnly,
         MalformedChunkDefinitions,
         UnrecognizedChunkDefinitions,

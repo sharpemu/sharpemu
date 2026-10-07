@@ -28,6 +28,70 @@ public sealed class KernelMemoryCompatExportsTests
     private const ulong SpanSizeOutAddress = GuestMemoryBase + 0x110;
 
     [Theory]
+    [InlineData("/dev/urandom")]
+    [InlineData("/dev/random")]
+    public void EntropyDevice_ReadsFreshBytesAndCloses(string path)
+    {
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x2000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(memory.TryWrite(GuestMemoryBase, Encoding.UTF8.GetBytes(path + "\0")));
+        ctx[CpuRegister.Rdi] = GuestMemoryBase;
+        ctx[CpuRegister.Rsi] = 0;
+        Assert.Equal(0, KernelMemoryCompatExports.PosixOpen(ctx));
+        var fd = ctx[CpuRegister.Rax];
+        Assert.True(fd > 2);
+        try
+        {
+            ctx[CpuRegister.Rdi] = fd;
+            ctx[CpuRegister.Rsi] = GuestMemoryBase + 0x200;
+            Assert.Equal(0, KernelMemoryCompatExports.PosixFstat(ctx));
+            var stat = new byte[120];
+            Assert.True(memory.TryRead(GuestMemoryBase + 0x200, stat));
+            Assert.Equal(0x2000, BitConverter.ToUInt16(stat, 8) & 0xF000);
+            Assert.Equal(0L, BitConverter.ToInt64(stat, 72));
+            var first = new byte[64];
+            var second = new byte[64];
+            ctx[CpuRegister.Rdi] = fd;
+            ctx[CpuRegister.Rsi] = GuestMemoryBase + 0x100;
+            ctx[CpuRegister.Rdx] = 64;
+            Assert.Equal(0, KernelMemoryCompatExports.PosixRead(ctx));
+            Assert.Equal(64UL, ctx[CpuRegister.Rax]);
+            Assert.True(memory.TryRead(GuestMemoryBase + 0x100, first));
+            Assert.Equal(0, KernelMemoryCompatExports.PosixRead(ctx));
+            Assert.True(memory.TryRead(GuestMemoryBase + 0x100, second));
+            Assert.False(first.SequenceEqual(second));
+            Assert.Contains(first, value => value != 0);
+            ctx[CpuRegister.Rsi] = 0;
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                KernelMemoryCompatExports.KernelReadUnderscore(ctx));
+        }
+        finally
+        {
+            ctx[CpuRegister.Rdi] = fd;
+            Assert.Equal(0, KernelMemoryCompatExports.PosixClose(ctx));
+        }
+        ctx[CpuRegister.Rsi] = GuestMemoryBase + 0x100;
+        ctx[CpuRegister.Rdx] = 64;
+        Assert.Equal(-1, KernelMemoryCompatExports.PosixRead(ctx));
+        Assert.Equal(-1, KernelMemoryCompatExports.PosixFstat(ctx));
+        Assert.Equal(-1, KernelMemoryCompatExports.PosixClose(ctx));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(0x20000)]
+    public void EntropyDevice_RejectsUnsupportedAccess(int flags)
+    {
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(memory.TryWrite(GuestMemoryBase, Encoding.UTF8.GetBytes("/dev/urandom\0")));
+        ctx[CpuRegister.Rdi] = GuestMemoryBase;
+        ctx[CpuRegister.Rsi] = unchecked((ulong)flags);
+        Assert.Equal(-1, KernelMemoryCompatExports.PosixOpen(ctx));
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void UppercaseStringConversion_ConsumesWideArgumentBetweenNarrowStrings(bool useVaList)

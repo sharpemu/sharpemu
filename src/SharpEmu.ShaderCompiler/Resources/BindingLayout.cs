@@ -55,6 +55,8 @@ public static class ImageDescriptorBinding
     private const uint SampledCompare2DBinding = 43;
     private const uint SampledCompare2DArrayBinding = 44;
     private const uint SampledCompareCubeBinding = 45;
+    private const uint StorageSintBinding = 46;
+    private const uint StorageCubeSintBinding = 51;
 
     public static DescriptorBindingKind? ForImage(ImageResource image)
     {
@@ -115,6 +117,7 @@ public static class ImageDescriptorBinding
                 {
                     ImageNumericClass.Float => (DescriptorBindingKind)StorageCubeFloatBinding,
                     ImageNumericClass.Uint => (DescriptorBindingKind)StorageCubeUintBinding,
+                    ImageNumericClass.Sint => (DescriptorBindingKind)StorageCubeSintBinding,
                     _ => null,
                 };
             }
@@ -167,6 +170,9 @@ public static class ImageDescriptorBinding
                         break;
                     case ImageNumericClass.Uint:
                         baseBinding = StorageUintBinding;
+                        break;
+                    case ImageNumericClass.Sint:
+                        baseBinding = StorageSintBinding;
                         break;
                     default:
                         return null;
@@ -249,7 +255,7 @@ public static class ImageDescriptorBinding
     public static uint ArrayIndex(DescriptorBindingKind kind) => (uint)kind - BindingLayout.FirstImageBinding;
 
     public static bool IsCube(DescriptorBindingKind kind) =>
-        (uint)kind is >= SampledCubeFloatBinding and <= AtomicCubeUintBinding or SampledCompareCubeBinding;
+        (uint)kind is >= SampledCubeFloatBinding and <= AtomicCubeUintBinding or SampledCompareCubeBinding or StorageCubeSintBinding;
 
     private static readonly ImageDimension[] SampledDimensions =
     [
@@ -311,7 +317,12 @@ public static class ImageDescriptorBinding
             return (ImageResourceClass.Storage, offset / 5 == 0 ? ImageNumericClass.Float : ImageNumericClass.Uint, StorageDimensions[offset % 5], false);
         }
 
-        if (index >= AtomicUintBinding && index < (uint)DescriptorBindingKind.Samplers)
+        if (index >= StorageSintBinding && index < StorageCubeSintBinding)
+            return (ImageResourceClass.Storage, ImageNumericClass.Sint, StorageDimensions[index - StorageSintBinding], false);
+        if (index == StorageCubeSintBinding)
+            return (ImageResourceClass.Storage, ImageNumericClass.Sint, ImageDimension.Dim2DArray, false);
+
+        if (index >= AtomicUintBinding && index < SampledCubeFloatBinding)
         {
             return (ImageResourceClass.Storage, ImageNumericClass.Uint, StorageDimensions[index - AtomicUintBinding], true);
         }
@@ -326,7 +337,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 {
     public const uint FirstImageBinding = 1;
     public const uint FirstStorageImageBinding = 22;
-    public const uint ImageBindingCount = 45;
+    public const uint ImageBindingCount = 51;
     public const uint NoShaderBase = uint.MaxValue;
     public const uint ShaderBaseDwordCount = 2;
     private const int ScalarRegisterCount = 256;
@@ -454,7 +465,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             }
         }
 
-        var width = instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
+        var width = instruction.Opcode is "SBitset0B64" or "SBitset1B64" ? 1u :
+            instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
         foreach (var source in instruction.Sources)
         {
             if (source.Kind == Gen5OperandKind.ScalarRegister)
@@ -468,14 +480,14 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         var comparesDestination = instruction.Encoding == Gen5ShaderEncoding.Sopk &&
             instruction.Opcode.StartsWith("SCmpk", StringComparison.Ordinal);
         if (comparesDestination ||
-            instruction.Opcode is "SBitset0B32" or "SBitset1B32" ||
+            instruction.Opcode is "SBitset0B32" or "SBitset1B32" or "SBitset0B64" or "SBitset1B64" ||
             instruction.Encoding == Gen5ShaderEncoding.Sopk && instruction.Opcode is "SAddkI32" or "SMulkI32" or "SCmovkI32")
         {
             foreach (var destination in instruction.Destinations)
             {
                 if (destination.Kind == Gen5OperandKind.ScalarRegister)
                 {
-                    Use(destination.Value, 1);
+                    Use(destination.Value, instruction.Opcode is "SBitset0B64" or "SBitset1B64" ? 2u : 1u);
                 }
             }
         }
@@ -590,7 +602,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
                 throw new ResourcePlanException($"shader binding layout failed: image {index} has an unmapped binding class");
             }
 
-            var dynamic = image.MipMode == ImageMipMode.DynamicStorage;
+            var dynamic = image.MipMode is ImageMipMode.DynamicStorage or ImageMipMode.ExplicitLodGather;
             var count = dynamic ? image.MipCount : 1;
             if (count == 0 || (!dynamic && image.MipCount != 1))
             {

@@ -713,9 +713,79 @@ internal static unsafe partial class VulkanVideoPresenter
         private const string ImageViewMinLodExtensionName = "VK_EXT_image_view_min_lod";
         private const string FillRectangleExtensionName = "VK_NV_fill_rectangle";
         private bool _supportsImageViewMinLod;
+        private bool _supportsNativeTwoSampleMixed;
+        private bool _supportsVariableSampleLocations;
 
         private void CreateDevice()
         {
+            var supportedTwoSampleCombination = false;
+            if (IsDeviceExtensionAvailable("VK_NV_coverage_reduction_mode"))
+            {
+                var function = _vk.GetInstanceProcAddr(_instance, "vkGetPhysicalDeviceSupportedFramebufferMixedSamplesCombinationsNV");
+                if (function.Handle != null)
+                {
+                    var query = (delegate* unmanaged<PhysicalDevice, uint*, FramebufferMixedSamplesCombinationNV*, Result>)function.Handle;
+                    uint count = 0;
+                    var result = query(_physicalDevice, &count, null);
+                    if (result == Result.Success && count <= 4096)
+                    {
+                        var combinations = new FramebufferMixedSamplesCombinationNV[count];
+                        for (var index = 0; index < combinations.Length; index++)
+                            combinations[index].SType = StructureType.FramebufferMixedSamplesCombinationNV;
+                        fixed (FramebufferMixedSamplesCombinationNV* pointer = combinations)
+                        {
+                            var capacity = count;
+                            result = query(_physicalDevice, &count, pointer);
+                            if (result == Result.Success && count <= capacity)
+                                for (var index = 0; index < count; index++)
+                                {
+                                    var combination = combinations[index];
+                                    supportedTwoSampleCombination |= combination.CoverageReductionMode == CoverageReductionModeNV.TruncateNV &&
+                                        combination.RasterizationSamples == SampleCountFlags.Count2Bit &&
+                                        (combination.DepthStencilSamples & SampleCountFlags.Count2Bit) != 0 &&
+                                        (combination.ColorSamples & SampleCountFlags.Count1Bit) != 0;
+                                }
+                        }
+                    }
+                }
+            }
+            var nativeMixed = supportedTwoSampleCombination &&
+                IsDeviceExtensionAvailable("VK_NV_framebuffer_mixed_samples") &&
+                IsDeviceExtensionAvailable("VK_EXT_sample_locations");
+            var nativeMixedFeatures = new PhysicalDeviceCoverageReductionModeFeaturesNV
+            {
+                SType = StructureType.PhysicalDeviceCoverageReductionModeFeaturesNV,
+            };
+            if (nativeMixed)
+            {
+                var coverageQuery = new PhysicalDeviceFeatures2
+                {
+                    SType = StructureType.PhysicalDeviceFeatures2,
+                    PNext = &nativeMixedFeatures,
+                };
+                _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &coverageQuery);
+                nativeMixed &= nativeMixedFeatures.CoverageReductionMode;
+                var sampleLocationProperties = new PhysicalDeviceSampleLocationsPropertiesEXT
+                {
+                    SType = StructureType.PhysicalDeviceSampleLocationsPropertiesExt,
+                };
+                var samplePropertyQuery = new PhysicalDeviceProperties2 { SType = StructureType.PhysicalDeviceProperties2, PNext = &sampleLocationProperties };
+                _vk.GetPhysicalDeviceProperties2(_physicalDevice, &samplePropertyQuery);
+                _supportsVariableSampleLocations = sampleLocationProperties.VariableSampleLocations;
+                var sampleGridProperties = new MultisamplePropertiesEXT { SType = StructureType.MultisamplePropertiesExt };
+                var sampleGridFunction = _vk.GetInstanceProcAddr(_instance, "vkGetPhysicalDeviceMultisamplePropertiesEXT");
+                if (sampleGridFunction.Handle != null)
+                    ((delegate* unmanaged<PhysicalDevice, SampleCountFlags, MultisamplePropertiesEXT*, void>)sampleGridFunction.Handle)(_physicalDevice, SampleCountFlags.Count2Bit, &sampleGridProperties);
+                else
+                    nativeMixed = false;
+                if ((sampleLocationProperties.SampleLocationSampleCounts & SampleCountFlags.Count2Bit) == 0 ||
+                    sampleGridProperties.MaxSampleLocationGridSize.Width < 2 || sampleGridProperties.MaxSampleLocationGridSize.Height < 2 ||
+                    sampleLocationProperties.SampleLocationSubPixelBits < 4 ||
+                    sampleLocationProperties.SampleLocationCoordinateRange[0] > 0f ||
+                    sampleLocationProperties.SampleLocationCoordinateRange[1] < 15f / 16f)
+                    nativeMixed = false;
+            }
+            _supportsNativeTwoSampleMixed = nativeMixed;
             var priority = 1.0f;
             var queueInfos = stackalloc DeviceQueueCreateInfo[2];
             queueInfos[0] = new DeviceQueueCreateInfo
@@ -981,12 +1051,25 @@ internal static unsafe partial class VulkanVideoPresenter
             var maintenance5Extension = (byte*)SilkMarshal.StringToPtr(Maintenance5ExtensionName);
             var imageViewMinLodExtension = (byte*)SilkMarshal.StringToPtr(ImageViewMinLodExtensionName);
             var fillRectangleExtension = (byte*)SilkMarshal.StringToPtr(FillRectangleExtensionName);
+            var nativeMixedExtension = (byte*)SilkMarshal.StringToPtr("VK_NV_framebuffer_mixed_samples");
+            var coverageReductionExtension = (byte*)SilkMarshal.StringToPtr("VK_NV_coverage_reduction_mode");
+            var sampleLocationsExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_sample_locations");
+            var postDepthCoverageExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_post_depth_coverage");
             try
             {
-                var extensions = stackalloc byte*[15];
+                var extensions = stackalloc byte*[19];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
+                _postDepthCoverageEnabled = IsDeviceExtensionAvailable("VK_EXT_post_depth_coverage");
+                if (_postDepthCoverageEnabled)
+                    extensions[extensionCount++] = postDepthCoverageExtension;
+                if (nativeMixed)
+                {
+                    extensions[extensionCount++] = nativeMixedExtension;
+                    extensions[extensionCount++] = coverageReductionExtension;
+                    extensions[extensionCount++] = sampleLocationsExtension;
+                }
                 if (IsDeviceExtensionAvailable("VK_EXT_shader_viewport_index_layer"))
                 {
                     extensions[extensionCount++] = viewportIndexLayerExtension;
@@ -1072,6 +1155,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     PNext = &timelineSemaphoreFeatures,
                 };
                 void* renderingChain = &addressFeatures;
+                if (nativeMixed)
+                {
+                    nativeMixedFeatures.PNext = renderingChain;
+                    renderingChain = &nativeMixedFeatures;
+                }
                 if (supportsSharedInt64Atomics)
                 {
                     atomicInt64Features = new PhysicalDeviceShaderAtomicInt64Features
@@ -1169,6 +1257,10 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             finally
             {
+                SilkMarshal.Free((nint)nativeMixedExtension);
+                SilkMarshal.Free((nint)coverageReductionExtension);
+                SilkMarshal.Free((nint)sampleLocationsExtension);
+                SilkMarshal.Free((nint)postDepthCoverageExtension);
                 SilkMarshal.Free((nint)swapchainExtension);
                 SilkMarshal.Free((nint)maintenance8Extension);
                 SilkMarshal.Free((nint)maintenance5Extension);
@@ -1185,7 +1277,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
-            _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device) { ImageViewMinLodSupported = _supportsImageViewMinLod };
+            _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device) { ImageViewMinLodSupported = _supportsImageViewMinLod, CustomTwoSampleLocationsSupported = _supportsNativeTwoSampleMixed };
             if (_readbackQueueFamilyIndex is { } readbackQueueFamily)
             {
                 _vk.GetDeviceQueue(_device, readbackQueueFamily, 0, out _readbackQueue);

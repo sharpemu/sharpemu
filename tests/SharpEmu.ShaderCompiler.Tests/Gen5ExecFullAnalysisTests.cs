@@ -9,7 +9,116 @@ namespace SharpEmu.ShaderCompiler.Tests;
 
 public sealed class Gen5ExecFullAnalysisTests
 {
+    [Theory]
+    [InlineData("SMovB64", false)]
+    [InlineData("SOrB64", false)]
+    [InlineData("SWqmB64", false)]
+    [InlineData("SAndB64", true)]
+    [InlineData("SAndn2B64", true)]
+    public void InitializedLaneProofRejectsExpansionsButKeepsSubsets(string opcode, bool expected)
+    {
+        var initialization = VectorAdd();
+        if (opcode == "SMovB64") Scalar(opcode, Exec, Gen5Operand.Source(193));
+        else Scalar(opcode, Exec, Gen5Operand.Scalar(Exec), Gen5Operand.Source(193));
+        var use = VectorAdd();
+        var result = Gen5ExecFullAnalysis.AnalyzeInitializedLanes(new Gen5ShaderProgram(0, _program), initialization, false);
+        Assert.Equal(expected, result.Contains(use));
+    }
+
+    [Fact]
+    public void InitializedLaneProofRejectsAJoinThatSkipsInitialization()
+    {
+        var branch = Branch("SCbranchScc0");
+        var initialization = VectorAdd();
+        var use = VectorAdd();
+        PointBranch(branch, use);
+        Assert.DoesNotContain(use, Gen5ExecFullAnalysis.AnalyzeInitializedLanes(new Gen5ShaderProgram(0, _program), initialization, false));
+    }
+
+    [Fact]
+    public void MatchingExecutionRequiresRestoringTheSavedMask()
+    {
+        var reference = VectorAdd();
+        Scalar("SMovB64", 8, Gen5Operand.Scalar(Exec));
+        Kill();
+        var restricted = VectorAdd();
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(8));
+        var restored = VectorAdd();
+        var result = Gen5ExecFullAnalysis.AnalyzeMatchingExecutionLanes(new Gen5ShaderProgram(0, _program), reference, false);
+        Assert.DoesNotContain(restricted, result);
+        Assert.Contains(restored, result);
+    }
+
     private const uint Exec = 126;
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public void QuadExpansionRequiresAQuadClosedInitializationMask(bool initializeWholeQuads, bool expected)
+    {
+        Kill();
+        if (initializeWholeQuads) Scalar("SWqmB64", Exec, Gen5Operand.Scalar(Exec));
+        var initialization = VectorAdd();
+        Kill();
+        Scalar("SWqmB64", Exec, Gen5Operand.Scalar(Exec));
+        var use = VectorAdd();
+        var program = new Gen5ShaderProgram(0, _program);
+        Assert.Equal(expected, Gen5ExecFullAnalysis.AnalyzeInitializedLanes(program, initialization, false).Contains(use));
+        Assert.DoesNotContain(use, Gen5ExecFullAnalysis.AnalyzeMatchingExecutionLanes(program, initialization, false));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void QuadInitializationProofRejectsSkippedOrNarrowedWqm(bool skip)
+    {
+        var branch = skip ? Branch("SCbranchScc0") : uint.MaxValue;
+        Scalar("SWqmB64", Exec, Gen5Operand.Scalar(Exec));
+        if (!skip) Kill();
+        var initialization = VectorAdd();
+        if (skip) PointBranch(branch, initialization);
+        Kill();
+        Scalar("SWqmB64", Exec, Gen5Operand.Scalar(Exec));
+        var use = VectorAdd();
+        Assert.DoesNotContain(use, Gen5ExecFullAnalysis.AnalyzeInitializedLanes(new Gen5ShaderProgram(0, _program), initialization, false));
+    }
+
+    [Theory]
+    [InlineData(false, "SAndn2B64", true)]
+    [InlineData(true, "SAndn2B64", false)]
+    [InlineData(false, "SOrB64", false)]
+    public void QuadClosureRetainsOnlySurvivingSubsetMasks(bool overwrite, string operation, bool expected)
+    {
+        Kill();
+        Scalar("SMovB64", 8, Gen5Operand.Scalar(Exec));
+        Scalar("SWqmB64", Exec, Gen5Operand.Scalar(Exec));
+        if (overwrite) Scalar("SMovB32", 9, Gen5Operand.Scalar(20));
+        var initialization = VectorAdd();
+        Scalar(operation, 8, Gen5Operand.Scalar(8), Gen5Operand.Scalar(20));
+        Scalar("SWqmB64", Exec, Gen5Operand.Scalar(8));
+        var use = VectorAdd();
+        Assert.Equal(expected, Gen5ExecFullAnalysis.AnalyzeInitializedLanes(new Gen5ShaderProgram(0, _program), initialization, false).Contains(use));
+    }
+
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(false, false)]
+    public void CompareExecutionOnlyPreservesTheSavedScalarMask(bool executionOnly, bool expected)
+    {
+        var initialization = VectorAdd();
+        Scalar("SMovB64", 106, Gen5Operand.Scalar(Exec));
+        var pc = Add(executionOnly ? "VCmpxLtF32" : "VCmpLtF32", Gen5ShaderEncoding.Vopc,
+            [Gen5Operand.Scalar(106)], [Gen5Operand.Vector(0), Gen5Operand.Vector(1)]);
+        var index = _program.FindIndex(instruction => instruction.Pc == pc);
+        _program[index] = _program[index] with { Control = new Gen5SdwaControl(6, 0, 6, 6,
+            false, false, 0, 0, 0, false, 106) };
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(106));
+        var use = VectorAdd();
+        var program = new Gen5ShaderProgram(0, _program);
+        Assert.Equal(expected, Gen5ExecFullAnalysis.AnalyzeInitializedLanes(program, initialization, false).Contains(use));
+        Assert.Equal(expected, Gen5ExecFullAnalysis.AnalyzeMatchingExecutionLanes(program, initialization, false).Contains(use));
+        Assert.Equal(expected, Gen5ExecFullAnalysis.Analyze(program, false).Contains(use));
+    }
 
     private readonly List<Gen5ShaderInstruction> _program = [];
     private uint _pc;

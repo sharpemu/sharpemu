@@ -91,6 +91,9 @@ internal static unsafe partial class VulkanVideoPresenter
         bool IShaderPipelineHost.ExecGuardElisionEnabled => _physicalDeviceVendorId != NvidiaVendorId;
         bool IShaderPipelineHost.PerVertexPixelInputsSupported => _supportsPerVertexPixelInputs;
         bool IShaderPipelineHost.ClipDistanceEnabled => _supportsShaderClipDistance;
+        private bool _postDepthCoverageEnabled;
+        bool IShaderPipelineHost.PostDepthCoverageSupported => _postDepthCoverageEnabled;
+        public bool NativeTwoSampleMixedSupported => _supportsNativeTwoSampleMixed;
 
         RenderHostLimits IShaderPipelineHost.Limits => _renderHostLimits;
 
@@ -159,28 +162,54 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // Refused while a GPU buffer or image write may still own the range.
+        public bool TryGetImageWriteRange(ReadOnlySpan<uint> image, out ulong address, out ulong size) =>
+            ImageRequestBuilders.TryGetStorageAllocationRange(image, out address, out size);
+
+        public bool TrySynchronizeVertexDomain(ulong address, ulong size)
+        {
+            if (size == 0 || address >= 1ul << 48 || size > (1ul << 48) - address || !_guestMemory.CanRead(address, size)) return false;
+            foreach (var identifier in _trackedImageBindings)
+            {
+                var image = _imageCache.GetImage(identifier);
+                if (!image.Binding.IsTarget && !image.Binding.ShaderWrite) continue;
+                var data = image.Description.Data;
+                if (data.Size != 0 && address < data.Address + data.Size && data.Address < address + size) return false;
+            }
+            if (_imageCache.HasGpuModifiedImageBytes(address, size)) return false;
+            return _bufferCache.TrySynchronizeCpuRead(address, size,
+                SharpEmu.HLE.GuestMemory.GuestMemoryProfile.ReadbackSource.ShaderResourceRead);
+        }
+
+        public bool TryReadPointSampledByteDomain(ReadOnlySpan<uint> image, ReadOnlySpan<uint> sampler,
+            uint channels, bool gathered, SharpEmu.ShaderCompiler.Resources.GuestWordReader cleanReader, out uint[] values)
+        {
+            values = [];
+            if (image.Length != 8 || new TextureDescriptorWords(image).Format is not (GuestPixelFormat.Bits8_8_8_8UInt or GuestPixelFormat.Bits8UInt))
+                return false;
+            var data = ImageRequestBuilders.Texture(image,
+                new ShaderImageShape(false, false, false, false, TextureNumericClass.Uint)).Request.Description.Data;
+            foreach (var identifier in _trackedImageBindings)
+            {
+                var bound = _imageCache.GetImage(identifier);
+                if (!bound.Binding.IsTarget && !bound.Binding.ShaderWrite) continue;
+                var output = bound.Description.Data;
+                if (data.Size != 0 && output.Size != 0 && data.Address < output.Address + output.Size &&
+                    output.Address < data.Address + data.Size) return false;
+            }
+            // Recording readers must observe every word for dependency validation.
+            // Only the unwrapped host reader can use the equivalent range check.
+            SharpEmu.ShaderCompiler.Resources.GuestWordReader hostReader = TryReadCleanGuestWord;
+            var rangeReader = cleanReader == hostReader ? TryReadResidentGuestBytes :
+                (SharpEmu.ShaderCompiler.Resources.ResidentGuestBytesReader?)null;
+            return ImageRequestBuilders.TryReadPointSampledByteDomain(image, sampler, channels, cleanReader, out values, gathered, rangeReader);
+        }
+
         public bool TryReadCleanGuestWord(ulong address, out uint word)
         {
             using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CleanGuestRead);
-            word = 0;
-            if (!_guestMemory.CanRead(address, sizeof(uint)))
-            {
-                return false;
-            }
-
-            if ((_bufferCache.MayHaveGpuDirtyPages(address, sizeof(uint)) && _bufferCache.HasGpuDirtyPages(address, sizeof(uint))) ||
-                _bufferCache.HasGpuDirtyBytes(address, sizeof(uint)) ||
-                _imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)))
-            {
-                return false;
-            }
-
             Span<byte> bytes = stackalloc byte[sizeof(uint)];
-            if (!_guestMemory.TryRead(address, bytes))
-            {
-                return false;
-            }
-
+            word = 0;
+            if (!TryReadResidentGuestBytes(address, bytes, clean: true)) return false;
             word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
             return true;
         }
@@ -193,10 +222,16 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (!_guestMemory.CanRead(address, size) ||
                     _bufferCache.HasGpuDirtyBytes(address, size) ||
-                    (clean && (_bufferCache.HasGpuDirtyPages(address, size) || _imageCache.HasGpuModifiedImageBytes(address, size))))
+                    (clean && _imageCache.HasGpuModifiedImageBytes(address, size)))
                 {
                     return false;
                 }
+
+                // GPU ownership is tracked in bytes, but protection covers whole pages.
+                // Read disjoint CPU-owned bytes through the backing alias so a protected
+                // guest view cannot trigger a download of neighboring GPU-owned bytes.
+                if (clean && _bufferCache.HasGpuDirtyPages(address, size))
+                    return _guestBacking.TryReadBacking(address, destination);
 
                 NoteCleanReadPage(address, size);
             }
@@ -845,9 +880,42 @@ internal static unsafe partial class VulkanVideoPresenter
                         FrontFace = parameters.FrontFaceClockwise ? FrontFace.Clockwise : FrontFace.CounterClockwise,
                         LineWidth = 1,
                     };
+                    var nativeMixed = _supportsNativeTwoSampleMixed &&
+                        parameters.Samples == 2 && rendering.DepthSamples == 2 && colorCount > 0 &&
+                        rendering.ColorSamples.Take(colorCount).All(count => count == 1);
+                    var coverageReduction = new PipelineCoverageReductionStateCreateInfoNV
+                    {
+                        SType = StructureType.PipelineCoverageReductionStateCreateInfoNV,
+                        CoverageReductionMode = CoverageReductionModeNV.TruncateNV,
+                    };
+                    var sampleLocationsEnabled = _supportsNativeTwoSampleMixed && parameters.Samples == 2;
+                    var sampleLocations = stackalloc SampleLocationEXT[8];
+                    for (var pixel = 0; pixel < 4; pixel++)
+                        for (var sample = 0; sample < 2; sample++)
+                        {
+                            var word = rendering.SampleLocationWords[pixel * 4] >> (sample * 8);
+                            var x = (int)(word << 28) >> 28;
+                            var y = (int)(word << 24) >> 28;
+                            sampleLocations[pixel * 2 + sample] = new SampleLocationEXT((x + 8) / 16f, (y + 8) / 16f);
+                        }
+                    var sampleLocationState = new PipelineSampleLocationsStateCreateInfoEXT
+                    {
+                        SType = StructureType.PipelineSampleLocationsStateCreateInfoExt,
+                        PNext = nativeMixed ? &coverageReduction : null,
+                        SampleLocationsEnable = true,
+                        SampleLocationsInfo = new SampleLocationsInfoEXT
+                        {
+                            SType = StructureType.SampleLocationsInfoExt,
+                            SampleLocationsPerPixel = SampleCountFlags.Count2Bit,
+                            SampleLocationGridSize = new Extent2D(2, 2),
+                            SampleLocationsCount = 8,
+                            PSampleLocations = sampleLocations,
+                        },
+                    };
                     var multisample = new PipelineMultisampleStateCreateInfo
                     {
                         SType = StructureType.PipelineMultisampleStateCreateInfo,
+                        PNext = sampleLocationsEnabled ? &sampleLocationState : (nativeMixed ? &coverageReduction : null),
                         SampleShadingEnable = parameters.SampleShadingEnable,
                         RasterizationSamples = ImageDescription.VulkanSampleCount(parameters.Samples),
                         MinSampleShading = 1f,
@@ -903,10 +971,21 @@ internal static unsafe partial class VulkanVideoPresenter
                         DepthAttachmentFormat = rendering.DepthFormat,
                         StencilAttachmentFormat = rendering.StencilFormat,
                     };
+                    var colorSampleCounts = stackalloc SampleCountFlags[8];
+                    for (var index = 0; index < colorCount; index++)
+                        colorSampleCounts[index] = ImageDescription.VulkanSampleCount(rendering.ColorSamples[index]);
+                    var attachmentSampleCounts = new AttachmentSampleCountInfoNV
+                    {
+                        SType = StructureType.AttachmentSampleCountInfoNV,
+                        PNext = &renderingInfo,
+                        ColorAttachmentCount = (uint)colorCount,
+                        PColorAttachmentSamples = colorSampleCounts,
+                        DepthStencilAttachmentSamples = ImageDescription.VulkanSampleCount(rendering.DepthSamples == 0 ? 1 : rendering.DepthSamples),
+                    };
                     var pipelineInfo = new GraphicsPipelineCreateInfo
                     {
                         SType = StructureType.GraphicsPipelineCreateInfo,
-                        PNext = &renderingInfo,
+                        PNext = nativeMixed ? &attachmentSampleCounts : &renderingInfo,
                         StageCount = stageCount,
                         PStages = shaderStages,
                         PVertexInputState = &vertexInput,

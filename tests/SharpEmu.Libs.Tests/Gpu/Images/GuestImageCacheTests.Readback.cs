@@ -14,6 +14,113 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 // Readback publication: scheduled readbacks, garbage collection under pressure, depth planes.
 public sealed partial class GuestImageCacheTests
 {
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(2u)]
+    public void LinearColorTarget_UsesExplicitRowPitch(uint channels)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const uint width = 37, height = 3, layers = 2;
+        var size = width * height * layers * channels;
+        var address = harness.MapBacked(0x4000, ReadWrite);
+        var input = Enumerable.Range(0, (int)size).Select(index => (byte)(index * 19 + 7)).ToArray();
+        harness.Write(address, input);
+        var request = AsColorTarget(LinearRequest(address, size,
+            channels == 1 ? Format.R8Unorm : Format.R8G8Unorm,
+            channels == 1 ? GuestPixelFormat.Bits8UNorm : GuestPixelFormat.Bits8_8UNorm,
+            GuestImageType.Color2D, new Extent3D(width, height, 1), layers, channels, 1));
+        var identifier = harness.Acquire(ref request);
+        Assert.Equal(input, harness.ReadImageBytes(harness.Image(identifier)));
+        harness.MarkGpuWritten(identifier);
+        var result = harness.Worker.Run(() =>
+        {
+            using var output = new GpuBuffer(harness.Vulkan.DeviceInfo, harness.Scheduler,
+                GpuBufferUsage.DeviceLocal, address, GpuBuffer.AllFlags, (size + 3UL) & ~3UL);
+            Assert.True(harness.Images.TrySynchronizeBufferFromImage(output, address, size));
+            return harness.CopyFromDevice(output.Handle, 0, size);
+        });
+        Assert.Equal(input, result);
+    }
+
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(2u)]
+    public void ExpandedSrgbBacking_TiledReadbackPreservesInactiveBytes(uint channels)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const uint width = 37, height = 3, layers = 2;
+        const ulong size = 0x20000;
+        var address = harness.MapBacked(0x40000, ReadWrite);
+        harness.Write(address, Enumerable.Repeat((byte)0x11, (int)size).ToArray());
+        var request = LinearRequest(address, size, Format.R8G8B8A8Srgb,
+            channels == 1 ? GuestPixelFormat.Bits8Srgb : GuestPixelFormat.Bits8_8Srgb,
+            GuestImageType.Color2D, new Extent3D(width, height, 1), layers, channels, 1);
+        request.Description.TileMode = GuestTileMode.RenderTarget;
+        var identifier = harness.Acquire(ref request);
+        var wide = harness.ReadImageBytes(harness.Image(identifier));
+        for (var pixel = 0; pixel < width * height * layers; pixel++)
+            for (var channel = 0; channel < 4; channel++)
+                Assert.Equal(channel < channels ? (byte)0x11 : channel == 3 ? (byte)255 : (byte)0,
+                    wide[pixel * 4 + channel]);
+        harness.MarkGpuWritten(identifier);
+        var result = harness.Worker.Run(() =>
+        {
+            using var output = new GpuBuffer(harness.Vulkan.DeviceInfo, harness.Scheduler,
+                GpuBufferUsage.DeviceLocal, address, GpuBuffer.AllFlags, size);
+            output.Fill(0, size, 0x5a5a5a5a);
+            Assert.True(harness.Images.TrySynchronizeBufferFromImage(output, address, size));
+            return harness.CopyFromDevice(output.Handle, 0, size);
+        });
+        Assert.Equal((int)(width * height * layers * channels), result.Count(value => value == 0x11));
+        Assert.Equal(result.Length - (int)(width * height * layers * channels), result.Count(value => value == 0x5a));
+    }
+
+    [Theory]
+    [InlineData(1u, 256u)]
+    [InlineData(2u, 256u)]
+    [InlineData(1u, 37u)]
+    [InlineData(2u, 37u)]
+    public void ExpandedSrgbBacking_RoundTripsEncodedGuestChannels(uint channels, uint width)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x4000, ReadWrite);
+        const uint height = 3, layers = 2;
+        var pitch = (width * channels + 255) / 256 * 256 / channels;
+        var size = pitch * height * layers * channels;
+        var input = Enumerable.Range(0, (int)size).Select(index => (byte)(index * 37 + 11)).ToArray();
+        harness.Write(address, input);
+        var request = LinearRequest(address, size, Format.R8G8B8A8Srgb,
+            channels == 1 ? GuestPixelFormat.Bits8Srgb : GuestPixelFormat.Bits8_8Srgb,
+            GuestImageType.Color2D, new Extent3D(width, height, 1), layers, channels, 1);
+        request.Description.Pitch = pitch;
+        request.Description.MipLayout[0].Pitch = pitch;
+        var identifier = harness.Acquire(ref request);
+        var expectedWide = new byte[width * height * layers * 4];
+        for (var pixel = 0; pixel < width * height * layers; pixel++)
+        {
+            expectedWide[pixel * 4 + 3] = 255;
+            for (var channel = 0; channel < channels; channel++)
+                expectedWide[pixel * 4 + channel] = input[(pixel / width * pitch + pixel % width) * channels + channel];
+        }
+        Assert.Equal(expectedWide, harness.ReadImageBytes(harness.Image(identifier)));
+        harness.MarkGpuWritten(identifier);
+        harness.Worker.Run(() =>
+        {
+            using var output = new GpuBuffer(harness.Vulkan.DeviceInfo, harness.Scheduler,
+                GpuBufferUsage.DeviceLocal, address, GpuBuffer.AllFlags, size);
+            output.Fill(0, size, 0x5a5a5a5a);
+            Assert.True(harness.Images.TrySynchronizeBufferFromImage(output, address, size));
+            var expectedGuest = Enumerable.Repeat((byte)0x5a, (int)size).ToArray();
+            for (var row = 0; row < height * layers; row++)
+                input.AsSpan((int)(row * pitch * channels), (int)(width * channels))
+                    .CopyTo(expectedGuest.AsSpan((int)(row * pitch * channels)));
+            Assert.Equal(expectedGuest, harness.CopyFromDevice(output.Handle, 0, size));
+        });
+    }
+
     [Fact]
     public void GarbageCollector_RetiresUnderPressureAndPublishesInOneTick()
     {

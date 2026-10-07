@@ -36,6 +36,8 @@ public static class NetExports
     private static readonly ConcurrentDictionary<int, NetPool> _pools = new();
     private static readonly ConcurrentDictionary<int, ResolverContext> _resolvers = new();
     private static readonly ConcurrentDictionary<int, Socket> _sockets = new();
+    private static readonly ConcurrentDictionary<int, NetEpoll> _epolls = new();
+    private static int _nextEpollId = 0x6000;
     private static int _nextPoolId;
     private static int _nextResolverId = 0x2000;
     private static int _nextSocketId = 255;
@@ -49,6 +51,176 @@ public static class NetExports
     private static nint _errnoAddress;
 
     private sealed record NetPool(string Name, int Size, int Flags);
+
+    private sealed class NetEpoll(string name)
+    {
+        public string Name { get; } = name;
+        public object Gate { get; } = new();
+        public Dictionary<int, (uint Events, ulong Data)> Watches { get; } = new();
+        public bool Destroyed;
+    }
+
+    [SysAbiExport(
+        Nid = "SF47kB2MNTo",
+        ExportName = "sceNetEpollCreate",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetEpollCreate(CpuContext ctx)
+    {
+        if (!_initialized)
+            return SetNetError(ctx, NetErrorNotInitialized, NetErrnoNotInitialized);
+        if (ctx[CpuRegister.Rsi] != 0)
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+
+        var name = string.Empty;
+        if (ctx[CpuRegister.Rdi] != 0 &&
+            !TryReadUtf8Z(ctx, ctx[CpuRegister.Rdi], MaxNameLength, out name))
+            return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+
+        var id = Interlocked.Increment(ref _nextEpollId);
+        if (id <= 0 || !_epolls.TryAdd(id, new NetEpoll(name)))
+            return SetNetError(ctx, NetErrorTooManyFiles, NetErrnoTooManyFiles);
+        ctx[CpuRegister.Rax] = unchecked((ulong)id);
+        return 0;
+    }
+
+    [SysAbiExport(
+        Nid = "Inp1lfL+Jdw",
+        ExportName = "sceNetEpollDestroy",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetEpollDestroy(CpuContext ctx)
+    {
+        if (!_epolls.TryRemove(unchecked((int)ctx[CpuRegister.Rdi]), out var poll))
+            return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+        DestroyEpoll(poll);
+        return ctx.SetReturn(0);
+    }
+
+    private static void DestroyEpoll(NetEpoll poll)
+    {
+        lock (poll.Gate)
+        {
+            poll.Destroyed = true;
+            poll.Watches.Clear();
+            Monitor.PulseAll(poll.Gate);
+        }
+    }
+
+    [SysAbiExport(Nid = "ZVw46bsasAk", ExportName = "sceNetEpollControl",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNet")]
+    public static int NetEpollControl(CpuContext ctx)
+    {
+        if (!_epolls.TryGetValue(unchecked((int)ctx[CpuRegister.Rdi]), out var poll))
+            return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+        var operation = unchecked((int)ctx[CpuRegister.Rsi]);
+        var socketId = unchecked((int)ctx[CpuRegister.Rdx]);
+        var eventAddress = ctx[CpuRegister.Rcx];
+        if (operation is < 1 or > 3 || (operation == 3 && eventAddress != 0))
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        if (!_sockets.ContainsKey(socketId))
+            return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+        uint events = 0;
+        ulong data = 0;
+        if (operation != 3)
+        {
+            Span<byte> record = stackalloc byte[24];
+            if (eventAddress == 0)
+                return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+            if (!ctx.Memory.TryRead(eventAddress, record))
+                return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+            events = BinaryPrimitives.ReadUInt32LittleEndian(record);
+            data = BinaryPrimitives.ReadUInt64LittleEndian(record[16..]);
+            // Only level-triggered socket readiness is supported. Reject edge,
+            // one-shot and resolver registrations instead of changing their meaning.
+            if ((events & ~0x1001Bu) != 0)
+                return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+        lock (poll.Gate)
+        {
+            if (poll.Destroyed)
+                return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+            if (operation == 1 && poll.Watches.ContainsKey(socketId))
+                return SetNetError(ctx, unchecked((int)0x80410111), 17); // EEXIST
+            if (operation != 1 && !poll.Watches.ContainsKey(socketId))
+                return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+            if (operation == 3) poll.Watches.Remove(socketId);
+            else poll.Watches[socketId] = (events, data);
+            Monitor.PulseAll(poll.Gate);
+        }
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(Nid = "drjIbDbA7UQ", ExportName = "sceNetEpollWait",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNet")]
+    public static int NetEpollWait(CpuContext ctx)
+    {
+        if (!_epolls.TryGetValue(unchecked((int)ctx[CpuRegister.Rdi]), out var poll))
+            return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+        var output = ctx[CpuRegister.Rsi];
+        var capacity = unchecked((int)ctx[CpuRegister.Rdx]);
+        var timeoutUsec = unchecked((int)ctx[CpuRegister.Rcx]);
+        if (capacity <= 0)
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        if (output == 0 || output > ulong.MaxValue - (ulong)capacity * 24)
+            return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+        var deadline = timeoutUsec < 0 ? long.MaxValue :
+            GuestThreadExecution.ComputeDeadlineTimestamp(TimeSpan.FromTicks((long)timeoutUsec * 10));
+        Span<byte> record = stackalloc byte[24];
+        while (true)
+        {
+            var count = 0;
+            lock (poll.Gate)
+            {
+                if (poll.Destroyed)
+                    return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+                foreach (var (id, watch) in poll.Watches)
+                {
+                    if (!_sockets.TryGetValue(id, out var socket)) continue;
+                    uint ready = 0;
+                    try
+                    {
+                        if (socket.Poll(0, SelectMode.SelectRead))
+                        {
+                            ready |= watch.Events & 1;
+                            // A pending accept also signals readability without payload bytes.
+                            if (socket.SocketType == SocketType.Stream &&
+                                (int)socket.GetSocketOption(SocketOptionLevel.Socket,
+                                    SocketOptionName.AcceptConnection)! == 0 && socket.Available == 0)
+                                ready |= 0x10;
+                        }
+                        if ((watch.Events & 2) != 0 && socket.Poll(0, SelectMode.SelectWrite)) ready |= 2;
+                        if (socket.Poll(0, SelectMode.SelectError) &&
+                            (int)socket.GetSocketOption(SocketOptionLevel.Socket, SocketOptionName.Error)! != 0)
+                            ready |= 8;
+                    }
+                    catch (ObjectDisposedException) { continue; }
+                    catch (SocketException) { ready |= 8; }
+                    if (ready == 0) continue;
+                    record.Clear();
+                    BinaryPrimitives.WriteUInt32LittleEndian(record, ready);
+                    BinaryPrimitives.WriteUInt64LittleEndian(record[8..], unchecked((ulong)id));
+                    BinaryPrimitives.WriteUInt64LittleEndian(record[16..], watch.Data);
+                    if (!ctx.Memory.TryWrite(output + (ulong)count * 24, record))
+                        return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+                    if (++count == capacity) break;
+                }
+                if (count != 0 || System.Diagnostics.Stopwatch.GetTimestamp() >= deadline)
+                {
+                    ctx[CpuRegister.Rax] = unchecked((ulong)count);
+                    return 0;
+                }
+                // Socket activity is checked at bounded intervals; control/destroy
+                // wakes this monitor immediately. No event is invented on timeout.
+                var remaining = deadline == long.MaxValue ? TimeSpan.FromMilliseconds(1) :
+                    TimeSpan.FromSeconds((deadline - System.Diagnostics.Stopwatch.GetTimestamp()) /
+                        (double)System.Diagnostics.Stopwatch.Frequency);
+                if (remaining > TimeSpan.Zero)
+                    Monitor.Wait(poll.Gate, remaining < TimeSpan.FromMilliseconds(1) ? remaining : TimeSpan.FromMilliseconds(1));
+            }
+            GuestThreadExecution.Scheduler?.DeliverPendingGuestExceptionIfReady(ctx);
+        }
+    }
 
     private sealed record ResolverContext(string Name, int PoolId, int Flags, int LastError);
 
@@ -116,6 +288,8 @@ public static class NetExports
         _initialized = false;
         _pools.Clear();
         _resolvers.Clear();
+        foreach (var poll in _epolls.Values) DestroyEpoll(poll);
+        _epolls.Clear();
         foreach (var socket in _sockets.Values)
         {
             socket.Dispose();
@@ -140,6 +314,36 @@ public static class NetExports
         }
 
         TraceNet("get_mac_address", 0, destinationAddress, unchecked((ulong)flags), 0);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "v6M4txecCuo",
+        ExportName = "sceNetEtherNtostr",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetEtherNtostr(CpuContext ctx)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        var outputAddress = ctx[CpuRegister.Rsi];
+        var capacity = unchecked((int)ctx[CpuRegister.Rdx]);
+        if (address == 0 || outputAddress == 0 || capacity < 18)
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+
+        Span<byte> mac = stackalloc byte[6];
+        if (!ctx.Memory.TryRead(address, mac))
+            return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+
+        const string hex = "0123456789abcdef";
+        Span<byte> text = stackalloc byte[18];
+        for (var index = 0; index < mac.Length; index++)
+        {
+            text[index * 3] = (byte)hex[mac[index] >> 4];
+            text[index * 3 + 1] = (byte)hex[mac[index] & 15];
+            text[index * 3 + 2] = index == 5 ? (byte)0 : (byte)':';
+        }
+        if (!ctx.Memory.TryWrite(outputAddress, text))
+            return SetNetError(ctx, NetErrorFault, NetErrnoFault);
         return ctx.SetReturn(0);
     }
 

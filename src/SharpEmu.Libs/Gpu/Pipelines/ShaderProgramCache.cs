@@ -7,6 +7,7 @@ using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Ir;
 using ImageResourceClass = SharpEmu.Libs.Gpu.Rendering.ImageResourceClass;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
@@ -38,6 +39,8 @@ public sealed class StageCompileOptions
     public uint PixelInputAddress { get; init; }
     public ComputeInputInfo? ComputeInfo { get; init; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
+    public bool OtherStageMayWriteMemory { get; init; }
+    public FlatParameterDomainReader? ReadFlatParameterDomain { get; init; }
 }
 
 // The key of a program entry: what the emitter reads besides the resource specialization.
@@ -237,10 +240,15 @@ internal sealed class ShaderProgramCache
             ReadMemory = _readGuestWord,
             ReadCleanMemory = _readCleanGuestWord,
             ReadResidentMemory = _prefetchResidentGuestBytes,
+            OtherStageMayWriteMemory = options.OtherStageMayWriteMemory,
+            ReadImageWriteRange = _host.TryGetImageWriteRange,
+            ReadPointSampledByteDomain = _host.TryReadPointSampledByteDomain,
+            ReadFlatParameterDomain = options.ReadFlatParameterDomain,
             ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
                 ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
                     Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,
-                    computeState.LocalDataShareDwords, computeState.ThreadIdCount)
+                    computeState.LocalDataShareDwords, computeState.ThreadIdCount,
+                    computeState.DispatchGroupsX, computeState.DispatchGroupsY, computeState.DispatchGroupsZ)
                 : null,
         };
         if (entry is null)
@@ -332,8 +340,96 @@ internal sealed class ShaderProgramCache
                 break;
             default:
                 StageStaticKey.Build(options.ComputeInfo ?? throw new ArgumentException("The compute lookup has no compute input info."), _staticState);
+                _staticState.Add(options.ComputeSystemRegisters?.WorkGroupXRegister ?? uint.MaxValue);
+                _staticState.Add(options.ComputeSystemRegisters?.WorkGroupYRegister ?? uint.MaxValue);
+                _staticState.Add(options.ComputeSystemRegisters?.WorkGroupZRegister ?? uint.MaxValue);
+                _staticState.Add(options.ComputeSystemRegisters?.ThreadGroupSizeRegister ?? uint.MaxValue);
                 break;
         }
+    }
+
+    internal FlatParameterDomainReader CreateFlatParameterDomainReader(ShaderSource vertex,
+        Gen5ShaderProgram pixel, PixelInputInfo pixelInfo, Func<ulong, ulong, bool>? synchronize = null)
+    {
+        var program = Decode(vertex);
+        var attributes = pixel.Instructions.Select(instruction => instruction.Control).OfType<Gen5InterpolationControl>()
+            .Select(control => control.Attribute).Distinct().Order().ToArray();
+        var locations = Gen5PixelInputMapping.ResolveLocations(pixelInfo.InterpolatorSettings, attributes);
+        return Read;
+        bool Read(uint attribute, uint channel, GuestWordReader reader, out uint[] values)
+        {
+            values = [];
+            var slot = Array.IndexOf(attributes, attribute);
+            if (slot < 0 || channel >= 4 || attribute >= pixelInfo.InterpolatorSettings.Length ||
+                (pixelInfo.InterpolatorSettings[attribute] & 0x20) != 0) return false;
+            return TryReadConvertedVertexParameter(program, vertex.UserDataBase, vertex.UserData,
+                vertex.Address, (uint)locations[slot], channel, reader, out values, synchronize);
+        }
+    }
+
+    internal static bool TryReadConvertedVertexParameter(Gen5ShaderProgram program, uint userDataBase,
+        uint[] userData, ulong shaderBase, uint location, uint channel, GuestWordReader reader, out uint[] values,
+        Func<ulong, ulong, bool>? synchronize = null)
+    {
+        values = [];
+        if (channel >= 4 || program.Instructions.Any(instruction => instruction.Opcode.Contains("rel", StringComparison.OrdinalIgnoreCase) ||
+            instruction.Opcode.Contains("GprIdx", StringComparison.Ordinal))) return false;
+        var exports = program.Instructions.Where(instruction => instruction.Control is Gen5ExportControl control &&
+            control.Target == 32 + location && (control.EnableMask & (1u << (int)channel)) != 0).ToArray();
+        if (exports.Length != 1 || exports[0].Control is not Gen5ExportControl { Compressed: false } ||
+            exports[0].Sources.Count <= channel || exports[0].Sources[(int)channel] is not { Kind: Gen5OperandKind.VectorRegister } output)
+            return false;
+        var writes = program.Instructions.Where(instruction => instruction.Pc < exports[0].Pc &&
+            (instruction.Destinations.Contains(output) || instruction.Control is Gen5BufferMemoryControl buffer &&
+                output.Value >= buffer.VectorData && output.Value - buffer.VectorData < buffer.DwordCount)).ToArray();
+        if (writes.Length != 3 || writes[0] is not { Opcode: "VMovB32", Control: null, Sources.Count: 1 } ||
+            writes[0].Sources[0] != Gen5Operand.Source(128) ||
+            writes[1] is not { Opcode: "BufferLoadFormatXyzw", Control: Gen5BufferMemoryControl load } ||
+            load.Typed || !load.IndexEnabled || load.OffsetEnabled || load.OffsetBytes < 0 || writes[1].Sources.Count < 3 ||
+            writes[1].Sources[2] != Gen5Operand.Source(128) ||
+            writes[2] is not { Opcode: "VCvtI32F32", Control: null, Sources.Count: 1 } || writes[2].Sources[0] != output)
+            return false;
+        var initialized = Gen5ExecFullAnalysis.AnalyzeInitializedLanes(program, writes[0].Pc, true);
+        var flow = IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance);
+        if (flow.BlockOf(writes[1].Pc) != flow.BlockOf(writes[2].Pc)) return false;
+        if (!initialized.Contains(exports[0].Pc) || !initialized.Contains(writes[1].Pc) || !initialized.Contains(writes[2].Pc) ||
+            !Gen5ExecFullAnalysis.AnalyzeMatchingExecutionLanes(program, writes[1].Pc, true).Contains(writes[2].Pc)) return false;
+        ShaderResourcePlan plan;
+        try { plan = ShaderResourcePlan.Extract(program, ShaderStage.Vertex, 0, userDataBase, (uint)userData.Length, waveSize: 32); }
+        catch (ResourcePlanException) { return false; }
+        if (plan.Memory.Entries.Any(memory => memory.Kind != MemoryResourceKind.LocalDataShare && memory.Access is MemoryAccess.Write or MemoryAccess.Atomic) ||
+            !plan.Memory.TryGetIndex(writes[1].Pc, 0, out var memoryIndex) ||
+            plan.Accesses[memoryIndex]?.Handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } handle) return false;
+        var evaluator = new RuntimeValueEvaluator(plan, new ResourceRuntimeInputs
+        {
+            UserData = userData, ShaderBase = shaderBase, ReadMemory = reader, ReadCleanMemory = reader,
+        });
+        var descriptor = new uint[4];
+        for (var index = 0; index < 4; index++) if (!evaluator.Evaluate(handle.Operands[index], out descriptor[index])) return false;
+        var component = output.Value - load.VectorData;
+        var selected = (descriptor[3] >> ((int)component * 3)) & 7;
+        var stride = (descriptor[1] >> 16) & 0x3FFF;
+        if (selected < 4 || selected > 7 || stride == 0 || (stride & 3) != 0 || descriptor[2] > 65536 ||
+            (descriptor[1] & 0x80000000) != 0 || (descriptor[3] & 0xF0800000) != 0 ||
+            !Gfx10UnifiedFormat.TryDecode((descriptor[3] >> 12) & 0x7F, out var format, out var number) || number != 7 ||
+            !Gfx10UnifiedFormat.TryGetComponentLayout(format, selected - 4, out var byteOffset, out var bitOffset, out var bits) ||
+            bitOffset != 0 || bits is not (16 or 32) || byteOffset + bits / 8 > stride) return false;
+        var address = ((ulong)(descriptor[1] & 0xFFFF) << 32) | descriptor[0];
+        if ((address & 3) != 0 || address + (ulong)stride * descriptor[2] + (ulong)load.OffsetBytes > 1ul << 48) return false;
+        if (descriptor[2] != 0 && synchronize is not null &&
+            !synchronize(address + (ulong)load.OffsetBytes, (ulong)stride * descriptor[2])) return false;
+        var found = new HashSet<uint> { 0 };
+        for (uint record = 0; record < descriptor[2]; record++)
+        {
+            var at = address + (ulong)record * stride + (ulong)load.OffsetBytes + byteOffset;
+            if (!reader(at & ~3ul, out var word)) return false;
+            var value = bits == 16 ? (float)BitConverter.UInt16BitsToHalf((ushort)(word >> ((int)(at & 3) * 8))) : BitConverter.UInt32BitsToSingle(word);
+            if (!float.IsFinite(value) || value < int.MinValue || (double)value > int.MaxValue) return false;
+            found.Add(unchecked((uint)(int)value));
+            if (found.Count > 4096) return false;
+        }
+        values = found.Order().ToArray();
+        return true;
     }
 
     private ProgramSourceEntry CreateEntry(ShaderSource source, StageCompileOptions options)
@@ -363,7 +459,8 @@ internal sealed class ShaderProgramCache
                 fetch?.Loads.Select(load => load.Pc).ToHashSet(),
                 beforeResourceTracking: dumpPlanning ? resourcePlan => ShaderPlanningDump.WriteGraph(source, resourcePlan) : null,
                 // Graphics stages compile as wave32 (see the compile request); compute follows the dispatch.
-                waveSize: source.Stage == ShaderStage.Compute ? options.ComputeInfo?.WaveSize ?? 64u : 32u);
+                waveSize: source.Stage == ShaderStage.Compute ? options.ComputeInfo?.WaveSize ?? 64u : 32u,
+                computeSystemRegisters: source.Stage == ShaderStage.Compute ? options.ComputeSystemRegisters : null);
         }
         catch (ResourcePlanException exception)
         {
@@ -623,6 +720,8 @@ internal sealed class ShaderProgramCache
             case ShaderStage.Pixel:
             {
                 var info = options.PixelInfo!;
+                if (info.EarlyDepth && info.ShaderSampleExclusionMask != 0 && !_host.PostDepthCoverageSupported)
+                    throw SubmissionScheduler.Fatal("Sample exclusion requires post-depth coverage support.");
                 var interpolators = new uint[info.InputCount];
                 Array.Copy(info.InterpolatorSettings, interpolators, interpolators.Length);
                 return new ShaderCompileRequest(entry.Plan, resources, layout)
@@ -633,6 +732,14 @@ internal sealed class ShaderProgramCache
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
                     PixelOutputs = options.PixelOutputs,
+                    EarlyFragmentTests = info.EarlyDepth,
+                    PixelShaderSampleExclusionMask = info.EarlyDepth ? info.ShaderSampleExclusionMask : 0u,
+                    PixelDepthExportEnable = info.DepthExportEnable,
+                    PixelSampleMaskExportEnable = info.SampleMaskExportEnable,
+                    PixelMaskExportSamples = info.MaskExportSamples,
+                    PixelRasterizationSamples = info.RasterizationSamples,
+                    PixelInterpolationSample = info.InterpolationSample,
+                    PixelCustomSampleOffsets = info.CustomSampleOffsets,
                     PixelInputEnable = options.PixelInputEnable,
                     PixelCustomInterpolationMask = info.CustomInterpolationMask,
                     SupportsPerVertexPixelInputs = _host.PerVertexPixelInputsSupported,
@@ -687,7 +794,7 @@ internal sealed class ShaderProgramCache
             }
 
             var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, record.Hash, record.UserDataBase, record.UserDataCount,
-                waveSize: record.Info.WaveSize);
+                waveSize: record.Info.WaveSize, computeSystemRegisters: record.SystemRegisters);
             var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor,
                 record.Info.DispatchThreadDimensions);

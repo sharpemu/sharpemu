@@ -9,7 +9,9 @@ public static class GuestImageFormat
 {
     public const uint Invalid = 0;
     public const uint Format8Uscaled = 3;
+    public const uint Format8Uint = 5;
     public const uint Format8x2Uscaled = 16;
+    public const uint Format8x4Uint = 60;
     public const uint Format16Unorm = 7;
     public const uint Format32Uint = 20;
     public const uint Format32Sint = 21;

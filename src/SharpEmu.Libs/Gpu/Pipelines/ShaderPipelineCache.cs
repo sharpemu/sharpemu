@@ -84,6 +84,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             vertex.ExportAddress, ShaderStage.Vertex, "vertex", vertex.GeometryUserScalars, vertex.GeometryResource2.UserScalarCount,
             probeWrittenRegisters: true, VertexUserDataBase);
         var vertexInfo = PrepareVertexInput(vertexSource, shaderInterface, context);
+        var vertexMayWriteMemory = MemoryAccessTable.Build(_programs.Decode(vertexSource)).Entries.Any(access =>
+            access.Kind != MemoryResourceKind.LocalDataShare &&
+            access.Access is MemoryAccess.Write or MemoryAccess.Atomic);
         ShaderSource? pixelSource = null;
         PixelInputInfo? pixelInfo = null;
         Gen5PixelOutputBinding[] pixelOutputs = [];
@@ -112,7 +115,23 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
             pixelOutputs = ResolveBoundTargets(context, targetExportMapping, depthBound ? pixelProgram.PixelColorExportMasks : null,
                 out var outputModes, out var outputMappings);
-            pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount);
+            var customSampleOffsets = new List<(float X, float Y)>();
+            var rasterizationSamples = 1u << context.AntialiasingConfig.SampleCountLog2;
+            var pixelIterations = (context.ScanModeControl1 & (1u << 16)) != 0
+                ? 1u << context.EnhancedQualityAntialiasing.PixelShaderIterationSamples : 1u;
+            if (_host.NativeTwoSampleMixedSupported && rasterizationSamples == 2 &&
+                (shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress & 0x11u) != 0)
+                for (uint pixelLocation = 0; pixelLocation < 4; pixelLocation++)
+                    for (uint sample = 0; sample < (pixelIterations == 1 ? 1 : rasterizationSamples); sample++)
+                    {
+                        var position = context.SampleLocations.Position(pixelLocation, sample);
+                        customSampleOffsets.Add((position.X - .5f, position.Y - .5f));
+                    }
+            pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface,
+                outputModes, outputMappings, inputCount,
+                1u << context.EnhancedQualityAntialiasing.MaskExportSamples,
+                rasterizationSamples, pixelIterations, context.ShaderSampleExclusionMask, customSampleOffsets,
+                context.DepthRenderOverride.ForceShaderDepthOrder);
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
             // the vertex program must declare every location the pixel program reads.
             attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(pixelProgram, pixelInfo));
@@ -132,6 +151,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     new StageCompileOptions
                     {
                         PixelInfo = pixelInfo,
+                        OtherStageMayWriteMemory = vertexMayWriteMemory,
+                        ReadFlatParameterDomain = _programs.CreateFlatParameterDomainReader(vertexSource,
+                            _programs.Decode(pixelSource), pixelInfo!, _host.TrySynchronizeVertexDomain),
                         PixelOutputs = pixelOutputs,
                         PixelInputEnable = shaderInterface.PixelInputEnable,
                         PixelInputAddress = shaderInterface.PixelInputAddress,
@@ -419,7 +441,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
         var description = BuildGraphicsDescription(
             colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts);
+            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, _host.NativeTwoSampleMixedSupported);
         var key = KeyOf(description);
         lock (_gate)
         {
@@ -456,7 +478,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool disableBlending,
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram,
-        SampleCountFlags noAttachmentSampleCounts)
+        SampleCountFlags noAttachmentSampleCounts, bool nativeTwoSampleMixedSupported = false)
     {
         if (colors.Length > PipelineStaticParameters.ColorAttachmentCount)
         {
@@ -489,6 +511,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             renderingState.ColorFormats[index] = format;
+            renderingState.ColorSamples[index] = color.Resolution.Samples;
             // A target the pixel program never exports keeps its contents, as on hardware; the
             // host output would otherwise write an undefined value (e.g. depth-only passes that
             // leave a color target bound and export only to the null target).
@@ -512,6 +535,18 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             renderingState.DepthFormat = rendering.DepthFormat;
             renderingState.StencilFormat = rendering.StencilFormat;
+            renderingState.DepthSamples = depth.Target.Target.Samples;
+        }
+
+        if (nativeTwoSampleMixedSupported && rendering.Samples == 2)
+        {
+            // Coverage masks are per pixel in the 2x2 sample-location grid.
+            // The native path currently represents unrestricted coverage only.
+            const uint activeSamples = 0x0003_0003;
+            if ((context.SampleCoverageMaskX0Y0X1Y0 & activeSamples) != activeSamples ||
+                (context.SampleCoverageMaskX0Y1X1Y1 & activeSamples) != activeSamples)
+                throw SubmissionScheduler.Fatal("Two-sample rendering with restricted per-pixel coverage is not supported.");
+            context.SampleLocations.Locations.CopyTo(renderingState.SampleLocationWords, 0);
         }
 
         var samples = rendering.Samples;

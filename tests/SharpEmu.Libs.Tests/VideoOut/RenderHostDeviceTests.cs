@@ -994,6 +994,20 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
                 Assert.True(host.TryReadCleanGuestWord(address, out word));
                 Assert.Equal(0xCAFEF00Du, word);
 
+                _ = harness.Cache.ObtainBuffer(address, 0x1000, isWritten: false);
+                _ = harness.Cache.ObtainBuffer(address + 0x800, 4, isWritten: true);
+                Assert.True(harness.Cache.HasGpuDirtyPages(address, 4));
+                Assert.False(harness.Cache.HasGpuDirtyBytes(address, 4));
+                Assert.True(host.TryReadCleanGuestWord(address, out word));
+                Assert.Equal(0xCAFEF00Du, word);
+                Assert.True(harness.Cache.HasGpuDirtyBytes(address + 0x800, 4));
+                Assert.False(host.TryReadCleanGuestWord(address + 0x800, out _));
+                Assert.False(host.TryReadCleanGuestWord(address + 0x7FE, out _));
+                Span<byte> resident = stackalloc byte[4];
+                Assert.True(host.TryReadResidentGuestBytes(address, resident, clean: true));
+                Assert.Equal(0xCAFEF00Du, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(resident));
+                Assert.True(harness.Cache.HasGpuDirtyBytes(address + 0x800, 4));
+
                 _ = harness.Cache.ObtainBuffer(address, 0x1000, isWritten: true);
                 Assert.False(host.TryReadCleanGuestWord(address, out _));
                 Assert.False(host.TryReadCleanGuestWord(address + 0x800, out _));

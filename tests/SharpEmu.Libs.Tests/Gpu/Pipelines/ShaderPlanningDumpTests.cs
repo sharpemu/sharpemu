@@ -31,8 +31,9 @@ public sealed class ShaderPlanningDumpTests
             using var fatalScope = new FatalScope();
             var guest = new PipelineTestGuest();
             // A lane-derived offset reads an image descriptor without a material-table selector.
+            // Modify its first word so an empty source buffer cannot prove a null descriptor.
             guest.RegisterProgram(codeAddress, PipelineTestGuest.MemoryBase + 0x8000,
-                [0x7E100500, 0xF42C0402, 0x10000000, 0xF0000108, 0x00040000, 0xBF810000]);
+                [0x7E100500, 0xF42C0402, 0x10000000, 0x80108110, 0xF0000108, 0x00040000, 0xBF810000]);
             var source = guest.Source(codeAddress, ShaderStage.Compute, new uint[8]);
             var cursor = 0u;
             var failure = Assert.Throws<SchedulerFatalException>(() =>

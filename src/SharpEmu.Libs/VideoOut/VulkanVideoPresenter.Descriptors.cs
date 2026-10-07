@@ -659,7 +659,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     binding.View = image.GetOrCreateView(binding.Request.View with { Aspect = ImageAspectFlags.ColorBit });
                     binding.MipViews = [];
                 }
-                else if (resource.MipMode == ImageMipMode.DynamicStorage)
+                else if (resource.MipMode is ImageMipMode.DynamicStorage or ImageMipMode.ExplicitLodGather)
                 {
                     if (resource.MipCount == 0 || resource.MipCount != view.LevelCount)
                     {

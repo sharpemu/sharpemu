@@ -383,6 +383,29 @@ public sealed class RenderExecutorStateTests : IDisposable
         Assert.Contains("imageSamples=2 targetSamples=1", fatal.Message);
     }
 
+    [Theory]
+    [InlineData(false, 1, false)]
+    [InlineData(true, 1, true)]
+    [InlineData(true, 2, false)]
+    public void Attachments_TwoSampleDepthWithSingleSampleColorRequiresExactHostSupport(bool supported, byte rasterLog2, bool accepted)
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.DepthTarget = RegisterWords.Depth(DepthBase, 64, 64, samplesLog2: 1);
+        banks.Context.AntialiasingConfig.SampleCountLog2 = rasterLog2;
+        _host.NativeTwoSampleMixedSupported = supported;
+        if (!accepted)
+        {
+            var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, banks, Indexed(3)));
+            Assert.Contains("color=1 depth=2", fatal.Message);
+            Assert.Empty(_host.BegunRenderings);
+            return;
+        }
+        _executor.DrawIndexed(1, banks, Indexed(3));
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal(2u, rendering.Samples);
+        Assert.Equal(1u, rendering.ColorAttachmentCount);
+        Assert.True(rendering.DepthStencilAttachment.HasDepth);
+    }
     [Fact]
     public void Attachments_SingleSampleColorWithMultisampledDepthIsFatal()
     {

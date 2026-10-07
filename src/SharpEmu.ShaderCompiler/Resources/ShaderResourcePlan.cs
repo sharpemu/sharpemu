@@ -36,6 +36,7 @@ public sealed class ShaderResourcePlan
     public IReadOnlyList<ResourceTableRead> TableReads { get; private set; } = [];
     public IReadOnlyDictionary<int, uint> FlattenedSlotByMemoryIndex { get; private set; } = new Dictionary<int, uint>();
     public IReadOnlyList<ScalarValue> DynamicReads { get; private set; } = [];
+    internal IReadOnlyDictionary<uint, ScalarValue> FlattenedBranchConditions { get; private set; } = new Dictionary<uint, ScalarValue>();
     public IReadOnlyList<byte> CleanFlatSlots { get; private set; } = [];
     public IReadOnlyList<IndirectImageAccess> IndirectImages { get; private set; } = [];
     public IReadOnlyList<BufferCandidateTablePlan> BufferCandidateTables { get; private set; } = [];
@@ -46,11 +47,13 @@ public sealed class ShaderResourcePlan
     private readonly object _compileGate = new();
     private CompiledResourceEvaluator? _compiledEvaluator;
     private int _compiledEvaluatorState;
+    private bool _resourceTrackingComplete;
 
     internal CompiledResourceEvaluator? CompiledEvaluator
     {
         get
         {
+            if (!_resourceTrackingComplete) return null;
             if (Volatile.Read(ref _compiledEvaluatorState) == 2) return _compiledEvaluator;
             if (Interlocked.CompareExchange(ref _compiledEvaluatorState, 1, 0) == 0) CompiledResourceEvaluator.Enqueue(this);
             return null;
@@ -61,6 +64,7 @@ public sealed class ShaderResourcePlan
     {
         lock (_compileGate)
         {
+            if (!_resourceTrackingComplete) return null;
             if (Volatile.Read(ref _compiledEvaluatorState) == 2) return _compiledEvaluator;
             CompiledResourceEvaluator? compiled;
             try
@@ -82,9 +86,13 @@ public sealed class ShaderResourcePlan
     public MemoryAccessBinding?[] Accesses { get; private set; } = [];
 
     public static ShaderResourcePlan Extract(Gen5ShaderProgram program, ShaderStage stage, ulong hash, uint userDataBase, uint userDataCount,
-        IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64)
+        IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64,
+        Gen5ComputeSystemRegisters? computeSystemRegisters = null)
     {
-        var graph = ScalarGraphDiskCache.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize);
+        if (stage != ShaderStage.Compute && computeSystemRegisters.HasValue)
+            throw new ArgumentException("Compute system inputs cannot be assigned to a graphics resource plan.");
+        var graph = ScalarGraphDiskCache.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize,
+            computeSystemRegisters: computeSystemRegisters);
         var plan = new ShaderResourcePlan(graph, stage, hash);
         var reads = ResourceTableReadPlanner.Plan(graph, stage, hash);
         var memo = new Dictionary<ScalarValue, ScalarValue>();
@@ -118,6 +126,9 @@ public sealed class ShaderResourcePlan
                 access.Active is null ? null : Rewrite(access.Active));
         }
 
+        // Guards and resource keys must use the same flattened memory-read identities.
+        plan.FlattenedBranchConditions = graph.BranchConditions.ToDictionary(pair => pair.Key, pair => Rewrite(pair.Value));
+
         // Diagnostics observe rewritten values before descriptor validation.
         beforeResourceTracking?.Invoke(plan);
         var tracked = ResourceTracker.Track(plan);
@@ -148,9 +159,15 @@ public sealed class ShaderResourcePlan
         foreach (var sampler in plan.Info.Samplers)
         {
             materialization.Add(sampler.Source);
+            if (plan.DescriptorSources[(int)sampler.Source].EquivalentSamplerSources is not null ||
+                plan.DescriptorSources[(int)sampler.Source].Workgroup is not null)
+                plan.RequiresSpecializationMemory = true;
         }
 
+        materialization.AddRange(plan.Info.DeviceStoreValidationSources.Values);
         plan.MaterializationSources = materialization;
+        if (materialization.Any(source => plan.DescriptorSources[(int)source].PackedPointer is not null))
+            plan.RequiresSpecializationMemory = true;
 
         var cleanSlots = new byte[plan.TableReads.Count];
         foreach (var image in plan.Info.Images)
@@ -160,8 +177,14 @@ public sealed class ShaderResourcePlan
                 continue;
             }
 
-            if (indirect.DirectCandidates is { } directCandidates)
+            if (indirect.Workgroup is not null)
             {
+                plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)image.Source], cleanSlots);
+            }
+            else if (indirect.DirectCandidates is { } directCandidates)
+            {
+                if (indirect.CandidateCountSource is { } countSource)
+                    plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)countSource], cleanSlots);
                 foreach (var candidate in directCandidates)
                     plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)candidate.Source], cleanSlots);
             }
@@ -176,6 +199,16 @@ public sealed class ShaderResourcePlan
                 plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)indirect.MaterialSource], cleanSlots);
                 plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)indirect.HeapSource], cleanSlots);
             }
+        }
+
+        foreach (var sampler in plan.Info.Samplers)
+        {
+            if (plan.DescriptorSources[(int)sampler.Source].RuntimeSamplerCountSource is { } countSource)
+                plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)countSource], cleanSlots);
+            if (plan.DescriptorSources[(int)sampler.Source].Workgroup is not null)
+                plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)sampler.Source], cleanSlots);
+            if (plan.DescriptorSources[(int)sampler.Source].EquivalentSamplerSources is { } candidates)
+                foreach (var candidate in candidates) plan.MarkCleanFlatSlots(plan.DescriptorSources[(int)candidate], cleanSlots);
         }
 
         plan.CleanFlatSlots = cleanSlots;
@@ -194,6 +227,7 @@ public sealed class ShaderResourcePlan
         }
 
         plan.WrittenRangeSlotByHandle = writtenSlots;
+        plan._resourceTrackingComplete = true;
         return plan;
     }
 

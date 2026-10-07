@@ -9,6 +9,32 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class ResourceBranchTests
 {
+    public static Gen5ShaderProgram JoinedTableBuffer(bool undefinedArm = false) => Program(
+        Vop1(0, "VMovB32", 0, Gen5Operand.Scalar(2)),
+        Vopc(4, "VCmpEqU32", Operand(0), 0),
+        Branch(8, "SCbranchVccz", 3),
+        ScalarLoad(12, 0, 16, 4), Branch(20, "SBranch", 2),
+        undefinedArm ? Nop(24) : ScalarLoad(24, 0, 16, 4, immediateOffset: 16),
+        BufferLoad(32, 16), EndProgram(40));
+
+    [Fact]
+    public void TableDescriptorsJoinedByVccStayInTheExecutedShaderRegisters()
+    {
+        var plan = Extract(JoinedTableBuffer(), userDataCount: 3);
+        var load = plan.Memory.Find(32)!;
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.Equal(BufferDescriptorProvenance.Runtime, load.BufferDescriptor!.Provenance);
+        Assert.Empty(plan.Info.Buffers);
+        var request = Request(JoinedTableBuffer(), userDataCount: 3);
+        Assert.True(SharpEmu.ShaderCompiler.Vulkan.Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+    }
+
+    [Fact]
+    public void JoinedTableDescriptorWithAnUndefinedArmStillFails()
+    {
+        Assert.Throws<ResourcePlanException>(() => Extract(JoinedTableBuffer(true), userDataCount: 3));
+    }
+
     private static Gen5ShaderProgram ConditionalBuffers(string branch = "SCbranchScc1", bool shared = false) => Program(
         Sopc(0, "SCmpEqU32", Gen5Operand.Scalar(8), Operand(1)),
         Branch(4, branch, 3), BufferLoad(8, 0), Branch(16, "SBranch", 2),

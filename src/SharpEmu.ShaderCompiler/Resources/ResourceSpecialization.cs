@@ -17,6 +17,8 @@ public readonly record struct BufferCandidateTableSpecialization(
     uint MappingOffset,
     uint SearchIterations);
 
+public readonly record struct RuntimeSamplerCandidate(uint Root, int SelectorMemoryIndex, uint Offset, uint Sampler);
+
 public readonly record struct ImageSpecialization(
     ImageNumericClass NumericClass,
     ImageDimension Dimension,
@@ -37,11 +39,14 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     public int BaseBufferCount { get; init; }
     public List<BufferSpecialization> Buffers { get; init; } = [];
     public List<ImageSpecialization> Images { get; init; } = [];
+    public List<(uint Root, uint Candidate)> IndirectImageCandidates { get; init; } = [];
     public List<BufferCandidateTableSpecialization> BufferCandidateTables { get; init; } = [];
+    public List<RuntimeSamplerCandidate> RuntimeSamplers { get; init; } = [];
 
     public bool Equals(ResourceSpecialization? other) =>
         other is not null && BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&
-        Images.SequenceEqual(other.Images) && BufferCandidateTables.SequenceEqual(other.BufferCandidateTables);
+        Images.SequenceEqual(other.Images) && IndirectImageCandidates.SequenceEqual(other.IndirectImageCandidates) &&
+        BufferCandidateTables.SequenceEqual(other.BufferCandidateTables) && RuntimeSamplers.SequenceEqual(other.RuntimeSamplers);
 
     public override bool Equals(object? obj) => Equals(obj as ResourceSpecialization);
 
@@ -59,10 +64,14 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
             hash.Add(image);
         }
 
+        foreach (var candidate in IndirectImageCandidates) hash.Add(candidate);
+
         foreach (var table in BufferCandidateTables)
         {
             hash.Add(table);
         }
+
+        foreach (var sampler in RuntimeSamplers) hash.Add(sampler);
 
         return hash.ToHashCode();
     }
@@ -72,7 +81,9 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
         BaseBufferCount = BaseBufferCount,
         Buffers = [.. Buffers],
         Images = [.. Images],
+        IndirectImageCandidates = [.. IndirectImageCandidates],
         BufferCandidateTables = [.. BufferCandidateTables],
+        RuntimeSamplers = [.. RuntimeSamplers],
     };
 
     // The specialization of a plan before any draw: raw buffers and the tracked image classes.
@@ -94,4 +105,7 @@ public sealed class SpecializedResourceInfo
 {
     public ShaderResourceInfo Info { get; init; } = new();
     public IReadOnlyDictionary<int, uint> SamplerByMemoryIndex { get; init; } = new Dictionary<int, uint>();
+    public IReadOnlyDictionary<int, SamplerResource> FiniteSamplersByMemoryIndex { get; init; } = new Dictionary<int, SamplerResource>();
+    public IReadOnlyDictionary<(int Memory, uint Image, uint Sampler), uint> SamplerByImageMemoryIndex { get; init; } =
+        new Dictionary<(int, uint, uint), uint>();
 }

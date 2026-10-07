@@ -96,6 +96,7 @@ public static partial class KernelMemoryCompatExports
 
     private static readonly object _fdGate = new();
     private static readonly Dictionary<int, FileStream> _openFiles = new();
+    private static readonly HashSet<int> _entropyDevices = new();
     private static readonly Dictionary<int, HostMovieBridge.BinkGuestCompletionShim>
         _binkGuestCompletionShims = new();
     private static readonly Dictionary<int, string> _observedBinkGuestFiles = new();
@@ -1450,6 +1451,22 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        if (guestPath is "/dev/urandom" or "/dev/random")
+        {
+            // These character devices provide entropy, not mounted host files.
+            // Only read-only opens are currently supported.
+            if (ResolveOpenAccess(flags) != FileAccess.Read ||
+                (flags & (O_CREAT | O_TRUNC | O_APPEND | O_DIRECTORY)) != 0)
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            lock (_fdGate)
+            {
+                var entropyFd = (int)Interlocked.Increment(ref _nextFileDescriptor);
+                _entropyDevices.Add(entropyFd);
+                ctx[CpuRegister.Rax] = unchecked((ulong)entropyFd);
+            }
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
         var hostPath = ResolveGuestPath(guestPath);
         var access = ResolveOpenAccess(flags);
         var mode = ResolveOpenMode(flags, access);
@@ -2254,6 +2271,11 @@ public static partial class KernelMemoryCompatExports
         string? observedBinkPath = null;
         lock (_fdGate)
         {
+            if (_entropyDevices.Remove(fd))
+            {
+                ctx[CpuRegister.Rax] = 0;
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
             if (_openFiles.Remove(fd, out stream))
             {
                 _binkGuestCompletionShims.Remove(fd);
@@ -2305,6 +2327,19 @@ public static partial class KernelMemoryCompatExports
         {
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        lock (_fdGate)
+        {
+            if (_entropyDevices.Contains(fd))
+            {
+                var bytes = GC.AllocateUninitializedArray<byte>(requested);
+                System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
+                if (!TryWriteCompat(ctx, bufferAddress, bytes))
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                ctx[CpuRegister.Rax] = unchecked((ulong)requested);
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            }
         }
 
         if (KernelSocketCompatExports.TryReadSocketFd(
@@ -6903,6 +6938,12 @@ public static partial class KernelMemoryCompatExports
         bool isDirectory = false;
         lock (_fdGate)
         {
+            if (_entropyDevices.Contains(fd))
+            {
+                return TryWriteKernelStat(ctx, statAddress, isDirectory: false, size: 0,
+                    DateTime.UnixEpoch, DateTime.UnixEpoch, DateTime.UnixEpoch,
+                    "entropy-device", modeOverride: 0x2124);
+            }
             if (_openDirectories.TryGetValue(fd, out var directory))
             {
                 hostPath = directory.Path;
@@ -7050,7 +7091,8 @@ public static partial class KernelMemoryCompatExports
         DateTime lastAccessUtc,
         DateTime lastWriteUtc,
         DateTime creationUtc,
-        string inodeSeed)
+        string inodeSeed,
+        ushort? modeOverride = null)
     {
         Span<byte> payload = stackalloc byte[KernelStatSize];
         payload.Clear();
@@ -7058,7 +7100,7 @@ public static partial class KernelMemoryCompatExports
         var seedBytes = Encoding.UTF8.GetBytes(inodeSeed);
         BinaryPrimitives.WriteUInt32LittleEndian(payload[KernelStatStDevOffset..], 0);
         BinaryPrimitives.WriteUInt32LittleEndian(payload[KernelStatStInoOffset..], ComputeDirectoryEntryHash(seedBytes));
-        BinaryPrimitives.WriteUInt16LittleEndian(payload[KernelStatStModeOffset..], isDirectory ? KernelStatModeDirectory : KernelStatModeRegular);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload[KernelStatStModeOffset..], modeOverride ?? (isDirectory ? KernelStatModeDirectory : KernelStatModeRegular));
         BinaryPrimitives.WriteUInt16LittleEndian(payload[KernelStatStNlinkOffset..], 1);
         BinaryPrimitives.WriteUInt32LittleEndian(payload[KernelStatStUidOffset..], 0);
         BinaryPrimitives.WriteUInt32LittleEndian(payload[KernelStatStGidOffset..], 0);

@@ -377,6 +377,33 @@ public static class KernelPthreadCompatExports
     public static int PthreadMutexTrylock(CpuContext ctx) => PthreadMutexLockCore(ctx, ctx[CpuRegister.Rdi], tryOnly: true);
 
     [SysAbiExport(
+        Nid = "IafI2PxcPnQ",
+        ExportName = "scePthreadMutexTimedlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadMutexTimedlock(CpuContext ctx)
+    {
+        // Unlike POSIX pthread_mutex_timedlock's absolute timespec, this export
+        // receives a 32-bit relative microsecond interval in the second argument.
+        var mutexAddress = ctx[CpuRegister.Rdi];
+        var timeoutUsec = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var deadline = GuestThreadExecution.ComputeDeadlineTimestamp(TimeSpan.FromTicks((long)timeoutUsec * 10));
+        while (true)
+        {
+            var result = PthreadMutexLockCore(ctx, mutexAddress, tryOnly: true);
+            if (result != (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY)
+                return result;
+            if (Stopwatch.GetTimestamp() >= deadline)
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
+
+            // Recheck ownership after every wake. A timeout never grants the lock
+            // or leaves a queued waiter behind. Trylock also preserves recursion.
+            Thread.Sleep(1);
+            GuestThreadExecution.Scheduler?.DeliverPendingGuestExceptionIfReady(ctx);
+        }
+    }
+
+    [SysAbiExport(
         Nid = "tn3VlD0hG60",
         ExportName = "scePthreadMutexUnlock",
         Target = Generation.Gen4 | Generation.Gen5,

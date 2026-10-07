@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Numerics;
+
 namespace SharpEmu.Libs.Gpu.Images;
 
 // PendingDcc holds a metadata fill seen before its color target was bound; it stays invisible
@@ -17,7 +19,7 @@ public enum SurfaceMetadataKind : byte
 public sealed class SurfaceMetadata
 {
     public SurfaceMetadataKind Kind;
-    public uint ClearMask;
+    public BigInteger ClearMask;
     public uint FillValue = 0xffffffff;
     public ulong FillSize;
     public ulong Size;

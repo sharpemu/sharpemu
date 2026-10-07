@@ -334,3 +334,44 @@ public sealed class AvPlayerAbiTests
                 hasPresentation));
     }
 }
+
+public sealed class Videodec2PictureInfoAbiTests
+{
+    [Fact]
+    public void DimensionsPreservePitchAndAdjacentFields()
+    {
+        const ulong address = 0x100000000;
+        var memory = new FakeCpuMemory(address, 0x100);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var expected = Enumerable.Repeat((byte)0xab, 0x38).ToArray();
+        Assert.True(memory.TryWrite(address, expected));
+        Assert.True(SharpEmu.Libs.Codec.Videodec2Exports.TryWritePictureDimensions(context, address, 1920, 1080));
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(0x10), 1920);
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(0x18), 1080);
+        var actual = new byte[expected.Length];
+        Assert.True(memory.TryRead(address, actual));
+        Assert.Equal(expected, actual);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NoPicturePreservesSizeAndClearsTheReadyField(bool flush)
+    {
+        const ulong address = 0x100000000;
+        var memory = new FakeCpuMemory(address, 0x100);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var initial = Enumerable.Repeat((byte)0xab, 0x48).ToArray();
+        BinaryPrimitives.WriteUInt64LittleEndian(initial, 0x48);
+        Assert.True(memory.TryWrite(address, initial));
+        context[CpuRegister.Rdi] = ulong.MaxValue;
+        context[flush ? CpuRegister.Rdx : CpuRegister.Rcx] = address;
+        Assert.Equal(0, flush
+            ? SharpEmu.Libs.Codec.Videodec2Exports.Videodec2Flush(context)
+            : SharpEmu.Libs.Codec.Videodec2Exports.Videodec2Decode(context));
+        var actual = new byte[initial.Length];
+        Assert.True(memory.TryRead(address, actual));
+        initial[8] = 0;
+        Assert.Equal(initial, actual);
+    }
+}

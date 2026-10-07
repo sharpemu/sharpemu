@@ -74,6 +74,16 @@ public sealed class ResourceMaterializationCache
         ref ResourceSpecialization specialization,
         out ResourceMaterializationFailure failure)
     {
+        // Allocation ranges must be proved again for each dispatch. These plans
+        // are not reusable until that proof is represented in the cache key.
+        if (ResourceMaterializer.RequiresDescriptorWriteProof(plan) ||
+            plan.DescriptorSources.Any(source => source.IndirectImage?.PackedTextureDomain is not null ||
+                source.IndirectImage?.Workgroup?.FlatAttribute is not null ||
+                source.IndirectImage?.Workgroup?.BufferDomain is not null) ||
+            plan.DescriptorSources.Any(source => source.IndirectImage?.Workgroup is not null) &&
+            plan.Memory.Entries.Any(memory => memory.Kind == MemoryResourceKind.Image &&
+                memory.Access is MemoryAccess.Write or MemoryAccess.Atomic))
+            return ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out failure);
         var key = KeyOf(plan, inputs);
         var found = TryFind(key, plan, inputs, out var cached);
         if (found)
@@ -133,6 +143,10 @@ public sealed class ResourceMaterializationCache
                 ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
+                OtherStageMayWriteMemory = inputs.OtherStageMayWriteMemory,
+                ReadImageWriteRange = inputs.ReadImageWriteRange,
+                ReadPointSampledByteDomain = inputs.ReadPointSampledByteDomain,
+                ReadFlatParameterDomain = inputs.ReadFlatParameterDomain,
                 TablePhase = recorder.TablePhase,
             };
             if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
@@ -179,7 +193,7 @@ public sealed class ResourceMaterializationCache
         ResidentGuestBytesReader residentReader, out Entry refreshed)
     {
         refreshed = null!;
-        if (!cached.TableRefreshable)
+        if (!cached.TableRefreshable || cached.OtherStageMayWriteMemory != inputs.OtherStageMayWriteMemory)
             return false;
 
         var current = new byte[cached.Bytes.Length];
@@ -214,6 +228,10 @@ public sealed class ResourceMaterializationCache
                 ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
+                OtherStageMayWriteMemory = inputs.OtherStageMayWriteMemory,
+                ReadImageWriteRange = inputs.ReadImageWriteRange,
+                ReadPointSampledByteDomain = inputs.ReadPointSampledByteDomain,
+                ReadFlatParameterDomain = inputs.ReadFlatParameterDomain,
             };
             var cachedTable = cached.Snapshot.FlattenedResourceTable;
             ReadingTable = true;
@@ -249,6 +267,7 @@ public sealed class ResourceMaterializationCache
                 UserData = cached.UserData,
                 ShaderBase = cached.ShaderBase,
                 ComputeState = cached.ComputeState,
+                OtherStageMayWriteMemory = cached.OtherStageMayWriteMemory,
                 RangeAddresses = cached.RangeAddresses,
                 RangeOffsets = cached.RangeOffsets,
                 RangeLengths = cached.RangeLengths,
@@ -387,6 +406,7 @@ public sealed class ResourceMaterializationCache
         public required uint[] UserData { get; init; }
         public required ulong ShaderBase { get; init; }
         public required ComputeSelectorState? ComputeState { get; init; }
+        public required bool OtherStageMayWriteMemory { get; init; }
         public required ulong[] RangeAddresses { get; init; }
         public required int[] RangeOffsets { get; init; }
         public required int[] RangeLengths { get; init; }
@@ -403,7 +423,8 @@ public sealed class ResourceMaterializationCache
         public bool Matches(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
         {
             if (!ReferenceEquals(Plan, plan) || ShaderBase != inputs.ShaderBase ||
-                !Nullable.Equals(ComputeState, inputs.ComputeState) || UserData.Length != inputs.UserData.Count)
+                !Nullable.Equals(ComputeState, inputs.ComputeState) ||
+                OtherStageMayWriteMemory != inputs.OtherStageMayWriteMemory || UserData.Length != inputs.UserData.Count)
                 return false;
             for (var index = 0; index < UserData.Length; index++)
                 if (UserData[index] != inputs.UserData[index])
@@ -415,6 +436,7 @@ public sealed class ResourceMaterializationCache
     private sealed class ReadRecorder
     {
         private readonly List<(ulong Address, uint Word, bool Clean, bool Table)> _reads = new();
+        private readonly Dictionary<ulong, int> _readIndex = new();
         private bool _inTable;
         private GuestWordReader? _reader;
         private GuestWordReader? _cleanReader;
@@ -438,6 +460,9 @@ public sealed class ResourceMaterializationCache
         public void Reset()
         {
             _reads.Clear();
+            var largeIndex = _readIndex.Count > 16384;
+            _readIndex.Clear();
+            if (largeIndex) _readIndex.TrimExcess();
             // Retain ordinary descriptor walks without keeping unusually large
             // tables alive for the lifetime of the renderer.
             if (_reads.Capacity > 16384)
@@ -475,8 +500,22 @@ public sealed class ResourceMaterializationCache
                 Failed = true;
                 return false;
             }
-            _reads.Add((address, word, clean, _inTable));
+            Record(address, word, clean);
             return true;
+        }
+
+        private void Record(ulong address, uint word, bool clean)
+        {
+            if (_readIndex.TryGetValue(address, out var index))
+            {
+                var previous = _reads[index];
+                // A cache entry cannot validate two different observations of one word.
+                if (previous.Word != word) Failed = true;
+                _reads[index] = (address, previous.Word, previous.Clean || clean, previous.Table && _inTable);
+                return;
+            }
+            _readIndex.Add(address, _reads.Count);
+            _reads.Add((address, word, clean, _inTable));
         }
 
         public ResidentGuestBytesReader? WrapResident(ResidentGuestBytesReader? inner)
@@ -493,8 +532,8 @@ public sealed class ResourceMaterializationCache
                 return false;
 
             for (var offset = 0; offset + sizeof(uint) <= destination.Length; offset += sizeof(uint))
-                _reads.Add((address + (ulong)offset,
-                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(destination[offset..]), clean, _inTable));
+                Record(address + (ulong)offset,
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(destination[offset..]), clean);
             return true;
         }
 
@@ -562,6 +601,7 @@ public sealed class ResourceMaterializationCache
                 UserData = userData,
                 ShaderBase = inputs.ShaderBase,
                 ComputeState = inputs.ComputeState,
+                OtherStageMayWriteMemory = inputs.OtherStageMayWriteMemory,
                 RangeAddresses = addresses,
                 RangeOffsets = offsets,
                 RangeLengths = lengths,

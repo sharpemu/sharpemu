@@ -10,6 +10,15 @@ namespace SharpEmu.ShaderCompiler.Tests;
 // Typed buffer instructions keep their own unified format; formatted untyped ones do not carry one.
 public sealed class Gen5TypedBufferLoadDecodeTests
 {
+    [Fact]
+    public void ComparisonGatherWithExplicitLodDecodesItsOpcodeAndLength()
+    {
+        var program = Decode([0xF0000100u | (0x4Cu << 18), 0x00000004u, 0xBF810000u]);
+        var gather = program.Instructions[0];
+        Assert.Equal("ImageGather4CL", gather.Opcode);
+        Assert.Equal(Gen5ShaderEncoding.Mimg, gather.Encoding);
+        Assert.Equal(8u, program.Instructions[1].Pc);
+    }
     private const ulong ShaderAddress = 0x1000;
     private const uint Format32x4Float = 77;
 

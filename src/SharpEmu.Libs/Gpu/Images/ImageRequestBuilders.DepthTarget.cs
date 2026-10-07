@@ -143,11 +143,6 @@ public static partial class ImageRequestBuilders
             {
                 throw SubmissionScheduler.Fatal($"The HTile metadata address is invalid: htile=0x{depthWords.HtileBase:X16}.");
             }
-
-            if (depthWords.SliceMax >= 32)
-            {
-                throw SubmissionScheduler.Fatal($"HTile clear tracking supports at most 32 slices: last={depthWords.SliceMax}.");
-            }
         }
 
         if (!depthWords.DepthSizeValid)

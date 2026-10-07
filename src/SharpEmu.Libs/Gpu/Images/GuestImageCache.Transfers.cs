@@ -108,6 +108,19 @@ public sealed unsafe partial class GuestImageCache
         }
 
         plan.Layout = TextureTransferLayout.Compute(format, info.Extent.Width, info.Extent.Height, info.Resources.Levels, layers, info.TileMode, info.Data.Size, allowDepthTile, volume, owner);
+        if (role == ImageRole.ColorTarget && info.TileMode == GuestTileMode.Linear && info.Resources.Levels == 1 && !volume)
+        {
+            // Linear color targets use the target register's pitch, not texture row alignment.
+            var slice = checked((ulong)info.Pitch * info.Extent.Height * info.BytesPerBlock);
+            if (slice > info.Data.Size / layers)
+                throw SubmissionScheduler.Fatal("The linear color target exceeds its guest allocation.");
+            plan.Layout.Pitch = info.Pitch;
+            plan.Layout.SliceStride = info.Data.Size / layers;
+            plan.Layout.Mips[0] = new TransferMipLayout
+            {
+                Size = slice, RowLength = info.Pitch, ImageHeight = info.Extent.Height,
+            };
+        }
         plan.Regions = plan.Layout.BuildCopies();
         if (info.IsDepth)
         {
@@ -260,6 +273,60 @@ public sealed unsafe partial class GuestImageCache
         UploadRegions(destination, copies.ToList(), linear);
     }
 
+    private static uint ExpandedColorChannels(CachedImage image) =>
+        image.Backing.Format is Format.R8G8B8A8Srgb or Format.R8G8B8A8Unorm
+            ? image.Description.GuestFormat switch
+            {
+                GuestPixelFormat.Bits8Srgb => 1u,
+                GuestPixelFormat.Bits8_8Srgb => 2u,
+                _ => 0u,
+            }
+            : 0u;
+
+    private static List<BufferImageCopy> ExpandedColorRegions(List<BufferImageCopy> guestRegions, out ulong size)
+    {
+        var result = new List<BufferImageCopy>(guestRegions.Count);
+        size = 0;
+        foreach (var guest in guestRegions)
+        {
+            var wide = guest;
+            wide.BufferOffset = size;
+            var pitch = guest.BufferRowLength == 0 ? guest.ImageExtent.Width : guest.BufferRowLength;
+            var height = guest.BufferImageHeight == 0 ? guest.ImageExtent.Height : guest.BufferImageHeight;
+            size = checked(size + (ulong)pitch * height * 4);
+            result.Add(wide);
+        }
+        return result;
+    }
+
+    private void ConvertExpandedColor(TilerBufferSpan guest, TilerBufferSpan wide,
+        List<BufferImageCopy> guestRegions, List<BufferImageCopy> wideRegions, uint channels, bool widen)
+    {
+        for (var index = 0; index < guestRegions.Count; index++)
+        {
+            var region = guestRegions[index];
+            if (region.ImageExtent.Depth != 1 || region.ImageSubresource.LayerCount != 1)
+                throw SubmissionScheduler.Fatal("Expanded color transfers require one slice per copy region.");
+            var pitch = region.BufferRowLength == 0 ? region.ImageExtent.Width : region.BufferRowLength;
+            var height = region.BufferImageHeight == 0 ? region.ImageExtent.Height : region.BufferImageHeight;
+            var narrowRow = checked((ulong)pitch * channels);
+            var wideRow = checked((ulong)pitch * 4);
+            if (region.BufferOffset > guest.Size || wideRegions[index].BufferOffset > wide.Size)
+                throw SubmissionScheduler.Fatal("Expanded color transfer offset exceeds its buffer span.");
+            var narrow = new TilerBufferSpan(guest.Buffer, checked(guest.Offset + region.BufferOffset), guest.Size - region.BufferOffset);
+            var expanded = new TilerBufferSpan(wide.Buffer, checked(wide.Offset + wideRegions[index].BufferOffset), wide.Size - wideRegions[index].BufferOffset);
+            _tiler.ConvertNarrowColor(widen ? narrow : expanded, widen ? expanded : narrow, channels, widen,
+                new DepthConversionLayout
+                {
+                    Width = region.ImageExtent.Width, Height = region.ImageExtent.Height, Layers = 1,
+                    SourceRowStride = widen ? narrowRow : wideRow,
+                    TargetRowStride = widen ? wideRow : narrowRow,
+                    SourceSliceStride = checked((widen ? narrowRow : wideRow) * height),
+                    TargetSliceStride = checked((widen ? wideRow : narrowRow) * height),
+                });
+        }
+    }
+
     private void UploadFromBuffer(CachedImage image, in ImageRequest request, GpuBuffer source, ulong sourceOffset)
     {
         if (image.DepthOwner.IsValid)
@@ -290,7 +357,17 @@ public sealed unsafe partial class GuestImageCache
                 linear = _tiler.SwapBgra16(linear);
             }
 
-            UploadRegions(image, plan.Regions, linear);
+            if (ExpandedColorChannels(image) is var channels && channels != 0)
+            {
+                var wideRegions = ExpandedColorRegions(plan.Regions, out var wideSize);
+                var wide = _tiler.GetScratchBuffer(wideSize);
+                ConvertExpandedColor(linear, wide, plan.Regions, wideRegions, channels, widen: true);
+                UploadRegions(image, wideRegions, wide);
+            }
+            else
+            {
+                UploadRegions(image, plan.Regions, linear);
+            }
             return;
         }
 
@@ -557,6 +634,21 @@ public sealed unsafe partial class GuestImageCache
         }
 
         var color = plan.Color;
+        if (ExpandedColorChannels(image) is var channels && channels != 0)
+        {
+            var wideRegions = ExpandedColorRegions(color.Regions, out var wideSize);
+            var wide = _tiler.GetScratchBuffer(wideSize);
+            image.DownloadToBuffer(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(wideRegions), wide.Buffer, 0, wide.Size);
+            var guest = color.Tiled
+                ? _tiler.Detile(destination.Handle, destinationOffset, destinationSize, color.LinearSize,
+                    System.Runtime.InteropServices.CollectionsMarshal.AsSpan(color.Tiles))
+                : new TilerBufferSpan(destination.Handle, destinationOffset, destinationSize);
+            ConvertExpandedColor(guest, wide, color.Regions, wideRegions, channels, widen: false);
+            if (color.Tiled)
+                _tiler.Tile(guest.Buffer, guest.Offset, guest.Size, destination.Handle, destinationOffset, destinationSize,
+                    System.Runtime.InteropServices.CollectionsMarshal.AsSpan(color.Tiles));
+            return;
+        }
         var swap = color.SwapBgra16 ? ColorChannelSwap.SwapBgra16 : ColorChannelSwap.None;
         if (!color.Tiled)
         {

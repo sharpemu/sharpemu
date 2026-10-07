@@ -3,6 +3,8 @@
 
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Vulkan;
+using SharpEmu.ShaderCompiler.Metal;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
@@ -17,15 +19,104 @@ public sealed class ResourceMaterializerTests
     private const uint ImageType2D = 9;
 
     [Theory]
+    [InlineData("write")]
+    [InlineData("atomic")]
+    [InlineData("compare")]
+    [InlineData("numeric")]
+    [InlineData("dimension")]
+    [InlineData("swizzle")]
+    public void SharedSampledCandidatesRejectDifferentUseSemantics(string difference)
+    {
+        var first = new ImageResource { ResourceClass = ImageResourceClass.Sampled, Read = true,
+            NumericClass = ImageNumericClass.Float, Dimension = ImageDimension.Dim2D };
+        var second = first.Clone();
+        Assert.True(ResourceMaterializer.CanShareSampledImageUse(first, second));
+        switch (difference)
+        {
+            case "write": second.Written = true; break;
+            case "atomic": second.Atomic = true; break;
+            case "compare": second.DepthCompare = true; break;
+            case "numeric": second.NumericClass = ImageNumericClass.Uint; break;
+            case "dimension": second.Dimension = ImageDimension.Dim3D; break;
+            case "swizzle": second.ShaderSwizzle ^= 1; break;
+        }
+        Assert.False(ResourceMaterializer.CanShareSampledImageUse(first, second));
+        Assert.False(ResourceMaterializer.CanShareSampledImageUse(second, first));
+    }
+
+    [Fact]
+    public void SharedImageCandidateOrderIsPartOfTheSpecializationIdentity()
+    {
+        var first = new ResourceSpecialization { IndirectImageCandidates = [(0, 0), (0, 2), (1, 1), (1, 2)] };
+        var clone = first.Clone();
+        Assert.Equal(first, clone);
+        Assert.Equal(first.GetHashCode(), clone.GetHashCode());
+        clone.IndirectImageCandidates[1] = (0, 1);
+        Assert.NotEqual(first, clone);
+        Assert.Equal((0u, 2u), first.IndirectImageCandidates[1]);
+        var reordered = first.Clone();
+        reordered.IndirectImageCandidates.Reverse();
+        Assert.NotEqual(first, reordered);
+    }
+
+    [Theory]
+    [InlineData(false, 3)]
+    [InlineData(false, 130)]
+    [InlineData(true, 3)]
+    [InlineData(true, 130)]
+    public void RepeatedSampledTablesShareCompatibleCandidatesAndKeepRootOrdering(bool differentViewWidth, int candidateCount)
+    {
+        var plan = Extract(ResourceTrackerTests.IndirectImageProgram(false));
+        var secondRoot = plan.Info.Images[0].Clone();
+        if (differentViewWidth) secondRoot.R128 = !secondRoot.R128;
+        plan.Info.Images.Add(secondRoot);
+        plan.Info.SampledPairs.Add(new SampledImagePair { Image = 1, Sampler = 0 });
+        uint[] userData = [0x1000, 224 << 16, (uint)candidateCount, 0, 0x10000, 16 << 16, (uint)candidateCount * 2, 0, 7];
+        var memory = new TestWordMemory { Words = new uint[0x13000 / 4] };
+        for (var index = 0; index < candidateCount; index++)
+        {
+            memory.At(0x1000 + (ulong)index * 224 + 4) = (uint)index;
+            var descriptor = ResourceTrackerTests.ImageDescriptor();
+            descriptor[0] += (uint)index;
+            ResourceTrackerTests.WriteImage(memory, 0x10000 + (ulong)index * 32, descriptor);
+        }
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, readCleanMemory: memory.Read),
+            ref snapshot, ref specialization, out var failure), failure.ToString());
+        Assert.Equal(differentViewWidth ? candidateCount * 2 : candidateCount + 1, snapshot.Images.Length);
+        var first = specialization.IndirectImageCandidates.Where(edge => edge.Root == 0).Select(edge => edge.Candidate).ToArray();
+        var second = specialization.IndirectImageCandidates.Where(edge => edge.Root == 1).Select(edge => edge.Candidate).ToArray();
+        Assert.Equal(0u, first[0]);
+        Assert.Equal(1u, second[0]);
+        Assert.Equal(candidateCount, first.Length);
+        Assert.Equal(candidateCount, second.Length);
+        if (!differentViewWidth) Assert.Equal(first.Skip(1), second.Skip(1));
+        else Assert.Empty(first.Intersect(second));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        Assert.Equal(first, resources.Info.Images[0].IndirectResources);
+        Assert.Equal(second, resources.Info.Images[1].IndirectResources);
+        var layout = BindingLayout.Allocate(resources.Info,
+            BindingLayout.CollectUserDataRegisters(plan.Graph.Program, 0, 64), false,
+            ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out error), error);
+
+    }
+
+    [Theory]
     [InlineData(32)]
     [InlineData(33)]
     [InlineData(64)]
     [InlineData(65)]
+    [InlineData(256)]
+    [InlineData(257)]
     public void MaterialImageCapacityPreservesTheLimitAndPublishedState(int distinctCount)
     {
         var plan = Extract(ResourceTrackerTests.IndirectImageProgram(false));
         uint[] userData = [0x1000, 224 << 16, (uint)distinctCount, 0, 0x10000, 16 << 16, (uint)distinctCount * 2, 0, 7];
-        var memory = new TestWordMemory { Words = new uint[0x11000 / 4] };
+        var memory = new TestWordMemory { Words = new uint[0x13000 / 4] };
         for (var index = 0; index < distinctCount; index++)
         {
             memory.At(0x1000 + (ulong)index * 224 + 4) = (uint)index;

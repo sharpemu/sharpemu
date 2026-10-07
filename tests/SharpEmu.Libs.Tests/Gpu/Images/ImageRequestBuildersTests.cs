@@ -16,7 +16,180 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 [Collection(SchedulingStateCollection.Name)]
 public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixture>
 {
+    [Fact]
+    public void PointSampledByteDomainFollowsDescriptorSwizzles()
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UInt, 4, 4);
+        // Output red selects stored alpha, green is zero, blue is one.
+        words[3] = (words[3] & ~0xFFFu) | 7u | (1u << 6) | (4u << 9);
+        bool Read(ulong address, out uint word) { word = 0xFA040302; return true; }
+        Assert.True(ImageRequestBuilders.TryReadPointSampledByteDomain(words, new uint[4], 7, Read, out var values));
+        Assert.Equal(new uint[] { 0, 1, 250, 255 }, values);
+        words[3] = (words[3] & ~7u) | 2u;
+        Assert.False(ImageRequestBuilders.TryReadPointSampledByteDomain(words, new uint[4], 7, Read, out values));
+    }
+
+    [Fact]
+    public void PointSampledByteDomainIncludesSelectedChannelsAndRequiresTheWholeSource()
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UInt, 4, 4,
+            tile: GuestTileMode.Linear);
+        var sampler = new uint[4];
+        var size = ImageRequestBuilders.Texture(words,
+            new ShaderImageShape(false, false, false, false, TextureNumericClass.Uint)).Request.Description.Data.Size;
+        var reads = 0;
+        bool Read(ulong address, out uint word)
+        {
+            reads++;
+            word = address == Base + size - 4 ? 0xFA090807u : 0xFA040302u;
+            return true;
+        }
+        Assert.True(ImageRequestBuilders.TryReadPointSampledByteDomain(words, sampler, 7, Read, out var values));
+        Assert.Equal(new uint[] { 0, 1, 2, 3, 4, 7, 8, 9, 255 }, values);
+        Assert.Equal((int)(size / 4), reads);
+        bool Incomplete(ulong address, out uint word)
+        {
+            word = 0xFA040302;
+            return address != Base + size - 4;
+        }
+        Assert.False(ImageRequestBuilders.TryReadPointSampledByteDomain(words, sampler, 7, Incomplete, out values));
+        Assert.Empty(values);
+        sampler[2] = 1u << 20;
+        reads = 0;
+        Assert.False(ImageRequestBuilders.TryReadPointSampledByteDomain(words, sampler, 7, Read, out values));
+        Assert.Equal(0, reads);
+    }
+
     private const ulong Base = 0x1_0000_0000;
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PointSampledByteDomainRangeReadsMatchWordsAndRejectAnUnreadableTail(bool unreadableTail)
+    {
+        var image = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UInt, 512, 3,
+            tile: GuestTileMode.Linear);
+        var size = ImageRequestBuilders.Texture(image,
+            new ShaderImageShape(false, false, false, false, TextureNumericClass.Uint)).Request.Description.Data.Size;
+        Assert.True(size > 4096);
+        uint Word(ulong address) => address == Base + size - 4 ? 0xFA090807u : 0xFA040302u;
+        bool Reference(ulong address, out uint word) { word = Word(address); return true; }
+        Assert.True(ImageRequestBuilders.TryReadPointSampledByteDomain(image, new uint[4], 7, Reference, out var expected));
+        var wordCalls = 0; var rangeCalls = 0;
+        bool ReadWord(ulong address, out uint word) { wordCalls++; word = Word(address); return true; }
+        bool ReadRange(ulong address, Span<byte> bytes, bool clean)
+        {
+            Assert.True(clean);
+            Assert.InRange(bytes.Length, 4, 4096);
+            Assert.Equal(0, bytes.Length % 4);
+            rangeCalls++;
+            if (unreadableTail && address + (ulong)bytes.Length == Base + size) return false;
+            for (var offset = 0; offset < bytes.Length; offset += 4)
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes[offset..], Word(address + (uint)offset));
+            return true;
+        }
+        Assert.Equal(!unreadableTail, ImageRequestBuilders.TryReadPointSampledByteDomain(image, new uint[4], 7,
+            ReadWord, out var actual, readCleanRange: ReadRange));
+        Assert.Equal(0, wordCalls);
+        Assert.Equal((int)((size + 4095) / 4096), rangeCalls);
+        if (unreadableTail) Assert.Empty(actual);
+        else Assert.Equal(expected, actual);
+    }
+
+    [Theory]
+    [InlineData(GuestTileMode.Linear)]
+    [InlineData(GuestTileMode.Standard4KB)]
+    public void R8DomainReadsLogicalTexelsWithoutTreatingPaddingAsSampledValues(GuestTileMode tile)
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8UInt, 3, 2, tile: tile);
+        var description = ImageRequestBuilders.Texture(words,
+            new ShaderImageShape(false, false, false, false, TextureNumericClass.Uint)).Request.Description;
+        var secondRow = tile == GuestTileMode.Linear ? description.MipLayout[0].Pitch : 16u;
+        bool Read(ulong address, out uint word)
+        {
+            word = address == Base ? 0xFA050403u : address == Base + secondRow ? 0xFA080706u : 0xFAFAFAFAu;
+            return true;
+        }
+        Assert.True(ImageRequestBuilders.TryReadPointSampledByteDomain(words, new uint[4], 1, Read, out var values));
+        Assert.Equal(new uint[] { 0, 1, 3, 4, 5, 6, 7, 8 }, values);
+        bool Missing(ulong address, out uint word) { Read(address, out word); return address != Base + secondRow; }
+        Assert.False(ImageRequestBuilders.TryReadPointSampledByteDomain(words, new uint[4], 1, Missing, out values));
+        Assert.Empty(values);
+        words[6] |= 1u << 20;
+        Assert.False(ImageRequestBuilders.TryReadPointSampledByteDomain(words, new uint[4], 1, Read, out values));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void IntegerGatherDomainKeepsTexelsSeparateFromSamplerFiltering(bool gathered, bool accepted)
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8UInt, 3, 1);
+        uint[] sampler = [4u << 9, 0, (3u << 20) | (3u << 22) | (2u << 26), 0];
+        bool Read(ulong address, out uint word) { word = 0xFA050403; return true; }
+        Assert.Equal(accepted, ImageRequestBuilders.TryReadPointSampledByteDomain(words, sampler, 1, Read, out var values, gathered));
+        if (accepted) Assert.Equal(new uint[] { 0, 1, 3, 4, 5 }, values);
+        sampler[3] = 3u << 30;
+        Assert.False(ImageRequestBuilders.TryReadPointSampledByteDomain(words, sampler, 1, Read, out values, gathered));
+    }
+
+    [Theory]
+    [InlineData(GuestTileMode.Linear)]
+    [InlineData(GuestTileMode.Standard4KB)]
+    public void StorageVolumeWriteRangeIncludesEverySliceAndMip(GuestTileMode tile)
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits32Float, 16, 16,
+            GuestImageType.Color3D, tile, lastLevel: 2, maxMip: 2, layers: 64);
+        var shape = new ShaderImageShape(false, false, true, true, TextureNumericClass.Float) { Volume = true };
+        var request = ImageRequestBuilders.Texture(words, shape).Request;
+        Assert.Equal(64u, request.Description.Extent.Depth);
+        Assert.Equal(ImageViewType.Type3D, request.View.Type);
+        Assert.True(ImageRequestBuilders.TryGetStorageAllocationRange(words, out var address, out var size));
+        Assert.Equal(Base, address);
+        Assert.Equal(request.Description.Data.Size, size);
+        Assert.True(size >= 16UL * 16 * 64 * sizeof(float));
+        var lastMip = request.Description.MipLayout[2];
+        Assert.True(lastMip.Offset + lastMip.Size <= size);
+        Assert.True(lastMip.Size > 0);
+
+        words[6] |= 1u << 20;
+        Assert.False(ImageRequestBuilders.TryGetStorageAllocationRange(words, out _, out _));
+    }
+
+    [Theory]
+    [InlineData(0u, true)]
+    [InlineData(1u << 20, false)]
+    [InlineData(1u << 21, false)]
+    public void StorageWriteRangeIncludesTheTiledAllocationAndRejectsCompression(uint compression, bool accepted)
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits16_16_16_16Float,
+            16, 16, tile: GuestTileMode.Standard4KB);
+        words[6] |= compression;
+        Assert.Equal(accepted, ImageRequestBuilders.TryGetStorageAllocationRange(words, out var address, out var size));
+        Assert.Equal(accepted ? Base : 0UL, address);
+        Assert.Equal(accepted ? 4096UL : 0UL, size);
+        words[0] = 0;
+        words[1] &= 0xFFFFFF00;
+        Assert.False(ImageRequestBuilders.TryGetStorageAllocationRange(words, out _, out _));
+        Assert.False(ImageRequestBuilders.TryGetStorageAllocationRange(words.AsSpan(0, 7), out _, out _));
+    }
+
+    [Theory]
+    [InlineData(0x100u)]
+    [InlineData(0x800u)]
+    public void TiledTextureViewPreservesItsDescriptorAddress(uint offset)
+    {
+        var words = RegisterWords.Texture(Base + offset, GuestPixelFormat.Bits16_16_16_16Float,
+            16, 16, tile: GuestTileMode.Standard4KB);
+        var shape = new ShaderImageShape(false, false, true, false, TextureNumericClass.Float);
+        var request = ImageRequestBuilders.Texture(words, shape).Request;
+        Assert.Equal(Base + offset, request.Description.Data.Address);
+        Assert.Equal(4096UL, request.Description.Data.Size);
+        Assert.Equal(32u, request.Description.Pitch);
+        Assert.Equal(GuestTileMode.Standard4KB, request.Description.TileMode);
+        Assert.Equal(Format.R16G16B16A16Sfloat, request.Description.PixelFormat);
+        Assert.Equal(0UL, request.Description.MipLayout[0].Offset);
+    }
 
     [Fact]
     public void EightBitUnsignedScaledTextureUsesUnormBackingWithShaderConversion()
@@ -341,6 +514,21 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Equal(value.DepthSize, request.Description.MipLayout[0].Size);
         Assert.Equal(ImageAspectFlags.DepthBit, request.View.Aspect);
         Assert.Equal(ImageUsageFlags.DepthStencilAttachmentBit, request.View.Usage);
+    }
+
+    [Fact]
+    public void DepthTarget_ResolvesHtileBeyondTheFirst32Slices()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        var words = RegisterWords.Depth(Base, 64, 64);
+        words = words with { ZInfo = words.ZInfo | (1u << 29), HtileBase = Base + 0x800000,
+            DepthView = 80u | (80u << 13) };
+        var resolution = ImageRequestBuilders.DepthTarget(words, _vulkan.DeviceInfo);
+        Assert.NotNull(resolution);
+        Assert.True(resolution.Value.HasHtile);
+        Assert.Equal(80u, resolution.Value.Request.View.BaseLayer);
+        Assert.Equal(1u, resolution.Value.Request.View.LayerCount);
+        Assert.Equal(81u, resolution.Value.Request.Description.Resources.Layers);
     }
 
     [Fact]

@@ -13,6 +13,160 @@ public readonly record struct TextureRequestResolution(ImageRequest Request, boo
 
 public static partial class ImageRequestBuilders
 {
+    // A conservative byte domain for point-sampled integer data. Tiling changes
+    // texel addresses, not the byte positions inside an RGBA8 texel. Including
+    // padding overestimates the domain; every byte must still be readable.
+    internal static bool TryReadPointSampledByteDomain(ReadOnlySpan<uint> imageWords,
+        ReadOnlySpan<uint> samplerWords, uint channels,
+        SharpEmu.ShaderCompiler.Resources.GuestWordReader readCleanWord, out uint[] values, bool gathered = false,
+        SharpEmu.ShaderCompiler.Resources.ResidentGuestBytesReader? readCleanRange = null)
+    {
+        values = [];
+        if (imageWords.Length != 8 || samplerWords.Length != 4 || channels is 0 or > 15) return false;
+        var image = new TextureDescriptorWords(imageWords);
+        var sampler = new SamplerDescriptorWords(samplerWords);
+        if (image.Format == GuestPixelFormat.Bits8UInt)
+            return TryReadR8TexelDomain(imageWords, sampler, channels, readCleanWord, out values, gathered);
+        if (image.IsNull || image.Format != GuestPixelFormat.Bits8_8_8_8UInt ||
+            image.Type != GuestImageType.Color2D || image.BaseLevel != 0 || image.LastLevel != 0 ||
+            image.MaxMip != 0 || image.Depth != 0 || image.BaseArray != 0 || image.MinLod != 0 ||
+            image.WriteCompress || image.MetadataCompress ||
+            image.TileMode is not (GuestTileMode.Linear or GuestTileMode.Standard4KB) ||
+            !gathered && (sampler.MagnifyFilter != (uint)SamplerFilter.Point || sampler.MinifyFilter != (uint)SamplerFilter.Point ||
+                sampler.MipFilter > (uint)SamplerMipFilter.Point || sampler.MaxAnisotropyRatio != 0) ||
+            sampler.DepthCompareFunction != 0 || sampler.BorderColorType == (uint)SamplerBorderColor.FromTable)
+            return false;
+
+        uint storedChannels = 0;
+        var found = new bool[256];
+        for (var channel = 0; channel < 4; channel++)
+        {
+            if ((channels & (1u << channel)) == 0) continue;
+            var selection = (image.DestinationSelectXyzw >> (channel * 3)) & 7;
+            if (selection >= 4) storedChannels |= 1u << (int)(selection - 4);
+            else if (selection <= 1) found[selection] = true;
+            else return false;
+        }
+        // Include all built-in integer border values, even when the sampler's
+        // address modes make the border unreachable.
+        found[0] = found[1] = found[255] = true;
+        var request = Texture(imageWords, new ShaderImageShape(false, false, false, false, TextureNumericClass.Uint));
+        if (request.Request.Description.PixelFormat != Format.R8G8B8A8Uint) return false;
+        var data = request.Request.Description.Data;
+        if (data.Size is 0 or > 16 * 1024 * 1024 || (data.Size & 3) != 0) return false;
+        Span<byte> block = stackalloc byte[4096];
+        for (ulong offset = 0; offset < data.Size;)
+        {
+            var bytes = readCleanRange is null ? sizeof(uint) : (int)Math.Min((ulong)block.Length, data.Size - offset);
+            if (readCleanRange is not null && !readCleanRange(data.Address + offset, block[..bytes], true)) return false;
+            for (var within = 0; within < bytes; within += 4)
+            {
+                uint word;
+                if (readCleanRange is null)
+                {
+                    if (!readCleanWord(data.Address + offset, out word)) return false;
+                }
+                else word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(block[within..]);
+                for (var channel = 0; channel < 4; channel++)
+                    if ((storedChannels & (1u << channel)) != 0) found[(word >> (channel * 8)) & 255] = true;
+            }
+            offset += (uint)bytes;
+        }
+        values = Enumerable.Range(0, 256).Where(value => found[value]).Select(value => (uint)value).ToArray();
+        return true;
+    }
+
+    internal static bool TryGetStorageAllocationRange(ReadOnlySpan<uint> words, out ulong address, out ulong size)
+    {
+        address = size = 0;
+        if (words.Length != 8) return false;
+        var descriptor = new TextureDescriptorWords(words);
+        if (descriptor.IsNull || descriptor.Type is not (GuestImageType.Color2D or GuestImageType.Color3D) ||
+            descriptor.WriteCompress || descriptor.MetadataCompress) return false;
+        var numeric = SharpEmu.ShaderCompiler.Resources.GuestImageFormat.SampledNumericClass(
+            SharpEmu.ShaderCompiler.Resources.GuestImageFormat.FormatOf(words));
+        if (numeric == SharpEmu.ShaderCompiler.Resources.ImageNumericClass.Unsupported) return false;
+        var storageClass = numeric switch
+        {
+            SharpEmu.ShaderCompiler.Resources.ImageNumericClass.Uint => TextureNumericClass.Uint,
+            SharpEmu.ShaderCompiler.Resources.ImageNumericClass.Sint => TextureNumericClass.Sint,
+            _ => TextureNumericClass.Float,
+        };
+        var shape = new ShaderImageShape(false, false, true, true, storageClass)
+        {
+            Volume = descriptor.Type == GuestImageType.Color3D,
+        };
+        var resolved = Texture(words, shape);
+        var data = resolved.Request.Description.Data;
+        if (resolved.Request.Description.PixelFormat == Format.Undefined ||
+            resolved.Request.Description.GuestFormat != descriptor.Format ||
+            data.Address != descriptor.BaseAddress || data.Size == 0 ||
+            data.Address >= 1ul << 48 || data.Size > (1ul << 48) - data.Address) return false;
+        address = data.Address;
+        size = data.Size;
+        return true;
+    }
+
+    private static bool TryReadR8TexelDomain(ReadOnlySpan<uint> imageWords, in SamplerDescriptorWords sampler,
+        uint channels, SharpEmu.ShaderCompiler.Resources.GuestWordReader reader, out uint[] values, bool gathered)
+    {
+        values = [];
+        var image = new TextureDescriptorWords(imageWords);
+        if (image.IsNull || image.Type != GuestImageType.Color2D || image.BaseLevel != 0 || image.LastLevel != 0 ||
+            image.MaxMip != 0 || image.Depth != 0 || image.BaseArray != 0 || image.MinLod != 0 ||
+            image.WriteCompress || image.MetadataCompress || image.TileMode is not (GuestTileMode.Linear or GuestTileMode.Standard4KB) ||
+            sampler.DepthCompareFunction != 0 || sampler.BorderColorType == (uint)SamplerBorderColor.FromTable ||
+            !gathered && (sampler.MaxAnisotropyRatio != 0 || sampler.MagnifyFilter != (uint)SamplerFilter.Point ||
+                sampler.MinifyFilter != (uint)SamplerFilter.Point || sampler.MipFilter > (uint)SamplerMipFilter.Point)) return false;
+        var description = Texture(imageWords,
+            new ShaderImageShape(false, false, false, false, TextureNumericClass.Uint)).Request.Description;
+        var data = description.Data;
+        if (data.Size is 0 or > 16 * 1024 * 1024 || data.Address >= 1ul << 48 || data.Size > (1ul << 48) - data.Address) return false;
+        var stored = false;
+        var found = new bool[256];
+        for (var channel = 0; channel < 4; channel++)
+        {
+            if ((channels & (1u << channel)) == 0) continue;
+            var selection = (image.DestinationSelectXyzw >> (channel * 3)) & 7;
+            if (selection == 4) stored = true;
+            else if (selection <= 1) found[selection] = true;
+            else return false;
+        }
+        // Built-in integer borders remain possible even when absent from the texels.
+        found[0] = found[1] = true;
+        TiledSurfaceLayout? surface = null;
+        if (image.TileMode == GuestTileMode.Standard4KB &&
+            (!TileGeometry.TryGetTiledTextureLayout(new(image.Format, image.TileMode, TileSurfaceDimension.Flat2D,
+                description.Extent.Width, description.Extent.Height), out surface) || surface.TotalSize != data.Size)) return false;
+        var words = new Dictionary<ulong, uint>();
+        if (stored)
+        for (uint y = 0; y < description.Extent.Height; y++)
+        for (uint x = 0; x < description.Extent.Width; x++)
+        {
+            ulong offset;
+            if (surface is null) offset = (ulong)y * description.MipLayout[0].Pitch + x;
+            else
+            {
+                var block = surface.Texture.Block;
+                var mip = surface.Mips[0];
+                if (!TileGeometry.TryGetBlockOffset(block, x % block.BlockWidth + mip.TailX,
+                    y % block.BlockHeight + mip.TailY, 0, out var within)) return false;
+                offset = mip.Offset + ((ulong)(y / block.BlockHeight) * (mip.PaddedWidth / block.BlockWidth) +
+                    x / block.BlockWidth) * block.BlockSize + within;
+            }
+            if (offset >= data.Size) return false;
+            var at = data.Address + (offset & ~3ul);
+            if (!words.TryGetValue(at, out var word))
+            {
+                if (!reader(at, out word)) return false;
+                words.Add(at, word);
+            }
+            found[(word >> (int)((offset & 3) * 8)) & 255] = true;
+        }
+        values = Enumerable.Range(0, 256).Where(value => found[value]).Select(value => (uint)value).ToArray();
+        return true;
+    }
+
     // A null descriptor binds a one-texel image of the numeric class the shader expects.
     public static ImageRequest NullTexture(in ShaderImageShape shape)
     {
@@ -273,7 +427,9 @@ public static partial class ImageRequestBuilders
             size = TileGeometry.TextureTotalSize(format, width, height, volume ? depth : imageLayers, levels, tile, volume);
         }
 
-        if (size.Size == 0 || size.Align == 0 || (address & (size.Align - 1UL)) != 0)
+        // T# encodes its byte address in 256-byte units. The layout alignment
+        // describes a new surface allocation, not an addressed view inside one.
+        if (size.Size == 0 || size.Align == 0 || (address & 0xFFUL) != 0)
         {
             throw SubmissionScheduler.Fatal(
                 $"The texture footprint or alignment is invalid: address=0x{address:X16} size=0x{size.Size:X} align=0x{size.Align:X} format={(uint)format} tile={(uint)tile}.");

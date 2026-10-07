@@ -161,6 +161,20 @@ public sealed class VulkanPresentEncodeFormatTests
     }
 
     [Theory]
+    [InlineData(1u, 6u, Format.R8Srgb)]
+    [InlineData(1u, 9u, Format.R8Srgb)]
+    [InlineData(3u, 6u, Format.R8G8Srgb)]
+    [InlineData(3u, 9u, Format.R8G8Srgb)]
+    public void TryDecodeRenderTargetFormat_DecodesNarrowSrgbOutputs(uint layout, uint numberType, Format expected)
+    {
+        Assert.True(VulkanVideoPresenter.TryDecodeRenderTargetFormat(layout, numberType, 0, out var decoded));
+        Assert.Equal(expected, decoded.Format);
+        Assert.Equal(SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float, decoded.OutputKind);
+        Assert.True(decoded.ExportMapping.IsIdentity);
+        Assert.False(VulkanVideoPresenter.TryDecodeRenderTargetFormat(layout, numberType, 4, out _));
+    }
+
+    [Theory]
     [InlineData(6u, 0u, Format.R8G8B8A8Srgb)]
     [InlineData(6u, 1u, Format.B8G8R8A8Srgb)]
     // Keep the texture NUMBER_FORMAT value as a compatibility input.

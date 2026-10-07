@@ -40,6 +40,7 @@ public static class ResourceMaterializer
         public uint[] UserData = [];
         public List<IndirectImageTable> IndirectImages = [];
         public List<BufferCandidateTable> BufferCandidateTables = [];
+        public List<RuntimeSamplerCandidate> RuntimeSamplers = [];
     }
 
     // One bounded runtime V# table resolved for this draw: the distinct candidate descriptors
@@ -125,6 +126,29 @@ public static class ResourceMaterializer
         using var snapshotProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Snapshot);
         failure = ResourceMaterializationFailure.Other;
         snapshot = new MaterializedSnapshot();
+        // A clean host read does not cover writes made during this draw. These
+        // proofs require stable descriptor inputs throughout shader execution.
+        DescriptorWriteProof? writeProof = null;
+        if (RequiresStableDescriptorInputs(plan))
+        {
+            if (inputs.OtherStageMayWriteMemory) return false;
+            if (RequiresDescriptorWriteProof(plan))
+            {
+                if (inputs.ReadCleanMemory is null) return false;
+                writeProof = new DescriptorWriteProof(inputs.ReadCleanMemory);
+                inputs = new ResourceRuntimeInputs
+                {
+                    UserData = inputs.UserData, ShaderBase = inputs.ShaderBase,
+                    ReadMemory = inputs.ReadMemory, ReadCleanMemory = writeProof.Read,
+                    ReadResidentMemory = inputs.ReadResidentMemory, ReadsClean = inputs.ReadsClean,
+                    ComputeState = inputs.ComputeState, TablePhase = inputs.TablePhase,
+                    OtherStageMayWriteMemory = inputs.OtherStageMayWriteMemory,
+                    ReadImageWriteRange = inputs.ReadImageWriteRange,
+                    ReadPointSampledByteDomain = inputs.ReadPointSampledByteDomain,
+                    ReadFlatParameterDomain = inputs.ReadFlatParameterDomain,
+                };
+            }
+        }
         if (plan.RequiresSpecializationMemory && inputs.ReadCleanMemory is null)
         {
             return false;
@@ -136,6 +160,18 @@ public static class ResourceMaterializer
         {
             SpecializationFailed(DiagnoseSnapshotEvaluationFailure(plan, inputs, activeSources));
             return false;
+        }
+
+        foreach (var source in plan.DescriptorSources)
+        {
+            if (source.ZeroExtentBufferSource is not { } bufferSource) continue;
+            if (!RuntimeValueEvaluator.EvaluateSources(plan, [bufferSource], inputs.WithReader(inputs.ReadCleanMemory), [],
+                    evaluateTable: false, out var descriptors, out _) ||
+                descriptors.Count != 1 || descriptors[0].DwordCount != 4 || ScalarBufferSize(descriptors[0].Dwords) != 0)
+            {
+                SpecializationFailed("a dynamically loaded descriptor requires an empty source buffer");
+                return false;
+            }
         }
 
         var cursor = 0;
@@ -156,8 +192,42 @@ public static class ResourceMaterializer
                     continue;
                 }
                 var cleanInputs = inputs.WithReader(inputs.ReadCleanMemory);
+                if (indirect.Workgroup is { } workgroup)
+                {
+                    if (!workgroup.TryEvaluate(plan, inputs, out var keys, out var descriptors) ||
+                        descriptors.Any(words => !UsableImageCandidate(words, image.R128)) ||
+                        !FinishIndirectImage(descriptors, keys, out var workgroupTable, out failure)) return false;
+                    snapshot.Images[imageIndex] = workgroupTable.Descriptors[(int)workgroupTable.Candidates[0]].Dwords;
+                    if (workgroupTable.Descriptors.Count > 1)
+                    {
+                        workgroupTable.Resource = (uint)imageIndex;
+                        snapshot.IndirectImages.Add(workgroupTable);
+                    }
+                    continue;
+                }
+                if (indirect.GatheredByteSelectorProof is { } byteProof && !byteProof.HasByteRange(plan, inputs))
+                    return false;
                 if (indirect.DirectCandidates is { } directCandidates)
                 {
+                    if (!TryCandidateCount(plan, indirect.CandidateCountSource, directCandidates.Count, cleanInputs, out var candidateCount))
+                        return false;
+                    directCandidates = directCandidates.Take(candidateCount).ToArray();
+                    if (candidateCount == 0)
+                    {
+                        if (!ProvenUnusedSource(plan, image.Source)) return false;
+                        // The guarded instruction cannot execute. Use the same
+                        // backend null binding as other proven inactive resources.
+                        snapshot.Images[imageIndex] = new uint[8];
+                        continue;
+                    }
+                    if (indirect.PackedTextureDomain is { } packed && inputs.ReadPointSampledByteDomain is not null)
+                    {
+                        if (packed.TryFilterCandidates(plan, inputs, directCandidates, out var selected))
+                        {
+                            if (selected.Count == 0) return false;
+                            directCandidates = selected;
+                        }
+                    }
                     if (!RuntimeValueEvaluator.EvaluateSources(plan, directCandidates.Select(candidate => candidate.Source).ToArray(),
                         cleanInputs, [], evaluateTable: false, out var descriptors, out _))
                     {
@@ -168,7 +238,11 @@ public static class ResourceMaterializer
                     {
                         var descriptor = descriptors[candidateIndex];
                         if (!UsableImageCandidate(descriptor.Dwords, image.R128))
+                        {
+                            if (indirect.CandidateCountSource is not null || indirect.GatheredByteSelectorProof is not null || indirect.PackedTextureDomain is not null)
+                                return false;
                             descriptor = DescriptorWords.Empty(8);
+                        }
                         var existing = directTable.Descriptors.FindIndex(candidate => candidate.SameAs(descriptor));
                         if (existing < 0)
                         {
@@ -243,8 +317,97 @@ public static class ResourceMaterializer
         }
 
         snapshot.Samplers = new uint[plan.Info.Samplers.Count][];
+        var extraSamplers = new List<uint[]>();
+        var additionalSampledPairs = 0;
         for (var index = 0; index < snapshot.Samplers.Length; index++)
+        {
+            var sampler = plan.Info.Samplers[index];
             snapshot.Samplers[index] = values[cursor++].Dwords;
+            if (plan.DescriptorSources[(int)sampler.Source].Workgroup is { LoopCounter: not null } workgroup &&
+                (activeSources.Length == 0 || activeSources[sampler.Source]))
+            {
+                // These instructions use the native sampler's complete state.
+                // Gather and comparison paths need additional specialization proofs.
+                if (plan.Memory.Entries.Any(memory => memory.NeedsSampler && memory.Sampler == index &&
+                    memory.Opcode is not ("ImageSampleD" or "ImageSampleLz")) ||
+                    !workgroup.TryEvaluate(plan, inputs, out var keys, out var records) || records.Length == 0)
+                    return false;
+                var distinct = new List<(uint[] Words, uint Sampler)>();
+                var mappingStart = snapshot.RuntimeSamplers.Count;
+                for (var record = 0; record < records.Length; record++)
+                {
+                    var found = distinct.FindIndex(candidate => candidate.Words.AsSpan().SequenceEqual(records[record]));
+                    uint target;
+                    if (found >= 0) target = distinct[found].Sampler;
+                    else
+                    {
+                        target = distinct.Count == 0 ? (uint)index : (uint)(snapshot.Samplers.Length + extraSamplers.Count);
+                        if (target >= ShaderResourceInfo.MaxSamplers) return false;
+                        if (distinct.Count != 0)
+                        {
+                            additionalSampledPairs += plan.Info.SampledPairs.Count(pair => pair.Sampler == index);
+                            if (plan.Info.SampledPairs.Count + additionalSampledPairs > ShaderResourceInfo.MaxSampledPairs) return false;
+                            extraSamplers.Add(records[record]);
+                        }
+                        distinct.Add((records[record], target));
+                    }
+                    var selectorRead = plan.Graph.ResolveInvariantPhi(workgroup.Handle.Operands[0]) ?? workgroup.Handle.Operands[0];
+                    snapshot.RuntimeSamplers.Add(new((uint)index, selectorRead.MemoryIndex, keys[record], target));
+                }
+                snapshot.Samplers[index] = records[0];
+                if (distinct.Count == 1)
+                    snapshot.RuntimeSamplers.RemoveRange(mappingStart, snapshot.RuntimeSamplers.Count - mappingStart);
+                continue;
+            }
+            if (plan.DescriptorSources[(int)sampler.Source].EquivalentSamplerSources is not { } candidates ||
+                activeSources.Length != 0 && !activeSources[sampler.Source]) continue;
+            var samplerSource = plan.DescriptorSources[(int)sampler.Source];
+            if (samplerSource.RuntimeSamplerCountSource is { } countSource)
+            {
+                if (inputs.ReadCleanMemory is null ||
+                    !TryCandidateCount(plan, countSource, candidates.Count, inputs.WithReader(inputs.ReadCleanMemory), out var count))
+                    return false;
+                if (count == 0)
+                {
+                    if (!ProvenUnusedSource(plan, sampler.Source)) return false;
+                    continue;
+                }
+                candidates = candidates.Take(count).ToArray();
+            }
+            if (inputs.ReadCleanMemory is null ||
+                !RuntimeValueEvaluator.EvaluateSources(plan, candidates.ToArray(), inputs.WithReader(inputs.ReadCleanMemory), [],
+                    evaluateTable: false, out var descriptors, out _) || descriptors.Count == 0 ||
+                descriptors.Any(descriptor => descriptor.DwordCount != 4 || !descriptor.SameAs(descriptors[0])))
+            {
+                SpecializationFailed($"finite sampler resource {index} requires identical readable candidates");
+                return false;
+            }
+            snapshot.Samplers[index] = descriptors[0].Dwords;
+        }
+        snapshot.Samplers = [.. snapshot.Samplers, .. extraSamplers];
+
+        foreach (var (memoryIndex, _) in plan.Info.DeviceStoreValidationSources)
+        {
+            var fields = values[cursor++].Dwords;
+            var memory = plan.Memory[memoryIndex];
+            var format = (fields[3] >> 12) & 0x7F;
+            var valid = Gfx10UnifiedFormat.TryDecode(format, out var dataFormat, out _) &&
+                memory.DataBits == 32 && !memory.Typed && (fields[1] & 0x80000000) == 0 &&
+                (fields[3] & 0xF0800000) == 0;
+            if (format != 0)
+            {
+                var count = Gfx10UnifiedFormat.ComponentCount(dataFormat);
+                valid &= count != 0 && count == memory.DataDwords &&
+                    ((fields[1] >> 16) & 0x3FFF) >= Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, count);
+                for (uint component = 0; component < count; component++)
+                    valid &= ((fields[3] >> (int)(component * 3)) & 7) == component + 4;
+            }
+            if (!valid)
+            {
+                SpecializationFailed($"device formatted store at 0x{memory.Pc:X} requires a proven linear, structured descriptor with matching identity channels");
+                return false;
+            }
+        }
 
         // Bounded runtime V# tables: the whole table is read and validated before it is
         // published, so a single unreadable candidate leaves the previous snapshot intact.
@@ -266,7 +429,102 @@ public static class ResourceMaterializer
         }
 
         snapshot.UserData = inputs.UserData.ToArray();
+        if (writeProof is not null && !writeProof.Validate(plan, inputs)) return false;
         return true;
+    }
+
+    private static bool ProvenUnusedSource(ShaderResourcePlan plan, uint source)
+    {
+        if (plan.DescriptorSources[(int)source].RuntimeZeroCountGuardPc is not { } pc) return false;
+        var flow = plan.Graph.ControlFlow;
+        var instruction = plan.Graph.Program.Instructions.First(instruction => instruction.Pc == pc);
+        var guard = flow.BlockOf(pc);
+        if (guard < 0 || !flow.BlockByStartPc.TryGetValue(pc + (uint)instruction.Words.Count * sizeof(uint), out var admitted))
+            return false;
+        var consumers = new HashSet<int>();
+        foreach (var memory in plan.Memory.Entries)
+        {
+            if (memory.Kind != MemoryResourceKind.Image || memory.PlanningOnly) continue;
+            var imageUses = memory.Resource < plan.Info.Images.Count && plan.Info.Images[(int)memory.Resource].Source == source;
+            var samplerUses = memory.NeedsSampler && memory.Sampler < plan.Info.Samplers.Count &&
+                plan.Info.Samplers[(int)memory.Sampler].Source == source;
+            if (imageUses || samplerUses) consumers.Add(flow.BlockOf(memory.Pc));
+        }
+        if (consumers.Count == 0 || consumers.Contains(-1)) return false;
+        var pending = new Stack<int>();
+        var visited = new HashSet<int>();
+        pending.Push(0);
+        while (pending.TryPop(out var block))
+        {
+            if (!visited.Add(block)) continue;
+            if (consumers.Contains(block)) return false;
+            foreach (var successor in flow.Successors[block])
+                if (block != guard || successor != admitted) pending.Push(successor);
+        }
+        return true;
+    }
+
+    private static bool RequiresStableDescriptorInputs(ShaderResourcePlan plan) =>
+        plan.DescriptorSources.Any(source => source.RuntimeSamplerCountSource is not null ||
+            source.IndirectImage is { } indirect &&
+            (indirect.CandidateCountSource is not null || indirect.GatheredByteSelectorProof is not null || indirect.PackedTextureDomain is not null));
+
+    internal static bool RequiresDescriptorWriteProof(ShaderResourcePlan plan) =>
+        RequiresStableDescriptorInputs(plan) && plan.Memory.Entries.Any(memory =>
+            memory.Kind is not (MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch or MemoryResourceKind.GlobalDataShare) &&
+            memory.Access is MemoryAccess.Write or MemoryAccess.Atomic);
+
+    private sealed class DescriptorWriteProof(GuestWordReader reader)
+    {
+        private readonly HashSet<ulong> _reads = [];
+
+        public bool Read(ulong address, out uint word)
+        {
+            word = 0;
+            if (address > (1ul << 48) - sizeof(uint) || !reader(address, out word)) return false;
+            _reads.Add(address);
+            return true;
+        }
+
+        public bool Validate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+        {
+            var evaluator = new RuntimeValueEvaluator(plan, inputs.WithReader(inputs.ReadCleanMemory));
+            var writes = new List<(ulong Address, ulong Size)>();
+            for (var index = 0; index < plan.Memory.Count; index++)
+            {
+                var memory = plan.Memory[index];
+                if (memory.Access is not (MemoryAccess.Write or MemoryAccess.Atomic) ||
+                    memory.Kind is MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch or MemoryResourceKind.GlobalDataShare) continue;
+                if (memory.Kind is MemoryResourceKind.Buffer or MemoryResourceKind.ScalarBuffer)
+                {
+                    if (plan.Accesses[index]?.Handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } buffer ||
+                        buffer.Operands.Any(operand => !plan.ValidateRuntimeValue(operand)) ||
+                        !IndirectSelectorValues.PackedPointerDescriptor.EvaluateHandle(buffer, evaluator, out var descriptor) ||
+                        !IndirectSelectorValues.PackedPointerDescriptor.Range(descriptor, out var bufferAddress, out var length))
+                        return false;
+                    // Include the immediate offset and a full element past the final
+                    // record, even when its stride is smaller than the store width.
+                    var extra = (ulong)memory.Offset + Math.Max(16ul, (ulong)memory.DataBits * memory.DataDwords / 8);
+                    if (length + extra > (1ul << 48) - bufferAddress) return false;
+                    writes.Add((bufferAddress, length + extra));
+                    continue;
+                }
+                if (memory.Kind != MemoryResourceKind.Image || inputs.ReadImageWriteRange is null ||
+                    plan.Accesses[index]?.Handle is not { Kind: ScalarValueKind.ImageHandle, Operands.Length: 8 } handle)
+                    return false;
+                var words = new uint[8];
+                for (var component = 0; component < words.Length; component++)
+                    if (!plan.ValidateRuntimeValue(handle.Operands[component]) ||
+                        !evaluator.Evaluate(handle.Operands[component], out words[component])) return false;
+                if (!inputs.ReadImageWriteRange(words, out var address, out var size) || size == 0 ||
+                    address >= 1ul << 48 || size > (1ul << 48) - address) return false;
+                writes.Add((address, size));
+            }
+            // Include dependencies read while evaluating output descriptors before
+            // comparing any ranges; outputs can alias each other's dependencies.
+            return !writes.Any(write => _reads.Any(read =>
+                read < write.Address + write.Size && write.Address < read + sizeof(uint)));
+        }
     }
 
     // Reads every candidate the loop guard can select from the guest SRT, validates it and
@@ -493,7 +751,8 @@ public static class ResourceMaterializer
     {
         ReadOnlySpan<uint> reserved =
         [
-            0x00000000u, 0x20000000u, 0xf0003000u, 0x00000000u,
+            // GFX10/10.3 word 2 bit 31 is RESOURCE_LEVEL, not reserved.
+            0x00000000u, 0x20000000u, 0x70003000u, 0x00000000u,
             0xe000e000u, 0xf9000000u, 0x00007b00u, 0x00000000u,
         ];
         for (var dword = 0; dword < reserved.Length; dword++)
@@ -858,13 +1117,15 @@ public static class ResourceMaterializer
 
     private static uint StorageMipCount(ImageResource image, ReadOnlySpan<uint> descriptor)
     {
-        if (image.MipMode != ImageMipMode.DynamicStorage || NullImageDescriptor(descriptor))
+        if (image.MipMode == ImageMipMode.None || NullImageDescriptor(descriptor))
         {
             return 1;
         }
 
         var baseLevel = (descriptor[3] >> 12) & 0xF;
         var last = (descriptor[3] >> 16) & 0xF;
+        if (image.MipMode == ImageMipMode.ExplicitLodGather && !image.R128)
+            last = Math.Min(last, (descriptor[5] >> 4) & 0xF);
         return baseLevel <= last ? last - baseLevel + 1 : 0;
     }
 
@@ -872,6 +1133,18 @@ public static class ResourceMaterializer
     {
         SpecializationFailed(message);
         return false;
+    }
+
+    private static bool TryCandidateCount(ShaderResourcePlan plan, uint? countSource, int maximum,
+        ResourceRuntimeInputs inputs, out int count)
+    {
+        count = maximum;
+        if (countSource is not { } source) return true;
+        if (!RuntimeValueEvaluator.EvaluateSources(plan, [source], inputs, [], evaluateTable: false,
+                out var descriptors, out _) || descriptors.Count != 1 || descriptors[0].DwordCount != 1 ||
+            descriptors[0].Dwords[0] > maximum) return false;
+        count = (int)descriptors[0].Dwords[0];
+        return true;
     }
 
     private static bool BuildSpecialization(
@@ -886,8 +1159,26 @@ public static class ResourceMaterializer
         failure = ResourceMaterializationFailure.Other;
         specializedSnapshot = snapshot;
         specialization = new ResourceSpecialization();
-        var info = plan.Info;
-        var imageCount = info.Images.Count;
+        var info = WithRuntimeSamplers(plan.Info, snapshot.RuntimeSamplers);
+        // Core Vulkan gather always addresses the view's base level. Explicit-LOD
+        // gathers instead bind one view per accessible mip and select it in the shader.
+        // Linear mip filtering and unnormalized gathers need separate semantics.
+        foreach (var access in plan.Memory.Entries.Where(access => access.Opcode == "ImageGather4CL"))
+        {
+            if (access.Sampler >= snapshot.Samplers.Length || access.Resource >= info.Images.Count)
+                return Fail("explicit LOD gather has no image or sampler");
+            var sampler = snapshot.Samplers[access.Sampler];
+            var descriptor = snapshot.Images[access.Resource];
+            if (sampler.Length < 4 || ((sampler[2] >> 26) & 3) > 1 ||
+                (sampler[0] & (1u << 15)) != 0 || descriptor.Length < 8 ||
+                ((descriptor[1] >> 8) & 0xFFF) != 0 ||
+                info.Images[(int)access.Resource].IndirectSearchIterations != 0)
+                return Fail("explicit LOD gather requires normalized point mip selection without a resource min LOD or indirect candidates");
+        }
+
+        var denseImages = snapshot.Images.ToList();
+        var owners = Enumerable.Range(0, info.Images.Count).Select(index => (uint)index).ToList();
+        var sharedCandidates = new List<(uint Root, uint Candidate)>();
         var mappingWordCount = 0;
         foreach (var table in snapshot.IndirectImages)
         {
@@ -896,13 +1187,24 @@ public static class ResourceMaterializer
                 return Fail("indirect image table has an invalid root or candidate count");
             }
 
-            if (imageCount + table.Descriptors.Count - 1 > ShaderResourceInfo.MaxImages)
+            sharedCandidates.Add((table.Resource, table.Resource));
+            for (var candidate = 1; candidate < table.Descriptors.Count; candidate++)
             {
-                failure = ResourceMaterializationFailure.ImageCapacityExceeded;
-                return Fail("indirect image candidates exceed the dense image resource limit");
+                var words = table.Descriptors[candidate].Dwords;
+                var existing = -1;
+                if (!NullImageDescriptor(words))
+                    for (var resource = 0; resource < denseImages.Count; resource++)
+                        if (words.AsSpan().SequenceEqual(denseImages[resource]) &&
+                            CanShareSampledImageUse(info.Images[(int)table.Resource], info.Images[(int)owners[resource]]))
+                        { existing = resource; break; }
+                if (existing < 0)
+                {
+                    existing = denseImages.Count;
+                    denseImages.Add(words);
+                    owners.Add(table.Resource);
+                }
+                sharedCandidates.Add((table.Resource, (uint)existing));
             }
-
-            imageCount += table.Descriptors.Count - 1;
             mappingWordCount = checked(mappingWordCount + 1 + table.Keys.Count * 2);
         }
 
@@ -911,11 +1213,17 @@ public static class ResourceMaterializer
             mappingWordCount = checked(mappingWordCount + 1 + table.Keys.Count * 2);
         }
 
-        // Each draw owns these arrays. Only indirect candidates require a larger table.
-        Array.Resize(ref snapshot.Images, imageCount);
+        var imageCount = denseImages.Count;
+        // Each bounded indirect root can contribute its own candidate table.
+        // MaxImages bounds the plan roots and each table, not their combined expansion.
+        if (imageCount > checked(info.Images.Count * ShaderResourceInfo.MaxImages))
+        {
+            failure = ResourceMaterializationFailure.ImageCapacityExceeded;
+            return Fail("indirect image candidates exceed the dense image resource limit");
+        }
+        snapshot.Images = denseImages.ToArray();
         var mappingCursor = snapshot.FlattenedTable.Length;
         Array.Resize(ref snapshot.FlattenedTable, checked(mappingCursor + mappingWordCount));
-        var imageCursor = info.Images.Count;
         var images = new List<ImageSpecialization>(imageCount);
         foreach (var image in info.Images)
         {
@@ -924,15 +1232,12 @@ public static class ResourceMaterializer
                 image.IndirectRoot, image.IndirectMappingOffset, image.IndirectSearchIterations, image.Cube));
         }
 
+        for (var resource = info.Images.Count; resource < imageCount; resource++)
+            images.Add(images[(int)owners[resource]] with { IndirectRoot = owners[resource] });
+
         foreach (var table in snapshot.IndirectImages)
         {
             var rootImage = images[(int)table.Resource];
-            for (var candidate = 1; candidate < table.Descriptors.Count; candidate++)
-            {
-                images.Add(rootImage with { IndirectRoot = table.Resource });
-                snapshot.Images[imageCursor++] = table.Descriptors[candidate].Dwords;
-            }
-
             var mappingOffset = (uint)mappingCursor;
             images[(int)table.Resource] = rootImage with
             {
@@ -1056,7 +1361,7 @@ public static class ResourceMaterializer
             var numericClass = GuestImageFormat.SampledNumericClass(format);
             if (storage)
             {
-                if ((!rawSintStorage && numericClass == ImageNumericClass.Sint) || numericClass == ImageNumericClass.Unsupported)
+                if (numericClass == ImageNumericClass.Unsupported)
                 {
                     return Fail($"storage image descriptor {index} uses unsupported format {format}");
                 }
@@ -1112,11 +1417,12 @@ public static class ResourceMaterializer
                 return Fail("indirect image specialization has an invalid key mapping");
             }
 
+            var candidateSet = ImageCandidates(images, (uint)rootIndex, sharedCandidates).ToHashSet();
             var exemplar = DescriptorConstants.NoIndex;
             var resourceCount = 0;
             for (var resource = 0; resource < images.Count; resource++)
             {
-                if (images[resource].IndirectRoot != rootIndex)
+                if (!candidateSet.Contains((uint)resource))
                 {
                     continue;
                 }
@@ -1138,7 +1444,7 @@ public static class ResourceMaterializer
             for (var candidate = 0; candidate < images.Count; candidate++)
             {
                 var image = images[candidate];
-                if (image.IndirectRoot != rootIndex)
+                if (!candidateSet.Contains((uint)candidate))
                 {
                     continue;
                 }
@@ -1162,7 +1468,8 @@ public static class ResourceMaterializer
                     separateSampledDimensions && !image.Cube && !imageClass.Cube &&
                     image.Dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray &&
                     imageClass.Dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray;
-                if (image.NumericClass != imageClass.NumericClass || !compatibleDimensions ||
+                var separateSampledTypes = separateSampledDimensions && !info.Images[rootIndex].DepthCompare;
+                if ((image.NumericClass != imageClass.NumericClass && !separateSampledTypes) || !compatibleDimensions ||
                     image.MipCount != imageClass.MipCount || image.ConversionFormat != imageClass.ConversionFormat ||
                     image.ShaderSwizzle != imageClass.ShaderSwizzle || image.Cube != imageClass.Cube)
                 {
@@ -1193,12 +1500,25 @@ public static class ResourceMaterializer
             }
         }
 
-        if (!BuildSamplerPlan(info, images, out var samplerPlan))
+        if (!BuildSamplerPlan(info, images, out var samplerPlan, sharedCandidates))
         {
             return Fail("specialized sampler layout exceeds its resource limit");
         }
 
         Array.Resize(ref snapshot.Samplers, checked((int)samplerPlan.SamplerCount));
+        // Typed candidates use separate sampling instructions. Every statically used
+        // UINT image/sampler pair must remain legal, including candidate combinations
+        // whose runtime keys differ. Do not invent integer linear-filter semantics.
+        foreach (var pair in info.SampledPairs)
+        {
+            if (images[(int)pair.Image].IndirectRoot != pair.Image) continue;
+            if (!ImageCandidates(images, pair.Image, sharedCandidates).Any(candidate => images[(int)candidate].NumericClass == ImageNumericClass.Uint &&
+                    images[(int)candidate].ConversionFormat == GuestImageFormat.Invalid)) continue;
+            var words = snapshot.Samplers[pair.Sampler];
+            if (words.Length < 4 || ((words[2] >> 20) & 0xF) != 0 ||
+                ((words[2] >> 24) & 3) > 1 || ((words[2] >> 26) & 3) > 1)
+                return Fail("indirect UINT sampled candidates require point filtering");
+        }
         for (var index = 0; index < info.Samplers.Count; index++)
         {
             var target = samplerPlan.PointSampler[index];
@@ -1213,13 +1533,16 @@ public static class ResourceMaterializer
         var compareUsage = new byte[ShaderResourceInfo.MaxSamplers];
         foreach (var pair in info.SampledPairs)
         {
-            var image = info.Images[(int)pair.Image];
-            var specialized = images[(int)pair.Image];
-            var sampler = RequiresPointSampler(specialized.NumericClass, specialized.ConversionFormat)
-                ? samplerPlan.PointSampler[pair.Sampler]
-                : pair.Sampler;
-            var depthCompare = image.DepthCompare && specialized.EmulatedCompareFunction < 0;
-            compareUsage[sampler] |= depthCompare ? (byte)2 : (byte)1;
+            foreach (var candidate in ImageCandidates(images, pair.Image, sharedCandidates))
+            {
+                var image = info.Images[(int)pair.Image];
+                var specialized = images[(int)candidate];
+                var sampler = RequiresPointSampler(specialized.NumericClass, specialized.ConversionFormat)
+                    ? samplerPlan.PointSampler[pair.Sampler]
+                    : pair.Sampler;
+                var depthCompare = image.DepthCompare && specialized.EmulatedCompareFunction < 0;
+                compareUsage[sampler] |= depthCompare ? (byte)2 : (byte)1;
+            }
         }
 
         for (var index = 0; index < snapshot.Samplers.Length && index < compareUsage.Length; index++)
@@ -1300,10 +1623,45 @@ public static class ResourceMaterializer
             BaseBufferCount = baseBufferCount,
             Buffers = buffers,
             Images = images,
+            IndirectImageCandidates = sharedCandidates,
             BufferCandidateTables = candidateTables,
+            RuntimeSamplers = snapshot.RuntimeSamplers,
         };
         specializedSnapshot = snapshot;
         return true;
+    }
+
+    internal static bool CanShareSampledImageUse(ImageResource left, ImageResource right) =>
+        left.ResourceClass == ImageResourceClass.Sampled && right.ResourceClass == ImageResourceClass.Sampled &&
+        !left.Written && !right.Written && !left.Atomic && !right.Atomic && !left.DepthCompare && !right.DepthCompare &&
+        left.Read == right.Read && left.NumericClass == right.NumericClass && left.Dimension == right.Dimension && left.MipMode == right.MipMode &&
+        left.MipCount == right.MipCount && left.ConversionFormat == right.ConversionFormat &&
+        left.ShaderSwizzle == right.ShaderSwizzle && left.Cube == right.Cube && left.R128 == right.R128 &&
+        left.EmulatedCompareFunction == right.EmulatedCompareFunction;
+
+    private static ShaderResourceInfo WithRuntimeSamplers(ShaderResourceInfo original,
+        IReadOnlyList<RuntimeSamplerCandidate> candidates)
+    {
+        if (candidates.Count == 0) return original;
+        var info = original.Clone();
+        foreach (var group in candidates.GroupBy(candidate => candidate.Root))
+        {
+            var root = info.Samplers[(int)group.Key];
+            root.SelectorMemoryIndex = group.First().SelectorMemoryIndex;
+            root.Candidates = group.Select(candidate => new FiniteSamplerCandidate(candidate.Offset, candidate.Sampler)).ToArray();
+            foreach (var target in group.Select(candidate => candidate.Sampler).Distinct().Where(target => target != group.Key))
+            {
+                if (target != info.Samplers.Count)
+                    throw new ResourcePlanException("runtime sampler candidates are not contiguous");
+                var sampler = original.Samplers[(int)group.Key].Clone();
+                sampler.Candidates = null;
+                sampler.SelectorMemoryIndex = -1;
+                info.Samplers.Add(sampler);
+                foreach (var pair in original.SampledPairs.Where(pair => pair.Sampler == group.Key))
+                    info.SampledPairs.Add(new SampledImagePair { Image = pair.Image, Sampler = target, FirstUsePc = pair.FirstUsePc });
+            }
+        }
+        return info;
     }
 
     private sealed class SamplerPlan
@@ -1312,9 +1670,25 @@ public static class ResourceMaterializer
         public uint SamplerCount;
     }
 
+    private static IEnumerable<uint> ImageCandidates(IReadOnlyList<ImageSpecialization> images, uint root,
+        IReadOnlyList<(uint Root, uint Candidate)>? sharedCandidates = null)
+    {
+        if (sharedCandidates is { Count: > 0 })
+        {
+            var found = false;
+            foreach (var entry in sharedCandidates)
+                if (entry.Root == root) { found = true; yield return entry.Candidate; }
+            if (found) yield break;
+        }
+        yield return root;
+        for (var index = 0; index < images.Count; index++)
+            if (index != root && images[index].IndirectRoot == root) yield return (uint)index;
+    }
+
     // A sampler that some pair uses with a point-only image needs a point-filtering
     // copy; when every pair does, the sampler itself switches.
-    private static bool BuildSamplerPlan(ShaderResourceInfo info, IReadOnlyList<ImageSpecialization> images, out SamplerPlan plan)
+    private static bool BuildSamplerPlan(ShaderResourceInfo info, IReadOnlyList<ImageSpecialization> images, out SamplerPlan plan,
+        IReadOnlyList<(uint Root, uint Candidate)>? sharedCandidates = null)
     {
         plan = new SamplerPlan();
         if (info.Samplers.Count > plan.PointSampler.Length)
@@ -1332,8 +1706,11 @@ public static class ResourceMaterializer
                 return false;
             }
 
-            var image = images[(int)pair.Image];
-            usage[pair.Sampler] |= RequiresPointSampler(image.NumericClass, image.ConversionFormat) ? (byte)2 : (byte)1;
+            foreach (var candidate in ImageCandidates(images, pair.Image, sharedCandidates))
+            {
+                var image = images[(int)candidate];
+                usage[pair.Sampler] |= RequiresPointSampler(image.NumericClass, image.ConversionFormat) ? (byte)2 : (byte)1;
+            }
         }
 
         for (var index = 0; index < info.Samplers.Count; index++)
@@ -1365,7 +1742,7 @@ public static class ResourceMaterializer
     // classes and indirect candidates, point samplers and the sampler each access uses.
     public static SpecializedResourceInfo ApplyTo(ShaderResourcePlan plan, ResourceSpecialization specialization)
     {
-        var source = plan.Info;
+        var source = WithRuntimeSamplers(plan.Info, specialization.RuntimeSamplers);
         if (source.Buffers.Count != specialization.BaseBufferCount || source.Images.Count > specialization.Images.Count)
         {
             throw new ResourcePlanException(
@@ -1440,19 +1817,33 @@ public static class ResourceMaterializer
             image.IndirectResources = [];
         }
 
-        for (var index = 0; index < info.Images.Count; index++)
+        if (specialization.IndirectImageCandidates.Count != 0)
         {
-            var root = info.Images[index].IndirectRoot;
-            if (root != DescriptorConstants.NoIndex)
+            foreach (var entry in specialization.IndirectImageCandidates)
             {
-                info.Images[(int)root].IndirectResources.Add((uint)index);
+                if (entry.Root >= info.Images.Count || entry.Candidate >= info.Images.Count)
+                    throw new ResourcePlanException("shared image candidate is outside the specialized resource table");
+                info.Images[(int)entry.Root].IndirectResources.Add(entry.Candidate);
+            }
+        }
+        else
+        {
+            for (var index = 0; index < info.Images.Count; index++)
+            {
+                var root = info.Images[index].IndirectRoot;
+                if (root != DescriptorConstants.NoIndex)
+                    info.Images[(int)root].IndirectResources.Add((uint)index);
             }
         }
 
-        if (!BuildSamplerPlan(source, specialization.Images, out var samplerPlan))
+        if (!BuildSamplerPlan(source, specialization.Images, out var samplerPlan, specialization.IndirectImageCandidates))
         {
             throw new ResourcePlanException($"shader resource specialization exceeds the sampler limit: hash=0x{plan.Hash:X16}");
         }
+
+        foreach (var pair in source.SampledPairs)
+            foreach (var candidate in ImageCandidates(specialization.Images, pair.Image, specialization.IndirectImageCandidates).Where(candidate => candidate != pair.Image))
+                info.SampledPairs.Add(new SampledImagePair { Image = candidate, Sampler = pair.Sampler, FirstUsePc = pair.FirstUsePc });
 
         for (var index = 0; index < source.Samplers.Count; index++)
         {
@@ -1530,6 +1921,8 @@ public static class ResourceMaterializer
         }
 
         var samplerByMemory = new Dictionary<int, uint>();
+        var finiteSamplersByMemory = new Dictionary<int, SamplerResource>();
+        var samplerByImageMemory = new Dictionary<(int Memory, uint Image, uint Sampler), uint>();
         for (var index = 0; index < plan.Memory.Count; index++)
         {
             var memory = plan.Memory[index];
@@ -1545,6 +1938,21 @@ public static class ResourceMaterializer
             }
 
             var sampler = memory.Sampler;
+            uint ResolveSampler(uint candidate, ImageResource candidateImage)
+            {
+                if (RequiresPointSampler(candidateImage.NumericClass, candidateImage.ConversionFormat)) candidate = samplerPlan.PointSampler[candidate];
+                if (candidateImage.DepthCompare) candidate = compareSampler[candidate];
+                return candidate;
+            }
+            if (source.Samplers[(int)sampler].Candidates is not null)
+            {
+                var finite = source.Samplers[(int)sampler].Clone();
+                finiteSamplersByMemory[index] = finite;
+            }
+            var samplerCandidates = source.Samplers[(int)sampler].Candidates?.Select(candidate => candidate.Sampler) ?? [sampler];
+            foreach (var imageCandidate in ImageCandidates(specialization.Images, memory.Resource, specialization.IndirectImageCandidates))
+                foreach (var samplerCandidate in samplerCandidates)
+                    samplerByImageMemory[(index, imageCandidate, samplerCandidate)] = ResolveSampler(samplerCandidate, info.Images[(int)imageCandidate]);
             if (RequiresPointSampler(image.NumericClass, image.ConversionFormat))
             {
                 sampler = samplerPlan.PointSampler[sampler];
@@ -1561,6 +1969,7 @@ public static class ResourceMaterializer
             }
         }
 
-        return new SpecializedResourceInfo { Info = info, SamplerByMemoryIndex = samplerByMemory };
+        return new SpecializedResourceInfo { Info = info, SamplerByMemoryIndex = samplerByMemory,
+            FiniteSamplersByMemoryIndex = finiteSamplersByMemory, SamplerByImageMemoryIndex = samplerByImageMemory };
     }
 }

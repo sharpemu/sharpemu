@@ -20,6 +20,39 @@ public sealed class AudioOut2PortGetStateExportsTests
     }
 
     [Fact]
+    public void ContextPush_NonblockingWithoutPcmDoesNotPaceSilentGrains()
+    {
+        var ctx = CreateContext(out var memory);
+        Span<byte> parameters = stackalloc byte[0x40];
+        parameters.Clear();
+        BinaryPrimitives.WriteUInt32LittleEndian(parameters[0x0C..], 4);
+        BinaryPrimitives.WriteUInt32LittleEndian(parameters[0x10..], 0x4000);
+        Assert.True(memory.TryWrite(MemoryBase, parameters));
+        ctx[CpuRegister.Rdi] = MemoryBase;
+        ctx[CpuRegister.Rsi] = MemoryBase + 0x400;
+        ctx[CpuRegister.Rdx] = 0x100;
+        ctx[CpuRegister.Rcx] = StateAddress;
+        Assert.Equal(0, AudioOut2Exports.AudioOut2ContextCreate(ctx));
+        Span<byte> handleBytes = stackalloc byte[8];
+        Assert.True(memory.TryRead(StateAddress, handleBytes));
+        var handle = BinaryPrimitives.ReadUInt64LittleEndian(handleBytes);
+        try
+        {
+            ctx[CpuRegister.Rdi] = handle;
+            ctx[CpuRegister.Rsi] = 0;
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            for (var i = 0; i < 4; i++)
+                Assert.Equal(0, AudioOut2Exports.AudioOut2ContextPush(ctx));
+            // Incorrectly pacing these grains adds over a second of sleep.
+            Assert.True(elapsed.Elapsed < TimeSpan.FromMilliseconds(500));
+        }
+        finally
+        {
+            ctx[CpuRegister.Rdi] = handle;
+            Assert.Equal(0, AudioOut2Exports.AudioOut2ContextDestroy(ctx));
+        }
+    }
+    [Fact]
     public void PortGetState_WritesExactlySizeofPortStateIgnoringPollutedR9()
     {
         var ctx = CreateContext(out var memory);

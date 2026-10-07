@@ -49,6 +49,7 @@ public sealed class ImageBacking
     public ImageCreateFlags Flags;
     public Image Handle;
     public ImageAccessState State = ImageAccessState.Initial;
+    public SampleLocationEXT[]? SampleLocations;
     public List<ImageAccessState>? SubresourceStates;
     public DeviceMemory Memory;
     public ulong AllocationSize;
@@ -251,9 +252,12 @@ public sealed unsafe partial class CachedImage : IDisposable
         _ => throw SubmissionScheduler.Fatal($"The image type is not a base type: type={(uint)type}."),
     };
 
-    private static ImageCreateFlags CreateFlags(in ImageDescription description)
+    private ImageCreateFlags CreateFlags(in ImageDescription description)
     {
         ImageCreateFlags flags = 0;
+        if (_device.CustomTwoSampleLocationsSupported && description.Samples == 2 &&
+            DepthFormatRule.AspectTransferFormat(description.PixelFormat) != Format.Undefined)
+            flags |= ImageCreateFlags.CreateSampleLocationsCompatibleDepthBitExt;
         if (DepthFormatRule.AspectTransferFormat(description.PixelFormat) == Format.Undefined)
         {
             flags |= ImageCreateFlags.CreateMutableFormatBit | ImageCreateFlags.CreateExtendedUsageBit;

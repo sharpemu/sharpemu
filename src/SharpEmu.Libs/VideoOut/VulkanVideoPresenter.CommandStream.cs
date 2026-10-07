@@ -753,6 +753,22 @@ internal static unsafe partial class VulkanVideoPresenter
                     _commandStream.RetryBlocked();
                 }
 
+                while (_pendingVideoPresentations.Count > 0 &&
+                       _pendingVideoPresentations.Peek().Sequence <= _presentedSequence)
+                {
+                    _pendingVideoPresentations.Dequeue();
+                }
+
+                // Both queues share a sequence. A later guest flip must not retire
+                // an earlier decoded frame, even while that flip waits for its GPU tick.
+                if (_pendingVideoPresentations.Count > 0 &&
+                    (_pendingGuestImagePresentations.Count == 0 ||
+                     _pendingVideoPresentations.Peek().Sequence < _pendingGuestImagePresentations.Peek().Sequence))
+                {
+                    presentation = _pendingVideoPresentations.Dequeue();
+                    return true;
+                }
+
                 if (_pendingGuestImagePresentations.Count > 0)
                 {
                     var pending = _pendingGuestImagePresentations.Peek();
@@ -765,12 +781,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
                     presentation = default;
                     return false;
-                }
-
-                while (_pendingVideoPresentations.Count > 0 &&
-                       _pendingVideoPresentations.Peek().Sequence <= _presentedSequence)
-                {
-                    _pendingVideoPresentations.Dequeue();
                 }
 
                 if (_pendingVideoPresentations.Count > 0)
@@ -807,6 +817,13 @@ internal static unsafe partial class VulkanVideoPresenter
         // True when a guest frame can be shown now; the wait loop wakes for it.
         private bool HasReadyPresentationLocked()
         {
+            if (_pendingVideoPresentations.Count > 0 &&
+                (_pendingGuestImagePresentations.Count == 0 ||
+                 _pendingVideoPresentations.Peek().Sequence < _pendingGuestImagePresentations.Peek().Sequence))
+            {
+                return true;
+            }
+
             if (_pendingGuestImagePresentations.Count > 0)
             {
                 var pending = _pendingGuestImagePresentations.Peek();

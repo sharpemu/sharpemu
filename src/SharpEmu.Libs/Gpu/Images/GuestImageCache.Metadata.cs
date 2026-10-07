@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Scheduling;
+using System.Numerics;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
@@ -18,13 +19,13 @@ public sealed partial class GuestImageCache
     {
         fillValue = 0;
         using var held = _lock.Hold();
-        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Kind == SurfaceMetadataKind.PendingDcc || slice >= (found.Kind == SurfaceMetadataKind.HTile ? 8192u : 32u))
         {
             return false;
         }
 
         fillValue = found.FillValue;
-        return (found.ClearMask & (1u << (int)slice)) != 0;
+        return (found.ClearMask & (BigInteger.One << (int)slice)) != 0;
     }
 
     public bool IsMetadataCleared(ulong address, uint slice) => IsMetadataCleared(address, slice, out _);
@@ -53,7 +54,7 @@ public sealed partial class GuestImageCache
             return false;
         }
 
-        found.ClearMask = uint.MaxValue;
+        found.ClearMask = found.Kind == SurfaceMetadataKind.HTile ? BigInteger.MinusOne : uint.MaxValue;
         return true;
     }
 
@@ -166,18 +167,18 @@ public sealed partial class GuestImageCache
     public bool SetMetadataSlice(ulong address, uint slice, bool isClear)
     {
         using var held = _lock.Hold();
-        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Kind == SurfaceMetadataKind.PendingDcc || slice >= 32)
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Kind == SurfaceMetadataKind.PendingDcc || slice >= (found.Kind == SurfaceMetadataKind.HTile ? 8192u : 32u))
         {
             return false;
         }
 
         if (isClear)
         {
-            found.ClearMask |= 1u << (int)slice;
+            found.ClearMask |= BigInteger.One << (int)slice;
         }
         else
         {
-            found.ClearMask &= ~(1u << (int)slice);
+            found.ClearMask &= ~(BigInteger.One << (int)slice);
         }
 
         return true;

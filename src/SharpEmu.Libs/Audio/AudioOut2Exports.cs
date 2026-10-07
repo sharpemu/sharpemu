@@ -441,7 +441,7 @@ public static class AudioOut2Exports
                 WaitForDeviceSlot(context);
             }
         }
-        else
+        else if (blocking != 0)
         {
             // Push is the blocking point of a grain: it waits for the grain an Advance claimed, or
             // claims one itself when the title does not advance separately.

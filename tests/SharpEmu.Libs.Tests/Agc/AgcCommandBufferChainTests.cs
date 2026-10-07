@@ -106,13 +106,59 @@ public sealed class AgcCommandBufferChainTests
 
         PointCommandBufferAt(memory, FirstLinkAddress);
         ctx[CpuRegister.Rdi] = CommandBufferAddress;
-        ctx[CpuRegister.Rsi] = SecondLinkAddress;
-        ctx[CpuRegister.Rdx] = 0x123;
+        ctx[CpuRegister.Rsi] = 0;
+        ctx[CpuRegister.Rdx] = SecondLinkAddress;
+        ctx[CpuRegister.Rcx] = 0x123;
 
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.AcbJump(ctx));
         Assert.Equal(FirstLinkAddress, ctx[CpuRegister.Rax]);
         Assert.Equal(unchecked((uint)SecondLinkAddress), ReadUInt32(memory, FirstLinkAddress + 4));
         Assert.Equal(0x0F30_0123u, ReadUInt32(memory, FirstLinkAddress + 12));
+    }
+
+    [Fact]
+    public void AcbJump_ReachesCompletionWriteInContinuation()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        WriteUInt32(memory, SecondLinkAddress, 0xC0033700);
+        WriteUInt32(memory, SecondLinkAddress + 4, 0x500);
+        WriteUInt32(memory, SecondLinkAddress + 8, unchecked((uint)WaitLabelAddress));
+        WriteUInt32(memory, SecondLinkAddress + 12, (uint)(WaitLabelAddress >> 32));
+        WriteUInt32(memory, SecondLinkAddress + 16, 6);
+        PointCommandBufferAt(memory, FirstLinkAddress);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = 0;
+        ctx[CpuRegister.Rdx] = SecondLinkAddress;
+        ctx[CpuRegister.Rcx] = 5;
+        Assert.Equal(0, AgcExports.AcbJump(ctx));
+        WriteUInt64(memory, SubmitPacketAddress, FirstLinkAddress);
+        WriteUInt32(memory, SubmitPacketAddress + 8, 4);
+        ctx[CpuRegister.Rdi] = 0x20;
+        ctx[CpuRegister.Rsi] = SubmitPacketAddress;
+        Assert.Equal(0, AgcExports.DriverSubmitAcb(ctx));
+        Assert.Equal(6u, ReadUInt32(memory, WaitLabelAddress));
+        Assert.False(StreamOf(memory).HasPending);
+    }
+
+    [Theory]
+    [InlineData(1UL, SecondLinkAddress, 5UL)]
+    [InlineData(0UL, SecondLinkAddress + 1, 5UL)]
+    [InlineData(0UL, 0x1000000000000UL, 5UL)]
+    [InlineData(0UL, SecondLinkAddress, 0x100000UL)]
+    public void AcbJump_RejectsUnsupportedEncodingWithoutAdvancing(ulong control, ulong target, ulong size)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        PointCommandBufferAt(memory, FirstLinkAddress);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = control;
+        ctx[CpuRegister.Rdx] = target;
+        ctx[CpuRegister.Rcx] = size;
+        AgcExports.AcbJump(ctx);
+        Assert.Equal(0UL, ctx[CpuRegister.Rax]);
+        Assert.Equal(FirstLinkAddress, ReadUInt64(memory, CommandBufferAddress + 0x10));
+        Assert.Equal(0u, ReadUInt32(memory, FirstLinkAddress));
     }
 
     [Fact]

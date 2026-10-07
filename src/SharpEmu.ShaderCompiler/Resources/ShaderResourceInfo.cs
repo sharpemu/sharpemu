@@ -26,6 +26,7 @@ public enum ImageMipMode : byte
 {
     None,
     DynamicStorage,
+    ExplicitLodGather,
 }
 
 // The identity dword selection with every component in place.
@@ -96,9 +97,13 @@ public sealed class SamplerResource
     public uint FirstUsePc { get; set; }
     public bool ForcePointFiltering { get; set; }
     public bool DepthCompare { get; set; }
+    public int SelectorMemoryIndex { get; set; } = -1;
+    public IReadOnlyList<FiniteSamplerCandidate>? Candidates { get; set; }
 
     public SamplerResource Clone() => (SamplerResource)MemberwiseClone();
 }
+
+public sealed record FiniteSamplerCandidate(uint Offset, uint Sampler);
 
 public sealed class SampledImagePair
 {
@@ -157,9 +162,11 @@ public sealed class BufferCandidateTableInfo
 public sealed class ShaderResourceInfo
 {
     public const int MaxBuffers = 32;
-    public const int MaxImages = 64;
+    // Bound materialized tables independently of the guest descriptor count.
+    // Host layouts are sized from the resulting dense resource table.
+    public const int MaxImages = 256;
     public const int MaxSamplers = 32;
-    public const int MaxSampledPairs = 64;
+    public const int MaxSampledPairs = 256;
     public const int NoScalarRegister = -1;
 
     public List<BufferResource> Buffers { get; set; } = [];
@@ -167,6 +174,7 @@ public sealed class ShaderResourceInfo
     public List<SamplerResource> Samplers { get; set; } = [];
     public List<SampledImagePair> SampledPairs { get; set; } = [];
     public List<BufferCandidateTableInfo> BufferCandidateTables { get; set; } = [];
+    public Dictionary<int, uint> DeviceStoreValidationSources { get; set; } = [];
     public List<StageInput> Inputs { get; set; } = [];
     public List<StageOutput> Outputs { get; set; } = [];
     public byte[] VertexFetchComponents { get; set; } = new byte[32];
@@ -182,6 +190,7 @@ public sealed class ShaderResourceInfo
         Samplers = Samplers.Select(sampler => sampler.Clone()).ToList(),
         SampledPairs = SampledPairs.Select(pair => pair.Clone()).ToList(),
         BufferCandidateTables = BufferCandidateTables.Select(table => table.Clone()).ToList(),
+        DeviceStoreValidationSources = new(DeviceStoreValidationSources),
         Inputs = [.. Inputs],
         Outputs = [.. Outputs],
         VertexFetchComponents = (byte[])VertexFetchComponents.Clone(),
@@ -202,17 +211,24 @@ public sealed record IndirectImageSelector(
 {
     public IndirectSelectorValues? SelectorValues { get; init; }
     public IReadOnlyList<DirectImageCandidate>? DirectCandidates { get; init; }
+    public uint? CandidateCountSource { get; init; }
+    internal IndirectSelectorValues.GatheredByteSelectorProof? GatheredByteSelectorProof { get; init; }
+    internal IndirectSelectorValues.PackedTextureDomain? PackedTextureDomain { get; init; }
     public bool Dense { get; init; }
     public uint TableOffset { get; init; }
     public uint DynamicOffsetBase { get; init; }
     public uint KeyBound { get; init; }
     public WaveIndexedImageSelector? WaveIndexed { get; init; }
+    internal IndirectSelectorValues.WorkgroupDescriptor? Workgroup { get; init; }
 
     // The key read's immediate offset. The hardware adds it after the 32-bit selector offset, without wrapping.
     public uint MaterialImmediate { get; init; }
 }
 
-public sealed record DirectImageCandidate(uint Offset, uint Source);
+public sealed record DirectImageCandidate(uint Offset, uint Source)
+{
+    internal uint? SelectorValue { get; init; }
+}
 
 // A wave-uniform descriptor selector. The guest derives each descriptor key from
 // a set bit in one scalar mask, through a compact global index table. Keeping this
@@ -226,6 +242,18 @@ public sealed class DescriptorSource
     public ScalarValue[] Dwords { get; init; } = [];
     public uint DwordCount => (uint)Dwords.Length;
     public IndirectImageSelector? IndirectImage { get; init; }
+    // A finite selector can use one native sampler only when all candidate
+    // descriptors are identical. Rechecked against clean memory on every draw.
+    public IReadOnlyList<uint>? EquivalentSamplerSources { get; init; }
+    public uint? RuntimeSamplerCountSource { get; init; }
+    internal uint? RuntimeZeroCountGuardPc { get; init; }
+    public IReadOnlyList<DirectImageCandidate>? FiniteSamplerSources { get; init; }
+    public int SamplerSelectorMemoryIndex { get; init; } = -1;
+    // Scalar loads from an empty buffer return zero regardless of the offset.
+    // Materialization must recheck the source extent before using these words.
+    public uint? ZeroExtentBufferSource { get; init; }
+    internal IndirectSelectorValues.PackedPointerDescriptor? PackedPointer { get; init; }
+    internal IndirectSelectorValues.WorkgroupDescriptor? Workgroup { get; init; }
 }
 
 // One immediate-offset scalar read the host evaluates into the flattened table.

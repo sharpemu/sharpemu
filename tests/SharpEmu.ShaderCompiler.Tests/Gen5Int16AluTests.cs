@@ -5,6 +5,7 @@ using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
+using SharpEmu.ShaderCompiler.Metal;
 using Xunit;
 
 namespace SharpEmu.ShaderCompiler.Tests;
@@ -39,6 +40,23 @@ public sealed class Gen5Int16AluTests
         Assert.NotEmpty(shader.Spirv);
     }
 
+    [Theory]
+    [InlineData(0x307u, false)]
+    [InlineData(0x314u, true)]
+    public void LogicalHalfWordShiftsPreserveTheOtherDestinationHalfInMetal(uint opcode, bool left)
+    {
+        foreach (var select in new uint[] { 0, 1, 2, 3, 8, 11 })
+        {
+            var words = Vop3(opcode);
+            words[0] |= select << 11;
+            var program = Decode(words);
+            Assert.True(Gen5MslTranslator.TryCompileProgram(ResourceTestProgram.Request(program, userDataCount: 0),
+                out var shader, out var error), error);
+            Assert.Contains("& 0xFu", shader.Source);
+            Assert.Contains(left ? "<<" : ">>", shader.Source);
+            Assert.Contains((select & 8) != 0 ? "v[3] & 0x0000FFFFu" : "v[3] & 0xFFFF0000u", shader.Source);
+        }
+    }
     private static uint[] Vop3(uint opcode) => [(0x35u << 26) | (opcode << 16) | 3u, (0x102u << 9) | 0x101u, SEndpgm];
 
     private static Gen5ShaderProgram Decode(IReadOnlyList<uint> words)

@@ -86,9 +86,10 @@ public sealed class ShaderCompileRequest
 
         FlattenedSlotByMemoryIndex = new Dictionary<int, uint>(plan.FlattenedSlotByMemoryIndex);
         FlattenedTableReservedWords = (uint)plan.FlattenedTableReservedCount;
-        IndirectKeyMemoryIndices = plan.IndirectImages.Select(access => access.Key.MemoryIndex).ToHashSet();
+        var samplerKeys = resources.FiniteSamplersByMemoryIndex.Values.Select(sampler => sampler.SelectorMemoryIndex).ToArray();
+        IndirectKeyMemoryIndices = plan.IndirectImages.Select(access => access.Key.MemoryIndex).Concat(samplerKeys).ToHashSet();
         IndirectOffsetKeyMemoryIndices = plan.IndirectImages.Where(access => access.KeyIsAddressOffset)
-            .Select(access => access.Key.MemoryIndex).ToHashSet();
+            .Select(access => access.Key.MemoryIndex).Concat(samplerKeys).ToHashSet();
         IndirectRootByMemoryIndex = plan.IndirectImages.ToDictionary(access => access.MemoryIndex, access => access.Key.MemoryIndex);
 
         var writtenSlots = new Dictionary<int, uint>();
@@ -175,6 +176,19 @@ public sealed class ShaderCompileRequest
 
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];
     public uint PixelInputEnable { get; init; }
+    // Explicit interpolation sample without requiring a fragment invocation per sample.
+    // The caller must select a sample valid for the pipeline's rasterization count.
+    public uint? PixelInterpolationSample { get; init; }
+    // Offsets relative to pixel center over a row-major 2x2 grid. A fixed sample uses
+    // four offsets; per-sample interpolation uses rasterizationSamples offsets per pixel.
+    public IReadOnlyList<(float X, float Y)> PixelCustomSampleOffsets { get; init; } = [];
+    public bool EarlyFragmentTests { get; init; }
+    // Samples excluded from triggering guest fragment execution after early depth/stencil tests.
+    public uint PixelShaderSampleExclusionMask { get; init; }
+    public bool PixelDepthExportEnable { get; init; }
+    public bool PixelSampleMaskExportEnable { get; init; }
+    public uint PixelMaskExportSamples { get; init; } = 1;
+    public uint PixelRasterizationSamples { get; init; } = 1;
     public uint PixelCustomInterpolationMask { get; init; }
 
     // False when the device cannot read one vertex's value of a pixel input (PerVertexKHR).

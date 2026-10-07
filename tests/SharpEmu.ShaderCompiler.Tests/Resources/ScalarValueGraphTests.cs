@@ -10,6 +10,37 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class ScalarValueGraphTests
 {
+    [Fact]
+    public void WorkgroupInputsKeepLogicalAxesAndCannotBecomeCpuConstants()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, 8, 4),
+            Sop2(8, "SLshrB32", 4, Gen5Operand.Scalar(3), Operand(4)),
+            ScalarBufferLoad(12, 8, 16, dynamicOffsetRegister: 4), EndProgram(20));
+        var graph = ScalarValueGraph.Build(program, 0, 3,
+            computeSystemRegisters: new(3, 5, 6, null));
+        var offset = graph.Accesses[4]!.Read!.Operands[1];
+        Assert.Equal(ScalarOperation.ShiftRightLogical32, offset.Operation);
+        Assert.Equal(ScalarValueKind.WorkgroupId, offset.Operands[0].Kind);
+        Assert.Equal(0ul, offset.Operands[0].Payload);
+        Assert.False(new RuntimeValueValidator(graph, 0, 3, 0).Validate(offset));
+        Assert.False(graph.Equivalent(graph.WorkgroupId(0), graph.WorkgroupId(1)));
+        Assert.True(graph.Equivalent(graph.WorkgroupId(1), graph.WorkgroupId(1)));
+        var ordinary = ScalarValueGraph.Build(program, 0, 3);
+        Assert.DoesNotContain(ordinary.Values, value => value.Kind == ScalarValueKind.WorkgroupId);
+    }
+
+    [Theory]
+    [InlineData(2u, 5u, 6u, 7u)]
+    [InlineData(3u, 3u, 6u, 7u)]
+    [InlineData(106u, 5u, 6u, 7u)]
+    [InlineData(3u, 5u, 6u, 3u)]
+    public void WorkgroupInputsRejectOverlappingOrReservedRegisters(uint x, uint y, uint z, uint size)
+    {
+        Assert.Throws<ArgumentException>(() => ScalarValueGraph.Build(Program(EndProgram(0)), 0, 3,
+            computeSystemRegisters: new(x, y, z, size)));
+    }
+
     private static Gen5ShaderInstruction[] Descriptor(uint pc, uint register, uint dword1, uint dword2, uint dword3) =>
     [
         MoveScalar(pc, register + 1, dword1),
@@ -446,8 +477,31 @@ public sealed class ScalarValueGraphTests
 
         Assert.Empty(plan.TableReads);
         var access = plan.Accesses[plan.Memory.Count - 1]!;
-        Assert.True(access.Handle!.Operands[0].IsUndefined);
+        var laneRead = access.Handle!.Operands[0];
+        Assert.Equal(ScalarValueKind.FirstLane, laneRead.Kind);
+        Assert.True(laneRead.Operands[0].IsUndefined);
+        Assert.Equal(16UL, laneRead.Payload);
+        Assert.False(new RuntimeValueEvaluator(plan, new ResourceRuntimeInputs()).Evaluate(laneRead, out _));
         Assert.True(plan.Info.UsesDeviceAddresses);
+    }
+
+    [Theory]
+    [InlineData(32u, 0x2222u)]
+    [InlineData(64u, 0x1111u)]
+    public void SavedLaneIndicesWrapAtTheGuestWaveSize(uint waveSize, uint expected)
+    {
+        var program = Program(
+            MoveScalar(0, 84, 0x1111),
+            WriteLane(8, vectorRegister: 18, scalarRegister: 84, lane: 31),
+            MoveScalar(16, 84, 0x2222),
+            WriteLane(24, vectorRegister: 18, scalarRegister: 84, lane: 63),
+            ReadLane(32, scalarRegister: 84, vectorRegister: 18, lane: 31),
+            ScalarLoad(40, 84, destination: 4),
+            EndProgram(48));
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 84, 2, waveSize: waveSize);
+        var value = plan.Accesses[plan.Memory.Count - 1]!.Handle!.Operands[0];
+        Assert.True(value.IsConstant);
+        Assert.Equal(expected, value.ConstantU32);
     }
 
     // The restored pointer meets the zeroed one at the join, so the read is not a

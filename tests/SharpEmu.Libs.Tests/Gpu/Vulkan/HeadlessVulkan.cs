@@ -21,7 +21,6 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     private static readonly List<string> ValidationMessages = new();
 
     private GpuDeviceInfo? _deviceInfo;
-    private ExtDebugUtils? _debugUtils;
     private DebugUtilsMessengerEXT _debugMessenger;
 
     private HeadlessVulkan(Vk vk, Instance instance, PhysicalDevice physical, Device device, Queue queue, uint queueFamily, uint apiVersion, in PhysicalDeviceFeatures features, bool dynamicRendering)
@@ -91,7 +90,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
 
     public bool ShaderInt64 { get; }
 
-    public bool ValidationEnabled => _debugUtils is not null;
+    public bool ValidationEnabled => _debugMessenger.Handle != 0;
 
     // The validation messages collected since the last call; empty when the layer is off.
     public string[] TakeValidationMessages()
@@ -162,11 +161,12 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     {
         Vk.DeviceWaitIdle(Device);
         Vk.DestroyDevice(Device, null);
-        if (_debugUtils is { } debugUtils)
+        if (_debugMessenger.Handle != 0)
         {
-            debugUtils.DestroyDebugUtilsMessenger(Instance, _debugMessenger, null);
+            var destroy = (delegate* unmanaged<Instance, DebugUtilsMessengerEXT, AllocationCallbacks*, void>)
+                Vk.GetInstanceProcAddr(Instance, "vkDestroyDebugUtilsMessengerEXT").Handle;
+            destroy(Instance, _debugMessenger, null);
         }
-
         Vk.DestroyInstance(Instance, null);
     }
 
@@ -184,10 +184,9 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
 
     private void RegisterDebugMessenger()
     {
-        if (!Vk.TryGetInstanceExtension(Instance, out ExtDebugUtils debugUtils))
-        {
-            return;
-        }
+        var create = (delegate* unmanaged<Instance, DebugUtilsMessengerCreateInfoEXT*, AllocationCallbacks*, DebugUtilsMessengerEXT*, Result>)
+            Vk.GetInstanceProcAddr(Instance, "vkCreateDebugUtilsMessengerEXT").Handle;
+        Assert.True(create != null);
 
         var info = new DebugUtilsMessengerCreateInfoEXT
         {
@@ -196,10 +195,9 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             MessageType = DebugUtilsMessageTypeFlagsEXT.ValidationBitExt | DebugUtilsMessageTypeFlagsEXT.GeneralBitExt,
             PfnUserCallback = DebugCallbackPointer,
         };
-        if (debugUtils.CreateDebugUtilsMessenger(Instance, &info, null, out _debugMessenger) == Result.Success)
-        {
-            _debugUtils = debugUtils;
-        }
+        DebugUtilsMessengerEXT messenger;
+        Assert.Equal(Result.Success, create(Instance, &info, null, &messenger));
+        _debugMessenger = messenger;
     }
 
     private static HeadlessVulkan? Create()

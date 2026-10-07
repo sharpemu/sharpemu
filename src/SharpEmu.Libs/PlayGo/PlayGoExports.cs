@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026 SharpEmu Emulator Project
+// Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
@@ -231,7 +231,7 @@ public static class PlayGoExports
             chunkIds = _metadata.ChunkIds;
         }
 
-        var availableEntries = chunkIds.Length == 0 ? 1u : (uint)chunkIds.Length;
+        var availableEntries = (uint)chunkIds.Length;
         if (outChunkIdList == 0)
         {
             TracePlayGo($"get_chunk_id count_only entries={availableEntries} out_entries=0x{outEntries:X16}");
@@ -249,7 +249,7 @@ public static class PlayGoExports
 
         for (uint i = 0; i < entriesToWrite; i++)
         {
-            var chunkId = chunkIds.Length == 0 ? (ushort)0 : chunkIds[i];
+            var chunkId = chunkIds[i];
             if (!ctx.TryWriteUInt16(outChunkIdList + (i * sizeof(ushort)), chunkId))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -673,8 +673,7 @@ public static class PlayGoExports
     {
         lock (_stateGate)
         {
-            return _metadata.ChunkIdKnowledge == PlayGoChunkIdKnowledge.Unknown ||
-                Array.BinarySearch(_metadata.ChunkIds, chunkId) >= 0;
+            return Array.BinarySearch(_metadata.ChunkIds, chunkId) >= 0;
         }
     }
 
@@ -687,8 +686,7 @@ public static class PlayGoExports
             // single-chunk fallback as below, or scePlayGoOpen fails fatally.
             return new PlayGoMetadata(
                 true,
-                [(ushort)0],
-                PlayGoChunkIdKnowledge.Authoritative);
+                [(ushort)0]);
         }
 
         var playGoDat = Path.Combine(app0Root, "sce_sys", "playgo-chunk.dat");
@@ -713,17 +711,17 @@ public static class PlayGoExports
             TracePlayGo($"metadata_missing; fully-installed chunks=[{string.Join(',', installedChunkIds)}]");
             return new PlayGoMetadata(
                 true,
-                installedChunkIds,
-                PlayGoChunkIdKnowledge.Authoritative);
+                installedChunkIds);
         }
 
         var chunkIds = LoadChunkIds(chunkDefsXml);
-        return new PlayGoMetadata(
-            true,
-            chunkIds,
-            chunkIds.Length == 0
-                ? PlayGoChunkIdKnowledge.Unknown
-                : PlayGoChunkIdKnowledge.Authoritative);
+        // Scenario descriptions do not define the package's chunk ids. Likewise,
+        // an unreadable or unsupported chunk map cannot provide an installation
+        // inventory. Advertising a synthetic chunk 0 here gives callers an invented
+        // inventory instead of reporting the unsupported chunk map.
+        // Open must report the missing capability rather than claim availability
+        // for chunks that cannot be enumerated.
+        return new PlayGoMetadata(chunkIds.Length != 0, chunkIds);
     }
 
     // Chunk ids for a title that ships no PlayGo sidecar, taken from the
@@ -846,20 +844,12 @@ public static class PlayGoExports
         Interlocked.Exchange(ref _locusTraceDiagnostics, 0);
     }
 
-    private enum PlayGoChunkIdKnowledge
-    {
-        Unknown,
-        Authoritative,
-    }
-
     private sealed record PlayGoMetadata(
         bool Available,
-        ushort[] ChunkIds,
-        PlayGoChunkIdKnowledge ChunkIdKnowledge)
+        ushort[] ChunkIds)
     {
         public static readonly PlayGoMetadata Empty = new(
             false,
-            Array.Empty<ushort>(),
-            PlayGoChunkIdKnowledge.Unknown);
+            Array.Empty<ushort>());
     }
 }

@@ -192,6 +192,7 @@ public enum SpirvCapability : uint
     SampledImageArrayDynamicIndexing = 29,
     StorageImageArrayDynamicIndexing = 31,
     SampleRateShading = 35,
+    SampleMaskPostDepthCoverage = 4447,
     Sampled1D = 43,
     Image1D = 44,
     Float16 = 9,
@@ -240,6 +241,8 @@ public enum SpirvExecutionModel : uint
 public enum SpirvExecutionMode : uint
 {
     OriginUpperLeft = 7,
+    EarlyFragmentTests = 9,
+    PostDepthCoverage = 4446,
     DepthReplacing = 12,
     LocalSize = 17,
 }
@@ -251,6 +254,7 @@ public enum SpirvDecoration : uint
     BuiltIn = 11,
     NoPerspective = 13,
     Flat = 14,
+    Sample = 17,
     PerVertexKhr = 5285,
     Location = 30,
     Binding = 33,
