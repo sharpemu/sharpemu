@@ -435,7 +435,12 @@ public sealed partial class GpuCommandInterpreter
                     throw _host.Fatal($"The occlusion-counter dump is invalid: index=0x{eventIndex:X8} address=0x{eventAddress:X16}.");
                 }
 
-                // Until real sample queries are implemented, conservatively report visibility.
+                if (_host.TryRecordOcclusionCounterDump(eventAddress))
+                {
+                    break;
+                }
+
+                // Without host sample queries, conservatively report visibility.
                 // A one-sample delta can disappear when the guest scales or reduces the counts.
                 const ulong visibleCounterStep = 0x2FFFFFF;
                 const ulong readyBit = 1UL << 63;

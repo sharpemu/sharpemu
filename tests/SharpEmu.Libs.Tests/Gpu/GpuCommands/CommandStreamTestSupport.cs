@@ -29,6 +29,20 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public List<string> Calls { get; } = new();
 
+    // When set, the host counts occlusion samples itself and records each dump address here.
+    public List<ulong>? OcclusionDumps { get; set; }
+
+    public bool TryRecordOcclusionCounterDump(ulong address)
+    {
+        if (OcclusionDumps is null)
+        {
+            return false;
+        }
+
+        OcclusionDumps.Add(address);
+        return true;
+    }
+
     public List<EndOfPipeWrite> EndOfPipeWrites { get; } = new();
 
     // Satisfied waits and command-processor memory writes reported to the host.

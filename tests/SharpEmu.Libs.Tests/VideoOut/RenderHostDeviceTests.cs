@@ -40,6 +40,38 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     private static bool DefersGlobalBarriers =>
         (bool)PresenterUnderTest.PresenterType.GetField("DeferGlobalBarriers", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OcclusionReadbackDoesNotSubmitWhileEndingRendering(bool exhaustRing)
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        var address = presenter.Harness.MapBacked(0x10000, ReadWrite);
+        presenter.Run(() =>
+        {
+            var ring = presenter.Harness.Cache.GetUtilityBuffer(GpuBufferUsage.Download);
+            if (exhaustRing)
+            {
+                Assert.True(ring.TryMap(ring.Size, out _));
+                ring.Commit();
+            }
+            var queryType = PresenterUnderTest.PresenterType.GetNestedType("OcclusionQuery",
+                System.Reflection.BindingFlags.NonPublic)!;
+            var query = Activator.CreateInstance(queryType, [address])!;
+            queryType.GetProperty("Conservative")!.SetValue(query, true);
+            presenter.GetField<System.Collections.IList>("_pendingOcclusionResults").Add(query);
+            var tick = presenter.Harness.Scheduler.CurrentTick;
+            presenter.InvokeMethod("PublishOcclusionResults", presenter.Command);
+            Assert.Equal(tick, presenter.Harness.Scheduler.CurrentTick);
+            presenter.Harness.Scheduler.Finish();
+            presenter.Harness.Scheduler.WaitForAllPriorityOperations();
+            ((ICommandStreamHost)presenter.Instance).RunPendingCommands();
+        });
+        Assert.Equal(OcclusionResultBlock.Build(0, true, []), presenter.Harness.Read(address, 256));
+        presenter.Harness.Shutdown();
+    }
+
     [Fact]
     public void GlobalBarrierEndsDynamicRendering()
     {

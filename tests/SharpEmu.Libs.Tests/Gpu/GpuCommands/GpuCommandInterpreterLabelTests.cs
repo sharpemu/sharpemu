@@ -338,6 +338,20 @@ public sealed class GpuCommandInterpreterLabelTests
     }
 
     [Fact]
+    public void EventWrite_OcclusionDumpUsesHostSampleCountsWhenAvailable()
+    {
+        var runner = new StreamRunner();
+        runner.Host.OcclusionDumps = new List<ulong>();
+
+        runner.Run(StreamRunner.Packet(PacketOpcode.EventWrite, 0x39 | (1u << 8), StreamRunner.Low(Label), StreamRunner.High(Label)));
+        runner.Run(StreamRunner.Packet(PacketOpcode.EventWrite, 0x39 | (1u << 8), StreamRunner.Low(Label + 8), StreamRunner.High(Label + 8)));
+
+        Assert.Equal(new[] { Label, Label + 8 }, runner.Host.OcclusionDumps);
+        Assert.Empty(runner.Host.Calls);
+        Assert.Equal(0UL, runner.Host.ReadQword(Label));
+    }
+
+    [Fact]
     public void FlipMarkers_PrepareRecordAndFlush()
     {
         var runner = new StreamRunner();

@@ -869,6 +869,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _renderingScopesBegun++;
             _renderingActive = true;
             _renderingState = state;
+            BeginOcclusionSegment(command);
         }
 
         public void EndRendering()
@@ -881,6 +882,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _renderingActive = false;
             _renderingState = default;
             var command = new CommandBuffer(_scheduler.Current.Handle);
+            EndOcclusionSegment(command);
             _vk.CmdEndRendering(command);
             foreach (var (sourceStages, destinationStages, barriers) in _barriersAfterRendering)
             {
@@ -893,6 +895,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _barriersAfterRendering.Clear();
+            PublishOcclusionResults(command);
             if (_globalBarrierAfterRendering)
             {
                 _globalBarrierAfterRendering = false;
