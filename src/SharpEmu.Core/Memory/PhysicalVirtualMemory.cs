@@ -1322,8 +1322,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     return true;
                 }
 
-                // POSIX cannot query foreign host mappings. The free ranges were
-                // reserved at startup, so a failed candidate means the gap is taken.
+                // When the host cannot be asked about foreign mappings, the free
+                // ranges reserved at startup are all we know, so a failed
+                // candidate means the gap is taken.
                 if (!OperatingSystem.IsWindows() && reservedCandidate != 0)
                 {
                     address = reservedCandidate;
@@ -1331,6 +1332,20 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 }
 
                 start = candidate + GuestMemoryLayout.GuestPage;
+
+                // Stepping one guest page per failure is hopeless on hosts that
+                // keep a very large span of the low address space to themselves:
+                // Apple Silicon refuses fixed placement for every address below
+                // the kernel's own allocation base, hundreds of gigabytes up, so
+                // a page-by-page walk needs tens of millions of iterations to
+                // reach the first address it can take. Ask the host where its
+                // mappings end and jump there when it knows.
+                var unmapped = _backedSpace!.FindUnmappedHostRange(start, size, limit);
+                if (unmapped > start)
+                {
+                    start = unmapped;
+                }
+
                 if (OperatingSystem.IsWindows() && _hostMemory.Query(candidate, out var info) &&
                     info.BaseAddress <= candidate && info.BaseAddress < limit &&
                     info.RegionSize <= limit - info.BaseAddress)

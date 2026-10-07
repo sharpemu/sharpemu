@@ -214,6 +214,14 @@ public sealed class GuestSpaceOwner : IDisposable
         }
     }
 
+    // Hint for callers that scan for a free guest address: the lowest address at
+    // or above <paramref name="address"/> that carries no host mapping for
+    // <paramref name="size"/> bytes, or 0 when the host cannot say. Reserving
+    // the result still has to be attempted, so a stale answer only costs a
+    // retry.
+    public ulong FindUnmappedHostRange(ulong address, ulong size, ulong searchEnd) =>
+        _host.FindUnmappedRange(address, size, searchEnd);
+
     public bool SetAccess(ulong address, ulong size, HostPageProtection protection)
     {
         if (!IsValidAlignedRange(address, size))
