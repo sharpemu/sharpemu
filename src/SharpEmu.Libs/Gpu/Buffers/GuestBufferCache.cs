@@ -704,8 +704,9 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             // packet satisfied). A CPU write after the submission began carries no ordering
             // guarantee for its commands, and sweeping on every draw would end the render pass
             // for every page the guest streams while the stream is being translated.
-            var epoch = _tracker.CpuDirtyEpoch;
-            if (mapping != _bdaSweepMapping || (epoch != _bdaSweepEpoch && (_bdaVisibilityPending || SweepBdaOnEveryDraw)))
+            // Hot pages remain writable, so later CPU writes need not advance CpuDirtyEpoch.
+            // Every visibility point must revisit their dirty ranges even with an unchanged epoch.
+            if (mapping != _bdaSweepMapping || _bdaVisibilityPending || SweepBdaOnEveryDraw)
             {
                 BeginUploadBatch();
                 try
@@ -718,7 +719,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                     EndUploadBatch();
                 }
 
-                _bdaSweepEpoch = epoch;
                 _bdaSweepMapping = mapping;
                 _bdaVisibilityPending = false;
             }
@@ -740,7 +740,6 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         Environment.GetEnvironmentVariable("SHARPEMU_BDA_SWEEP_EVERY_DRAW") == "1";
 
     public void NoteMemoryVisibilityPoint() => _bdaVisibilityPending = true;
-    private long _bdaSweepEpoch = -1;
     private ulong _bdaSweepMapping;
 
     private void TouchBuffersInRange(ulong guestAddress, ulong size)

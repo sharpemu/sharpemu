@@ -674,7 +674,12 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         var address = harness.MapBacked(0x10000, ReadWrite);
         var (buffer, _) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x8000, isWritten: false));
 
-        harness.Worker.Run(() => harness.Cache.WriteHostMemory(address + 0x1000, Pattern(0x100, 7)));
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.WriteHostMemory(address + 0x1000, Pattern(0x100, 7));
+            // Deferred host writes become visible when a command acquires its buffer.
+            harness.Cache.PrepareBda([new GuestSpan(address, 0x10000)]);
+        });
 
         Assert.Equal(Pattern(0x100, 7), harness.Read(address + 0x1000, 0x100));
         Assert.Equal(Pattern(0x100, 7), harness.ReadBack(buffer, 0x1000, 0x100));
@@ -801,8 +806,8 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
             harness.Write(address, expected);
             harness.Worker.Run(() =>
             {
+                harness.Cache.NoteMemoryVisibilityPoint();
                 harness.Cache.PrepareBda([new GuestSpan(address, size)]);
-                Assert.False(harness.Cache.HasCpuDirtyPages(address, size));
                 Assert.False(harness.Cache.HasGpuDirtyPages(address, size));
                 harness.Cache.PrepareBda([new GuestSpan(address, size)]);
             });
@@ -835,7 +840,11 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         });
         Assert.Equal(Bytes(0x12345678u), harness.ReadBack(buffer, offset, 4));
         Assert.True(harness.Cache.TrySynchronizeCpuRead(address, size));
-        harness.Worker.Run(() => harness.Cache.PrepareBda([new GuestSpan(address, size)]));
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.NoteMemoryVisibilityPoint();
+            harness.Cache.PrepareBda([new GuestSpan(address, size)]);
+        });
 
         var expected = Pattern((int)size, 7);
         await Task.Run(() =>
@@ -843,8 +852,44 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
             Assert.True(harness.Store.MarkCpuWrite(address, size));
             harness.Write(address, expected);
         });
-        harness.Worker.Run(() => harness.Cache.PrepareBda([new GuestSpan(address, size)]));
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.NoteMemoryVisibilityPoint();
+            harness.Cache.PrepareBda([new GuestSpan(address, size)]);
+        });
         Assert.False(harness.Cache.HasCpuDirtyPages(address, size));
+        Assert.Equal(expected, harness.ReadBack(buffer, offset, size));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void DeviceAddressVisibilityPointRefreshesHotPagesWithoutAnotherWriteFault()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        const ulong size = 0x8000;
+        var (buffer, offset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, size, false));
+        for (var write = 1; write <= 3; write++)
+        {
+            Assert.True(harness.Store.MarkCpuWrite(address, size));
+            harness.Write(address, Pattern((int)size, (byte)write));
+            harness.Worker.Run(() =>
+            {
+                harness.Cache.NoteMemoryVisibilityPoint();
+                harness.Cache.PrepareBda([new GuestSpan(address, size)]);
+            });
+        }
+
+        Assert.True(harness.Cache.HasCpuDirtyPages(address, size));
+        var expected = Pattern((int)size, 9);
+        // A permanently writable hot page changes without another protection fault.
+        harness.Write(address, expected);
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.NoteMemoryVisibilityPoint();
+            harness.Cache.PrepareBda([new GuestSpan(address, size)]);
+        });
         Assert.Equal(expected, harness.ReadBack(buffer, offset, size));
         harness.Shutdown();
     }
