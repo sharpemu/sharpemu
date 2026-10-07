@@ -158,12 +158,14 @@ public static class Gen5ExecFullAnalysis
             written |= Bit(sdst) | Bit(sdst + 1);
         }
 
-        if (opcode.StartsWith("VCmp", StringComparison.Ordinal) && scalarDestination is null)
+        if (opcode.StartsWith("VCmpx", StringComparison.Ordinal))
         {
-            // VOPC compares write VCC, V_CMPX writes EXEC.
-            written |= opcode.StartsWith("VCmpx", StringComparison.Ordinal)
-                ? Bit(ExecLow) | Bit(ExecHigh)
-                : Bit(106) | Bit(107);
+            written |= Bit(ExecLow) | Bit(ExecHigh);
+        }
+        else if (opcode.StartsWith("VCmp", StringComparison.Ordinal) && scalarDestination is null)
+        {
+            // VOPC compares write VCC.
+            written |= Bit(106) | Bit(107);
         }
 
         if (opcode.StartsWith('V') && opcode.Contains("Co", StringComparison.Ordinal) && scalarDestination is null)

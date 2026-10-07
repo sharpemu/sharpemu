@@ -12,9 +12,27 @@ public static class NpWebApi2Exports
     private static int _initialized;
     private static int _nextLibraryContextHandle;
     private static int _nextPushEventHandle;
+    private static int _nextPushEventCallbackHandle;
     private static int _nextUserContextHandle = 1000;
     private static readonly object _contextGate = new();
     private static readonly HashSet<int> _libraryContexts = [];
+    private static readonly HashSet<int> _userContexts = [];
+    private static readonly HashSet<int> _pushEventFilters = [];
+
+    public static void ResetRuntimeState()
+    {
+        Interlocked.Exchange(ref _initialized, 0);
+        Interlocked.Exchange(ref _nextLibraryContextHandle, 0);
+        Interlocked.Exchange(ref _nextPushEventHandle, 0);
+        Interlocked.Exchange(ref _nextPushEventCallbackHandle, 0);
+        Interlocked.Exchange(ref _nextUserContextHandle, 1000);
+        lock (_contextGate)
+        {
+            _libraryContexts.Clear();
+            _userContexts.Clear();
+            _pushEventFilters.Clear();
+        }
+    }
 
     [SysAbiExport(
         Nid = "+o9816YQhqQ",
@@ -51,6 +69,11 @@ public static class NpWebApi2Exports
         }
 
         var filterHandle = Interlocked.Increment(ref _nextPushEventHandle);
+        lock (_contextGate)
+        {
+            _pushEventFilters.Add(filterHandle);
+        }
+
         TraceNpWebApi2("push-event-create-filter", libraryContextId, (ulong)filterHandle);
         return ctx.SetReturn(filterHandle);
     }
@@ -72,6 +95,20 @@ public static class NpWebApi2Exports
         Interlocked.Exchange(ref _initialized, 1);
         TraceNpWebApi2("init-alt", libraryContextId, 0);
         return ctx.SetReturn(handle);
+    }
+
+    [SysAbiExport(
+        Nid = "fIATVMo4Y1w",
+        ExportName = "sceNpWebApi2PushEventDeleteHandle",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpWebApi2")]
+    public static int NpWebApi2PushEventDeleteHandle(CpuContext ctx)
+    {
+        TraceNpWebApi2(
+            "push-event-delete-handle",
+            unchecked((int)ctx[CpuRegister.Rdi]),
+            unchecked((uint)ctx[CpuRegister.Rsi]));
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -97,7 +134,32 @@ public static class NpWebApi2Exports
         }
 
         var userContextId = Interlocked.Increment(ref _nextUserContextHandle);
+        lock (_contextGate)
+        {
+            _userContexts.Add(userContextId);
+        }
+
         return ctx.SetReturn(userContextId);
+    }
+
+    [SysAbiExport(
+        Nid = "fY3QqeNkF8k",
+        ExportName = "sceNpWebApi2PushEventRegisterCallback",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNpWebApi2")]
+    public static int NpWebApi2PushEventRegisterCallback(CpuContext ctx)
+    {
+        var userContextId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var filterId = unchecked((int)ctx[CpuRegister.Rsi]);
+        var callback = ctx[CpuRegister.Rdx];
+        if (callback == 0 || !IsRegisteredPushEventPair(userContextId, filterId))
+        {
+            return ctx.SetReturn(NpWebApi2ErrorInvalidArgument);
+        }
+
+        var callbackId = Interlocked.Increment(ref _nextPushEventCallbackHandle);
+        TraceNpWebApi2("push-event-register-callback", userContextId, (ulong)callbackId);
+        return ctx.SetReturn(callbackId);
     }
 
     [SysAbiExport(
@@ -171,7 +233,22 @@ public static class NpWebApi2Exports
             if (_libraryContexts.Count == 0)
             {
                 Interlocked.Exchange(ref _initialized, 0);
+                _userContexts.Clear();
+                _pushEventFilters.Clear();
             }
+        }
+    }
+
+    private static bool IsRegisteredPushEventPair(int userContextId, int filterId)
+    {
+        if (Volatile.Read(ref _initialized) == 0 || userContextId <= 0 || filterId <= 0)
+        {
+            return false;
+        }
+
+        lock (_contextGate)
+        {
+            return _userContexts.Contains(userContextId) && _pushEventFilters.Contains(filterId);
         }
     }
 

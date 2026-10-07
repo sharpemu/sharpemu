@@ -22,7 +22,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // This partial owns the submission scheduler and the GPU worker relay.
 
         private readonly object _queueGate = new();
-        private readonly GpuWorkerRelay _relay = new(WakeRenderThread);
+        private readonly GpuWorkerRelay _relay;
 
         internal GpuWorkerRelay Relay => _relay;
         private readonly SubmissionContext _submissionContext = new();

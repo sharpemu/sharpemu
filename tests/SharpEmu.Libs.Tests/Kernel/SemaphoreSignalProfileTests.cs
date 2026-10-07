@@ -41,7 +41,8 @@ public sealed class SemaphoreSignalProfileTests
 
     [Theory]
     [InlineData(0, 2, true)]
-    [InlineData(0, 0, false)]
+    [InlineData(0, 0, true)]
+    [InlineData(1, -1, false)]
     [InlineData(1, int.MaxValue, false)]
     public void SignalKeepsTokenSemanticsAndRecordsStagesWhenEnabled(uint initial, int count, bool succeeds)
     {

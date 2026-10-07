@@ -124,6 +124,57 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
 
     public IdleOutcome SubmitDone(ICpuMemory memory) => EnsureCommandStream(memory).Done();
 
+    public void RunAfterPendingCommandStreams(Action work)
+    {
+        ArgumentNullException.ThrowIfNull(work);
+
+        CommandStreamQueue? commandStream;
+        CommandStreamWorker? worker;
+        lock (_commandStreamGate)
+        {
+            commandStream = _commandStream;
+            worker = _commandStreamWorker;
+        }
+
+        if (commandStream is null || worker?.IsWorkerThread == true)
+        {
+            work();
+            return;
+        }
+
+        using var done = new SemaphoreSlim(0);
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? failure = null;
+        if (!commandStream.TryEnqueueControlBarrier(
+                () =>
+                {
+                    try
+                    {
+                        work();
+                    }
+                    catch (Exception exception)
+                    {
+                        failure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(exception);
+                    }
+                    finally
+                    {
+                        done.Release();
+                    }
+                },
+                () =>
+                {
+                    failure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(
+                        new OperationCanceledException("The command stream stopped before the video-out state change could run."));
+                    done.Release();
+                }))
+        {
+            work();
+            return;
+        }
+
+        done.Wait();
+        failure?.Throw();
+    }
+
     public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat) =>
         MetalVideoPresenter.RegisterKnownDisplayBuffer(address, guestFormat);
 

@@ -9,6 +9,7 @@ using SharpEmu.Libs.AvPlayer;
 using SharpEmu.Libs.Media;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
@@ -255,6 +256,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public Presenter(uint width, uint height)
         {
             _commandStream = new CommandStreamQueue(this);
+            _relay = new GpuWorkerRelay(WakeRenderThread, _commandStream.TryEnqueueControlBarrier);
             _hostBufferPool = new VulkanHostBufferPool(
                 MaximumCachedHostBufferBytes,
                 DestroyHostBufferAllocation);

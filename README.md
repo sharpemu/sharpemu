@@ -58,17 +58,17 @@ Our goal is **not** to emulate PS4 games, as there is already an excellent emula
 
 ## Games Tested
 
-|               Demons Souls Remake                   |                     Astro Bot                        |
+|               Demon's Souls Remake                   |                     ASTRO BOT                        |
 | :-----------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
 | ![DeS screenshot](./.github/images/demons-souls.jpg) | ![Astro Bot](./.github/images/astro-bot.jpg) |
 
-|                  Hades                    |                 Dead Cells                    |
+|                  ASTRO's PLAYROOM                    |                 Dead Cells                    |
 | :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Hades](./.github/images/hades.jpg) | ![Dead Cells](./.github/images/dead-cells.jpg) |
+| ![Astro's Playroom](./.github/images/astros-playroom.jpg) | ![Dead Cells](./.github/images/dead-cells.jpg) |
 
-|                  PAC-MAN World Re-PAC                    |                 Tomb Raider V Remastered                    |
+|                  God of War: Sons of Sparta                    |                 Tomb Raider V Remastered                    |
 | :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Pac-Man](./.github/images/pac-man-world-re-pac.jpg) | ![Tomb Raider V](./.github/images/tomb-raider-v-remastered.jpg) |
+| ![GoW SOS](./.github/images/gow-sos.jpg) | ![Tomb Raider V](./.github/images/tomb-raider-v-remastered.jpg) |
 
 ## Status
 

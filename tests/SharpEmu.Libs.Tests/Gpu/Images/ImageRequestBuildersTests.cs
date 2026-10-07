@@ -362,6 +362,38 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     }
 
     [Fact]
+    public void DepthTarget_StencilIsCompressedOnlyWithHtileBacking()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        const ulong stencilBase = Base + 0x80000;
+        const ulong htileBase = Base + 0x100000;
+        var words = RegisterWords.Depth(Base, 64, 64, stencilBase: stencilBase) with
+        {
+            ZInfo = (uint)GuestDepthFormat.Z32Float | (1u << 29),
+            StencilInfo = 0x00100981,
+            HtileBase = htileBase,
+        };
+
+        var resolution = ImageRequestBuilders.DepthTarget(words, _vulkan.DeviceInfo);
+
+        Assert.NotNull(resolution);
+        var value = resolution.Value;
+        Assert.True(value.HasStencil);
+        Assert.True(value.HasHtile);
+        Assert.Equal(MetadataKind.Htile, value.Request.Description.Metadata.Kind);
+        Assert.Equal(htileBase, value.Request.Description.Metadata.Range.Address);
+        Assert.True(value.Request.Description.Metadata.StencilCompressed);
+
+        var missingHtile = words with { ZInfo = (uint)GuestDepthFormat.Z32Float, HtileBase = 0 };
+        var uncompressed = ImageRequestBuilders.DepthTarget(missingHtile, _vulkan.DeviceInfo);
+
+        Assert.NotNull(uncompressed);
+        Assert.True(uncompressed.Value.HasStencil);
+        Assert.False(uncompressed.Value.HasHtile);
+        Assert.False(uncompressed.Value.Request.Description.Metadata.StencilCompressed);
+    }
+
+    [Fact]
     public void DepthTarget_NoAttachmentWhenNothingIsActive()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

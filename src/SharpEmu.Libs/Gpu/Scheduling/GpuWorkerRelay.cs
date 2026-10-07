@@ -14,15 +14,59 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
     private readonly object _gate = new();
     private readonly Queue<Action> _commands = new();
     private readonly Action _wake;
+    private readonly Func<Action, Action, bool>? _tryEnqueueAfterPendingWork;
     private int _pendingCount;
     private bool _accepting = true;
 
-    public GpuWorkerRelay(Action wake)
+    public GpuWorkerRelay(Action wake, Func<Action, Action, bool>? tryEnqueueAfterPendingWork = null)
     {
         _wake = wake;
+        _tryEnqueueAfterPendingWork = tryEnqueueAfterPendingWork;
     }
 
     public bool TryRunAfterPendingWork(Action work) => TryRunOnGpuQueue(work);
+
+    public bool TryRunAfterAcceptedCommandStreams(Action work)
+    {
+        ArgumentNullException.ThrowIfNull(work);
+        if (IsGpuQueueThread || _tryEnqueueAfterPendingWork is null)
+        {
+            return TryRunOnGpuQueue(work);
+        }
+
+        using var done = new SemaphoreSlim(0);
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? failure = null;
+        if (!_tryEnqueueAfterPendingWork(
+                () =>
+                {
+                    try
+                    {
+                        work();
+                    }
+                    catch (Exception exception)
+                    {
+                        failure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(exception);
+                    }
+                    finally
+                    {
+                        done.Release();
+                    }
+                },
+                () =>
+                {
+                    failure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(
+                        new OperationCanceledException(
+                            "The command stream stopped before the ordered GPU worker action could run."));
+                    done.Release();
+                }))
+        {
+            return false;
+        }
+
+        done.Wait();
+        failure?.Throw();
+        return true;
+    }
 
     public bool IsGpuQueueThread => _boundWorker == this;
 

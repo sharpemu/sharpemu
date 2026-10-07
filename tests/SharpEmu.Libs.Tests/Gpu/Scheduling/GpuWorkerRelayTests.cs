@@ -18,9 +18,9 @@ public sealed class GpuWorkerRelayTests : IDisposable
         private readonly Thread _thread;
         private bool _stop;
 
-        public TestWorker()
+        public TestWorker(Func<Action, Action, bool>? tryEnqueueAfterPendingWork = null)
         {
-            Relay = new GpuWorkerRelay(Wake);
+            Relay = new GpuWorkerRelay(Wake, tryEnqueueAfterPendingWork);
             _thread = new Thread(Run) { IsBackground = true };
         }
 
@@ -158,6 +158,116 @@ public sealed class GpuWorkerRelayTests : IDisposable
         Assert.False(retired);
         Assert.DoesNotContain(device.Log, entry => entry.StartsWith("wait", StringComparison.Ordinal));
         device.Complete(1);
+    }
+
+    [Fact]
+    public void AfterPendingWork_BypassesTheCommandStreamBarrier()
+    {
+        var barrierCalled = false;
+        using var worker = new TestWorker(
+            (_, _) =>
+            {
+                barrierCalled = true;
+                return true;
+            });
+        worker.Start();
+        var workRan = false;
+        var ranOnWorker = false;
+
+        Assert.True(worker.Relay.TryRunAfterPendingWork(() =>
+        {
+            workRan = true;
+            ranOnWorker = worker.Relay.IsGpuQueueThread;
+        }));
+        Assert.True(workRan);
+        Assert.True(ranOnWorker);
+        Assert.False(barrierCalled);
+    }
+
+    [Fact]
+    public void AfterPendingWork_ReturnsFalseWhenTheWorkerIsClosed()
+    {
+        var barrierCalled = false;
+        var relay = new GpuWorkerRelay(
+            () => { },
+            (_, _) =>
+            {
+                barrierCalled = true;
+                return true;
+            });
+        relay.StopAcceptingWork();
+
+        Assert.False(relay.TryRunAfterPendingWork(() => { }));
+        Assert.False(barrierCalled);
+    }
+
+    [Fact]
+    public async Task AfterAcceptedCommandStreams_WaitsForTheControlBarrier()
+    {
+        Action? run = null;
+        Action? cancel = null;
+        var relay = new GpuWorkerRelay(
+            () => { },
+            (work, cancellation) =>
+            {
+                run = work;
+                cancel = cancellation;
+                return true;
+            });
+        var workRan = false;
+
+        var completion = Task.Run(() =>
+            relay.TryRunAfterAcceptedCommandStreams(() => workRan = true));
+        Assert.True(WaitUntil(() => Volatile.Read(ref run) is not null));
+        Assert.False(await CompletesWithin(completion, 50));
+
+        run!();
+
+        Assert.True(await completion.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.True(workRan);
+        Assert.NotNull(cancel);
+    }
+
+    [Fact]
+    public async Task AfterAcceptedCommandStreams_CancellationReleasesTheCaller()
+    {
+        Action? cancel = null;
+        var relay = new GpuWorkerRelay(
+            () => { },
+            (_, cancellation) =>
+            {
+                cancel = cancellation;
+                return true;
+            });
+
+        var completion = Task.Run(() => Record.Exception(() =>
+            relay.TryRunAfterAcceptedCommandStreams(() => { })));
+        Assert.True(WaitUntil(() => Volatile.Read(ref cancel) is not null));
+        cancel!();
+
+        Assert.IsType<OperationCanceledException>(
+            await completion.WaitAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public async Task AfterAcceptedCommandStreams_RethrowsTheWorkException()
+    {
+        Action? run = null;
+        var relay = new GpuWorkerRelay(
+            () => { },
+            (work, _) =>
+            {
+                run = work;
+                return true;
+            });
+        var expected = new InvalidOperationException("ordered state change failed");
+
+        var completion = Task.Run(() => Record.Exception(() =>
+            relay.TryRunAfterAcceptedCommandStreams(() => throw expected)));
+        Assert.True(WaitUntil(() => Volatile.Read(ref run) is not null));
+        run!();
+
+        Assert.Same(expected, await completion.WaitAsync(TimeSpan.FromSeconds(2)));
     }
 
     [Fact]

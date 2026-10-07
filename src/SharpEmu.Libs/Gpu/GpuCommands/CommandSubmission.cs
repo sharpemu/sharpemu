@@ -101,6 +101,8 @@ public sealed class CommandSubmission
     // The submitter's own sequence number, kept for diagnostics and the translation state.
     public ulong SubmissionId { get; }
 
+    internal ulong AdmissionOrdinal { get; set; }
+
     // Snapshots captured at submit time; the processor never reads them.
     public object? GeometrySnapshots { get; }
 

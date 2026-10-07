@@ -398,15 +398,18 @@ public static partial class VideoOutExports
     public static int VideoOutClose(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        lock (_stateGate)
+        GuestGpu.Current.RunAfterPendingCommandStreams(() =>
         {
-            foreach (var request in _flipRequests.Values.Where(request => request.Handle == handle).ToArray())
+            lock (_stateGate)
             {
-                CancelFlipLocked(request);
+                foreach (var request in _flipRequests.Values.Where(request => request.Handle == handle).ToArray())
+                {
+                    CancelFlipLocked(request);
+                }
+                _ports.Remove(handle);
+                Monitor.PulseAll(_stateGate);
             }
-            _ports.Remove(handle);
-            Monitor.PulseAll(_stateGate);
-        }
+        });
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -1246,36 +1249,42 @@ public static partial class VideoOutExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var attributeIndex = unchecked((int)ctx[CpuRegister.Rsi]);
-        if (!TryGetPort(handle, out var port))
-        {
-            return OrbisVideoOutErrorInvalidHandle;
-        }
-
         if (attributeIndex < 0)
         {
             return OrbisVideoOutErrorInvalidValue;
         }
 
-        lock (_stateGate)
+        var result = (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        GuestGpu.Current.RunAfterPendingCommandStreams(() =>
         {
-            if (attributeIndex >= port.Groups.Length || port.Groups[attributeIndex] is null)
+            lock (_stateGate)
             {
-                return OrbisVideoOutErrorInvalidValue;
-            }
-
-            port.Groups[attributeIndex] = null;
-            foreach (var slot in port.BufferSlots)
-            {
-                if (slot.GroupIndex == attributeIndex)
+                if (!_ports.TryGetValue(handle, out var port))
                 {
-                    slot.GroupIndex = -1;
-                    slot.AddressLeft = 0;
-                    slot.AddressRight = 0;
+                    result = OrbisVideoOutErrorInvalidHandle;
+                    return;
+                }
+
+                if (attributeIndex >= port.Groups.Length || port.Groups[attributeIndex] is null)
+                {
+                    result = OrbisVideoOutErrorInvalidValue;
+                    return;
+                }
+
+                port.Groups[attributeIndex] = null;
+                foreach (var slot in port.BufferSlots)
+                {
+                    if (slot.GroupIndex == attributeIndex)
+                    {
+                        slot.GroupIndex = -1;
+                        slot.AddressLeft = 0;
+                        slot.AddressRight = 0;
+                    }
                 }
             }
+        });
 
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-        }
+        return result;
     }
 
     [SysAbiExport(
