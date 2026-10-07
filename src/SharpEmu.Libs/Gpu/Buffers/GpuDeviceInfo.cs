@@ -34,12 +34,19 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
         MaxMemoryAllocationCount = properties.Limits.MaxMemoryAllocationCount;
         MaxComputeWorkGroupCount = (properties.Limits.MaxComputeWorkGroupCount[0], properties.Limits.MaxComputeWorkGroupCount[1], properties.Limits.MaxComputeWorkGroupCount[2]);
         Slabs = new GpuMemorySlabs(this);
+        GuestImports = new GuestBufferImportPool(this);
         const FormatFeatureFlags blit = FormatFeatureFlags.BlitSrcBit | FormatFeatureFlags.BlitDstBit;
         Images.RenderScalePolicy.ConfigureFormatSupport(format => (GetFormatProperties(format).OptimalTilingFeatures & blit) == blit);
     }
 
     // Shared chunks the small buffers are carved from; freed at device teardown.
     internal GpuMemorySlabs Slabs { get; }
+
+    internal GuestBufferImportPool GuestImports { get; }
+
+    public Silk.NET.Vulkan.Extensions.EXT.ExtExternalMemoryHost? ExternalMemoryHost { get; set; }
+
+    public ulong ImportedHostPointerAlignment { get; set; }
 
     public Vk Vk { get; }
 

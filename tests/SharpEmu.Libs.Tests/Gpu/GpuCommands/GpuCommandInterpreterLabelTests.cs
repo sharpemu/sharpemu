@@ -50,6 +50,19 @@ public sealed class GpuCommandInterpreterLabelTests
             StreamRunner.Low(value), StreamRunner.High(value),
             contextId);
 
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(2u)]
+    [InlineData(3u)]
+    public void CompletionHostDoesNotPublishReleaseLabelsWhileParsing(uint selection)
+    {
+        var runner = new StreamRunner();
+        runner.Host.RecordsCompletionLabels = true;
+        runner.Run(ReleaseMemoryNative(0x28, 0, 0, 0, selection, 2, Label, 0x11223344, 0));
+        Assert.Single(runner.Host.EndOfPipeWrites);
+        Assert.Equal(0UL, runner.Host.ReadQword(Label));
+    }
+
     [Fact]
     public void EndOfPipeWrite64_LandsBeforeTheCompletionIsRecorded()
     {

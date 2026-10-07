@@ -1176,6 +1176,10 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public object? BackingAliasSnapshot => _backedSpace?.AliasSnapshot;
 
+    public ulong BackingAliasBase => _backedSpace?.AliasBase ?? 0;
+
+    public ulong BackingAliasSize => _backedSpace?.BackingSize ?? 0;
+
     public bool TryEnterBackingAliasAccess() => !_disposed && _backedSpace is { } backed && backed.TryEnterAliasAccess();
 
     public void ExitBackingAliasAccess() => _backedSpace?.ExitAliasAccess();

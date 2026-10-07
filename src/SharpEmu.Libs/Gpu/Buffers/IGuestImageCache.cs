@@ -21,5 +21,8 @@ public interface IGuestImageCache
 
     void InvalidateMemoryFromGpu(ulong address, ulong size);
 
+    // Preserve image-owned bytes before a partial buffer overwrite changes ownership.
+    void PreserveGpuContentsForBufferWrite(ulong address, ulong size);
+
     bool TrySynchronizeBufferFromImage(GpuBuffer buffer, ulong address, ulong size);
 }

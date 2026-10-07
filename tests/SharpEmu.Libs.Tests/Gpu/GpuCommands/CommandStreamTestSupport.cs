@@ -27,9 +27,24 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public ICpuMemory Memory => GuestMemory;
 
+    public bool RecordsCompletionLabels { get; set; }
+    public bool QueueSignalWrites { get; set; }
+    public Dictionary<ulong, ulong> QueuedSignals { get; } = new();
+    public List<ulong> SignalReads { get; } = new();
+
+    public bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source)
+    {
+        if (!QueueSignalWrites || source.Length is not (4 or 8)) return GuestMemory.TryWrite(address, source);
+        QueuedSignals[address] = source.Length == 4
+            ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(source)
+            : System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(source);
+        return true;
+    }
+
     public List<string> Calls { get; } = new();
 
     public List<EndOfPipeWrite> EndOfPipeWrites { get; } = new();
+    public Action<EndOfPipeWrite>? AfterEndOfPipe { get; set; }
 
     // Satisfied waits and command-processor memory writes reported to the host.
     public int VisibilityPoints { get; private set; }
@@ -58,6 +73,21 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     // Qword values the GPU owns; the synchronized read lands them in memory first, as a download would.
     public Dictionary<ulong, ulong> PendingGpuValues { get; } = new();
+
+    public bool PollSignals { get; set; }
+
+    public bool TryReadGuestSignal(ulong address, Span<byte> destination)
+    {
+        SignalReads.Add(address);
+        if (QueuedSignals.TryGetValue(address, out var value))
+        {
+            if (destination.Length == 4)
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(destination, (uint)value);
+            else System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(destination, value);
+            return true;
+        }
+        return PollSignals ? GuestMemory.TryRead(address, destination) : TryReadGuest(address, destination);
+    }
 
     public bool TryReadGuest(ulong address, Span<byte> destination)
     {
@@ -144,6 +174,8 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
     {
         EndOfPipeWrites.Add(write);
         Calls.Add($"eop {write.Kind}");
+        if (QueueSignalWrites && write.Destination != 0) QueuedSignals[write.Destination] = write.Value;
+        AfterEndOfPipe?.Invoke(write);
     }
 
     public void TriggerInterrupt(int eventId, uint contextId) => Calls.Add($"interrupt {eventId} {contextId}");

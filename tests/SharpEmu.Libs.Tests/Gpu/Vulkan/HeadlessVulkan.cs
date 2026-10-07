@@ -381,6 +381,8 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             vulkan13Features.PNext = &barycentricFeatures;
         }
         var extensionNames = new List<string>();
+        var hostImportSupported = HasDeviceExtensions(vk, physical, ["VK_EXT_external_memory_host"]);
+        if (hostImportSupported) extensionNames.Add("VK_EXT_external_memory_host");
         if (HasDeviceExtensions(vk, physical, ["VK_KHR_portability_subset"])) extensionNames.Add("VK_KHR_portability_subset");
         if (dynamicRendering) extensionNames.AddRange(RenderingExtensionNames);
         if (barycentric) extensionNames.Add(barycentricExtension);
@@ -416,6 +418,16 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             SupportsFragmentShaderBarycentric = barycentric,
             SupportsFillRectangle = fillRectangle,
         };
+        if (hostImportSupported && vk.TryGetDeviceExtension(instance, device, out ExtExternalMemoryHost hostImport))
+        {
+            var hostProperties = new PhysicalDeviceExternalMemoryHostPropertiesEXT
+            { SType = StructureType.PhysicalDeviceExternalMemoryHostPropertiesExt };
+            var properties = new PhysicalDeviceProperties2
+            { SType = StructureType.PhysicalDeviceProperties2, PNext = &hostProperties };
+            vk.GetPhysicalDeviceProperties2(physical, &properties);
+            result.DeviceInfo.ExternalMemoryHost = hostImport;
+            result.DeviceInfo.ImportedHostPointerAlignment = hostProperties.MinImportedHostPointerAlignment;
+        }
         if (validation)
         {
             result.RegisterDebugMessenger();

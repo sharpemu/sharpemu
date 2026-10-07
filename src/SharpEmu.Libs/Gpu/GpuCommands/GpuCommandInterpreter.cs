@@ -439,7 +439,7 @@ public sealed partial class GpuCommandInterpreter
 
     internal void WriteBytes(ulong address, ReadOnlySpan<byte> source)
     {
-        if (!_host.Memory.TryWrite(address, source))
+        if (!_host.TryWriteGuest(address, source))
         {
             throw _host.Fatal($"The command stream cannot write guest memory: address=0x{address:X16} size={source.Length}.");
         }

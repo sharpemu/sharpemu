@@ -28,13 +28,21 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        var value = is64Bit ? ReadQword(address) : ReadDword(address);
+        // The host owns asynchronous signal prediction and invalidation. A parsed
+        // write may already have been submitted and reset by the guest CPU, so the
+        // interpreter must not override the host with its packet-local cached value.
+        Span<byte> signal = stackalloc byte[8];
+        if (!_host.TryReadGuestSignal(address, signal[..(is64Bit ? 8 : 4)]))
+            throw _host.Fatal($"The command stream cannot read guest memory: address=0x{address:X16} size={(is64Bit ? 8 : 4)}.");
+        var value = is64Bit
+            ? System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(signal)
+            : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(signal);
         if (!WaitOperation.TryCompare(value, reference, mask, compareFunction, out var satisfied))
         {
             throw _host.Fatal($"The wait compare function is unknown: function={compareFunction} address=0x{address:X16}.");
         }
 
-        if (!satisfied && TryReadOwnWrite(address, is64Bit, out var ownValue))
+        if (!satisfied && !_host.RecordsCompletionLabels && TryReadOwnWrite(address, is64Bit, out var ownValue))
         {
             _ = WaitOperation.TryCompare(ownValue, reference, mask, compareFunction, out satisfied);
         }

@@ -1046,6 +1046,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"The device lacks a required rendering feature: device={deviceName} extension={PushDescriptorExtensionName}.");
             }
 
+            var supportsHostImport = IsDeviceExtensionAvailable("VK_EXT_external_memory_host");
+            var hostImportExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_external_memory_host");
             var swapchainExtension = (byte*)SilkMarshal.StringToPtr("VK_KHR_swapchain");
             var pushDescriptorExtension = (byte*)SilkMarshal.StringToPtr(PushDescriptorExtensionName);
             var maintenance8Extension = (byte*)SilkMarshal.StringToPtr("VK_KHR_maintenance8");
@@ -1061,8 +1063,9 @@ internal static unsafe partial class VulkanVideoPresenter
             var fillRectangleExtension = (byte*)SilkMarshal.StringToPtr(FillRectangleExtensionName);
             try
             {
-                var extensions = stackalloc byte*[15];
+                var extensions = stackalloc byte*[16];
                 var extensionCount = 0u;
+                if (supportsHostImport) extensions[extensionCount++] = hostImportExtension;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
                 if (IsDeviceExtensionAvailable("VK_EXT_shader_viewport_index_layer"))
@@ -1249,6 +1252,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             finally
             {
+                SilkMarshal.Free((nint)hostImportExtension);
                 SilkMarshal.Free((nint)swapchainExtension);
                 SilkMarshal.Free((nint)maintenance8Extension);
                 SilkMarshal.Free((nint)maintenance5Extension);
@@ -1266,6 +1270,22 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
             _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device) { ImageViewMinLodSupported = _supportsImageViewMinLod };
+            if (supportsHostImport && _vk.TryGetDeviceExtension(_instance, _device, out ExtExternalMemoryHost hostImport))
+            {
+                var hostProperties = new PhysicalDeviceExternalMemoryHostPropertiesEXT
+                {
+                    SType = StructureType.PhysicalDeviceExternalMemoryHostPropertiesExt,
+                };
+                var properties = new PhysicalDeviceProperties2
+                {
+                    SType = StructureType.PhysicalDeviceProperties2,
+                    PNext = &hostProperties,
+                };
+                _vk.GetPhysicalDeviceProperties2(_physicalDevice, &properties);
+                _deviceInfo.ExternalMemoryHost = hostImport;
+                _deviceInfo.ImportedHostPointerAlignment = hostProperties.MinImportedHostPointerAlignment;
+            }
+
             if (_readbackQueueFamilyIndex is { } readbackQueueFamily)
             {
                 _vk.GetDeviceQueue(_device, readbackQueueFamily, 0, out _readbackQueue);

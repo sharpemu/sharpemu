@@ -31,6 +31,104 @@ public unsafe class GpuBuffer : IDisposable
     private DeviceMemory _memory;
     private readonly ulong _memoryOffset;
     private readonly GpuMemorySlabs.Block? _slab;
+    private readonly SharpEmu.HLE.IGuestBackedSpace? _importBacking;
+    private readonly GuestBufferImportPool.Allocation? _guestImport;
+    public bool IsGuestImport => _importBacking != null;
+
+    public bool HasCurrentGuestMapping() => !IsGuestImport ||
+        (_importBacking!.TryResolveBackingAlias(CpuAddress, Size, out var alias) && alias == (ulong)_mapped);
+
+    private GpuBuffer(GpuDeviceInfo device, SubmissionScheduler scheduler, ulong address, ulong size,
+        VkBuffer handle, GuestBufferImportPool.Allocation allocation, ulong memoryOffset, ulong alias, ulong deviceAddress,
+        SharpEmu.HLE.IGuestBackedSpace backing)
+    {
+        _device = device;
+        _scheduler = scheduler;
+        CpuAddress = address;
+        Size = size;
+        Usage = GpuBufferUsage.Unified;
+        _handle = handle;
+        _guestImport = allocation;
+        _memory = allocation.Memory;
+        _memoryOffset = memoryOffset;
+        _allocationSize = size;
+        _mapped = (byte*)alias;
+        _deviceAddress = deviceAddress;
+        IsCoherent = true;
+        _importBacking = backing;
+    }
+
+    // Import the permanent backing alias, never the guest VA that munmap can replace.
+    // The lease outlives the Vulkan allocation, including deferred buffer retirement.
+    public static bool TryImportGuest(GpuDeviceInfo device, SubmissionScheduler scheduler,
+        SharpEmu.HLE.IGuestBackedSpace backing, ulong address, ulong size, out GpuBuffer? buffer)
+    {
+        buffer = null;
+        var alignment = device.ImportedHostPointerAlignment;
+        if (device.ExternalMemoryHost == null || alignment == 0 || size == 0 || size > GuestBufferImportPool.RegionSize ||
+            size % alignment != 0 || !backing.TryEnterBackingAliasAccess()) return false;
+        VkBuffer handle = default;
+        GuestBufferImportPool.Allocation? allocation = null;
+        try
+        {
+            if (!backing.TryResolveBackingAlias(address, size, out var alias) || alias % alignment != 0) return false;
+            const ExternalMemoryHandleTypeFlags type = ExternalMemoryHandleTypeFlags.HostAllocationBitExt;
+            var flags = AllFlags | BufferUsageFlags.ShaderDeviceAddressBit;
+            var externalQuery = new PhysicalDeviceExternalBufferInfo
+            {
+                SType = StructureType.PhysicalDeviceExternalBufferInfo, Usage = flags, HandleType = type,
+            };
+            var externalProperties = new ExternalBufferProperties { SType = StructureType.ExternalBufferProperties };
+            device.Vk.GetPhysicalDeviceExternalBufferProperties(device.PhysicalDevice, &externalQuery, &externalProperties);
+            if ((externalProperties.ExternalMemoryProperties.ExternalMemoryFeatures & ExternalMemoryFeatureFlags.ImportableBit) == 0)
+                return false;
+            var external = new ExternalMemoryBufferCreateInfo
+            {
+                SType = StructureType.ExternalMemoryBufferCreateInfo, HandleTypes = type,
+            };
+            var families = device.SharedQueueFamilies;
+            fixed (uint* family = families)
+            {
+                var create = new BufferCreateInfo
+                {
+                    SType = StructureType.BufferCreateInfo, PNext = &external, Size = size, Usage = flags,
+                    SharingMode = families is { Length: > 1 } ? SharingMode.Concurrent : SharingMode.Exclusive,
+                    QueueFamilyIndexCount = families is { Length: > 1 } ? (uint)families.Length : 0,
+                    PQueueFamilyIndices = families is { Length: > 1 } ? family : null,
+                };
+                if (device.Vk.CreateBuffer(device.Device, &create, null, out handle) != Result.Success) return false;
+            }
+            var dedicated = new MemoryDedicatedRequirements { SType = StructureType.MemoryDedicatedRequirements };
+            var requirements2 = new MemoryRequirements2 { SType = StructureType.MemoryRequirements2, PNext = &dedicated };
+            var requirementsInfo = new BufferMemoryRequirementsInfo2
+            { SType = StructureType.BufferMemoryRequirementsInfo2, Buffer = handle };
+            device.Vk.GetBufferMemoryRequirements2(device.Device, &requirementsInfo, &requirements2);
+            if (dedicated.RequiresDedicatedAllocation) return false;
+            var requirements = requirements2.MemoryRequirements;
+            // Never import padding outside the leased range.
+            if (requirements.Size > size) return false;
+            if ((externalProperties.ExternalMemoryProperties.ExternalMemoryFeatures &
+                ExternalMemoryFeatureFlags.DedicatedOnlyBit) != 0) return false;
+            if (!device.GuestImports.TryAcquire(backing, alias, requirements.Size, requirements.Alignment,
+                    requirements.MemoryTypeBits, out allocation, out var memoryOffset) || allocation == null) return false;
+            if (device.Vk.BindBufferMemory(device.Device, handle, allocation.Memory, memoryOffset) != Result.Success)
+                return false;
+            var info = new BufferDeviceAddressInfo { SType = StructureType.BufferDeviceAddressInfo, Buffer = handle };
+            var gpuAddress = device.Vk.GetBufferDeviceAddress(device.Device, &info);
+            if (gpuAddress == 0) return false;
+            buffer = new GpuBuffer(device, scheduler, address, size, handle, allocation, memoryOffset, alias, gpuAddress, backing);
+            return true;
+        }
+        finally
+        {
+            if (buffer == null)
+            {
+                if (handle.Handle != 0) device.Vk.DestroyBuffer(device.Device, handle, null);
+                allocation?.Release();
+            }
+            backing.ExitBackingAliasAccess();
+        }
+    }
 
     // allowSlab: the caller records on the scheduler's current command buffer, which clears a recycled slab block.
     public GpuBuffer(GpuDeviceInfo device, SubmissionScheduler scheduler, GpuBufferUsage usage, ulong cpuAddress, BufferUsageFlags flags, ulong size,
@@ -321,6 +419,10 @@ public unsafe class GpuBuffer : IDisposable
         if (_slab is { } slab)
         {
             _device.Slabs.Release(slab);
+        }
+        else if (_guestImport is { } imported)
+        {
+            imported.Release();
         }
         else
         {

@@ -27,6 +27,10 @@ public interface IGuestBackedSpace
 
     object? BackingAliasSnapshot => null;
 
+    // Bounds of the permanent shared allocation, usable only while holding an alias lease.
+    ulong BackingAliasBase => 0;
+    ulong BackingAliasSize => 0;
+
     bool TryEnterBackingAliasAccess() => false;
 
     void ExitBackingAliasAccess()

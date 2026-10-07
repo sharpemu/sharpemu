@@ -179,6 +179,12 @@ internal static unsafe partial class VulkanVideoPresenter
         private long _lastCommandStreamProgressTicks;
         private static readonly long _blockedRetryTicks =
             CommandStreamQueue.AllBlockedRetryMilliseconds * System.Diagnostics.Stopwatch.Frequency / 1000L;
+        private ulong _lastSignalRetryCompletedTick;
+        private long BlockedRetryTicks => _bufferCache is { DirectGuestBuffers: true }
+            ? Math.Max(1, System.Diagnostics.Stopwatch.Frequency / 1000L) : _blockedRetryTicks;
+
+        private bool SignalProducerCompleted => _bufferCache is { DirectGuestBuffers: true } &&
+            _scheduler.Timeline.CompletedTick != _lastSignalRetryCompletedTick;
 
         public CommandStreamQueue CommandStream => _commandStream;
 
@@ -204,7 +210,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        // Runs slices until the budget ends or nothing is runnable; blocked heads retry every 100 ms.
+        // Runs slices until the budget ends or nothing is runnable. Coherent signals
+        // retry on GPU progress or after 1 ms, without blocking this worker on a fence.
         private void RunCommandStreamSlices(long renderWorkDeadline)
         {
             var slices = 0;
@@ -265,12 +272,13 @@ internal static unsafe partial class VulkanVideoPresenter
         private void RetryBlockedCommandStreamIfDue()
         {
             var now = System.Diagnostics.Stopwatch.GetTimestamp();
-            if (now - _lastCommandStreamProgressTicks < _blockedRetryTicks)
+            if (!SignalProducerCompleted && now - _lastCommandStreamProgressTicks < BlockedRetryTicks)
             {
                 return;
             }
 
             _commandStream.RetryBlocked();
+            _lastSignalRetryCompletedTick = _scheduler.Timeline.CompletedTick;
             _lastCommandStreamProgressTicks = now;
         }
 
@@ -282,11 +290,24 @@ internal static unsafe partial class VulkanVideoPresenter
                 return null;
             }
 
-            var remaining = _blockedRetryTicks - (System.Diagnostics.Stopwatch.GetTimestamp() - _lastCommandStreamProgressTicks);
+            if (SignalProducerCompleted) return 0;
+            var remaining = BlockedRetryTicks - (System.Diagnostics.Stopwatch.GetTimestamp() - _lastCommandStreamProgressTicks);
             return remaining <= 0 ? 0 : (int)Math.Max(1, remaining * 1000 / System.Diagnostics.Stopwatch.Frequency);
         }
 
         ICpuMemory ICommandStreamHost.Memory => _guestMemory;
+
+        private static readonly bool CompletionLabelsEnabled =
+            Environment.GetEnvironmentVariable("SHARPEMU_COMPLETION_LABELS") == "1";
+        public bool RecordsCompletionLabels => CompletionLabelsEnabled || _bufferCache.DirectGuestBuffers;
+
+        public bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source)
+        {
+            if (!_bufferCache.DirectGuestBuffers) return _guestMemory.TryWrite(address, source);
+            _ = BeginBatchedGuestCommands();
+            _bufferCache.RecordCommandWrite(address, source);
+            return true;
+        }
 
         public bool TryReadGuest(ulong address, Span<byte> destination)
         {
@@ -303,6 +324,10 @@ internal static unsafe partial class VulkanVideoPresenter
             using var readScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandMemoryRead);
             return _guestMemory.TryRead(address, destination);
         }
+
+        public bool TryReadGuestSignal(ulong address, Span<byte> destination) =>
+            _bufferCache.TryReadQueuedSignal(address, destination) ||
+            _bufferCache.TryReadDirectSignal(address, destination) || TryReadGuest(address, destination);
 
         public void RunPendingCommands()
         {
@@ -407,6 +432,15 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             using var completionScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandEndOfPipe);
             _ = BeginBatchedGuestCommands();
+            if (RecordsCompletionLabels && write.Kind is not (EndOfPipeWriteKind.InterruptOnly or
+                EndOfPipeWriteKind.GdsWrite32 or EndOfPipeWriteKind.Flip))
+            {
+                var wide = write.Kind is EndOfPipeWriteKind.Write64 or EndOfPipeWriteKind.WriteBack64 or
+                    EndOfPipeWriteKind.Interrupt64 or EndOfPipeWriteKind.InterruptWriteBack64 or
+                    EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack;
+                _bufferCache.RecordCompletionLabel(write.Destination, write.Value, wide);
+            }
+
             var buffer = _scheduler.Current;
             switch (write.Kind)
             {

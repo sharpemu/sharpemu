@@ -150,7 +150,7 @@ internal sealed class CacheHarness : IDisposable
         ulong backingBytes = BackingBytes,
         SchedulerHooks? hooks = null,
         bool startScheduler = true,
-        IHostViewMemory? viewHost = null)
+        IHostViewMemory? viewHost = null, bool directGuestBuffers = false)
     {
         _vulkan = vulkan;
         _views = viewHost ?? HostViewMemory.Create();
@@ -164,7 +164,7 @@ internal sealed class CacheHarness : IDisposable
         }
 
         var space = backing?.Invoke(Memory) ?? Memory;
-        Cache = new GuestBufferCache(vulkan.DeviceInfo, Worker.Scheduler, Worker.Relay, Gpu.Pages, Memory, space);
+        Cache = new GuestBufferCache(vulkan.DeviceInfo, Worker.Scheduler, Worker.Relay, Gpu.Pages, Memory, space, directGuestBuffers);
         Images = new GuestImageCache(vulkan.DeviceInfo, Worker.Scheduler, Gpu.Pages, Cache, space, readbackLinearImages);
         Cache.ImageCache = Images;
         Gpu.AttachStores(Cache, Images);

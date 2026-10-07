@@ -41,6 +41,55 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         (bool)PresenterUnderTest.PresenterType.GetField("DeferGlobalBarriers", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
 
     [Fact]
+    public void DirectGuestWaitCanUseAnUnsubmittedSignalWithoutPublishingItToTheCpu()
+    {
+        if (!Ready() || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var presenter = new PresenterUnderTest(_vulkan, directGuestBuffers: true);
+        var address = presenter.Harness.MapBacked(GuestBufferCache.CachingPageSize, ReadWrite);
+        presenter.Run(() =>
+        {
+            var host = (ICommandStreamHost)presenter.Instance;
+            var tick = presenter.Harness.Scheduler.CurrentTick;
+            Assert.True(host.TryWriteGuest(address, BitConverter.GetBytes(123u)));
+            Assert.True(host.TryWriteGuest(address + 16, BitConverter.GetBytes(456u)));
+            Span<byte> value = stackalloc byte[4];
+            Assert.True(host.TryReadGuestSignal(address, value));
+            Assert.Equal(123u, BitConverter.ToUInt32(value));
+            Assert.Equal(tick, presenter.Harness.Scheduler.CurrentTick);
+            Assert.True(presenter.Harness.Memory.TryReadBacking(address, value));
+            Assert.Equal(0u, BitConverter.ToUInt32(value));
+            host.Flush();
+            Assert.False(presenter.Harness.Cache.TryReadQueuedSignal(address, value));
+            presenter.Harness.Scheduler.Wait(tick);
+            presenter.Harness.Write(address, BitConverter.GetBytes(0u));
+            Assert.True(host.TryReadGuestSignal(address, value));
+            Assert.Equal(0u, BitConverter.ToUInt32(value));
+        });
+        presenter.Harness.Shutdown();
+    }
+
+    [Fact]
+    public void DirectGuestCommandOnlyWriteIsSubmittedByHostFlush()
+    {
+        if (!Ready() || _vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        using var presenter = new PresenterUnderTest(_vulkan, directGuestBuffers: true);
+        var address = presenter.Harness.MapBacked(GuestBufferCache.CachingPageSize, ReadWrite);
+        presenter.Run(() =>
+        {
+            var host = (ICommandStreamHost)presenter.Instance;
+            var tick = presenter.Harness.Scheduler.CurrentTick;
+            Assert.True(host.TryWriteGuest(address, BitConverter.GetBytes(123u)));
+            host.Flush();
+            // A WRITE_DATA-only producer must reach the GPU even without a draw,
+            // dispatch or EOP to open the presenter's normal work batch.
+            Assert.True(presenter.Harness.Scheduler.CurrentTick > tick);
+            presenter.Harness.Scheduler.Wait(tick);
+            Assert.Equal(123u, BitConverter.ToUInt32(presenter.Harness.Read(address, 4)));
+        });
+        presenter.Harness.Shutdown();
+    }
+
+    [Fact]
     public void GlobalBarrierEndsDynamicRendering()
     {
         if (!Ready()) return;

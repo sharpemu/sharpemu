@@ -16,6 +16,7 @@ namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
 // Device-address loads, stores and atomics compiled through a compile request and run
 // against a page table on the device.
+[Collection(SharpEmu.Libs.Tests.Gpu.Scheduling.SchedulingStateCollection.Name)]
 public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITestOutputHelper output) : IClassFixture<HeadlessVulkanFixture>
 {
     private const ulong PageSize = Gen5SpirvTranslator.DeviceAddressPageSize;
@@ -26,6 +27,26 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
     private const uint AddressLow = 0;
     private const uint AddressHigh = 1;
     private const uint OffsetRegister = 3;
+
+    [Fact]
+    public void ImportedGuestBackingSupportsTranslatedDeviceAddressLoadsAndStores()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true) || vulkan!.DeviceInfo.ExternalMemoryHost == null) return;
+        var load = new Run(vulkan, LoadProgram("GlobalLoadDword", 8), direct: true);
+        var input = load.MapPage(GuestBase, Pattern(64));
+        load.Dispatch(GuestBase);
+        Assert.Equal(ReadWord(input, 8), load.ResultWord(0));
+        load.Finish(output, "imported load");
+
+        var store = new Run(vulkan, StoreProgram("GlobalStoreDword", 8, 123), direct: true);
+        store.MapPage(GuestBase, new byte[64]);
+        store.Dispatch(GuestBase, writtenRange: (GuestBase, 64));
+        Assert.Equal(123u, store.PageWord(GuestBase, 8));
+        store.Finish(output, "imported store");
+
+
+    }
 
     [Fact]
     public void PageBits_MatchTheHostCache() =>
@@ -338,6 +359,8 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
     // One compiled program with its harness, page table, fault buffer and result buffer.
     private sealed class Run
     {
+        private readonly SharpEmu.Core.Memory.PhysicalVirtualMemory? _directMemory;
+        private ulong _backingOffset;
         private readonly ImageTestHarness _harness;
         private readonly LayoutComputeRunner _runner;
         private readonly GpuBuffer _result;
@@ -346,7 +369,7 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
         private readonly ulong _tableEntries;
         private GpuBuffer? _pageTable;
 
-        public Run(HeadlessVulkan vulkan, Gen5ShaderProgram program, uint threadCount = 1, ulong tableEntries = TableEntries)
+        public Run(HeadlessVulkan vulkan, Gen5ShaderProgram program, uint threadCount = 1, ulong tableEntries = TableEntries, bool direct = false)
         {
             var (plan, resources, layout) = Prepare(program);
             Plan = plan;
@@ -354,6 +377,8 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
             Assert.True(resources.Info.UsesDeviceAddresses);
             Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request, out var shader, out var error), error);
             _harness = new ImageTestHarness(vulkan);
+            if (direct) _directMemory = new SharpEmu.Core.Memory.PhysicalVirtualMemory(
+                viewHost: SharpEmu.HLE.Host.HostViewMemory.Create(), backingBytes: 32UL * 1024 * 1024);
             _runner = new LayoutComputeRunner(_harness, Request, shader.Spirv);
             _result = _runner.CreateBuffer(ResultBytes);
             _fault = _runner.CreateBuffer(tableEntries / 8);
@@ -366,7 +391,19 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
 
         public byte[] MapPage(ulong guestPage, byte[] bytes)
         {
-            _pages[guestPage] = _runner.CreateBuffer(bytes, PageSize);
+            if (_directMemory is { } memory)
+            {
+                Assert.True(memory.TryHoldRangeAtOrAbove(0x2_0000_0000, PageSize, 0x4000, out var address));
+                Assert.True(memory.TryMapBacked(address, PageSize, _backingOffset,
+                    SharpEmu.HLE.GuestPageProtection.Read | SharpEmu.HLE.GuestPageProtection.Write, out _));
+                _backingOffset += PageSize;
+                Assert.True(memory.TryWriteBacking(address, bytes));
+                GpuBuffer? imported = null;
+                _harness.Run(() => Assert.True(GpuBuffer.TryImportGuest(_harness.Vulkan.DeviceInfo,
+                    _harness.Scheduler, memory, address, PageSize, out imported)));
+                _pages[guestPage] = imported!;
+            }
+            else _pages[guestPage] = _runner.CreateBuffer(bytes, PageSize);
             return bytes;
         }
 
@@ -426,6 +463,11 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
         {
             _harness.AssertNoValidationMessages();
             _runner.Dispose();
+            if (_directMemory != null)
+            {
+                foreach (var page in _pages.Values) page.Dispose();
+                _directMemory.Dispose();
+            }
             _harness.Dispose();
             output.WriteLine($"Verified {name} on {_harness.Vulkan.DeviceName}; validation={_harness.Vulkan.ValidationEnabled}.");
         }
