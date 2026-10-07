@@ -87,10 +87,6 @@ public interface ICommandStreamHost
     // The host records labels as GPU writes; the interpreter must not publish them early.
     bool RecordsCompletionLabels => false;
 
-    // Later GPU commands execute after a recorded label. A matching paired GPU wait
-    // may be decoded without blocking the CPU worker or publishing the label early.
-    bool CanOrderCompletionWaitOnGpu => false;
-
     bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source) => Memory.TryWrite(address, source);
 
     // Reads guest memory the GPU may have written; the host synchronizes GPU-owned pages first.

@@ -40,7 +40,9 @@ reads wait for the exact physical-range producer. A signal wait can read live
 coherent memory and suspend its guest queue without draining other queues. A known
 4- or 8-byte queued signal can be forwarded to the command decoder while its write
 is still unsubmitted, preserving GPU command order without publishing the value to
-the CPU. Predictions expire on submission and overlapping writes invalidate them;
+the CPU. The interpreter always asks the host for asynchronous signal state; its older
+packet-local write cache cannot override a CPU reset. Predictions expire on
+submission and overlapping writes invalidate them;
 submitted signals must be read live because the CPU may have reset them.
 
 Staging reservations can submit work. Copy producers are therefore tracked after
@@ -67,3 +69,10 @@ waits, but 64 MiB and 16 MiB import regions were slower than the mirrored contro
 Four MiB regions reduce pinned memory further. This does not establish a net FPS
 improvement or broad game compatibility. Keep imports opt-in until matched runtime
 measurements, scene validation, and shutdown checks support enabling them.
+
+A remaining compatibility limitation is physical aliasing across mirrored buffer
+views. Two guest virtual addresses can share physical bytes while their mirrored
+GPU buffers diverge. Device probes reproduce stale reads both with imports disabled
+on the parent branch and when one view is imported and the other falls back. This
+work does not resolve the mirrored cache's physical-alias ownership model. It is a
+known acceptance limitation, not evidence that mixed fallback aliases are safe.

@@ -220,18 +220,11 @@ public sealed partial class GpuCommandInterpreter
 
     private void WriteImmediateLabel(ulong destination, ulong value, bool is64Bit)
     {
-        // Forward only the paired command-processor wait when the host guarantees GPU
-        // ordering. The guest CPU still observes the label only after the GPU writes it.
+        // Asynchronous hosts publish and predict completion through their own
+        // timeline. A packet-local copy cannot observe submission or CPU resets.
         if (_host.RecordsCompletionLabels)
         {
             _lastWriteLength = 0;
-            if (_host.CanOrderCompletionWaitOnGpu)
-            {
-                _lastWriteAddress = destination;
-                _lastWriteValue = value;
-                _lastWriteLength = is64Bit ? sizeof(ulong) : sizeof(uint);
-                _lastWritePacket = _packetSerial;
-            }
             return;
         }
 

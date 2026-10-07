@@ -300,7 +300,6 @@ internal static unsafe partial class VulkanVideoPresenter
         private static readonly bool CompletionLabelsEnabled =
             Environment.GetEnvironmentVariable("SHARPEMU_COMPLETION_LABELS") == "1";
         public bool RecordsCompletionLabels => CompletionLabelsEnabled || _bufferCache.DirectGuestBuffers;
-        public bool CanOrderCompletionWaitOnGpu => RecordsCompletionLabels;
 
         public bool TryWriteGuest(ulong address, ReadOnlySpan<byte> source)
         {
