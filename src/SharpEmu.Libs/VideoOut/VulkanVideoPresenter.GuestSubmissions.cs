@@ -77,6 +77,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             _ = bundle;
             EndRendering();
+            _occlusionQueries?.Submit(_scheduler);
             if (!_batchOpen)
             {
                 return;

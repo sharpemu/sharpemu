@@ -114,6 +114,10 @@ public sealed partial class DirectExecutionBackend
 
 			ulong rip = ReadCtxU64(contextRecord, 248);
 			ulong rsp = ReadCtxU64(contextRecord, 152);
+            if (exceptionCode == 0x80000003 && _nativeFunctionTrace?.TryHandle(exceptionAddress, contextRecord) == true)
+            {
+                return -1;
+            }
 			if (MayBeGuestInt41(exceptionRecord) && TryRecoverGuestInt41(exceptionCode, contextRecord, rip))
 			{
 				return -1;
@@ -204,6 +208,7 @@ public sealed partial class DirectExecutionBackend
 
 			Console.Error.WriteLine("[LOADER][INFO] =========================================");
 			Console.Error.WriteLine("[LOADER][INFO] NATIVE EXCEPTION CAUGHT!");
+            _nativeFunctionTrace?.DumpRecentSerialization();
 			Console.Error.WriteLine($"[LOADER][INFO]   Code: 0x{exceptionCode:X8}");
 			Console.Error.WriteLine($"[LOADER][INFO]   Exception Address: 0x{exceptionAddress:X16}");
 			Console.Error.WriteLine($"[LOADER][INFO]   RIP: 0x{rip:X16}");

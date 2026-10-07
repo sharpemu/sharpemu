@@ -145,7 +145,179 @@ public sealed partial class DirectExecutionBackend
 		return true;
 	}
 
+	[ThreadStatic]
+	private static ulong _previousProbeRegister14;
+
+	private unsafe void TraceImportAddressProbe(CpuContext cpuContext, ImportStubEntry importStubEntry, nint argumentPacket)
+	{
+		if (_mutexTraceAddress != 0) return;
+		if (_probeImportReturnAddress == 0) return;
+		var returnAddress = *(ulong*)(argumentPacket + 96);
+		var probeFramePointer = *(ulong*)(argumentPacket + 56);
+		// A guest-library wrapper can place the requested return address in its saved frame.
+		var matchesCaller = probeFramePointer != 0 &&
+			probeFramePointer <= ulong.MaxValue - sizeof(ulong) &&
+			TryReadStackU64(probeFramePointer + sizeof(ulong), out var callerReturnAddress) &&
+			callerReturnAddress == _probeImportReturnAddress;
+		if (returnAddress != _probeImportReturnAddress && !matchesCaller) return;
+		var savedRdi = *(ulong*)argumentPacket;
+		var savedRsi = *(ulong*)(argumentPacket + 8);
+		var savedRbx = *(ulong*)(argumentPacket + 48);
+		var savedFramePointer = *(ulong*)(argumentPacket + 56);
+		var savedR12 = *(ulong*)(argumentPacket + 64);
+		var savedR13 = *(ulong*)(argumentPacket + 72);
+		var savedR14 = *(ulong*)(argumentPacket + 80);
+		var savedR15 = *(ulong*)(argumentPacket + 88);
+		var probeSequence = Interlocked.Increment(ref _probeImportReturnAddressCount);
+		// Keep each targeted register record; limit only the larger memory snapshots.
+		{
+			var frameValue = TryReadStackU64(savedFramePointer, out var savedRbp) ? savedRbp : 0;
+			var frameReturn = TryReadStackU64(savedFramePointer + sizeof(ulong), out var savedReturn)
+				? savedReturn
+				: 0;
+			Console.Error.WriteLine(
+				$"[LOADER][TRACE] import-return-address-probe " +
+				$"thread=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} " +
+				$"nid={importStubEntry.Nid} ret=0x{returnAddress:X16} " +
+				$"rsp=0x{(ulong)argumentPacket + 96:X16} rbp=0x{savedFramePointer:X16} " +
+				$"saved_rbp=0x{frameValue:X16} saved_ret=0x{frameReturn:X16} " +
+				$"sample={probeSequence} rdi=0x{savedRdi:X16} rsi=0x{savedRsi:X16} " +
+				$"rbx=0x{savedRbx:X16} r12=0x{savedR12:X16} r13=0x{savedR13:X16} " +
+				$"r14=0x{savedR14:X16} r15=0x{savedR15:X16}");
+			if (probeSequence == 1 || savedR14 != _previousProbeRegister14)
+			{
+				_previousProbeRegister14 = savedR14;
+				TraceImportProbeRegion(cpuContext, probeSequence, "stack", address: (ulong)argumentPacket + 96, length: 512);
+				TraceImportProbeRegion(cpuContext, probeSequence, "r15", address: savedR15, length: 128);
+				TraceImportProbePointers(cpuContext, probeSequence, savedR15);
+				if (_probeImportRootAddress != 0)
+					TraceImportProbeRoot(cpuContext, probeSequence);
+			}
+			if (probeSequence <= 2048 || (probeSequence & 65535) == 0)
+			{
+				// Read through the checked memory interface; a register need not contain a pointer.
+				Span<byte> probeMemory = stackalloc byte[0x190];
+				var readable = savedR12 <= ulong.MaxValue - (ulong)probeMemory.Length &&
+					cpuContext.Memory.TryRead(savedR12, probeMemory);
+				Console.Error.WriteLine(
+					$"[LOADER][TRACE] import-probe-memory sample={probeSequence} " +
+					$"thread=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} " +
+					$"address=0x{savedR12:X16} readable={readable} " +
+					$"bytes={(readable ? Convert.ToHexString(probeMemory) : string.Empty)}");
+				// Capture a bounded secondary region without dereferencing guest pointers directly.
+				var secondaryMemory = new byte[8192];
+				var secondaryReadable = savedR13 <= ulong.MaxValue - (ulong)secondaryMemory.Length &&
+					cpuContext.Memory.TryRead(savedR13, secondaryMemory);
+				Console.Error.WriteLine(
+					$"[LOADER][TRACE] import-probe-secondary-memory sample={probeSequence} " +
+					$"thread=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} " +
+					$"address=0x{savedR13:X16} readable={secondaryReadable} " +
+					$"bytes={(secondaryReadable ? Convert.ToHexString(secondaryMemory) : string.Empty)}");
+			}
+		}
+	}
+
+	private void TraceImportProbeRoot(CpuContext context, long sequence)
+	{
+		var paths = Environment.GetEnvironmentVariable("SHARPEMU_PROBE_IMPORT_ROOT_PATHS");
+		if (string.IsNullOrWhiteSpace(paths))
+		{
+			TraceImportProbePointers(context, sequence, _probeImportRootAddress, 512, 5);
+			return;
+		}
+		Span<byte> pointerBytes = stackalloc byte[sizeof(ulong)];
+		foreach (var path in paths.Split(';').Take(16))
+		{
+			var address = _probeImportRootAddress;
+			var offsets = path.Split('/');
+			var readable = offsets.Length <= 8;
+			foreach (var offsetText in offsets.Take(8))
+			{
+				if (!readable || !ulong.TryParse(offsetText,
+					System.Globalization.NumberStyles.AllowHexSpecifier,
+					System.Globalization.CultureInfo.InvariantCulture, out var offset) ||
+					address == 0 || offset > ulong.MaxValue - address ||
+					address + offset > ulong.MaxValue - sizeof(ulong) ||
+					!context.Memory.TryRead(address + offset, pointerBytes))
+				{
+					readable = false;
+					break;
+				}
+				address = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(pointerBytes);
+			}
+			Console.Error.WriteLine($"[LOADER][TRACE] import-probe-path sample={sequence} " +
+				$"path={path} readable={readable} address=0x{address:X16}");
+			if (readable)
+			{
+				TraceImportProbeRegion(context, sequence, "path", address, 512);
+				TraceImportProbePointers(context, sequence, address, 512, 3);
+			}
+		}
+	}
+
+	private static void TraceImportProbeRegion(CpuContext context, long sequence, string region,
+		ulong address, int length)
+	{
+		Span<byte> bytes = stackalloc byte[length];
+		var readable = address != 0 && address <= ulong.MaxValue - (ulong)length &&
+			context.Memory.TryRead(address, bytes);
+		Console.Error.WriteLine($"[LOADER][TRACE] import-probe-region sample={sequence} region={region} " +
+			$"address=0x{address:X16} readable={readable} bytes={(readable ? Convert.ToHexString(bytes) : string.Empty)}");
+	}
+
+	private static void TraceImportProbePointers(CpuContext context, long sequence, ulong rootAddress,
+		int regionLength = 128, int maximumDepth = 3)
+	{
+		var pending = new Queue<(ulong Address, int Depth)>();
+		var visited = new HashSet<ulong>();
+		pending.Enqueue((rootAddress, 0));
+		var readableRegions = 0;
+		Span<byte> bytes = stackalloc byte[regionLength];
+		while (pending.Count != 0 && visited.Count < 4096 && readableRegions < 128)
+		{
+			var (address, depth) = pending.Dequeue();
+			if (address < 0x10000 || (address & 7) != 0 ||
+				address > ulong.MaxValue - (ulong)bytes.Length || !visited.Add(address) ||
+				!context.Memory.TryRead(address, bytes))
+				continue;
+			readableRegions++;
+			Console.Error.WriteLine($"[LOADER][TRACE] import-probe-pointers sample={sequence} " +
+				$"depth={depth} address=0x{address:X16} bytes={Convert.ToHexString(bytes)}");
+			if (depth == maximumDepth) continue;
+			for (var offset = 0; offset < bytes.Length; offset += sizeof(ulong))
+				pending.Enqueue((System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes[offset..]), depth + 1));
+		}
+	}
+
 	private unsafe ulong DispatchImport(int importIndex, nint argPackPtr)
+	{
+		if (_ownershipTrace is { } ownership && (uint)importIndex < (uint)_importEntries.Length)
+		{
+			var importName = _importEntries[importIndex].Export?.Name ?? _importEntries[importIndex].Nid;
+			if (!ownership.IncludesImport(importName)) return DispatchImportCore(importIndex, argPackPtr);
+			var ownershipCaller = ResolveMutexTraceCaller(argPackPtr);
+			if (!ownership.IncludesCaller(ownershipCaller)) return DispatchImportCore(importIndex, argPackPtr);
+			RecordOwnershipTrace(importName, argPackPtr, ownershipCaller, false, 0);
+			var ownershipResult = DispatchImportCore(importIndex, argPackPtr);
+			RecordOwnershipTrace(importName, argPackPtr, ownershipCaller, true, ownershipResult);
+			return ownershipResult;
+		}
+		if (_mutexTraceAddress == 0 || (uint)importIndex >= (uint)_importEntries.Length)
+			return DispatchImportCore(importIndex, argPackPtr);
+		var name = _importEntries[importIndex].Export?.Name ?? _importEntries[importIndex].Nid;
+		if (*(ulong*)argPackPtr != _mutexTraceAddress &&
+			(_mutexMemoryCallers.Count == 0 || !IsMutexTraceSynchronizationImport(name)))
+			return DispatchImportCore(importIndex, argPackPtr);
+		var caller = ResolveMutexTraceCaller(argPackPtr);
+		if (*(ulong*)argPackPtr != _mutexTraceAddress && !_mutexMemoryCallers.Contains(caller))
+			return DispatchImportCore(importIndex, argPackPtr);
+		RecordMutexTrace(name, argPackPtr, caller, false, 0);
+		var result = DispatchImportCore(importIndex, argPackPtr);
+		RecordMutexTrace(name, argPackPtr, caller, true, result);
+		return result;
+	}
+
+	private unsafe ulong DispatchImportCore(int importIndex, nint argPackPtr)
 	{
 		long num = NextImportDispatchIndex();
 		if ((num & 0x3F) == 0)
@@ -164,6 +336,7 @@ public sealed partial class DirectExecutionBackend
 			return 18446744071562199042uL;
 		}
 		ImportStubEntry importStubEntry = _importEntries[importIndex];
+		TraceImportAddressProbe(cpuContext, importStubEntry, argPackPtr);
 		using var registerPacketImport = SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.MeasureImport(importStubEntry.Nid);
 		if (_perfHleHistogram)
 		{
@@ -235,25 +408,7 @@ public sealed partial class DirectExecutionBackend
 		ulong value7 = cpuContext[CpuRegister.R14];
 		ulong value8 = cpuContext[CpuRegister.R15];
 		ulong num7 = *(ulong*)(argPackPtr + 96);
-		var importStackPointer = (ulong)argPackPtr + 96;
-		var probeTarget = (_probeImportReturnAddress != 0 && num7 == _probeImportReturnAddress) ||
-			(string.Equals(importStubEntry.Nid, "2Z+PpY6CaJg", StringComparison.Ordinal) &&
-			 importStackPointer >= 0x00006FFFAC1FF000UL &&
-			 importStackPointer < 0x00006FFFAC200000UL);
-		if (probeTarget &&
-			Interlocked.Increment(ref _probeImportReturnAddressCount) <= 2048)
-		{
-			var frameValue = TryReadImportStackU64(value4, out var savedRbp) ? savedRbp : 0;
-			var frameReturn = TryReadImportStackU64(value4 + sizeof(ulong), out var savedReturn)
-				? savedReturn
-				: 0;
-			Console.Error.WriteLine(
-				$"[LOADER][TRACE] import-return-address-probe " +
-				$"thread=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} " +
-				$"nid={importStubEntry.Nid} ret=0x{num7:X16} " +
-				$"rsp=0x{(ulong)argPackPtr + 96:X16} rbp=0x{value4:X16} " +
-				$"saved_rbp=0x{frameValue:X16} saved_ret=0x{frameReturn:X16}");
-		}
+		var probeTarget = _probeImportReturnAddress != 0 && num7 == _probeImportReturnAddress;
 		var isGuestWorker = GuestThreadExecution.IsGuestThread;
 		if (!IsLikelyReturnAddress(num7))
 		{
@@ -615,11 +770,12 @@ public sealed partial class DirectExecutionBackend
 			}
 			else if (orbisGen2Result != OrbisGen2Result.ORBIS_GEN2_OK)
 			{
-				if (ShouldLogImportResult(importStubEntry.Nid, orbisGen2Result))
+                if (ShouldLogImportResult(importStubEntry.Nid, orbisGen2Result, out var mutexOccurrence))
 				{
 					Console.Error.WriteLine(
 						$"[LOADER][WARN] Import#{num} result: {orbisGen2Result} ({importStubEntry.Nid}) " +
-						$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} ret=0x{num7:X16}");
+                        $"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} ret=0x{num7:X16}" +
+                        (mutexOccurrence != 0 ? $" occurrence={mutexOccurrence}" : string.Empty));
 				}
 			}
 			cpuContext[CpuRegister.Rbx] = value3;
@@ -1467,14 +1623,15 @@ public sealed partial class DirectExecutionBackend
 		if (returnValue != (int)OrbisGen2Result.ORBIS_GEN2_OK)
 		{
 			var returnResult = (OrbisGen2Result)returnValue;
-			if (ShouldLogImportResult(importStubEntry.Nid, returnResult))
+            if (ShouldLogImportResult(importStubEntry.Nid, returnResult, out var mutexOccurrence))
 			{
 				Console.Error.WriteLine(
 					$"[LOADER][WARN] Import#{dispatchIndex} result: {returnResult} ({importStubEntry.Nid}) " +
 					$"rdi=0x{arg0:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} " +
 					$"rdx=0x{cpuContext[CpuRegister.Rdx]:X16} rcx=0x{cpuContext[CpuRegister.Rcx]:X16} " +
 					$"r8=0x{cpuContext[CpuRegister.R8]:X16} r9=0x{cpuContext[CpuRegister.R9]:X16} " +
-					$"ret=0x{returnRip:X16}");
+                    $"ret=0x{returnRip:X16}" +
+                    (mutexOccurrence != 0 ? $" occurrence={mutexOccurrence}" : string.Empty));
 			}
 		}
 
@@ -1568,14 +1725,15 @@ public sealed partial class DirectExecutionBackend
 			cpuContext[CpuRegister.Rax] = unchecked((ulong)returnValue);
 		}
 
-		if (returnValue != (int)OrbisGen2Result.ORBIS_GEN2_OK &&
-			ShouldLogImportResult(importStubEntry.Nid, (OrbisGen2Result)returnValue))
-		{
-			Console.Error.WriteLine(
-				$"[LOADER][WARN] Import#{dispatchIndex} result: {(OrbisGen2Result)returnValue} ({importStubEntry.Nid}) " +
-				$"rdi=0x{cpuContext[CpuRegister.Rdi]:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} " +
-				$"ret=0x{*(ulong*)(argPackPtr + 96):X16}");
-		}
+        if (returnValue != (int)OrbisGen2Result.ORBIS_GEN2_OK &&
+            ShouldLogImportResult(importStubEntry.Nid, (OrbisGen2Result)returnValue, out var mutexOccurrence))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] Import#{dispatchIndex} result: {(OrbisGen2Result)returnValue} ({importStubEntry.Nid}) " +
+                $"rdi=0x{cpuContext[CpuRegister.Rdi]:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} " +
+                $"ret=0x{*(ulong*)(argPackPtr + 96):X16}" +
+                (mutexOccurrence != 0 ? $" occurrence={mutexOccurrence}" : string.Empty));
+        }
 
 		return cpuContext[CpuRegister.Rax];
 	}
@@ -1620,13 +1778,26 @@ public sealed partial class DirectExecutionBackend
 			"DfivPArhucg" or // memcmp
 			"8zTFvBIAIN8";   // memset
 
-	private bool ShouldLogImportResult(string nid, OrbisGen2Result result)
+    private bool ShouldLogImportResult(string nid, OrbisGen2Result result, out int mutexOccurrence)
 	{
+        mutexOccurrence = 0;
 		var resultValue = unchecked((int)result);
 		if (resultValue > 0)
 		{
 			return false;
 		}
+
+        // Preserve the first self-lock warnings and sample repeats without changing the guest result.
+        if (result == OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK && nid is "9UK1vLZQft4" or "7H0iTOciTLo")
+        {
+            return ShouldSampleImportResult(nid, resultValue, out mutexOccurrence);
+        }
+
+        if ((nid is "2Z+PpY6CaJg" or "tn3VlD0hG60") &&
+            (result is OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT or OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED))
+        {
+            return ShouldSampleImportResult(nid, resultValue, out mutexOccurrence);
+        }
 
 		var expectedFileProbeMiss =
 			result == OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND &&
@@ -1693,8 +1864,12 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 
+        return ShouldSampleImportResult(nid, resultValue, out _);
+    }
+
+    private bool ShouldSampleImportResult(string nid, int resultValue, out int count)
+    {
 		var key = nid + "\0" + resultValue;
-		int count;
 		lock (_importResultLogSampleGate)
 		{
 			_importResultLogSamples.TryGetValue(key, out count);

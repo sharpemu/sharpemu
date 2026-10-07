@@ -133,6 +133,142 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Theory]
+    [InlineData(0ul, false)]
+    [InlineData(0x3000ul, false)]
+    [InlineData(0ul, true)]
+    [InlineData(0ul, true, 7u)]
+    [InlineData(0ul, true, 8u)]
+    [InlineData(0ul, false, 65535u, 0x2000u)]
+    [InlineData(0ul, true, 65535u, 0x2000u)]
+    public void MeshAutoDraw_RecordsMeshGroupsAndDrawParameters(ulong geometryAddress, bool triangleStrip,
+        uint totalLimit = 65535, uint stages = 0x20)
+    {
+        var meshStage = Stage(Program(ShaderStageKind.Mesh));
+        _pipelines.MeshShadersSupported = true;
+        _pipelines.Graphics = new GraphicsPrograms
+        {
+            Vertex = new ShaderProgram(0x11),
+            Pixel = new ShaderProgram(0x22),
+            VertexInput = new VertexInputInfo { Stage = meshStage },
+            MeshInput = new MeshDrawConfiguration
+            {
+                Geometry = new GuestGeometryConfiguration
+                {
+                    InputPrimitiveCountPerWorkgroup = 8,
+                    InputTriangleStrip = triangleStrip,
+                },
+                Execution = new MeshExecutionLimits
+                {
+                    MaxGroupCountX = 65535,
+                    MaxGroupCountY = 65535,
+                    MaxGroupTotalCount = totalLimit,
+                },
+            },
+            PixelInput = new PixelInputInfo { Stage = Stage(Program(ShaderStageKind.Pixel)) },
+        };
+        MeshDrawParameters? parameters = null;
+        _host.PreparationFailure = stage =>
+        {
+            if (stage.Program?.Stage == ShaderStageKind.Mesh) parameters = stage.MeshDraw;
+            return null;
+        };
+        var banks = Banks();
+        banks.UserConfig.PrimitiveType = triangleStrip ? 6u : 4u;
+        banks.Context.ShaderStages = stages;
+        banks.Shader.Vertex.GeometryAddress = geometryAddress;
+
+        if (totalLimit < (triangleStrip ? 8u : 4u))
+        {
+            var error = Assert.Throws<RenderExecutorFatalException>(() =>
+                _executor.DrawAuto(1, banks, Auto(30, instances: 2, firstVertex: 5)));
+            Assert.Contains("total=8/7", error.Message);
+            Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw_mesh", StringComparison.Ordinal));
+            return;
+        }
+        _executor.DrawAuto(1, banks, Auto(30, instances: 2, firstVertex: 5));
+
+        Assert.Contains("get_mesh_programs pixelActive=True", _pipelines.Calls);
+        Assert.Contains(triangleStrip ? "draw_mesh 4 2 1" : "draw_mesh 2 2 1", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("bind_vertex", StringComparison.Ordinal));
+        Assert.Equal(new MeshDrawParameters(30, 5, 0, 0, 0), parameters);
+        Assert.Equal(triangleStrip ? 6u : 4u, _pipelines.MeshPrimitiveType);
+    }
+
+    [Theory]
+    [InlineData(0x20u, false)]
+    [InlineData(0x2030u, false)]
+    [InlineData(0x2030u, true)]
+    [InlineData(0x2000u, false)]
+    [InlineData(0x2000u, true)]
+    [InlineData(0x00402000u, false)]
+    [InlineData(0x2030u, false, true)]
+    [InlineData(0x2030u, true, true)]
+    public void IndexedMeshDrawUploadsIndicesWithinPreparation(uint stages, bool strip, bool indirect = false)
+    {
+        _pipelines.MeshShadersSupported = true;
+        _pipelines.Graphics = new GraphicsPrograms
+        {
+            Vertex = new ShaderProgram(0x11), Pixel = new ShaderProgram(0x22),
+            VertexInput = new VertexInputInfo { Stage = Stage(Program(ShaderStageKind.Mesh)) },
+            PixelInput = new PixelInputInfo { Stage = Stage(Program(ShaderStageKind.Pixel)) },
+            MeshInput = new MeshDrawConfiguration
+            {
+                Geometry = new GuestGeometryConfiguration { InputPrimitiveCountPerWorkgroup = 1 },
+                Execution = new MeshExecutionLimits
+                {
+                    MaxGroupCountX = 65535, MaxGroupCountY = 65535, MaxGroupTotalCount = 65535,
+                },
+            },
+        };
+        MeshDrawParameters? parameters = null;
+        _host.PreparationFailure = stage =>
+        {
+            if (stage.Program?.Stage == ShaderStageKind.Mesh) parameters = stage.MeshDraw;
+            return null;
+        };
+        var banks = Banks(withDepth: indirect);
+        banks.Context.ShaderStages = stages;
+        banks.UserConfig.PrimitiveType = strip ? 6u : 4u;
+        _host.WriteGuest(IndexBase + (indirect ? 8ul : 0), [7, 0, 2, 0, 7, 0, 9, 0, 4, 0, 2, 0]);
+        var arguments = Indexed(6, instances: 2, baseVertex: -1);
+        if (indirect)
+        {
+            WriteIndirectArguments(6, 2, 4, unchecked((uint)-1), 5);
+            arguments = Indexed(40, source: DrawOffsetSource.IndirectArguments) with
+            {
+                IndirectArgumentsAddress = IndirectArguments,
+            };
+        }
+        _executor.DrawIndexed(1, banks, arguments);
+        Assert.Equal(strip ? new uint[] { 6, 1, 6, 1, 8, 6, 6, 8, 3, 8, 1, 3 }
+            : [6, 1, 6, 8, 3, 1], _host.MeshIndices);
+        Assert.Equal(new MeshDrawParameters(strip ? 12u : 6u, 0, indirect ? 5u : 0u, 4, 0x8000), parameters);
+        AssertOrder("preparation_begin", "upload_mesh_indices", "prepare_bindings",
+            strip ? "draw_mesh 4 2 1" : "draw_mesh 2 2 1", "preparation_end");
+        Assert.Equal(4u, _pipelines.MeshPrimitiveType);
+        Assert.Equal(indirect, _pipelines.MeshDepthBound);
+        Assert.Contains("get_mesh_programs pixelActive=True", _pipelines.Calls);
+        Assert.Equal(strip ? 6u : 4u, banks.UserConfig.PrimitiveType);
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("bind_index", StringComparison.Ordinal));
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw_indexed", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PrimitiveGenerationWithHullStageRemainsRejectedWithMeshSupport(bool indexed)
+    {
+        _pipelines.MeshShadersSupported = true;
+        var banks = Banks();
+        banks.Context.ShaderStages = 0x2004;
+        if (indexed) _executor.DrawIndexed(1, banks, Indexed(6));
+        else _executor.DrawAuto(1, banks, Auto(6));
+        Assert.Empty(_pipelines.Calls);
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw", StringComparison.Ordinal));
+        Assert.Null(_host.MeshIndices);
+    }
+
+    [Theory]
     [InlineData(0u, 0u)]
     [InlineData(6u, 0u)]
     [InlineData(0u, 1u)]
@@ -235,6 +371,34 @@ public sealed class RenderExecutorDrawTests : IDisposable
         _executor.DrawIndexed(1, banks, Indexed(3));
 
         Assert.Contains(_host.Calls, c => c.StartsWith("draw_indexed", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(0x2000u, false)]
+    [InlineData(0x2000u, true)]
+    [InlineData(0x2030u, false)]
+    [InlineData(0x2030u, true)]
+    [InlineData(0x00402000u, false)]
+    [InlineData(0x00402000u, true)]
+    [InlineData(0x00C02030u, false)]
+    [InlineData(0x00C02030u, true)]
+    public void PrimitiveShaderWithoutMeshSupportUsesVertexPrograms(uint stages, bool indexed)
+    {
+        _pipelines.MeshShadersSupported = false;
+        var banks = Banks();
+        banks.Context.ShaderStages = stages;
+        banks.UserConfig.PrimitiveType = (uint)GuestPrimitiveType.TriangleStrip;
+
+        if (indexed) _executor.DrawIndexed(1, banks, Indexed(6));
+        else _executor.DrawAuto(1, banks, Auto(6));
+
+        Assert.Contains("get_graphics_programs pixelActive=True", _pipelines.Calls);
+        Assert.DoesNotContain(_pipelines.Calls, call => call.StartsWith("get_mesh_programs", StringComparison.Ordinal));
+        Assert.Null(_host.MeshIndices);
+        Assert.NotEmpty(_pipelines.PipelineRequests);
+        Assert.All(_pipelines.PipelineRequests, request => Assert.Equal(PrimitiveTopology.TriangleStrip, request.Topology));
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw_mesh", StringComparison.Ordinal));
+        Assert.Contains(_host.Calls, call => call.StartsWith(indexed ? "draw_indexed " : "draw ", StringComparison.Ordinal));
     }
 
     [Theory]
@@ -508,6 +672,38 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains("bind_vertex 100:100,100:0,101:0,1:0,100:180", _host.Calls);
     }
 
+    [Theory]
+    [InlineData(0u, 1u, 2u, 74u, 0u, 12ul)]
+    [InlineData(0u, 1u, 2u, 74u, 4u, 16ul)]
+    [InlineData(0u, 1u, 2u, 29u, 0u, 4ul)]
+    [InlineData(0u, 1u, 2u, 50u, 0u, 4ul)]
+    [InlineData(0u, 0u, 2u, 74u, 0u, 0ul)]
+    [InlineData(0u, 1u, 0u, 74u, 0u, 1ul)]
+    [InlineData(0u, 1u, 1u, 74u, 0u, 1ul)]
+    [InlineData(0u, 1u, 3u, 74u, 0u, 1ul)]
+    [InlineData(16u, 2u, 2u, 74u, 0u, 32ul)]
+    public void ConstantVertexRange_CoversTheFormatOnlyWhenBoundsPermitIt(
+        uint stride, uint records, uint bounds, uint format, uint offset, ulong expected)
+    {
+        var defaults = Programs();
+        var descriptor = new BufferDescriptorWords((uint)(VertexBase + offset),
+            (uint)(VertexBase >> 32) | (stride << 16), records, (bounds << 28) | (format << 12) | 0x3AC);
+        _pipelines.Graphics = new GraphicsPrograms
+        {
+            Vertex = defaults.Vertex, Pixel = defaults.Pixel, PixelInput = defaults.PixelInput,
+            VertexInput = new VertexInputInfo
+            {
+                Stage = defaults.VertexInput.Stage,
+                Buffers = [new VertexInputBuffer(VertexBase, stride, records)],
+                Attributes = [new VertexAttributeResource(descriptor, 0, 3, 11, 0, 0, offset)],
+            },
+        };
+        _executor.DrawAuto(1, Banks(), Auto(3));
+        var obtains = _host.Calls.Where(call => call.StartsWith("obtain", StringComparison.Ordinal)).ToArray();
+        if (expected == 0) Assert.Empty(obtains);
+        else Assert.Equal($"obtain {VertexBase:X} {expected:X} written=False -> 100:0", Assert.Single(obtains));
+    }
+
     [Fact]
     public void VertexRanges_ClampToTheMappedSizeAndFailForAnAddressOutsideTheAcquiredRange()
     {
@@ -538,6 +734,33 @@ public sealed class RenderExecutorDrawTests : IDisposable
 
         fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, Banks(primitiveType: 17), Indexed(3)));
         Assert.Contains("primitiveType=17", fatal.Message);
+    }
+
+    [Theory]
+    [InlineData(3u)]
+    [InlineData(6u)]
+    [InlineData(63u)]
+    public void LegacyRectangleList_NativeFillPreservesGuestDrawArguments(uint count)
+    {
+        _host.SupportsNativeRectangles = true;
+        Assert.True(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: true, out var topology));
+        Assert.Equal(PrimitiveTopology.PatchList, topology);
+        _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(count, instances: 2, firstVertex: 9, firstInstance: 4, source: DrawOffsetSource.IndirectArguments));
+        Assert.Contains($"draw {count} 2 9 4", _host.Calls);
+    }
+
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(2u)]
+    [InlineData(4u)]
+    [InlineData(5u)]
+    [InlineData(7u)]
+    [InlineData(8u)]
+    public void LegacyRectangleList_NativeFillPreservesIncompleteGroups(uint count)
+    {
+        _host.SupportsNativeRectangles = true;
+        _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(count, instances: 2));
+        Assert.Contains($"draw {count} 2 0 0", _host.Calls);
     }
 
     [Fact]

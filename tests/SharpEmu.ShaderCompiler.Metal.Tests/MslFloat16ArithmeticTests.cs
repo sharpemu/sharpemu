@@ -27,7 +27,7 @@ public sealed class MslFloat16ArithmeticTests
         var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
 
         Assert.Contains("as_type<half>", shader.Source, StringComparison.Ordinal);
-        Assert.Contains("fmin(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("& 0x7FFFu) > 0x7C00u", shader.Source, StringComparison.Ordinal);
         Assert.Contains("fmax(", shader.Source, StringComparison.Ordinal);
         Assert.Contains("& 0xFFFF0000u", shader.Source, StringComparison.Ordinal);
     }

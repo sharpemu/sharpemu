@@ -5,6 +5,8 @@ using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.GuestMemory;
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
@@ -78,7 +80,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         _staging = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Upload, 512 * MiB);
         _uploader = new GuestBufferUploader(device, scheduler, guest, _staging);
         _stream = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Stream, 64 * MiB);
-        _download = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Download, 32 * MiB);
+        _download = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Download, 64 * MiB);
         _deviceRing = new GpuRingBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 128 * MiB);
         StreamOffsetAlignment = device.MinUniformBufferOffsetAlignment;
         _gds.Mapped.Clear();
@@ -198,8 +200,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         return CreateBuffer(guestAddress, size);
     }
 
-    public (GpuBuffer Buffer, ulong Offset) ObtainBuffer(ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer = false, ResourceSlotIdentifier bufferIdentifier = default)
+    public (GpuBuffer Buffer, ulong Offset) ObtainBuffer(ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer = false,
+        ResourceSlotIdentifier bufferIdentifier = default, ulong traceShaderHash = 0)
     {
+        if (isWritten && ImageClearTrace.Enabled) ImageCache?.TraceGuestWrite("shader-buffer-write", guestAddress, size, shaderHash: traceShaderHash);
+        if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-obtain", guestAddress, size, $"written={isWritten} texel={isTexelBuffer} hash=0x{traceShaderHash:X16}", remember: true);
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferAcquisitionChecks);
         var command = _scheduler.Current;
         if (command.IsInvalid || !IsValidRange(guestAddress, size))
@@ -217,6 +222,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
                 _backing.TryReadBacking(guestAddress, _stream.Mapped.Slice((int)streamOffset, (int)size)))
             {
                 _stream.Commit();
+                if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-stream-upload", guestAddress, size, $"offset=0x{streamOffset:X}");
                 return (_stream, streamOffset);
             }
         }
@@ -383,6 +389,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         var images = RequireImageCache();
+        if (ImageClearTrace.Enabled) images.TraceGuestWrite("command-fill", guestAddress, size, value);
+        images.TraceMetadataFill(guestAddress, size, value);
         _ = images.ClearMetadata(guestAddress);
         var region = images.QueryRegion(guestAddress, size);
         if (!HasGpuDirtyBytes(guestAddress, size) && !region.GpuImageBytes)
@@ -541,6 +549,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         var images = RequireImageCache();
+        if (ImageClearTrace.Enabled && dstMemory) images.TraceGuestWrite("command-copy", dstVaddr, size, srcGds ? 0 : srcVaddr);
         var srcRegion = srcMemory ? images.QueryRegion(srcVaddr, size) : default;
         var dstRegion = dstMemory ? images.QueryRegion(dstVaddr, size) : default;
         if (srcMemory && dstMemory && !HasGpuDirtyBytes(srcVaddr, size) && !HasGpuDirtyBytes(dstVaddr, size) &&
@@ -1161,6 +1170,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private PendingDownload? BeginReadMemoryOnGpu(ulong guestAddress, ulong size, bool isWrite, GuestMemoryProfile.ReadbackSource source,
         bool allowPending, bool markHot = false)
     {
+        if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("cpu-synchronize", guestAddress, size, $"write={isWrite} source={source}");
         using var readbackScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.BufferReadback);
         using var foreignRead = _device.Slabs.BeginForeignRead();
         var readbackStarted = GuestMemoryProfile.ReadbackDetailsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
@@ -1465,6 +1475,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         var planner = new BufferDownloadBatchPlanner(_download.Size);
         foreach (var piece in copies)
         {
+            if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("buffer-download-planned", piece.Address, piece.Size, $"sourceOffset=0x{piece.SourceOffset:X}");
             var copy = piece;
             while (copy.Size != 0)
             {
@@ -1622,10 +1633,14 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var placement = copy.Placement;
             var offset = baseOffset + placement.DataOffset;
             _download.Invalidate(offset, placement.DataSize);
+            if (GpuCommands.VisibilityResultTrace.Enabled)
+                GpuCommands.VisibilityResultTrace.Download(copy.Address,
+                    _download.Mapped.Slice((int)offset, (int)placement.DataSize), _backing.TryReadBacking);
             if (!_backing.TryWriteBacking(copy.Address, _download.Mapped.Slice((int)offset, (int)placement.DataSize)))
             {
                 throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copy.Address:X16} size=0x{placement.DataSize:X16}");
             }
+            if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("buffer-published", copy.Address, placement.DataSize, $"tick={completionTick}");
         }
 
         batch.Clear();
@@ -1730,6 +1745,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         if (source != null)
         {
             buffer.NoteGpuWrite();
+            if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-upload", guestAddress, size, $"bytes={totalSize} copies={copies.Count}");
             var command = _scheduler.Current;
             command.EndRendering();
             var native = new CommandBuffer(command.Handle);

@@ -62,6 +62,41 @@ public readonly record struct BufferCandidateTableUse(
     uint MappingOffset,
     uint SearchIterations);
 
+public readonly record struct MeshShaderConfiguration(
+    uint OutputVertexCapacity,
+    uint OutputPrimitiveCapacity,
+    uint ProvokingVertex,
+    uint InputPrimitiveCountPerWorkgroup,
+    uint InputVertexCountPerWorkgroup,
+    uint LocalDataShareDwords,
+    bool InputTriangleStrip = false,
+    uint DeviceSubgroupLaneCount = 0,
+    bool InputPointList = false)
+{
+    public static uint[] ParameterLocations(Gen5ShaderProgram program, int requiredOutputCount) =>
+        program.Instructions.Select(instruction => instruction.Control).OfType<Gen5ExportControl>()
+            .Where(export => export.Target is >= 32 and < 64).Select(export => export.Target - 32)
+            .Concat(Enumerable.Range(0, Math.Max(requiredOutputCount, 0)).Select(location => (uint)location))
+            .Distinct().Order().ToArray();
+
+    public static uint[] ParameterLocations(ShaderCompileRequest request) =>
+        request.MeshOutputLocationMask is { } mask
+            ? Enumerable.Range(0, 32).Where(location => (mask & (1u << location)) != 0)
+                .Select(location => (uint)location).ToArray()
+            : ParameterLocations(request.Program, request.RequiredVertexOutputCount);
+
+    public ulong OutputMemoryBytes(int parameterCount, uint vertexGranularity, uint primitiveGranularity)
+    {
+        if (vertexGranularity == 0 || primitiveGranularity == 0)
+            throw new ArgumentOutOfRangeException(nameof(vertexGranularity));
+        var vertices = ((ulong)OutputVertexCapacity + vertexGranularity - 1) / vertexGranularity * vertexGranularity;
+        var primitives = ((ulong)OutputPrimitiveCapacity + primitiveGranularity - 1) / primitiveGranularity * primitiveGranularity;
+        // Position and each parameter use one location. Layer and CullPrimitive use one each.
+        // Primitive indices do not count toward output storage.
+        return checked(((ulong)parameterCount + 1) * 16 * vertices + 32 * primitives);
+    }
+}
+
 // Everything an emitter needs to compile one permutation of a program: the decoded
 // program, its resource plan applied to one specialization, and the binding layout.
 public sealed class ShaderCompileRequest
@@ -80,6 +115,7 @@ public sealed class ShaderCompileRequest
         Bindings = bindings;
         UserDataBase = plan.UserDataBase;
         UserDataCount = plan.UserDataCount;
+        ExcludedUserDataRegisters = plan.Graph.ExcludedUserDataRegisters;
         UsesFlattenedTable = RequiresFlattenedTable(plan, resources);
         UsesGlobalDataShare = BindingLayout.UsesGlobalDataShare(Program);
         ReadsShaderBase = BindingLayout.ReadsShaderBase(Program);
@@ -136,6 +172,7 @@ public sealed class ShaderCompileRequest
     public BindingLayout Bindings { get; }
     public uint UserDataBase { get; }
     public uint UserDataCount { get; }
+    public ulong ExcludedUserDataRegisters { get; }
     public bool UsesFlattenedTable { get; }
     public bool UsesGlobalDataShare { get; }
     public bool ReadsShaderBase { get; }
@@ -163,6 +200,7 @@ public sealed class ShaderCompileRequest
 
     public uint WaveSize { get; init; } = 32;
     public bool EnableExecGuardElision { get; init; } = true;
+    public bool IeeeMode { get; init; }
     public uint ScratchDwords { get; init; }
     public bool EnableGraphicsSubgroupOperations { get; init; } = true;
 
@@ -174,6 +212,7 @@ public sealed class ShaderCompileRequest
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
 
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];
+    public bool PixelDepthExportEnable { get; init; }
     public uint PixelInputEnable { get; init; }
     public uint PixelCustomInterpolationMask { get; init; }
 
@@ -184,10 +223,12 @@ public sealed class ShaderCompileRequest
     public IReadOnlyList<uint>? PixelInputCntl { get; init; }
 
     public int RequiredVertexOutputCount { get; init; }
+    public uint? MeshOutputLocationMask { get; init; }
     public IReadOnlyList<ShaderVertexInput> VertexInputs { get; init; } = [];
     public uint PositionExportControl { get; init; }
     public bool SupportsClipDistance { get; init; } = true;
     public ShaderClipSpaceTransform ClipSpace { get; init; }
+    public MeshShaderConfiguration? Mesh { get; init; }
 
     // The LDS the dispatch allocates (COMPUTE_PGM_RSRC2.LDS_SIZE), 0 when unknown.
     public uint LocalDataShareDwords { get; init; }

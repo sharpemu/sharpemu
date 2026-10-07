@@ -203,20 +203,25 @@ public sealed class GuestGpuMemory : IDisposable
         using var registerScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingRegister);
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"map guest={protection}");
-        _spansLock.EnterWriteLock();
-        try
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingRegisterSpan))
         {
-            _spans.Add(address, size);
-            Interlocked.Increment(ref _spanVersion);
+            _spansLock.EnterWriteLock();
+            try
+            {
+                _spans.Add(address, size);
+                Interlocked.Increment(ref _spanVersion);
+            }
+            finally
+            {
+                _spansLock.ExitWriteLock();
+            }
         }
-        finally
-        {
-            _spansLock.ExitWriteLock();
-        }
-
-        _pages.ClearWriteRestorations(address, size);
-        _pages.Permissions.Set(address, size, protection);
-        _pages.Reapply(address, size);
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingRegisterClearRestorations))
+            _pages.ClearWriteRestorations(address, size);
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingRegisterPermissions))
+            _pages.Permissions.Set(address, size, protection);
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingRegisterReapply))
+            _pages.Reapply(address, size);
     }
 
     // A guest mprotect on a covered range: the ledger changes, then every page gets its derived protection.
@@ -309,9 +314,30 @@ public sealed class GuestGpuMemory : IDisposable
 
             if (attachment?.Gpu is { } gpu && !gpu.IsGpuQueueThread)
             {
-                if (gpu.TryRunAfterPendingWork(() => ApplyChange(attachment.Scheduler)))
+                var dispatchStarted = GuestMemoryProfile.GetTimestamp();
+                long callbackStarted = 0;
+                long callbackFinished = 0;
+                var accepted = gpu.TryRunAfterPendingWork(() =>
+                {
+                    callbackStarted = GuestMemoryProfile.GetTimestamp();
+                    ApplyChange(attachment.Scheduler);
+                    callbackFinished = GuestMemoryProfile.GetTimestamp();
+                });
+                var callerResumed = GuestMemoryProfile.GetTimestamp();
+                if (accepted)
+                {
+                    GuestMemoryProfile.RecordInterval(GuestMemoryProfile.Operation.MappingRelayDispatch,
+                        dispatchStarted, callbackStarted);
+                    GuestMemoryProfile.RecordInterval(GuestMemoryProfile.Operation.MappingRelayCallback,
+                        callbackStarted, callbackFinished);
+                    GuestMemoryProfile.RecordInterval(GuestMemoryProfile.Operation.MappingRelayCompletion,
+                        callbackFinished, callerResumed);
                     return;
-                WaitForDetach(attachment);
+                }
+                GuestMemoryProfile.RecordInterval(GuestMemoryProfile.Operation.MappingRelayRejected,
+                    dispatchStarted, callerResumed);
+                using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingDetachWait))
+                    WaitForDetach(attachment);
                 continue;
             }
 

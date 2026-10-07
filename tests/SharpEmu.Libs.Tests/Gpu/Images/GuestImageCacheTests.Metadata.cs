@@ -14,6 +14,104 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 // Surface metadata registration, the pending DCC state and compressed surfaces.
 public sealed partial class GuestImageCacheTests
 {
+    [Theory]
+    [InlineData(0x10000ul)]
+    [InlineData(0x200000ul)]
+    public void CpuWrite_InvalidatesComputedDccRange(ulong metadataOffset)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(metadataOffset + 0x10000, ReadWrite);
+        var metadataAddress = address + metadataOffset;
+        var color = AsColorTarget(LinearRequest(address + 0x4000, 4, Format.R8G8B8A8Srgb,
+            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1));
+        color.Description.Metadata.Kind = MetadataKind.Dcc;
+        color.Description.Metadata.Range = new GuestSpan(metadataAddress, 0);
+        color.Description.TileMode = GuestTileMode.RenderTarget;
+        var metadataSize = color.Description.DccSliceSize * color.Description.TransferLayers;
+        Assert.True(metadataSize > 8);
+        harness.Images.RegisterDccMetadataForTest(metadataAddress, metadataSize);
+        Assert.True(harness.Images.IsMetadata(metadataAddress));
+        harness.ImageStore.MarkCpuWrite(metadataAddress + metadataSize, 8);
+        Assert.True(harness.Images.IsMetadata(metadataAddress));
+        harness.ImageStore.MarkCpuWrite(metadataAddress + metadataSize / 2, 8);
+        Assert.False(harness.Images.IsMetadata(metadataAddress));
+        harness.Shutdown();
+    }
+
+    [Theory]
+    [InlineData(0x10000ul)]
+    [InlineData(0x200000ul)]
+    public void CpuWrite_InvalidatesMetadataWithoutDeletingItsImageOrReplacement(ulong metadataOffset)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(metadataOffset + 0x10000, ReadWrite);
+        var metadataAddress = address + metadataOffset;
+        var depth = LinearRequest(address + 0x4000, 4, Format.D32Sfloat,
+            GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        depth = AsDepthTarget(depth, Format.D32Sfloat);
+        depth.Description.Metadata.Kind = MetadataKind.Htile;
+        depth.Description.Metadata.Range = new GuestSpan(metadataAddress, 0x100);
+        var depthIdentifier = harness.Acquire(ref depth);
+        Assert.True(harness.Images.ClearMetadata(metadataAddress));
+
+        harness.ImageStore.MarkCpuWrite(metadataAddress + 0x100, 8);
+        Assert.True(harness.Images.IsMetadataCleared(metadataAddress, 0));
+        harness.ImageStore.MarkCpuWrite(metadataAddress + 0x80, 8);
+        Assert.False(harness.Images.IsMetadata(metadataAddress));
+        Assert.False(harness.Images.IsMetadataCleared(metadataAddress, 0));
+        Assert.True(harness.Image(depthIdentifier).Registered);
+        Assert.True(harness.Image(depthIdentifier).IsGpuModified);
+
+        harness.Worker.Run(() => harness.Images.AcquireDepthTargetView(depthIdentifier, depth));
+        Assert.True(harness.Images.IsMetadata(metadataAddress));
+        Assert.False(harness.Images.IsMetadataCleared(metadataAddress, 0));
+        harness.ImageStore.MarkCpuWrite(metadataAddress + 0x80, 8);
+
+        var color = LinearRequest(address + 0x8000, 4, Format.R8G8B8A8Srgb,
+            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        color = AsColorTarget(color);
+        color.Description.Metadata.Kind = MetadataKind.Dcc;
+        color.Description.Metadata.Range = new GuestSpan(metadataAddress, 0x100);
+        color.Description.Metadata.Compression = DisplayCompression.Dcc256_256_0;
+        harness.Acquire(ref color);
+        Assert.False(harness.Images.IsMetadataCleared(metadataAddress, 0));
+        Assert.False(harness.Images.ClearMetadata(metadataAddress));
+
+        harness.Worker.Run(() =>
+        {
+            harness.Image(depthIdentifier).ClearGpuModified();
+            harness.Images.DeleteImageForTest(depthIdentifier);
+        });
+        Assert.True(harness.Images.IsMetadata(metadataAddress));
+        Assert.True(harness.Images.TryAbsorbDccFill(metadataAddress, 0x100, 0xc0c0c0c0u));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void CpuWriteInvalidatesTheExpandedPendingDccFill()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x300000, ReadWrite);
+        var metadataAddress = address + 0x200000;
+        Assert.False(harness.Images.TryAbsorbDccFill(metadataAddress, 0x100, 0xc0c0c0c0u));
+        Assert.False(harness.Images.TryAbsorbDccFill(metadataAddress, 0x300, 0xc0c0c0c0u));
+        Assert.False(harness.ImageStore.MarkCpuWrite(metadataAddress + 0x200, 8));
+
+        var color = LinearRequest(address, 4, Format.R8G8B8A8Srgb,
+            GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        color = AsColorTarget(color);
+        color.Description.Metadata.Kind = MetadataKind.Dcc;
+        color.Description.Metadata.Range = new GuestSpan(metadataAddress, 0x100);
+        color.Description.Metadata.Compression = DisplayCompression.Dcc256_256_0;
+        harness.Acquire(ref color);
+        Assert.True(harness.Images.IsMetadata(metadataAddress));
+        Assert.False(harness.Images.IsMetadataCleared(metadataAddress, 0));
+        harness.Shutdown();
+    }
+
     [Fact]
     public void HtileEntries_ReportRegisteredAndClearedState()
     {
@@ -124,7 +222,7 @@ public sealed partial class GuestImageCacheTests
         Assert.True(harness.Images.TryAbsorbDccFill(metadata, 0x100, 0x01010101u));
         Assert.False(harness.Images.IsMetadataCleared(metadata, 0));
         Assert.True(harness.Images.TryAbsorbDccFill(metadata, 0x100, 0xc0c0c0c0u));
-        Assert.True(harness.Images.IsMetadataCleared(metadata, 5));
+        Assert.False(harness.Images.IsMetadataCleared(metadata, 5));
         Assert.False(harness.Images.ClearMetadata(metadata));
 
         // A compressed target rejects readback and read claims but keeps GPU ownership.
@@ -193,6 +291,38 @@ public sealed partial class GuestImageCacheTests
         Assert.False(harness.Cache.HasGpuDirtyBytes(metadata, SliceSize));
         Assert.True(harness.Images.TryReadGuestDccClear(metadata, SliceSize, 0, out _, out var code));
         Assert.Equal(0x00, code);
+        harness.Shutdown();
+    }
+
+    [Theory]
+    [InlineData(64u)]
+    [InlineData(65u)]
+    public void DccVolume_TracksAndConsumesEverySlice(uint depth)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x100000, ReadWrite);
+        var metadata = address + 0x80000;
+        Assert.False(harness.Images.TryAbsorbDccFill(metadata, depth * 4096ul, 0x40404040));
+        var target = AsColorTarget(LinearRequest(address, depth * 4ul, Format.R8G8B8A8Unorm,
+            GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color3D, new Extent3D(1, 1, depth), 1, 4, 1));
+        target.View = target.View with { Type = ImageViewType.Type2DArray, LayerCount = depth };
+        target.Description.Metadata.Kind = MetadataKind.Dcc;
+        target.Description.Metadata.Range = new GuestSpan(metadata, depth * 4096ul);
+        harness.Acquire(ref target);
+        for (uint slice = 0; slice < depth; slice++)
+        {
+            Assert.True(harness.Images.IsMetadataCleared(metadata, slice, out var fill));
+            Assert.Equal(0x40404040u, fill);
+        }
+        Assert.False(harness.Images.IsMetadataCleared(metadata, depth));
+        Assert.False(harness.Images.SetMetadataSlice(metadata, depth, false));
+        for (uint slice = 0; slice < depth; slice++)
+            Assert.True(harness.Images.SetMetadataSlice(metadata, slice, false));
+        for (uint slice = 0; slice < depth; slice++)
+            Assert.False(harness.Images.IsMetadataCleared(metadata, slice));
+        Assert.True(harness.Images.TryAbsorbDccFill(metadata, depth * 4096ul, 0x40404040));
+        Assert.True(harness.Images.IsMetadataCleared(metadata, depth - 1));
         harness.Shutdown();
     }
 

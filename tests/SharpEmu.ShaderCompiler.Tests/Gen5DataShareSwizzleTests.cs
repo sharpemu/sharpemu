@@ -22,13 +22,7 @@ public sealed class Gen5DataShareSwizzleTests
     [InlineData(0x8000u)]
     public void SupportedModesCompileOnBothBackends(uint selection)
     {
-        uint[] words = [0xD8D40000u | selection, (4u << 24) | (4u << 8), 0xBF810000];
-        var bytes = new byte[words.Length * sizeof(uint)];
-        for (var index = 0; index < words.Length; index++)
-            BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)), words[index]);
-        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(new CpuContext(new InstructionMemory(bytes), Generation.Gen5),
-            0x1000, out var program, out var error), error);
-        var instruction = program.Instructions[0];
+        var instruction = DecodeSwizzle(selection);
         Assert.Equal("DsSwizzleB32", instruction.Opcode);
         Assert.Equal(new[] { Gen5Operand.Vector(4) }, instruction.Sources);
         Assert.Equal(new[] { Gen5Operand.Vector(4) }, instruction.Destinations);
@@ -38,6 +32,17 @@ public sealed class Gen5DataShareSwizzleTests
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out var metalError), metalError);
         Assert.Contains("sharpemu_ballot(exec)", metal.Source);
         Assert.Contains("simd_shuffle", metal.Source);
+    }
+
+    private static Gen5ShaderInstruction DecodeSwizzle(uint selection)
+    {
+        uint[] words = [0xD8D40000u | selection, (4u << 24) | 4u, 0xBF810000];
+        var bytes = new byte[words.Length * sizeof(uint)];
+        for (var index = 0; index < words.Length; index++)
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)), words[index]);
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(new CpuContext(new InstructionMemory(bytes), Generation.Gen5),
+            0x1000, out var program, out var error), error);
+        return program.Instructions[0];
     }
 
     [Theory]
@@ -61,8 +66,7 @@ public sealed class Gen5DataShareSwizzleTests
             Vop2(0, "VAddI32", 4, Operand(1000), Gen5Operand.Vector(0)),
             Vop2(4, "VAndB32", 6, Operand(maskOddLanes ? 1u : 0u), Gen5Operand.Vector(0)),
             Vopc(8, "VCmpxEqU32", Operand(0), 6),
-            DataShare(12, "DsSwizzleB32", false, [Gen5Operand.Vector(4)], [4],
-                selection & 255, selection >> 8),
+            DecodeSwizzle(selection) with { Pc = 12 },
             MoveScalar(20, 126, uint.MaxValue),
             MoveScalar(24, 127, uint.MaxValue),
             Vop2(28, "VLshlrevB32", 5, Operand(2), Gen5Operand.Vector(0)),

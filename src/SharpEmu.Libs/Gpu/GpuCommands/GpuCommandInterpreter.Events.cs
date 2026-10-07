@@ -16,7 +16,7 @@ public sealed partial class GpuCommandInterpreter
         var eventIndex = (payload[0] >> 8) & 0x7u;
         var eventType = payload[0] & 0x3Fu;
         ulong eventAddress = 0;
-        if (eventType == 0x39)
+        if (eventType is 0x38 or 0x39)
         {
             if (packet.Length != 4)
             {
@@ -24,6 +24,11 @@ public sealed partial class GpuCommandInterpreter
             }
 
             eventAddress = Address(payload[1], payload[2]);
+        }
+
+        if (eventType == 0x3A && packet.Length != 2)
+        {
+            throw _host.Fatal($"The occlusion reset packet length is not supported: length={packet.Length} address=0x{packet.PacketAddress:X16}.");
         }
 
         RaiseEvent(eventType, eventIndex, eventAddress);

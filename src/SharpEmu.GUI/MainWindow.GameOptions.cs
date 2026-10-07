@@ -21,6 +21,7 @@ public partial class MainWindow
         "SHARPEMU_WRITABLE_APP0",
         "SHARPEMU_VK_VALIDATION",
         "SHARPEMU_DUMP_SPIRV",
+        "SHARPEMU_SKIP_RT",
         "SHARPEMU_LOG_DIRECT_MEMORY",
         "SHARPEMU_LOG_IO",
         "SHARPEMU_LOG_NP",
@@ -387,6 +388,8 @@ public partial class MainWindow
         {
             if (name == StrictComputeSettings.VariableName)
                 StrictComputeSettings.SetEnabled(entries, toggle.IsChecked == true);
+            else if (name == RayTracingSkipSettings.VariableName)
+                RayTracingSkipSettings.SetEnabled(entries, toggle.IsChecked == true);
             else if (toggle.IsChecked == true)
             {
                 entries.Add(name);
@@ -408,6 +411,7 @@ public partial class MainWindow
     private static bool IsEnvironmentEnabled(IEnumerable<string> entries, string name)
     {
         if (name == StrictComputeSettings.VariableName) return StrictComputeSettings.IsEnabled(entries);
+        if (name == RayTracingSkipSettings.VariableName) return RayTracingSkipSettings.IsEnabled(entries);
         foreach (var entry in entries)
         {
             var parts = entry.Split('=', 2, StringSplitOptions.TrimEntries);
@@ -499,6 +503,7 @@ public partial class MainWindow
         ("SHARPEMU_WRITABLE_APP0", GameEnvWritableApp0Toggle),
         ("SHARPEMU_VK_VALIDATION", GameEnvVkValidationToggle),
         ("SHARPEMU_DUMP_SPIRV", GameEnvDumpSpirvToggle),
+        ("SHARPEMU_SKIP_RT", GameEnvSkipRtToggle),
         ("SHARPEMU_LOG_DIRECT_MEMORY", GameEnvLogDirectMemoryToggle),
         ("SHARPEMU_LOG_IO", GameEnvLogIoToggle),
         ("SHARPEMU_LOG_NP", GameEnvLogNpToggle),

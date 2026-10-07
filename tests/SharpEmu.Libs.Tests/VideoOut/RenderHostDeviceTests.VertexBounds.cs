@@ -18,7 +18,7 @@ public sealed unsafe partial class RenderHostDeviceTests
     [Fact]
     public void FullscreenStrip_DoesNotRasterizeTheVertexBeyondTheGuestDescriptor()
     {
-        if (!Ready()) return;
+        if (!Ready() || !_vulkan.SupportsClipDistance) return;
         using var presenter = new PresenterUnderTest(_vulkan);
         presenter.LoadRenderingCommands();
         var harness = presenter.Harness;

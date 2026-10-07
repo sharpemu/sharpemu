@@ -203,6 +203,35 @@ public sealed class GuestMemoryAllocatorTests
         Assert.Equal([alignedAddress + 0x1000], host.FreedAddresses);
     }
 
+    [Theory]
+    [InlineData(HostRegionState.Committed)]
+    [InlineData(HostRegionState.Reserved)]
+    public void AddressSearchSkipsLargeHostView(HostRegionState state)
+    {
+        if (OperatingSystem.IsMacOS())
+            return;
+
+        const ulong viewStart = 0x1_0000_0000;
+        const ulong viewSize = 0x4_0000_0000;
+        using var memory = new PhysicalVirtualMemory(new FakeHostMemory(viewStart, viewSize, state));
+
+        Assert.True(memory.TryAllocateAtOrAbove(viewStart, 0x1000, false, 0x1000, out var address));
+        Assert.Equal(viewStart + viewSize, address);
+    }
+
+    [Fact]
+    public void AddressSearchUsesOwnedReservedTail()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        const ulong start = 0x0000008001600000;
+        using var memory = new PhysicalVirtualMemory(new GranularityAwareHostMemory());
+        Assert.True(memory.TryAllocateAtExact(start, 0x1000, false, out _));
+        Assert.True(memory.TryAllocateAtOrAbove(start, 0x2000, false, 0x1000, out var address));
+        Assert.Equal(start + 0x1000, address);
+    }
+
     [Fact]
     public void TryBackFixedRangeRollsBackEarlierGapsWhenLaterGapCannotBeBacked()
     {
@@ -443,10 +472,12 @@ public sealed class GuestMemoryAllocatorTests
         public void Dispose() { }
     }
 
-    private sealed class FakeHostMemory : IHostMemory
+    private sealed class FakeHostMemory(ulong occupiedStart = 0, ulong occupiedSize = 0,
+        HostRegionState occupiedState = HostRegionState.Committed) : IHostMemory
     {
         public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
-            desiredAddress != 0 ? desiredAddress : 0x00007000_0000_0000;
+            occupiedSize != 0 && desiredAddress >= occupiedStart && desiredAddress - occupiedStart < occupiedSize
+                ? 0 : desiredAddress != 0 ? desiredAddress : 0x00007000_0000_0000;
 
         public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) =>
             Allocate(desiredAddress, size, protection);
@@ -469,6 +500,12 @@ public sealed class GuestMemoryAllocatorTests
 
         public bool Query(ulong address, out HostRegionInfo info)
         {
+            if (occupiedSize != 0 && address >= occupiedStart && address - occupiedStart < occupiedSize)
+            {
+                info = new HostRegionInfo(occupiedStart, occupiedStart, occupiedSize,
+                    occupiedState, 0x1000, HostPageProtection.ReadWrite, 4, 4);
+                return true;
+            }
             info = default;
             return false;
         }

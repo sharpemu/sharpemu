@@ -180,11 +180,13 @@ public enum SpirvOp : ushort
     GroupNonUniformShuffleXor = 346,
     GroupNonUniformShuffleUp = 347,
     GroupNonUniformShuffleDown = 348,
+    SetMeshOutputsExt = 5295,
 }
 
 public enum SpirvCapability : uint
 {
     Shader = 1,
+    ShaderLayer = 69,
     InterpolationFunction = 52,
     FragmentBarycentricKhr = 5284,
     ClipDistance = 32,
@@ -208,11 +210,11 @@ public enum SpirvCapability : uint
     GroupNonUniformVote = 62,
     GroupNonUniformBallot = 64,
     GroupNonUniformShuffle = 65,
-    ShaderLayer = 5253,
-    ShaderViewportIndex = 5254,
+    ShaderViewportIndex = 70,
     ShaderViewportIndexLayerExt = 5254,
     RuntimeDescriptorArray = 5302,
     PhysicalStorageBufferAddresses = 5347,
+    MeshShadingExt = 5283,
 }
 
 public enum SpirvStorageClass : uint
@@ -235,6 +237,7 @@ public enum SpirvExecutionModel : uint
     Vertex = 0,
     Fragment = 4,
     GLCompute = 5,
+    MeshExt = 5365,
 }
 
 public enum SpirvExecutionMode : uint
@@ -242,6 +245,9 @@ public enum SpirvExecutionMode : uint
     OriginUpperLeft = 7,
     DepthReplacing = 12,
     LocalSize = 17,
+    OutputVertices = 26,
+    OutputPrimitivesExt = 5270,
+    OutputTrianglesExt = 5298,
 }
 
 public enum SpirvDecoration : uint
@@ -253,11 +259,13 @@ public enum SpirvDecoration : uint
     Flat = 14,
     PerVertexKhr = 5285,
     Location = 30,
+    Index = 32,
     Binding = 33,
     DescriptorSet = 34,
     Offset = 35,
     NoContraction = 42,
     NonWritable = 24,
+    PerPrimitiveExt = 5271,
 }
 
 public enum SpirvBuiltIn : uint
@@ -279,10 +287,13 @@ public enum SpirvBuiltIn : uint
     GlobalInvocationId = 28,
     LocalInvocationIndex = 29,
     SubgroupSize = 36,
+    SubgroupId = 40,
     SubgroupLocalInvocationId = 41,
     SampleId = 18,
     SampleMask = 20,
     FragDepth = 22,
+    PrimitiveTriangleIndicesExt = 5296,
+    CullPrimitiveExt = 5299,
 }
 
 public enum SpirvImageDim : uint
@@ -614,6 +625,14 @@ public sealed class SpirvModuleBuilder
         return id;
     }
 
+    public uint TypeArrayDistinct(uint elementType, uint count)
+    {
+        var length = Constant(TypeInt(32, false), count);
+        var id = AllocateId();
+        Emit(_typesConstantsGlobals, SpirvOp.TypeArray, id, elementType, length);
+        return id;
+    }
+
     public uint TypeRuntimeArray(uint elementType)
     {
         if (_runtimeArrayTypes.TryGetValue(elementType, out var existing))
@@ -781,9 +800,12 @@ public sealed class SpirvModuleBuilder
     }
 
     public uint BeginFunction(uint returnType, uint functionType)
+        => BeginFunction(returnType, functionType, 0);
+
+    public uint BeginFunction(uint returnType, uint functionType, uint functionControl)
     {
         var id = AllocateId();
-        Emit(_functions, SpirvOp.Function, returnType, id, 0, functionType);
+        Emit(_functions, SpirvOp.Function, returnType, id, functionControl, functionType);
         return id;
     }
 

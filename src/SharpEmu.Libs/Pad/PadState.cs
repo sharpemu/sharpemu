@@ -22,7 +22,12 @@ internal readonly record struct PadState(
     HostGamepadType Type = HostGamepadType.Generic,
     HostGamepadConnection Connection = HostGamepadConnection.Unknown,
     HostMotionState Motion = default,
-    HostTouchState Touch = default);
+    HostTouchState Touch = default)
+{
+    internal bool HostWindowFocused { get; init; }
+    internal uint KeyboardButtons { get; init; }
+    internal uint ControllerButtons { get; init; }
+}
 
 /// <summary>SCE_PAD_BUTTON bit values.</summary>
 internal static class OrbisPadButton

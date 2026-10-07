@@ -11,6 +11,47 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class DirectImageTableTests
 {
+    [Theory]
+    [InlineData(9u, 0u, true)]
+    [InlineData(13u, 0x00020003u, true)]
+    [InlineData(13u, 0x00040003u, false)]
+    public void DenseCandidateTracePreservesSourceAddressesAndRawWords(uint type, uint sliceWord, bool valid)
+    {
+        uint[] descriptor = [0x017D5C00, 0xC4700000, 0x010DC1DF,
+            0x01B00FAC | (type << 28), sliceWord, 0x00500004, 0x00000400, 0x00005204];
+        bool ReadCandidate(ulong address, out uint word)
+        {
+            word = 0;
+            const ulong start = 0x1000 + 344;
+            if (address < start || address >= start + 32 * 32)
+                return false;
+            word = descriptor[(int)((address - start) % 32 / 4)];
+            return true;
+        }
+
+        var plan = ShaderResourcePlan.Extract(CreateGuardedProgram(), ShaderStage.Compute, Hash, 0, 2);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var observedKeys = new List<uint>();
+        var inputs = new ResourceRuntimeInputs
+        {
+            UserData = [0x1000, 0],
+            ReadCleanMemory = ReadCandidate,
+            TraceImageCandidate = (source, key, heap, address, words) =>
+            {
+                Assert.Equal(plan.Info.Images[0].Source, source);
+                Assert.Equal(0x1000ul, heap);
+                Assert.Equal(heap + 344 + key * 32, address);
+                Assert.Equal(descriptor, words.ToArray());
+                observedKeys.Add(key);
+            },
+        };
+        Assert.True(ResourceMaterializer.Materialize(plan,
+            inputs.WithReader(ReadCandidate), ref snapshot, ref specialization));
+        Assert.Equal(Enumerable.Range(0, 32).Select(key => (uint)key), observedKeys);
+        Assert.Equal(valid ? descriptor : new uint[8], Assert.Single(snapshot.Images));
+    }
+
     internal static Gen5ShaderProgram CreateWaveIndexedDescriptorProgram()
     {
         return Program(
@@ -326,7 +367,7 @@ public sealed class DirectImageTableTests
 
         var success = ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read),
             ref snapshot, ref specialization, out var failure);
-        Assert.Equal(distinctCount <= ShaderResourceInfo.MaxImages, success);
+        Assert.Equal(distinctCount <= ShaderResourceInfo.MaxIndirectImageCandidates, success);
         if (success)
         {
             Assert.Equal(ResourceMaterializationFailure.None, failure);

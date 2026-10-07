@@ -26,6 +26,7 @@ public sealed class GraphicsPrograms
     public ShaderProgram Vertex { get; init; }
     public ShaderProgram Pixel { get; init; }
     public VertexInputInfo VertexInput { get; init; } = new();
+    public MeshDrawConfiguration? MeshInput { get; init; }
     public PixelInputInfo PixelInput { get; init; } = new();
 
     // False when the provider could not build the programs; the executor skips the draw.
@@ -54,6 +55,10 @@ public sealed class ComputeProgram
 // The shader and pipeline caches behind the executor.
 public interface IShaderPipelineProvider
 {
+    bool MeshShadersSupported => false;
+
+    void DumpRejectedGraphics(RegisterBanks banks, bool autoDraw) { }
+
     GraphicsPrograms GetGraphicsPrograms(
         VertexStageRegisters vertex,
         PixelStageRegisters pixel,
@@ -62,6 +67,16 @@ public interface IShaderPipelineProvider
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound);
+
+    GraphicsPrograms GetMeshGraphicsPrograms(
+        VertexStageRegisters vertex,
+        PixelStageRegisters pixel,
+        ShaderInterfaceRegisters shaderInterface,
+        ContextRegisters context,
+        UserConfigRegisters userConfig,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound) => new() { Available = false };
 
     PipelineHandle CreateGraphicsPipeline(
         ReadOnlySpan<ColorTargetState> colors,

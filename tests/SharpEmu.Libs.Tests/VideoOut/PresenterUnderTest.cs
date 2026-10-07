@@ -55,6 +55,7 @@ internal sealed class PresenterUnderTest : IDisposable
         SetField("_device", vulkan.Device);
         SetField("_supportsFragmentShaderBarycentric", vulkan.SupportsFragmentShaderBarycentric);
         SetField("_supportsFillRectangle", vulkan.SupportsFillRectangle);
+        SetField("_supportsShaderClipDistance", vulkan.SupportsClipDistance);
         SetField("_deviceInfo", vulkan.DeviceInfo);
         SetField("_scheduler", Harness.Scheduler);
         SetField("_relay", Harness.Worker.Relay);
@@ -68,6 +69,8 @@ internal sealed class PresenterUnderTest : IDisposable
         SetField("_commandStream", new CommandStreamQueue((ICommandStreamHost)Instance));
         SetField("_descriptorHeap", new DescriptorHeap(vulkan.DeviceInfo, Harness.Scheduler));
         SetField("_maxPushDescriptors", vulkan.MaxPushDescriptors);
+        vulkan.Vk.GetPhysicalDeviceProperties(vulkan.Physical, out var deviceProperties);
+        SetField("_shaderDescriptorLimits", deviceProperties.Limits);
         SetField("_noAttachmentSampleCounts", SampleCountFlags.Count1Bit);
         HostBuffers = new VulkanHostBufferPool(128UL * 1024 * 1024, allocation => InvokeMethod("DestroyHostBufferAllocation", allocation));
         SetField("_hostBufferPool", HostBuffers);
@@ -77,7 +80,7 @@ internal sealed class PresenterUnderTest : IDisposable
         {
             "_batchResources", "_batchRetireBuffers", "_pendingGuestSubmissions",
             "_deferredGuestImageVersionDestroys",
-            "_pipelineEntries", "_shaderModules", "_shaderModuleSpirvBytes",
+            "_pipelineEntries", "_shaderModules", "_shaderModuleSpirvBytes", "_rectangleStageCode",
             "_preparedTextures", "_barriersAfterRendering", "_feedbackSnapshotPool",
         })
         {

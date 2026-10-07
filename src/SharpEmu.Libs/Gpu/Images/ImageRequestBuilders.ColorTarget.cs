@@ -308,6 +308,11 @@ public static partial class ImageRequestBuilders
         {
             throw SubmissionScheduler.Fatal($"The 3D render-target view starts past the mip depth: base={view.BaseLayer} count={view.LayerCount} depth={viewDepth} mip={words.MipLevel}.");
         }
+        if (volume)
+        {
+            // The slice window does not increase the storage depth of a volume.
+            view = view with { LayerCount = Math.Min(view.LayerCount, viewDepth - view.BaseLayer) };
+        }
 
         var description = ImageDescription.Create();
         description.Data = new GuestSpan(words.BaseAddress, backingSize);
@@ -350,6 +355,32 @@ public static partial class ImageRequestBuilders
             targetFormat.HostFormat, viewType, ImageAspectFlags.ColorBit, words.MipLevel, 1, view.BaseLayer, view.LayerCount, default, ImageUsageFlags.ColorAttachmentBit);
         var request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
         var (clearSupported, fixedClearSupported, clearValue) = DccClearInfo(targetFormat.HostFormat, hasDcc, words.ClearWord0);
+        if (hasDcc && fixedClearSupported && words.Order == ChannelOrder.Standard &&
+            !is1D && levels == 1 && samples == 1 && tileMode == GuestTileMode.RenderTarget)
+        {
+            var sliceSize = NativeColorClear.SliceSize(width, height, bytesPerElement);
+            var metadataSize = sliceSize * description.TransferLayers;
+            if (sliceSize != 0 && (words.DccAddress & 4095) == 0 &&
+                metadataSize <= ulong.MaxValue - words.DccAddress)
+            {
+                description.Metadata.Range = new GuestSpan(words.DccAddress, metadataSize);
+                description.Metadata.NativeColorClear = true;
+                description.Metadata.ColorAlphaOnLeastSignificantBits = words.Layout is
+                    ChannelLayout.Bits8 or ChannelLayout.Bits16 or ChannelLayout.Bits32 or
+                    ChannelLayout.Bits2_10_10_10 or ChannelLayout.Bits1_5_5_5;
+                description.Metadata.ColorMetadataBaseLayer = view.BaseLayer;
+                description.Metadata.PackedColorClearSupported = clearSupported;
+                description.Metadata.PackedColorClear = clearValue;
+                request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
+            }
+        }
+        if (ImageClearTrace.Enabled)
+        {
+            ImageClearTrace.Write($"target image=0x{words.BaseAddress:X16} extent={width}x{height} format={targetFormat.HostFormat} " +
+                $"metadata=0x{words.DccAddress:X16} enabled={hasDcc} mip={words.MipLevel} layer={view.BaseLayer} layers={view.LayerCount} " +
+                $"info=0x{words.Info:X8} control=0x{words.DccControl:X8} clear0=0x{words.ClearWord0:X8} " +
+                $"packedSupported={clearSupported} fixedSupported={fixedClearSupported}");
+        }
         return new ColorTargetResolution(
             request, words.BaseAddress, backingSize, viewExtent, words.MipLevel, view.BaseLayer, samples, targetFormat.ExportMapping,
             clearSupported, fixedClearSupported, clearValue);

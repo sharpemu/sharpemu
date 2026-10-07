@@ -387,7 +387,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                 }
                 using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GamepadPoll))
                 {
-                    SampleGamepad();
+                    SampleGamepad(updateDevices: false);
                 }
                 var now = timer.Elapsed.TotalSeconds;
                 render(now - last);
@@ -441,8 +441,21 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         SDL_QuitSubSystem(InitFlags);
     }
 
+    private long _lastEventPumpTimestamp;
+
     private void PumpEvents()
     {
+        if (RenderPhaseProfile.Enabled)
+        {
+            var timestamp = Stopwatch.GetTimestamp();
+            if (_lastEventPumpTimestamp != 0)
+            {
+                var gap = Stopwatch.GetElapsedTime(_lastEventPumpTimestamp, timestamp).TotalMilliseconds;
+                if (gap >= 1000)
+                    Console.Error.WriteLine($"[PERF][WINDOW_EVENT_GAP] gap_ms={gap:F3}");
+            }
+            _lastEventPumpTimestamp = timestamp;
+        }
         SDL_Event windowEvent;
         while (PollWindowEvent(&windowEvent))
         {
@@ -738,7 +751,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         HostWindowInput.ClearGamepad();
     }
 
-    private void SampleGamepad()
+    private void SampleGamepad(bool updateDevices = true)
     {
         lock (_gamepadGate)
         {
@@ -748,7 +761,8 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                 return;
             }
 
-            SDL_UpdateGamepads();
+            if (updateDevices)
+                SDL_UpdateGamepads();
             var state = SdlGamepadStateReader.Read(_gamepad) with
             {
                 Motion = ReadMotion(),

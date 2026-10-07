@@ -46,9 +46,8 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         _pageCount = pageCount;
         _faultBufferSize = pageCount / 8;
         _faultBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags,
-            _faultBufferSize + (GuestGpuMemoryHook.TraceEnabled ? 32UL : 0UL));
-        if (GuestGpuMemoryHook.TraceEnabled)
-            _traceDownloadBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, MaxPendingFaults * 256);
+            _faultBufferSize + 64UL);
+        _traceDownloadBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, MaxPendingFaults * 256);
         _downloadBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, MaxPendingFaults * PageFaultAreaSize);
 
         var vk = device.Vk;
@@ -173,7 +172,7 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         {
             if (_traceDownloadBuffer is not null && !_traceInitialized)
             {
-                _faultBuffer.Fill(_faultBufferSize, 32, 0);
+                _faultBuffer.Fill(_faultBufferSize, 64, 0);
                 _traceInitialized = true;
             }
             return _faultBuffer;
@@ -226,16 +225,18 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         var scanTick = _scheduler.CurrentTick;
         if (_traceDownloadBuffer is not null)
         {
-            _traceDownloadBuffer.CopyFrom(_scheduler.Current, _faultBuffer, _faultBufferSize, area * 256UL, 32,
+            _traceDownloadBuffer.CopyFrom(_scheduler.Current, _faultBuffer, _faultBufferSize, area * 256UL, 64,
                 destinationAfter: AccessFlags.HostReadBit);
-            _faultBuffer.Fill(_faultBufferSize, 32, 0);
+            _faultBuffer.Fill(_faultBufferSize, 64, 0);
         }
         _scheduler.QueueCompletionAction(() =>
         {
             if (_traceDownloadBuffer is not null)
             {
-                _traceDownloadBuffer.Invalidate(area * 256UL, 32);
-                var record = MemoryMarshal.Cast<byte, uint>(_traceDownloadBuffer.Mapped.Slice((int)area * 256, 32));
+                _traceDownloadBuffer.Invalidate(area * 256UL, 64);
+                var record = MemoryMarshal.Cast<byte, uint>(_traceDownloadBuffer.Mapped.Slice((int)area * 256, 64));
+                if (record[8] == 2)
+                    throw SubmissionScheduler.Fatal($"The shader called an unlinked function: hash=0x{((ulong)record[10] << 32 | record[9]):X16} pc=0x{record[11]:X} target=0x{((ulong)record[13] << 32 | record[12]):X16}.");
                 if (record[0] != 0)
                     Console.Error.WriteLine($"[GPU][DEVICE_ADDRESS_FAULT] scan_tick={scanTick} hash=0x{((ulong)record[2] << 32 | record[1]):X16} pc=0x{record[3]:X} address=0x{((ulong)record[5] << 32 | record[4]):X16} stage={record[6]}");
             }

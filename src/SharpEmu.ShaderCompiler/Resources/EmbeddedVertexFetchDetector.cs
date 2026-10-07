@@ -3,6 +3,7 @@
 
 using System.Collections.Generic;
 using System.Linq;
+using SharpEmu.ShaderCompiler.Ir;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
@@ -62,6 +63,47 @@ public static class EmbeddedVertexFetchDetector
             Value = Value,
             PrologLoads = PrologLoads is null ? null : [.. PrologLoads],
         };
+
+        public readonly bool SameValue(ScalarInfo other) => Type == other.Type &&
+            (Type == ValueType.Unknown || (AttributeId == other.AttributeId && Value == other.Value &&
+                (PrologLoads ?? []).SequenceEqual(other.PrologLoads ?? [])));
+    }
+
+    private sealed class TrackingState
+    {
+        public ScalarInfo[] Scalars = new ScalarInfo[ScalarRegisterCount];
+        public ValueType[] Vectors = new ValueType[VectorRegisterCount];
+        public Dictionary<(uint Register, uint Lane), ScalarInfo> Lanes = [];
+        public int VertexOffset = -1;
+        public int InstanceOffset = -1;
+
+        public TrackingState Copy() => new()
+        {
+            Scalars = (ScalarInfo[])Scalars.Clone(),
+            Vectors = (ValueType[])Vectors.Clone(),
+            Lanes = new(Lanes),
+            VertexOffset = VertexOffset,
+            InstanceOffset = InstanceOffset,
+        };
+
+        public void Merge(TrackingState other)
+        {
+            for (var index = 0; index < Scalars.Length; index++)
+                if (!Scalars[index].SameValue(other.Scalars[index])) Scalars[index] = default;
+            for (var index = 0; index < Vectors.Length; index++)
+                if (Vectors[index] != other.Vectors[index]) Vectors[index] = ValueType.Unknown;
+            foreach (var key in Lanes.Keys.ToArray())
+                if (!other.Lanes.TryGetValue(key, out var value) || !Lanes[key].SameValue(value))
+                    Lanes.Remove(key);
+            if (VertexOffset != other.VertexOffset) VertexOffset = -2;
+            if (InstanceOffset != other.InstanceOffset) InstanceOffset = -2;
+        }
+
+        public bool SameValue(TrackingState other) =>
+            VertexOffset == other.VertexOffset && InstanceOffset == other.InstanceOffset &&
+            Scalars.Where((value, index) => !value.SameValue(other.Scalars[index])).Any() == false &&
+            Vectors.SequenceEqual(other.Vectors) && Lanes.Count == other.Lanes.Count &&
+            Lanes.All(pair => other.Lanes.TryGetValue(pair.Key, out var value) && pair.Value.SameValue(value));
     }
 
     public static EmbeddedVertexFetchPlan Detect(
@@ -73,20 +115,18 @@ public static class EmbeddedVertexFetchDetector
         uint waveSize)
     {
         var plan = new EmbeddedVertexFetchPlan();
-        var vertexOffsetCandidate = -1;
-        var instanceOffsetCandidate = -1;
-        var vertexOffsetConflict = false;
-        var instanceOffsetConflict = false;
-        var scalars = new ScalarInfo[ScalarRegisterCount];
-        var vectors = new ValueType[VectorRegisterCount];
-        var lanes = new Dictionary<(uint Register, uint Lane), ScalarInfo>();
-        var trackLanes = !program.Instructions.Any(instruction => HasBranch(instruction.Opcode));
+        // Unknown targets can enter any instruction. Do not rewrite a program with unresolved transfers.
+        if (program.Instructions.Any(instruction => instruction.Opcode is
+            "SSetpcB64" or "SSwappcB64" or "SRfeB64" or "SCallB64")) return plan;
+        var graph = IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance);
+        if (graph.Blocks.Count == 0) return plan;
+        var initial = new TrackingState();
 
         void Mark(int register, ValueType type)
         {
             if (register >= 0 && register < ScalarRegisterCount)
             {
-                scalars[register].Type = type;
+                initial.Scalars[register].Type = type;
             }
         }
 
@@ -95,190 +135,239 @@ public static class EmbeddedVertexFetchDetector
         Mark(bufferTableRegister, ValueType.BufferTable);
         Mark(bufferTableRegister + 1, ValueType.BufferTable);
 
-        foreach (var instruction in program.Instructions)
+        var blocks = graph.Blocks.Select(block => program.Instructions
+            .Where(instruction => instruction.Pc >= block.StartPc && instruction.Pc < block.EndPc).ToArray()).ToArray();
+        var inputs = new TrackingState?[blocks.Length];
+        var outputs = new TrackingState?[blocks.Length];
+        var pending = new Queue<int>();
+        var queued = new bool[blocks.Length];
+        pending.Enqueue(0);
+        queued[0] = true;
+        while (pending.TryDequeue(out var blockIndex))
         {
-            var destination = instruction.Destinations.Count != 0 ? instruction.Destinations[0] : default(Gen5Operand?);
-            var source0 = instruction.Sources.Count > 0 ? instruction.Sources[0] : default(Gen5Operand?);
-            var source1 = instruction.Sources.Count > 1 ? instruction.Sources[1] : default(Gen5Operand?);
-            var source2 = instruction.Sources.Count > 2 ? instruction.Sources[2] : default(Gen5Operand?);
-
-            // Fetch shaders accumulate the draw's vertex offset in v0, or in v5 and the
-            // instance offset in v8 under the user-data-at-s8 layout.
-            var vertexIndexAccumulator = IsVector(destination) && (destination!.Value.Value == 0 || (userDataBase == 8 && destination.Value.Value == 5));
-            var instanceIndexAccumulator = IsVector(destination) && destination!.Value.Value == (userDataBase == 8 ? 8u : 3u);
-            var indexOffsetAdd = (vertexIndexAccumulator || instanceIndexAccumulator) && IsTrackedScalarRegister(source0) &&
-                ((instruction.Opcode == "VAddI32" && IsVector(source1) && source1!.Value.Value == destination!.Value.Value) ||
-                 (userDataBase == 8 && destination!.Value.Value is 5 or 8 && instruction.Opcode == "VSadU32" &&
-                  IsVector(source2) && source2!.Value.Value == destination.Value.Value &&
-                  TryConstant(scalars, source1, out var sadZero) && sadZero == 0));
-            if (plan.Loads.Count == 0 && indexOffsetAdd)
+            queued[blockIndex] = false;
+            TrackingState? incoming = blockIndex == 0 ? initial.Copy() : null;
+            foreach (var predecessor in graph.Predecessors[blockIndex])
             {
-                var register = ScalarRegister(source0!.Value);
-                if (register >= userDataBase && register - userDataBase < userDataCount)
+                if (outputs[predecessor] is not { } previous) continue;
+                if (incoming is null) incoming = previous.Copy();
+                else incoming.Merge(previous);
+            }
+            if (incoming is null) continue;
+            inputs[blockIndex] = incoming.Copy();
+            ProcessBlock(blocks[blockIndex], incoming, collect: false);
+            if (outputs[blockIndex] is { } old && old.SameValue(incoming)) continue;
+            outputs[blockIndex] = incoming;
+            foreach (var successor in graph.Successors[blockIndex])
+                if (!queued[successor])
                 {
-                    ref var candidate = ref (vertexIndexAccumulator ? ref vertexOffsetCandidate : ref instanceOffsetCandidate);
-                    ref var conflict = ref (vertexIndexAccumulator ? ref vertexOffsetConflict : ref instanceOffsetConflict);
-                    if (candidate >= 0 && candidate != (int)register)
+                    pending.Enqueue(successor);
+                    queued[successor] = true;
+                }
+        }
+        for (var blockIndex = 0; blockIndex < blocks.Length; blockIndex++)
+            if (inputs[blockIndex] is { } input) ProcessBlock(blocks[blockIndex], input, collect: true);
+        return plan;
+
+        void ProcessBlock(Gen5ShaderInstruction[] instructions, TrackingState state, bool collect)
+        {
+            var scalars = state.Scalars;
+            var vectors = state.Vectors;
+            var lanes = state.Lanes;
+            foreach (var instruction in instructions)
+            {
+
+                var destination = instruction.Destinations.Count != 0 ? instruction.Destinations[0] : default(Gen5Operand?);
+                var source0 = instruction.Sources.Count > 0 ? instruction.Sources[0] : default(Gen5Operand?);
+                var source1 = instruction.Sources.Count > 1 ? instruction.Sources[1] : default(Gen5Operand?);
+                var source2 = instruction.Sources.Count > 2 ? instruction.Sources[2] : default(Gen5Operand?);
+
+                // Fetch shaders accumulate the draw's vertex offset in v0, or in v5 and the
+                // instance offset in v8 under the user-data-at-s8 layout.
+                var vertexIndexAccumulator = IsVector(destination) && (destination!.Value.Value == 0 || (userDataBase == 8 && destination.Value.Value == 5));
+                var instanceIndexAccumulator = IsVector(destination) && destination!.Value.Value == (userDataBase == 8 ? 8u : 3u);
+                var indexOffsetAdd = (vertexIndexAccumulator || instanceIndexAccumulator) && IsTrackedScalarRegister(source0) &&
+                    ((instruction.Opcode == "VAddI32" && IsVector(source1) && source1!.Value.Value == destination!.Value.Value) ||
+                     (userDataBase == 8 && destination!.Value.Value is 5 or 8 && instruction.Opcode == "VSadU32" &&
+                      IsVector(source2) && source2!.Value.Value == destination.Value.Value &&
+                      TryConstant(scalars, source1, out var sadZero) && sadZero == 0));
+                if (indexOffsetAdd)
+                {
+                    var register = ScalarRegister(source0!.Value);
+                    if (register >= userDataBase && register - userDataBase < userDataCount)
                     {
-                        conflict = true;
-                    }
-                    else
-                    {
-                        candidate = (int)register;
+                        ref var candidate = ref (vertexIndexAccumulator ? ref state.VertexOffset : ref state.InstanceOffset);
+                        candidate = candidate == -1 || candidate == (int)register ? (int)register : -2;
                     }
                 }
-            }
 
-            switch (instruction.Opcode)
-            {
-                case "VWritelaneB32":
-                    if (IsVector(destination) && destination!.Value.Value < VectorRegisterCount)
-                    {
-                        vectors[destination.Value.Value] = ValueType.Unknown;
-                    }
-
-                    if (trackLanes && IsVector(destination) && IsTrackedScalarRegister(source0) && ScalarRegister(source0!.Value) < ScalarRegisterCount &&
-                        TryConstant(scalars, source1, out var lane))
-                    {
-                        lanes[(destination!.Value.Value, Lane(lane, waveSize))] = scalars[ScalarRegister(source0.Value)].Copy();
-                    }
-                    else if (IsVector(destination))
-                    {
-                        ClearLanes(lanes, destination!.Value.Value);
-                    }
-
-                    break;
-                case "VReadlaneB32":
-                    if (trackLanes && IsTrackedScalarRegister(destination) && ScalarRegister(destination!.Value) < ScalarRegisterCount && IsVector(source0) &&
-                        TryConstant(scalars, source1, out var readLane))
-                    {
-                        scalars[ScalarRegister(destination.Value)] = lanes.TryGetValue((source0!.Value.Value, Lane(readLane, waveSize)), out var stored)
-                            ? stored.Copy()
-                            : default;
-                    }
-                    else if (IsTrackedScalarRegister(destination))
-                    {
-                        ClearScalars(scalars, destination!.Value, 1);
-                    }
-
-                    break;
-                case "SMovB32":
-                    if (IsTrackedScalarRegister(destination) && IsTrackedScalarRegister(source0) && ScalarRegister(source0!.Value) < ScalarRegisterCount)
-                    {
-                        scalars[ScalarRegister(destination!.Value)] = scalars[ScalarRegister(source0.Value)].Copy();
-                    }
-                    else if (IsTrackedScalarRegister(destination))
-                    {
-                        if (TryConstant(scalars, source0, out var value))
+                switch (instruction.Opcode)
+                {
+                    case "VWritelaneB32":
+                        if (IsVector(destination) && destination!.Value.Value < VectorRegisterCount)
                         {
-                            scalars[ScalarRegister(destination!.Value)] = new ScalarInfo { Type = ValueType.Constant, Value = value };
+                            vectors[destination.Value.Value] = ValueType.Unknown;
                         }
-                        else
+
+                        if (IsVector(destination) && IsTrackedScalarRegister(source0) && ScalarRegister(source0!.Value) < ScalarRegisterCount &&
+                            TryConstant(scalars, source1, out var lane))
+                        {
+                            lanes[(destination!.Value.Value, Lane(lane, waveSize))] = scalars[ScalarRegister(source0.Value)].Copy();
+                        }
+                        else if (IsVector(destination))
+                        {
+                            ClearLanes(lanes, destination!.Value.Value);
+                        }
+
+                        break;
+                    case "VReadlaneB32":
+                        if (IsTrackedScalarRegister(destination) && ScalarRegister(destination!.Value) < ScalarRegisterCount && IsVector(source0) &&
+                            TryConstant(scalars, source1, out var readLane))
+                        {
+                            scalars[ScalarRegister(destination.Value)] = lanes.TryGetValue((source0!.Value.Value, Lane(readLane, waveSize)), out var stored)
+                                ? stored.Copy()
+                                : default;
+                        }
+                        else if (IsTrackedScalarRegister(destination))
                         {
                             ClearScalars(scalars, destination!.Value, 1);
                         }
-                    }
 
-                    break;
-                case "SMovkI32":
-                    if (IsTrackedScalarRegister(destination))
-                    {
-                        scalars[ScalarRegister(destination!.Value)] = new ScalarInfo
-                        {
-                            Type = ValueType.Constant,
-                            Value = unchecked((uint)(short)instruction.Sources[0].Value),
-                        };
-                    }
-
-                    break;
-                default:
-                    if (instruction.Control is Gen5ScalarMemoryControl scalarLoad && instruction.Opcode.StartsWith("SLoadDword", StringComparison.Ordinal))
-                    {
-                        ApplyScalarLoad(instruction, scalarLoad, scalars);
-                    }
-                    else if (instruction.Opcode == "VCndmaskB32")
-                    {
-                        if (IsVector(destination) && destination!.Value.Value < VectorRegisterCount)
-                        {
-                            ClearLanes(lanes, destination.Value.Value);
-                            if (IsVector(source0) && source0!.Value.Value == 8 && IsVector(source1) && source1!.Value.Value == 5)
-                            {
-                                vectors[destination.Value.Value] = ValueType.Index;
-                            }
-                        }
-                    }
-                    else if (IsAttributePropagationAlu(instruction.Opcode))
-                    {
-                        if (IsTrackedScalarRegister(destination) && IsTrackedScalarRegister(source0) && ScalarRegister(source0!.Value) < ScalarRegisterCount &&
-                            scalars[ScalarRegister(source0.Value)].Type == ValueType.Attribute)
+                        break;
+                    case "SMovB32":
+                        if (IsTrackedScalarRegister(destination) && IsTrackedScalarRegister(source0) && ScalarRegister(source0!.Value) < ScalarRegisterCount)
                         {
                             scalars[ScalarRegister(destination!.Value)] = scalars[ScalarRegister(source0.Value)].Copy();
                         }
                         else if (IsTrackedScalarRegister(destination))
                         {
-                            if (TryConstant(scalars, source0, out var left) && TryConstant(scalars, source1, out var right))
+                            if (TryConstant(scalars, source0, out var value))
                             {
-                                scalars[ScalarRegister(destination!.Value)] = new ScalarInfo
-                                {
-                                    Type = ValueType.Constant,
-                                    Value = instruction.Opcode switch
-                                    {
-                                        "SAndB32" => left & right,
-                                        "SLshlB32" => left << (int)(right & 31),
-                                        "SBfeU32" => left >> (int)(right & 31),
-                                        _ => unchecked(left + right),
-                                    },
-                                };
+                                scalars[ScalarRegister(destination!.Value)] = new ScalarInfo { Type = ValueType.Constant, Value = value };
                             }
                             else
                             {
                                 ClearScalars(scalars, destination!.Value, 1);
                             }
                         }
-                    }
-                    else if (instruction.Control is Gen5BufferMemoryControl buffer && IsFetchBufferLoad(instruction.Opcode))
-                    {
-                        if (buffer.VectorAddress < VectorRegisterCount && vectors[buffer.VectorAddress] == ValueType.Index &&
-                            buffer.ScalarResource < ScalarRegisterCount && scalars[buffer.ScalarResource].Type == ValueType.Buffer)
-                        {
-                            var table = scalars[buffer.ScalarResource];
-                            if (plan.Loads.Count == 0)
-                            {
-                                if (!vertexOffsetConflict)
-                                {
-                                    plan.VertexOffsetScalarRegister = vertexOffsetCandidate;
-                                }
 
-                                if (!instanceOffsetConflict)
+                        break;
+                    case "SCmovB64":
+                        if (IsTrackedScalarRegister(destination))
+                        {
+                            ClearScalars(scalars, destination!.Value, 2);
+                        }
+
+                        break;
+                    case "SMovkI32":
+                        if (IsTrackedScalarRegister(destination))
+                        {
+                            scalars[ScalarRegister(destination!.Value)] = new ScalarInfo
+                            {
+                                Type = ValueType.Constant,
+                                Value = unchecked((uint)(short)instruction.Sources[0].Value),
+                            };
+                        }
+
+                        break;
+                    default:
+                        if (instruction.Control is Gen5ScalarMemoryControl scalarLoad && instruction.Opcode.StartsWith("SLoadDword", StringComparison.Ordinal))
+                        {
+                            ApplyScalarLoad(instruction, scalarLoad, scalars);
+                        }
+                        else if (instruction.Opcode == "VCndmaskB32")
+                        {
+                            if (IsVector(destination) && destination!.Value.Value < VectorRegisterCount)
+                            {
+                                ClearLanes(lanes, destination.Value.Value);
+                                vectors[destination.Value.Value] = ValueType.Unknown;
+                                if (IsVector(source0) && source0!.Value.Value == 8 && IsVector(source1) && source1!.Value.Value == 5)
                                 {
-                                    plan.InstanceOffsetScalarRegister = instanceOffsetCandidate;
+                                    vectors[destination.Value.Value] = ValueType.Index;
                                 }
                             }
-
-                            plan.Loads.Add(new EmbeddedVertexFetchLoad(instruction.Pc, table.AttributeId, Math.Max(buffer.DwordCount, 1u), table.PrologLoads is null ? [] : [.. table.PrologLoads]));
                         }
-                    }
+                        else if (IsAttributePropagationAlu(instruction.Opcode))
+                        {
+                            if (IsTrackedScalarRegister(destination) && IsTrackedScalarRegister(source0) && ScalarRegister(source0!.Value) < ScalarRegisterCount &&
+                                scalars[ScalarRegister(source0.Value)].Type == ValueType.Attribute)
+                            {
+                                scalars[ScalarRegister(destination!.Value)] = scalars[ScalarRegister(source0.Value)].Copy();
+                            }
+                            else if (IsTrackedScalarRegister(destination))
+                            {
+                                if (TryConstant(scalars, source0, out var left) && TryConstant(scalars, source1, out var right))
+                                {
+                                    scalars[ScalarRegister(destination!.Value)] = new ScalarInfo
+                                    {
+                                        Type = ValueType.Constant,
+                                        Value = instruction.Opcode switch
+                                        {
+                                            "SAndB32" => left & right,
+                                            "SLshlB32" => left << (int)(right & 31),
+                                            "SBfeU32" => left >> (int)(right & 31),
+                                            _ => unchecked(left + right),
+                                        },
+                                    };
+                                }
+                                else
+                                {
+                                    ClearScalars(scalars, destination!.Value, 1);
+                                }
+                            }
+                        }
+                        else if (instruction.Control is Gen5BufferMemoryControl buffer && IsFetchBufferLoad(instruction.Opcode))
+                        {
+                            if (collect && buffer.VectorAddress < VectorRegisterCount && vectors[buffer.VectorAddress] == ValueType.Index &&
+                                buffer.ScalarResource < ScalarRegisterCount && scalars[buffer.ScalarResource].Type == ValueType.Buffer)
+                            {
+                                var table = scalars[buffer.ScalarResource];
+                                if (plan.Loads.Count == 0)
+                                {
+                                    if (state.VertexOffset >= 0)
+                                    {
+                                        plan.VertexOffsetScalarRegister = state.VertexOffset;
+                                    }
 
-                    break;
-            }
+                                    if (state.InstanceOffset >= 0)
+                                    {
+                                        plan.InstanceOffsetScalarRegister = state.InstanceOffset;
+                                    }
+                                }
 
-            if (instruction.Opcode == "VMovreldB32")
-            {
-                lanes.Clear();
-            }
-            else if (instruction.Opcode != "VWritelaneB32")
-            {
-                foreach (var written in instruction.Destinations)
+                                plan.Loads.Add(new EmbeddedVertexFetchLoad(instruction.Pc, table.AttributeId, Math.Max(buffer.DwordCount, 1u), table.PrologLoads is null ? [] : [.. table.PrologLoads]));
+                            }
+                        }
+                        else
+                        {
+                            foreach (var written in instruction.Destinations)
+                                if (IsTrackedScalarRegister(written))
+                                    ClearScalars(scalars, written, instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u);
+                        }
+
+                        break;
+                }
+
+                if (instruction.Opcode == "VMovreldB32")
                 {
-                    if (written.Kind == Gen5OperandKind.VectorRegister)
+                    lanes.Clear();
+                    Array.Clear(vectors);
+                }
+                else if (instruction.Opcode != "VWritelaneB32")
+                {
+                    foreach (var written in instruction.Destinations)
                     {
-                        ClearLanes(lanes, written.Value);
+                        if (written.Kind == Gen5OperandKind.VectorRegister)
+                        {
+                            ClearLanes(lanes, written.Value);
+                            if (instruction.Opcode != "VCndmaskB32" && written.Value < VectorRegisterCount)
+                                vectors[written.Value] = ValueType.Unknown;
+                        }
                     }
                 }
             }
-        }
 
-        return plan;
+        }
     }
 
     // A scalar load through the attribute table yields attribute records; one through
@@ -372,10 +461,6 @@ public static class EmbeddedVertexFetchDetector
             ClearScalars(scalars, destination.Value, count);
         }
     }
-
-    private static bool HasBranch(string opcode) =>
-        opcode is "SSetpcB64" or "SBranch" or "SCbranchScc0" or "SCbranchScc1" or "SCbranchVccz" or "SCbranchVccnz" or
-            "SCbranchExecz" or "SCbranchExecnz";
 
     private static bool IsFetchBufferLoad(string opcode) =>
         opcode is "BufferLoadFormatX" or "BufferLoadFormatXy" or "BufferLoadFormatXyz" or "BufferLoadFormatXyzw";

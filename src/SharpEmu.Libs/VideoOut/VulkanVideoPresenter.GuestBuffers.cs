@@ -91,6 +91,10 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _imageCache.InvalidateMemoryFromGpu(guestBuffer.BaseAddress, guestBuffer.Size);
             }
+            else if (guestBuffer.Writable)
+            {
+                _imageCache.InvalidateMemoryCopiesFromGpu(guestBuffer.BaseAddress, guestBuffer.Size);
+            }
             if (offset % _minStorageBufferOffsetAlignment != 0)
             {
                 throw SubmissionScheduler.Fatal(

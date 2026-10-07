@@ -23,15 +23,18 @@ internal sealed unsafe class VulkanCommandProfile : IDisposable
     internal bool PerCommandMarkers { get; set; } = Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_GPU_DRAWS") == "1";
     private readonly List<(ulong Start, ulong End)> _spans = new();
 
-    internal enum IntervalKind { Preparation, Draw, DrawIndexed, Dispatch, Tail, Overflow }
+    internal enum IntervalKind { Preparation, Draw, DrawIndexed, Dispatch, Tail, Overflow, MeshDraw }
     private readonly record struct IntervalKey(IntervalKind Kind, ulong Pipeline);
-    private readonly record struct Marker(IntervalKey Key, uint First, uint Second, uint Third);
+    internal readonly record struct MeshDrawState(uint Width, uint Height, float ViewportWidth, float ViewportHeight,
+        uint ScissorWidth, uint ScissorHeight, bool DepthTest, bool DepthWrite);
+    private readonly record struct Marker(IntervalKey Key, uint First, uint Second, uint Third, MeshDrawState MeshState);
     private sealed class IntervalTotal
     {
         public ulong Count;
         public double Milliseconds;
         public double MaximumMilliseconds;
         public Marker MaximumMarker;
+        public double MeshGroups;
     }
 
     private sealed class BufferQueries(QueryPool pool)
@@ -94,7 +97,7 @@ internal sealed unsafe class VulkanCommandProfile : IDisposable
         _vulkan.CmdWriteTimestamp2(command, PipelineStageFlags2.TopOfPipeBit, queries.Pool, 0);
     }
 
-    public void WriteMarker(CommandBuffer command, IntervalKind kind, ulong pipeline = 0, uint first = 0, uint second = 0, uint third = 0)
+    public void WriteMarker(CommandBuffer command, IntervalKind kind, ulong pipeline = 0, uint first = 0, uint second = 0, uint third = 0, MeshDrawState meshState = default)
     {
         if (!PerCommandMarkers && kind != IntervalKind.Tail)
         {
@@ -113,7 +116,7 @@ internal sealed unsafe class VulkanCommandProfile : IDisposable
         }
 
         var index = queries.Count++;
-        queries.Markers[index] = new Marker(new IntervalKey(kind, pipeline), first, second, third);
+        queries.Markers[index] = new Marker(new IntervalKey(kind, pipeline), first, second, third, meshState);
         // Completion intervals do not isolate shader stages or eliminate overlap with later work.
         _vulkan.CmdWriteTimestamp2(command, PipelineStageFlags2.BottomOfPipeBit, queries.Pool, (uint)index);
     }
@@ -164,6 +167,8 @@ internal sealed unsafe class VulkanCommandProfile : IDisposable
             var milliseconds = ElapsedTicks(values[(index - 1) * 2], values[index * 2], _timestampBits) * (double)_timestampPeriod / 1_000_000;
             total.Count++;
             total.Milliseconds += milliseconds;
+            if (marker.Key.Kind == IntervalKind.MeshDraw)
+                total.MeshGroups += (double)marker.First * marker.Second * marker.Third;
             if (milliseconds >= total.MaximumMilliseconds)
             {
                 total.MaximumMilliseconds = milliseconds;
@@ -231,7 +236,16 @@ internal sealed unsafe class VulkanCommandProfile : IDisposable
         {
             _write($"[PERF][GPU_INTERVAL] completed_ms={_totals.Values.Sum(total => total.Milliseconds):F3} intervals={_totals.Values.Sum(total => (long)total.Count)} skipped_markers={_skippedMarkers} unavailable_buffers={_unavailableBuffers}");
             foreach (var (key, total) in _totals.OrderByDescending(pair => pair.Value.Milliseconds).Take(12))
-                _write($"[PERF][GPU_INTERVAL] kind={key.Kind} pipeline={key.Pipeline} count={total.Count} total_ms={total.Milliseconds:F3} max_ms={total.MaximumMilliseconds:F3} max_args={total.MaximumMarker.First},{total.MaximumMarker.Second},{total.MaximumMarker.Third}");
+            {
+                _write($"[PERF][GPU_INTERVAL] kind={key.Kind} pipeline={key.Pipeline} count={total.Count} total_ms={total.Milliseconds:F3} avg_ms={total.Milliseconds / total.Count:F3} max_ms={total.MaximumMilliseconds:F3} max_args={total.MaximumMarker.First},{total.MaximumMarker.Second},{total.MaximumMarker.Third} mesh_groups={total.MeshGroups:F0}");
+                if (key.Kind == IntervalKind.MeshDraw)
+                {
+                    var state = total.MaximumMarker.MeshState;
+                    _write($"[PERF][GPU_MESH_MAX] pipeline={key.Pipeline} target={state.Width}x{state.Height} " +
+                        $"viewport={state.ViewportWidth}x{state.ViewportHeight} scissor={state.ScissorWidth}x{state.ScissorHeight} " +
+                        $"depth_test={state.DepthTest} depth_write={state.DepthWrite}");
+                }
+            }
         }
         _totals.Clear();
         _skippedMarkers = 0;

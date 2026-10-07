@@ -425,8 +425,32 @@ public sealed partial class GpuCommandInterpreter
             case 0x19:
             case 0x1A:
             case 0x1B:
+                break;
             case 0x38:
+            {
+                var counterId = (eventAddress >> 3) & 0x3Fu;
+                if (eventIndex != 1 || counterId >= (ulong)_syntheticOcclusionCounters.Length)
+                {
+                    throw _host.Fatal($"The occlusion-counter selection is not supported: index=0x{eventIndex:X8} counter={counterId}.");
+                }
+
+                // The address field holds packed control data, not a guest pointer.
+                _selectedOcclusionCounter = (int)counterId;
+                _occlusionDumpStrideBytes = 4u << (int)((eventAddress >> 9) & 0x3u);
+                _occlusionDumpInstanceMask = (uint)((eventAddress >> 11) & 0xFF_FFFFu);
+                break;
+            }
             case 0x3A:
+                if (eventIndex != 0)
+                {
+                    throw _host.Fatal($"The occlusion-counter reset index is invalid: index=0x{eventIndex:X8}.");
+                }
+
+                _syntheticOcclusionCounters[_selectedOcclusionCounter] = 0;
+                if (_selectedOcclusionCounter == 0 && _host.TryReadOcclusionCounter(QueueId, out var resetCount))
+                {
+                    _occlusionCounterStart = resetCount;
+                }
                 break;
             case 0x39:
             {
@@ -435,15 +459,28 @@ public sealed partial class GpuCommandInterpreter
                     throw _host.Fatal($"The occlusion-counter dump is invalid: index=0x{eventIndex:X8} address=0x{eventAddress:X16}.");
                 }
 
-                // Publish visible occlusion results for each depth block.
                 const ulong readyBit = 1UL << 63;
-                var result = readyBit | SyntheticOcclusionCounter;
-                for (var depthBlock = 0u; depthBlock < 16u; depthBlock++)
+                var hostCount = 0UL;
+                var aggregate = _selectedOcclusionCounter == 0 && _host.TryReadOcclusionCounter(QueueId, out hostCount);
+                var count = aggregate ? (hostCount - _occlusionCounterStart) & (readyBit - 1) : SyntheticOcclusionCounter;
+                var result = readyBit | count;
+                if (VisibilityResultTrace.Enabled)
+                    VisibilityResultTrace.Occlusion($"dump queue={QueueId} submit={SubmitId} address=0x{eventAddress:X16} counter={_selectedOcclusionCounter} aggregate={aggregate} host={hostCount} resetBase={_occlusionCounterStart} value={count} mask=0x{_occlusionDumpInstanceMask:X6} stride={_occlusionDumpStrideBytes}");
+                for (var depthBlock = 0u; depthBlock < 24u; depthBlock++)
                 {
-                    WriteQword(eventAddress + ((ulong)depthBlock * 2 * sizeof(ulong)), result);
+                    if ((_occlusionDumpInstanceMask & (1u << (int)depthBlock)) != 0)
+                    {
+                        var destination = eventAddress + ((ulong)depthBlock * _occlusionDumpStrideBytes);
+                        // One virtual depth block holds the host sum. The other blocks are empty.
+                        WriteQword(destination, aggregate && depthBlock != 0 ? readyBit : result);
+                    }
                 }
 
-                SyntheticOcclusionCounter = (SyntheticOcclusionCounter + 1) & (readyBit - 1);
+                if (_occlusionDumpInstanceMask != 0 && VisibilityResultTrace.Enabled)
+                    VisibilityResultTrace.Published(QueueId, SubmitId, eventAddress, result,
+                        _occlusionDumpInstanceMask, _occlusionDumpStrideBytes, _host.Memory as SharpEmu.HLE.IGuestBackedSpace, aggregate);
+                if (!aggregate)
+                    _syntheticOcclusionCounters[_selectedOcclusionCounter] = (SyntheticOcclusionCounter + 1) & (readyBit - 1);
                 break;
             }
 

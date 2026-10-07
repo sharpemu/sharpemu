@@ -448,6 +448,8 @@ public sealed class RenderExecutorStateTests : IDisposable
                 _pipelines.Calls.Clear();
                 _pipelines.PipelineRenderings.Clear();
                 _pipelines.PipelineRequests.Clear();
+                _pipelines.ExportMappings.Clear();
+                _pipelines.DisableBlendingRequests.Clear();
                 _executor.DrawIndexed(1, Banks(), Indexed(3));
                 _executor.DrawAuto(2, Banks(), Auto(3));
                 _executor.Dispatch(3, Banks(), 1, 1, 1, 0x41);
@@ -456,13 +458,9 @@ public sealed class RenderExecutorStateTests : IDisposable
             Sequence();
             Sequence();
             var baselineReads = _host.GuestReads;
-            var before = GC.GetAllocatedBytesForCurrentThread();
-            Sequence();
-            var baselineBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+            var baselineBytes = AllocationMeasurementCollection.Measure(Sequence);
             var readsPerSequence = _host.GuestReads - baselineReads;
-            before = GC.GetAllocatedBytesForCurrentThread();
-            Sequence();
-            var measuredBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+            var measuredBytes = AllocationMeasurementCollection.Measure(Sequence);
 
             Assert.Equal(0, readsPerSequence);
             Assert.Equal(readsPerSequence, _host.GuestReads - baselineReads - readsPerSequence);

@@ -13,9 +13,53 @@ namespace SharpEmu.Libs.Tests.Memory.GuestMemory;
 [Collection(GuestMemoryStateCollection.Name)]
 public sealed unsafe class PhysicalVirtualMemoryBackedTests
 {
+    [Fact]
+    public void DefaultHostForwardsAllocationQueriesAndReusesReleasedLowerGap()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var host = HostViewMemory.Create();
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var runtimeHost = (IHostMemory)typeof(PhysicalVirtualMemory)
+            .GetField("_hostMemory", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(memory)!;
+        var size = host.Granularity;
+        var start = ProbeGuestAddress(host, 4 * size);
+        Assert.Equal(start, PlatformMemory.Reserve(start, size, HostPageProtection.NoAccess));
+        var foreignHeld = true;
+        try
+        {
+            Assert.True(runtimeHost.TryQueryAllocation(start + 4096, out var allocation));
+            Assert.Equal(new HostAddressRange(start, size), allocation);
+            Assert.True(memory.TryHoldRangeAtOrAbove(start, size, size, out var selected));
+            Assert.Equal(start + size, selected);
+            Assert.True(PlatformMemory.Free(start));
+            foreignHeld = false;
+            Assert.False(runtimeHost.TryQueryAllocation(start, out _));
+            Assert.True(memory.TryHoldRangeAtOrAbove(start, size, size, out selected));
+            Assert.Equal(start, selected);
+        }
+        finally
+        {
+            if (foreignHeld) Assert.True(PlatformMemory.Free(start));
+        }
+    }
+
     private sealed class QueryCountingHostMemory(IHostMemory inner) : IHostMemory
     {
         public int QueryCount { get; set; }
+        public int AllocationQueryCount { get; set; }
+        public int AllocationQueryMode { get; init; }
+        public bool TryQueryAllocation(ulong address, out HostAddressRange range)
+        {
+            AllocationQueryCount++;
+            range = default;
+            if (AllocationQueryMode == 2)
+            {
+                range = new HostAddressRange(address, ulong.MaxValue);
+                return true;
+            }
+            return AllocationQueryMode == 1 && inner.TryQueryAllocation(address, out range);
+        }
         public bool RejectExecutableProtection { get; init; }
         public ulong Allocate(ulong address, ulong size, HostPageProtection protection) => inner.Allocate(address, size, protection);
         public ulong Reserve(ulong address, ulong size, HostPageProtection protection) => inner.Reserve(address, size, protection);
@@ -306,6 +350,77 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         Assert.True(memory.TryHoldRange(higherAddress, size));
         Assert.True(memory.TryHoldRangeAtOrAbove(lowerAddress, size, size, out var selectedAddress));
         Assert.Equal(lowerAddress, selectedAddress);
+    }
+
+    [Fact]
+    public void AvailableRangeReusesOwnedSpaceWithoutHostQueries()
+    {
+        if (!Supported) return;
+        var host = HostViewMemory.Create();
+        var size = HoleSize(host);
+        var memoryHost = new QueryCountingHostMemory(PlatformMemory);
+        using var memory = new PhysicalVirtualMemory(memoryHost, host, BackingSize);
+        var lowerAddress = ProbeGuestAddress(host, 4 * size);
+        var higherAddress = lowerAddress + 2 * size;
+        Assert.True(memory.TryHoldRange(higherAddress, 2 * size));
+        Assert.True(memory.TryMapBacked(higherAddress, size, 0, GuestPageProtection.Read, out _));
+        memoryHost.QueryCount = 0;
+
+        Assert.True(memory.TryHoldAvailableRange(lowerAddress, size, host.Granularity, out var selectedAddress));
+        Assert.Equal(higherAddress + size, selectedAddress);
+        Assert.Equal(0, memoryHost.QueryCount);
+        Assert.Equal(0UL, selectedAddress % host.Granularity);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void ForeignAllocationSearchPreservesLowerGapAfterRelease(int queryMode)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var host = HostViewMemory.Create();
+        var memoryHost = new QueryCountingHostMemory(PlatformMemory) { AllocationQueryMode = queryMode };
+        using var memory = new PhysicalVirtualMemory(memoryHost, host, BackingSize);
+        var size = host.Granularity;
+        var start = ProbeGuestAddress(host, 4 * size);
+        Assert.Equal(start, PlatformMemory.Reserve(start, size, HostPageProtection.NoAccess));
+        var foreignHeld = true;
+        try
+        {
+            Assert.True(memory.TryHoldRangeAtOrAbove(start, size, size, out var selected));
+            Assert.Equal(start + size, selected);
+            Assert.True(memoryHost.AllocationQueryCount > 0);
+            if (queryMode == 1)
+                Assert.Equal(0, memoryHost.QueryCount);
+            else
+                Assert.True(memoryHost.QueryCount > 0);
+            Assert.True(PlatformMemory.Free(start));
+            foreignHeld = false;
+            Assert.True(memory.TryHoldRangeAtOrAbove(start, size, size, out selected));
+            Assert.Equal(start, selected);
+        }
+        finally
+        {
+            if (foreignHeld) Assert.True(PlatformMemory.Free(start));
+        }
+    }
+
+    [Fact]
+    public void OrderedSearchReusesLowerGapAfterPartialUnmap()
+    {
+        if (!Supported) return;
+        var host = HostViewMemory.Create();
+        var size = HoleSize(host);
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var address = ProbeGuestAddress(host, 4 * size);
+        Assert.True(memory.TryHoldRange(address, 4 * size));
+        Assert.True(memory.TryMapBacked(address, 3 * size, 0, GuestPageProtection.Read, out _));
+        Assert.True(memory.TryHoldRangeAtOrAbove(address, size, size, out var tail));
+        Assert.Equal(address + 3 * size, tail);
+        Assert.True(memory.TryUnmapBacked(address + size, size));
+        Assert.True(memory.TryHoldRangeAtOrAbove(address, size, size, out var lower));
+        Assert.Equal(address + size, lower);
     }
 
     [Fact]

@@ -18,6 +18,29 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 
 public sealed unsafe partial class RenderHostDeviceTests
 {
+    [Fact]
+    public void FragmentLayer_RejectsMissingDeviceFeatureBeforeModuleCreation()
+    {
+        if (!Ready()) return;
+        var (plan, resources, layout) = Prepare(Program(EndProgram(0)), ShaderStage.Pixel);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelInputAddress = 1u << 13,
+            PixelInputEnable = 1u << 13,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var compiled, out var compilationError), compilationError);
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.SetField("_supportsShaderLayer", false);
+        presenter.Run(() =>
+        {
+            var error = Assert.Throws<NotSupportedException>(() =>
+                ((IShaderPipelineHost)presenter.Instance).CreateShaderModule(
+                    new VulkanCompiledGuestShader(compiled.Spirv), ShaderStage.Pixel, 1, 1));
+            Assert.Contains("shaderOutputLayer", error.Message);
+        });
+        presenter.Harness.Shutdown();
+    }
+
     [Theory]
     [InlineData(0u, true, 191)]
     [InlineData(1u, true, 64)]
@@ -39,7 +62,9 @@ public sealed unsafe partial class RenderHostDeviceTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void RectangleList_PreservesInterpolationAndProvokingVertexOutsideTheInputTriangle(bool flat)
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void RectangleList_PreservesInterpolationAndProvokingVertexOutsideTheInputTriangle(bool flat, bool geometryFallback = false)
     {
         if (!Ready()) return;
         if (!_vulkan.SupportsFillRectangle || !_vulkan.SupportsFragmentShaderBarycentric)
@@ -49,6 +74,13 @@ public sealed unsafe partial class RenderHostDeviceTests
         }
 
         using var presenter = new PresenterUnderTest(_vulkan);
+        if (geometryFallback)
+        {
+            _vulkan.Vk.GetPhysicalDeviceFeatures(_vulkan.Physical, out var features);
+            Assert.True(features.GeometryShader);
+            presenter.SetField("_supportsFillRectangle", false);
+            presenter.SetField("_supportsRectangleGeometry", true);
+        }
         presenter.LoadRenderingCommands();
         var harness = presenter.Harness;
         var target = harness.MapBacked(0x10000, ReadWrite);

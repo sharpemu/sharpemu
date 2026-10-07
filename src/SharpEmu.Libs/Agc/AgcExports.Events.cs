@@ -64,14 +64,24 @@ public static partial class AgcExports
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var eventType = (uint)(ctx[CpuRegister.Rsi] & 0xFF);
         var eventAddress = ctx[CpuRegister.Rdx];
-        if (commandBufferAddress == 0 || eventType > 0x3F || eventAddress != 0)
+        if (commandBufferAddress == 0 || eventType > 0x3F)
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(2, ItEventWrite, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, eventType))
+        var hasAddress = eventType is 0x38 or 0x39;
+        var packetDwords = hasAddress ? 4u : 2u;
+        var eventIndex = hasAddress ? 1u : eventType is 0x07 or 0x0F or 0x10 ? 4u : 0u;
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItEventWrite, 0)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, eventType | (eventIndex << 8)))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        if (hasAddress &&
+            (!TryWriteUInt32(ctx, commandAddress + 8, (uint)eventAddress & ~7u) ||
+             !TryWriteUInt32(ctx, commandAddress + 12, (uint)(eventAddress >> 32))))
         {
             return ReturnPointer(ctx, 0);
         }

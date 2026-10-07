@@ -24,4 +24,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../docs/guest-ownership-trace.md" LogicalName="GuestOwnershipTraceGuide" />
+  </ItemGroup>
 </Project>

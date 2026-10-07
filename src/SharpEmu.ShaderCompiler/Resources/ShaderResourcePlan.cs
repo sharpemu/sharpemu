@@ -84,7 +84,9 @@ public sealed class ShaderResourcePlan
     public static ShaderResourcePlan Extract(Gen5ShaderProgram program, ShaderStage stage, ulong hash, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64)
     {
-        var graph = ScalarGraphDiskCache.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize);
+        // Mesh system inputs are not uniform user data, even when a GS pointer occupies s0:s1.
+        var graph = ScalarGraphDiskCache.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize,
+            excludedUserDataRegisters: stage == ShaderStage.Mesh ? 0xFCUL : 0);
         var plan = new ShaderResourcePlan(graph, stage, hash);
         var reads = ResourceTableReadPlanner.Plan(graph, stage, hash);
         var memo = new Dictionary<ScalarValue, ScalarValue>();
@@ -123,6 +125,8 @@ public sealed class ShaderResourcePlan
         var tracked = ResourceTracker.Track(plan);
         plan.DescriptorSources = tracked.Sources;
         plan.Info = tracked.Info;
+        if (program.Instructions.Any(instruction => instruction.Control is ShaderCallFaultControl))
+            plan.Info.UsesDeviceAddresses = true;
         plan.IndirectImages = tracked.IndirectImages;
         plan.BufferCandidateTables = tracked.BufferCandidateTables;
         plan.DynamicReads = plan.DynamicReads.Where(read => !tracked.IndirectReads.Contains(read)).ToList();

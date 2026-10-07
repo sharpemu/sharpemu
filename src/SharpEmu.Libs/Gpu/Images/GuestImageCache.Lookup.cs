@@ -1,7 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Buffers;
 
 namespace SharpEmu.Libs.Gpu.Images;
@@ -44,7 +43,51 @@ public sealed partial class GuestImageCache
     }
 
     private static bool SameRequest(in ImageRequest left, in ImageRequest right) =>
-        MemoryMarshal.AsBytes(new ReadOnlySpan<ImageRequest>(in left)).SequenceEqual(MemoryMarshal.AsBytes(new ReadOnlySpan<ImageRequest>(in right)));
+        SameDescription(left.Description, right.Description) && left.View == right.View && left.Role == right.Role &&
+        left.TraceTextureMetadataAddress == right.TraceTextureMetadataAddress &&
+        string.Equals(left.TraceTextureDescriptor, right.TraceTextureDescriptor, StringComparison.Ordinal) &&
+        left.TraceMetadataCompress == right.TraceMetadataCompress && left.TraceWriteCompress == right.TraceWriteCompress;
+
+    private static bool SameDescription(in ImageDescription left, in ImageDescription right)
+    {
+        if (left.Data != right.Data || left.Stencil != right.Stencil ||
+            left.HtileClearMask != right.HtileClearMask || left.PixelFormat != right.PixelFormat ||
+            left.GuestFormat != right.GuestFormat || left.Type != right.Type ||
+            left.Extent.Width != right.Extent.Width || left.Extent.Height != right.Extent.Height ||
+            left.Extent.Depth != right.Extent.Depth || left.Resources != right.Resources ||
+            left.Pitch != right.Pitch || left.BytesPerBlock != right.BytesPerBlock ||
+            left.Samples != right.Samples || left.TileMode != right.TileMode || left.Bgra16 != right.Bgra16)
+        {
+            return false;
+        }
+
+        ref readonly var a = ref left.Metadata;
+        ref readonly var b = ref right.Metadata;
+        if (a.Range != b.Range || a.Kind != b.Kind || a.Control != b.Control || a.Compression != b.Compression ||
+            a.StencilCompressed != b.StencilCompressed || a.NativeColorClear != b.NativeColorClear ||
+            a.ColorAlphaOnLeastSignificantBits != b.ColorAlphaOnLeastSignificantBits ||
+            a.ColorMetadataBaseLayer != b.ColorMetadataBaseLayer || a.PackedColorClearSupported != b.PackedColorClearSupported ||
+            a.PackedColorClear.Uint32_0 != b.PackedColorClear.Uint32_0 ||
+            a.PackedColorClear.Uint32_1 != b.PackedColorClear.Uint32_1 ||
+            a.PackedColorClear.Uint32_2 != b.PackedColorClear.Uint32_2 ||
+            a.PackedColorClear.Uint32_3 != b.PackedColorClear.Uint32_3)
+        {
+            return false;
+        }
+
+        for (var level = 0; level < ImageDescription.MaxLevels; level++)
+        {
+            ref readonly var first = ref left.MipLayout[level];
+            ref readonly var second = ref right.MipLayout[level];
+            if (first.Offset != second.Offset || first.Size != second.Size ||
+                first.Pitch != second.Pitch || first.Height != second.Height)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private bool TryReuseLookup(ref ImageRequest request, bool exactFormat, out ResourceSlotIdentifier result)
     {

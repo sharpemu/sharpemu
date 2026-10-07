@@ -72,6 +72,8 @@ public static partial class Gen5SpirvTranslator
         private readonly bool _enableGraphicsSubgroupOperations;
         private readonly uint _waveLaneCount;
         private readonly bool _emulateWave64;
+        private readonly bool _hasIndirectControlFlow;
+        private readonly Dictionary<uint, Dictionary<uint, uint>> _savedLaneValues = new();
 
         // Safety valve for the PC-dispatcher loop. Each iteration executes one
         // GCN basic block; a correctly-translated shader always reaches its
@@ -126,6 +128,7 @@ public static partial class Gen5SpirvTranslator
         private readonly uint[] _pixelInputCntl;
         private readonly List<uint> _interfaces = [];
         private readonly Dictionary<uint, uint> _pixelInputs = [];
+        private uint _pixelInputLocationMask;
         private readonly Dictionary<uint, SpirvPixelOutput> _pixelOutputs = [];
         private readonly Dictionary<uint, uint> _vertexOutputs = [];
         private readonly Dictionary<uint, SpirvVertexInput> _vertexInputsByPc = [];
@@ -159,6 +162,7 @@ public static partial class Gen5SpirvTranslator
         private uint _vcc;
         private uint _exec;
         private uint _reachedPixelExport;
+        private uint _pixelDepthOutput;
         private uint _pixelValidMaskActive;
         private uint _programCounter;
         private uint _programActive;
@@ -178,6 +182,7 @@ public static partial class Gen5SpirvTranslator
         private uint _scratch;
         private uint _scratchElementPointer;
         private uint _scratchDwordCount;
+        private uint _ldsDwordCount;
         private uint _positionOutput;
         private uint _pointSizeOutput;
         private uint _clipDistanceOutput;
@@ -286,18 +291,20 @@ public static partial class Gen5SpirvTranslator
                     }
                 }
 
-                var blocks = BuildBasicBlocks(_request.Program.Instructions);
-                // The fallback when the full structurer declines: blocks in program order behind a
-                // next-block guard, with natural loops as structured loops.
-                var structuredForward = StructuredForwardBlocks && blocks.Count != 0 && TryBuildLoopRegions(blocks, out _loopLatchByHeader);
-                DeclareModule();
+                var blocks = BuildBasicBlocks(_request.Program.Instructions, _stage == Gen5SpirvStage.Mesh);
+                // Mesh blocks use their own barrier convergence path.
+                var structuredForward = _stage != Gen5SpirvStage.Mesh && StructuredForwardBlocks &&
+                    blocks.Count != 0 && TryBuildLoopRegions(blocks, out _loopLatchByHeader);
                 if (blocks.Count == 0)
                 {
                     error = "shader contains no executable blocks";
                     return false;
                 }
 
-
+                _directMeshBlocks = CanEmitDirectMeshBlocks(blocks);
+                FindLocalComparisonPredicates(blocks);
+                DeclareModule();
+                DeclareIntegerReciprocalFunction();
                 var functionType = _module.TypeFunction(_voidType);
                 var main = _module.BeginFunction(_voidType, functionType);
                 _module.AddName(main, "main");
@@ -329,9 +336,14 @@ public static partial class Gen5SpirvTranslator
                     _module.AddStatement(SpirvOp.Return);
                     _module.AddLabel();
                 }
+                InitializeStorageBlockLengths();
                 EmitInitialState();
-
-                if (StructuredControlFlow && blocks.Count > 0 && TryStructureRange(blocks, 0, blocks.Count, blocks.Count, emit: false, out _))
+                if (_directMeshBlocks)
+                {
+                    if (!TryEmitDirectMeshBlocks(blocks, out error)) return false;
+                }
+                else if (_stage != Gen5SpirvStage.Mesh && StructuredControlFlow && blocks.Count > 0 &&
+                    TryStructureRange(blocks, 0, blocks.Count, blocks.Count, emit: false, out _))
                 {
                     // As the dispatcher does before its first block: an out-of-bounds invocation runs nothing.
                     var runLabel = _module.AllocateId();
@@ -348,101 +360,21 @@ public static partial class Gen5SpirvTranslator
                     _module.AddStatement(SpirvOp.Branch, doneLabel);
                     _module.AddLabel(doneLabel);
                 }
-                else
+                else if (structuredForward)
                 {
-                var loopHeader = _module.AllocateId();
-                var switchHeader = _module.AllocateId();
-                var switchMerge = _module.AllocateId();
-                var loopContinue = _module.AllocateId();
-                var loopMerge = _module.AllocateId();
-                var defaultLabel = _module.AllocateId();
-                var caseLabels = new uint[blocks.Count];
-                for (var index = 0; index < caseLabels.Length; index++)
-                {
-                    caseLabels[index] = _module.AllocateId();
-                }
-
-                if (structuredForward)
-                {
-                    // Each invocation visits its blocks in program order, except for the back
-                    // edges of natural loops. Emitting the blocks in order, each guarded by "this
-                    // is the next block", and every loop as a structured SPIR-V loop runs exactly
-                    // what the dispatcher loop would. The driver then sees ifs and loops and can
-                    // keep only the live guest registers in hardware registers, where the
-                    // dispatcher keeps nearly all of them live and pays a switch per block.
+                    // Keep structured control flow so the driver can promote local registers.
+                    var structuredMerge = _module.AllocateId();
                     if (!TryEmitStructuredRange(blocks, 0, blocks.Count - 1, -1, out error))
                     {
                         return false;
                     }
 
-                    _module.AddStatement(SpirvOp.Branch, loopMerge);
+                    _module.AddStatement(SpirvOp.Branch, structuredMerge);
+                    _module.AddLabel(structuredMerge);
                 }
-                else
+                else if (!TryEmitDispatchedBlocks(blocks, out error))
                 {
-                _module.AddStatement(SpirvOp.Branch, loopHeader);
-                _module.AddLabel(loopHeader);
-                // Check before the first block can write from an inactive invocation.
-                var programIsActive = Load(_boolType, _programActive);
-                _module.AddStatement(SpirvOp.LoopMerge, loopMerge, loopContinue, 0);
-                _module.AddStatement(SpirvOp.BranchConditional, programIsActive, switchHeader, loopMerge);
-
-                _module.AddLabel(switchHeader);
-                var selector = Load(_uintType, _programCounter);
-                _module.AddStatement(SpirvOp.SelectionMerge, switchMerge, 0);
-                var switchOperands = new uint[2 + (blocks.Count * 2)];
-                switchOperands[0] = selector;
-                switchOperands[1] = defaultLabel;
-                for (var index = 0; index < blocks.Count; index++)
-                {
-                    switchOperands[2 + (index * 2)] = (uint)index;
-                    switchOperands[3 + (index * 2)] = caseLabels[index];
-                }
-
-                _module.AddStatement(SpirvOp.Switch, switchOperands);
-                for (var index = 0; index < blocks.Count; index++)
-                {
-                    _module.AddLabel(caseLabels[index]);
-                    if (!TryEmitBlock(blocks, index, out error))
-                    {
-                        error = $"block=0x{blocks[index].StartPc:X}: {error}";
-                        return false;
-                    }
-
-                    _module.AddStatement(SpirvOp.Branch, switchMerge);
-                }
-
-                _module.AddLabel(defaultLabel);
-                Store(_programActive, _module.ConstantBool(false));
-                _module.AddStatement(SpirvOp.Branch, switchMerge);
-
-                _module.AddLabel(switchMerge);
-                _module.AddStatement(SpirvOp.Branch, loopContinue);
-                _module.AddLabel(loopContinue);
-                var active = Load(_boolType, _programActive);
-                if (_maxDispatcherSteps > 0)
-                {
-                    var steps = IAdd(Load(_uintType, _iterationGuard), UInt(1));
-                    Store(_iterationGuard, steps);
-                    var withinLimit = _module.AddInstruction(
-                        SpirvOp.ULessThan,
-                        _boolType,
-                        steps,
-                        UInt((uint)_maxDispatcherSteps));
-                    active = _module.AddInstruction(
-                        SpirvOp.LogicalAnd,
-                        _boolType,
-                        active,
-                        withinLimit);
-                }
-
-                _module.AddStatement(
-                    SpirvOp.BranchConditional,
-                    active,
-                    loopHeader,
-                    loopMerge);
-                }
-
-                _module.AddLabel(loopMerge);
+                    return false;
                 }
                 if (_stage == Gen5SpirvStage.Pixel &&
                     Environment.GetEnvironmentVariable(
@@ -508,6 +440,11 @@ public static partial class Gen5SpirvTranslator
                     _module.AddLabel(returnLabel);
                 }
 
+                if (_stage == Gen5SpirvStage.Mesh)
+                {
+                    CommitMeshOutputs();
+                }
+
                 _module.AddStatement(SpirvOp.Return);
                 _module.EndFunction();
 
@@ -515,12 +452,17 @@ public static partial class Gen5SpirvTranslator
                 {
                     Gen5SpirvStage.Vertex => SpirvExecutionModel.Vertex,
                     Gen5SpirvStage.Pixel => SpirvExecutionModel.Fragment,
+                    Gen5SpirvStage.Mesh => SpirvExecutionModel.MeshExt,
                     _ => SpirvExecutionModel.GLCompute,
                 };
                 _module.AddEntryPoint(model, main, "main", _interfaces);
                 if (_stage == Gen5SpirvStage.Pixel)
                 {
                     _module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
+                    if (_pixelDepthOutput != 0)
+                    {
+                        _module.AddExecutionMode(main, SpirvExecutionMode.DepthReplacing);
+                    }
                 }
                 else if (_stage == Gen5SpirvStage.Compute)
                 {
@@ -538,11 +480,24 @@ public static partial class Gen5SpirvTranslator
                         physicalSizes[1],
                         physicalSizes[2]);
                 }
+                else if (_stage == Gen5SpirvStage.Mesh)
+                {
+                    _module.AddExecutionMode(
+                        main,
+                        SpirvExecutionMode.LocalSize,
+                        _pairedMeshLanes ? _localSizeX / 2 : _localSizeX,
+                        _localSizeY,
+                        _localSizeZ);
+                    AddMeshExecutionModes(main);
+                }
 
                 var attributeCount = _stage == Gen5SpirvStage.Vertex
                     ? (uint)_vertexOutputs.Count
                     : (uint)_pixelInputs.Count;
-                shader = new Gen5SpirvShader(_module.Build(), attributeCount);
+                shader = new Gen5SpirvShader(_module.Build(), attributeCount)
+                {
+                    InputLocationMask = _stage == Gen5SpirvStage.Pixel ? _pixelInputLocationMask : null,
+                };
                 return true;
             }
             catch (Exception exception)
@@ -555,6 +510,11 @@ public static partial class Gen5SpirvTranslator
         private void DeclareModule()
         {
             _module.AddCapability(SpirvCapability.Shader);
+            if (_stage == Gen5SpirvStage.Mesh)
+            {
+                _module.AddExtension("SPV_EXT_mesh_shader");
+                _module.AddCapability(SpirvCapability.MeshShadingExt);
+            }
             _module.AddCapability(SpirvCapability.Int64);
             _module.AddCapability(SpirvCapability.ImageQuery);
             if (UsesSubgroupOperations())
@@ -567,7 +527,7 @@ public static partial class Gen5SpirvTranslator
                     _module.AddCapability(SpirvCapability.GroupNonUniformShuffle);
                 }
 
-                if (UsesWaveControl())
+                if (UsesWaveControl() || _stage == Gen5SpirvStage.Mesh)
                 {
                     _module.AddCapability(SpirvCapability.GroupNonUniformVote);
                 }
@@ -671,6 +631,7 @@ public static partial class Gen5SpirvTranslator
                 DeclareLds();
                 DeclareWave64Scratch();
                 DeclareStageInterface();
+                DeclarePairedMeshRegisters();
                 return;
             }
         }
@@ -678,15 +639,14 @@ public static partial class Gen5SpirvTranslator
         private void DeclareScratch()
         {
             if (!_request.Program.Instructions.Any(static instruction =>
-                    instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal)) &&
-                !_request.Memory.Entries.Any(static memory =>
-                    memory.AddressSpace is FlatAddressSpace.Private or FlatAddressSpace.SharedOrPrivate))
+                    instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal) ||
+                    instruction.Opcode.StartsWith("Flat", StringComparison.Ordinal)))
             {
                 return;
             }
 
             _scratchDwordCount = Math.Max(_request.ScratchDwords, 1u);
-            var arrayType = _module.TypeArray(_uintType, _scratchDwordCount);
+            var arrayType = _module.TypeArrayDistinct(_uintType, _scratchDwordCount);
             var arrayPointer = _module.TypePointer(SpirvStorageClass.Private, arrayType);
             _scratchElementPointer = _module.TypePointer(SpirvStorageClass.Private, _uintType);
             _scratch = _module.AddGlobalVariable(
@@ -704,15 +664,9 @@ public static partial class Gen5SpirvTranslator
                 return;
             }
 
-            // Metal exposes 32 KiB of threadgroup memory on the Apple GPUs we
-            // target. Some PS5 compute shaders legitimately request all of it,
-            // so allocating another workgroup variable for the wave64 bridge
-            // makes pipeline creation fail. Reuse the final dwords of the
-            // existing LDS allocation in that case. The translator already
-            // bounds guest LDS accesses to this fixed allocation; keeping the
-            // bridge inside it preserves the host limit and still provides the
-            // cross-subgroup rendezvous needed to model one 64-lane guest wave.
-            if (_lds != 0)
+            // Compute uses the final LDS words for its wave64 bridge. Mesh keeps
+            // bridge storage separate from the guest's declared LDS allocation.
+            if (_lds != 0 && _stage != Gen5SpirvStage.Mesh)
             {
                 _wave64Exchange = _lds;
                 _wave64ExchangeElementPointer = _ldsElementPointer;
@@ -749,22 +703,21 @@ public static partial class Gen5SpirvTranslator
                 return;
             }
 
-            // Compute shaders get genuine workgroup-shared LDS. Graphics stages
-            // (NGG export/vertex, pixel) cannot use the Workgroup storage class
-            // in SPIR-V, but they still emit ds_write/ds_read — typically as
-            // per-invocation scratch/spill or as NGG staging whose cross-lane
-            // reads don't feed this stage's exports. Model those as a
-            // per-invocation Private array so the shader is valid SPIR-V and its
-            // draw stops being dropped. Index masking in LdsPointer keeps the
-            // arbitrary computed addresses inside the array.
-            var storageClass = _stage == Gen5SpirvStage.Compute
+            // Compute and mesh share LDS across invocations. Other graphics
+            // stages keep their DS scratch private to each invocation.
+            var storageClass = _stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh
                 ? SpirvStorageClass.Workgroup
                 : SpirvStorageClass.Private;
-            var dwordCount = _stage == Gen5SpirvStage.Compute
-                ? ComputeLdsGuestDwordCount()
-                : PrivateLdsDwordCount;
+            var dwordCount = _stage == Gen5SpirvStage.Mesh
+                ? _request.Mesh?.LocalDataShareDwords ?? 0
+                : _stage == Gen5SpirvStage.Compute ? ComputeLdsGuestDwordCount() : PrivateLdsDwordCount;
+            if (dwordCount == 0)
+            {
+                throw new InvalidOperationException("The mesh program uses LDS without a declared allocation.");
+            }
+            _ldsDwordCount = dwordCount;
             _ldsDwordMask = dwordCount - 1;
-            var arrayDwordCount = UsesWave64Exchange() && dwordCount < LdsDwordCount
+            var arrayDwordCount = _stage == Gen5SpirvStage.Compute && UsesWave64Exchange() && dwordCount < LdsDwordCount
                 ? dwordCount + Wave64ExchangeDwordCount
                 : dwordCount;
 
@@ -855,7 +808,7 @@ public static partial class Gen5SpirvTranslator
                 // LocalInvocationIndex is a compute-stage built-in. Graphics
                 // stages can still use native subgroup operations, but they
                 // cannot combine two subgroup32 halves through a workgroup.
-                if (_stage == Gen5SpirvStage.Compute && _waveLaneCount == 64)
+                if ((_stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh) && _waveLaneCount == 64)
                 {
                     _localInvocationIndexInput = _module.AddGlobalVariable(
                         subgroupPointer,
@@ -1032,6 +985,7 @@ public static partial class Gen5SpirvTranslator
                     }
 
                     _pixelInputs.Add(attribute, variable);
+                    _pixelInputLocationMask |= 1u << (int)locations[index];
                     _interfaces.Add(variable);
                 }
 
@@ -1049,6 +1003,16 @@ public static partial class Gen5SpirvTranslator
                     (uint)SpirvBuiltIn.FragCoord);
                 _interfaces.Add(_fragCoordInput);
                 DeclarePixelSystemInputs();
+
+                if (_request.PixelDepthExportEnable && _request.Program.Instructions.Any(static instruction =>
+                        instruction.Control is Gen5ExportControl { Target: 8 } export && (export.EnableMask & 1) != 0))
+                {
+                    _pixelDepthOutput = _module.AddGlobalVariable(
+                        _module.TypePointer(SpirvStorageClass.Output, _floatType), SpirvStorageClass.Output);
+                    _module.AddName(_pixelDepthOutput, "gl_FragDepth");
+                    _module.AddDecoration(_pixelDepthOutput, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.FragDepth);
+                    _interfaces.Add(_pixelDepthOutput);
+                }
 
                 var declaredPixelOutputs =
                     Environment.GetEnvironmentVariable(
@@ -1069,6 +1033,10 @@ public static partial class Gen5SpirvTranslator
                         variable,
                         SpirvDecoration.Location,
                         binding.HostLocation);
+                    if (binding.BlendSourceIndex != 0)
+                    {
+                        _module.AddDecoration(variable, SpirvDecoration.Index, binding.BlendSourceIndex);
+                    }
                     _pixelOutputs.Add(
                         binding.ExportTarget,
                         new SpirvPixelOutput(
@@ -1099,6 +1067,10 @@ public static partial class Gen5SpirvTranslator
                     (uint)SpirvBuiltIn.WorkgroupId);
                 _interfaces.Add(_localInvocationIdInput);
                 _interfaces.Add(_workGroupIdInput);
+                if (_stage == Gen5SpirvStage.Mesh)
+                {
+                    DeclareMeshOutputs();
+                }
             }
         }
 
@@ -1169,7 +1141,12 @@ public static partial class Gen5SpirvTranslator
             {
                 Store(_pixelValidMaskActive, _module.ConstantBool(true));
             }
-            if (_subgroupInvocationIdInput != 0 && _emulateWave64)
+            if (_pairedMeshLanes)
+            {
+                StoreS64(106, ULong(0));
+                StoreS64(126, ULong(ulong.MaxValue));
+            }
+            else if (_subgroupInvocationIdInput != 0 && _emulateWave64)
             {
                 StoreS64(106, BothHalvesOfOwnBallot(_module.ConstantBool(false)));
                 StoreS64(126, BothHalvesOfOwnBallot(_module.ConstantBool(true)));
@@ -1249,6 +1226,11 @@ public static partial class Gen5SpirvTranslator
             {
                 var fragCoord = Load(_vec4Type, _fragCoordInput);
                 EmitPixelInputState(fragCoord);
+                if (_pixelDepthOutput != 0)
+                {
+                    // Keep raster depth on paths that do not export a replacement.
+                    Store(_pixelDepthOutput, _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, fragCoord, 2));
+                }
                 foreach (var output in _pixelOutputs.Values)
                 {
                     Store(output.Variable, _module.ConstantNull(output.Type));
@@ -1327,6 +1309,11 @@ public static partial class Gen5SpirvTranslator
                             sizeRegister,
                             UInt(checked(_localSizeX * _localSizeY * _localSizeZ)));
                     }
+                }
+
+                if (_stage == Gen5SpirvStage.Mesh)
+                {
+                    InitializeMeshOutputState();
                 }
             }
         }
@@ -1430,6 +1417,134 @@ public static partial class Gen5SpirvTranslator
 
         private enum SharedMemoryPhase { None, Read, Write }
 
+        private int FindComputeDispatcherStart(IReadOnlyList<ShaderBlock> blocks)
+        {
+            if (_stage != Gen5SpirvStage.Compute || _hasIndirectControlFlow) return 0;
+            var start = blocks.Count;
+            for (var index = 0; index < blocks.Count; index++)
+            {
+                var terminator = _request.Program.Instructions[blocks[index].EndIndex - 1];
+                if (!IsBranch(terminator.Opcode)) continue;
+                if (!TryGetBranchTargetPc(terminator, out var target)) return 0;
+                if (IsExitBranchTarget(_request.Program.Instructions, target)) continue;
+                if (!TryFindBlock(blocks, target, out var destination)) return 0;
+                if (destination <= index) start = Math.Min(start, destination);
+            }
+            return start;
+        }
+
+        private bool TryEmitComputePrefix(IReadOnlyList<ShaderBlock> blocks, int end, out string error)
+        {
+            error = string.Empty;
+            for (var index = 0; index < end; index++)
+            {
+                var selected = _module.AddInstruction(SpirvOp.IEqual, _boolType,
+                    Load(_uintType, _programCounter), UInt((uint)index));
+                var active = LogicalAnd(Load(_boolType, _programActive), selected);
+                var body = _module.AllocateId();
+                var merge = _module.AllocateId();
+                _module.AddStatement(SpirvOp.SelectionMerge, merge, 0);
+                _module.AddStatement(SpirvOp.BranchConditional, active, body, merge);
+                _module.AddLabel(body);
+                if (!TryEmitBlock(blocks, index, out error)) return false;
+                if (_maxDispatcherSteps > 0)
+                {
+                    var steps = IAdd(Load(_uintType, _iterationGuard), UInt(1));
+                    Store(_iterationGuard, steps);
+                    Store(_programActive, LogicalAnd(Load(_boolType, _programActive),
+                        _module.AddInstruction(SpirvOp.ULessThan, _boolType, steps, UInt((uint)_maxDispatcherSteps))));
+                }
+                _module.AddStatement(SpirvOp.Branch, merge);
+                _module.AddLabel(merge);
+            }
+            return true;
+        }
+
+        private bool TryEmitDispatchedBlocks(IReadOnlyList<ShaderBlock> blocks, out string error)
+        {
+            error = string.Empty;
+            if (_stage == Gen5SpirvStage.Mesh) return TryEmitConvergedMeshDispatch(blocks, out error);
+
+            var dispatcherStart = FindComputeDispatcherStart(blocks);
+            if (!TryEmitComputePrefix(blocks, dispatcherStart, out error)) return false;
+            if (dispatcherStart == blocks.Count) return true;
+
+            var loopHeader = _module.AllocateId();
+            var switchHeader = _module.AllocateId();
+            var switchMerge = _module.AllocateId();
+            var loopContinue = _module.AllocateId();
+            var loopMerge = _module.AllocateId();
+            var defaultLabel = _module.AllocateId();
+            var caseLabels = new uint[blocks.Count];
+            for (var index = 0; index < caseLabels.Length; index++)
+            {
+                caseLabels[index] = _module.AllocateId();
+            }
+
+            _module.AddStatement(SpirvOp.Branch, loopHeader);
+            _module.AddLabel(loopHeader);
+            // Check before the first block can write from an inactive invocation.
+            var programIsActive = Load(_boolType, _programActive);
+            _module.AddStatement(SpirvOp.LoopMerge, loopMerge, loopContinue, 0);
+            _module.AddStatement(SpirvOp.BranchConditional, programIsActive, switchHeader, loopMerge);
+
+            _module.AddLabel(switchHeader);
+            var selector = Load(_uintType, _programCounter);
+            _module.AddStatement(SpirvOp.SelectionMerge, switchMerge, 0);
+            var switchOperands = new uint[2 + ((blocks.Count - dispatcherStart) * 2)];
+            switchOperands[0] = selector;
+            switchOperands[1] = defaultLabel;
+            for (var index = dispatcherStart; index < blocks.Count; index++)
+            {
+                switchOperands[2 + ((index - dispatcherStart) * 2)] = (uint)index;
+                switchOperands[3 + ((index - dispatcherStart) * 2)] = caseLabels[index];
+            }
+
+            _module.AddStatement(SpirvOp.Switch, switchOperands);
+            for (var index = dispatcherStart; index < blocks.Count; index++)
+            {
+                _module.AddLabel(caseLabels[index]);
+                if (!TryEmitBlock(blocks, index, out error))
+                {
+                    error = $"block=0x{blocks[index].StartPc:X}: {error}";
+                    return false;
+                }
+
+                _module.AddStatement(SpirvOp.Branch, switchMerge);
+            }
+
+            _module.AddLabel(defaultLabel);
+            Store(_programActive, _module.ConstantBool(false));
+            _module.AddStatement(SpirvOp.Branch, switchMerge);
+
+            _module.AddLabel(switchMerge);
+            _module.AddStatement(SpirvOp.Branch, loopContinue);
+            _module.AddLabel(loopContinue);
+            var active = Load(_boolType, _programActive);
+            if (_maxDispatcherSteps > 0)
+            {
+                var steps = IAdd(Load(_uintType, _iterationGuard), UInt(1));
+                Store(_iterationGuard, steps);
+                var withinLimit = _module.AddInstruction(
+                    SpirvOp.ULessThan,
+                    _boolType,
+                    steps,
+                    UInt((uint)_maxDispatcherSteps));
+                active = _module.AddInstruction(
+                    SpirvOp.LogicalAnd,
+                    _boolType,
+                    active,
+                    withinLimit);
+            }
+            _module.AddStatement(
+                SpirvOp.BranchConditional,
+                active,
+                loopHeader,
+                loopMerge);
+            _module.AddLabel(loopMerge);
+            return true;
+        }
+
         private bool TryEmitBlock(
             IReadOnlyList<ShaderBlock> blocks,
             int blockIndex,
@@ -1452,10 +1567,22 @@ public static partial class Gen5SpirvTranslator
             error = string.Empty;
             var block = blocks[blockIndex];
             var halfMaskPlan = HalfMaskPlan();
-            // One guest wave can span two host subgroups. Keep its shared-memory phases ordered.
-            // The half-mask plan inserts its own barriers; other wave64 programs also
-            // need LDS phase ordering when reads and writes span basic blocks.
-            var synchronizeSharedMemory = _emulateWave64 && halfMaskPlan is null;
+            _savedLaneValues.Clear();
+            // Use fallback barriers only when the half-mask plan is not available.
+            // Restrict the fallback to single blocks and forward compute paths.
+            var synchronizeSharedMemory = _emulateWave64 && halfMaskPlan is null && (blocks.Count == 1 ||
+                (_stage == Gen5SpirvStage.Compute && !_hasIndirectControlFlow &&
+                    FindComputeDispatcherStart(blocks) == blocks.Count));
+            var lastWorkgroupBarrierIndex = -1;
+            if (!_emulateWave64 && _stage == Gen5SpirvStage.Compute && !_hasIndirectControlFlow &&
+                FindComputeDispatcherStart(blocks) == blocks.Count)
+            {
+                for (var index = block.StartIndex; index < block.EndIndex; index++)
+                {
+                    if (_request.Program.Instructions[index].Opcode == "SBarrier") lastWorkgroupBarrierIndex = index;
+                }
+            }
+            var passedWorkgroupBarrier = false;
             var sharedMemoryPhase = SharedMemoryPhase.None;
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
@@ -1478,23 +1605,36 @@ public static partial class Gen5SpirvTranslator
                     continue;
                 }
 
-                if (synchronizeSharedMemory)
+                if (synchronizeSharedMemory || lastWorkgroupBarrierIndex >= 0)
                 {
                     var nextPhase = instruction.Control is Gen5DataShareControl { Gds: false }
                         ? instruction.Opcode.StartsWith("DsRead", StringComparison.Ordinal) ? SharedMemoryPhase.Read
                         : instruction.Opcode.StartsWith("DsWrite", StringComparison.Ordinal) ? SharedMemoryPhase.Write : SharedMemoryPhase.None
                         : SharedMemoryPhase.None;
-                    if (instruction.Opcode == "SBarrier") sharedMemoryPhase = SharedMemoryPhase.None;
+                    if (instruction.Opcode == "SBarrier")
+                    {
+                        sharedMemoryPhase = SharedMemoryPhase.None;
+                        passedWorkgroupBarrier = true;
+                    }
                     if (nextPhase != SharedMemoryPhase.None)
                     {
-                        if (sharedMemoryPhase != SharedMemoryPhase.None && sharedMemoryPhase != nextPhase) EmitWave64Barrier();
+                        // Keep all shared reads complete before a reduction overwrites their source.
+                        // Existing barriers bound this straight-line workgroup region.
+                        var protectSharedReads = passedWorkgroupBarrier && index < lastWorkgroupBarrierIndex &&
+                            sharedMemoryPhase == SharedMemoryPhase.Read && nextPhase == SharedMemoryPhase.Write;
+                        if ((synchronizeSharedMemory && sharedMemoryPhase != SharedMemoryPhase.None &&
+                            sharedMemoryPhase != nextPhase) || protectSharedReads) EmitWave64Barrier();
                         sharedMemoryPhase = nextPhase;
                     }
                 }
 
                 _execKnownFull = IsExecKnownFull(instruction.Pc);
                 _emittingPc = instruction.Pc;
-                var emitted = TryEmitInstruction(instruction, out error);
+                var emitted = _pairedMeshLanes
+                    ? TryEmitPairedInstruction(instruction, out error,
+                        index + 1 < block.EndIndex && IsMeshSharedMemoryRead(instruction) &&
+                        IsMeshSharedMemoryRead(_request.Program.Instructions[index + 1]))
+                    : TryEmitInstruction(instruction, out error);
                 _emittingPc = null;
                 _execKnownFull = false;
                 if (!emitted)
@@ -1524,6 +1664,7 @@ public static partial class Gen5SpirvTranslator
             var terminator = _request.Program.Instructions[block.EndIndex - 1];
             if (terminator.Opcode == "SEndpgm")
             {
+                if (terminator.Control is ShaderCallFaultControl callFault) EmitShaderCallFault(callFault);
                 Store(_programActive, _module.ConstantBool(false));
                 return true;
             }
@@ -1562,6 +1703,15 @@ public static partial class Gen5SpirvTranslator
                 var hasTargetBlock = hasTarget && TryFindBlock(blocks, targetPc, out targetBlock);
                 var targetExits = hasTarget && IsExitBranchTarget(_request.Program.Instructions, targetPc);
                 var hasCondition = TryGetBranchCondition(terminator.Opcode, out var condition);
+                if (terminator.Control is ShaderCallMatchControl call)
+                {
+                    var address = Pair64(LoadS(call.AddressRegister), LoadS(call.AddressRegister + 1));
+                    var argument = Pair64(LoadS(call.ArgumentRegister), LoadS(call.ArgumentRegister + 1));
+                    condition = LogicalNot(LogicalAnd(
+                        _module.AddInstruction(SpirvOp.IEqual, _boolType, address, ULong(call.Address)),
+                        _module.AddInstruction(SpirvOp.IEqual, _boolType, argument, ULong(call.Argument))));
+                    hasCondition = true;
+                }
                 if (!hasTarget || (!hasTargetBlock && !targetExits) || !hasCondition)
                 {
                     error =
@@ -1907,7 +2057,7 @@ public static partial class Gen5SpirvTranslator
             return true;
         }
 
-        // SHARPEMU_STRUCTURED_FORWARD_BLOCKS=0 always emits the block dispatcher loop.
+        // Disable forward structuring to use the dispatcher fallback with a compute prefix.
         private static readonly bool StructuredForwardBlocks = !string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_STRUCTURED_FORWARD_BLOCKS"), "0", StringComparison.Ordinal);
 
@@ -2030,8 +2180,15 @@ public static partial class Gen5SpirvTranslator
                 _module.AddStatement(SpirvOp.Branch, loopHeader);
             }
             _module.AddLabel(loopHeader);
+            // Skip inactive loop regions before the body reaches the driver optimizer.
+            // Permit forward branches into any block in the loop, not only its header.
+            var currentBlock = Load(_uintType, _programCounter);
+            var withinLoop = LogicalAnd(
+                _module.AddInstruction(SpirvOp.UGreaterThanEqual, _boolType, currentBlock, UInt((uint)header)),
+                _module.AddInstruction(SpirvOp.ULessThanEqual, _boolType, currentBlock, UInt((uint)latch)));
+            var enterLoop = LogicalAnd(Load(_boolType, _programActive), withinLoop);
             _module.AddStatement(SpirvOp.LoopMerge, loopMerge, loopContinue, 0);
-            _module.AddStatement(SpirvOp.Branch, loopBody);
+            _module.AddStatement(SpirvOp.BranchConditional, enterLoop, loopBody, loopMerge);
             _module.AddLabel(loopBody);
             if (!(singleBlock
                     ? TryEmitBlock(blocks, header, out error)
@@ -2110,10 +2267,10 @@ public static partial class Gen5SpirvTranslator
             {
                 "SCbranchScc0" => LogicalNot(Load(_boolType, _scc)),
                 "SCbranchScc1" => Load(_boolType, _scc),
-                "SCbranchVccz" => LogicalNot(WaveMaskAny(106, _vcc)),
-                "SCbranchVccnz" => WaveMaskAny(106, _vcc),
-                "SCbranchExecz" => LogicalNot(WaveMaskAny(126, _exec)),
-                "SCbranchExecnz" => WaveMaskAny(126, _exec),
+                "SCbranchVccz" => LogicalNot(WaveMaskHasLanes(106)),
+                "SCbranchVccnz" => WaveMaskHasLanes(106),
+                "SCbranchExecz" => LogicalNot(WaveMaskHasLanes(126)),
+                "SCbranchExecnz" => WaveMaskHasLanes(126),
                 // The emulator does not expose a shader debug session.
                 "SCbranchCdbgsys" or
                 "SCbranchCdbguser" or
@@ -2130,9 +2287,19 @@ public static partial class Gen5SpirvTranslator
         {
             error = string.Empty;
             // No shader trap handler is installed, so S_TRAP has no effect.
+            if (instruction.Control is ShaderCallEntryControl call)
+            {
+                StoreS(call.ReturnRegister, UInt((uint)call.ReturnAddress));
+                StoreS(call.ReturnRegister + 1, UInt((uint)(call.ReturnAddress >> 32)));
+                return true;
+            }
             if (instruction.Opcode == "STrap")
             {
                 return true;
+            }
+            if (instruction.Opcode == "SSendmsg" && _stage == Gen5SpirvStage.Mesh)
+            {
+                return TryEmitMeshAllocation(instruction, out error);
             }
             if (instruction.Opcode is
                 "SNop" or
@@ -2152,7 +2319,12 @@ public static partial class Gen5SpirvTranslator
 
             if (instruction.Opcode == "SBarrier")
             {
-                if (_stage == Gen5SpirvStage.Compute)
+                if (_stage == Gen5SpirvStage.Mesh)
+                {
+                    if (!_directMeshBlocks) Store(_meshBarrierWaiting, _module.ConstantBool(true));
+                    return true;
+                }
+                if (_stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh)
                 {
                     // s_waitcnt vmcnt(0) + s_barrier also publishes buffer and image
                     // stores to the workgroup: AcquireRelease over uniform, workgroup
@@ -2611,7 +2783,7 @@ public static partial class Gen5SpirvTranslator
             EmitConditional(isFirstActive, () =>
             {
                 uint original;
-                if (_stage == Gen5SpirvStage.Compute)
+                if (_stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh)
                 {
                     original = EmitAtomic(
                         instruction.Opcode == "DsAppend"
@@ -2676,13 +2848,11 @@ public static partial class Gen5SpirvTranslator
             var addressWithOffset = offsetBytes == 0
                 ? address
                 : IAdd(address, UInt(offsetBytes));
-            // Mask the dword index into the array bounds. LDS is a power-of-two
-            // dword count, so this is a no-op for in-range compute addresses but
-            // prevents out-of-bounds access when a graphics-stage scratch write
-            // uses an arbitrary computed byte address.
-            var index = BitwiseAnd(
-                ShiftRightLogical(addressWithOffset, UInt(2)),
-                UInt(_ldsDwordMask));
+            // Bound the dword index. Mesh LDS need not have a power-of-two size.
+            var dwordIndex = ShiftRightLogical(addressWithOffset, UInt(2));
+            var index = (_ldsDwordCount & _ldsDwordMask) == 0
+                ? BitwiseAnd(dwordIndex, UInt(_ldsDwordMask))
+                : _module.AddInstruction(SpirvOp.UMod, _uintType, dwordIndex, UInt(_ldsDwordCount));
             return _module.AddInstruction(
                 SpirvOp.AccessChain,
                 _ldsElementPointer,
@@ -3134,6 +3304,7 @@ public static partial class Gen5SpirvTranslator
             var specialized = info.Buffers[bindingIndex];
             var stride = UInt(specialized.PackedStride & 0x3FFF);
             var descriptorFormat = specialized.DescriptorFormat;
+            var descriptorSwizzle = specialized.DescriptorSwizzle;
             var descriptorWord3 = UInt((specialized.DescriptorFormat << 12) | (specialized.DescriptorSwizzle & 0xFFF));
 
             var scalarOffset = instruction.Sources.Count > 2
@@ -3196,47 +3367,6 @@ public static partial class Gen5SpirvTranslator
             if (instruction.Opcode.StartsWith("BufferAtomic", StringComparison.Ordinal))
             {
                 var atomicSuffix = instruction.Opcode["BufferAtomic".Length..];
-                if (atomicSuffix is "SwapX2" or "OrX2")
-                {
-                    var wideAtomicOp = atomicSuffix == "SwapX2"
-                        ? SpirvOp.AtomicExchange
-                        : SpirvOp.AtomicOr;
-                    EmitExecConditional(() =>
-                    {
-                        var secondAddress = IAdd(dwordAddress, UInt(1));
-                        var inRange = _module.AddInstruction(
-                            SpirvOp.LogicalAnd,
-                            _boolType,
-                            IsBufferWordInRange(bindingIndex, dwordAddress),
-                            IsBufferWordInRange(bindingIndex, secondAddress));
-                        EmitConditional(inRange, () =>
-                        {
-                            var originalLow = EmitAtomic(
-                                wideAtomicOp,
-                                _uintType,
-                                BufferWordPointer(bindingIndex, dwordAddress),
-                                scope: 1,
-                                semantics: 0x48,
-                                value: () => LoadV(control.VectorData),
-                                comparator: () => UInt(0));
-                            var originalHigh = EmitAtomic(
-                                wideAtomicOp,
-                                _uintType,
-                                BufferWordPointer(bindingIndex, secondAddress),
-                                scope: 1,
-                                semantics: 0x48,
-                                value: () => LoadV(control.VectorData + 1),
-                                comparator: () => UInt(0));
-                            if (control.Glc)
-                            {
-                                StoreV(control.VectorData, originalLow);
-                                StoreV(control.VectorData + 1, originalHigh);
-                            }
-                        });
-                    });
-
-                    return true;
-                }
 
                 if (atomicSuffix is "Fmin" or "Fmax")
                 {
@@ -3385,6 +3515,9 @@ public static partial class Gen5SpirvTranslator
             {
                 if (!control.Typed)
                 {
+                    if (_stage == Gen5SpirvStage.Mesh && TryEmitSpecializedMeshBufferLoad(bindingIndex,
+                        byteAddress, descriptorFormat, descriptorSwizzle, control.VectorData, control.DwordCount))
+                        return true;
                     EmitBufferFormatLoad(
                         bindingIndex,
                         byteAddress,
@@ -6330,6 +6463,17 @@ public static partial class Gen5SpirvTranslator
                     Store(_pixelValidMaskActive, Load(_boolType, _exec));
                 }
 
+                if (export.Target == 8)
+                {
+                    if (_pixelDepthOutput != 0 && (export.EnableMask & 1) != 0)
+                    {
+                        var depth = Bitcast(_floatType, LoadV(instruction.Sources[0].Value));
+                        Store(_pixelDepthOutput, _module.AddInstruction(SpirvOp.Select, _floatType,
+                            Load(_boolType, _exec), depth, Load(_floatType, _pixelDepthOutput)));
+                    }
+                    return true;
+                }
+
                 if (!_pixelOutputs.TryGetValue(export.Target, out var output))
                 {
                     return true;
@@ -6371,21 +6515,21 @@ public static partial class Gen5SpirvTranslator
 
                     if (export.Compressed)
                     {
-                        var value = LoadCompressedExportComponent(
-                            instruction,
-                            component);
-                        values[component] = output.Kind switch
+                        if (output.Kind == Gen5PixelOutputKind.Float)
                         {
-                            Gen5PixelOutputKind.Uint => _module.AddInstruction(
-                                SpirvOp.ConvertFToU,
-                                _uintType,
-                                value),
-                            Gen5PixelOutputKind.Sint => _module.AddInstruction(
-                                SpirvOp.ConvertFToS,
-                                _intType,
-                                value),
-                            _ => value,
-                        };
+                            values[component] = LoadCompressedExportComponent(instruction, component);
+                        }
+                        else
+                        {
+                            var packed = LoadV(instruction.Sources[component >> 1].Value);
+                            var signed = output.Kind == Gen5PixelOutputKind.Sint;
+                            values[component] = _module.AddInstruction(
+                                signed ? SpirvOp.BitFieldSExtract : SpirvOp.BitFieldUExtract,
+                                signed ? _intType : _uintType,
+                                signed ? Bitcast(_intType, packed) : packed,
+                                UInt((uint)(component & 1) * 16),
+                                UInt(16));
+                        }
                         continue;
                     }
 
@@ -6521,6 +6665,11 @@ public static partial class Gen5SpirvTranslator
                     Load(output.Type, output.Variable));
                 Store(output.Variable, vector);
                 return true;
+            }
+
+            if (_stage == Gen5SpirvStage.Mesh)
+            {
+                return TryEmitMeshExport(instruction, export, out error);
             }
 
             if (_stage != Gen5SpirvStage.Vertex)
@@ -7650,6 +7799,7 @@ public static partial class Gen5SpirvTranslator
 
         private void StoreVDynamic(uint registerIndex, uint value)
         {
+            _savedLaneValues.Clear();
             // With EXEC known to be all ones the write needs no EXEC test.
             var exec = _execKnownFull ? 0 : Load(_boolType, _exec);
             for (var register = _dynamicVectorRange.First; register <= _dynamicVectorRange.Last; register++)
@@ -7688,6 +7838,11 @@ public static partial class Gen5SpirvTranslator
                 _module.ConstantNull(arrayType));
             _interfaces.Add(_packedHalfRegisters);
             _module.AddName(_packedHalfRegisters, "vgprPackedHalf");
+            if (_pairedMeshLanes)
+                _meshLaneRegisters[_logicalHalf] = _meshLaneRegisters[_logicalHalf] with
+                {
+                    PackedHalves = _packedHalfRegisters,
+                };
             return _packedHalfRegisters;
         }
 
@@ -7698,7 +7853,11 @@ public static partial class Gen5SpirvTranslator
         private void StoreS(uint register, uint value)
         {
             Store(ScalarPointer(register), value);
-            if (register is 106 or 107)
+            if (_pairedMeshLanes && register is 106 or 107 or 126 or 127)
+            {
+                UpdatePairedMeshPredicate(register, value);
+            }
+            else if (register is 106 or 107)
             {
                 if (_waveLaneCount != 32 || register == 106)
                 {
@@ -7750,8 +7909,9 @@ public static partial class Gen5SpirvTranslator
             return _execFullPcs.Contains(pc);
         }
 
-        private void StoreV(uint register, uint value, bool guardWithExec = true)
+        private void StoreV(uint register, uint value, bool guardWithExec = true, bool preserveSavedLanes = false)
         {
+            if (!preserveSavedLanes) _savedLaneValues.Remove(register);
             if (guardWithExec && !_execKnownFull)
             {
                 var active = Load(_boolType, _exec);
@@ -7956,6 +8116,8 @@ public static partial class Gen5SpirvTranslator
 
         private uint GuestWaveLane()
         {
+            if (_stage == Gen5SpirvStage.Mesh && _meshSubgroupInput != 0)
+                return BitwiseAnd(MeshInvocationIndex(), UInt(_waveLaneCount - 1));
             if (_waveLaneCount == 64 && _localInvocationIndexInput != 0)
             {
                 return BitwiseAnd(
@@ -8034,7 +8196,7 @@ public static partial class Gen5SpirvTranslator
                 SpirvOp.ULessThan,
                 _boolType,
                 Load(_uintType, _subgroupInvocationIdInput),
-                UInt(32));
+                UInt(_stage == Gen5SpirvStage.Mesh ? _waveLaneCount : 32));
 
         private uint BooleanToLaneMask(uint condition) =>
             _module.AddInstruction(
@@ -8075,6 +8237,8 @@ public static partial class Gen5SpirvTranslator
                 ballot,
                 0);
             var widened = _module.AddInstruction(SpirvOp.UConvert, _ulongType, low);
+            if (_stage == Gen5SpirvStage.Mesh && _request.Mesh?.DeviceSubgroupLaneCount == 64)
+                return Pair64(low, _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, ballot, 1));
             if (_waveLaneCount != 64)
             {
                 return widened;
@@ -8259,12 +8423,18 @@ public static partial class Gen5SpirvTranslator
         // That includes VCC and EXEC: compilers use VCC_HI (s107) as an ordinary SGPR.
         private void StoreWaveMask(uint register, uint condition)
         {
+            if (_collectWaveMasks)
+            {
+                if (!_pendingWaveMasks.TryGetValue(register, out var conditions))
+                    _pendingWaveMasks.Add(register, conditions = new uint[2]);
+                conditions[_logicalHalf] = condition;
+                return;
+            }
             if (_waveLaneCount == 32)
             {
                 StoreS(register, Narrow(BooleanToWaveMask(condition)));
                 return;
             }
-
             if (_emulateWave64 &&
                 _subgroupInvocationIdInput != 0 &&
                 _emittingPc is { } pc &&
@@ -8275,7 +8445,6 @@ public static partial class Gen5SpirvTranslator
                 StoreS64(register, BooleanToHalfWaveMask(condition));
                 return;
             }
-
             StoreS64(register, BooleanToWaveMask(condition));
         }
 
@@ -8317,19 +8486,18 @@ public static partial class Gen5SpirvTranslator
             _module.AddLabel(mergeLabel);
         }
 
-        // Only instructions that address LDS memory need the array. ds_swizzle/ds_bpermute move data
-        // between lanes and GDS instructions use the global data share, so a graphics stage using
-        // just those must not get an 8 KiB zero-initialized per-invocation array: Metal pays for it
-        // in compile time (seconds for a large pixel shader) and in private memory per pixel.
+        // Allocate LDS for direct or FLAT access, but not for lane-only or GDS operations.
         private bool UsesLds() =>
             _request.Program.Instructions.Any(static instruction =>
-                instruction.Control is Gen5DataShareControl { Gds: false } &&
-                instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32")) ||
+                (instruction.Control is Gen5DataShareControl { Gds: false } &&
+                 instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32")) ||
+                instruction.Control is Gen5GlobalMemoryControl { UsesFlatAddress: true } ||
+                instruction.Sources.Any(source => source.Kind == Gen5OperandKind.EncodedConstant && source.Value is 235 or 236)) ||
             _request.Memory.Entries.Any(static memory =>
                 memory.AddressSpace is FlatAddressSpace.Shared or FlatAddressSpace.SharedOrPrivate);
 
         private bool UsesSubgroupShuffle() =>
-            _request.Program.Instructions.Any(instruction =>
+            _pairedMeshLanes || _request.Program.Instructions.Any(instruction =>
                 instruction.Control is Gen5DppControl or Gen5Dpp8Control ||
                 instruction.Opcode is "VPermlane16B32" or "VPermlanex16B32" or "VReadlaneB32" or
                     "DsAppend" or "DsConsume" or "DsSwizzleB32" or "DsBpermuteB32");
@@ -8349,7 +8517,8 @@ public static partial class Gen5SpirvTranslator
 
         private bool UsesSubgroupOperations() =>
             _enableGraphicsSubgroupOperations &&
-            (UsesSubgroupShuffle() ||
+            ((_stage == Gen5SpirvStage.Mesh && _request.Mesh?.DeviceSubgroupLaneCount > 0) ||
+             UsesSubgroupShuffle() ||
              UsesSubgroupBroadcast() ||
              UsesWaveControl() ||
              _request.Program.Instructions.Any(static instruction =>
@@ -8383,6 +8552,16 @@ public static partial class Gen5SpirvTranslator
             out uint targetPc)
         {
             targetPc = 0;
+            if (instruction.Control is ShaderLinkedBranchControl linked)
+            {
+                targetPc = linked.TargetPc;
+                return true;
+            }
+            if (instruction.Control is ShaderCallMatchControl call)
+            {
+                targetPc = call.TargetPc;
+                return true;
+            }
             if (instruction.Encoding != Gen5ShaderEncoding.Sopp ||
                 instruction.Words.Count == 0)
             {
@@ -8403,7 +8582,7 @@ public static partial class Gen5SpirvTranslator
         }
 
         private static IReadOnlyList<ShaderBlock> BuildBasicBlocks(
-            IReadOnlyList<Gen5ShaderInstruction> instructions)
+            IReadOnlyList<Gen5ShaderInstruction> instructions, bool splitBarriers = false)
         {
             if (instructions.Count == 0)
             {
@@ -8420,7 +8599,8 @@ public static partial class Gen5SpirvTranslator
                     leaders.Add(targetPc);
                 }
 
-                if ((IsBranch(instruction.Opcode) || instruction.Opcode == "SEndpgm") &&
+                if ((IsBranch(instruction.Opcode) || instruction.Opcode == "SEndpgm" ||
+                     (splitBarriers && instruction.Opcode == "SBarrier")) &&
                     index + 1 < instructions.Count)
                 {
                     leaders.Add(instructions[index + 1].Pc);

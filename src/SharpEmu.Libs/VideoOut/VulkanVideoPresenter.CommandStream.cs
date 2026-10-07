@@ -218,20 +218,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SliceResult result;
                 using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.CommandStream))
                 {
-                    var aliasAccess = _guestBacking?.TryEnterBackingAliasAccess() == true;
-                    _backingAliasAccess = aliasAccess;
-                    try
-                    {
-                        result = _commandStream.ProcessOne();
-                    }
-                    finally
-                    {
-                        _backingAliasAccess = false;
-                        if (aliasAccess)
-                        {
-                            _guestBacking!.ExitBackingAliasAccess();
-                        }
-                    }
+                    result = _commandStream.ProcessOne();
                 }
 
                 switch (result)
@@ -311,6 +298,10 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots)
         {
+            if (_occlusionQueueId != queueId)
+                EndRendering();
+            _occlusionQueueId = queueId;
+            _imageCache.SetMetadataTraceSubmission(queueId, submissionId);
             using var contextScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.QueueContext);
             _activeGuestQueue = new VulkanGuestQueueIdentity(_commandQueueNames[queueId], submissionId);
             BindSubmissionContext(_activeGuestQueue);
@@ -396,6 +387,15 @@ internal static unsafe partial class VulkanVideoPresenter
             _bufferCache.CopyBuffer(destination, source, size, destinationIsGds, sourceIsGds);
         }
 
+        public void TraceGuestWrite(string operation, ulong address, ulong size) =>
+            _imageCache.TraceGuestWrite(operation, address, size);
+
+        public void TraceWritersOf(string subject, ulong address, ulong size) =>
+            _imageCache.TraceWritersOf(subject, address, size);
+
+        public void TraceDrawTarget(string disposition, ulong address, ulong pixelShaderAddress, ulong vertexShaderAddress) =>
+            _imageCache.TraceGuestWrite($"draw-target-{disposition}", address, 1, pixelShaderAddress, vertexShaderAddress);
+
         public void ReadGds(Span<uint> destination, uint wordOffset, uint wordCount) =>
             EndOfPipe.ReadGdsWords(_bufferCache.GdsBuffer.Mapped, destination, wordOffset, wordCount);
 
@@ -479,6 +479,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments)
         {
+            SetOcclusionCounting();
             using var translationScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandDrawTranslation);
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
             try
@@ -493,6 +494,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
         {
+            SetOcclusionCounting();
             using var translationScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandDrawTranslation);
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
             try
@@ -684,6 +686,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"queue={_activeGuestQueue.Name} submission={_activeGuestQueue.SubmissionId} " +
                     $"request={requestId} addr=0x{displayBuffer.Address:X16} " +
                     $"size={extent.Width}x{extent.Height}");
+                IndexedDrawTrace.OnFlip(version);
+                VisibilityResultTrace.OnFlip(version);
                 RenderDocCapture.OnGuestFlipBoundary(version);
                 VideoOutExports.TraceGpuFlip(_guestMemory, handle, index, flipMode, flipArg, displayBuffer.Address, VideoOutExports.GetFlipEventCount(requestId));
             }

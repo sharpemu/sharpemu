@@ -18,6 +18,10 @@ public struct ImageRequest
     public ImageDescription Description;
     public ImageViewDescription View;
     public ImageRole Role;
+    internal ulong TraceTextureMetadataAddress;
+    internal string? TraceTextureDescriptor;
+    internal bool TraceMetadataCompress;
+    internal bool TraceWriteCompress;
 
     public ImageRequest(in ImageDescription description, in ImageViewDescription view, ImageRole role)
     {

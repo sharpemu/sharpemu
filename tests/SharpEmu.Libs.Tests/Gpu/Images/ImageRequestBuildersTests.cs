@@ -19,6 +19,21 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     private const ulong Base = 0x1_0000_0000;
 
     [Fact]
+    public void InvalidTextureLayerReportsDescriptorAndShaderContext()
+    {
+        using var fatal = new FatalScope();
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UNorm,
+            32, 32, GuestImageType.Color2D, baseArray: 1904);
+        var error = Assert.Throws<SchedulerFatalException>(() =>
+            ImageRequestBuilders.Texture(words, Sampled2D, 0x123456789ABCDEF0, 7));
+        Assert.Contains("baseLayer=1904 layers=1", error.Message);
+        Assert.Contains("shaderHash=0x123456789ABCDEF0 image=7", error.Message);
+        Assert.Contains("type=Color2D", error.Message);
+        Assert.Contains("shape=", error.Message);
+        Assert.Contains($"words={string.Join(',', words.Select(word => word.ToString("X8")))}", error.Message);
+    }
+
+    [Fact]
     public void EightBitUnsignedScaledTextureUsesUnormBackingWithShaderConversion()
     {
         Assert.Equal(ImageNumericClass.Float, GuestImageFormat.SampledNumericClass(GuestImageFormat.Format8Uscaled));
@@ -74,21 +89,32 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     }
 
     [Theory]
-    [InlineData(GuestImageType.Color2D, 1u, true)]
-    [InlineData(GuestImageType.Color3D, 32u, false)]
-    [InlineData(GuestImageType.Color2DArray, 4u, false)]
-    public void CompressedTexture_CarriesDccMetadataOnlyForSingleLayer2D(GuestImageType type, uint layers, bool expected)
+    [InlineData(GuestImageType.Color2D, 1u, false, true)]
+    [InlineData(GuestImageType.Color3D, 32u, false, false)]
+    [InlineData(GuestImageType.Color2DArray, 4u, false, false)]
+    [InlineData(GuestImageType.Color2D, 1u, true, true)]
+    [InlineData(GuestImageType.Color3D, 32u, true, true)]
+    [InlineData(GuestImageType.Color2DArray, 4u, true, true)]
+    public void CompressedTexture_PreservesGenericDccAndNativeClearScopes(GuestImageType type, uint layers, bool nativeClear, bool expected)
     {
         const ulong metadata = 0x1_2000_0000;
-        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UNorm, 32, 32, type, GuestTileMode.RenderTarget, layers: layers);
+        var format = nativeClear ? GuestPixelFormat.Bits8_8_8_8UNorm : GuestPixelFormat.Bits8_8_8_8UInt;
+        var words = RegisterWords.Texture(Base, format, 32, 32, type, GuestTileMode.RenderTarget, layers: layers);
         words[6] |= (1u << 21) | (uint)(((metadata >> 8) & 0xFF) << 24);
         words[7] = (uint)(metadata >> 16);
-        var shape = Sampled2D with { Volume = type == GuestImageType.Color3D, Arrayed = type == GuestImageType.Color2DArray };
+        var shape = Sampled2D with
+        {
+            Volume = type == GuestImageType.Color3D,
+            Arrayed = type == GuestImageType.Color2DArray,
+            NumericClass = nativeClear ? TextureNumericClass.Float : TextureNumericClass.Uint,
+        };
 
         var description = ImageRequestBuilders.Texture(words, shape).Request.Description;
 
         Assert.Equal(expected ? MetadataKind.Dcc : MetadataKind.None, description.Metadata.Kind);
         Assert.Equal(expected ? metadata : 0UL, description.Metadata.Range.Address);
+        Assert.Equal(nativeClear, description.Metadata.NativeColorClear);
+        if (!nativeClear) Assert.Equal(0UL, description.Metadata.Range.Size);
     }
 
     private readonly HeadlessVulkan? _vulkan;
@@ -210,6 +236,36 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.ColorTarget(RegisterWords.Color(Base, 64, 64, maxMip: 1), 0xF, 0, false));
         Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.ColorTarget(RegisterWords.Color(Base, 64, 64, dimension: 3), 0xF, 0, false));
         Assert.Equal(3, fatal.Messages.Count);
+    }
+
+    [Theory]
+    [InlineData(0u, 0u, 63u, 64u)]
+    [InlineData(0u, 0u, 64u, 64u)]
+    [InlineData(0u, 4u, 8191u, 60u)]
+    [InlineData(1u, 4u, 64u, 28u)]
+    [InlineData(0u, 4u, 7u, 4u)]
+    public void ColorTarget_VolumeViewUsesOnlyExistingMipSlices(
+        uint mipLevel, uint firstSlice, uint lastSlice, uint expectedLayers)
+    {
+        var words = RegisterWords.Color(Base, 64, 64, GuestTileMode.Standard4KB,
+            maxMip: 1, mipLevel: mipLevel, sliceMax: lastSlice, sliceStart: firstSlice,
+            dimension: 2, depth: 63);
+        var resolution = ImageRequestBuilders.ColorTarget(words, 0xF, 0, false);
+
+        Assert.NotNull(resolution);
+        Assert.Equal(new Extent3D(64, 64, 64), resolution.Value.Request.Description.Extent);
+        Assert.Equal(new SubresourceCount(2, 1), resolution.Value.Request.Description.Resources);
+        Assert.Equal(firstSlice, resolution.Value.Request.View.BaseLayer);
+        Assert.Equal(expectedLayers, resolution.Value.Request.View.LayerCount);
+    }
+
+    [Fact]
+    public void ColorTarget_VolumeViewRejectsFirstSliceOutsideMip()
+    {
+        using var fatal = new FatalScope();
+        var words = RegisterWords.Color(Base, 64, 64, GuestTileMode.Standard4KB,
+            maxMip: 1, mipLevel: 1, sliceStart: 32, sliceMax: 64, dimension: 2, depth: 63);
+        Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.ColorTarget(words, 0xF, 0, false));
     }
 
     [Fact]

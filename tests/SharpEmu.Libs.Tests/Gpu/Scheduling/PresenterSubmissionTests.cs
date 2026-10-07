@@ -10,6 +10,7 @@ using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Memory.GpuMemory;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using Xunit;
 
@@ -20,6 +21,94 @@ public sealed class PresenterSubmissionTests
 {
     private const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     private static readonly Type PresenterType = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
+
+    [Theory]
+    [InlineData(0x000u, false)]
+    [InlineData(0x001u, false)]
+    [InlineData(0x002u, false)]
+    [InlineData(0x003u, false)]
+    [InlineData(0x100u, true)]
+    [InlineData(0x101u, false)]
+    [InlineData(0x102u, true)]
+    [InlineData(0x103u, false)]
+    [InlineData(0x170u, true)]
+    [InlineData(0x172u, true)]
+    [InlineData(0x200u, false)]
+    [InlineData(0xE00u, false)]
+    [InlineData(0xF00u, true)]
+    [InlineData(0xF01u, false)]
+    [InlineData(0xFF000000u, false)]
+    [InlineData(0xFF000102u, true)]
+    public void OcclusionCounting_UsesCounterZeroEnableAndIncrementDisable(uint control, bool expected)
+    {
+        var presenter = RuntimeHelpers.GetUninitializedObject(PresenterType);
+        var commands = new CommandStreamQueue((ICommandStreamHost)presenter);
+        Set(presenter, "_commandStream", commands);
+
+        foreach (var queueId in new[] { 0, 2 })
+        {
+            Set(presenter, "_occlusionQueueId", queueId);
+            Set(presenter, "_occlusionCounting", !expected);
+            commands.GetInterpreter(queueId).TypedRegisters.Context.DepthCountControl = control;
+            commands.GetInterpreter(queueId == 0 ? 2 : 0).TypedRegisters.Context.DepthCountControl = expected ? 0u : 0x100u;
+
+            Invoke(presenter, "SetOcclusionCounting");
+
+            Assert.Equal(expected, (bool)Get(presenter, "_occlusionCounting"));
+            Assert.False((bool)Get(presenter, "_renderingActive"));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OcclusionCounting_CreatesQueriesBeforeFirstReadAndReusesThem(bool supported)
+    {
+        var presenter = RuntimeHelpers.GetUninitializedObject(PresenterType);
+        var commands = new CommandStreamQueue((ICommandStreamHost)presenter);
+        Set(presenter, "_commandStream", commands);
+        Set(presenter, "_supportsPreciseOcclusion", supported);
+        var context = commands.GetInterpreter(0).TypedRegisters.Context;
+
+        Invoke(presenter, "SetOcclusionCounting");
+        Assert.Null(Get(presenter, "_occlusionQueries"));
+        context.DepthCountControl = 0x100;
+        Invoke(presenter, "SetOcclusionCounting");
+        var queries = Get(presenter, "_occlusionQueries");
+        if (supported) Assert.NotNull(queries);
+        else Assert.Null(queries);
+
+        context.DepthCountControl = 0;
+        Invoke(presenter, "SetOcclusionCounting");
+        Assert.Same(queries, Get(presenter, "_occlusionQueries"));
+        context.DepthCountControl = 0x100;
+        Invoke(presenter, "SetOcclusionCounting");
+        Assert.Same(queries, Get(presenter, "_occlusionQueries"));
+    }
+
+    [Theory]
+    [InlineData(false, "shaderClipDistance")]
+    [InlineData(true, "fragmentShaderBarycentric")]
+    public void ShaderClipDistance_ChecksDeviceSupportBeforeModuleCreation(bool supported, string missingFeature)
+    {
+        var presenter = RuntimeHelpers.GetUninitializedObject(PresenterType);
+        Set(presenter, "_supportsShaderClipDistance", supported);
+        // Capability declarations are sufficient for this check before the device call.
+        uint[] words =
+        {
+            0x07230203, 0x00010500, 0, 1, 0,
+            (2u << 16) | (uint)SpirvOp.Capability, (uint)SpirvCapability.ClipDistance,
+            (2u << 16) | (uint)SpirvOp.Capability, (uint)SpirvCapability.FragmentBarycentricKhr,
+        };
+        var code = new byte[words.Length * sizeof(uint)];
+        for (var index = 0; index < words.Length; index++)
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(code.AsSpan(index * sizeof(uint)), words[index]);
+
+        var createModule = PresenterType.GetMethod("CreateShaderModule", InstanceMembers, null, new[] { typeof(byte[]) }, null)!;
+        var wrapper = Assert.Throws<TargetInvocationException>(() => createModule.Invoke(presenter, new object[] { code }));
+        var error = Assert.IsType<NotSupportedException>(wrapper.InnerException);
+        Assert.Contains(missingFeature, error.Message);
+    }
 
     [Fact]
     public void FlipCapacity_SuspendsAtTheBoundAndReopensAfterDequeue()

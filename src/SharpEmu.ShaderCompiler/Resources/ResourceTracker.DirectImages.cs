@@ -124,7 +124,7 @@ public sealed partial class ResourceTracker
                     (instruction.Encoding == Gen5ShaderEncoding.Sopk && instruction.Opcode is "SAddkI32" or "SMulkI32" &&
                         instruction.Destinations.Contains(destination)))) return false;
                 overwritten = instruction.Destinations.Any(target => target.Kind == Gen5OperandKind.ScalarRegister &&
-                    (target == destination || (instruction.Opcode.Contains("64", StringComparison.Ordinal) && target.Value + 1 == destination.Value))) ||
+                    (target == destination || (instruction.DestinationWidth > 1 && target.Value + 1 == destination.Value))) ||
                     instruction.Control is Gen5Vop3Control { ScalarDestination: { } scalarDestination } &&
                         destination.Value >= scalarDestination && destination.Value - scalarDestination < 2 ||
                     instruction.Control is Gen5SdwaControl { ScalarDestination: { } compareDestination } &&

@@ -51,6 +51,16 @@ public sealed partial class RenderExecutor
         }
 
         var useThreadDimensions = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0;
+        if ((indirectArgumentsAddress == 0 || useThreadDimensions) && (groupsX == 0 || groupsY == 0 || groupsZ == 0))
+        {
+            if (RenderTrace.Enabled && RenderTrace.ZeroDispatch())
+            {
+                RenderTrace.Write($"Skipping a zero-sized dispatch: groups={groupsX}x{groupsY}x{groupsZ} initiator=0x{dispatchInitiator:X8} shader=0x{compute.Address:X16}");
+            }
+
+            return;
+        }
+
         var computeProgram = _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator, groupsX, groupsY, groupsZ);
         if (computeProgram.Consumed)
         {
@@ -132,16 +142,6 @@ public sealed partial class RenderExecutor
             }
         }
 
-        if (indirectArgumentsAddress == 0 && (groupsX == 0 || groupsY == 0 || groupsZ == 0))
-        {
-            if (RenderTrace.Enabled && RenderTrace.ZeroDispatch())
-            {
-                RenderTrace.Write($"Skipping a zero-sized dispatch: groups={groupsX}x{groupsY}x{groupsZ} initiator=0x{dispatchInitiator:X8} shader=0x{compute.Address:X16}");
-            }
-
-            return;
-        }
-
         _host.EndRendering();
         using (_host.BeginPreparation())
         {
@@ -195,10 +195,12 @@ public sealed partial class RenderExecutor
                 physicalGroups[axisOrder[logical]] = logicalGroups[logical];
             }
 
+            var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
             if (indirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(indirectArgumentsAddress))
             {
                 _host.Dispatch(physicalGroups[0], physicalGroups[1], physicalGroups[2]);
             }
+            _host.EndComputeImageSnapshot(imageSnapshot, bindings);
             _host.ShaderAccessBarrier();
         }
 

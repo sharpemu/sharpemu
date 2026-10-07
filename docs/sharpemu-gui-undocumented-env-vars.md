@@ -7,17 +7,39 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 ## Scope
 
+`SHARPEMU_SNAPSHOT_COMPUTE_HASH` selects the first two matching Vulkan dispatches
+for image snapshots before and after execution. See [image snapshots](image-clear-tracing.md#selected-draw-snapshots).
+
+`SHARPEMU_SNAPSHOT_PIXEL_HASH` selects the first two Vulkan draws with a matching
+pixel shader hash for input/output image snapshots. It is off by default. See
+[selected draw snapshots](image-clear-tracing.md#selected-draw-snapshots) for limits and output paths.
+
 This list contains each `SHARPEMU_*` environment variable in the repository that the GUI does not show.
-The GUI shows 14 variables on its **Options** and **Game options** pages. This list does not contain them:
+The GUI exposes these variables on its **Options** and **Game options** pages:
 `SHARPEMU_BTHID_UNAVAILABLE`, `SHARPEMU_CRASH_CAPTURE`, `SHARPEMU_DEFAULT_PROFILE`,
 `SHARPEMU_DISABLE_IMPORT_LOOP_GUARD`, `SHARPEMU_DUMP_SPIRV`, `SHARPEMU_LOG_DIRECT_MEMORY`, `SHARPEMU_LOG_IO`,
 `SHARPEMU_LOG_NP`, `SHARPEMU_PROFILE_PERFORMANCE`, `SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE`,
-`SHARPEMU_RENDERDOC`, `SHARPEMU_VK_DISABLE_IMPLICITS`, `SHARPEMU_STRICT_COMPUTE`, `SHARPEMU_VK_VALIDATION`, `SHARPEMU_WRITABLE_APP0`.
+`SHARPEMU_RENDERDOC`, `SHARPEMU_SKIP_RT`, `SHARPEMU_VK_DISABLE_IMPLICITS`, `SHARPEMU_STRICT_COMPUTE`, `SHARPEMU_VK_VALIDATION`, `SHARPEMU_WRITABLE_APP0`.
 
 The list contains 269 variables. The source was examined on 2026-09-19, branch `dev`.
 The descriptions come from the code that reads each variable. The emulator was not started for this list.
 
+## Ray-tracing compute skip (GUI Debug option)
+
+`SHARPEMU_SKIP_RT` is off by default. Set it to `1` to skip ray-tracing compute.
+Unset it or set it to `0` to run those shaders. The Debug section exposes this
+switch in Options and Game options. Restart the game after a change.
+Compute shaders with `ImageBvhIntersectRay` or `ImageBvh64IntersectRay` are
+skipped before resource planning and compilation. The entire dispatch is skipped.
+This compatibility workaround applies with either strict-compute setting.
+It does not skip ordinary shader calls or graphics draws.
+A `RAY_TRACING_SKIPPED` warning identifies each skipped shader by hash.
+Ray-traced effects can be missing or incorrect.
+
 ## How to use a variable
+
+See [Import results and diagnostic logging](import-result-logging.md) for expected
+result filters, mutex warning sampling, and diagnostic selection.
 
 1. Set the variable in the shell before you start the emulator or the GUI.
 2. You can also enter additional env vars using the button next to the "Play" button from GUI.
@@ -161,10 +183,10 @@ These variables apply to audio output and video playback.
 | --- | --- | --- | --- |
 | `SHARPEMU_ALSA_DEVICE` | text (ALSA device name) | Sets the ALSA playback device on Linux. The default is `default`. | `PosixAlsaAudioStream.cs` |
 | `SHARPEMU_AUDIO_LATENCY_MS` | number (milliseconds) | Sets the target depth of the SDL audio queue, which is the playback latency. The default is 60. Values of zero or less use the default. | `SdlHostAudio.cs` |
-| `SHARPEMU_BINK_MODE` | text (`native`, `ffmpeg`, `dummy`, `skip`, `guest`) | Selects how the emulator handles Bink movies. `native` or `ffmpeg` decodes on the host and is the default. `dummy` shows a placeholder frame, `skip` skips the movie, and `guest` lets the guest decode. | `HostMovieBridge.cs` |
+| `SHARPEMU_BINK_MODE` | text (`native`, `ffmpeg`, `dummy`, `skip`, `guest`) | Selects how the emulator handles Bink movies. `guest` is the default, including for unknown values. `native` or `ffmpeg` decodes on the host. `dummy` shows a placeholder frame; `skip` skips the movie. Runtime startup logs `BINK VIDEO PLAYBACK MODE: HOST`, `GUEST`, `SKIP`, or `DUMMY`. This reports the selected mode, not decoder success. | `HostMovieBridge.cs`, `SharpEmuRuntime.cs` |
 | `SHARPEMU_LOG_MOVIE_SYNC` | `1` | Records the difference between the movie clock and the guest audio position during movie playback. The emulator reads the value one time at start. | `MediaFramePlayback.cs` |
 | `SHARPEMU_MOVIE_CLOCK` | `wall` | Sets the time base for host-decoded movie playback. By default, playback follows the guest audio clock and uses the wall clock when no guest audio flows. `wall` makes playback always use the wall clock. | `MediaFramePlayback.cs` |
-| `SHARPEMU_TRACE_AVPLAYER_IMAGES` | `1` | Set to `1` to write `[AVPLAYER][TRACE]` lines for video buffer addresses and the first 16 video frame payloads. It also marks the video buffer ranges for image traces in other components. The default is off. | `AvPlayerExports.cs` |
+| `SHARPEMU_TRACE_AVPLAYER_IMAGES` | `1` | Traces video buffer addresses, the first 16 frame payload summaries per process, and stop, close, and end-of-stream transitions. Transition lines include the video timestamp and playback clock. It also enables video buffer range checks for image traces. The default is off. | `AvPlayerExports.cs` |
 
 ## Input
 
@@ -239,6 +261,7 @@ Each variable adds one group of messages to the log. The default is off.
 | `SHARPEMU_LOG_ACM` | `1` | Writes `acm.` trace lines from the Acm library handlers to stderr. Default is off. | `AcmExports.cs` |
 | `SHARPEMU_LOG_AGC_SHADER` | `1` | Writes only the AGC shader trace lines and the Vulkan shader trace lines. `SHARPEMU_LOG_AGC=1` also turns this on. Default is off. | `AgcExports.cs`, `VulkanVideoPresenter.Draws.Recording.cs` |
 | `SHARPEMU_LOG_AGC` | `1` | Starts the full AGC trace: command submissions, shader creation, draws and dispatches. It also turns on the AGC shader trace and the Vulkan shader trace. Default is off. | `AgcExports.cs`, `RenderExecutor.Trace.cs`, `AgcExports.ShaderState.cs` |
+| `SHARPEMU_TRACE_MESH` | `1` | Traces geometry draw selection, mesh setup, resources, transfers, and queue submission. Output and history are bounded. Default is off. See [Mesh draw tracing](mesh-draw-tracing.md). | `MeshDrawTrace.cs` |
 | `SHARPEMU_LOG_AJM` | `1` | Writes `ajm.` trace lines to stderr: context initialization, codec registration, split buffer descriptors and ATRAC9 decode state. Default is off. | `AjmExports.cs`, `Atrac9DecodeState.cs` |
 | `SHARPEMU_LOG_ALLOC_IMPORTS` | `1` | Writes more trace lines for `sceKernelGetGPI` (the returned mask) and for the PRT aperture set call (the raw register values). Default is off. | `KernelRuntimeCompatExports.cs` |
 | `SHARPEMU_LOG_ALL_IMPORTS` | `1` | Writes a debug line for each import stub during setup. The lines show if the import uses a direct bridge, a trampoline, HLE or a runtime symbol. Default is off. | `DirectExecutionBackend.cs` |
@@ -256,6 +279,7 @@ Each variable adds one group of messages to the log. The default is off.
 | `SHARPEMU_LOG_EQUEUE` | `1` | Writes trace lines for kernel event queue operations. The emulator reads the value one time at start. | `KernelEventQueueCompatExports.cs` |
 | `SHARPEMU_LOG_EVENT_FLAG` | `1` | Writes trace lines for kernel event flag operations. The emulator reads the value one time at start. | `KernelEventFlagCompatExports.cs` |
 | `SHARPEMU_LOG_EXPECTED_IMPORT_RESULTS` | `1` | Shows import error results that the emulator knows as usual, for example file-not-found probes, timeouts and busy trylocks. It shows the first 8 results for each NID and result, and then every 10000th. The default hides these results. | `DirectExecutionBackend.Imports.cs` |
+| `SHARPEMU_TRACE_PAD_INPUT` | `1` | Logs pad open, get-handle, and close results, plus changes in focus, button bits, and connected-session guest writes, including reopened handles. It stops after 64 handle events and 256 input changes. Retained lookup results and input snapshots have the same bounds. Default is off. | `PadInputChangeTrace.cs` |
 | `SHARPEMU_LOG_FIBER` | `1` | Writes `fiber` trace lines for the Fiber library calls. It also writes a line for each fiber context transfer in the CPU backend. | `FiberExports.cs`, `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs` |
 | `SHARPEMU_LOG_FILE` | path | Writes all log entries to this file with timestamps and appends to an existing file. The file receives every log level. `SHARPEMU_LOG_LEVEL` then limits only the console output. | `SharpEmuLog.cs` |
 | `SHARPEMU_LOG_FMOD` | `1` | Writes a trace line for the FMOD `system_set_output` compatibility call. The line shows the system address, the output type and the call count. | `FmodCompatExports.cs` |
@@ -276,16 +300,17 @@ Each variable adds one group of messages to the log. The default is off.
 | `SHARPEMU_LOG_NP_WEB_API2` | `1` | Writes an `npwebapi2` trace line for each NpWebApi2 call. The line shows the operation, the id, the first argument and the initialized state. | `NpWebApi2Exports.cs` |
 | `SHARPEMU_LOG_OPEN` | `1` | Writes trace lines for guest file open operations to stderr. The default is off. | `KernelMemoryCompatExports.cs` |
 | `SHARPEMU_LOG_PLAYGO` | `1` | Writes `playgo` trace lines for PlayGo calls. For single-entry locus queries it shows the first 32 calls and then every 1000th call. | `PlayGoExports.cs` |
+| `SHARPEMU_PLAYGO_DISABLE_METADATA_FALLBACK` | `1` | Diagnostic comparison. When no PlayGo metadata file is present, Open returns `0x80B2000E` instead of using inferred chunks. This also applies when app0 is unset. Read at PlayGo initialization. Default off. Existing metadata handling is unchanged; this does not validate metadata contents. Remove after the test because some games depend on the fallback. | `PlayGoExports.cs` |
 | `SHARPEMU_LOG_POINTER_WINDOW_SIZE` | hex number | Sets the byte size of each memory window that `SHARPEMU_LOG_POINTER_WINDOWS` shows after a guest fault. The value is hexadecimal, with or without `0x`. The default is 0x80. | `DirectExecutionBackend.Exceptions.cs` |
 | `SHARPEMU_LOG_POSIX_SIGNALS` | `1` | Writes a trace line for every POSIX signal that the fault handler receives. When unset, the log shows only the first 16 signals and then every 1024th signal. | `DirectExecutionBackend.PosixSignals.cs` |
 | `SHARPEMU_LOG_PROC_PARAM_PTRS` | `1` | Shows the pointer fields in the process parameter block. This dump is part of the `SHARPEMU_LOG_PROC_PARAM` trace, so set that variable also. | `KernelRuntimeCompatExports.cs` |
 | `SHARPEMU_LOG_PROC_PARAM` | `1` | Shows the address and the contents of the process parameter block of the guest program. The default is off. | `KernelRuntimeCompatExports.cs` |
 | `SHARPEMU_LOG_PS5_USER_SLOTS` | `1` | Adds four 0x60-byte memory dumps to the IL2CPP exception diagnostic. The dumps start at the fixed guest address 0x801A73110 and have a step of 0x51C8 bytes. | `DirectExecutionBackend.Imports.cs` |
 | `SHARPEMU_LOG_PSML` | `1` | Writes `psml.` trace lines for the PSML library calls to stderr. The default is off. | `PsmlExports.cs` |
-| `SHARPEMU_LOG_PTHREADS` | `1` | Writes trace lines for the pthread calls of the guest. It also starts the condition variable trace of `SHARPEMU_LOG_PTHREAD_CONDS`. The default is off. | `KernelPthreadCompatExports.cs`, `KernelExports.cs` |
+| `SHARPEMU_LOG_PTHREADS` | `1` | Writes pthread trace lines and enables the condition variable trace. Mutex lines include the guest object words, owner, recursion count, type, and result. These lines do not require an error and do not contain retained event history. The default is off. | `KernelPthreadCompatExports.cs`, `KernelExports.cs` |
 | `SHARPEMU_LOG_PTHREAD_CONDS` | `1` | Writes a `pthread_cond_` trace line for each condition variable operation. The line shows the waiter count, the signal epoch, and the result. | `KernelPthreadCompatExports.cs` |
 | `SHARPEMU_LOG_PTHREAD_FASTPATH` | `1` | Writes trace lines for the mutex fast path. It shows the first 16 fast-path unlocks with the mutex object words. It shows one busy result for each mutex address. | `KernelPthreadCompatExports.cs` |
-| `SHARPEMU_LOG_PTHREAD_MUTEX_FILTER` | list of hex addresses | Limits the mutex trace to the given mutex addresses. Use a comma, a semicolon, or a space between the hexadecimal addresses. The listed mutexes are in the trace even if `SHARPEMU_LOG_PTHREADS` is not set. | `KernelPthreadCompatExports.cs` |
+| `SHARPEMU_LOG_PTHREAD_MUTEX_FILTER` | list of hex addresses | Selects mutex trace lines by guest mutex address or resolved address. Use a comma, a semicolon, or a space between hexadecimal addresses. A valid address list enables the selected lines without `SHARPEMU_LOG_PTHREADS`. Output does not require an error. | `KernelPthreadCompatExports.cs` |
 | `SHARPEMU_LOG_REFSCAN_ADDRS` | list of hex addresses | After a guest fault, scans executable guest memory from 0x800000000 to 0x810000000 for instructions that refer to the given addresses. It shows a maximum of 24 hits for each address. Use a comma between the hexadecimal addresses. | `DirectExecutionBackend.Exceptions.cs` |
 | `SHARPEMU_LOG_REGISTER_WINDOWS` | `1` | After a guest fault, shows a 0x80-byte memory window at each general register value that is 0x10000 or more. The default is off. | `DirectExecutionBackend.Exceptions.cs` |
 | `SHARPEMU_LOG_SAVEDATA` | `1` | Writes `savedata.` and `save_data_dialog.` trace lines for the save data calls to stderr. The default is off. | `SaveDataExports.cs`, `SaveDataDialogExports.cs` |
@@ -299,10 +324,11 @@ Each variable adds one group of messages to the log. The default is off.
 | `SHARPEMU_LOG_THREAD_MODE` | `1` | Writes `[THREADMODE]` lines when a native guest worker thread is created, starts a guest run, and stops a guest run. Each line shows the host thread identifiers. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.NativeWorker.cs` |
 | `SHARPEMU_LOG_USER_SERVICE` | `1` | Writes trace lines for the user service library calls. Each line includes the guest return address of the call. | `UserServiceExports.cs` |
 | `SHARPEMU_LOG_USLEEP` | `1` | Writes trace lines for `usleep` calls: the first 32 calls and then every 10000th call. It also stops the native inline `usleep` stub and the leaf import path, so each call goes through the traced handler. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs`, `KernelRuntimeCompatExports.cs` |
+| `SHARPEMU_DISABLE_EXTRQ_REWRITE` | `1` | Disables the load-time EXTRQ rewrite on hosts without SSE4a. Uses fault-time recovery instead. The default is off. | `Sse4aExtractRewrite.cs` |
 | `SHARPEMU_LOG_VIDEOOUT_FPS` | `1` | Writes periodic frame rate lines with flip, present, draw, pipeline, and buffer pool counts. `SHARPEMU_PROFILE_PERFORMANCE=1` starts the same output. | `VideoOutExports.cs` |
 | `SHARPEMU_LOG_VIDEOOUT` | `1` | Writes `videoout.` trace lines for the video output calls, such as flip events and frame dumps. The default is off. | `VideoOutExports.cs` |
 | `SHARPEMU_LOG_VK_RESOURCES` | `1` | Writes a `vk.global_buffer` trace line one time for each new guest buffer that the Vulkan presenter binds. The line shows the base address and the size. | `VulkanVideoPresenter.Draws.Recording.cs`, `VulkanVideoPresenter.GuestBuffers.cs` |
-| `SHARPEMU_LOG_VMEM` | `1` | Writes debug lines for guest virtual memory operations and `[HOSTMEM]` lines for host memory operations. The default is off. | `PhysicalVirtualMemory.cs`, `HostMemory.cs`, `PosixHostMemory.cs` |
+| `SHARPEMU_LOG_VMEM` | `1` | Writes debug lines for guest virtual memory operations and `[HOSTMEM]` lines for host memory operations. Adds `[VMEM][ALLOC_SEARCH]` for the first 64 searches, with up to five rejected candidates per search, and `[VMEM][ALLOC_FAILURE]` for the first 32 allocation exceptions, including the phase and stack. The default is off. | `PhysicalVirtualMemory.cs`, `KernelVirtualRangeAllocator.cs`, `HostMemory.cs`, `PosixHostMemory.cs` |
 | `SHARPEMU_LOG_WIDE_PRINTF_ARGS` | `1` | Writes trace lines for the arguments of printf format calls, such as string arguments. Use `SHARPEMU_LOG_WIDE_PRINTF_FILTER` to limit the output. | `KernelMemoryCompatExports.cs` |
 | `SHARPEMU_LOG_WIDE_PRINTF_FILTER` | text | Limits the `SHARPEMU_LOG_WIDE_PRINTF_ARGS` trace to format strings that contain this text. The comparison is case-sensitive. When unset, the trace includes all format strings. | `KernelMemoryCompatExports.cs` |
 | `SHARPEMU_LOG_WIDE_PRINTF` | `1` | Writes a trace line for each wide-character printf call. The line shows the first 160 characters of the format and of the result. | `KernelMemoryCompatExports.cs` |
@@ -319,7 +345,12 @@ Each variable records a detailed sequence of events. Traces can be large.
 | `SHARPEMU_LOG_IMPORT_FRAMES` | `1` | Adds the guest frame chain to each traced import. It applies only to imports that `SHARPEMU_LOG_ALL_IMPORTS` or `SHARPEMU_LOG_IMPORT_FILTER` selects. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs` |
 | `SHARPEMU_LOG_IMPORT_PERIODIC` | `1` | Starts the periodic import trace. It shows the early import bands and every 100000th import dispatch. The default is off because the stderr output decreases the speed. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs` |
 | `SHARPEMU_LOG_IMPORT_RECENT` | `1` | Writes the recent import history after each traced import. It applies only to imports that `SHARPEMU_LOG_ALL_IMPORTS` or `SHARPEMU_LOG_IMPORT_FILTER` selects. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs` |
-| `SHARPEMU_PROBE_IMPORT_RET_ADDRESS` | hex address | Set a guest return address. When an import call returns to this address, the emulator writes an `import-return-address-probe` line with the thread, NID, stack and frame values. The limit is 2048 lines. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs` |
+| `SHARPEMU_PROBE_IMPORT_RET_ADDRESS` | hex address | Set a guest return address. Match the import return address or the immediate saved caller. Record each matching call with its registers. Read 512 stack bytes and 128 bytes at R15 on the first match or when R14 changes on that host thread. At those points, follow aligned pointers from R15 for at most three levels, 4096 candidates, and 128 readable regions of 128 bytes. Read 400 bytes at R12 and 8192 bytes at R13 for the first 2048 matches and each 65536th match. All memory reads are checked. This memory can contain guest data. Keep the log private. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs` |
+| `SHARPEMU_PROBE_IMPORT_ROOT_ADDRESS` | hex address | With the return-address probe enabled, capture an additional pointer graph on the first match and each R14 transition. Read up to 128 regions of 512 bytes, at most five pointer levels and 4096 candidates. Use checked reads. The snapshot is not atomic and can contain guest data. Keep it private. The default is off. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs` |
+| `SHARPEMU_PROBE_IMPORT_ROOT_PATHS` | hex pointer paths | Optional paths from the configured root, separated by semicolons. Each slash-separated hexadecimal offset reads a pointer at the current address plus that offset. Offsets have no `0x` prefix. Limit: 16 paths, eight offsets each. Each resolved path gets a 512-byte snapshot and an independent bounded pointer graph, so unrelated roots cannot exhaust its budget. Reads are checked but not atomic. Keep logs private. | `DirectExecutionBackend.Imports.cs` |
+| `SHARPEMU_TRACE_MUTEX_ADDRESS` | hex address | Buffer import entry and normal return events whose first argument matches this guest address. Retain the first 65536 events and report dropped events. Write timestamps, thread handles, caller, results, and registers at normal process exit. Suppress the large return-address snapshots while enabled. A returned event records the import result, not proof that a deferred lock has been acquired. Default off. | `DirectExecutionBackend.MutexTrace.cs` |
+| `SHARPEMU_TRACE_MUTEX_MEMORY_CALLERS`, `SHARPEMU_TRACE_MUTEX_MEMORY_PATHS` | hex caller list; memory paths | With the mutex trace enabled, include mutex and condition imports from selected callers even when their first argument differs from the selected mutex. Capture memory before and after host dispatch; a host return does not prove that a blocked guest call has resumed. Match the direct return address or the saved frame caller. Separate callers with commas and paths with semicolons. A path starts with `frame`, `r15`, `stack` (the import-entry stack, including its return address), or an absolute hex address. Each `/offset` reads a pointer at the current address plus that hex offset. Retain the last 2048 snapshots, up to 16 paths and 512 bytes per path. Report host thread IDs, the total count, and unreadable regions at normal shutdown. These reads are not atomic across threads and can affect timing. Default off. | `DirectExecutionBackend.MutexTrace.cs` |
+| `SHARPEMU_TRACE_MUTEX_RIP_START`, `SHARPEMU_TRACE_MUTEX_RIP_END` | hex addresses | With mutex tracing and guest RIP sampling enabled, retain the last 2048 register snapshots in this start-inclusive, end-exclusive range. Include 256 checked stack bytes read after the sampled thread resumes; these bytes are not an atomic call stack. Write at normal process exit. Default off. Logs can contain guest data; keep them private. | `DirectExecutionBackend.MutexTrace.cs` |
 | `SHARPEMU_PROBE_IMPORT_RET` | text (NID or `*`) | Set an import NID, or `*` for all imports. For the first 8 applicable import calls, the emulator writes the bytes and the disassembly before the return address. The default is off. | `DirectExecutionBackend.cs`, `DirectExecutionBackend.Imports.cs`, `DirectExecutionBackend.Diagnostics.cs` |
 | `SHARPEMU_RTC_PROBE_RANGE` | hex address range (`start-end`) | Set a range of guest addresses. When a caller of `sceRtcGetCurrentTick` returns into this range, the emulator writes 0x100 bytes of code near that return address. It does this one time only. | `RtcExports.cs` |
 | `SHARPEMU_TRACE_AGC_EQ_ACCESSORS` | `1` | Set to `1` to write an `agc.eq_accessor` line for calls to the AGC event accessor functions. Each line shows the accessor, the event address, the result and the event bytes. After 64 lines, the emulator writes only at power-of-two counts. | `AgcExports.Events.cs` |
@@ -335,6 +366,7 @@ Each variable records a detailed sequence of events. Traces can be large.
 | `SHARPEMU_TRACE_GUEST_IMAGE_WIDTH` | number | Effect not clear from the code. The Vulkan presenter keeps the number for an image filter that compares the image width, but no code calls the filter. | `VulkanVideoPresenter.Draws.Recording.cs` |
 | `SHARPEMU_TRACE_GUEST_MEMORY_LIFETIME` | list of source names or `*` | The guest image write tracker writes `[WT][LIFETIME]` lines for each tracked range that has a listed source name. Use a comma or a semicolon between names. `*` selects all sources. | `GuestImageWriteTracker.cs` |
 | `SHARPEMU_TRACE_GUEST_WRITES` | list of hex addresses or `*` | Effect not clear from the code. The Vulkan presenter reads the list in an address filter for guest image writes, but no code calls the filter. | `VulkanVideoPresenter.Draws.Recording.cs` |
+| `SHARPEMU_TRACE_IMAGE_CLEARS` | `1` | Traces Vulkan image clear decisions, metadata, and image history. Includes volume descriptor data, metadata slice samples, and clear decisions before and after image use. Volume output stops at 2,048 records or 256 keys; each metadata range scan is limited to 8 MiB. Default is off. Set before launch. Tracing can affect timing. See [Image clear tracing](image-clear-tracing.md). | `ImageClearTrace.cs`, `GuestImageCache.VolumeClearTrace.cs` |
 | `SHARPEMU_TRACE_PACKED_EXPORT` | `1` | The SPIR-V translator writes `[AGC][PACKED-EXPORT]` and `[AGC][TITLE-IR]` lines for packed export analysis. It does this only for the shader program at address 0x0000000500781200. Default is off. | `Gen5SpirvTranslator.cs` |
 | `SHARPEMU_TRACE_PRESENTED_GUEST_IMAGE_ADDRS` | list of hex addresses or `*` | Writes a `vk.present_sample` trace line when the presenter shows a guest image at a listed address. It records the first presentation of each address unless `SHARPEMU_TRACE_PRESENTED_GUEST_IMAGE_OCCURRENCE` is set. | `VulkanVideoPresenter.Draws.Recording.cs`, `VulkanVideoPresenter.RenderLoop.cs` |
 | `SHARPEMU_TRACE_PRESENTED_GUEST_IMAGE_OCCURRENCE` | number | Selects which presentation of an address in `SHARPEMU_TRACE_PRESENTED_GUEST_IMAGE_ADDRS` the presenter records. Default is 0, which selects the first presentation. | `VulkanVideoPresenter.Draws.Recording.cs` |
@@ -364,6 +396,16 @@ Each variable writes data to files.
 
 Each variable records timings or counts.
 
+With `SHARPEMU_PROFILE_PERFORMANCE=1`, the memory report includes
+`[PERF][RESERVATION_TOTAL]` call counts and inclusive query times by stage.
+`[PERF][RESERVATION_DETAIL]` records owned overlaps, native reservation failures,
+and Windows allocation/page queries. Details include range bounds and available
+native error values. Each report keeps at most four distinct samples per stage
+and 32 overall. Totals include omitted samples; `omitted_calls` counts calls
+excluded from the detail samples. Each report resets the counters. Query success
+records the native result, not whether the caller accepts the returned bounds.
+These records use the existing switch; no separate variable is required.
+
 | Variable | Value | Function | Code that reads it |
 | --- | --- | --- | --- |
 | `SHARPEMU_LOG_AUDIO_QUEUE` | `1` | Writes one `[PERF][AUDIO]` line per second for each SDL audio stream. The line shows the queue depth in milliseconds, the submit rate, the fill percentage and the drops. The emulator reads the value one time at start. | `SdlHostAudio.cs` |
@@ -375,9 +417,9 @@ Each variable records timings or counts.
 | `SHARPEMU_PROFILE_GPU_DRAWS` | `1` | Use with the render profile. Writes a GPU timestamp after each draw and dispatch, so that the `[PERF][GPU_INTERVAL]` lines give the GPU time of each pipeline. The default writes only two timestamps for each submission for the `[PERF][GPU_BUSY]` lines, because one timestamp for each draw can change the GPU time. | `VulkanCommandProfile.cs` |
 | `SHARPEMU_PROFILE_GUEST_IMAGE_TRACKER` | `1` | Set to `1` to record counters for the guest image write tracker. The emulator writes `[PERF][GUEST_IMAGE_TRACKER]` and `[PERF][GUEST_IMAGE_TRACKER_RANGE]` lines. `SHARPEMU_PROFILE_PERFORMANCE=1` also starts this profile. | `GuestImageWriteTracker.cs` |
 | `SHARPEMU_PROFILE_GUEST_RIP_INTERVAL_MS` | number (milliseconds) | Set the time between samples of the guest code profiler. The value must be more than 0. The default is 2. | `DirectExecutionBackend.GuestSampler.cs` |
-| `SHARPEMU_PROFILE_GUEST_RIP_REPORT_S` | number (seconds) | Set the time between reports of the guest code profiler. The value must be more than 0. The default is 15. | `DirectExecutionBackend.GuestSampler.cs` |
+| `SHARPEMU_PROFILE_GUEST_RIP_REPORT_S` | number (seconds) | Set the sample window for each buffered guest profiler report. The value must be more than 0. The default is 15. Reports are written at normal process exit, not after each window. | `DirectExecutionBackend.GuestSampler.cs` |
 | `SHARPEMU_PROFILE_GUEST_RIP_THREAD` | text | Set a text filter for the guest code profiler. The profiler samples only guest threads whose name contains this text. The comparison ignores case. When unset, the profiler samples all guest threads. | `DirectExecutionBackend.GuestSampler.cs` |
-| `SHARPEMU_PROFILE_GUEST_RIP` | `1` | Set to `1` to start a sample profiler for guest code. The profiler records the instruction address of each guest thread and writes `[PERF][GUEST]` reports. The default is off. | `DirectExecutionBackend.GuestSampler.cs`, `DirectExecutionBackend.Imports.cs` |
+| `SHARPEMU_PROFILE_GUEST_RIP` | `1` | Start the guest instruction-address sampler. Retain the first 4096 report lines, including module records. Write them and the dropped-line count at normal process exit, even without mutex tracing. Forced termination can lose the reports. With `SHARPEMU_TRACE_MUTEX_ADDRESS`, also retain up to 65536 location samples for contexts that accessed that address. Sampling briefly suspends host threads and can affect timing. Default off. | `DirectExecutionBackend.GuestSampler.cs`, `DirectExecutionBackend.Imports.cs`, `DirectExecutionBackend.MutexTrace.cs` |
 | `SHARPEMU_PROFILE_GUEST_SCHEDULER` | `1` | Set to `1` to record guest thread scheduler statistics. The emulator writes `[PERF][GUEST_SCHED]` lines. With `SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE=1`, it also records guest thread flow events. `SHARPEMU_PROFILE_PERFORMANCE=1` also starts this profile. | `DirectExecutionBackend.GuestSchedulerProfile.cs`, `GuestThreadFlowProfile.cs` |
 | `SHARPEMU_PROFILE_RENDER_REPORT_S` | number (seconds) | Set the time between render profile reports. The value can be a decimal number and must be more than 0. The default is 5. | `RenderPhaseProfile.cs` |
 | `SHARPEMU_PROFILE_RENDER` | `1` | Set to `1` to measure the time of each render thread phase. The emulator writes `[PERF][RENDER]`, `[PERF][RENDER_MS]` and related lines. With `SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE=1`, it also records GPU memory access counters. `SHARPEMU_PROFILE_PERFORMANCE=1` also starts this profile. | `RenderPhaseProfile.cs`, `GpuMemoryAccessProfile.cs` |
@@ -431,3 +473,25 @@ Thus they have no effect, or only a part of their function operates. The rows ab
 - `SHARPEMU_TRACE_GUEST_IMAGE_HEIGHT`
 - `SHARPEMU_TRACE_GUEST_IMAGE_WIDTH`
 - `SHARPEMU_TRACE_GUEST_WRITES`
+
+### Configurable ownership capture
+
+See the [guest ownership trace guide](guest-ownership-trace.md) for a tested JSON
+example, launch commands, field definitions, output interpretation, and limits.
+
+`SHARPEMU_TRACE_OWNERSHIP_PLAN` selects a local JSON array of capture points. Default off.
+Each point has `Caller` (hex return address), `Import` (export name), `Name`, `Returned`
+(default false), `Capacity` (default 4096), and `Regions`. It takes precedence over the
+mutex event trace. No guest addresses are built into the diagnostic.
+
+Each region has `Name`, `Address`, and either `Length` or `End`. Expressions start with
+a hex value or `arg0`, `arg1`, `arg2`, `rbx`, `frame`, `r12`, `r13`, `r14`, `r15`, or `stack`.
+`stack` includes the import-entry return address. Operators run left to right: `+`, `-`,
+and `*` use hex operands; `/offset` reads an eight-byte pointer at that offset.
+`FollowPointers` reads 64 bytes at each pointer in the captured region.
+
+The capture retains the first events per point, with at most 256 KiB per region and
+a 128 MiB accounting budget. It reports dropped events, unreadable regions, and truncation.
+Snapshots are not atomic across threads. A host return is not proof of guest continuation
+completion. Normal process exit writes the trace; forced termination can lose it.
+The capture only reads guest state and does not change allocation, waits, or completion.

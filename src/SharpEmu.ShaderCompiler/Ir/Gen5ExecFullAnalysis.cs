@@ -147,7 +147,8 @@ public static class Gen5ExecFullAnalysis
             }
         }
 
-        var scalarDestination = instruction.Control switch
+        // GFX10 V_CMPX changes EXEC and ignores the legacy scalar destination.
+        uint? scalarDestination = opcode.StartsWith("VCmpx", StringComparison.Ordinal) ? null : instruction.Control switch
         {
             Gen5Vop3Control control => control.ScalarDestination,
             Gen5SdwaControl control => control.ScalarDestination,

@@ -16,10 +16,11 @@ internal static partial class RegisterWriters
     public static void FillContext(RegisterPacketWriter?[] direct, RegisterWriter?[] indirect)
     {
         direct[DbRenderControl] = RenderControlPacket;
+        direct[DbCountControl] = DepthCountControlPacket;
         direct[DbRenderOverride] = DepthRenderOverridePacket;
         foreach (var offset in new[]
                  {
-                     DbCountControl, DbRenderOverride2, DbDfsmControl, DbRmiL2CacheControl, CbRmiGl2CacheControl,
+                     DbRenderOverride2, DbDfsmControl, DbRmiL2CacheControl, CbRmiGl2CacheControl,
                      TaBcBaseAddr, TaBcBaseAddrHi, CbDccControl, PaSuPointSize, PaSuPointMinMax, DbAlphaToMask, VgtDrawPayloadCntl,
                      VgtPrimitiveIdReset, PaClObjPrimIdCntl, PaSuVtxCntl, PaScFovWindowLr, PaScFovWindowTb, PaScModeCntl1,
                      PaScAaMaskX0Y0X1Y0, PaScAaMaskX0Y1X1Y1, PsShaderSampleExclusionMask, PaScBinnerCntl0, PaScBinnerCntl1,
@@ -165,7 +166,7 @@ internal static partial class RegisterWriters
 
         foreach (var offset in new[]
                  {
-                     CbDccControl, DbCountControl, DbSResultsCompareState0, DbSResultsCompareState1, DbRenderOverride2,
+                     CbDccControl, DbSResultsCompareState0, DbSResultsCompareState1, DbRenderOverride2,
                      DbDfsmControl, DbRmiL2CacheControl, CbRmiGl2CacheControl, TaBcBaseAddr, TaBcBaseAddrHi, PaSuPointSize, PaSuPointMinMax,
                      SpiTmpringSize, VgtDrawPayloadCntl, VgtPrimitiveIdReset, PaClObjPrimIdCntl, PaScFovWindowLr, PaScFovWindowTb, PaScFsrEnable,
                      FsrRecursions0, FsrRecursions1, PaScModeCntl1, PaScAaMaskX0Y0X1Y0, PaScAaMaskX0Y1X1Y1, PaSuVtxCntl, PsShaderSampleExclusionMask,
@@ -176,6 +177,7 @@ internal static partial class RegisterWriters
         }
 
         indirect[SpiVsOutConfig] = static (banks, _, value) => banks.Context.ShaderInterface.VertexOutputConfiguration = value;
+        indirect[DbCountControl] = static (banks, _, value) => banks.Context.DepthCountControl = value;
         indirect[DbRenderOverride] = static (banks, _, value) => banks.Context.DepthRenderOverride = DepthRenderOverrideRegisters.Decode(value);
         indirect[SpiShaderPosFormat] = static (banks, _, value) => banks.Context.ShaderInterface.PositionExportFormat = value;
         indirect[SpiShaderIdxFormat] = static (banks, _, value) => banks.Context.ShaderInterface.IndexExportFormat = value;
@@ -376,6 +378,9 @@ internal static partial class RegisterWriters
 
     private static uint DepthControlPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
         SingleValue(banks, in packet, offset, values, RegisterWriteTable.ContextIndirect[DbDepthControl]!);
+
+    private static uint DepthCountControlPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
+        SingleValue(banks, in packet, offset, values, RegisterWriteTable.ContextIndirect[DbCountControl]!);
 
     private static uint EnhancedQualityAntialiasingPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
         SingleValue(banks, in packet, offset, values, RegisterWriteTable.ContextIndirect[DbEqaa]!);

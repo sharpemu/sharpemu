@@ -9,6 +9,20 @@ namespace SharpEmu.Libs.Tests.Media;
 
 public sealed class HostMovieBridgeTests : IDisposable
 {
+    [Theory]
+    [InlineData(null, "GUEST")]
+    [InlineData("", "GUEST")]
+    [InlineData("unknown", "GUEST")]
+    [InlineData("guest", "GUEST")]
+    [InlineData("native", "HOST")]
+    [InlineData("FFMPEG", "HOST")]
+    [InlineData("skip", "SKIP")]
+    [InlineData("dummy", "DUMMY")]
+    public void PlaybackModeNameUsesTheEffectiveSelection(string? configured, string expected)
+    {
+        Assert.Equal(expected, HostMovieBridge.GetPlaybackModeName(configured));
+    }
+
     private readonly string _tempDirectory = Path.Combine(
         Path.GetTempPath(),
         $"sharpemu-bink-{Guid.NewGuid():N}");

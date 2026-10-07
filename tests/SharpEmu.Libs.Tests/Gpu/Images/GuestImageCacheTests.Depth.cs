@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
+using SharpEmu.Libs.Tests.Memory.GuestMemory;
 using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
@@ -14,6 +16,134 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 // Depth and stencil overlaps, buffer synchronization from images, and layered conversions.
 public sealed unsafe partial class GuestImageCacheTests
 {
+    [Theory]
+    [InlineData(8ul, 4u, 1u)]
+    [InlineData(4ul, 2u, 2u)]
+    public void StencilAssociation_SeparatesChangedRangeOrExtent(ulong stencilSize, uint width, uint height)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var stencilAddress = address + 0x10000;
+        var original = AsDepthTarget(LinearRequest(address, 16, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new Extent3D(4, 1, 1), 1, 4, 1), Format.D32SfloatS8Uint);
+        original.Description.Stencil = new GuestSpan(stencilAddress, 4);
+        original.View = original.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        var originalIdentifier = harness.Acquire(ref original);
+        harness.MarkGpuWritten(originalIdentifier);
+        var originalAssociation = harness.ProxyAt(stencilAddress, 4);
+        var originalRecord = harness.Image(originalAssociation);
+        Assert.True(originalRecord.IsWatched);
+
+        var replacement = AsDepthTarget(LinearRequest(address + 0x4000, 16, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new Extent3D(width, height, 1), 1, 4, 1), Format.D32SfloatS8Uint);
+        replacement.Description.Stencil = new GuestSpan(stencilAddress, stencilSize);
+        replacement.View = replacement.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        var replacementIdentifier = harness.Find(ref replacement);
+        harness.Worker.Run(() => harness.Images.AssociateStencilForTest(replacementIdentifier, replacement.Description.Stencil));
+        var associations = harness.Images.FindImagesInRangeForTest(stencilAddress, stencilSize, false);
+        var replacementAssociation = Assert.Single(associations, identifier =>
+            harness.Image(identifier).DepthOwner == replacementIdentifier);
+
+        Assert.NotEqual(originalAssociation, replacementAssociation);
+        Assert.Equal(originalIdentifier, originalRecord.DepthOwner);
+        Assert.Equal(original.Description.Stencil, originalRecord.Description.Data);
+        Assert.True(originalRecord.IsWatched);
+        Assert.Equal(replacement.Description.Stencil, harness.Image(replacementAssociation).Description.Data);
+        Assert.Equal(replacement.Description.Extent, harness.Image(replacementAssociation).Description.Extent);
+    }
+
+    [Fact]
+    public void StencilAssociation_ReleasesFormerImageWriteProtection()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var stencilAddress = address + 0x10000;
+        var color = LinearRequest(stencilAddress, 4, Format.R32Uint, GuestPixelFormat.Bits32UInt,
+            GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var colorIdentifier = harness.Acquire(ref color);
+        var colorImage = harness.Image(colorIdentifier);
+        var colorBacking = colorImage.Backing.Handle;
+        Assert.True(colorImage.IsWatched);
+
+        var depth = AsDepthTarget(LinearRequest(address, 4, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1), Format.D32SfloatS8Uint);
+        depth.Description.Stencil = new GuestSpan(stencilAddress, 4);
+        depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        var depthIdentifier = harness.Find(ref depth);
+        harness.Worker.Run(() => harness.Images.AssociateStencilForTest(depthIdentifier, depth.Description.Stencil));
+
+        var association = harness.ProxyAt(stencilAddress, 4);
+        Assert.True(association.IsValid);
+        Assert.Equal(colorIdentifier, association);
+        Assert.Equal(depthIdentifier, colorImage.DepthOwner);
+        Assert.Equal(colorBacking, colorImage.Backing.Handle);
+        Assert.False(colorImage.IsWatched);
+        Assert.Equal(SharpEmu.HLE.Host.HostPageProtection.ReadWrite, harness.Protection(stencilAddress));
+        harness.Worker.Run(() => harness.Images.AssociateStencilForTest(depthIdentifier, depth.Description.Stencil));
+        Assert.Equal(association, harness.ProxyAt(stencilAddress, 4));
+
+        Assert.False(colorImage.IsWatched);
+        Assert.Equal(SharpEmu.HLE.Host.HostPageProtection.ReadWrite, harness.Protection(stencilAddress));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void StencilAssociation_PreservesActiveWatchOnReuse(bool changeDepthOwner)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        var views = new FailingHostViews(HostViewMemory.Create());
+        using var harness = new CacheHarness(_vulkan, viewHost: views);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var stencilAddress = address + 0x10000;
+        harness.Write(address, Bytes(0.25f, 0.5f, 0.75f, 1.0f));
+        harness.Write(stencilAddress, [0x01, 0x02, 0x03, 0x04]);
+        var depth = AsDepthTarget(LinearRequest(address, 16, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new Extent3D(4, 1, 1), 1, 4, 1), Format.D32SfloatS8Uint);
+        depth.Description.Stencil = new GuestSpan(stencilAddress, 4);
+        depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        var depthIdentifier = harness.Acquire(ref depth);
+        harness.MarkGpuWritten(depthIdentifier);
+        var association = harness.ProxyAt(stencilAddress, 4);
+        var record = harness.Image(association);
+        Assert.True(record.IsWatched);
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(stencilAddress));
+
+        if (changeDepthOwner)
+        {
+            var previousDepthIdentifier = depthIdentifier;
+            depth.Description.Data = new GuestSpan(address + 0x4000, 16);
+            depthIdentifier = harness.Acquire(ref depth);
+            harness.MarkGpuWritten(depthIdentifier);
+            Assert.NotEqual(previousDepthIdentifier, depthIdentifier);
+        }
+
+        var protectionCalls = views.Log.Count(operation => operation == FailingHostViews.Op.ChangeAccess);
+        for (var index = 0; index < 16; index++)
+        {
+            harness.Worker.Run(() => harness.Images.AssociateStencilForTest(depthIdentifier, depth.Description.Stencil));
+            Assert.True(record.IsWatched);
+            Assert.Equal(depthIdentifier, record.DepthOwner);
+            Assert.Equal(association, harness.ProxyAt(stencilAddress, 4));
+            Assert.Equal(depthIdentifier, harness.Acquire(ref depth));
+            harness.MarkGpuWritten(depthIdentifier);
+        }
+
+        Assert.Equal(protectionCalls, views.Log.Count(operation => operation == FailingHostViews.Op.ChangeAccess));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(stencilAddress));
+        harness.Write(stencilAddress, [0x05, 0x06, 0x07, 0x08]);
+        Assert.True(harness.WriteFault(stencilAddress));
+        Assert.False(record.IsWatched);
+        Assert.True(record.IsDefinitelyCpuDirty);
+        Assert.Equal(depthIdentifier, harness.Acquire(ref depth));
+        Assert.True(record.IsWatched);
+        Assert.Equal(new byte[] { 0x05, 0x06, 0x07, 0x08 },
+            harness.ReadImageBytes(harness.Image(depthIdentifier), ImageAspectFlags.StencilBit)[..4]);
+        harness.Shutdown();
+    }
+
     [Fact]
     public void BufferSynchronization_CopiesFittingMipsVolumesAndWholeDepthOnly()
     {

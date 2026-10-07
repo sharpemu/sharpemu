@@ -1,4 +1,4 @@
-﻿// Copyright (C) 2026 SharpEmu Emulator Project
+// Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
@@ -131,6 +131,7 @@ public static class PlayGoExports
 
             if (!_metadata.Available)
             {
+                TracePlayGo("open result=0x80B2000E metadata_unavailable");
                 return OrbisPlayGoErrorNotSupportPlayGo;
             }
 
@@ -680,9 +681,19 @@ public static class PlayGoExports
 
     private static PlayGoMetadata LoadPlayGoMetadata()
     {
+        var disableMetadataFallback = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PLAYGO_DISABLE_METADATA_FALLBACK"),
+            "1",
+            StringComparison.Ordinal);
         var app0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
         if (string.IsNullOrWhiteSpace(app0Root))
         {
+            if (disableMetadataFallback)
+            {
+                TracePlayGo("metadata_unavailable app0_unset fallback_disabled=1");
+                return PlayGoMetadata.Empty;
+            }
+
             // No app0 override to probe for sidecar files: same fully-installed
             // single-chunk fallback as below, or scePlayGoOpen fails fatally.
             return new PlayGoMetadata(
@@ -698,6 +709,12 @@ public static class PlayGoExports
         var hasMetadata = File.Exists(playGoDat) || File.Exists(scenarioJson) || File.Exists(chunkDefsXml);
         if (!hasMetadata)
         {
+            if (disableMetadataFallback)
+            {
+                TracePlayGo("metadata_missing fallback_disabled=1");
+                return PlayGoMetadata.Empty;
+            }
+
             // No PlayGo sidecar: derive the installed chunk set from the pak files
             // actually present on disk. A locally dumped title has all of its data
             // installed, and a package that splits content across chunks names them

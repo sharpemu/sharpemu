@@ -27,6 +27,14 @@ public static partial class Gen5MslTranslator
     private static bool ValidatePixelOutputs(IReadOnlyList<Gen5PixelOutputBinding> outputs, out string error)
     {
         error = string.Empty;
+        var dualSource = outputs.Any(output => output.BlendSourceIndex != 0);
+        if (dualSource && (outputs.Count != 2 ||
+            outputs.Any(output => output.HostLocation != 0 || output.Kind != Gen5PixelOutputKind.Float) ||
+            !outputs.Select(output => output.BlendSourceIndex).Order().SequenceEqual(new uint[] { 0, 1 })))
+        {
+            error = "dual-source pixel outputs require indices zero and one at host location zero";
+            return false;
+        }
         if (outputs.Count > 8)
         {
             error = "pixel outputs must contain at most eight guest slots in the 0..7 range";
@@ -44,7 +52,8 @@ public static partial class Gen5MslTranslator
             for (var other = index + 1; other < outputs.Count; other++)
             {
                 if (outputs[other].GuestSlot == outputs[index].GuestSlot ||
-                    outputs[other].HostLocation == outputs[index].HostLocation)
+                    (outputs[other].HostLocation == outputs[index].HostLocation &&
+                     outputs[other].BlendSourceIndex == outputs[index].BlendSourceIndex))
                 {
                     error = "pixel output guest slots and host locations must be unique";
                     return false;
@@ -53,7 +62,7 @@ public static partial class Gen5MslTranslator
         }
 
         // Host locations must be dense 0..N-1 so [[color(n)]] attachments match.
-        for (uint location = 0; location < outputs.Count; location++)
+        for (uint location = 0; location < (dualSource ? 1 : outputs.Count); location++)
         {
             var found = false;
             foreach (var output in outputs)
@@ -401,7 +410,7 @@ public static partial class Gen5MslTranslator
                         _ => "float4",
                     };
                     source.AppendLine(
-                        $"    {fieldType} mrt{binding.GuestSlot} [[color({binding.HostLocation})]];");
+                        $"    {fieldType} mrt{binding.GuestSlot} [[color({binding.HostLocation}){(binding.BlendSourceIndex != 0 ? $", index({binding.BlendSourceIndex})" : string.Empty)}]];");
                 }
 
                 source.AppendLine("};");
@@ -1865,6 +1874,11 @@ public static partial class Gen5MslTranslator
             out uint targetPc)
         {
             targetPc = 0;
+            if (instruction.Control is ShaderLinkedBranchControl linked)
+            {
+                targetPc = linked.TargetPc;
+                return true;
+            }
             if (instruction.Encoding != Gen5ShaderEncoding.Sopp ||
                 instruction.Words.Count == 0)
             {

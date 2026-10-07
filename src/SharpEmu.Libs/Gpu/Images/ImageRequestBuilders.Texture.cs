@@ -112,7 +112,8 @@ public static partial class ImageRequestBuilders
 
     // The view follows the compiled module: a volume, a layer window to the last layer, or one layer.
     private static ImageViewDescription TextureView(
-        in TextureDescriptorWords descriptor, in ShaderImageShape shape, Format format, bool shaderConversion, uint viewLevels, uint imageLayers)
+        in TextureDescriptorWords descriptor, in ShaderImageShape shape, Format format, bool shaderConversion, uint viewLevels, uint imageLayers,
+        ulong shaderHash, int imageIndex)
     {
         var mapping = shape.Storage || shaderConversion ? default : ViewFormatRules.ComponentMapping(DestinationSwizzle(descriptor));
         var usage = shape.Storage ? ImageUsageFlags.StorageBit : ImageUsageFlags.SampledBit;
@@ -124,7 +125,11 @@ public static partial class ImageRequestBuilders
         var baseLayer = descriptor.BaseArray;
         if (baseLayer >= imageLayers)
         {
-            throw SubmissionScheduler.Fatal($"The texture base layer is outside the image: baseLayer={baseLayer} layers={imageLayers} address=0x{descriptor.BaseAddress:X16}.");
+            var words = new uint[8];
+            for (var index = 0; index < words.Length; index++) words[index] = descriptor[index];
+            throw SubmissionScheduler.Fatal($"The texture base layer is outside the image: baseLayer={baseLayer} layers={imageLayers} address=0x{descriptor.BaseAddress:X16}. " +
+                $"shaderHash=0x{shaderHash:X16} image={imageIndex} type={descriptor.Type} depth={descriptor.Depth} " +
+                $"shape={shape} words={string.Join(',', words.Select(word => word.ToString("X8")))}");
         }
 
         var layerCount = shape.Arrayed ? imageLayers - baseLayer : 1;
@@ -174,7 +179,8 @@ public static partial class ImageRequestBuilders
     private static Dictionary<TextureKey, TextureRequestResolution>? _textureCache;
 
     // Builds the request for a sampled or storage texture; the words are the eight T# dwords.
-    public static TextureRequestResolution Texture(ReadOnlySpan<uint> words, in ShaderImageShape shape)
+    public static TextureRequestResolution Texture(ReadOnlySpan<uint> words, in ShaderImageShape shape,
+        ulong shaderHash = 0, int imageIndex = -1)
     {
         Span<uint> key = stackalloc uint[8];
         words[..Math.Min(words.Length, 8)].CopyTo(key);
@@ -185,7 +191,7 @@ public static partial class ImageRequestBuilders
             return cached;
         }
 
-        var resolution = BuildTexture(key, shape);
+        var resolution = BuildTexture(key, shape, shaderHash, imageIndex);
         if (cache.Count >= TextureCacheLimit)
         {
             cache.Clear();
@@ -195,11 +201,14 @@ public static partial class ImageRequestBuilders
         return resolution;
     }
 
-    private static TextureRequestResolution BuildTexture(ReadOnlySpan<uint> words, in ShaderImageShape shape)
+    private static TextureRequestResolution BuildTexture(ReadOnlySpan<uint> words, in ShaderImageShape shape,
+        ulong shaderHash, int imageIndex)
     {
         Span<uint> padded = stackalloc uint[8];
         words[..Math.Min(words.Length, 8)].CopyTo(padded);
         var descriptor = new TextureDescriptorWords(padded);
+        if (ImageClearTrace.Enabled && descriptor.Type == GuestImageType.Color3D)
+            ImageClearTrace.Write($"volume-descriptor address=0x{descriptor.BaseAddress:X16} words={Convert.ToHexString(System.Runtime.InteropServices.MemoryMarshal.AsBytes(padded))}");
         var storage = shape.Storage;
         if (descriptor.BaseAddress == 0)
         {
@@ -317,8 +326,34 @@ public static partial class ImageRequestBuilders
             PopulateTextureMipLayout(ref description);
         }
 
-        var view = TextureView(descriptor, shape, viewFormat, shaderConversion, viewLevels, description.Resources.Layers);
+        var view = TextureView(descriptor, shape, viewFormat, shaderConversion, viewLevels, description.Resources.Layers,
+            shaderHash, imageIndex);
+        if (!shape.R128 && descriptor.MetadataCompress && !description.IsDepth && !shaderConversion &&
+            tile == GuestTileMode.RenderTarget && levels == 1 && samples == 1 &&
+            type is GuestImageType.Color2D or GuestImageType.Color2DArray or GuestImageType.Color3D &&
+            NativeColorClear.TryDecode(0x40, viewFormat, !descriptor.DccAlphaOnMostSignificantBits, out _))
+        {
+            var clearMetadataAddress = descriptor.MetadataAddress << 8;
+            var sliceSize = NativeColorClear.SliceSize(width, height, description.BytesPerBlock);
+            var metadataSize = sliceSize * description.TransferLayers;
+            if (clearMetadataAddress != 0 && (clearMetadataAddress & 4095) == 0 && sliceSize != 0 &&
+                metadataSize <= ulong.MaxValue - clearMetadataAddress)
+            {
+                description.Metadata.Kind = MetadataKind.Dcc;
+                description.Metadata.Range = new GuestSpan(clearMetadataAddress, metadataSize);
+                description.Metadata.NativeColorClear = true;
+                description.Metadata.ColorAlphaOnLeastSignificantBits = !descriptor.DccAlphaOnMostSignificantBits;
+                description.Metadata.ColorMetadataBaseLayer = volume ? 0 : view.BaseLayer;
+            }
+        }
         var request = new ImageRequest(description, view, storage ? ImageRole.StorageImage : ImageRole.Texture);
+        if (ImageClearTrace.Enabled && volume)
+        {
+            request.TraceTextureMetadataAddress = descriptor.MetadataAddress << 8;
+            request.TraceMetadataCompress = descriptor.MetadataCompress;
+            request.TraceWriteCompress = descriptor.WriteCompress;
+            request.TraceTextureDescriptor = string.Join(",", ((ReadOnlySpan<uint>)descriptor.Fields).ToArray().Select(word => word.ToString("X8")));
+        }
         return new TextureRequestResolution(request, shaderConversion, pixelFormat, DestinationSwizzle(descriptor));
     }
 

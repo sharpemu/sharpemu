@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Vulkan;
@@ -45,6 +46,68 @@ public sealed class GlobalDataShareBindingTests(HeadlessVulkanFixture fixture) :
         }
 
         return type.GetField(name, PresenterUnderTest.InstanceMembers)!.GetValue(instance)!;
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Commit_ImageAliasesRequireOnlyTheCanonicalBinding(bool omitCanonicalBinding)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan) || !vulkan.SupportsDynamicRendering) return;
+        using var fatal = new FatalScope();
+        using var presenter = new PresenterUnderTest(vulkan);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var image = new ImageResource
+        {
+            Dimension = ImageDimension.Dim2D,
+            ResourceClass = SharpEmu.ShaderCompiler.Resources.ImageResourceClass.Sampled,
+            NumericClass = ImageNumericClass.Float,
+            Read = true,
+        };
+        var info = new ShaderResourceInfo
+        {
+            Images = [image, image.Clone(), image.Clone()],
+            ImageBindings = [0, 0, 0],
+        };
+        var program = new ShaderProgramInfo
+        {
+            Stage = ShaderStageKind.Compute,
+            Hash = 0x78,
+            Resources = new SpecializedResourceInfo { Info = info },
+            Bindings = omitCanonicalBinding ? new BindingLayout() : BindingLayout.Allocate(info, [], false, false, false),
+        };
+        var words = RegisterWords.Texture(address, GuestPixelFormat.Bits8_8_8_8UNorm, 1, 1);
+        var stage = new ShaderStageResources(program, new ResourceSnapshot { Images = [words, words, words] });
+        var input = new ComputeInputInfo { ThreadsX = 1, ThreadsY = 1, ThreadsZ = 1, Stage = stage };
+        var host = (IShaderPipelineHost)presenter.Instance;
+        presenter.Run(() =>
+        {
+            presenter.RenderHost.ResetBindings();
+            using var preparation = presenter.RenderHost.BeginPreparation();
+            var bindings = presenter.RenderHost.PrepareBindings(stage);
+            presenter.RenderHost.BindResources(bindings);
+            var module = host.CreateShaderModule(new VulkanCompiledGuestShader(CreateEmptyComputeShader()), ShaderStage.Compute, program.Hash, 1);
+            var pipeline = host.CreateComputePipeline(new ComputePipelineDescription { Input = input, Program = new ShaderProgram(1, module), Stage = program });
+            if (omitCanonicalBinding)
+            {
+                var error = Assert.Throws<SchedulerFatalException>(() => presenter.RenderHost.CommitBindings(PipelineBindPoint.Compute, pipeline, [bindings]));
+                Assert.Contains("image=0 occurrences=0 views=1", error.Message);
+            }
+            else
+            {
+                presenter.RenderHost.CommitBindings(PipelineBindPoint.Compute, pipeline, [bindings]);
+                presenter.RenderHost.BindPipeline(PipelineBindPoint.Compute, pipeline);
+                presenter.RenderHost.Dispatch(1, 1, 1);
+                presenter.RenderHost.ShaderAccessBarrier();
+            }
+        });
+        presenter.Run(() => presenter.InvokeMethod("FlushBatchedGuestCommands"));
+        harness.Finish();
+        harness.Shutdown();
+        vulkan.AssertNoValidationMessages();
     }
 
     [Fact]

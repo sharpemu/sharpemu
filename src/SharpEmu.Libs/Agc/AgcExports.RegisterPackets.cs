@@ -299,6 +299,15 @@ public static partial class AgcExports
         }
 
         TraceAgc($"agc.dcb_set_{registerSpace}_indirect buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} regs=0x{registersAddress:X16} count={registerCount}");
+        if (_traceAgc && (registerCount & 0x3FFFu) != 0)
+        {
+            Span<byte> tableSnapshot = stackalloc byte[(int)Math.Min(registerCount & 0x3FFFu, 16u) * 8];
+            var tableAddress = registersAddress & ~3UL;
+            var captured = ctx.Memory.TryRead(tableAddress, tableSnapshot);
+            TraceAgc($"agc.register_table_created cmd=0x{commandAddress:X16} bank={registerSpace} " +
+                $"table=0x{tableAddress:X16} count={registerCount & 0x3FFFu} captured={captured} " +
+                $"bytes={(captured ? Convert.ToHexString(tableSnapshot) : string.Empty)}");
+        }
         return ReturnPointer(ctx, commandAddress);
     }
 

@@ -46,12 +46,13 @@ public static class DeviceAddressRangePlanner
                 continue;
             }
 
-            // A FLAT address built from an aperture base is an LDS or scratch
-            // pointer; the backend routes it per lane, so it owns no device range.
-            if (memory.Kind == MemoryResourceKind.Flat)
+            if (memory.Kind == MemoryResourceKind.Flat && memory.Offset == 0 &&
+                (memory.Opcode.StartsWith("FlatLoadDword", StringComparison.Ordinal) ||
+                 memory.Opcode.StartsWith("FlatStoreDword", StringComparison.Ordinal)))
             {
                 memory.AddressSpace = ClassifyFlatAddress(plan, handle.Operands[1], plan.Accesses[index]!.Active);
-                if (memory.AddressSpace != FlatAddressSpace.Global)
+                if (memory.AddressSpace != FlatAddressSpace.Global ||
+                    ExcludesGlobalAddress(plan, memory.Pc, handle.Operands[1]))
                 {
                     continue;
                 }
@@ -90,11 +91,6 @@ public static class DeviceAddressRangePlanner
         return ranges;
     }
 
-    // A FLAT address is local when its high dword provably lies in an aperture.
-    // Two shapes occur: the high dword is clamped between constants inside the
-    // apertures (v_med3_u32 with the hard-coded PS5 bounds), or it derives from an
-    // aperture operand, which shaders often merge into the upper half of a
-    // computed dword with SDWA WORD1.
     private static FlatAddressSpace ClassifyFlatAddress(ShaderResourcePlan plan, ScalarValue high, ScalarValue? active)
     {
         var range = UnsignedRange(plan, high, active, []);
@@ -103,8 +99,7 @@ public static class DeviceAddressRangePlanner
         var lowPrivate = Gen5InlineConstants.IsPrivateApertureHigh(low);
         var highShared = Gen5InlineConstants.IsSharedApertureHigh(highBound);
         var highPrivate = Gen5InlineConstants.IsPrivateApertureHigh(highBound);
-        // The two apertures are adjacent windows, so bounds inside them keep every
-        // value in between inside them too.
+        // This interval excludes global memory. Execution still checks the exact tag.
         if ((lowShared || lowPrivate) && (highShared || highPrivate))
         {
             return (lowShared || highShared, lowPrivate || highPrivate) switch
@@ -115,14 +110,10 @@ public static class DeviceAddressRangePlanner
             };
         }
 
-        return ClassifyByApertureOperand(high);
+        return ClassifyLocalAlternatives(plan.Graph, high, []);
     }
 
-    // Conservative unsigned bounds of a 32-bit value as the access sees it. Phi, Select,
-    // UMin and UMax yield one of their inputs, so a cycle adds nothing (Empty); a select
-    // on the access's own EXEC mask contributes only its active arm.
-    // The mask is the same node when EXEC was not written in between, even when its
-    // value is unknown (an undefined node is never structurally equivalent).
+    // Unknown paths retain the full range. Only proven bounds can exclude global memory.
     private static readonly (uint Low, uint High) Empty = (uint.MaxValue, 0u);
 
     private static bool IsEmpty((uint Low, uint High) range) => range.Low > range.High;
@@ -142,7 +133,7 @@ public static class DeviceAddressRangePlanner
         }
 
         if (!visiting.Add(value))
-            return Empty;
+            return (0, uint.MaxValue);
         try
         {
             switch (value.Kind)
@@ -165,7 +156,7 @@ public static class DeviceAddressRangePlanner
                     var left = UnsignedRange(plan, value.Operands[0], active, visiting);
                     var right = UnsignedRange(plan, value.Operands[1], active, visiting);
                     if (IsEmpty(left) || IsEmpty(right))
-                        return IsEmpty(left) ? right : left;
+                        return (0, uint.MaxValue);
                     return value.Operation == ScalarOperation.UMin32
                         ? (Math.Min(left.Low, right.Low), Math.Min(left.High, right.High))
                         : (Math.Max(left.Low, right.Low), Math.Max(left.High, right.High));
@@ -180,40 +171,128 @@ public static class DeviceAddressRangePlanner
         }
     }
 
-    private static FlatAddressSpace ClassifyByApertureOperand(ScalarValue high)
+    private static bool ExcludesGlobalAddress(ShaderResourcePlan plan, uint pc, ScalarValue high)
     {
-        var shared = false;
-        var @private = false;
-        var pending = new Stack<ScalarValue>();
-        var visited = new HashSet<ScalarValue>();
-        pending.Push(high);
-        while (pending.TryPop(out var value))
+        var activeHigh = ActiveAddressHigh(plan, pc, high, out var minimumHigh);
+        return minimumHigh >= 0x10000 || IsLocalAperture(plan.Graph, activeHigh, new HashSet<ScalarValue>());
+    }
+
+    private static ScalarValue ActiveAddressHigh(ShaderResourcePlan plan, uint pc, ScalarValue high, out uint minimumHigh)
+    {
+        minimumHigh = 0;
+        var instructions = plan.Graph.Program.Instructions;
+        var index = -1;
+        for (var position = 0; position < instructions.Count; position++)
+            if (instructions[position].Pc == pc) { index = position; break; }
+        if (index < 0 || instructions[index].Control is not Gen5GlobalMemoryControl control) return high;
+        var block = plan.Graph.ControlFlow.Blocks.First(block => pc >= block.StartPc && pc < block.EndPc);
+        for (var position = index - 1; position >= 0 && instructions[position].Pc >= block.StartPc; position--)
         {
-            if (!visited.Add(value))
+            var instruction = instructions[position];
+            if (instruction.Opcode.StartsWith("VCmp", StringComparison.Ordinal) ||
+                instruction.Destinations.Any(destination => destination.Kind == Gen5OperandKind.ScalarRegister && destination.Value >= 126)) break;
+            if (instruction.Encoding is not (Gen5ShaderEncoding.Vop1 or Gen5ShaderEncoding.Vop2 or
+                Gen5ShaderEncoding.Vop3 or Gen5ShaderEncoding.Vop3p) && instruction.Opcode is not ("SWaitcnt" or "SNop")) break;
+            if (instruction.Destinations.Any(destination => destination.Kind == Gen5OperandKind.VectorRegister &&
+                destination.Value == control.VectorAddress + 1))
             {
-                continue;
+                // The address write and memory access use the same EXEC mask in this block.
+                if (plan.Graph.UnsignedMedianSources.TryGetValue(instruction.Pc, out var sources))
+                {
+                    var constants = new List<uint>();
+                    foreach (var source in sources)
+                        if (TryConstant(plan.Graph, source, new HashSet<ScalarValue>(), out var constant))
+                            constants.Add((uint)constant);
+                    // Two constant operands bound an unsigned median from below.
+                    if (constants.Count >= 2) minimumHigh = constants.Min();
+                }
+                return plan.Graph.ConditionalMaskResults.TryGetValue(instruction.Pc, out var result) ? result : high;
             }
+        }
+        return high;
+    }
 
-            if (value.Kind == ScalarValueKind.MemoryAperture)
-            {
-                if (Gen5InlineConstants.IsSharedAperture((uint)value.Payload))
-                    shared = true;
-                else
-                    @private = true;
-                continue;
-            }
+    private static bool IsLocalAperture(ScalarValueGraph graph, ScalarValue value, HashSet<ScalarValue> visiting) =>
+        ClassifyLocalAlternatives(graph, value, visiting) != FlatAddressSpace.Global;
 
-            foreach (var operand in value.Operands)
-                pending.Push(operand);
+    private static FlatAddressSpace ClassifyLocalAlternatives(
+        ScalarValueGraph graph, ScalarValue value, HashSet<ScalarValue> visiting)
+    {
+        value = graph.ResolveInvariantPhi(value) ?? value;
+        if (TryConstant(graph, value, [], out var constant))
+        {
+            if (constant == Gen5InlineConstants.SharedApertureBase >> 32 ||
+                constant == Gen5InlineConstants.SharedFlatApertureBase >> 32)
+                return FlatAddressSpace.Shared;
+            if (constant == Gen5InlineConstants.PrivateApertureBase >> 32 ||
+                constant == Gen5InlineConstants.PrivateFlatApertureBase >> 32)
+                return FlatAddressSpace.Private;
+            return FlatAddressSpace.Global;
         }
 
-        return (shared, @private) switch
+        if (!visiting.Add(value)) return FlatAddressSpace.Global;
+        try
         {
-            (true, true) => FlatAddressSpace.SharedOrPrivate,
-            (true, false) => FlatAddressSpace.Shared,
-            (false, true) => FlatAddressSpace.Private,
-            _ => FlatAddressSpace.Global,
-        };
+            var alternatives = value.Kind == ScalarValueKind.Select ? value.Operands.Skip(1) :
+                value.Kind == ScalarValueKind.Phi ? value.Operands.AsEnumerable() : [];
+            FlatAddressSpace? result = null;
+            foreach (var alternative in alternatives)
+            {
+                var classification = ClassifyLocalAlternatives(graph, alternative, visiting);
+                if (classification == FlatAddressSpace.Global) return FlatAddressSpace.Global;
+                result = result is null || result == classification
+                    ? classification : FlatAddressSpace.SharedOrPrivate;
+            }
+            return result ?? FlatAddressSpace.Global;
+        }
+        finally
+        {
+            visiting.Remove(value);
+        }
+    }
+
+    private static bool TryConstant(ScalarValueGraph graph, ScalarValue value, HashSet<ScalarValue> visiting, out ulong result)
+    {
+        value = graph.ResolveInvariantPhi(value) ?? value;
+        result = value.Payload;
+        if (value.Kind == ScalarValueKind.MemoryAperture)
+        {
+            result = Gen5InlineConstants.DecodeAperture64((uint)value.Payload) >> 32;
+            return true;
+        }
+        if (value.IsConstant) return true;
+        if (value.Kind == ScalarValueKind.Phi && visiting.Add(value))
+        {
+            var pending = new Stack<ScalarValue>();
+            var seen = new HashSet<ScalarValue>();
+            pending.Push(value);
+            ulong? candidate = null;
+            var validPhi = true;
+            while (pending.TryPop(out var current))
+            {
+                if (!seen.Add(current)) continue;
+                if (current.Kind == ScalarValueKind.Phi)
+                {
+                    if (current.Operands.Length == 0) validPhi = false;
+                    foreach (var incoming in current.Operands) pending.Push(incoming);
+                }
+                else if (!TryConstant(graph, current, visiting, out var incomingValue) ||
+                    candidate.HasValue && candidate.Value != incomingValue) validPhi = false;
+                else candidate = incomingValue;
+            }
+            visiting.Remove(value);
+            result = candidate ?? 0;
+            return validPhi && candidate.HasValue;
+        }
+        if (value.Kind != ScalarValueKind.Operation || !visiting.Add(value)) return false;
+        var operands = new ulong[value.Operands.Length];
+        var valid = true;
+        for (var index = 0; index < operands.Length; index++)
+            valid &= TryConstant(graph, value.Operands[index], visiting, out operands[index]);
+        visiting.Remove(value);
+        if (!valid || !ScalarOperationSemantics.TryEvaluate(value.Operation, operands, out result)) return false;
+        if (value.Type == ScalarValueType.U32) result = (uint)result;
+        return true;
     }
 
     // An access is bounded when its only run-time term is the record's immediate offset:
@@ -252,6 +331,31 @@ public static class DeviceAddressRangePlanner
             result[index] = new DeviceAddressRange(range.Handle, baseAddress, planned ? size : 0, planned, range.Written);
         }
 
-        return result;
+        if (plan.Graph.Program.FunctionBufferAccesses.Count == 0) return result;
+        var functionRanges = new List<DeviceAddressRange>(result);
+        var seen = new HashSet<(ulong Base, ulong Size, bool Written)>();
+        foreach (var memory in plan.Memory.Entries)
+        {
+            if (!memory.DeviceDescriptor || !plan.Graph.Program.FunctionBufferAccesses.Contains(memory.Pc)) continue;
+            if (!plan.Memory.TryGetIndex(memory.Pc, memory.ComponentIndex, out var memoryIndex) ||
+                plan.Accesses[memoryIndex]?.Handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } handle)
+                throw new ResourcePlanException("The shader function buffer has no descriptor.");
+            var words = new uint[4];
+            for (var component = 0; component < 4; component++)
+                if (!evaluator.Evaluate(handle.Operands[component], out words[component]))
+                    throw new ResourcePlanException("The shader function buffer range cannot be resolved.");
+            var address = words[0] | ((ulong)(words[1] & 0xFFFF) << 32);
+            if ((words[1] & 0x80000000) != 0)
+                throw new ResourcePlanException("The shader function uses an unsupported swizzled buffer.");
+            var stride = (words[1] >> 16) & 0x3FFF;
+            var size = (ulong)words[2] * Math.Max(stride, 1u);
+            var written = memory.Access is MemoryAccess.Write or MemoryAccess.Atomic;
+            if (size == 0) continue;
+            if (size > AddressMask - address + 1)
+                throw new ResourcePlanException("The shader function buffer range wraps the guest address space.");
+            if (seen.Add((address, size, written)))
+                functionRanges.Add(new((uint)functionRanges.Count, address, size, true, written));
+        }
+        return functionRanges.ToArray();
     }
 }

@@ -76,6 +76,7 @@ internal static unsafe partial class VulkanVideoPresenter
             ShaderStageKind.Vertex => ShaderStage.Vertex,
             ShaderStageKind.Pixel => ShaderStage.Pixel,
             ShaderStageKind.Compute => ShaderStage.Compute,
+            ShaderStageKind.Mesh => ShaderStage.Mesh,
             _ => throw SubmissionScheduler.Fatal($"The stage kind is unknown: stage={program.Stage} hash=0x{program.Hash:X16}."),
         };
 
@@ -110,6 +111,26 @@ internal static unsafe partial class VulkanVideoPresenter
             DepthCompare: image.DepthCompare,
             Atomic: image.Atomic);
 
+        private readonly HashSet<string> _imageLookupTraceEntries = new(StringComparer.Ordinal);
+
+        private void TraceImageLookup(ImageResource image, uint[] words, ShaderProgramInfo program, int index, in ImageRequest request)
+        {
+            if (!ImageClearTrace.Enabled ||
+                !ImageTraceRange.Overlaps(request.Description.Data.Address, 1) ||
+                _imageLookupTraceEntries.Count >= 256)
+                return;
+
+            var description = request.Description;
+            var message = $"ImageLookup shader=0x{program.Hash:X16} stage={program.Stage} image={index} indirectRoot={image.IndirectRoot} " +
+                $"address=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} type={description.Type} tile={description.TileMode} " +
+                $"extent={description.Extent.Width}x{description.Extent.Height}x{description.Extent.Depth} levels={description.Resources.Levels} layers={description.Resources.Layers} format={description.PixelFormat} " +
+                $"view={request.View} words={string.Join(',', words.Select(word => word.ToString("X8")))}";
+            if (!_imageLookupTraceEntries.Add(message)) return;
+            Console.Error.WriteLine($"[GPU][TRACE] {message}");
+            if (_imageLookupTraceEntries.Count == 256)
+                Console.Error.WriteLine("[GPU][TRACE] ImageLookup limit=256. Further entries are omitted.");
+        }
+
         // Render-state discovery for one shader image; the view is acquired later with the draw.
         private TextureResource ResolveImageBinding(ImageResource image, uint[] words, ShaderProgramInfo program, int index)
         {
@@ -119,12 +140,26 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var storage = image.ResourceClass == ShaderCompiler.Resources.ImageResourceClass.Storage;
-            var resolution = ImageRequestBuilders.Texture(words, ShapeOf(image));
+            var resolution = ImageRequestBuilders.Texture(words, ShapeOf(image), program.Hash, index);
             _ = BeginBatchedGuestCommands();
             var request = resolution.Request;
+            _imageCache.TraceTextureMetadata(request);
+            if (Gpu.Images.ImageClearTrace.Enabled)
+            {
+                Gpu.Images.ImageTraceRange.NoteFollowedImage(program.Hash, index, request.Description.Data.Address, request.Description.Data.Size);
+                TraceImageLookup(image, words, program, index, request);
+                _imageCache.TraceTextureBinding(program.Hash, index, words, request);
+            }
+            _imageCache.SynchronizeColorMetadata(request);
+            _ = BeginBatchedGuestCommands();
             var imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("image-binding", $"stage={program.Stage} hash=0x{program.Hash:X16} slot={index} storage={storage} address=0x{request.Description.Data.Address:X16} size=0x{request.Description.Data.Size:X} view={request.View} words={string.Join(",", words.Select(value => value.ToString("X8")))}");
             resolution = resolution with { Request = request };
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
+            _imageCache.ApplyNativeColorClear(imageIdentifier, request);
+            if (Gpu.Images.ImageClearTrace.Enabled)
+                _imageCache.TraceVolumeClear("resolved-shader-image", request, _imageCache.GetImage(imageIdentifier),
+                    $"stage={program.Stage} hash=0x{program.Hash:X16} slot={index}");
             BindImage(imageIdentifier, storage);
             var descriptor = new TextureDescriptorWords(words);
             if (ShouldTraceTextureBindings())
@@ -235,6 +270,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public IPreparedBindings PrepareBindings(ShaderStageResources stage)
         {
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("stage-binding", $"stage={stage.Program?.Stage} hash=0x{stage.Program?.Hash:X16} shaderBase=0x{stage.ShaderBase:X16} userData={string.Join(",", stage.Resources.UserData.Select(value => value.ToString("X8")))}");
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DescriptorPreparation);
             var preparation = RequirePreparation();
             var program = RequireProgram(stage);
@@ -293,6 +329,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             stage.WriteDispatchThreadLimits(shaderData);
+            stage.WriteMeshDrawParameters(shaderData);
             prepared.ShaderData = shaderData;
             if (layout.Find(DescriptorBindingKind.GlobalDataShare) is not null)
             {
@@ -495,6 +532,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var size = ClampMappedSize(address, requested);
+            if (MeshDrawTrace.Active) MeshDrawTrace.Write("buffer-binding", $"stage={program.Stage} hash=0x{program.Hash:X16} slot={slot} address=0x{address:X16} requested=0x{requested:X} size=0x{size:X} written={resource.Written} formatted={resource.Formatted}");
             var alignment = _minStorageBufferOffsetAlignment;
             var maxRange = _deviceInfo.MaxStorageBufferRange;
             if (alignment == 0 || size > maxRange)
@@ -502,7 +540,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"A storage buffer range or the device alignment is unsupported: buffer={slot} size=0x{size:X} alignment={alignment} hash=0x{program.Hash:X16}.");
             }
 
-            var (buffer, offset) = _bufferCache.ObtainBuffer(address, size, resource.Written, isTexelBuffer: resource.Formatted, bufferIdentifier);
+            var (buffer, offset) = _bufferCache.ObtainBuffer(address, size, resource.Written, isTexelBuffer: resource.Formatted, bufferIdentifier, program.Hash);
+            TraceBufferParameter(program.Hash, slot, address, size, buffer.Handle.Handle, offset, resource.Written);
             var alignedOffset = offset - offset % alignment;
             var adjustment = offset - alignedOffset;
             if (adjustment % sizeof(uint) != 0 || adjustment >= MaxMemoryOffsetAdjustment || size > maxRange - adjustment)
@@ -514,6 +553,10 @@ internal static unsafe partial class VulkanVideoPresenter
             if (resource.Formatted && resource.Written)
             {
                 _imageCache.InvalidateMemoryFromGpu(address, size);
+            }
+            else if (resource.Written)
+            {
+                _imageCache.InvalidateMemoryCopiesFromGpu(address, size);
             }
 
             return new BufferView(buffer.Handle, alignedOffset, size + adjustment);
@@ -604,7 +647,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 var size = ClampMappedSize(range.Base, range.Size);
                 if (range.Written)
                 {
-                    _ = _bufferCache.ObtainBuffer(range.Base, size, isWritten: true);
+                    _ = _bufferCache.ObtainBuffer(range.Base, size, isWritten: true, traceShaderHash: program.Hash);
+                    _imageCache.InvalidateMemoryCopiesFromGpu(range.Base, size);
                 }
                 else
                 {
@@ -752,7 +796,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 var stage = (PreparedStageBindings)prepared;
                 var stageFlag = DescriptorWriter.ShaderStageFlag(StageOf(stage.Program));
-                if ((bindPoint == PipelineBindPoint.Graphics && (stageFlag & (ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit)) == 0) ||
+                if ((bindPoint == PipelineBindPoint.Graphics && (stageFlag & (ShaderStageFlags.VertexBit | ShaderStageFlags.MeshBitExt | ShaderStageFlags.FragmentBit)) == 0) ||
                     (bindPoint == PipelineBindPoint.Compute && stageFlag != ShaderStageFlags.ComputeBit))
                 {
                     throw SubmissionScheduler.Fatal($"A stage does not belong to the bind point: stage={stage.Program.Stage} bindPoint={bindPoint}.");
@@ -947,7 +991,16 @@ internal static unsafe partial class VulkanVideoPresenter
 
                     for (var index = 0; index < descriptors.Images.Length; index++)
                     {
-                        var expected = descriptors.Images[index].MipViews.Length == 0 ? 1u : (uint)descriptors.Images[index].MipViews.Length;
+                        var resources = stage.Resources.Info;
+                        var canonical = resources.GetCanonicalImageBinding((uint)index);
+                        if (canonical >= descriptors.Images.Length || resources.GetCanonicalImageBinding(canonical) != canonical)
+                        {
+                            throw SubmissionScheduler.Fatal($"An image alias has no canonical binding: image={index} canonical={canonical} hash=0x{program.Hash:X16}.");
+                        }
+
+                        var expected = canonical == index
+                            ? Math.Max(1u, (uint)descriptors.Images[index].MipViews.Length)
+                            : 0u;
                         if (occurrences[index] != expected)
                         {
                             throw SubmissionScheduler.Fatal($"An image is bound a different number of times than its views: image={index} occurrences={occurrences[index]} views={expected} hash=0x{program.Hash:X16}.");
@@ -972,7 +1025,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (hasPushData)
                 {
-                    var pushStages = bindPoint == PipelineBindPoint.Graphics ? ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit : ShaderStageFlags.ComputeBit;
+                    var pushStages = bindPoint == PipelineBindPoint.Graphics
+                        ? ((entry.Description?.VertexStage.Stage == ShaderStageKind.Mesh
+                            ? ShaderStageFlags.MeshBitExt : ShaderStageFlags.VertexBit) |
+                           ShaderStageFlags.FragmentBit)
+                        : ShaderStageFlags.ComputeBit;
                     _vk.CmdPushConstants(command, entry.Layout, pushStages, 0, PushData.ByteSize, pushData);
                 }
 

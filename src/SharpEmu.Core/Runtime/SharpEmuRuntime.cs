@@ -86,6 +86,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
     public static ISharpEmuRuntime CreateDefault(SharpEmuRuntimeOptions options = default)
     {
+        Console.Error.WriteLine("[MEDIA][INFO] BINK VIDEO PLAYBACK MODE: " +
+            SharpEmu.Libs.Media.HostMovieBridge.GetPlaybackModeName(Environment.GetEnvironmentVariable("SHARPEMU_BINK_MODE")));
         var cpuExecutionOptions = new CpuExecutionOptions
         {
             CpuEngine = options.CpuEngine,
@@ -95,7 +97,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         };
         var virtualMemory = new PhysicalVirtualMemory(
             viewHost: HostViewMemory.Create(),
-            preReserveGuestAddressSpace: true);
+            preReserveGuestAddressSpace: true,
+            adoptStartupAddressReservations: options.AdoptStartupAddressReservations);
         var moduleManager = new ModuleManager();
         // The compile-time generated registry (SharpEmu.SourceGenerators) is the sole
         // registration source; content tests in SharpEmu.Libs.Tests pin its invariants.

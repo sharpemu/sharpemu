@@ -28,6 +28,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private KhrSwapchain _swapchainApi = null!;
         private delegate* unmanaged<Device, DebugUtilsObjectNameInfoEXT*, Result> _setDebugUtilsObjectName;
         private delegate* unmanaged<CommandBuffer, DebugUtilsLabelEXT*, void> _cmdBeginDebugUtilsLabel;
+        private delegate* unmanaged<CommandBuffer, DebugUtilsLabelEXT*, void> _cmdInsertDebugUtilsLabel;
         private delegate* unmanaged<CommandBuffer, void> _cmdEndDebugUtilsLabel;
         private Instance _instance;
         private SurfaceKHR _surface;
@@ -44,6 +45,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private uint _maxComputeWorkGroupInvocations;
         private ulong _minStorageBufferOffsetAlignment = 1;
         private bool _supportsIndependentBlend;
+        private bool _supportsDualSourceBlend;
         private bool _supportsDepthBiasClamp;
         private uint _maxColorAttachments;
         private Device _device;
@@ -177,6 +179,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var setObjectName = _vk.GetDeviceProcAddr(_device, "vkSetDebugUtilsObjectNameEXT");
             var beginLabel = _vk.GetDeviceProcAddr(_device, "vkCmdBeginDebugUtilsLabelEXT");
+            var insertLabel = _vk.GetDeviceProcAddr(_device, "vkCmdInsertDebugUtilsLabelEXT");
             var endLabel = _vk.GetDeviceProcAddr(_device, "vkCmdEndDebugUtilsLabelEXT");
             _setDebugUtilsObjectName =
                 (delegate* unmanaged<Device, DebugUtilsObjectNameInfoEXT*, Result>)
@@ -184,6 +187,9 @@ internal static unsafe partial class VulkanVideoPresenter
             _cmdBeginDebugUtilsLabel =
                 (delegate* unmanaged<CommandBuffer, DebugUtilsLabelEXT*, void>)
                 beginLabel.Handle;
+            _cmdInsertDebugUtilsLabel =
+                (delegate* unmanaged<CommandBuffer, DebugUtilsLabelEXT*, void>)
+                insertLabel.Handle;
             _cmdEndDebugUtilsLabel =
                 (delegate* unmanaged<CommandBuffer, void>)
                 endLabel.Handle;
@@ -214,6 +220,21 @@ internal static unsafe partial class VulkanVideoPresenter
                     PObjectName = namePointer,
                 };
                 _ = _setDebugUtilsObjectName(_device, &info);
+            }
+        }
+
+        private void InsertDebugLabel(CommandBuffer commandBuffer, string name)
+        {
+            if (_cmdInsertDebugUtilsLabel is null || commandBuffer.Handle == 0) return;
+            var bytes = NullTerminatedUtf8(name);
+            fixed (byte* namePointer = bytes)
+            {
+                var label = new DebugUtilsLabelEXT
+                {
+                    SType = StructureType.DebugUtilsLabelExt,
+                    PLabelName = namePointer,
+                };
+                _cmdInsertDebugUtilsLabel(commandBuffer, &label);
             }
         }
 
@@ -579,6 +600,10 @@ internal static unsafe partial class VulkanVideoPresenter
         private void LoadComputeDeviceLimits()
         {
             _vk.GetPhysicalDeviceProperties(_physicalDevice, out var properties);
+            var meshProperties = new PhysicalDeviceMeshShaderPropertiesEXT
+            {
+                SType = StructureType.PhysicalDeviceMeshShaderPropertiesExt,
+            };
             var pushDescriptorProperties = new PhysicalDevicePushDescriptorPropertiesKHR
             {
                 SType = StructureType.PhysicalDevicePushDescriptorPropertiesKhr,
@@ -598,7 +623,28 @@ internal static unsafe partial class VulkanVideoPresenter
                 SType = StructureType.PhysicalDeviceProperties2,
                 PNext = &subgroup,
             };
+            if (IsDeviceExtensionAvailable(MeshShaderExtensionName))
+            {
+                pushDescriptorProperties.PNext = &meshProperties;
+            }
             _vk.GetPhysicalDeviceProperties2(_physicalDevice, &properties2);
+            if (pushDescriptorProperties.PNext != null)
+            {
+                _meshShaderLimits = new MeshShaderLimits(
+                    meshProperties.MaxMeshWorkGroupInvocations,
+                    meshProperties.MaxMeshOutputVertices,
+                    meshProperties.MaxMeshOutputPrimitives,
+                    Math.Min(meshProperties.MaxMeshSharedMemorySize, meshProperties.MaxMeshPayloadAndSharedMemorySize),
+                    meshProperties.MaxMeshWorkGroupCount[0],
+                    meshProperties.MaxMeshWorkGroupCount[1],
+                    meshProperties.MaxMeshWorkGroupTotalCount,
+                    meshProperties.MaxMeshWorkGroupSize[0],
+                    meshProperties.MaxMeshOutputMemorySize,
+                    meshProperties.MaxMeshPayloadAndOutputMemorySize,
+                    meshProperties.MeshOutputPerVertexGranularity,
+                    meshProperties.MeshOutputPerPrimitiveGranularity,
+                    meshProperties.MaxMeshOutputComponents);
+            }
             SetNativeSubgroupCapabilities(subgroup.SubgroupSize, subgroup.SupportedStages);
             _canRequireComputeSubgroup32 =
                 subgroup.SubgroupSize != RdnaSubgroupSize &&
@@ -609,6 +655,7 @@ internal static unsafe partial class VulkanVideoPresenter
             // MoltenVK reports a zero OpArrayLength for storage buffers bound through push
             // descriptors, which turns every bounds-checked load into zero and drops every store.
             _maxPushDescriptors = Gpu.Vulkan.VulkanPushDescriptorPolicy.UsableCount(_vk, _physicalDevice, pushDescriptorProperties.MaxPushDescriptors);
+            _shaderDescriptorLimits = properties.Limits;
             _noAttachmentSampleCounts = properties.Limits.FramebufferNoAttachmentsSampleCounts;
             _maxComputeWorkGroupCountX = properties.Limits.MaxComputeWorkGroupCount[0];
             _maxComputeWorkGroupCountY = properties.Limits.MaxComputeWorkGroupCount[1];
@@ -708,11 +755,16 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private bool _supportsFragmentShaderBarycentric;
         private bool _supportsPerVertexPixelInputs;
+        private bool _supportsShaderLayer;
+        private bool _supportsMeshShader;
+        private MeshShaderLimits _meshShaderLimits;
+        private delegate* unmanaged<CommandBuffer, uint, uint, uint, void> _cmdDrawMeshTasks;
         private const string FragmentShaderBarycentricExtensionName = "VK_KHR_fragment_shader_barycentric";
         private const string Maintenance5ExtensionName = "VK_KHR_maintenance5";
         private const string ImageViewMinLodExtensionName = "VK_EXT_image_view_min_lod";
         private const string FillRectangleExtensionName = "VK_NV_fill_rectangle";
         private bool _supportsImageViewMinLod;
+        private const string MeshShaderExtensionName = "VK_EXT_mesh_shader";
 
         private void CreateDevice()
         {
@@ -740,14 +792,20 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             _vk.GetPhysicalDeviceFeatures(_physicalDevice, out var supportedFeatures);
             _supportsIndependentBlend = supportedFeatures.IndependentBlend;
+            _supportsDualSourceBlend = supportedFeatures.DualSrcBlend;
             _supportsDepthBiasClamp = supportedFeatures.DepthBiasClamp;
             _supportsDepthBounds = supportedFeatures.DepthBounds;
             _supportsShaderClipDistance = supportedFeatures.ShaderClipDistance;
             _supportsFillRectangle = IsDeviceExtensionAvailable(FillRectangleExtensionName);
+            _supportsRectangleGeometry = supportedFeatures.GeometryShader;
+            _supportsPreciseOcclusion = supportedFeatures.OcclusionQueryPrecise;
             var enabledFeatures = new PhysicalDeviceFeatures
             {
                 DepthBounds = supportedFeatures.DepthBounds,
+                GeometryShader = supportedFeatures.GeometryShader,
+                OcclusionQueryPrecise = supportedFeatures.OcclusionQueryPrecise,
                 IndependentBlend = supportedFeatures.IndependentBlend,
+                DualSrcBlend = supportedFeatures.DualSrcBlend,
                 VertexPipelineStoresAndAtomics = supportedFeatures.VertexPipelineStoresAndAtomics,
                 FragmentStoresAndAtomics = supportedFeatures.FragmentStoresAndAtomics,
                 ShaderInt64 = supportedFeatures.ShaderInt64,
@@ -904,30 +962,32 @@ internal static unsafe partial class VulkanVideoPresenter
                 SType = StructureType.PhysicalDeviceRobustness2FeaturesExt,
                 PNext = &maintenance8Features,
             };
-            var timelineSemaphoreFeatures = new PhysicalDeviceTimelineSemaphoreFeatures
+            var vulkan12Features = new PhysicalDeviceVulkan12Features
             {
-                SType = StructureType.PhysicalDeviceTimelineSemaphoreFeatures,
+                SType = StructureType.PhysicalDeviceVulkan12Features,
                 PNext = &robustness2Features,
             };
-            var addressFeatures = new PhysicalDeviceBufferDeviceAddressFeatures
+            var meshFeatures = new PhysicalDeviceMeshShaderFeaturesEXT
             {
-                SType = StructureType.PhysicalDeviceBufferDeviceAddressFeatures,
-                PNext = &timelineSemaphoreFeatures,
+                SType = StructureType.PhysicalDeviceMeshShaderFeaturesExt,
+                PNext = &vulkan12Features,
             };
-            var atomicInt64Features = new PhysicalDeviceShaderAtomicInt64Features
-            {
-                SType = StructureType.PhysicalDeviceShaderAtomicInt64Features,
-                PNext = &addressFeatures,
-            };
+            var meshExtensionAvailable = IsDeviceExtensionAvailable(MeshShaderExtensionName);
             var featuresQuery = new PhysicalDeviceFeatures2
             {
                 SType = StructureType.PhysicalDeviceFeatures2,
-                PNext = &atomicInt64Features,
+                PNext = meshExtensionAvailable ? &meshFeatures : &vulkan12Features,
             };
             _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &featuresQuery);
-            var supportsTimelineSemaphore = timelineSemaphoreFeatures.TimelineSemaphore;
-            var supportsBufferDeviceAddress = addressFeatures.BufferDeviceAddress;
-            var supportsSharedInt64Atomics = atomicInt64Features.ShaderSharedInt64Atomics;
+            _supportsMeshShader = meshExtensionAvailable && meshFeatures.MeshShader &&
+                vulkan13Features.ComputeFullSubgroups &&
+                ((ShaderStageFlags)Volatile.Read(ref _nativeSubgroupShaderStages) & ShaderStageFlags.MeshBitExt) != 0;
+            var supportsTimelineSemaphore = vulkan12Features.TimelineSemaphore;
+            var supportsBufferDeviceAddress = vulkan12Features.BufferDeviceAddress;
+            var supportsSharedInt64Atomics = vulkan12Features.ShaderSharedInt64Atomics;
+            _supportsShaderLayer = vulkan12Features.ShaderOutputLayer;
+            var supportsViewportIndexLayer = IsDeviceExtensionAvailable("VK_EXT_shader_viewport_index_layer") &&
+                vulkan12Features.ShaderOutputViewportIndex && vulkan12Features.ShaderOutputLayer;
             var supportsMaintenance8 = maintenance8Features.Maintenance8;
             var supportsRobustBufferAccess2 = robustness2Features.RobustBufferAccess2;
             var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
@@ -981,19 +1041,24 @@ internal static unsafe partial class VulkanVideoPresenter
             var maintenance5Extension = (byte*)SilkMarshal.StringToPtr(Maintenance5ExtensionName);
             var imageViewMinLodExtension = (byte*)SilkMarshal.StringToPtr(ImageViewMinLodExtensionName);
             var fillRectangleExtension = (byte*)SilkMarshal.StringToPtr(FillRectangleExtensionName);
+            var meshExtension = (byte*)SilkMarshal.StringToPtr(MeshShaderExtensionName);
             try
             {
                 var extensions = stackalloc byte*[15];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
-                if (IsDeviceExtensionAvailable("VK_EXT_shader_viewport_index_layer"))
+                if (supportsViewportIndexLayer)
                 {
                     extensions[extensionCount++] = viewportIndexLayerExtension;
                 }
                 if (_supportsFragmentShaderBarycentric)
                 {
                     extensions[extensionCount++] = barycentricExtension;
+                }
+                if (_supportsMeshShader)
+                {
+                    extensions[extensionCount++] = meshExtension;
                 }
                 if (supportsColorWriteEnable)
                 {
@@ -1061,28 +1126,29 @@ internal static unsafe partial class VulkanVideoPresenter
                         "the buffer store needs bufferDeviceAddress, which this device lacks");
                 }
 
-                timelineSemaphoreFeatures.TimelineSemaphore = true;
-                timelineSemaphoreFeatures.PNext = supportsRobustness2
-                    ? &robustness2Features
-                    : (supportsMaintenance8 ? &maintenance8Features : null);
-                addressFeatures = new PhysicalDeviceBufferDeviceAddressFeatures
+                vulkan12Features = new PhysicalDeviceVulkan12Features
                 {
-                    SType = StructureType.PhysicalDeviceBufferDeviceAddressFeatures,
+                    SType = StructureType.PhysicalDeviceVulkan12Features,
+                    TimelineSemaphore = true,
                     BufferDeviceAddress = true,
-                    PNext = &timelineSemaphoreFeatures,
+                    ShaderSharedInt64Atomics = supportsSharedInt64Atomics,
+                    ShaderOutputLayer = _supportsShaderLayer,
+                    ShaderOutputViewportIndex = supportsViewportIndexLayer,
+                    PNext = supportsRobustness2
+                        ? &robustness2Features
+                        : (supportsMaintenance8 ? &maintenance8Features : null),
                 };
-                void* renderingChain = &addressFeatures;
-                if (supportsSharedInt64Atomics)
+                void* renderingChain = &vulkan12Features;
+                if (_supportsMeshShader)
                 {
-                    atomicInt64Features = new PhysicalDeviceShaderAtomicInt64Features
+                    meshFeatures = new PhysicalDeviceMeshShaderFeaturesEXT
                     {
-                        SType = StructureType.PhysicalDeviceShaderAtomicInt64Features,
-                        ShaderSharedInt64Atomics = true,
+                        SType = StructureType.PhysicalDeviceMeshShaderFeaturesExt,
+                        MeshShader = true,
                         PNext = renderingChain,
                     };
-                    renderingChain = &atomicInt64Features;
+                    renderingChain = &meshFeatures;
                 }
-
                 if (_supportsFragmentShaderBarycentric)
                 {
                     barycentricFeatures.PNext = renderingChain;
@@ -1147,6 +1213,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     DynamicRendering = true,
                     Synchronization2 = true,
                     SubgroupSizeControl = _canRequireComputeSubgroup32,
+                    ComputeFullSubgroups = _supportsMeshShader,
                     PNext = renderingChain,
                 };
                 var features2 = new PhysicalDeviceFeatures2
@@ -1166,6 +1233,15 @@ internal static unsafe partial class VulkanVideoPresenter
                 };
 
                 Check(_vk.CreateDevice(_physicalDevice, &createInfo, null, out _device), "vkCreateDevice");
+                if (_supportsMeshShader)
+                {
+                    _cmdDrawMeshTasks = (delegate* unmanaged<CommandBuffer, uint, uint, uint, void>)
+                        _vk.GetDeviceProcAddr(_device, "vkCmdDrawMeshTasksEXT").Handle;
+                    if (_cmdDrawMeshTasks is null)
+                    {
+                        throw SubmissionScheduler.Fatal("The mesh shader command is unavailable after enabling VK_EXT_mesh_shader.");
+                    }
+                }
             }
             finally
             {
@@ -1182,6 +1258,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)pushDescriptorExtension);
                 SilkMarshal.Free((nint)barycentricExtension);
                 SilkMarshal.Free((nint)viewportIndexLayerExtension);
+                SilkMarshal.Free((nint)meshExtension);
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
