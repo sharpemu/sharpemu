@@ -291,9 +291,14 @@ public sealed class GuestPageTracker
         VisitRegions(vaddr, size, create: true, static (_, _, _) => false);
         var previousOwner = _uploadOwner;
         _uploadOwner = this;
-        // The reentry guard keeps this thread out of a second upload, so its scratch lists are free.
-        var held = _scratchHeld ??= new List<TrackedRegion>();
-        var cleared = _scratchCleared ??= new List<(TrackedRegion Region, ulong Address, ulong Size)>();
+        // Another tracker may upload from this callback. It needs its own rollback
+        // state; the reentry guard only rejects reentry into this tracker.
+        var held = previousOwner is null
+            ? _scratchHeld ??= new List<TrackedRegion>()
+            : new List<TrackedRegion>();
+        var cleared = previousOwner is null
+            ? _scratchCleared ??= new List<(TrackedRegion Region, ulong Address, ulong Size)>()
+            : new List<(TrackedRegion Region, ulong Address, ulong Size)>();
         held.Clear();
         cleared.Clear();
         try
