@@ -7,6 +7,9 @@ namespace SharpEmu.Libs.Gpu.Images;
 
 internal static class NativeColorClear
 {
+    internal static ulong CmaskSliceSize(uint width, uint height) => width == 0 || height == 0 ? 0 :
+        ((width + 1023UL) / 1024) * ((height + 511UL) / 512) * 4096;
+
     internal static ulong SliceSize(uint width, uint height, uint bytesPerPixel)
     {
         var block = bytesPerPixel switch

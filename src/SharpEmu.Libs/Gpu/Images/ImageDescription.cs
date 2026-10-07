@@ -21,6 +21,7 @@ public enum MetadataKind : byte
     None,
     Htile,
     Dcc,
+    Cmask,
 }
 
 public struct MetadataDescription
