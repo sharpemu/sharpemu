@@ -24,6 +24,7 @@ public sealed unsafe partial class GuestImageCache
         var description = request.Description;
         var metadata = description.Metadata;
         if (!metadata.NativeColorClear) return;
+        var metadataKind = metadata.Kind == MetadataKind.Cmask ? SurfaceMetadataKind.CMask : SurfaceMetadataKind.Dcc;
         var view = request.View;
         var layers = description.TransferLayers;
         var volumeTexture = description.IsVolume && view.Type == ImageViewType.Type3D;
@@ -36,24 +37,21 @@ public sealed unsafe partial class GuestImageCache
         using (var held = _lock.Hold())
         {
             IncludeMetadataWriteRange(metadata.Range.Address, metadata.Range.Size);
-            if (!_surfaceMetadata.TryGetValue(metadata.Range.Address, out var registration) || registration.Invalidated)
+            // A new metadata use must not retain another surface's clear state or ownership.
+            if (!_surfaceMetadata.TryGetValue(metadata.Range.Address, out var registration) ||
+                registration.Invalidated || registration.Kind != metadataKind || !registration.NativeColorClear)
             {
-                registration = new SurfaceMetadata { Kind = SurfaceMetadataKind.Dcc };
+                registration = new SurfaceMetadata { Kind = metadataKind };
                 _surfaceMetadata[metadata.Range.Address] = registration;
-            }
-            else if (registration.Kind == SurfaceMetadataKind.PendingDcc)
-            {
-                registration.Kind = SurfaceMetadataKind.Dcc;
-            }
-            else if (registration.Kind != SurfaceMetadataKind.Dcc)
-            {
-                throw SubmissionScheduler.Fatal("The native color target metadata is not DCC.");
             }
             registration.NativeColorClear = true;
             registration.DccSliceCount = layers;
             // Native bytes own the clear state. Do not reuse deferred fill flags.
             registration.ClearMask = 0;
+            registration.FillSize = 0;
+            registration.FillValue = uint.MaxValue;
             registration.RangeSize = Math.Max(registration.RangeSize, metadata.Range.Size);
+            registration.Size = Math.Max(registration.Size, metadata.Range.Size);
             _slots[imageIdentifier].Description.Metadata = metadata;
             _slots[imageIdentifier].MetadataRegistration = registration;
         }
@@ -78,9 +76,10 @@ public sealed unsafe partial class GuestImageCache
             throw SubmissionScheduler.Fatal($"The color metadata is unreadable: address=0x{address:X16}.");
         var code = bytes[0];
         ClearColorValue color;
-        if (code == 0x20 && request.Role == ImageRole.ColorTarget && metadata.PackedColorClearSupported)
+        var cmask = metadata.Kind == MetadataKind.Cmask;
+        if (code == (cmask ? 0 : 0x20) && request.Role == ImageRole.ColorTarget && metadata.PackedColorClearSupported)
             color = metadata.PackedColorClear;
-        else if (!NativeColorClear.TryDecode(code, view.Format, metadata.ColorAlphaOnLeastSignificantBits, out color))
+        else if (cmask || !NativeColorClear.TryDecode(code, view.Format, metadata.ColorAlphaOnLeastSignificantBits, out color))
             return false;
 
         var scan = new UniformMetadataScan(code, sliceSize);

@@ -36,6 +36,7 @@ public readonly record struct ColorTargetWords(
     public uint Depth => Attrib3 & 0x1FFF;
     public GuestTileMode TileMode => (GuestTileMode)((Attrib3 >> 14) & 0x1F);
     public uint Dimension => (Attrib3 >> 24) & 0x3;
+    public bool WriteVrsRateHintToCmask => (Attrib3 & (1u << 31)) != 0;
     public bool DataWriteOnDccClearToRegister => ((DccControl >> 19) & 0x1) != 0;
 }
 

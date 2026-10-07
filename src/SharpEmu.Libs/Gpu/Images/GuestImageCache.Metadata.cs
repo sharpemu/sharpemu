@@ -403,7 +403,7 @@ public sealed partial class GuestImageCache
             {
                 SurfaceMetadataKind.Dcc => metadata.Size,
                 SurfaceMetadataKind.PendingDcc => metadata.FillSize,
-                _ => 0UL,
+                _ => metadata.NativeColorClear ? metadata.Size : 0UL,
             };
             if (extent != 0 && address < start + extent && start < address + size)
             {
@@ -419,7 +419,8 @@ public sealed partial class GuestImageCache
     {
         using var held = _lock.Hold();
         if (_surfaceMetadata.ContainsKey(address)) RecordMetadataEvent("clear-request", address);
-        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind is SurfaceMetadataKind.PendingDcc or SurfaceMetadataKind.Dcc)
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.NativeColorClear ||
+            found.Kind is SurfaceMetadataKind.PendingDcc or SurfaceMetadataKind.Dcc)
         {
             return false;
         }

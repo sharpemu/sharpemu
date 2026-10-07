@@ -443,6 +443,26 @@ public static partial class ImageRequestBuilders
                 request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
             }
         }
+        // DCC takes precedence. CMASK register clears apply only to single-sample color targets.
+        if (!words.DccEnabled && words.FastClear && words.CmaskAddress != 0 &&
+            !words.FmaskCompression && !words.WriteVrsRateHintToCmask &&
+            !is1D && levels == 1 && samples == 1 && tileMode == GuestTileMode.RenderTarget &&
+            PackedClearValue.TryDecodeColor(targetFormat.HostFormat, words.ClearWord0, out var cmaskClear))
+        {
+            var sliceSize = NativeColorClear.CmaskSliceSize(width, height);
+            var metadataSize = sliceSize * description.TransferLayers;
+            if (sliceSize != 0 && (words.CmaskAddress & 4095) == 0 &&
+                metadataSize <= ulong.MaxValue - words.CmaskAddress)
+            {
+                description.Metadata.Kind = MetadataKind.Cmask;
+                description.Metadata.Range = new GuestSpan(words.CmaskAddress, metadataSize);
+                description.Metadata.NativeColorClear = true;
+                description.Metadata.ColorMetadataBaseLayer = view.BaseLayer;
+                description.Metadata.PackedColorClearSupported = true;
+                description.Metadata.PackedColorClear = cmaskClear;
+                request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
+            }
+        }
         if (ImageClearTrace.Enabled)
         {
             ImageClearTrace.Write($"target image=0x{words.BaseAddress:X16} extent={width}x{height} format={targetFormat.HostFormat} " +
