@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Threading;
+
 namespace SharpEmu.HLE.Host.Posix;
 
 // View mappings bypass the anonymous-allocation tables. Keep their query state together.
@@ -10,6 +12,12 @@ internal static class PosixViewRegions
     private readonly record struct Region(ulong Start, ulong End, uint State, uint Protection,
         uint[]? PageProtections, ulong PageBase);
     private static readonly List<Region> Regions = new();
+
+    // The regions in address order, replaced whenever the list changes. Queries read it without
+    // Gate: every HLE import queries the guest stack's protection first, and Gate is held across
+    // mprotect by the GPU write tracker, so a locked query made each import wait on page traffic.
+    // Page protections change in place and are read racily, as a concurrent change always was.
+    private static Region[] _snapshot = [];
 
     internal static void Replace(ulong address, ulong size, uint state, uint protection)
     {
@@ -46,6 +54,8 @@ internal static class PosixViewRegions
             else
                 Regions.Add(region);
         }
+
+        Volatile.Write(ref _snapshot, [.. Regions]);
     }
 
     // Mapping creates the storage. Fault-time protection updates must not allocate.
@@ -66,9 +76,8 @@ internal static class PosixViewRegions
 
     internal static bool TryQuery(ulong address, out HostMemory.BasicInfo info)
     {
-        lock (Gate)
         {
-            foreach (var region in Regions)
+            foreach (var region in Volatile.Read(ref _snapshot))
             {
                 if (region.Start > address) break;
                 if (address >= region.End) continue;

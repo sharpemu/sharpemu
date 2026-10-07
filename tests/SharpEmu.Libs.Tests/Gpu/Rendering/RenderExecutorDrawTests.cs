@@ -113,6 +113,27 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
+    public void IndirectAutoDraw_LetsTheGpuReadTheArguments()
+    {
+        var arguments = Auto(1, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, Banks(), arguments);
+
+        AssertOrder("obtain 100600000 10 written=False", "begin_rendering", "bind_pipeline Graphics A1", "draw_indirect", "reset_bindings");
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw ", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void IndirectAutoTriangleFan_ReadsTheArgumentsOnTheCpu()
+    {
+        WriteIndirectArguments(3, 2, 4, 1);
+        var arguments = Auto(1, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, Banks(PrimitiveTriangleFan), arguments);
+
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indirect", StringComparison.Ordinal));
+        Assert.Contains(_host.Calls, c => c.StartsWith("draw ", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void AutoDraw_RecordsThePhasesAndTheVertexOffsets()
     {
         _executor.DrawAuto(3, Banks(), Auto(3, instances: 1, firstVertex: 5));

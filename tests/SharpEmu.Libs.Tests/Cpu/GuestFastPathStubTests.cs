@@ -297,6 +297,30 @@ public sealed unsafe class GuestFastPathStubTests
         Assert.Equal(original, buffer);
     }
 
+    [Fact]
+    public void MemoryCopyStub_LeavesAPageSizedCopyToTheManagedExport()
+    {
+        if (!CanRunStubs())
+        {
+            return;
+        }
+
+        using var stub = new MemoryCopyStub();
+        var minimum = DirectExecutionBackend.ManagedCopyMinimumBytes;
+        var source = Enumerable.Range(0, minimum).Select(value => (byte)(value * 3)).ToArray();
+        var destination = new byte[minimum];
+        fixed (byte* from = source)
+        fixed (byte* to = destination)
+        {
+            // The managed export marks the whole destination written before it copies, instead of
+            // taking a write-tracking fault per watched page.
+            Assert.Equal(MemoryCopySlowPathMarker, stub.Call(to, from, (nuint)minimum));
+            Assert.Equal((ulong)to, stub.Call(to, from, (nuint)minimum - 1));
+        }
+
+        Assert.Equal(source[..^1], destination[..^1]);
+    }
+
     /// <summary>The memcpy stub called with the platform (SysV) convention the guest uses.</summary>
     private sealed class MemoryCopyStub : IDisposable
     {

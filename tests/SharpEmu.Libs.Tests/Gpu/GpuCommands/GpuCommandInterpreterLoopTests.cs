@@ -262,6 +262,30 @@ public sealed class GpuCommandInterpreterLoopTests
     }
 
     [Fact]
+    public void Wait_IsAMemoryVisibilityPointOnlyOnceSatisfied()
+    {
+        var runner = new StreamRunner();
+
+        Assert.Equal(SubmissionProgress.Blocked, runner.Run(WaitEqual(Label, 1)));
+        Assert.Equal(0, runner.Host.VisibilityPoints);
+
+        runner.Host.WriteDword(Label, 1);
+        Assert.Equal(SubmissionProgress.Complete, runner.Run());
+        Assert.Equal(1, runner.Host.VisibilityPoints);
+    }
+
+    [Fact]
+    public void WriteData_IsAMemoryVisibilityPoint()
+    {
+        var runner = new StreamRunner();
+
+        runner.Run(WriteData(Label, 7));
+
+        Assert.Equal(7u, runner.Host.ReadDword(Label));
+        Assert.Equal(1, runner.Host.VisibilityPoints);
+    }
+
+    [Fact]
     public void PendingCommands_RunBeforeEveryPacket()
     {
         var runner = new StreamRunner();

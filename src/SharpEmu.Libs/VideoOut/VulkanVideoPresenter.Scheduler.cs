@@ -101,7 +101,11 @@ internal static unsafe partial class VulkanVideoPresenter
         private void CreateImageCache()
         {
             var (memory, _, backing) = RequireGuestMemory("image store");
-            _imageCache = new GuestImageCache(_deviceInfo, _scheduler, memory.Pages, _bufferCache, backing, readbackLinearImages: false);
+            // The guest reads linear GPU-written images back on the CPU (UE's exposure readback
+            // feeds View.PreExposure), so they are published to guest memory after their tick.
+            // SHARPEMU_READBACK_LINEAR_IMAGES=0 keeps them GPU-only.
+            _imageCache = new GuestImageCache(_deviceInfo, _scheduler, memory.Pages, _bufferCache, backing,
+                readbackLinearImages: Environment.GetEnvironmentVariable("SHARPEMU_READBACK_LINEAR_IMAGES") != "0");
             _bufferCache.ImageCache = _imageCache;
             _samplerStore = new SamplerStore(_deviceInfo);
         }

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 
@@ -133,12 +134,14 @@ public static partial class AgcExports
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var indexCount = (uint)ctx[CpuRegister.Rsi];
         var indexAddress = ctx[CpuRegister.Rdx];
-        var modifier = (uint)ctx[CpuRegister.Rcx];
+        var modifier = ctx[CpuRegister.Rcx];
 
-        if (commandBufferAddress == 0 || modifier != 0x4000_0000)
+        if (commandBufferAddress == 0)
         {
             return ReturnPointer(ctx, 0);
         }
+
+        NoteDrawModifier("sceAgcDcbDrawIndex", modifier);
 
         if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 5, out var baseCommand) ||
             !TryWriteUInt32(ctx, baseCommand, Pm4(3, ItIndexBase, 0)) ||
@@ -239,10 +242,12 @@ public static partial class AgcExports
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var indexCount = (uint)ctx[CpuRegister.Rsi];
         var modifier = ctx[CpuRegister.Rdx];
-        if (commandBufferAddress == 0 || modifier != 0x4000_0000)
+        if (commandBufferAddress == 0)
         {
             return ReturnPointer(ctx, 0);
         }
+
+        NoteDrawModifier("sceAgcDcbDrawIndexAuto", modifier);
 
         if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 7, out var commandAddress) ||
             !TryWriteUInt32(ctx, commandAddress, Pm4(7, ItNop, RDrawIndexAuto)) ||
@@ -457,4 +462,19 @@ public static partial class AgcExports
     #pragma warning restore SHEM006
 
     private static long _indirectDrawEmitRejectCount;
+
+    private static readonly ConcurrentDictionary<(string, ulong), byte> _reportedDrawModifiers = new();
+
+    // The modifier names the shader stage that receives the draw and the user registers the
+    // command processor fills for indirect draws. A direct draw emits the same packet for every
+    // modifier; rejecting the unfamiliar ones dropped whole passes, such as Unreal's volume
+    // rasterization through the geometry stage, without a trace.
+    private static void NoteDrawModifier(string export, ulong modifier)
+    {
+        if (modifier != 0x4000_0000 && _reportedDrawModifiers.TryAdd((export, modifier), 0))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] agc.draw_modifier {export} modifier=0x{modifier:X} stage={(uint)modifier >> 29} flags=0x{(uint)modifier & 7u:X}");
+        }
+    }
 }

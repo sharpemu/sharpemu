@@ -204,6 +204,27 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
     }
 
     [Fact]
+    public void Barriers_SkipReadsAfterReadsInOneLayoutButKeepEveryReaderForTheNextWriter()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(16, 16));
+        const ImageLayout readOnly = ImageLayout.ShaderReadOnlyOptimal;
+
+        Assert.Single(image.GetBarriers(readOnly, AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, null).Barriers);
+        var (reread, _) = image.GetBarriers(readOnly, AccessFlags.TransferReadBit, PipelineStageFlags.TransferBit, null);
+        Assert.Empty(reread);
+        Assert.Equal(new ImageAccessState(PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit,
+            AccessFlags.ShaderReadBit | AccessFlags.TransferReadBit, readOnly), image.Backing.State);
+
+        var (write, writeStages) = image.GetBarriers(ImageLayout.General, AccessFlags.ShaderWriteBit, PipelineStageFlags.ComputeShaderBit, null);
+        var barrier = Assert.Single(write);
+        Assert.Equal(PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit, writeStages);
+        Assert.Equal(AccessFlags2.ShaderReadBit | AccessFlags2.TransferReadBit, barrier.SrcAccessMask);
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
     public void Barriers_IgnoreLayerWindowsOnVolumes()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

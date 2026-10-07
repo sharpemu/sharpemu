@@ -354,4 +354,36 @@ public sealed class VertexInputResolverTests : IDisposable
         Assert.Contains("records=4/5", fatal.Message);
     }
 
+    [Theory]
+    [InlineData(74u, 3, 12ul)]
+    [InlineData(77u, 4, 16ul)]
+    [InlineData(77u, 3, 16ul)]
+    [InlineData(64u, 2, 8ul)]
+    public void MergeBuffers_ConstantUncheckedStreamIncludesFullFormattedFetch(uint format, int components, ulong expectedSize)
+    {
+        var resource = Attribute(StreamBase, 0, 1, 0);
+        resource = resource with
+        {
+            Descriptor = resource.Descriptor with { Word3 = IdentitySelect | (format << 12) | (2u << 28) },
+            RegisterCount = components,
+        };
+        var buffer = Assert.Single(VertexInputResolver.MergeBuffers([resource], ShaderAddress));
+        Assert.Equal(1u, buffer.RecordCount);
+        Assert.Equal(0u, buffer.Stride);
+        Assert.Equal(expectedSize, buffer.Size);
+    }
+
+    [Theory]
+    [InlineData(0u, 1u)]
+    [InlineData(1u, 1u)]
+    [InlineData(3u, 1u)]
+    [InlineData(2u, 0u)]
+    public void MergeBuffers_BoundedOrUnboundConstantStreamKeepsDeclaredFootprint(uint outOfBounds, uint records)
+    {
+        var resource = Attribute(StreamBase, 0, records, 0);
+        resource = resource with { Descriptor = resource.Descriptor with { Word3 = resource.Descriptor.Word3 | (outOfBounds << 28) } };
+        var buffer = Assert.Single(VertexInputResolver.MergeBuffers([resource], ShaderAddress));
+        Assert.Equal((ulong)records, buffer.Size);
+    }
+
 }

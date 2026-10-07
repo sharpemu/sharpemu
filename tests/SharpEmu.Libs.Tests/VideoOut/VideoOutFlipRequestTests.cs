@@ -414,6 +414,21 @@ public sealed class VideoOutFlipRequestTests : IDisposable
         Assert.Null(VideoOutExports.GetFlipOutcomeForTests(request));
     }
 
+    // A CPU flip reserved before its preparation reaches the graphics queue must not hold back an earlier wait.
+    [Fact]
+    public void CpuFlip_BlocksBufferWaitsOnlyOnceTheGraphicsQueueReachesIt()
+    {
+        Assert.Equal(0, VideoOutExports.TryReserveFlipRequest(_handle, -1, 0, 13, gpuQueued: false, out var request));
+        Assert.True(VideoOutExports.IsFlipDone(_handle, -1));
+
+        VideoOutExports.MarkFlipOrdered(request);
+        Assert.False(VideoOutExports.IsFlipDone(_handle, -1));
+
+        VideoOutExports.CompleteFlip(request);
+        VideoOutExports.MarkFlipPresented(request);
+        Assert.True(VideoOutExports.IsFlipDone(_handle, -1));
+    }
+
     // Update completion counters even if the presenter has already finished the frame.
     [Fact]
     public void PresentThenComplete_StillCountsTheFlip()
