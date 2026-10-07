@@ -435,15 +435,21 @@ public sealed partial class GpuCommandInterpreter
                     throw _host.Fatal($"The occlusion-counter dump is invalid: index=0x{eventIndex:X8} address=0x{eventAddress:X16}.");
                 }
 
-                // Publish visible occlusion results for each depth block.
+                // Until real sample queries are implemented, conservatively report visibility.
+                // A one-sample delta can disappear when the guest scales or reduces the counts.
+                const ulong visibleCounterStep = 0x2FFFFFF;
                 const ulong readyBit = 1UL << 63;
                 var result = readyBit | SyntheticOcclusionCounter;
                 for (var depthBlock = 0u; depthBlock < 16u; depthBlock++)
                 {
-                    WriteQword(eventAddress + ((ulong)depthBlock * 2 * sizeof(ulong)), result);
+                    // Query reducers can read a GPU-cached copy of this range. Use the same
+                    // ordered transfer path as clears instead of changing only CPU backing.
+                    var destination = eventAddress + ((ulong)depthBlock * 2 * sizeof(ulong));
+                    _host.FillBuffer(destination, sizeof(uint), (uint)result, false);
+                    _host.FillBuffer(destination + sizeof(uint), sizeof(uint), (uint)(result >> 32), false);
                 }
 
-                SyntheticOcclusionCounter = (SyntheticOcclusionCounter + 1) & (readyBit - 1);
+                SyntheticOcclusionCounter = (SyntheticOcclusionCounter + visibleCounterStep) & (readyBit - 1);
                 break;
             }
 

@@ -11,6 +11,8 @@ public interface IGuestImageCache
 {
     ImageRegionInfo QueryRegion(ulong address, ulong size);
 
+    bool HasGpuModifiedImageBytes(ulong address, ulong size) => QueryRegion(address, size).GpuImageBytes;
+
     bool ClearMetadata(ulong address);
 
     bool OverlapsDccMetadata(ulong address, ulong size);

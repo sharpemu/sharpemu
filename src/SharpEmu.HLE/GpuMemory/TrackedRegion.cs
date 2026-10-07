@@ -144,20 +144,24 @@ public sealed class TrackedRegion
         }
     }
 
+    // Receives the runs one upload clears and the runs it copies; a struct visitor keeps the walk allocation-free.
+    public interface ICpuUploadVisitor
+    {
+        void Cleared(TrackedRegion region, ulong address, ulong size);
+
+        void Upload(ulong address, ulong size);
+    }
+
     // Hot read-only pages stay writable and dirty, so each obtain observes current CPU bytes.
-    public void ForEachCpuUploadRange(
-        bool preserveHotPages,
-        ulong address,
-        ulong size,
-        Action<ulong, ulong> visitCleared,
-        Action<ulong, ulong> visitUpload)
+    public void ForEachCpuUploadRange<TVisitor>(bool preserveHotPages, ulong address, ulong size, ref TVisitor visitor)
+        where TVisitor : struct, ICpuUploadVisitor
     {
         var (start, end) = GetPageRange(address, size);
         var upload = new PageMask(_cpuDirty, start, end);
         var cleared = preserveHotPages ? upload & ~_hotCpuWrites : upload;
         foreach (var (runStart, runEnd) in cleared)
         {
-            visitCleared(BaseAddress + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
+            visitor.Cleared(this, BaseAddress + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
             _cpuDirty.UnsetRange(runStart, runEnd);
             _recentCpuUploads.SetRange(runStart, runEnd);
         }
@@ -165,7 +169,7 @@ public sealed class TrackedRegion
         UpdateCpuProtection(track: true);
         foreach (var (runStart, runEnd) in upload)
         {
-            visitUpload(BaseAddress + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
+            visitor.Upload(BaseAddress + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
         }
     }
 

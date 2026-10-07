@@ -272,6 +272,18 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         _lastMemoryDrainTick = nextTick;
     }
 
+    // Waits for a tick that has already been submitted; safe from any thread, since it only
+    // waits on the timeline and records nothing.
+    public void WaitForSubmittedTick(ulong tick)
+    {
+        if (tick >= CurrentTick)
+        {
+            throw Fatal($"Cannot wait off the queue for a tick that is still recording: {tick} >= {CurrentTick}.");
+        }
+
+        _timeline.Wait(tick);
+    }
+
     public void Wait(ulong tick)
     {
         if (tick > CurrentTick)

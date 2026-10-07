@@ -44,6 +44,8 @@ internal static class HostMovieBridge
     private static bool _frameBufferPresented;
     private static MediaFramePlayback? _playback;
     private static Timer? _playbackWatchdog;
+    private static long _watchdogFrameIndex = -1;
+    private static readonly TimeSpan StalledPlaybackTimeout = TimeSpan.FromSeconds(60);
     private static long _frameSerial;
     private static uint _presentationWidth = MaxHostVideoWidth;
     private static uint _presentationHeight = MaxHostVideoHeight;
@@ -326,6 +328,7 @@ internal static class HostMovieBridge
     private static void ArmPlaybackWatchdogLocked(string hostPath)
     {
         _playbackWatchdog?.Dispose();
+        _watchdogFrameIndex = -1;
         var timeout = TryReadBinkInfo(hostPath, out var info)
             ? GetPlaybackWatchdogTimeout(info)
             : TimeSpan.FromSeconds(150);
@@ -337,6 +340,17 @@ internal static class HostMovieBridge
                 {
                     if (!string.Equals(_activePath, path, StringComparison.OrdinalIgnoreCase))
                     {
+                        return;
+                    }
+
+                    // Playback follows the guest's own decode and audio clock, so a slow host plays a
+                    // movie slower than real time. Expire only a movie that stopped advancing: forcing EOF
+                    // under a guest decoder that is still mid-stream wedges it on the last frame.
+                    var frameIndex = _playback?.PlaybackProgress.FrameIndex ?? -1;
+                    if (_playback is not null && frameIndex > _watchdogFrameIndex)
+                    {
+                        _watchdogFrameIndex = frameIndex;
+                        _playbackWatchdog?.Change(StalledPlaybackTimeout, Timeout.InfiniteTimeSpan);
                         return;
                     }
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
 
@@ -28,6 +29,18 @@ public sealed partial class RenderExecutor
         return hostDepthBits == 0 ? guestFactor : MathF.ScaleB(guestFactor, hostDepthBits + offset.NegativeDepthBits);
     }
 
+    // The host resolution of the attachments a draw writes; all of them share one rule, so
+    // the first bound target decides.
+    private static float AttachmentRenderScale(in DrawState state)
+    {
+        if (state.ColorCount > 0 && state.Colors[0].Image.IsValid)
+        {
+            return state.Colors[0].RenderScale;
+        }
+
+        return state.Depth.Image.IsValid ? state.Depth.RenderScale : 1f;
+    }
+
     // The dynamic state of a draw from the context bank and the resolved targets.
     private DynamicDrawState BuildDynamicState(ContextRegisters context, in DrawState state)
     {
@@ -36,6 +49,9 @@ public sealed partial class RenderExecutor
         var limits = _host.Limits;
         uint framebufferWidth;
         uint framebufferHeight;
+        // The guest describes its viewport and scissor in guest pixels; the attachments decide
+        // how many host texels one of those covers.
+        var renderScale = AttachmentRenderScale(in state);
         if (state.ColorCount > 0 && state.Colors[0].Image.IsValid)
         {
             framebufferWidth = state.Colors[0].Resolution.Extent.Width;
@@ -53,6 +69,13 @@ public sealed partial class RenderExecutor
         }
 
         var scissor = ResolveScissor(viewportRegisters, context.ScanMode, framebufferWidth, framebufferHeight);
+        if (renderScale != 1f)
+        {
+            scissor = ScaleScissor(scissor, renderScale,
+                RenderScalePolicy.ScaleLength(framebufferWidth, renderScale),
+                RenderScalePolicy.ScaleLength(framebufferHeight, renderScale));
+        }
+
         ref readonly var viewport = ref viewportRegisters.Viewports[0];
         float viewportX;
         float viewportY;
@@ -60,17 +83,19 @@ public sealed partial class RenderExecutor
         float viewportHeight;
         if (context.Clip.ClipDisable)
         {
+            // The vertex program bakes the transform onto the same reference extent, so
+            // multiplying only the host viewport puts guest pixels at host positions.
             viewportX = 0;
             viewportY = 0;
-            viewportWidth = Math.Min(limits.MaxViewportWidth, MaxViewportDimension);
-            viewportHeight = Math.Min(limits.MaxViewportHeight, MaxViewportDimension);
+            viewportWidth = RenderScalePolicy.ClipSpaceReferenceExtent(Math.Min(limits.MaxViewportWidth, MaxViewportDimension)) * renderScale;
+            viewportHeight = RenderScalePolicy.ClipSpaceReferenceExtent(Math.Min(limits.MaxViewportHeight, MaxViewportDimension)) * renderScale;
         }
         else
         {
-            viewportX = viewport.XOffset - viewport.XScale;
-            viewportY = viewport.YOffset - viewport.YScale;
-            viewportWidth = viewport.XScale * 2f;
-            viewportHeight = viewport.YScale * 2f;
+            viewportX = (viewport.XOffset - viewport.XScale) * renderScale;
+            viewportY = (viewport.YOffset - viewport.YScale) * renderScale;
+            viewportWidth = viewport.XScale * 2f * renderScale;
+            viewportHeight = viewport.YScale * 2f * renderScale;
         }
 
         var lineWidth = context.LineWidth;
@@ -137,6 +162,21 @@ public sealed partial class RenderExecutor
             depthState.BackMasks,
             state.ColorCount,
             colorWriteMask);
+    }
+
+    // A guest scissor in host texels. The edges round outward so no guest pixel the game
+    // asked for loses its host coverage, and the result stays inside the attachment.
+    public static ScissorRectangle ScaleScissor(ScissorRectangle scissor, float scale, uint hostWidth, uint hostHeight)
+    {
+        static int Floor(int value, float scale) => (int)MathF.Floor(value * scale);
+        static int Ceiling(int value, float scale) => (int)MathF.Ceiling(value * scale);
+        var left = Math.Clamp(Floor(scissor.Left, scale), 0, (int)hostWidth);
+        var top = Math.Clamp(Floor(scissor.Top, scale), 0, (int)hostHeight);
+        return new ScissorRectangle(
+            left,
+            top,
+            Math.Clamp(Ceiling(scissor.Right, scale), left, (int)hostWidth),
+            Math.Clamp(Ceiling(scissor.Bottom, scale), top, (int)hostHeight));
     }
 
     // The screen, window, generic, viewport and clip rectangles intersected and clamped to the extent.

@@ -513,7 +513,7 @@ internal sealed class ShaderProgramCache
         {
             resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, source.UserDataBase, (uint)source.UserData.Length, pushDataCursor,
-                source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions);
+                source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions, source.Stage);
         }
         catch (ResourcePlanException exception)
         {
@@ -593,6 +593,8 @@ internal sealed class ShaderProgramCache
     {
         var enableGraphicsSubgroups = _host.GraphicsSubgroupOperationsEnabled;
         var sharedInt64Atomics = _host.SharedInt64AtomicsEnabled;
+        var nativeHalfConversion = _host.NativeHalfConversionExact;
+        var zeroOutOfBoundsReads = _host.ZeroOutOfBoundsBufferReads;
         switch (source.Stage)
         {
             case ShaderStage.Vertex:
@@ -605,6 +607,8 @@ internal sealed class ShaderProgramCache
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
+                    NativeHalfConversionExact = nativeHalfConversion,
+                    ZeroOutOfBoundsBufferReads = zeroOutOfBoundsReads,
                     RequiredVertexOutputCount = options.RequiredVertexOutputCount,
                     VertexInputs = entry.VertexInputs,
                     PositionExportControl = info.PositionExportControl,
@@ -632,6 +636,8 @@ internal sealed class ShaderProgramCache
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
+                    NativeHalfConversionExact = nativeHalfConversion,
+                    ZeroOutOfBoundsBufferReads = zeroOutOfBoundsReads,
                     PixelOutputs = options.PixelOutputs,
                     PixelInputEnable = options.PixelInputEnable,
                     PixelCustomInterpolationMask = info.CustomInterpolationMask,
@@ -643,12 +649,12 @@ internal sealed class ShaderProgramCache
 
             default:
                 return BuildComputeRequest(entry.Plan, resources, layout, options.ComputeInfo!, options.ComputeSystemRegisters,
-                    sharedInt64Atomics, _host.ExecGuardElisionEnabled);
+                    sharedInt64Atomics, _host.ExecGuardElisionEnabled, nativeHalfConversion, zeroOutOfBoundsReads);
         }
     }
 
     private static BindingLayout AllocateLayout(Gen5ShaderProgram program, ShaderResourcePlan plan, SpecializedResourceInfo resources,
-        uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits) =>
+        uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits, ShaderStage stage) =>
         BindingLayout.Allocate(
             resources.Info,
             BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount),
@@ -656,12 +662,19 @@ internal sealed class ShaderProgramCache
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources),
             BindingLayout.ReadsShaderBase(program),
             pushDataCursor,
-            usesDispatchThreadLimits: usesDispatchThreadLimits);
+            usesDispatchThreadLimits: usesDispatchThreadLimits,
+            // A pixel program reads its position in guest pixels; any program that samples or
+            // fetches an image needs to know which of them the host holds at another size.
+            usesRenderScale: Images.RenderScalePolicy.Enabled &&
+                             (stage == ShaderStage.Pixel || resources.Info.Images.Count != 0));
 
     private static ShaderCompileRequest BuildComputeRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout layout,
-        ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision) =>
+        ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision,
+        bool nativeHalfConversion, bool zeroOutOfBoundsReads) =>
         new(plan, resources, layout)
         {
+            NativeHalfConversionExact = nativeHalfConversion,
+            ZeroOutOfBoundsBufferReads = zeroOutOfBoundsReads,
             WaveSize = info.WaveSize,
             EnableExecGuardElision = info.WaveSize != 64 || execGuardElision,
             TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
@@ -675,7 +688,8 @@ internal sealed class ShaderProgramCache
         };
 
     internal static bool TryCompilePrewarm(ComputePrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
-        bool sharedInt64Atomics, bool execGuardElision, out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error)
+        bool sharedInt64Atomics, bool execGuardElision, bool nativeHalfConversion, bool zeroOutOfBoundsReads,
+        out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error)
     {
         compiled = null;
         layout = null;
@@ -690,9 +704,9 @@ internal sealed class ShaderProgramCache
                 waveSize: record.Info.WaveSize);
             var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor,
-                record.Info.DispatchThreadDimensions);
+                record.Info.DispatchThreadDimensions, ShaderStage.Compute);
             var request = BuildComputeRequest(plan, resources, layout, record.Info, record.SystemRegisters,
-                sharedInt64Atomics, execGuardElision);
+                sharedInt64Atomics, execGuardElision, nativeHalfConversion, zeroOutOfBoundsReads);
             return compiler.TryCompileProgram(request, out compiled, out error) && compiled is not null;
         }
         catch (Exception exception)
