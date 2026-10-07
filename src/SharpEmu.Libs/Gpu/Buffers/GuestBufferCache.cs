@@ -455,11 +455,15 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
     }
 
+    // The fill pattern staged per thread; DCC fills arrive with every compressed target clear.
+    [ThreadStatic]
+    private static uint[]? _fillPattern;
+
     private bool TryWriteFillToBacking(ulong guestAddress, ulong size, uint value)
     {
-        var values = new uint[(int)Math.Min(size / sizeof(uint), 4096)];
-        Array.Fill(values, value);
-        var bytes = MemoryMarshal.AsBytes<uint>(values);
+        var values = (_fillPattern ??= new uint[4096]).AsSpan(0, (int)Math.Min(size / sizeof(uint), 4096));
+        values.Fill(value);
+        var bytes = MemoryMarshal.AsBytes(values);
         for (ulong offset = 0; offset < size;)
         {
             var chunk = (int)Math.Min(size - offset, (ulong)bytes.Length);
@@ -2043,20 +2047,11 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         profileScope.SwitchPhase(isWritten
             ? RenderPhaseProfile.Phase.BufferDirtySyncWritten
             : isTexelBuffer ? RenderPhaseProfile.Phase.BufferDirtySyncTexel : RenderPhaseProfile.Phase.BufferDirtySyncUpload);
-        var copies = new List<BufferCopy>();
-        var totalSize = 0UL;
-        GpuBuffer? source = null;
-        _tracker.ForEachUploadRange(
-            guestAddress,
-            size,
-            isWritten,
-            (address, bytes) =>
-            {
-                copies.Add(new BufferCopy(totalSize, buffer.Offset(address), bytes));
-                totalSize += bytes;
-            },
-            () => source = _uploader.PrepareSource(buffer.CpuAddress, CollectionsMarshal.AsSpan(copies), totalSize, guestAddress, size),
-            preserveCpuWriteHotPages);
+        var copies = _syncCopies ??= new List<BufferCopy>();
+        copies.Clear();
+        var sink = new UploadSink(_uploader, buffer, copies, guestAddress, size);
+        _tracker.ForEachUploadRange(guestAddress, size, isWritten, ref sink, preserveCpuWriteHotPages);
+        var source = sink.Source;
         if (source != null)
         {
             buffer.NoteGpuWrite();
@@ -2098,7 +2093,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             ulong hotBytes = 0;
             foreach (var copy in copies)
                 hotBytes += _tracker.CountCpuWriteHotBytes(buffer.CpuAddress + copy.DstOffset, copy.Size);
-            BufferUploadProfile.Record(guestAddress, size, copies.Count, totalSize, hotBytes, elapsedTicks);
+            BufferUploadProfile.Record(guestAddress, size, copies.Count, sink.TotalSize, hotBytes, elapsedTicks);
         }
 
         if (isTexelBuffer)
@@ -2113,6 +2108,28 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
 
         return false;
+    }
+
+    // The copies of one synchronization; the tracker forbids nesting, so one list per thread is reused.
+    [ThreadStatic]
+    private static List<BufferCopy>? _syncCopies;
+
+    // Collects a buffer's CPU-dirty runs as copies, then stages them while the tracker holds the regions.
+    private struct UploadSink(GuestBufferUploader uploader, GpuBuffer buffer, List<BufferCopy> copies, ulong guestAddress, ulong size)
+        : GuestPageTracker.IUploadRangeSink
+    {
+        public ulong TotalSize { get; private set; }
+
+        public GpuBuffer? Source { get; private set; }
+
+        public void Range(ulong address, ulong bytes)
+        {
+            copies.Add(new BufferCopy(TotalSize, buffer.Offset(address), bytes));
+            TotalSize += bytes;
+        }
+
+        public void Upload() =>
+            Source = uploader.PrepareSource(buffer.CpuAddress, CollectionsMarshal.AsSpan(copies), TotalSize, guestAddress, size);
     }
 
     private GpuBuffer? FindOwner(ulong guestAddress, ulong size)

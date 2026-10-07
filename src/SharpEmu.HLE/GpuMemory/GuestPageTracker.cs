@@ -242,50 +242,108 @@ public sealed class GuestPageTracker
         }
     }
 
-    // Region locks stay held across uploadFunc only for a written range, which turns GPU-dirty.
+    // Receives the CPU-dirty runs an upload copies, then performs the upload while the regions are held.
+    public interface IUploadRangeSink
+    {
+        void Range(ulong address, ulong size);
+
+        void Upload();
+    }
+
+    private struct DelegateUploadSink(Action<ulong, ulong> rangeFunc, Action uploadFunc) : IUploadRangeSink
+    {
+        public readonly void Range(ulong address, ulong size) => rangeFunc(address, size);
+
+        public readonly void Upload() => uploadFunc();
+    }
+
+    // Forwards a region's upload runs to the sink and remembers the runs it cleared, for rollback.
+    private struct RegionUploadVisitor<TSink>(TSink sink, List<(TrackedRegion Region, ulong Address, ulong Size)> cleared)
+        : TrackedRegion.ICpuUploadVisitor
+        where TSink : struct, IUploadRangeSink
+    {
+        public TSink Sink = sink;
+
+        public readonly void Cleared(TrackedRegion region, ulong address, ulong size) => cleared.Add((region, address, size));
+
+        public void Upload(ulong address, ulong size) => Sink.Range(address, size);
+    }
+
+    // Uploads run on every bound buffer of every draw, so the bookkeeping lists are reused per thread.
+    [ThreadStatic]
+    private static List<TrackedRegion>? _scratchHeld;
+
+    [ThreadStatic]
+    private static List<(TrackedRegion Region, ulong Address, ulong Size)>? _scratchCleared;
+
     public void ForEachUploadRange(ulong vaddr, ulong size, bool isWritten, Action<ulong, ulong> rangeFunc, Action uploadFunc,
         bool preserveCpuWriteHotPages = true)
+    {
+        var sink = new DelegateUploadSink(rangeFunc, uploadFunc);
+        ForEachUploadRange(vaddr, size, isWritten, ref sink, preserveCpuWriteHotPages);
+    }
+
+    // Region locks stay held across the upload only for a written range, which turns GPU-dirty.
+    public void ForEachUploadRange<TSink>(ulong vaddr, ulong size, bool isWritten, ref TSink sink, bool preserveCpuWriteHotPages = true)
+        where TSink : struct, IUploadRangeSink
     {
         RejectUploadCallbackReentry();
         VisitRegions(vaddr, size, create: true, static (_, _, _) => false);
         var previousOwner = _uploadOwner;
         _uploadOwner = this;
-        var held = new List<TrackedRegion>();
-        var cleared = new List<(TrackedRegion Region, ulong Address, ulong Size)>();
+        // Another tracker may upload from this callback. It needs its own rollback
+        // state; the reentry guard only rejects reentry into this tracker.
+        var held = previousOwner is null
+            ? _scratchHeld ??= new List<TrackedRegion>()
+            : new List<TrackedRegion>();
+        var cleared = previousOwner is null
+            ? _scratchCleared ??= new List<(TrackedRegion Region, ulong Address, ulong Size)>()
+            : new List<(TrackedRegion Region, ulong Address, ulong Size)>();
+        held.Clear();
+        cleared.Clear();
         try
         {
             using (GpuMemoryAccessProfile.Measure(GpuMemoryAccessProfile.Operation.UploadTracking, size))
             {
-                VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
+                var visitor = new RegionUploadVisitor<TSink>(sink, cleared);
+                var preserveHotPages = !isWritten && preserveCpuWriteHotPages;
+                for (var (index, offset, remaining) = (vaddr / BlockBytes, vaddr % BlockBytes, size); remaining != 0; index++, offset = 0)
                 {
+                    var bytes = Math.Min(BlockBytes - offset, remaining);
+                    remaining -= bytes;
+                    if (Volatile.Read(ref _regions[index]) is not { } region)
+                    {
+                        continue;
+                    }
+
                     region.Lock.Enter();
                     held.Add(region);
-                    var address = region.BaseAddress + offset;
-                    region.ForEachCpuUploadRange(
-                        preserveHotPages: !isWritten && preserveCpuWriteHotPages,
-                        address,
-                        bytes,
-                        (runAddress, runSize) => cleared.Add((region, runAddress, runSize)),
-                        rangeFunc);
+                    region.ForEachCpuUploadRange(preserveHotPages, region.BaseAddress + offset, bytes, ref visitor);
                     if (!isWritten)
                     {
                         region.Lock.Exit();
-                        held.Remove(region);
+                        held.RemoveAt(held.Count - 1);
                     }
+                }
 
-                    return false;
-                });
+                sink = visitor.Sink;
             }
-            uploadFunc();
+            sink.Upload();
             if (isWritten)
             {
-                VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
+                for (var (index, offset, remaining) = (vaddr / BlockBytes, vaddr % BlockBytes, size); remaining != 0; index++, offset = 0)
                 {
+                    var bytes = Math.Min(BlockBytes - offset, remaining);
+                    remaining -= bytes;
+                    if (Volatile.Read(ref _regions[index]) is not { } region)
+                    {
+                        continue;
+                    }
+
                     region.ChangeState(WriteOrigin.Gpu, enable: true, region.BaseAddress + offset, bytes);
                     region.Lock.Exit();
                     held.Remove(region);
-                    return false;
-                });
+                }
             }
         }
         catch
@@ -333,6 +391,8 @@ public sealed class GuestPageTracker
                 region.Lock.Exit();
             }
 
+            held.Clear();
+            cleared.Clear();
             _uploadOwner = previousOwner;
         }
     }

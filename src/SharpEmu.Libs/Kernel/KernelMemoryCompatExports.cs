@@ -2358,41 +2358,53 @@ public static partial class KernelMemoryCompatExports
             positionBefore = -1;
         }
 
-        var buffer = GC.AllocateUninitializedArray<byte>(requested);
-        var read = stream.Read(buffer, 0, requested);
-        if (read > 0 && useBinkCompletionShim)
-        {
-            // The patched NumFrames field is what tells the guest "this
-            // movie is fully consumed" - hold that specific read until the
-            // host has actually finished showing it, so guest-side game
-            // logic can't race ahead of what's still on screen.
-            if (completionShim.Patch(positionBefore, buffer.AsSpan(0, read)))
-            {
-                HostMovieBridge.WaitForHostPlaybackToFinish(stream.Name);
-            }
-        }
-        if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        long positionAfter;
+        // Guest reads are frequent and mostly small: a pooled buffer spares each one an allocation.
+        var pooled = requested <= MaxPooledReadBytes;
+        var buffer = pooled ? ArrayPool<byte>.Shared.Rent(requested) : GC.AllocateUninitializedArray<byte>(requested);
         try
         {
-            positionAfter = stream.Position;
+            var read = stream.Read(buffer, 0, requested);
+            if (read > 0 && useBinkCompletionShim)
+            {
+                // The patched NumFrames field is what tells the guest "this
+                // movie is fully consumed" - hold that specific read until the
+                // host has actually finished showing it, so guest-side game
+                // logic can't race ahead of what's still on screen.
+                if (completionShim.Patch(positionBefore, buffer.AsSpan(0, read)))
+                {
+                    HostMovieBridge.WaitForHostPlaybackToFinish(stream.Name);
+                }
+            }
+            if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            long positionAfter;
+            try
+            {
+                positionAfter = stream.Position;
+            }
+            catch (IOException)
+            {
+                positionAfter = -1;
+            }
+
+            LogIoTrace(
+                "read",
+                stream.Name,
+                $"fd={fd} req={requested} read={read} pos={positionBefore}->{positionAfter} preview='{PreviewIoBytes(buffer, read, 64)}' hex={PreviewIoHex(buffer, read, 32)} guest_tail={PreviewGuestHex(ctx, bufferAddress + (ulong)Math.Max(read, 0), 32)}");
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)read);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
-        catch (IOException)
+        finally
         {
-            positionAfter = -1;
+            if (pooled)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
-
-        LogIoTrace(
-            "read",
-            stream.Name,
-            $"fd={fd} req={requested} read={read} pos={positionBefore}->{positionAfter} preview='{PreviewIoBytes(buffer, read, 64)}' hex={PreviewIoHex(buffer, read, 32)} guest_tail={PreviewGuestHex(ctx, bufferAddress + (ulong)Math.Max(read, 0), 32)}");
-
-        ctx[CpuRegister.Rax] = unchecked((ulong)read);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -7206,8 +7218,40 @@ public static partial class KernelMemoryCompatExports
     }
 
     // Read once: file-heavy titles call LogIoTrace for every resolved path.
+    private const int MaxPooledReadBytes = 1 << 20;
+
     private static readonly bool _logIo =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO"), "1", StringComparison.Ordinal);
+
+    // Builds an I/O trace detail only while SHARPEMU_LOG_IO is on: its holes (byte previews of
+    // every read) are otherwise never evaluated.
+    [System.Runtime.CompilerServices.InterpolatedStringHandler]
+    private ref struct IoTraceDetail
+    {
+        private System.Runtime.CompilerServices.DefaultInterpolatedStringHandler _inner;
+
+        public IoTraceDetail(int literalLength, int formattedCount, out bool enabled)
+        {
+            enabled = _logIo;
+            _inner = enabled ? new System.Runtime.CompilerServices.DefaultInterpolatedStringHandler(literalLength, formattedCount) : default;
+        }
+
+        public void AppendLiteral(string value) => _inner.AppendLiteral(value);
+
+        public void AppendFormatted<T>(T value) => _inner.AppendFormatted(value);
+
+        public void AppendFormatted<T>(T value, string? format) => _inner.AppendFormatted(value, format);
+
+        public string ToStringAndClear() => _inner.ToStringAndClear();
+    }
+
+    private static void LogIoTrace(string operation, string path, IoTraceDetail detail)
+    {
+        if (_logIo)
+        {
+            LogIoTrace(operation, path, detail.ToStringAndClear());
+        }
+    }
 
     private static void LogIoTrace(string operation, string path, string detail)
     {
