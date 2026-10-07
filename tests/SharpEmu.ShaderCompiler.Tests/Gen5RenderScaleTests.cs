@@ -106,6 +106,29 @@ public sealed class Gen5RenderScaleTests
         ValidateWhenAvailable(spirv);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void DynamicSampleOffsetsRemainInGuestTexels(bool usesRenderScale)
+    {
+        var spirv = CompileImageAccess("ImageSampleLzO", usesRenderScale);
+        var instructions = Parse(spirv);
+        var divide = Assert.Single(instructions, item => item.Opcode == SpirvOp.FDiv);
+        var offset = Definition(instructions, divide.Operands[2]);
+        Assert.Equal(usesRenderScale ? SpirvOp.CompositeConstruct : SpirvOp.ConvertSToF, offset.Opcode);
+        if (usesRenderScale)
+        {
+            foreach (var component in offset.Operands.Skip(2))
+            {
+                var multiply = Definition(instructions, component);
+                Assert.Equal(SpirvOp.FMul, multiply.Opcode);
+                // Each image selects its factor; unscaled bindings select one.
+                Assert.Equal(SpirvOp.Select, Definition(instructions, multiply.Operands[3]).Opcode);
+            }
+        }
+        ValidateWhenAvailable(spirv);
+    }
+
     private static byte[] CompilePixelPosition(bool usesRenderScale)
     {
         var program = ResourceTestProgram.Program(

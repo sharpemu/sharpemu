@@ -6497,6 +6497,30 @@ public static partial class Gen5SpirvTranslator
                 SpirvOp.ConvertSToF,
                 spatialFloatType,
                 texelOffset);
+            // The instruction's offset is in guest texels. Convert it to host texels
+            // before normalizing by the host mip extent. Array layers and depth are
+            // never scaled; the per-image mask also preserves unscaled bindings.
+            if (UsesRenderScale)
+            {
+                var factor = LoadImageScaleFactor(resource, ImageCoordinateFactorDword);
+                if (spatialComponentCount == 1)
+                {
+                    offsetFloat = _module.AddInstruction(SpirvOp.FMul, _floatType, offsetFloat, factor);
+                }
+                else
+                {
+                    var components = new uint[checked((int)spatialComponentCount)];
+                    for (uint component = 0; component < spatialComponentCount; component++)
+                    {
+                        var value = _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, offsetFloat, component);
+                        components[component] = component < 2
+                            ? _module.AddInstruction(SpirvOp.FMul, _floatType, value, factor)
+                            : value;
+                    }
+                    offsetFloat = _module.AddInstruction(SpirvOp.CompositeConstruct, spatialFloatType, components);
+                }
+            }
+
             var normalizedOffset = _module.AddInstruction(
                 SpirvOp.FDiv,
                 spatialFloatType,

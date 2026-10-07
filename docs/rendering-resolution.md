@@ -42,7 +42,8 @@ backing is created at `ceil(guest × scale)`. Everything that would notice:
   loaded, so the pixel position inputs and everything derived from them - screen
   UVs above all - stay in guest pixels. Integer image coordinates are mapped
   onto host texels through the bound image's factor, and resource-info queries
-  report guest sizes. The factors and a mask of scaled image resources travel in
+  report guest sizes. Dynamic sample offsets are converted from guest texels
+  to host texels before normalization. The factors and a mask of scaled image resources travel in
   shader data, so no shader is specialized per scale.
 - **Guest transfers.** An upload fills a guest-resolution twin of the image from
   the copy regions the tiler built and blits into the backing; a download blits
@@ -90,8 +91,6 @@ Only the Vulkan backend scales; the Metal backend ignores the setting.
   character's coat picks up colour speckle. Effects that reason about texels
   rather than about the screen - screen-space shadows, subsurface scattering,
   dithering - change their footprint with the host resolution.
-- **A dynamic sample offset** is normalized against the host size, so it is off
-  by the scale on a scaled image.
 - **Guest stencil uploads and downloads** of a scaled image would lose the
   stencil plane; this cannot happen today only because stencil images never
   scale.
