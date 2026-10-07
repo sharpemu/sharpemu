@@ -1823,12 +1823,8 @@ public static partial class Gen5SpirvTranslator
             return true;
         }
 
-        // Reads one V_FMA_MIX source as an f32. op_sel_hi selects whether a
-        // register operand is taken as an f16 (the half picked by op_sel, widened
-        // exactly to f32) or as a full f32; inline constants are always f32. The
-        // per-operand neg_hi bit takes the absolute value and neg negates, in that
-        // order (abs-then-neg), reusing the VOP3P modifier fields the way the mix
-        // ops define them rather than the packed low/high-lane meaning.
+        // Half selection applies to registers and literals. Inline constants stay f32.
+        // Apply absolute value before negation for mixed-precision instructions.
         private uint EmitFmaMixOperand(
             Gen5ShaderInstruction instruction,
             Gen5Vop3pControl control,
@@ -1837,7 +1833,8 @@ public static partial class Gen5SpirvTranslator
             var source = instruction.Sources[index];
             var readAsHalf =
                 ((control.OpSelHiMask >> index) & 1) != 0 &&
-                source.Kind is Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister;
+                source.Kind is Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister
+                    or Gen5OperandKind.LiteralConstant;
 
             uint value;
             if (readAsHalf)
