@@ -99,6 +99,50 @@ public static class AcmExports
         return CompleteBatchStart(ctx, context, infoCount, errorAddress, batchAddress);
     }
 
+    // DSP batch submission and synchronization. The emulator runs no ACM DSP
+    // jobs (FFT/panner/reverb output stays silent), but Scream's workers trap
+    // with int 0x41/0x42 asserts whenever a submission call reports failure,
+    // so the whole batch surface must report success.
+    [SysAbiExport(
+        Nid = "WeZOIm8+8WI",
+        ExportName = "sceAcmBatchInitialize",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAcm")]
+    public static int AcmBatchInitialize(CpuContext ctx) =>
+        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+
+    [SysAbiExport(
+        Nid = "Mk1xvQXIdkk",
+        ExportName = "sceAcmBatchInitializeLite",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAcm")]
+    public static int AcmBatchInitializeLite(CpuContext ctx) =>
+        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+
+    [SysAbiExport(
+        Nid = "A5NXCXK5Gfc",
+        ExportName = "sceAcmBatchStart",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAcm")]
+    public static int AcmBatchStart(CpuContext ctx) =>
+        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+
+    [SysAbiExport(
+        Nid = "S3BPrjCfZ90",
+        ExportName = "sceAcmBatchStartMultiple",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAcm")]
+    public static int AcmBatchStartMultiple(CpuContext ctx) =>
+        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+
+    [SysAbiExport(
+        Nid = "uqDIauipRbo",
+        ExportName = "sceAcmBatchProcess",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAcm")]
+    public static int AcmBatchProcess(CpuContext ctx) =>
+        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+
     [SysAbiExport(
         Nid = "RLN3gRlXJLE",
         ExportName = "sceAcmBatchWait",

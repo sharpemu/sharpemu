@@ -107,4 +107,5 @@ internal static class KernelVirtualRangeAllocator
         addressSpace = null;
         return false;
     }
+
 }

@@ -19,9 +19,19 @@ public static class AjmExports
     private const int OrbisAjmErrorCodecAlreadyRegistered = unchecked((int)0x80930009);
     private const int OrbisAjmErrorCodecNotRegistered = unchecked((int)0x8093000A);
     private const int OrbisAjmErrorJobCreation = unchecked((int)0x80930012);
-    private const ulong MaxSilentPcmBytes = 1 << 20;
     private const uint Atrac9CodecType = 1;
-    private const uint MaxCodecType = 25;
+    // instanceId packs codecType into the high bits and the instance slot
+    // into the low InstanceIdSlotBits bits (see AjmInstanceCreate's
+    // `(codecType << InstanceIdSlotBits) | instanceSlot` and the
+    // `& InstanceIdSlotMask` unpacks in AjmInstanceDestroy/GetError).
+    private const int InstanceIdSlotBits = 14;
+    private const uint InstanceIdSlotMask = (1u << InstanceIdSlotBits) - 1;
+    // Registration is pure bookkeeping (a HashSet.Add), so the only real
+    // constraint is that codecType must not overflow the 32-bit instanceId
+    // once shifted left by InstanceIdSlotBits -- not any hardcoded list of
+    // known Sony codec ids, which a retail title's Gen5 codec type (e.g. 24)
+    // can legitimately fall outside of.
+    private const uint MaxCodecType = 1u << (32 - InstanceIdSlotBits);
     private const int MaxInstanceIndex = 0x2FFF;
     private const int MaxDecodeBufferBytes = 64 * 1024 * 1024;
 
@@ -86,9 +96,15 @@ public static class AjmExports
 
     public static int AjmInitialize(CpuContext ctx)
     {
-        var reserved = ctx[CpuRegister.Rdi];
+        var reservedOrOptions = ctx[CpuRegister.Rdi];
         var outputAddress = ctx[CpuRegister.Rsi];
-        if (reserved != 0 || outputAddress == 0)
+        // The Gen4 AJM ABI requires a zero reserved argument. Gen5 callers
+        // also use this slot for an opaque initialization value (observed as
+        // 0x0000000300000000 in a retail title), which the software backend
+        // does not need to interpret. Keep the output pointer validation for
+        // both generations; only relax the legacy reserved-field check on
+        // Gen5.
+        if ((ctx.TargetGeneration == Generation.Gen4 && reservedOrOptions != 0) || outputAddress == 0)
         {
             return unchecked((int)0x806A0001);
         }
@@ -105,7 +121,8 @@ public static class AjmExports
         if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AJM"), "1", StringComparison.Ordinal))
         {
             Console.Error.WriteLine(
-                $"[LOADER][TRACE] ajm.initialize reserved={reserved} out=0x{outputAddress:X16} context={contextId}");
+                $"[LOADER][TRACE] ajm.initialize reserved_or_options=0x{reservedOrOptions:X16} " +
+                $"generation={ctx.TargetGeneration} out=0x{outputAddress:X16} context={contextId}");
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -119,9 +136,12 @@ public static class AjmExports
         LibraryName = "libSceAjm")]
     public static int AjmFinalize(CpuContext ctx)
     {
-        Contexts.TryRemove(unchecked((uint)ctx[CpuRegister.Rdi]), out _);
-        ctx[CpuRegister.Rax] = 0;
-        return 0;
+        if (!Contexts.TryRemove(unchecked((uint)ctx[CpuRegister.Rdi]), out _))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -273,7 +293,7 @@ public static class AjmExports
             }
             while (state.InstancesBySlot.ContainsKey(instanceSlot));
 
-            instanceId = (codecType << 14) | instanceSlot;
+            instanceId = (codecType << InstanceIdSlotBits) | instanceSlot;
             Span<byte> value = stackalloc byte[sizeof(uint)];
             BinaryPrimitives.WriteUInt32LittleEndian(value, instanceId);
             if (!ctx.Memory.TryWrite(outputAddress, value))
@@ -314,7 +334,7 @@ public static class AjmExports
             return ctx.SetReturn(OrbisAjmErrorInvalidContext);
         }
 
-        var instanceSlot = instanceId & 0x3FFF;
+        var instanceSlot = instanceId & InstanceIdSlotMask;
         lock (state.Gate)
         {
             if (instanceSlot == 0 || !state.InstancesBySlot.Remove(instanceSlot))
@@ -334,8 +354,21 @@ public static class AjmExports
         LibraryName = "libSceAjm")]
     public static int AjmModuleUnregister(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 0;
-        return 0;
+        var contextId = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var codecType = unchecked((uint)ctx[CpuRegister.Rsi]);
+        if (!Contexts.TryGetValue(contextId, out var state))
+        {
+            return ctx.SetReturn(OrbisAjmErrorInvalidContext);
+        }
+
+        bool removed;
+        lock (state.Gate)
+        {
+            removed = state.RegisteredCodecs.Remove(codecType);
+        }
+
+        Trace($"module_unregister context={contextId} codec={codecType} was_registered={removed}");
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -549,16 +582,28 @@ public static class AjmExports
         var infoAddress = ctx[CpuRegister.Rdi];
         var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
         var gaplessAddress = ctx[CpuRegister.Rdx];
-        var resultAddress = ctx[CpuRegister.Rcx];
+        var reset = unchecked((int)ctx[CpuRegister.Rcx]);
+        var resultAddress = ctx[CpuRegister.R8];
 
         if (!TryAppendBatchJob(ctx, infoAddress, AjmJobControlSize))
         {
             return ctx.SetReturn(OrbisAjmErrorJobCreation);
         }
 
-        var status = TryGetInstance(instanceId, out _) ? 0 : Atrac9DecodeState.ResultInvalidParameter;
+        var status = TryGetInstance(instanceId, out var instance) ? 0 : Atrac9DecodeState.ResultInvalidParameter;
+        Span<byte> gapless = stackalloc byte[AjmSidebandGaplessDecodeBytes];
+        if (status == 0 && gaplessAddress != 0 && ctx.Memory.TryRead(gaplessAddress, gapless))
+        {
+            instance!.Atrac9?.SetGapless(
+                BinaryPrimitives.ReadUInt32LittleEndian(gapless),
+                BinaryPrimitives.ReadUInt16LittleEndian(gapless[4..]),
+                reset != 0);
+        }
+
         WriteBasicResult(ctx, resultAddress, status);
-        Trace($"batch_job_set_gapless_decode instance=0x{instanceId:X8} gapless=0x{gaplessAddress:X16} status=0x{status:X8}");
+        Trace(
+            $"batch_job_set_gapless_decode instance=0x{instanceId:X8} " +
+            $"gapless=0x{gaplessAddress:X16} reset={reset} status=0x{status:X8}");
         return ctx.SetReturn(0);
     }
 
@@ -667,8 +712,8 @@ public static class AjmExports
     private static bool TryGetInstance(uint instanceId, out AjmInstanceState instance)
     {
         instance = null!;
-        var codec = instanceId >> 14;
-        var slot = instanceId & 0x3FFF;
+        var codec = instanceId >> InstanceIdSlotBits;
+        var slot = instanceId & InstanceIdSlotMask;
         if (slot == 0)
         {
             return false;
@@ -865,7 +910,10 @@ public static class AjmExports
         var descriptors = split
             ? Math.Min(inputCountOrSize, MaxBufferDescriptors) + Math.Min(outputCountOrSize, MaxBufferDescriptors)
             : 0;
-        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobRunSize + (descriptors * AjmBufferDescriptorBytes)))
+        var jobSize = split
+            ? AjmJobRunSplitBaseSize + (descriptors * AjmBufferDescriptorBytes)
+            : AjmJobRunSize;
+        if (!TryAppendBatchJob(ctx, infoAddress, jobSize))
         {
             return ctx.SetReturn(OrbisAjmErrorJobCreation);
         }
@@ -1124,6 +1172,10 @@ public static class AjmExports
 
         if ((flags & AjmJobSidebandFlagGaplessDecode) != 0 && (ulong)(offset + AjmSidebandGaplessDecodeBytes) <= size)
         {
+            var gapless = instance?.Atrac9?.Gapless ?? default;
+            BinaryPrimitives.WriteUInt32LittleEndian(sideband[offset..], gapless.TotalSamples);
+            BinaryPrimitives.WriteUInt16LittleEndian(sideband[(offset + 4)..], gapless.SkipSamples);
+            BinaryPrimitives.WriteUInt16LittleEndian(sideband[(offset + 6)..], gapless.SkippedSamples);
             offset += AjmSidebandGaplessDecodeBytes;
         }
 
@@ -1244,6 +1296,8 @@ public static class AjmExports
     private const ulong AjmBatchInfoLastGoodJobRaField = 32;
     private const ulong AjmJobControlSize = 48;
     private const ulong AjmJobRunSize = 64;
+    // SCE_AJM_JOB_RUN_SPLIT_SIZE(N) is 32 + 16 bytes per descriptor.
+    private const ulong AjmJobRunSplitBaseSize = 32;
     private const ulong AjmJobGetStatisticsSize = 88;
     private const int AjmStatisticsResultBytes = 48;
     private const int AjmSidebandResultBytes = 8;
@@ -1277,8 +1331,12 @@ public static class AjmExports
                TryWriteUInt64(ctx, infoAddress + AjmBatchInfoOffsetField, offset + jobSize);
     }
 
-    // AjmBatchError: int error_code; const void* job_addr; uint32_t cmd_offset; const void* job_ra;
-    private const int AjmBatchErrorBytes = 24;
+    // SceAjmBatchError { int iErrorCode; const void *pJobAddress;
+    // unsigned int uiCommandOffset; const void *pJobOriginRa; }. The two pointers
+    // force 8-byte alignment, so the struct is 0x20 bytes (4+4 pad, 8, 4+4 pad, 8)
+    // rather than the 24-byte naive field sum — pJobOriginRa lives at +0x18 and was
+    // left holding stale guest bytes.
+    private const int AjmBatchErrorBytes = 0x20;
 
     private static void ClearAjmBatchError(CpuContext ctx, ulong errorAddress)
     {

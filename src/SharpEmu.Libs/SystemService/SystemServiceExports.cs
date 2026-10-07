@@ -19,11 +19,27 @@ public static class SystemServiceExports
 
     private static string? _mainAppTitleId;
     private static int _noticeScreenSkipFlag;
+    private static int _systemLanguage = 1;
 
-    public static void ConfigureApplicationInfo(string? titleId)
+    public static void ConfigureApplicationInfo(string? titleId, int systemLanguage = 1)
     {
         _mainAppTitleId = string.IsNullOrWhiteSpace(titleId) ? null : titleId.Trim();
+        Volatile.Write(ref _systemLanguage, systemLanguage);
     }
+
+    [SysAbiExport(
+        Nid = "x1UB9bwDSOw",
+        ExportName = "sceSystemServiceDisableMusicPlayer",
+        Target = Generation.Gen5,
+        LibraryName = "libSceSystemService")]
+    public static int SystemServiceDisableMusicPlayer(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
+        Nid = "9kPCz7Or+1Y",
+        ExportName = "sceSystemServiceReenableMusicPlayer",
+        Target = Generation.Gen5,
+        LibraryName = "libSceSystemService")]
+    public static int SystemServiceReenableMusicPlayer(CpuContext ctx) => ctx.SetReturn(0);
 
     [SysAbiExport(
         Nid = "3RQ5aQfnstU",
@@ -114,7 +130,8 @@ public static class SystemServiceExports
 
         var value = parameterId switch
         {
-            1 or 2 or 3 or 1000 => 1,
+            1 or 400 => Volatile.Read(ref _systemLanguage),
+            2 or 3 or 1000 => 1,
             4 => 180,
             _ => 0,
         };
@@ -240,6 +257,9 @@ public static class SystemServiceExports
         LibraryName = "libSceSystemService")]
     public static int SystemServiceReportAbnormalTermination(CpuContext ctx) => ctx.SetReturn(0);
 
-    internal static void ResetForTests() =>
+    internal static void ResetForTests()
+    {
         Volatile.Write(ref _noticeScreenSkipFlag, 0);
+        Volatile.Write(ref _systemLanguage, 1);
+    }
 }

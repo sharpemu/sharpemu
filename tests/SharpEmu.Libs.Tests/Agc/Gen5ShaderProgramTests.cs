@@ -30,6 +30,22 @@ public sealed class Gen5ShaderProgramTests
         Assert.Equal(0x8765_4325u, program.PixelColorExportMasks);
     }
 
+    [Fact]
+    public void ParameterExportMaskTracksEnabledParameterSlots()
+    {
+        var program = new Gen5ShaderProgram(
+            0,
+            [
+                Export(12, 0xF),
+                Export(32, 0x1),
+                Export(35, 0x8),
+                Export(63, 0xF),
+                Export(34, 0),
+            ]);
+
+        Assert.Equal(0x8000_0009u, program.ParameterExportMask);
+    }
+
     private static Gen5ShaderInstruction Export(uint target, uint enableMask) => new(
         0,
         Gen5ShaderEncoding.Exp,

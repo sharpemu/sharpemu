@@ -101,6 +101,13 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
 
     public bool Query(ulong address, out HostRegionInfo info)
     {
+        if (PosixViewRegions.TryQuery(address, out var view))
+        {
+            info = new HostRegionInfo(view.BaseAddress, view.AllocationBase, view.RegionSize,
+                view.State == HostMemory.MEM_RESERVE ? HostRegionState.Reserved : HostRegionState.Committed,
+                view.State, ToHostProtection(view.Protect), view.Protect, view.AllocationProtect);
+            return true;
+        }
         if (Posix.Query((void*)address, out var nativeInfo) == 0)
         {
             info = default;
@@ -321,6 +328,7 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
                     }
                 }
 
+                HostMemory.OnMappingChanged();
                 Regions[(ulong)result] = new Region
                 {
                     Base = (ulong)result,
@@ -350,7 +358,8 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
                     : munmap((nint)address, (nuint)region.Size) == 0;
                 if (released)
                 {
-                    Regions.Remove((ulong)address);
+                    HostMemory.OnMappingChanged();
+                Regions.Remove((ulong)address);
                 }
 
                 return released;
@@ -485,6 +494,7 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
 
         private static void SetProtectRangeLocked(Region region, ulong start, ulong size, uint protect)
         {
+            HostMemory.OnMappingChanged();
             if (start == region.Base && size >= region.Size)
             {
                 region.DefaultProtect = protect;

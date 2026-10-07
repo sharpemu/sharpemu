@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
+using SharpEmu.HLE;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -40,6 +41,9 @@ public sealed partial class DirectExecutionBackend
 			? report
 			: 15;
 
+	private static readonly string? _profileGuestRipThreadFilter =
+		Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_GUEST_RIP_THREAD");
+
 	private const ulong GuestImageBase = 0x0000_0008_0000_0000UL;
 	private const ulong GuestImageLimit = 0x0000_0009_0000_0000UL;
 
@@ -48,31 +52,30 @@ public sealed partial class DirectExecutionBackend
 	private readonly ConcurrentDictionary<string, long> _guestRipThreadSamples = new();
 	private readonly ConcurrentDictionary<string, long> _guestWaitSamples = new();
 	private readonly ConcurrentDictionary<string, long> _guestThreadWaitSamples = new();
+	private readonly ConcurrentDictionary<string, long> _guestThreadWaitReasonSamples = new();
 	private long _guestRipTotalSamples;
 	private long _guestWaitTotalSamples;
 	private long _guestRipCaptureFailures;
 	private long _guestRipSamplerErrors;
-	private int _guestRipSampleCursor;
+
+	private readonly record struct GuestRipSampleTarget(
+		string Name,
+		CpuContext Context,
+		int HostThreadId,
+		string? BlockReason);
 
 	/// <summary>
 	/// Names the HLE call a thread is parked in, using the guest RIP the import
 	/// dispatcher left on its context.
 	/// </summary>
-	private string ResolveWaitLabel(GuestThreadState thread)
+	private string ResolveWaitLabel(CpuContext context, string? blockReason)
 	{
-		var context = thread.Context;
-		if (context is null)
-		{
-			return "<no-context>";
-		}
-
 		var importIndex = context.ActiveImportIndex;
 		if ((uint)importIndex >= (uint)_importEntries.Length)
 		{
 			// Host code with no import in flight: the thread is parked by the
 			// emulator's own scheduler. The cooperative block records why, which
 			// is the part that actually identifies what the frame is waiting on.
-			var blockReason = thread.BlockReason;
 			return string.IsNullOrEmpty(blockReason)
 				? "<idle-or-scheduler>"
 				: $"blocked:{blockReason}";
@@ -116,7 +119,8 @@ public sealed partial class DirectExecutionBackend
 		sampler.Start();
 		Console.Error.WriteLine(
 			$"[PERF][GUEST] RIP sampler started: interval={_profileGuestRipIntervalMs}ms " +
-			$"report={_profileGuestRipReportSeconds}s");
+			$"report={_profileGuestRipReportSeconds}s " +
+			$"thread={_profileGuestRipThreadFilter ?? "<all>"}");
 	}
 
 	private void GuestRipSampleLoop()
@@ -129,14 +133,20 @@ public sealed partial class DirectExecutionBackend
 		{
 			try
 			{
-				var guestThreads = SnapshotGuestThreads();
-				var sampleIndex = guestThreads.Length == 0
-					? 0
-					: (int)((uint)Interlocked.Increment(ref _guestRipSampleCursor) % (uint)guestThreads.Length);
-				foreach (var thread in guestThreads.Skip(sampleIndex).Take(1))
+				var guestThreads = SnapshotGuestRipTargets();
+				if (!string.IsNullOrWhiteSpace(_profileGuestRipThreadFilter))
 				{
-					var hostThreadId = Volatile.Read(ref thread.HostThreadId);
-					if (hostThreadId == 0)
+					guestThreads = guestThreads
+						.Where(thread => thread.Name.Contains(
+							_profileGuestRipThreadFilter,
+							StringComparison.OrdinalIgnoreCase))
+						.ToArray();
+				}
+				var sampledHostThreads = new HashSet<int>();
+				foreach (var thread in guestThreads)
+				{
+					var hostThreadId = thread.HostThreadId;
+					if (hostThreadId == 0 || !sampledHostThreads.Add(hostThreadId))
 					{
 						continue;
 					}
@@ -165,12 +175,18 @@ public sealed partial class DirectExecutionBackend
 						continue;
 					}
 
+					var threadName = string.IsNullOrEmpty(thread.Name) ? "<unnamed>" : thread.Name;
+					var waitLabel = ResolveWaitLabel(thread.Context, thread.BlockReason);
 					_guestWaitSamples.AddOrUpdate(
-						ResolveWaitLabel(thread),
+						waitLabel,
 						1,
 						static (_, value) => value + 1);
 					_guestThreadWaitSamples.AddOrUpdate(
-						string.IsNullOrEmpty(thread.Name) ? "<unnamed>" : thread.Name,
+						threadName,
+						1,
+						static (_, value) => value + 1);
+					_guestThreadWaitReasonSamples.AddOrUpdate(
+						$"{threadName}\u001F{waitLabel}",
 						1,
 						static (_, value) => value + 1);
 					Interlocked.Increment(ref _guestWaitTotalSamples);
@@ -201,10 +217,38 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
+	private GuestRipSampleTarget[] SnapshotGuestRipTargets()
+	{
+		using (LockGate("SnapshotGuestRipTargets"))
+		{
+			var targets = new GuestRipSampleTarget[_guestThreads.Count + _externalGuestThreads.Count];
+			var index = 0;
+			foreach (var thread in _guestThreads.Values)
+			{
+				targets[index++] = new GuestRipSampleTarget(
+					thread.Name,
+					thread.Context,
+					Volatile.Read(ref thread.HostThreadId),
+					thread.BlockReason);
+			}
+
+			foreach (var pair in _externalGuestThreads)
+			{
+				var thread = pair.Value;
+				targets[index++] = new GuestRipSampleTarget(
+					thread.Name,
+					thread.Context,
+					Volatile.Read(ref thread.HostThreadId),
+					null);
+			}
+
+			return targets;
+		}
+	}
+
 	private void ReportGuestRipSamples(long windowSamples, double windowSeconds)
 	{
-		var total = Interlocked.Read(ref _guestRipTotalSamples);
-		if (total == 0)
+		if (windowSamples == 0)
 		{
 			return;
 		}
@@ -233,7 +277,7 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		Console.Error.WriteLine(
-			$"[PERF][GUEST] samples={total} window={windowSamples} in {windowSeconds:F1}s " +
+			$"[PERF][GUEST] window={windowSamples} in {windowSeconds:F1}s " +
 			$"capture_failures={Interlocked.Read(ref _guestRipCaptureFailures)}");
 
 		Console.Error.WriteLine(
@@ -243,7 +287,7 @@ public sealed partial class DirectExecutionBackend
 				byRip.OrderByDescending(pair => pair.Value)
 					.Take(12)
 					.Select(pair =>
-						$"0x{pair.Key:X}{DescribeGuestAddress(pair.Key)}={pair.Value * 100.0 / total:F1}%")));
+						$"0x{pair.Key:X}{DescribeGuestAddress(pair.Key)}={pair.Value * 100.0 / windowSamples:F1}%")));
 
 		Console.Error.WriteLine(
 			"[PERF][GUEST] top_page: " +
@@ -252,7 +296,7 @@ public sealed partial class DirectExecutionBackend
 				byPage.OrderByDescending(pair => pair.Value)
 					.Take(8)
 					.Select(pair =>
-						$"0x{pair.Key:X}{DescribeGuestAddress(pair.Key)}={pair.Value * 100.0 / total:F1}%")));
+						$"0x{pair.Key:X}{DescribeGuestAddress(pair.Key)}={pair.Value * 100.0 / windowSamples:F1}%")));
 
 		var byWait = new List<KeyValuePair<string, long>>(_guestWaitSamples.Count + 16);
 		foreach (var pair in _guestWaitSamples)
@@ -262,12 +306,26 @@ public sealed partial class DirectExecutionBackend
 
 		var waitTotal = Interlocked.Read(ref _guestWaitTotalSamples);
 		Console.Error.WriteLine(
-			$"[PERF][GUEST] waiting={waitTotal * 100.0 / total:F1}% of guest thread-time; top_wait: " +
+			$"[PERF][GUEST] waiting={waitTotal * 100.0 / windowSamples:F1}% of guest thread-time; top_wait: " +
 			string.Join(
 				" | ",
 				byWait.OrderByDescending(pair => pair.Value)
 					.Take(12)
-					.Select(pair => $"{pair.Key}={pair.Value * 100.0 / total:F1}%")));
+					.Select(pair => $"{pair.Key}={pair.Value * 100.0 / windowSamples:F1}%")));
+
+		Console.Error.WriteLine(
+			"[PERF][GUEST] thread_wait: " +
+			string.Join(
+				" | ",
+				_guestThreadWaitReasonSamples.OrderByDescending(pair => pair.Value)
+					.Take(16)
+					.Select(pair =>
+					{
+						var separator = pair.Key.IndexOf('\u001F');
+						var threadName = separator >= 0 ? pair.Key[..separator] : pair.Key;
+						var waitLabel = separator >= 0 ? pair.Key[(separator + 1)..] : "<unknown>";
+						return $"{threadName}->{waitLabel}={pair.Value * 100.0 / windowSamples:F1}%";
+					})));
 
 		// Per-thread spin/park split. The global wait share mixes the job pool in
 		// with a dozen dormant threads, which hides the number that matters:
@@ -291,7 +349,14 @@ public sealed partial class DirectExecutionBackend
 				" | ",
 				byThread.OrderByDescending(pair => pair.Value)
 					.Take(10)
-					.Select(pair => $"{pair.Key}={pair.Value * 100.0 / total:F1}%")));
+					.Select(pair => $"{pair.Key}={pair.Value * 100.0 / windowSamples:F1}%")));
+
+		_guestRipSamples.Clear();
+		_guestRipThreadSamples.Clear();
+		_guestWaitSamples.Clear();
+		_guestThreadWaitSamples.Clear();
+		_guestThreadWaitReasonSamples.Clear();
+		Interlocked.Exchange(ref _guestWaitTotalSamples, 0);
 	}
 
 	/// <summary>

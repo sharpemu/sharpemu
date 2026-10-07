@@ -60,8 +60,16 @@ public static class KernelEventFlagCompatExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!TryReadNullTerminatedUtf8(ctx, nameAddress, MaxEventFlagNameLength + 1, out var name))
+        // Event flag names are commonly stored in executable/read-only image
+        // pages. Use the kernel compatibility reader so those pages can use
+        // its guarded host-read fallback when the guest mapping's protection
+        // metadata temporarily rejects a normal TryRead call.
+        if (!KernelMemoryCompatExports.TryReadNullTerminatedUtf8(
+                ctx, nameAddress, MaxEventFlagNameLength + 1, out var name))
         {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] event_flag name read failed address=0x{nameAddress:X16} " +
+                $"range={ctx.Memory.DescribeReadRange(nameAddress, (ulong)(MaxEventFlagNameLength + 1))}");
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
@@ -78,8 +86,11 @@ public static class KernelEventFlagCompatExports
             Bits = initialPattern,
         };
 
-        if (!ctx.TryWriteUInt64(outAddress, handle))
+        if (!KernelMemoryCompatExports.TryWriteUInt64Compat(ctx, outAddress, handle))
         {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] event_flag handle write failed address=0x{outAddress:X16} " +
+                $"range={ctx.Memory.DescribeReadRange(outAddress, sizeof(ulong))}");
             _eventFlags.TryRemove(handle, out _);
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }

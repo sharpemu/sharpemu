@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 #nullable disable
+using System;
+
 namespace LibAtrac9
 {
     /// <summary>
@@ -15,6 +17,13 @@ namespace LibAtrac9
             {
                 ChannelCount += Block.BlockTypeToChannelCount(type);
             }
+        }
+
+        internal static ChannelConfig CreateIndependentMono(int channelCount)
+        {
+            var blockTypes = new BlockType[channelCount];
+            Array.Fill(blockTypes, BlockType.Mono);
+            return new ChannelConfig(blockTypes);
         }
 
         /// <summary>

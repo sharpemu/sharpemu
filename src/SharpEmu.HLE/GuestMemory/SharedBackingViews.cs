@@ -1,0 +1,721 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using System.Runtime.InteropServices;
+using SharpEmu.HLE.Host;
+
+namespace SharpEmu.HLE.GuestMemory;
+
+public readonly record struct ViewRecord(ulong Address, ulong Size, ulong Offset, HostPageProtection Protection)
+{
+    public bool WasRestored { get; init; }
+}
+
+public sealed unsafe class SharedBackingViews : IDisposable
+{
+    internal static Action<string> OnFatal = message => Environment.FailFast(message);
+
+    private readonly IHostViewMemory _host;
+    private readonly HostBackingObject? _backing;
+    private readonly object _lock = new();
+    private readonly SortedList<ulong, ViewRecord> _views = new();
+    private bool _disposed;
+
+    // Guest command writes and their reads by the render thread reach TryWriteBacking and
+    // TryReadBacking millions of times per second, a few bytes at a time, while views
+    // change rarely. Single-view accesses search this immutable copy of _views without
+    // the lock; every change to _views republishes it under the lock.
+    private ViewRecord[] _snapshot = [];
+
+    // Single-view accesses in flight; Dispose waits for them before releasing the alias.
+    private int _activeAccesses;
+
+    public SharedBackingViews(IHostViewMemory host, ulong size)
+    {
+        _host = host;
+        _ = host.TryCreateBacking(size, out _backing, out _);
+    }
+
+    public bool IsAvailable => _backing != null && !_disposed;
+
+    public ulong AliasBase => _backing?.AliasBase ?? 0;
+
+    public ulong Size => _backing?.Size ?? 0;
+
+    public bool Clear(ulong offset, ulong size)
+    {
+        lock (_lock)
+        {
+            if (!IsAvailable || !IsWithinBacking(offset, size))
+            {
+                return false;
+            }
+
+            NativeMemory.Clear((void*)(AliasBase + offset), (nuint)size);
+            return true;
+        }
+    }
+
+    public bool TryWriteBacking(ulong address, ReadOnlySpan<byte> data)
+    {
+        if (TryAccessSingleView(address, (ulong)data.Length, out var target))
+        {
+            try
+            {
+                data.CopyTo(new Span<byte>((void*)target, data.Length));
+                return true;
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _activeAccesses);
+            }
+        }
+
+        lock (_lock)
+        {
+            if (IsAvailable && TryFindRecord(address, (ulong)data.Length, out var record))
+            {
+                var offset = record.Offset + address - record.Address;
+                if (!IsWithinBacking(offset, (ulong)data.Length))
+                {
+                    return false;
+                }
+
+                data.CopyTo(new Span<byte>((void*)(AliasBase + offset), data.Length));
+                return true;
+            }
+
+            if (!TryCollectBackingSegments(address, (ulong)data.Length, out var pieces))
+            {
+                return false;
+            }
+
+            foreach (var (backing, dataOffset, bytes) in pieces)
+            {
+                data.Slice(dataOffset, bytes).CopyTo(new Span<byte>((void*)backing, bytes));
+            }
+
+            return true;
+        }
+    }
+
+    // The lock-free single-view read only; false (with nothing read) for anything else.
+    public bool TryReadSingleView(ulong address, Span<byte> data)
+    {
+        if (!TryAccessSingleView(address, (ulong)data.Length, out var source))
+        {
+            return false;
+        }
+
+        try
+        {
+            new ReadOnlySpan<byte>((void*)source, data.Length).CopyTo(data);
+            return true;
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _activeAccesses);
+        }
+    }
+
+    public bool TryReadBacking(ulong address, Span<byte> data)
+    {
+        if (TryAccessSingleView(address, (ulong)data.Length, out var source))
+        {
+            try
+            {
+                new ReadOnlySpan<byte>((void*)source, data.Length).CopyTo(data);
+                return true;
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _activeAccesses);
+            }
+        }
+
+        lock (_lock)
+        {
+            // A read inside one mapping needs no temporary segment list.
+            if (IsAvailable && TryFindRecord(address, (ulong)data.Length, out var record))
+            {
+                var offset = record.Offset + address - record.Address;
+                if (!IsWithinBacking(offset, (ulong)data.Length))
+                {
+                    return false;
+                }
+
+                new ReadOnlySpan<byte>((void*)(AliasBase + offset), data.Length).CopyTo(data);
+                return true;
+            }
+
+            if (!TryCollectBackingSegments(address, (ulong)data.Length, out var pieces))
+            {
+                return false;
+            }
+
+            foreach (var (backing, dataOffset, bytes) in pieces)
+            {
+                new ReadOnlySpan<byte>((void*)backing, bytes).CopyTo(data.Slice(dataOffset, bytes));
+            }
+
+            return true;
+        }
+    }
+
+    // Use temporary storage if a copy segment can overwrite another segment's source.
+    public bool TryCopyBacking(ulong destination, ulong source, ulong size)
+    {
+        lock (_lock)
+        {
+            if (IsAvailable && size <= int.MaxValue &&
+                TryFindRecord(source, size, out var sourceRecord) &&
+                TryFindRecord(destination, size, out var destinationRecord))
+            {
+                var sourceOffset = sourceRecord.Offset + source - sourceRecord.Address;
+                var destinationOffset = destinationRecord.Offset + destination - destinationRecord.Address;
+                if (!IsWithinBacking(sourceOffset, size) || !IsWithinBacking(destinationOffset, size))
+                {
+                    return false;
+                }
+
+                // Use the backing alias so CopyTo can detect overlap between different guest views.
+                new ReadOnlySpan<byte>((void*)(AliasBase + sourceOffset), (int)size)
+                    .CopyTo(new Span<byte>((void*)(AliasBase + destinationOffset), (int)size));
+                return true;
+            }
+
+            if (!TryCollectBackingSegments(source, size, out var from) || !TryCollectBackingSegments(destination, size, out var to))
+            {
+                return false;
+            }
+
+            var chunks = CreateCopySegments(from, to);
+            if (!HasCrossSegmentOverlap(chunks))
+            {
+                foreach (var (fromPtr, toPtr, bytes) in chunks)
+                {
+                    Buffer.MemoryCopy((void*)fromPtr, (void*)toPtr, bytes, bytes);
+                }
+
+                return true;
+            }
+
+            var staging = new byte[size];
+            foreach (var (backing, dataOffset, bytes) in from)
+            {
+                new ReadOnlySpan<byte>((void*)backing, bytes).CopyTo(staging.AsSpan(dataOffset, bytes));
+            }
+
+            foreach (var (backing, dataOffset, bytes) in to)
+            {
+                staging.AsSpan(dataOffset, bytes).CopyTo(new Span<byte>((void*)backing, bytes));
+            }
+
+            return true;
+        }
+    }
+
+    public bool TryMapReservedRange(ulong address, ulong size, ulong offset, HostPageProtection protection, out HostViewFailure failure)
+        => TryMapReservedRange(address, size, offset, protection, false, out failure);
+
+    private bool TryMapReservedRange(ulong address, ulong size, ulong offset, HostPageProtection protection,
+        bool wasRestored, out HostViewFailure failure)
+    {
+        if (!IsAvailable || !IsWithinBacking(offset, size))
+        {
+            failure = IsAvailable ? HostViewFailure.OffsetOutOfBounds : HostViewFailure.BackingUnavailable;
+            return false;
+        }
+
+        // Keep the mapping and its record under one lock to prevent disposal between them.
+        lock (_lock)
+        {
+            if (!_host.TryMapView(_backing!, address, offset, size, protection, out failure))
+            {
+                return false;
+            }
+
+            if (_disposed)
+            {
+                _ = _host.UnmapView(address, size);
+                failure = HostViewFailure.BackingUnavailable;
+                return false;
+            }
+
+            if (_views.ContainsKey(address))
+            {
+                OnFatal($"A backing view record already exists at 0x{address:X16}.");
+            }
+
+            _views[address] = new ViewRecord(address, size, offset, protection) { WasRestored = wasRestored };
+            PublishSnapshot();
+        }
+
+        failure = HostViewFailure.None;
+        return true;
+    }
+
+    public bool Unmap(ulong address, ulong size, out bool holePreserved)
+    {
+        holePreserved = false;
+        if (!IsAvailable || size == 0 || ulong.MaxValue - address < size)
+        {
+            return false;
+        }
+
+        var end = address + size;
+        var targets = new List<ViewRecord>();
+        lock (_lock)
+        {
+            var current = address;
+            while (current < end)
+            {
+                if (!TryFindRecord(current, 1, out var record))
+                {
+                    return false;
+                }
+
+                var partSize = Math.Min(end, record.Address + record.Size) - current;
+                targets.Add(new ViewRecord(current, partSize, record.Offset + current - record.Address, record.Protection));
+                current += partSize;
+            }
+        }
+
+        var removed = new List<ViewRecord>();
+        foreach (var target in targets)
+        {
+            if (!TryUnmapSingleView(target.Address, target.Size, out var partPreserved))
+            {
+                RestoreMappingsInReverseOrder(removed);
+                return false;
+            }
+
+            if (!partPreserved)
+            {
+                OnFatal($"The address range was not kept reserved after unmapping the view at 0x{target.Address:X16}.");
+            }
+
+            removed.Add(target);
+        }
+
+        // Each removed view leaves a reserved range. Join these ranges into one free range.
+        if (removed.Count > 1 && !_host.JoinHoles(address, size))
+        {
+            RestoreMappingsInReverseOrder(removed);
+            return false;
+        }
+
+        holePreserved = true;
+        return true;
+    }
+
+    private bool TryUnmapSingleView(ulong address, ulong size, out bool holePreserved)
+    {
+        holePreserved = false;
+        var old = default(ViewRecord);
+        lock (_lock)
+        {
+            var index = RangeSearch.FindLastIndexAtOrBelow(_views, address);
+            if (index >= 0)
+            {
+                var record = _views.Values[index];
+                if (address + size <= record.Address + record.Size)
+                {
+                    old = record;
+                    _views.RemoveAt(index);
+                    PublishSnapshot();
+                }
+            }
+        }
+
+        if (old.Size == 0)
+        {
+            return false;
+        }
+
+        if (!_host.UnmapView(old.Address, old.Size))
+        {
+            RestoreViewRecord(old);
+            return false;
+        }
+
+        if (address == old.Address && size == old.Size)
+        {
+            holePreserved = true;
+            return true;
+        }
+
+        var leftSize = address - old.Address;
+        var rightAddress = address + size;
+        var rightSize = old.Address + old.Size - rightAddress;
+        var ok = true;
+        if (leftSize != 0 && leftSize != old.Size)
+        {
+            ok = _host.SplitHole(old.Address, leftSize) && ok;
+        }
+
+        if (rightSize != 0)
+        {
+            ok = _host.SplitHole(address, size) && ok;
+        }
+
+        if (leftSize != 0)
+        {
+            ok = TryMapReservedRange(old.Address, leftSize, old.Offset, old.Protection, true, out _) && ok;
+        }
+
+        if (rightSize != 0)
+        {
+            ok = TryMapReservedRange(rightAddress, rightSize, old.Offset + (rightAddress - old.Address), old.Protection, true, out _) && ok;
+        }
+
+        if (ok)
+        {
+            holePreserved = true;
+            return true;
+        }
+
+        if (leftSize != 0 && Contains(old.Address, leftSize) && !TryUnmapSingleView(old.Address, leftSize, out _))
+        {
+            OnFatal($"Could not remove the partial backing view at 0x{old.Address:X16} during recovery.");
+        }
+
+        if (rightSize != 0 && Contains(rightAddress, rightSize) && !TryUnmapSingleView(rightAddress, rightSize, out _))
+        {
+            OnFatal($"Could not remove the partial backing view at 0x{rightAddress:X16} during recovery.");
+        }
+
+        if (!_host.JoinHoles(old.Address, old.Size))
+        {
+            OnFatal($"Could not join the reserved ranges at 0x{old.Address:X16} during recovery.");
+        }
+
+        RestoreViewMapping(old);
+        return false;
+    }
+
+    internal bool IsRestoredView(ulong address)
+    {
+        lock (_lock)
+        {
+            return IsAvailable && TryFindRecord(address, 1, out var record) && record.WasRestored;
+        }
+    }
+
+    // Contains over the published snapshot, without the lock: descriptor validation asks
+    // this for every bound buffer, and the lock is contended by guest threads. A true answer
+    // is as current as a locked one would be once the lock were released.
+    public bool ContainsWithoutLock(ulong address, ulong size)
+    {
+        if (size == 0 || ulong.MaxValue - address < size || Volatile.Read(ref _disposed))
+        {
+            return false;
+        }
+
+        var snapshot = Volatile.Read(ref _snapshot);
+        var end = address + size;
+        var current = address;
+        while (current < end)
+        {
+            var low = 0;
+            var high = snapshot.Length - 1;
+            var found = -1;
+            while (low <= high)
+            {
+                var middle = low + ((high - low) >> 1);
+                if (snapshot[middle].Address <= current)
+                {
+                    found = middle;
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle - 1;
+                }
+            }
+
+            if (found < 0 || current >= snapshot[found].Address + snapshot[found].Size)
+            {
+                return false;
+            }
+
+            current = Math.Min(end, snapshot[found].Address + snapshot[found].Size);
+        }
+
+        return true;
+    }
+
+    public bool Contains(ulong address, ulong size)
+    {
+        if (size == 0 || ulong.MaxValue - address < size)
+        {
+            return false;
+        }
+
+        lock (_lock)
+        {
+            var end = address + size;
+            var current = address;
+            while (current < end)
+            {
+                if (!TryFindRecord(current, 1, out var record))
+                {
+                    return false;
+                }
+
+                current = Math.Min(end, record.Address + record.Size);
+            }
+
+            return true;
+        }
+    }
+
+    // Remove all recorded views before releasing the backing alias and object.
+    public void Dispose()
+    {
+        List<ViewRecord> views;
+        lock (_lock)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            views = new List<ViewRecord>(_views.Values);
+            _views.Clear();
+            PublishSnapshot();
+        }
+
+        // A lock-free access that found a view before the snapshot emptied still copies
+        // through the alias; let it finish before the alias is released.
+        var spin = new SpinWait();
+        while (Volatile.Read(ref _activeAccesses) != 0)
+        {
+            spin.SpinOnce();
+        }
+
+        foreach (var view in views)
+        {
+            if (!_host.UnmapView(view.Address, view.Size))
+            {
+                OnFatal($"Could not remove the backing view at 0x{view.Address:X16} during disposal.");
+            }
+        }
+
+        _backing?.Dispose();
+    }
+
+    private bool TryCollectBackingSegments(ulong address, ulong size, out List<(ulong Backing, int DataOffset, int Bytes)> pieces)
+    {
+        pieces = new List<(ulong, int, int)>();
+        if (!IsAvailable || size == 0 || ulong.MaxValue - address < size)
+        {
+            return false;
+        }
+
+        var end = address + size;
+        var current = address;
+        while (current < end)
+        {
+            if (!TryFindRecord(current, 1, out var record))
+            {
+                return false;
+            }
+
+            var bytes = Math.Min(end, record.Address + record.Size) - current;
+            var offset = record.Offset + current - record.Address;
+            if (!IsWithinBacking(offset, bytes))
+            {
+                return false;
+            }
+
+            pieces.Add((AliasBase + offset, (int)(current - address), (int)bytes));
+            current += bytes;
+        }
+
+        return true;
+    }
+
+    private static List<(ulong From, ulong To, int Bytes)> CreateCopySegments(
+        List<(ulong Backing, int DataOffset, int Bytes)> from,
+        List<(ulong Backing, int DataOffset, int Bytes)> to)
+    {
+        var chunks = new List<(ulong, ulong, int)>();
+        var i = 0;
+        var j = 0;
+        var offset = 0;
+        while (i < from.Count && j < to.Count)
+        {
+            var fromEnd = from[i].DataOffset + from[i].Bytes;
+            var toEnd = to[j].DataOffset + to[j].Bytes;
+            var end = Math.Min(fromEnd, toEnd);
+            chunks.Add((
+                from[i].Backing + (ulong)(offset - from[i].DataOffset),
+                to[j].Backing + (ulong)(offset - to[j].DataOffset),
+                end - offset));
+            offset = end;
+            i += fromEnd == end ? 1 : 0;
+            j += toEnd == end ? 1 : 0;
+        }
+
+        return chunks;
+    }
+
+    private static bool HasCrossSegmentOverlap(List<(ulong From, ulong To, int Bytes)> chunks)
+    {
+        for (var a = 0; a < chunks.Count; a++)
+        {
+            for (var b = 0; b < chunks.Count; b++)
+            {
+                if (a != b && chunks[a].From < chunks[b].To + (ulong)chunks[b].Bytes &&
+                    chunks[b].To < chunks[a].From + (ulong)chunks[a].Bytes)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private bool TryFindRecord(ulong address, ulong size, out ViewRecord record)
+    {
+        record = default;
+        if (size == 0 || ulong.MaxValue - address < size)
+        {
+            return false;
+        }
+
+        var index = RangeSearch.FindLastIndexAtOrBelow(_views, address);
+        if (index < 0)
+        {
+            return false;
+        }
+
+        var candidate = _views.Values[index];
+        if (address + size > candidate.Address + candidate.Size)
+        {
+            return false;
+        }
+
+        record = candidate;
+        return true;
+    }
+
+    // Must be called under _lock after every change to _views.
+    private void PublishSnapshot()
+    {
+        var snapshot = new ViewRecord[_views.Count];
+        _views.Values.CopyTo(snapshot, 0);
+        Volatile.Write(ref _snapshot, snapshot);
+    }
+
+    // Resolves an access that lies inside one view to its alias address and registers
+    // it as in flight; the caller must decrement _activeAccesses when done. Anything
+    // else (spanning views, unmapped, disposed) is left to the locked path.
+    private bool TryAccessSingleView(ulong address, ulong size, out ulong target)
+    {
+        target = 0;
+        if (size == 0 || ulong.MaxValue - address < size)
+        {
+            return false;
+        }
+
+        Interlocked.Increment(ref _activeAccesses);
+        if (TryFindAlias(Volatile.Read(ref _snapshot), address, size, out target))
+        {
+            return true;
+        }
+
+        Interlocked.Decrement(ref _activeAccesses);
+        return false;
+    }
+
+    public object AliasSnapshot => Volatile.Read(ref _snapshot);
+
+    public bool TryEnterAliasAccess()
+    {
+        Interlocked.Increment(ref _activeAccesses);
+        if (!Volatile.Read(ref _disposed) && _backing != null)
+        {
+            return true;
+        }
+
+        Interlocked.Decrement(ref _activeAccesses);
+        return false;
+    }
+
+    public void ExitAliasAccess() => Interlocked.Decrement(ref _activeAccesses);
+
+    public bool TryResolveAlias(ulong address, ulong size, out ulong target)
+    {
+        target = 0;
+        return size != 0 && ulong.MaxValue - address >= size && TryFindAlias(Volatile.Read(ref _snapshot), address, size, out target);
+    }
+
+    private bool TryFindAlias(ViewRecord[] snapshot, ulong address, ulong size, out ulong target)
+    {
+        target = 0;
+        var low = 0;
+        var high = snapshot.Length - 1;
+        var found = -1;
+        while (low <= high)
+        {
+            var middle = low + ((high - low) >> 1);
+            if (snapshot[middle].Address <= address)
+            {
+                found = middle;
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        if (found >= 0 && !Volatile.Read(ref _disposed) && _backing != null)
+        {
+            var record = snapshot[found];
+            if (address + size <= record.Address + record.Size)
+            {
+                var offset = record.Offset + address - record.Address;
+                if (IsWithinBacking(offset, size))
+                {
+                    target = AliasBase + offset;
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private bool IsWithinBacking(ulong offset, ulong size) =>
+        size != 0 && offset < Size && size <= Size - offset;
+
+    private void RestoreViewRecord(ViewRecord record)
+    {
+        lock (_lock)
+        {
+            _views[record.Address] = record;
+            PublishSnapshot();
+        }
+    }
+
+    private void RestoreViewMapping(ViewRecord record)
+    {
+        if (!TryMapReservedRange(record.Address, record.Size, record.Offset, record.Protection, true, out _))
+        {
+            OnFatal($"Could not restore the backing view at 0x{record.Address:X16}.");
+        }
+    }
+
+    private void RestoreMappingsInReverseOrder(List<ViewRecord> records)
+    {
+        for (var index = records.Count - 1; index >= 0; index--)
+        {
+            RestoreViewMapping(records[index]);
+        }
+    }
+}

@@ -36,6 +36,11 @@ public sealed class SysAbiExportGeneratorTests
             // Guest string marshalling: the thunk reads the pointer before the handler.
             [SysAbiExport(Nid = "1G3lF1Gg1k8", ExportName = "sceKernelOpen")]
             public static int KernelOpen(CpuContext ctx, [GuestCString(4096)] string path, int flags) => 0;
+
+            // A single fail-closed handler may back a catalog of LLE-preferred exports.
+            [SysAbiExport(Nid = "5fbPUzoA2fM", ExportName = "sceLleFirst", Target = Generation.Gen5, LibraryName = "libSceLle", PreferLle = true)]
+            [SysAbiExport(Nid = "L9NfM+f4f1Y", ExportName = "sceLleSecond", Target = Generation.Gen5, LibraryName = "libSceLle", PreferLle = true)]
+            public static int LleFallback(CpuContext ctx) => -1;
         }
         """;
 
@@ -121,6 +126,22 @@ public sealed class SysAbiExportGeneratorTests
         // generation, and exports outside the registration generation are skipped.
         Assert.Contains("attributeTarget == global::SharpEmu.HLE.Generation.None ? registrationGeneration : attributeTarget", generated, StringComparison.Ordinal);
         Assert.Contains("(target & registrationGeneration) == 0", generated, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MultipleLlePreferredAttributesShareOneFailClosedHandler()
+    {
+        var (_, generated) = RoslynTestHost.RunGenerator(RoslynTestHost.Compile(HandlerSource));
+
+        Assert.Contains("\"5fbPUzoA2fM\"", generated, StringComparison.Ordinal);
+        Assert.Contains("\"L9NfM+f4f1Y\"", generated, StringComparison.Ordinal);
+        Assert.Equal(
+            2,
+            generated.Split("global::TestExports.SampleExports.LleFallback", StringSplitOptions.None).Length - 1);
+        Assert.Contains(
+            ", true, global::TestExports.SampleExports.LleFallback",
+            generated,
+            StringComparison.Ordinal);
     }
 
     [Fact]

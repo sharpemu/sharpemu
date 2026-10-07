@@ -48,8 +48,12 @@ Useful options:
 ```text
 --debug-host HOST   Debug server host (default 127.0.0.1)
 --debug-port PORT   Debug server port (default 5714)
---listen ADDRESS    Web UI bind address (default 127.0.0.1)
+--listen ADDRESS    Loopback Web UI bind address (default 127.0.0.1)
 --ui-port PORT      Web UI port; 0 chooses a free port (default 8765)
+--emulator-path PATH
+                    Trusted local SharpEmu executable override
+--allow-remote-debugger
+                    Allow connecting the bridge to a non-loopback debugger
 --no-connect        Do not connect to SharpEmu automatically
 --no-browser        Do not open a browser automatically
 --verbose           Print HTTP request logs
@@ -80,8 +84,16 @@ python3 -m unittest discover -s tools/SharpEmu.DebuggerFrontend/tests -v
 node --check tools/SharpEmu.DebuggerFrontend/web/app.js
 ```
 
-The HTTP service binds to loopback by default and has no authentication. Only
-use a non-loopback `--listen` address on a trusted network.
+The HTTP service only accepts `localhost`, `127.0.0.1`, or `::1` listeners and
+Host headers. Loopback is not treated as authentication because unrelated web
+pages can still send requests to local services. Every API request requires an
+ephemeral token, while state-changing requests additionally require same-origin
+browser provenance and JSON content. The emulator executable is resolved
+locally; `/api/launch` cannot override it. Use `--emulator-path` when a
+non-default local build is required. Remote debugger connections are disabled
+unless explicitly enabled with `--allow-remote-debugger`; this does not expose
+the HTTP frontend. The debugger protocol itself has no transport authentication,
+so only enable remote access over a trusted network or authenticated tunnel.
 
 On Linux, the Browse button uses `zenity` or `kdialog`. A full path can always
 be entered manually. Closing the frontend also stops the emulator process it

@@ -22,18 +22,22 @@ public sealed class ConsoleWindow : Window
     private readonly ListBox _list;
     private readonly TextBox _searchBox;
     private readonly CheckBox _autoScrollCheck;
+    private readonly GuiSettings _settings;
+    private bool _placementRestored;
 
     public ConsoleWindow(
         AvaloniaList<LogLine> lines,
         Action clear,
-        bool autoScroll)
+        bool autoScroll,
+        GuiSettings settings)
     {
         var loc = Localization.Instance;
 
         _sourceLines = lines;
+        _settings = settings;
         Title = loc.Get("Console.WindowTitle");
-        Width = 980;
-        Height = 620;
+        Width = settings.ConsoleWindowWidth;
+        Height = settings.ConsoleWindowHeight;
         MinWidth = 520;
         MinHeight = 320;
         Background = new SolidColorBrush(Color.Parse("#0D1017"));
@@ -115,7 +119,64 @@ public sealed class ConsoleWindow : Window
 
         lines.CollectionChanged += OnLinesChanged;
         Closed += (_, _) => lines.CollectionChanged -= OnLinesChanged;
+        Opened += (_, _) => RestorePlacement();
+        PositionChanged += (_, _) => RememberNormalBounds();
+        SizeChanged += (_, _) => RememberNormalBounds();
+        PropertyChanged += (_, change) =>
+        {
+            if (_placementRestored && change.Property == WindowStateProperty && WindowState != WindowState.Minimized)
+                _settings.ConsoleWindowMaximized = WindowState == WindowState.Maximized;
+        };
+        Closing += (_, _) =>
+        {
+            RememberNormalBounds();
+            if (WindowState != WindowState.Minimized)
+                _settings.ConsoleWindowMaximized = WindowState == WindowState.Maximized;
+            _settings.Save();
+        };
         RefreshVisibleLines();
+    }
+
+    private void RestorePlacement()
+    {
+        if (_settings.ConsoleWindowLeft is { } left && _settings.ConsoleWindowTop is { } top)
+        {
+            var savedPosition = new PixelPoint(left, top);
+            var screen = Screens.ScreenFromPoint(savedPosition) ?? Screens.ScreenFromWindow(Owner ?? this) ?? Screens.Primary;
+            if (screen is not null)
+            {
+                Width = Math.Min(Width, Math.Max(MinWidth, screen.WorkingArea.Width / screen.Scaling));
+                Height = Math.Min(Height, Math.Max(MinHeight, screen.WorkingArea.Height / screen.Scaling));
+                Position = ConstrainPosition(savedPosition, screen.WorkingArea, new Size(Width, Height), screen.Scaling);
+            }
+        }
+        _placementRestored = true;
+        RememberNormalBounds();
+        if (_settings.ConsoleWindowMaximized)
+            WindowState = WindowState.Maximized;
+    }
+
+    private void RememberNormalBounds()
+    {
+        if (!_placementRestored || !IsVisible || WindowState != WindowState.Normal)
+            return;
+
+        _settings.ConsoleWindowLeft = Position.X;
+        _settings.ConsoleWindowTop = Position.Y;
+        if (ClientSize.Width >= MinWidth && ClientSize.Height >= MinHeight)
+        {
+            _settings.ConsoleWindowWidth = ClientSize.Width;
+            _settings.ConsoleWindowHeight = ClientSize.Height;
+        }
+    }
+
+    internal static PixelPoint ConstrainPosition(PixelPoint position, PixelRect workingArea, Size size, double scaling)
+    {
+        var maximumLeft = workingArea.Right - (int)Math.Ceiling(size.Width * scaling);
+        var maximumTop = workingArea.Bottom - (int)Math.Ceiling(size.Height * scaling);
+        return new PixelPoint(
+            Math.Clamp(position.X, workingArea.X, Math.Max(workingArea.X, maximumLeft)),
+            Math.Clamp(position.Y, workingArea.Y, Math.Max(workingArea.Y, maximumTop)));
     }
 
     private void OnLinesChanged(object? sender, NotifyCollectionChangedEventArgs e)

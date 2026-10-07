@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
@@ -15,8 +16,29 @@ public static class LibcStdioExports
     private const int MaxModeLength = 16;
     private const int ReadChunkSize = 1024 * 1024;
     private const ulong GuestFileObjectSize = 0x100;
+    // The SDK fpos_t contains one 8-byte offset and one 16-byte _Mbstatet.
+    private const int SdkFposSize = 24;
+    private const int FullBuffering = 0;
+    private const int LineBuffering = 1;
+    private const int NoBuffering = 2;
+    private const int Enoent = 2;
+    private const int Eio = 5;
+    private const int Ebadf = 9;
+    private const int Enomem = 12;
+    private const int Eacces = 13;
+    private const int Efault = 14;
+    private const int Einval = 22;
+    private const int Erofs = 30;
 
-    private static readonly ConcurrentDictionary<ulong, FileStream> _fileHandles = new();
+    private sealed class StdioFile(FileStream stream)
+    {
+        public object Gate { get; } = new();
+        public FileStream Stream { get; set; } = stream;
+        public bool IsClosed { get; set; }
+    }
+
+    private static readonly ConcurrentDictionary<ulong, StdioFile> _fileHandles = new();
+    private static readonly ConcurrentDictionary<ulong, int> _fileBufferingModes = new();
 
     private static readonly bool _traceStdio =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_STDIO"), "1", StringComparison.Ordinal);
@@ -59,14 +81,33 @@ public static class LibcStdioExports
 
         if (pathAddress == 0 || modeAddress == 0 ||
             !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, pathAddress, MaxPathLength, out var guestPath) ||
-            !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, modeAddress, MaxModeLength, out var mode) ||
-            !TryParseFopenMode(mode, out var fileMode, out var fileAccess))
+            !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, modeAddress, MaxModeLength, out var mode))
         {
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT,
+                Efault);
+        }
+
+        if (string.IsNullOrEmpty(guestPath))
+        {
+            return FilePointerFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, Enoent);
+        }
+
+        if (!TryParseFopenMode(mode, out var fileMode, out var fileAccess))
+        {
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                Einval);
         }
 
         var hostPath = KernelMemoryCompatExports.ResolveGuestPath(guestPath);
+        if (string.IsNullOrEmpty(hostPath))
+        {
+            return FilePointerFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, Enoent);
+        }
+
         if (fileAccess != FileAccess.Read && KernelMemoryCompatExports.IsReadOnlyGuestMutationPath(guestPath))
         {
             if (_traceStdio)
@@ -75,8 +116,10 @@ public static class LibcStdioExports
                     $"[LOADER][TRACE] fopen: guest='{guestPath}' host='{hostPath}' mode='{mode}' -> PERMISSION_DENIED (read-only path)");
             }
 
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED,
+                Erofs);
         }
 
         try
@@ -107,11 +150,14 @@ public static class LibcStdioExports
                     out var handle))
             {
                 stream.Dispose();
-                ctx[CpuRegister.Rax] = 0;
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
+                return FilePointerFailure(
+                    ctx,
+                    OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN,
+                    Enomem);
             }
 
-            _fileHandles[handle] = stream;
+            _fileHandles[handle] = new StdioFile(stream);
+            _fileBufferingModes[handle] = FullBuffering;
 
             if (_traceStdio)
             {
@@ -122,7 +168,8 @@ public static class LibcStdioExports
             ctx[CpuRegister.Rax] = handle;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (
+            ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             if (_traceStdio)
             {
@@ -130,10 +177,7 @@ public static class LibcStdioExports
                     $"[LOADER][TRACE] fopen: guest='{guestPath}' host='{hostPath}' mode='{mode}' -> FAILED {ex.GetType().Name}: {ex.Message}");
             }
 
-            ctx[CpuRegister.Rax] = 0;
-            return ex is UnauthorizedAccessException
-                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED
-                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            return FilePointerFailure(ctx, ex);
         }
     }
 
@@ -148,7 +192,7 @@ public static class LibcStdioExports
         var offset = unchecked((long)ctx[CpuRegister.Rsi]);
         var whence = unchecked((int)ctx[CpuRegister.Rdx]);
 
-        if (!_fileHandles.TryGetValue(handle, out var stream) || !TryGetSeekOrigin(whence, out var origin))
+        if (!_fileHandles.TryGetValue(handle, out var file) || !TryGetSeekOrigin(whence, out var origin))
         {
             ctx[CpuRegister.Rax] = unchecked((ulong)(int)-1);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
@@ -156,7 +200,23 @@ public static class LibcStdioExports
 
         try
         {
-            stream.Seek(offset, origin);
+            lock (file.Gate)
+            {
+                if (file.IsClosed)
+                {
+                    ctx[CpuRegister.Rax] = unchecked((ulong)(int)-1);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+                }
+
+                file.Stream.Seek(offset, origin);
+                if (_traceStdio)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] fseek: thread={Environment.CurrentManagedThreadId} " +
+                        $"handle=0x{handle:X} offset={offset} whence={whence} " +
+                        $"pos={file.Stream.Position}");
+                }
+            }
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -176,7 +236,7 @@ public static class LibcStdioExports
     {
         var handle = ctx[CpuRegister.Rdi];
 
-        if (!_fileHandles.TryGetValue(handle, out var stream))
+        if (!_fileHandles.TryGetValue(handle, out var file))
         {
             ctx[CpuRegister.Rax] = unchecked((ulong)(long)-1);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
@@ -184,13 +244,174 @@ public static class LibcStdioExports
 
         try
         {
-            ctx[CpuRegister.Rax] = unchecked((ulong)stream.Position);
+            lock (file.Gate)
+            {
+                if (file.IsClosed)
+                {
+                    ctx[CpuRegister.Rax] = unchecked((ulong)(long)-1);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+                }
+
+                ctx[CpuRegister.Rax] = unchecked((ulong)file.Stream.Position);
+            }
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
         catch (IOException)
         {
             ctx[CpuRegister.Rax] = unchecked((ulong)(long)-1);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "SHlt7EhOtqA",
+        ExportName = "fgetpos",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Fgetpos(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        var positionAddress = ctx[CpuRegister.Rsi];
+
+        if (!_fileHandles.TryGetValue(handle, out var file))
+        {
+            return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Ebadf);
+        }
+
+        if (positionAddress == 0)
+        {
+            return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, Efault);
+        }
+
+        try
+        {
+            lock (file.Gate)
+            {
+                if (file.IsClosed)
+                {
+                    return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Ebadf);
+                }
+
+                Span<byte> position = stackalloc byte[SdkFposSize];
+                position.Clear();
+                BinaryPrimitives.WriteInt64LittleEndian(position, file.Stream.Position);
+                if (!ctx.Memory.TryWrite(positionAddress, position))
+                {
+                    return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, Efault);
+                }
+            }
+
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        catch (IOException)
+        {
+            return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Eio);
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "7PkSz+qnTto",
+        ExportName = "fsetpos",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Fsetpos(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        var positionAddress = ctx[CpuRegister.Rsi];
+
+        if (!_fileHandles.TryGetValue(handle, out var file))
+        {
+            return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Ebadf);
+        }
+
+        Span<byte> position = stackalloc byte[SdkFposSize];
+        if (positionAddress == 0 || !ctx.Memory.TryRead(positionAddress, position))
+        {
+            return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, Efault);
+        }
+
+        var offset = BinaryPrimitives.ReadInt64LittleEndian(position);
+        if (offset < 0)
+        {
+            return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Einval);
+        }
+
+        try
+        {
+            lock (file.Gate)
+            {
+                if (file.IsClosed)
+                {
+                    return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Ebadf);
+                }
+
+                file.Stream.Seek(offset, SeekOrigin.Begin);
+            }
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        catch (IOException)
+        {
+            return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Eio);
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "QMFyLoqNxIg",
+        ExportName = "setvbuf",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libc")]
+    public static int Setvbuf(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        var bufferAddress = ctx[CpuRegister.Rsi];
+        var mode = unchecked((int)ctx[CpuRegister.Rdx]);
+        var size = ctx[CpuRegister.Rcx];
+
+        if (!_fileHandles.TryGetValue(handle, out var file))
+        {
+            return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Ebadf);
+        }
+
+        if (mode is not FullBuffering and not LineBuffering and not NoBuffering)
+        {
+            return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Einval);
+        }
+
+        if (bufferAddress != 0 && size != 0)
+        {
+            if (size - 1 > ulong.MaxValue - bufferAddress)
+            {
+                return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Einval);
+            }
+
+            Span<byte> probe = stackalloc byte[1];
+            if (!ctx.Memory.TryRead(bufferAddress, probe) ||
+                !ctx.Memory.TryRead(bufferAddress + size - 1, probe))
+            {
+                return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, Efault);
+            }
+        }
+
+        try
+        {
+            lock (file.Gate)
+            {
+                if (file.IsClosed)
+                {
+                    return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Ebadf);
+                }
+
+                file.Stream.Flush();
+                _fileBufferingModes[handle] = mode;
+            }
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        catch (IOException)
+        {
+            return StdioStatusFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, Eio);
         }
     }
 
@@ -203,7 +424,7 @@ public static class LibcStdioExports
     {
         var handle = ctx[CpuRegister.Rdi];
 
-        if (!_fileHandles.TryRemove(handle, out var stream))
+        if (!_fileHandles.TryGetValue(handle, out var file))
         {
             ctx[CpuRegister.Rax] = unchecked((ulong)(int)-1);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
@@ -211,7 +432,20 @@ public static class LibcStdioExports
 
         try
         {
-            stream.Dispose();
+            lock (file.Gate)
+            {
+                if (file.IsClosed ||
+                    !_fileHandles.TryRemove(handle, out var removed) ||
+                    !ReferenceEquals(file, removed))
+                {
+                    ctx[CpuRegister.Rax] = unchecked((ulong)(int)-1);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+                }
+
+                file.IsClosed = true;
+                file.Stream.Dispose();
+            }
+            _fileBufferingModes.TryRemove(handle, out _);
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -240,7 +474,7 @@ public static class LibcStdioExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        if (destination == 0 || !_fileHandles.TryGetValue(handle, out var stream))
+        if (destination == 0 || !_fileHandles.TryGetValue(handle, out var file))
         {
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
@@ -252,22 +486,39 @@ public static class LibcStdioExports
 
         try
         {
-            while (totalRead < totalRequested)
+            lock (file.Gate)
             {
-                var request = (int)Math.Min((ulong)buffer.Length, totalRequested - totalRead);
-                var read = stream.Read(buffer, 0, request);
-                if (read <= 0)
+                if (file.IsClosed)
                 {
-                    break;
+                    ctx[CpuRegister.Rax] = 0;
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
                 }
 
-                if (!ctx.Memory.TryWrite(destination + totalRead, buffer.AsSpan(0, read)))
+                while (totalRead < totalRequested)
                 {
-                    ctx[CpuRegister.Rax] = totalRead / elementSize;
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                    var request = (int)Math.Min((ulong)buffer.Length, totalRequested - totalRead);
+                    var read = file.Stream.Read(buffer, 0, request);
+                    if (read <= 0)
+                    {
+                        break;
+                    }
+
+                    if (!ctx.Memory.TryWrite(destination + totalRead, buffer.AsSpan(0, read)))
+                    {
+                        ctx[CpuRegister.Rax] = totalRead / elementSize;
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                    }
+
+                    totalRead += (ulong)read;
                 }
 
-                totalRead += (ulong)read;
+                if (_traceStdio)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] fread: thread={Environment.CurrentManagedThreadId} " +
+                        $"handle=0x{handle:X} requested={totalRequested} read={totalRead} " +
+                        $"pos={file.Stream.Position}");
+                }
             }
         }
         catch (IOException)
@@ -278,12 +529,6 @@ public static class LibcStdioExports
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
-        }
-
-        if (_traceStdio)
-        {
-            Console.Error.WriteLine(
-                $"[LOADER][TRACE] fread: handle=0x{handle:X} requested={totalRequested} read={totalRead} pos={stream.Position}");
         }
 
         ctx[CpuRegister.Rax] = totalRead / elementSize;
@@ -301,7 +546,7 @@ public static class LibcStdioExports
         var maxCount = unchecked((int)ctx[CpuRegister.Rsi]);
         var handle = ctx[CpuRegister.Rdx];
 
-        if (destination == 0 || maxCount <= 0 || !_fileHandles.TryGetValue(handle, out var stream))
+        if (destination == 0 || maxCount <= 0 || !_fileHandles.TryGetValue(handle, out var file))
         {
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
@@ -312,35 +557,51 @@ public static class LibcStdioExports
 
         try
         {
-            while (count < maxCount - 1)
+            lock (file.Gate)
             {
-                var b = stream.ReadByte();
-                if (b < 0)
+                if (file.IsClosed)
                 {
-                    break;
+                    ctx[CpuRegister.Rax] = 0;
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
                 }
 
-                buffer[count++] = (byte)b;
-                if (b == '\n')
+                while (count < maxCount - 1)
                 {
-                    break;
+                    var b = file.Stream.ReadByte();
+                    if (b < 0)
+                    {
+                        break;
+                    }
+
+                    buffer[count++] = (byte)b;
+                    if (b == '\n')
+                    {
+                        break;
+                    }
                 }
-            }
 
-            if (count == 0)
-            {
-                ctx[CpuRegister.Rax] = 0;
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-            }
+                if (count == 0)
+                {
+                    ctx[CpuRegister.Rax] = 0;
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+                }
 
-            Span<byte> withNul = stackalloc byte[count + 1];
-            buffer.AsSpan(0, count).CopyTo(withNul);
-            withNul[count] = 0;
+                Span<byte> withNul = stackalloc byte[count + 1];
+                buffer.AsSpan(0, count).CopyTo(withNul);
+                withNul[count] = 0;
 
-            if (!ctx.Memory.TryWrite(destination, withNul))
-            {
-                ctx[CpuRegister.Rax] = 0;
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                if (!ctx.Memory.TryWrite(destination, withNul))
+                {
+                    ctx[CpuRegister.Rax] = 0;
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                }
+
+                if (_traceStdio)
+                {
+                    Console.Error.WriteLine(
+                        $"[LOADER][TRACE] fgets: thread={Environment.CurrentManagedThreadId} " +
+                        $"handle=0x{handle:X} read={count} pos={file.Stream.Position}");
+                }
             }
         }
         finally
@@ -369,7 +630,7 @@ public static class LibcStdioExports
     private static int FgetcCore(CpuContext ctx)
     {
         var handle = ctx[CpuRegister.Rdi];
-        if (!_fileHandles.TryGetValue(handle, out var stream))
+        if (!_fileHandles.TryGetValue(handle, out var file))
         {
             ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
@@ -377,7 +638,17 @@ public static class LibcStdioExports
 
         try
         {
-            var value = stream.ReadByte();
+            int value;
+            lock (file.Gate)
+            {
+                if (file.IsClosed)
+                {
+                    ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+                }
+
+                value = file.Stream.ReadByte();
+            }
             ctx[CpuRegister.Rax] = value < 0 ? unchecked((ulong)(-1L)) : (ulong)value;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -396,8 +667,14 @@ public static class LibcStdioExports
     public static int Feof(CpuContext ctx)
     {
         var handle = ctx[CpuRegister.Rdi];
-        var atEnd = _fileHandles.TryGetValue(handle, out var stream) &&
-            stream.CanRead && stream.Position >= stream.Length;
+        var atEnd = false;
+        if (_fileHandles.TryGetValue(handle, out var file))
+        {
+            lock (file.Gate)
+            {
+                atEnd = !file.IsClosed && file.Stream.CanRead && file.Stream.Position >= file.Stream.Length;
+            }
+        }
         ctx[CpuRegister.Rax] = atEnd ? 1UL : 0UL;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -421,11 +698,17 @@ public static class LibcStdioExports
     public static int Rewind(CpuContext ctx)
     {
         var handle = ctx[CpuRegister.Rdi];
-        if (_fileHandles.TryGetValue(handle, out var stream))
+        if (_fileHandles.TryGetValue(handle, out var file))
         {
             try
             {
-                stream.Seek(0, SeekOrigin.Begin);
+                lock (file.Gate)
+                {
+                    if (!file.IsClosed)
+                    {
+                        file.Stream.Seek(0, SeekOrigin.Begin);
+                    }
+                }
             }
             catch (IOException)
             {
@@ -446,11 +729,23 @@ public static class LibcStdioExports
         var character = unchecked((byte)ctx[CpuRegister.Rdi]);
         var handle = ctx[CpuRegister.Rsi];
 
-        if (_fileHandles.TryGetValue(handle, out var stream))
+        if (_fileHandles.TryGetValue(handle, out var file))
         {
             try
             {
-                stream.WriteByte(character);
+                lock (file.Gate)
+                {
+                    if (file.IsClosed)
+                    {
+                        ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+                    }
+
+                    file.Stream.WriteByte(character);
+                    Span<byte> written = stackalloc byte[1];
+                    written[0] = character;
+                    FlushForBufferingMode(handle, file.Stream, written);
+                }
             }
             catch (IOException)
             {
@@ -487,7 +782,7 @@ public static class LibcStdioExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        var knownHandle = _fileHandles.TryGetValue(handle, out var stream);
+        var knownHandle = _fileHandles.TryGetValue(handle, out var file);
         if (source == 0)
         {
             ctx[CpuRegister.Rax] = 0;
@@ -500,25 +795,45 @@ public static class LibcStdioExports
 
         try
         {
-            while (totalWritten < totalRequested)
+            if (knownHandle)
             {
-                var request = (int)Math.Min((ulong)buffer.Length, totalRequested - totalWritten);
-                if (!ctx.Memory.TryRead(source + totalWritten, buffer.AsSpan(0, request)))
+                lock (file!.Gate)
                 {
-                    ctx[CpuRegister.Rax] = totalWritten / elementSize;
-                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-                }
+                    if (file.IsClosed)
+                    {
+                        ctx[CpuRegister.Rax] = 0;
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+                    }
 
-                if (knownHandle)
-                {
-                    stream!.Write(buffer, 0, request);
+                    while (totalWritten < totalRequested)
+                    {
+                        var request = (int)Math.Min((ulong)buffer.Length, totalRequested - totalWritten);
+                        if (!ctx.Memory.TryRead(source + totalWritten, buffer.AsSpan(0, request)))
+                        {
+                            ctx[CpuRegister.Rax] = totalWritten / elementSize;
+                            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                        }
+
+                        file.Stream.Write(buffer, 0, request);
+                        FlushForBufferingMode(handle, file.Stream, buffer.AsSpan(0, request));
+                        totalWritten += (ulong)request;
+                    }
                 }
-                else
+            }
+            else
+            {
+                while (totalWritten < totalRequested)
                 {
+                    var request = (int)Math.Min((ulong)buffer.Length, totalRequested - totalWritten);
+                    if (!ctx.Memory.TryRead(source + totalWritten, buffer.AsSpan(0, request)))
+                    {
+                        ctx[CpuRegister.Rax] = totalWritten / elementSize;
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                    }
+
                     Console.Out.Write(System.Text.Encoding.UTF8.GetString(buffer, 0, request));
+                    totalWritten += (ulong)request;
                 }
-
-                totalWritten += (ulong)request;
             }
         }
         catch (IOException)
@@ -548,14 +863,29 @@ public static class LibcStdioExports
         {
             if (handle == 0)
             {
-                foreach (var stream in _fileHandles.Values)
+                foreach (var file in _fileHandles.Values)
                 {
-                    stream.Flush();
+                    lock (file.Gate)
+                    {
+                        if (!file.IsClosed)
+                        {
+                            file.Stream.Flush();
+                        }
+                    }
                 }
             }
-            else if (_fileHandles.TryGetValue(handle, out var stream))
+            else if (_fileHandles.TryGetValue(handle, out var file))
             {
-                stream.Flush();
+                lock (file.Gate)
+                {
+                    if (file.IsClosed)
+                    {
+                        ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+                    }
+
+                    file.Stream.Flush();
+                }
             }
         }
         catch (IOException)
@@ -613,11 +943,21 @@ public static class LibcStdioExports
     {
         var payload = System.Text.Encoding.UTF8.GetBytes(rendered);
 
-        if (_fileHandles.TryGetValue(handle, out var stream))
+        if (_fileHandles.TryGetValue(handle, out var file))
         {
             try
             {
-                stream.Write(payload, 0, payload.Length);
+                lock (file.Gate)
+                {
+                    if (file.IsClosed)
+                    {
+                        ctx[CpuRegister.Rax] = unchecked((ulong)(-1L));
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+                    }
+
+                    file.Stream.Write(payload, 0, payload.Length);
+                    FlushForBufferingMode(handle, file.Stream, payload);
+                }
             }
             catch (IOException)
             {
@@ -645,25 +985,57 @@ public static class LibcStdioExports
         var modeAddress = ctx[CpuRegister.Rsi];
         var handle = ctx[CpuRegister.Rdx];
 
-        if (pathAddress == 0 || modeAddress == 0 || handle == 0 ||
+        if (pathAddress == 0 || modeAddress == 0 ||
             !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, pathAddress, MaxPathLength, out var guestPath) ||
-            !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, modeAddress, MaxModeLength, out var mode) ||
-            !TryParseFopenMode(mode, out var fileMode, out var fileAccess))
+            !KernelMemoryCompatExports.TryReadNullTerminatedUtf8(ctx, modeAddress, MaxModeLength, out var mode))
         {
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT,
+                Efault);
         }
 
-        if (_fileHandles.TryRemove(handle, out var previousStream))
+        if (handle == 0)
         {
-            previousStream.Dispose();
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                Ebadf);
+        }
+
+        if (string.IsNullOrEmpty(guestPath))
+        {
+            return FilePointerFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, Enoent);
+        }
+
+        if (!TryParseFopenMode(mode, out var fileMode, out var fileAccess))
+        {
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                Einval);
+        }
+
+        if (!_fileHandles.TryGetValue(handle, out var file))
+        {
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                Ebadf);
         }
 
         var hostPath = KernelMemoryCompatExports.ResolveGuestPath(guestPath);
+        if (string.IsNullOrEmpty(hostPath))
+        {
+            return FilePointerFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, Enoent);
+        }
+
         if (fileAccess != FileAccess.Read && KernelMemoryCompatExports.IsReadOnlyGuestMutationPath(guestPath))
         {
-            ctx[CpuRegister.Rax] = 0;
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+            return FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED,
+                Erofs);
         }
 
         try
@@ -677,9 +1049,22 @@ public static class LibcStdioExports
                 }
             }
 
-            var stream = new FileStream(hostPath, fileMode, fileAccess, FileShare.ReadWrite);
-            // freopen keeps the caller's FILE* identity, so rebind the same handle value.
-            _fileHandles[handle] = stream;
+            var replacement = new FileStream(hostPath, fileMode, fileAccess, FileShare.ReadWrite);
+            lock (file.Gate)
+            {
+                if (file.IsClosed)
+                {
+                    replacement.Dispose();
+                    return FilePointerFailure(
+                        ctx,
+                        OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                        Ebadf);
+                }
+
+                file.Stream.Dispose();
+                file.Stream = replacement;
+                _fileBufferingModes[handle] = FullBuffering;
+            }
 
             if (_traceStdio)
             {
@@ -690,7 +1075,8 @@ public static class LibcStdioExports
             ctx[CpuRegister.Rax] = handle;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (
+            ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
             if (_traceStdio)
             {
@@ -698,10 +1084,7 @@ public static class LibcStdioExports
                     $"[LOADER][TRACE] freopen: guest='{guestPath}' host='{hostPath}' mode='{mode}' -> FAILED {ex.GetType().Name}: {ex.Message}");
             }
 
-            ctx[CpuRegister.Rax] = 0;
-            return ex is UnauthorizedAccessException
-                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED
-                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            return FilePointerFailure(ctx, ex);
         }
     }
 
@@ -808,6 +1191,63 @@ public static class LibcStdioExports
             default:
                 return false;
         }
+    }
+
+    private static int FilePointerFailure(
+        CpuContext ctx,
+        OrbisGen2Result diagnosticResult,
+        int errno)
+    {
+        KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
+        ctx[CpuRegister.Rax] = 0;
+        return (int)diagnosticResult;
+    }
+
+    private static int StdioStatusFailure(
+        CpuContext ctx,
+        OrbisGen2Result diagnosticResult,
+        int errno)
+    {
+        KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
+        ctx[CpuRegister.Rax] = unchecked((ulong)(int)-1);
+        return (int)diagnosticResult;
+    }
+
+    private static void FlushForBufferingMode(
+        ulong handle,
+        FileStream stream,
+        ReadOnlySpan<byte> payload)
+    {
+        if (!_fileBufferingModes.TryGetValue(handle, out var mode))
+        {
+            return;
+        }
+
+        if (mode == NoBuffering ||
+            (mode == LineBuffering && payload.Contains((byte)'\n')))
+        {
+            stream.Flush();
+        }
+    }
+
+    private static int FilePointerFailure(CpuContext ctx, Exception exception)
+    {
+        return exception switch
+        {
+            UnauthorizedAccessException => FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED,
+                Eacces),
+            FileNotFoundException or DirectoryNotFoundException => FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND,
+                Enoent),
+            ArgumentException or NotSupportedException => FilePointerFailure(
+                ctx,
+                OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT,
+                Einval),
+            _ => FilePointerFailure(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND, Eio),
+        };
     }
 
     private static bool TryGetSeekOrigin(int whence, out SeekOrigin origin)

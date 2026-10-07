@@ -8,29 +8,38 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Network;
 
 public static class NetExports
 {
     private const int NetErrorBadFileDescriptor = unchecked((int)0x80410109);
+    private const int NetErrorFault = unchecked((int)0x8041010E);
     private const int NetErrorInvalidArgument = unchecked((int)0x80410116);
+    private const int NetErrorTooManyFiles = unchecked((int)0x80410118);
     private const int NetErrorWouldBlock = unchecked((int)0x80410123);
     private const int NetErrorAddressInUse = unchecked((int)0x80410130);
+    private const int NetErrorResolverNoDns = unchecked((int)0x804101E1);
     private const int NetErrorNotInitialized = unchecked((int)0x804101C8);
     private const int NetErrnoBadFileDescriptor = 9;
+    private const int NetErrnoFault = 14;
     private const int NetErrnoInvalidArgument = 22;
+    private const int NetErrnoTooManyFiles = 24;
     private const int NetErrnoWouldBlock = 35;
     private const int NetErrnoAddressInUse = 48;
     private const int NetErrnoNotInitialized = 200;
+    private const int NetErrnoResolverNoDns = 225;
     private const int MaxNameLength = 256;
+    private static ReadOnlySpan<byte> OfflineMacAddress => [0x02, 0x53, 0x48, 0x41, 0x52, 0x50];
 
     private static readonly ConcurrentDictionary<int, NetPool> _pools = new();
     private static readonly ConcurrentDictionary<int, ResolverContext> _resolvers = new();
     private static readonly ConcurrentDictionary<int, Socket> _sockets = new();
     private static int _nextPoolId;
     private static int _nextResolverId = 0x2000;
-    private static int _nextSocketId = 0x4000;
+    private static int _nextSocketId = 255;
+    private static readonly object _socketIdGate = new();
     // The platform networking module is usable immediately after it is loaded.
     // Games and middleware (notably FMOD) can create internal sockets before an
     // explicit sceNetInit call reaches application code.
@@ -42,6 +51,48 @@ public static class NetExports
     private sealed record NetPool(string Name, int Size, int Flags);
 
     private sealed record ResolverContext(string Name, int PoolId, int Flags, int LastError);
+
+    internal static bool TryGetReadEventState(
+        int socketId,
+        ulong lowWater,
+        out bool ready,
+        out ulong availableBytes,
+        out ushort eventFlags)
+    {
+        ready = false;
+        availableBytes = 0;
+        eventFlags = 0;
+        if (!_sockets.TryGetValue(socketId, out var socket))
+        {
+            return false;
+        }
+
+        try
+        {
+            var readSignaled = socket.Poll(0, SelectMode.SelectRead);
+            availableBytes = unchecked((ulong)Math.Max(0, socket.Available));
+            if (readSignaled && availableBytes == 0)
+            {
+                ready = true;
+                eventFlags = KernelEventQueueCompatExports.KernelEventFlagEof;
+            }
+            else
+            {
+                ready = availableBytes >= Math.Max(1UL, lowWater);
+            }
+        }
+        catch (SocketException)
+        {
+            ready = true;
+            eventFlags = KernelEventQueueCompatExports.KernelEventFlagEof;
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+
+        return true;
+    }
 
     [SysAbiExport(
         Nid = "Nlev7Lg8k3A",
@@ -75,6 +126,24 @@ public static class NetExports
     }
 
     [SysAbiExport(
+        Nid = "6Oc0bLsIYe0",
+        ExportName = "sceNetGetMacAddress",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetGetMacAddress(CpuContext ctx)
+    {
+        var destinationAddress = ctx[CpuRegister.Rdi];
+        var flags = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (destinationAddress == 0 || flags != 0 || !ctx.Memory.TryWrite(destinationAddress, OfflineMacAddress))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        TraceNet("get_mac_address", 0, destinationAddress, unchecked((ulong)flags), 0);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
         Nid = "Q4qBuN-c0ZM",
         ExportName = "sceNetSocket",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -102,8 +171,12 @@ public static class NetExports
         try
         {
             var socket = new Socket(addressFamily, socketType, protocolType);
-            var id = Interlocked.Increment(ref _nextSocketId);
-            _sockets[id] = socket;
+            var id = AddSocket(socket);
+            if (id < 0)
+            {
+                socket.Dispose();
+                return SetNetError(ctx, NetErrorTooManyFiles, NetErrnoTooManyFiles);
+            }
             TraceNet("socket.create", id, unchecked((ulong)family), unchecked((ulong)type), unchecked((ulong)protocol));
             ctx[CpuRegister.Rax] = unchecked((ulong)id);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -130,6 +203,110 @@ public static class NetExports
         socket.Dispose();
         TraceNet("socket.close", id, 0, 0, 0);
         return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "9wO9XrMsNhc",
+        ExportName = "sceNetRecv",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetRecv(CpuContext ctx) => ReceiveSocket(ctx, withAddress: false);
+
+    [SysAbiExport(
+        Nid = "304ooNZxWDY",
+        ExportName = "sceNetRecvfrom",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetRecvfrom(CpuContext ctx) => ReceiveSocket(ctx, withAddress: true);
+
+    private static int ReceiveSocket(CpuContext ctx, bool withAddress)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var bufferAddress = ctx[CpuRegister.Rsi];
+        var requested = ctx[CpuRegister.Rdx];
+        var flags = unchecked((int)ctx[CpuRegister.Rcx]);
+        var address = withAddress ? ctx[CpuRegister.R8] : 0;
+        var addressLength = withAddress ? ctx[CpuRegister.R9] : 0;
+        if (!_sockets.TryGetValue(id, out var socket))
+        {
+            return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+        }
+
+        if (bufferAddress == 0 || (address != 0 && addressLength == 0) ||
+            (flags & ~(0x2 | 0x4 | 0x80 | 0x20000)) != 0)
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        if (requested == 0)
+        {
+            return ctx.SetReturn(0);
+        }
+
+        var count = (int)Math.Min(requested, 1UL << 20);
+        var socketFlags = (flags & 0x2) != 0 ? SocketFlags.Peek : SocketFlags.None;
+
+        try
+        {
+            if ((flags & 0x80) != 0 && !socket.Poll(0, SelectMode.SelectRead))
+            {
+                return SetNetError(ctx, NetErrorWouldBlock, NetErrnoWouldBlock);
+            }
+
+            var payload = new byte[count];
+            IPEndPoint? endpoint = null;
+            int received;
+            if (address == 0)
+            {
+                received = socket.Receive(payload, socketFlags);
+            }
+            else
+            {
+                EndPoint remote = new IPEndPoint(IPAddress.Any, 0);
+                received = socket.ReceiveFrom(payload, socketFlags, ref remote);
+                endpoint = remote as IPEndPoint;
+            }
+            if (!ctx.Memory.TryWrite(bufferAddress, payload.AsSpan(0, received)))
+            {
+                return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+            }
+
+            if (address != 0 && endpoint is not null)
+            {
+                Span<byte> lengthBytes = stackalloc byte[sizeof(uint)];
+                if (!ctx.Memory.TryRead(addressLength, lengthBytes))
+                {
+                    return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+                }
+
+                Span<byte> guestAddress = stackalloc byte[16];
+                guestAddress[0] = 16;
+                guestAddress[1] = 2;
+                BinaryPrimitives.WriteUInt16BigEndian(guestAddress[2..], unchecked((ushort)endpoint.Port));
+                endpoint.Address.MapToIPv4().GetAddressBytes().CopyTo(guestAddress[4..]);
+                var copyLength = (int)Math.Min(BinaryPrimitives.ReadUInt32LittleEndian(lengthBytes), 16u);
+                BinaryPrimitives.WriteUInt32LittleEndian(lengthBytes, 16);
+                if (!ctx.Memory.TryWrite(address, guestAddress[..copyLength]) ||
+                    !ctx.Memory.TryWrite(addressLength, lengthBytes))
+                {
+                    return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+                }
+            }
+
+            return ctx.SetReturn(received);
+        }
+        catch (SocketException exception) when (exception.SocketErrorCode is SocketError.WouldBlock or SocketError.IOPending or SocketError.TimedOut)
+        {
+            return SetNetError(ctx, NetErrorWouldBlock, NetErrnoWouldBlock);
+        }
+        catch (SocketException)
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+        catch (ObjectDisposedException)
+        {
+            return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+        }
     }
 
     [SysAbiExport(
@@ -193,7 +370,13 @@ public static class NetExports
         ExportName = "setsockopt",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixSetsockopt(CpuContext ctx) => NetSetsockopt(ctx);
+    public static int PosixSetsockopt(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        return KernelSocketCompatExports.IsEmulatedSocketFd(id)
+            ? KernelSocketCompatExports.PosixSetSocketOption(ctx)
+            : NetSetsockopt(ctx);
+    }
 
     /// <summary>
     /// Reads back the socket options this backend actually tracks: SO_NBIO,
@@ -213,6 +396,11 @@ public static class NetExports
     public static int PosixGetsockopt(CpuContext ctx)
     {
         var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (KernelSocketCompatExports.IsEmulatedSocketFd(id))
+        {
+            return KernelSocketCompatExports.PosixGetSocketOption(ctx);
+        }
+
         var level = unchecked((int)ctx[CpuRegister.Rsi]);
         var option = unchecked((int)ctx[CpuRegister.Rdx]);
         var valueAddress = ctx[CpuRegister.Rcx];
@@ -322,6 +510,32 @@ public static class NetExports
         {
             return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
         }
+    }
+
+    [SysAbiExport(
+        Nid = "oBr313PppNE",
+        ExportName = "sendto",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixSendTo(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        return KernelSocketCompatExports.IsEmulatedSocketFd(id)
+            ? KernelSocketCompatExports.PosixSendTo(ctx)
+            : SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+    }
+
+    [SysAbiExport(
+        Nid = "lUk6wrGXyMw",
+        ExportName = "recvfrom",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixReceiveFrom(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        return KernelSocketCompatExports.IsEmulatedSocketFd(id)
+            ? KernelSocketCompatExports.PosixReceiveFrom(ctx)
+            : SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
     }
 
     /// <summary>
@@ -464,8 +678,12 @@ public static class NetExports
         try
         {
             var accepted = socket.Accept();
-            var acceptedId = Interlocked.Increment(ref _nextSocketId);
-            _sockets[acceptedId] = accepted;
+            var acceptedId = AddSocket(accepted);
+            if (acceptedId < 0)
+            {
+                accepted.Dispose();
+                return SetNetError(ctx, NetErrorTooManyFiles, NetErrnoTooManyFiles);
+            }
             TraceNet("socket.accept", acceptedId, unchecked((ulong)id), 0, 0);
             ctx[CpuRegister.Rax] = unchecked((ulong)acceptedId);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -672,6 +890,58 @@ public static class NetExports
         return ctx.SetReturn(result);
     }
 
+    [SysAbiExport(
+        Nid = "Nd91WaWmG2w",
+        ExportName = "sceNetResolverStartNtoa",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetResolverStartNtoa(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (!_resolvers.TryGetValue(id, out var resolver))
+        {
+            return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+        }
+
+        var destination = ctx[CpuRegister.Rdx];
+        var flags = unchecked((int)ctx[CpuRegister.R9]);
+        if (destination == 0 || ctx[CpuRegister.Rsi] == 0 ||
+            !TryReadUtf8Z(ctx, ctx[CpuRegister.Rsi], MaxNameLength, out var hostname) ||
+            (flags & ~0x10000) != 0)
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        if ((flags & 0x10000) == 0 && IPAddress.TryParse(hostname, out var parsed) &&
+            parsed.AddressFamily == AddressFamily.InterNetwork)
+        {
+            return ctx.Memory.TryWrite(destination, parsed.GetAddressBytes())
+                ? ctx.SetReturn(0)
+                : SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        _resolvers.TryUpdate(id, resolver with { LastError = NetErrorResolverNoDns }, resolver);
+        return SetNetError(ctx, NetErrorResolverNoDns, NetErrnoResolverNoDns);
+    }
+
+    private static int AddSocket(Socket socket)
+    {
+        lock (_socketIdGate)
+        {
+            // Guest fd_set has 1024 bits; IDs outside it corrupt the guest stack.
+            for (var attempt = 0; attempt < 768; attempt++)
+            {
+                _nextSocketId = _nextSocketId == 1023 ? 256 : _nextSocketId + 1;
+                if (_sockets.TryAdd(_nextSocketId, socket))
+                {
+                    return _nextSocketId;
+                }
+            }
+        }
+
+        return -1;
+    }
+
     private static bool TryTranslateSocketParameters(
         int family,
         int type,
@@ -800,6 +1070,13 @@ public static class NetExports
         ctx[CpuRegister.Rax] = 1;
         return 1;
     }
+
+    [SysAbiExport(
+        Nid = "9vA2aW+CHuA",
+        ExportName = "sceNetInetNtop",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetInetNtop(CpuContext ctx) => PosixInetNtop(ctx);
 
     private static void TraceNet(string operation, int id, ulong arg0, ulong arg1, ulong arg2)
     {

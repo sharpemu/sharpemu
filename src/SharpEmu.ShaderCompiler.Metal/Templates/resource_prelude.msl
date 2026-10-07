@@ -1,0 +1,125 @@
+struct Gen5AddressRange
+{
+    ulong first_page;
+    ulong page_count;
+    device uint* base;
+};
+
+// Finds the mapped range of a guest address; a miss records the page in the fault bitmap.
+static inline device uint* sharpemu_resolve_device_address(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, thread bool& valid)
+{
+    ulong masked = address & {{address_mask}};
+    ulong page = masked >> {{page_bits}}u;
+    uint low = 0u;
+    uint high = range_count;
+    for (uint step = 0u; step < {{search_steps}}u; step++)
+    {
+        uint middle = low + ((high - low) >> 1u);
+        bool move_up = low < high && ranges[middle].first_page <= page;
+        low = move_up ? middle + 1u : low;
+        high = move_up ? high : middle;
+    }
+    valid = false;
+    if (low != 0u)
+    {
+        Gen5AddressRange range = ranges[low - 1u];
+        if (page - range.first_page < range.page_count)
+        {
+            valid = true;
+            ulong byte_offset = ((page - range.first_page) << {{page_bits}}u) + (masked & {{page_offset_mask}});
+            return (device uint*)((device uchar*)range.base + byte_offset);
+        }
+    }
+    uint page_index = (uint)page;
+    uint word = page_index >> 5u;
+    if (word < fault_words)
+    {
+        atomic_fetch_or_explicit((device atomic_uint*)(faults + word), 1u << (page_index & 31u), memory_order_relaxed);
+    }
+    return nullptr;
+}
+
+static inline uint sharpemu_load_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address)
+{
+    bool valid = false;
+    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, address, valid);
+    return valid ? *word : 0u;
+}
+
+// An unaligned value assembled from the two aligned dwords it spans.
+static inline uint sharpemu_load_device_unaligned(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint count)
+{
+    uint alignment = (uint)(address & 3ul);
+    ulong aligned = address & ~3ul;
+    uint shift = alignment * 8u;
+    uint low = sharpemu_load_device_dword(ranges, range_count, faults, fault_words, aligned);
+    uint high = (alignment + count > 4u) ? sharpemu_load_device_dword(ranges, range_count, faults, fault_words, aligned + 4ul) : 0u;
+    return (low >> shift) | (shift == 0u ? 0u : (high << (32u - shift)));
+}
+
+static inline void sharpemu_store_device_dword(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint value)
+{
+    bool valid = false;
+    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, address, valid);
+    if (valid)
+    {
+        *word = value;
+    }
+}
+
+static inline void sharpemu_store_device_masked_word(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint value, uint mask)
+{
+    if (mask == 0u)
+    {
+        return;
+    }
+    bool valid = false;
+    device uint* word = sharpemu_resolve_device_address(ranges, range_count, faults, fault_words, address, valid);
+    if (!valid)
+    {
+        return;
+    }
+    if (mask == 0xFFFFFFFFu)
+    {
+        *word = value;
+        return;
+    }
+    device atomic_uint* atomic_word = (device atomic_uint*)word;
+    uint observed = atomic_load_explicit(atomic_word, memory_order_relaxed);
+    while (!atomic_compare_exchange_weak_explicit(atomic_word, &observed, (observed & ~mask) | value, memory_order_relaxed, memory_order_relaxed))
+    {
+    }
+}
+
+// A sub-dword store merges into the dwords it touches.
+static inline void sharpemu_store_device_bytes(device const Gen5AddressRange* ranges, uint range_count, device uint* faults, uint fault_words, ulong address, uint value, uint count)
+{
+    uint element_mask = count == 1u ? 0xFFu : 0xFFFFu;
+    uint alignment = (uint)(address & 3ul);
+    ulong aligned = address & ~3ul;
+    uint shift = alignment * 8u;
+    uint carry_shift = 32u - shift;
+    bool crosses = alignment + count > 4u;
+    uint masked = value & element_mask;
+    sharpemu_store_device_masked_word(ranges, range_count, faults, fault_words, aligned, masked << shift, element_mask << shift);
+    sharpemu_store_device_masked_word(ranges, range_count, faults, fault_words, aligned + 4ul, crosses ? (masked >> carry_shift) : 0u, crosses ? (element_mask >> carry_shift) : 0u);
+}
+
+static inline uint sharpemu_atomic_step(device atomic_uint* word, bool increment)
+{
+    uint observed = atomic_load_explicit(word, memory_order_relaxed);
+    while (!atomic_compare_exchange_weak_explicit(word, &observed, increment ? observed + 1u : observed - 1u, memory_order_relaxed, memory_order_relaxed))
+    {
+    }
+    return observed;
+}
+
+// Compare-and-swap that retries only spurious failures; returns the value observed.
+static inline uint sharpemu_atomic_compare_swap(device atomic_uint* word, uint compare, uint value)
+{
+    uint expected = compare;
+    while (!atomic_compare_exchange_weak_explicit(word, &expected, value, memory_order_relaxed, memory_order_relaxed) && expected == compare)
+    {
+    }
+    return expected;
+}

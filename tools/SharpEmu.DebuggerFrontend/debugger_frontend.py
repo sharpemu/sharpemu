@@ -10,22 +10,26 @@ import argparse
 import copy
 from collections import deque
 import errno
+import hmac
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import json
 import os
 import platform
 import queue
 import re
+import secrets
 from pathlib import Path
 import shutil
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 import webbrowser
@@ -37,6 +41,9 @@ WEB_ROOT = APP_ROOT / "web"
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_JOURNAL_MESSAGES = 1000
 APPLICATION_ID = "sharpemu-debugger-frontend"
+CSRF_HEADER = "X-SharpEmu-CSRF-Token"
+CSRF_TOKEN_PLACEHOLDER = b"__SHARPEMU_CSRF_TOKEN__"
+ALLOWED_HTTP_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 KNOWN_WAIT_IMPORTS: dict[str, tuple[str, str, str]] = {
     "9UK1vLZQft4": ("libKernel", "scePthreadMutexLock", "mutex"),
@@ -51,6 +58,29 @@ KNOWN_WAIT_IMPORTS: dict[str, tuple[str, str, str]] = {
     "j6RaAUlaLv0": ("libSceVideoOut", "sceVideoOutWaitVblank", "timeline"),
     "1jfXLRVzisc": ("libKernel", "sceKernelUsleep", "sleep"),
 }
+
+
+def _normalize_loopback_host(host: str) -> str | None:
+    """Returns a stable loopback host name, rejecting DNS-rebindable names."""
+
+    value = host.strip().lower()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    value = value.rstrip(".")
+    if value == "localhost":
+        return value
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return None
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.compressed if address.is_loopback else None
+
+
+def _normalize_http_host(host: str) -> str | None:
+    normalized = _normalize_loopback_host(host)
+    return normalized if normalized in ALLOWED_HTTP_HOSTS else None
 
 
 def analyze_debug_stop(stop: dict[str, Any]) -> dict[str, Any] | None:
@@ -238,6 +268,10 @@ class BridgeError(RuntimeError):
     """Raised when the debugger bridge cannot complete an operation."""
 
 
+class RequestValidationError(RuntimeError):
+    """Raised when an HTTP request violates the frontend API contract."""
+
+
 class EventJournal:
     """A bounded, cursor-addressable activity stream for the browser."""
 
@@ -268,8 +302,9 @@ class EventJournal:
 class EmulatorProcessManager:
     """Launches and supervises the one emulator process owned by the UI."""
 
-    def __init__(self, journal: EventJournal) -> None:
+    def __init__(self, journal: EventJournal, emulator_path: str | None = None) -> None:
         self.journal = journal
+        self._configured_emulator_path = emulator_path
         self._lock = threading.RLock()
         self._process: subprocess.Popen[str] | None = None
         self._reader_thread: threading.Thread | None = None
@@ -282,7 +317,6 @@ class EmulatorProcessManager:
         self,
         eboot_path: str,
         debug_port: int,
-        emulator_path: str | None = None,
     ) -> dict[str, Any]:
         eboot = Path(eboot_path).expanduser().resolve()
         if not eboot.is_file():
@@ -292,7 +326,7 @@ class EmulatorProcessManager:
         if self._port_is_open("127.0.0.1", debug_port):
             raise BridgeError(f"Port {debug_port} is already in use. Stop the existing debugger or choose another port.")
 
-        executable = self.resolve_emulator(emulator_path)
+        executable = self.resolve_emulator()
         with self._lock:
             self._refresh_process_locked()
             if self._process is not None and self._process.poll() is None:
@@ -305,7 +339,7 @@ class EmulatorProcessManager:
                 environment["PATH"] = f"{local_dotnet}{os.pathsep}{environment.get('PATH', '')}"
 
             command = [
-                str(executable),
+                *([sys.executable, str(executable)] if executable.suffix.lower() == ".py" else [str(executable)]),
                 f"--debug-server=127.0.0.1:{debug_port}",
                 str(eboot),
             ]
@@ -432,9 +466,9 @@ class EmulatorProcessManager:
         selected = result.stdout.strip()
         return str(Path(selected).expanduser().resolve()) if selected else None
 
-    def resolve_emulator(self, explicit_path: str | None = None) -> Path:
-        if explicit_path:
-            candidate = Path(explicit_path).expanduser().resolve()
+    def resolve_emulator(self) -> Path:
+        if self._configured_emulator_path:
+            candidate = Path(self._configured_emulator_path).expanduser().resolve()
         else:
             system = platform.system().lower()
             machine = platform.machine().lower()
@@ -533,9 +567,15 @@ class EmulatorProcessManager:
 class DebuggerBridge:
     """Owns one debugger socket and serializes request/reply traffic."""
 
-    def __init__(self, default_host: str = "127.0.0.1", default_port: int = 5714) -> None:
+    def __init__(
+        self,
+        default_host: str = "127.0.0.1",
+        default_port: int = 5714,
+        allow_remote: bool = False,
+    ) -> None:
         self.default_host = default_host
         self.default_port = default_port
+        self.allow_remote = allow_remote
         self.journal = EventJournal()
 
         self._state_lock = threading.RLock()
@@ -564,18 +604,28 @@ class DebuggerBridge:
         host = host.strip()
         if not host:
             raise BridgeError("A debugger host is required.")
+        socket_host = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+        if not self.allow_remote and _normalize_loopback_host(socket_host) is None:
+            raise BridgeError(
+                "Remote debugger connections are disabled. "
+                "Restart with --allow-remote-debugger to opt in."
+            )
         if port < 1 or port > 65535:
             raise BridgeError("The debugger port must be between 1 and 65535.")
 
         self.disconnect(log=False)
         self._drain_responses()
         try:
-            client = socket.create_connection((host, port), timeout=timeout)
+            client = socket.create_connection((socket_host, port), timeout=timeout)
+            peer_host = str(client.getpeername()[0])
+            if not self.allow_remote and _normalize_loopback_host(peer_host) is None:
+                client.close()
+                raise BridgeError("The debugger host resolved outside loopback.")
             client.settimeout(None)
             client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             reader = client.makefile("r", encoding="utf-8", newline="\n")
         except OSError as exc:
-            message = f"Could not connect to {host}:{port}: {exc}"
+            message = f"Could not connect to {socket_host}:{port}: {exc}"
             self.journal.append("error", message)
             raise BridgeError(message) from exc
 
@@ -584,7 +634,7 @@ class DebuggerBridge:
             generation = self._generation
             self._socket = client
             self._connected = True
-            self._endpoint = f"{host}:{port}"
+            self._endpoint = f"{socket_host}:{port}"
             self._protocol = None
             self._target_state = "Connecting"
             self._last_stop = None
@@ -592,7 +642,7 @@ class DebuggerBridge:
             self._breakpoints = []
             self._hello_event = threading.Event()
 
-        self.journal.append("system", f"Connected to {host}:{port}")
+        self.journal.append("system", f"Connected to {socket_host}:{port}")
         thread = threading.Thread(
             target=self._read_loop,
             args=(generation, client, reader),
@@ -605,7 +655,7 @@ class DebuggerBridge:
         self._hello_event.wait(timeout=min(timeout, 1.5))
         with self._state_lock:
             if generation != self._generation or not self._connected:
-                raise BridgeError(f"The debugger at {host}:{port} closed the connection.")
+                raise BridgeError(f"The debugger at {socket_host}:{port} closed the connection.")
 
     def disconnect(self, reason: str = "Disconnected", log: bool = True) -> None:
         with self._lifecycle_lock:
@@ -715,8 +765,11 @@ class DebuggerBridge:
         reason = "Debugger closed the connection."
         try:
             while True:
-                line = reader.readline()
+                line = reader.readline(MAX_REQUEST_BYTES + 1)
                 if line == "":
+                    break
+                if len(line) > MAX_REQUEST_BYTES:
+                    reason = "Debugger sent an oversized protocol message."
                     break
                 line = line.strip()
                 if not line:
@@ -825,9 +878,16 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
     bridge: DebuggerBridge
     process_manager: EmulatorProcessManager
     verbose = False
+    server_version = "SharpEmuDebuggerFrontend"
+    sys_version = ""
 
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if self._validated_request_authority() is None:
+            return
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/") and not self._has_valid_csrf_token():
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "Missing or invalid API token."})
+            return
         if parsed.path == "/api/snapshot":
             values = parse_qs(parsed.query)
             try:
@@ -861,20 +921,17 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
         except OSError:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
+        if file_name == "index.html":
+            body = body.replace(CSRF_TOKEN_PLACEHOLDER, self.server.csrf_token.encode("ascii"))
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header(
-            "Content-Security-Policy",
-            "default-src 'self'; connect-src 'self'; img-src 'self' data:; "
-            "script-src 'self'; style-src 'self'; base-uri 'none'; frame-ancestors 'none'",
-        )
         self.end_headers()
         self.wfile.write(body)
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if self._validated_post_authority() is None:
+            return
         parsed = urlparse(self.path)
         try:
             body = self._read_json_body()
@@ -898,12 +955,14 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
                 if not isinstance(eboot_path, str) or not eboot_path.strip():
                     raise BridgeError("Choose an eboot file before launching.")
                 debug_port = int(body.get("debugPort", self.bridge.default_port))
-                emulator_path = body.get("emulatorPath")
-                if emulator_path is not None and not isinstance(emulator_path, str):
-                    raise BridgeError("'emulatorPath' must be a string.")
+                if "emulatorPath" in body:
+                    raise RequestValidationError(
+                        "'emulatorPath' cannot be supplied over HTTP. "
+                        "Configure it locally with --emulator-path."
+                    )
                 self.bridge.disconnect(log=False)
                 try:
-                    self.process_manager.launch(eboot_path, debug_port, emulator_path)
+                    self.process_manager.launch(eboot_path, debug_port)
                     self.process_manager.wait_for_debugger(debug_port)
                     self.bridge.connect("127.0.0.1", debug_port)
                     self._prime_snapshot()
@@ -934,10 +993,17 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, {"response": response})
                 return
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown API endpoint."})
-        except (BridgeError, ValueError, TypeError) as exc:
+        except RequestValidationError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except BridgeError as exc:
             self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)})
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Request body is not valid JSON."})
+
+    def do_OPTIONS(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if self._validated_request_authority() is None:
+            return
+        self._send_json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "CORS requests are not supported."})
 
     def _prime_snapshot(self) -> None:
         try:
@@ -955,17 +1021,126 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
         self.server.shutdown()
         self.server.server_close()
 
-    def _read_json_body(self) -> dict[str, Any]:
+    def _validated_request_authority(self) -> tuple[str, int] | None:
+        client_host = str(self.client_address[0]) if self.client_address else ""
+        if _normalize_loopback_host(client_host) is None:
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "The frontend only accepts loopback clients."})
+            return None
+
+        host_values = self.headers.get_all("Host", [])
+        if len(host_values) != 1:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Exactly one Host header is required."})
+            return None
+        authority = self._parse_host_authority(host_values[0])
+        expected_port = int(self.server.server_address[1])
+        if authority is None or authority[1] != expected_port:
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "The Host header is not allowed."})
+            return None
+
+        fetch_site = self.headers.get("Sec-Fetch-Site", "").strip().lower()
+        allowed_fetch_sites = {"", "same-origin"}
+        if self.command == "GET":
+            allowed_fetch_sites.add("none")
+        if fetch_site not in allowed_fetch_sites:
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "Cross-origin requests are not allowed."})
+            return None
+        return authority
+
+    def _validated_post_authority(self) -> tuple[str, int] | None:
+        authority = self._validated_request_authority()
+        if authority is None:
+            return None
+
+        if not self._has_valid_csrf_token():
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "Missing or invalid CSRF token."})
+            return None
+
+        origin_values = self.headers.get_all("Origin", [])
+        referer_values = self.headers.get_all("Referer", [])
+        if not origin_values and not referer_values:
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "Origin or Referer is required."})
+            return None
+        if origin_values and (
+            len(origin_values) != 1 or self._parse_origin_authority(origin_values[0]) != authority
+        ):
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "The request Origin is not allowed."})
+            return None
+
+        if referer_values and (
+            len(referer_values) != 1 or self._parse_origin_authority(referer_values[0]) != authority
+        ):
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "The request Referer is not allowed."})
+            return None
+        return authority
+
+    def _has_valid_csrf_token(self) -> bool:
+        token_values = self.headers.get_all(CSRF_HEADER, [])
+        supplied_token = token_values[0] if len(token_values) == 1 else ""
+        return (
+            bool(supplied_token)
+            and supplied_token.isascii()
+            and hmac.compare_digest(supplied_token, self.server.csrf_token)
+        )
+
+    @staticmethod
+    def _parse_host_authority(value: str) -> tuple[str, int] | None:
         try:
-            length = int(self.headers.get("Content-Length", "0"))
+            parsed = urlsplit(f"//{value}")
+            port = parsed.port if parsed.port is not None else 80
+        except ValueError:
+            return None
+        if (
+            not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        host = _normalize_http_host(parsed.hostname)
+        return (host, port) if host is not None else None
+
+    @staticmethod
+    def _parse_origin_authority(value: str) -> tuple[str, int] | None:
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port if parsed.port is not None else 80
+        except ValueError:
+            return None
+        if (
+            parsed.scheme.lower() != "http"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            return None
+        host = _normalize_http_host(parsed.hostname)
+        return (host, port) if host is not None else None
+
+    def _read_json_body(self) -> dict[str, Any]:
+        if self.headers.get("Transfer-Encoding") is not None:
+            raise RequestValidationError("Transfer-Encoding is not supported.")
+        if self.headers.get_content_type() != "application/json":
+            raise RequestValidationError("Content-Type must be application/json.")
+        charset = self.headers.get_content_charset()
+        if charset is not None and charset.lower() not in {"utf-8", "utf8"}:
+            raise RequestValidationError("JSON requests must use UTF-8.")
+        length_values = self.headers.get_all("Content-Length", [])
+        if len(length_values) != 1:
+            raise RequestValidationError("Exactly one Content-Length header is required.")
+        try:
+            length = int(length_values[0])
         except ValueError as exc:
-            raise BridgeError("Invalid Content-Length header.") from exc
+            raise RequestValidationError("Invalid Content-Length header.") from exc
         if length < 0 or length > MAX_REQUEST_BYTES:
-            raise BridgeError("HTTP request body is too large.")
+            raise RequestValidationError("HTTP request body is too large.")
         raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise RequestValidationError("HTTP request body ended unexpectedly.")
         value = json.loads(raw.decode("utf-8") if raw else "{}")
         if not isinstance(value, dict):
-            raise BridgeError("Expected a JSON object request body.")
+            raise RequestValidationError("Expected a JSON object request body.")
         return value
 
     def _send_json(self, status: HTTPStatus, payload: Any) -> None:
@@ -974,12 +1149,26 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
+        except OSError:
             pass
+
+    def end_headers(self) -> None:
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; connect-src 'self'; img-src 'self' data:; "
+            "script-src 'self'; style-src 'self'; object-src 'none'; form-action 'self'; "
+            "base-uri 'none'; frame-ancestors 'none'",
+        )
+        super().end_headers()
 
     def log_message(self, format_string: str, *args: Any) -> None:
         if self.verbose:
@@ -988,7 +1177,17 @@ class FrontendRequestHandler(BaseHTTPRequestHandler):
 
 class FrontendHttpServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # SO_REUSEADDR permits duplicate live listeners on Windows instead of only
+    # allowing quick restart after close.
+    allow_reuse_address = os.name != "nt"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.csrf_token = secrets.token_urlsafe(32)
+        super().__init__(*args, **kwargs)
+
+
+class FrontendHttpServerV6(FrontendHttpServer):
+    address_family = socket.AF_INET6
 
 
 def create_frontend_server(
@@ -998,8 +1197,13 @@ def create_frontend_server(
 ) -> FrontendHttpServer:
     """Binds the UI server, replacing an older frontend on the same port."""
 
+    normalized_address = _normalize_http_host(listen_address)
+    if normalized_address is None:
+        raise SystemExit("The debugger frontend may only listen on localhost, 127.0.0.1, or ::1.")
+    listen_address = normalized_address
+
     try:
-        return FrontendHttpServer((listen_address, port), handler_type)
+        return _bind_frontend_server(listen_address, port, handler_type)
     except OSError as exc:
         if exc.errno != errno.EADDRINUSE or port == 0:
             raise SystemExit(f"Could not start the frontend on {listen_address}:{port}: {exc}") from None
@@ -1013,7 +1217,7 @@ def create_frontend_server(
     deadline = time.monotonic() + 10.0
     while time.monotonic() < deadline:
         try:
-            return FrontendHttpServer((listen_address, port), handler_type)
+            return _bind_frontend_server(listen_address, port, handler_type)
         except OSError as exc:
             if exc.errno != errno.EADDRINUSE:
                 raise SystemExit(f"Could not start the frontend on {listen_address}:{port}: {exc}") from None
@@ -1021,23 +1225,54 @@ def create_frontend_server(
     raise SystemExit(f"The previous SharpEmu frontend did not release port {port} in time.")
 
 
+def _bind_frontend_server(
+    listen_address: str,
+    port: int,
+    handler_type: type[FrontendRequestHandler],
+) -> FrontendHttpServer:
+    server_type = FrontendHttpServerV6 if listen_address == "::1" else FrontendHttpServer
+    server = server_type((listen_address, port), handler_type)
+    if _normalize_http_host(str(server.server_address[0])) is None:
+        server.server_close()
+        raise SystemExit("The debugger frontend resolved its listen address outside loopback.")
+    return server
+
+
 def request_existing_frontend_shutdown(listen_address: str, port: int) -> bool:
     """Stops only a verified SharpEmu frontend listening on the target port."""
 
-    probe_host = "127.0.0.1" if listen_address in {"0.0.0.0", "localhost"} else listen_address
+    probe_host = "127.0.0.1" if listen_address == "localhost" else listen_address
     url_host = f"[{probe_host}]" if ":" in probe_host and not probe_host.startswith("[") else probe_host
     base_url = f"http://{url_host}:{port}"
     try:
-        with urlopen(f"{base_url}/api/health", timeout=0.75) as response:
+        with urlopen(f"{base_url}/", timeout=0.75) as response:
+            page = response.read(128 * 1024)
+    except (OSError, URLError):
+        return False
+    if b"<title>SharpEmu Debugger</title>" not in page:
+        return False
+
+    token_match = re.search(
+        rb'<meta\s+name="sharpemu-csrf-token"\s+content="([A-Za-z0-9_-]{32,})"',
+        page,
+    )
+    csrf_token = token_match.group(1).decode("ascii") if token_match else None
+    health_headers = {CSRF_HEADER: csrf_token} if csrf_token else {}
+    try:
+        health_request = Request(f"{base_url}/api/health", headers=health_headers)
+        with urlopen(health_request, timeout=0.75) as response:
             health = json.load(response)
     except (OSError, URLError, ValueError, json.JSONDecodeError):
         return False
 
     if isinstance(health, dict) and health.get("application") == APPLICATION_ID:
+        headers = {"Content-Type": "application/json", "Origin": base_url}
+        if csrf_token:
+            headers[CSRF_HEADER] = csrf_token
         request = Request(
             f"{base_url}/api/shutdown",
             data=b"{}",
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:
@@ -1051,13 +1286,6 @@ def request_existing_frontend_shutdown(listen_address: str, port: int) -> bool:
     # Verify both their page identity and the exact owning process before asking
     # that legacy instance to exit through its normal Ctrl+C cleanup path.
     if not isinstance(health, dict) or health.get("ok") is not True:
-        return False
-    try:
-        with urlopen(f"{base_url}/", timeout=0.75) as response:
-            page = response.read(128 * 1024)
-    except (OSError, URLError):
-        return False
-    if b"<title>SharpEmu Debugger</title>" not in page:
         return False
     legacy_pid = find_legacy_frontend_pid(port)
     if legacy_pid is None:
@@ -1104,6 +1332,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--debug-port", type=int, default=5714, help="SharpEmu debugger port")
     parser.add_argument("--listen", default="127.0.0.1", help="Frontend HTTP bind address")
     parser.add_argument("--ui-port", type=int, default=8765, help="Frontend HTTP port (0 chooses a free port)")
+    parser.add_argument("--emulator-path", help="Trusted local SharpEmu executable path")
+    parser.add_argument(
+        "--allow-remote-debugger",
+        action="store_true",
+        help="Allow the bridge to connect to a non-loopback debugger host",
+    )
     parser.add_argument("--no-connect", action="store_true", help="Do not connect to SharpEmu on startup")
     parser.add_argument("--no-browser", action="store_true", help="Do not open the frontend in a browser")
     parser.add_argument("--verbose", action="store_true", help="Print HTTP request logs")
@@ -1117,8 +1351,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.ui_port < 0 or args.ui_port > 65535:
         raise SystemExit("--ui-port must be between 0 and 65535")
 
-    bridge = DebuggerBridge(args.debug_host, args.debug_port)
-    process_manager = EmulatorProcessManager(bridge.journal)
+    bridge = DebuggerBridge(args.debug_host, args.debug_port, allow_remote=args.allow_remote_debugger)
+    process_manager = EmulatorProcessManager(bridge.journal, args.emulator_path)
     handler_type = type(
         "ConfiguredFrontendRequestHandler",
         (FrontendRequestHandler,),
@@ -1126,15 +1360,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     server = create_frontend_server(args.listen, args.ui_port, handler_type)
     actual_port = server.server_address[1]
-    browser_host = args.listen if args.listen not in {"0.0.0.0", "::"} else "127.0.0.1"
-    url = f"http://{browser_host}:{actual_port}/"
+    browser_host = _normalize_http_host(args.listen) or "127.0.0.1"
+    url_host = f"[{browser_host}]" if ":" in browser_host else browser_host
+    url = f"http://{url_host}:{actual_port}/"
 
     print(f"SharpEmu Debugger Frontend: {url}")
     print(f"Debugger endpoint: {args.debug_host}:{args.debug_port}")
     print("Press Ctrl+C to stop.")
-    if args.listen not in {"127.0.0.1", "localhost", "::1"}:
-        print("Warning: the frontend is listening beyond loopback; no authentication is provided.")
-
     if not args.no_connect:
         def connect_default() -> None:
             try:

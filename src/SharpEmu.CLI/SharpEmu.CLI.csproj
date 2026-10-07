@@ -130,7 +130,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </PropertyGroup>
 
   <Target Name="FetchFfmpegRuntime"
-    BeforeTargets="Publish"
+    BeforeTargets="Publish;Build"
     Condition="'$(RuntimeIdentifier)' != '' And '$(FfmpegRuntimePackage)' != ''">
     <DownloadFile
       SourceUrl="https://github.com/sharpemu/ffmpeg-core/releases/download/$(FfmpegRuntimeTag)/$(FfmpegRuntimePackage)"
@@ -158,6 +158,25 @@ SPDX-License-Identifier: GPL-2.0-or-later
     </ItemGroup>
     <Copy SourceFiles="@(_FfmpegRuntimeFiles)"
       DestinationFolder="$(PublishDir)$(NativeLibraryFolderName)"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- Mirrors PublishFfmpegRuntime for plain `dotnet build`: devs running
+       straight out of the build output directory (no publish step) still
+       need the FFmpeg plugins present, otherwise AvPlayer/Bink video probing
+       throws NotSupportedException the first time a guest opens a movie. -->
+  <Target Name="BuildFfmpegRuntime"
+    AfterTargets="Build"
+    DependsOnTargets="FetchFfmpegRuntime"
+    Condition="'$(RuntimeIdentifier)' != '' And '$(FfmpegRuntimePackage)' != ''">
+    <ItemGroup>
+      <_FfmpegRuntimeFiles Condition="$(RuntimeIdentifier.StartsWith('win'))"
+        Include="$(FfmpegRuntimeExtractDir)/bin/*.dll" />
+      <_FfmpegRuntimeFiles Condition="!$(RuntimeIdentifier.StartsWith('win'))"
+        Include="$(FfmpegRuntimeExtractDir)/lib/*.so;$(FfmpegRuntimeExtractDir)/lib/*.so.*;$(FfmpegRuntimeExtractDir)/lib/*.dylib" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_FfmpegRuntimeFiles)"
+      DestinationFolder="$(OutDir)$(NativeLibraryFolderName)"
       SkipUnchangedFiles="true" />
   </Target>
 

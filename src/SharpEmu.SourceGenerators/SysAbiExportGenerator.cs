@@ -27,7 +27,16 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
 
     private sealed class ExportModel : IEquatable<ExportModel>
     {
-        public ExportModel(string containingType, string methodName, SysAbiExportShape.HandlerShape shape, string typedParameterKinds, string libraryName, string nid, string exportName, int target)
+        public ExportModel(
+            string containingType,
+            string methodName,
+            SysAbiExportShape.HandlerShape shape,
+            string typedParameterKinds,
+            string libraryName,
+            string nid,
+            string exportName,
+            int target,
+            bool preferLle)
         {
             ContainingType = containingType;
             MethodName = methodName;
@@ -37,6 +46,7 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
             Nid = nid;
             ExportName = exportName;
             Target = target;
+            PreferLle = preferLle;
         }
 
         public string ContainingType { get; }
@@ -51,6 +61,7 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
         public string Nid { get; }
         public string ExportName { get; }
         public int Target { get; }
+        public bool PreferLle { get; }
 
         public bool Equals(ExportModel? other) =>
             other is not null &&
@@ -61,7 +72,8 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
             LibraryName == other.LibraryName &&
             Nid == other.Nid &&
             ExportName == other.ExportName &&
-            Target == other.Target;
+            Target == other.Target &&
+            PreferLle == other.PreferLle;
 
         public override bool Equals(object? obj) => Equals(obj as ExportModel);
 
@@ -73,6 +85,7 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
                 hash = (hash * 31) + ContainingType.GetHashCode();
                 hash = (hash * 31) + MethodName.GetHashCode();
                 hash = (hash * 31) + Nid.GetHashCode();
+                hash = (hash * 31) + PreferLle.GetHashCode();
                 return hash;
             }
         }
@@ -80,80 +93,90 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        var exports = context.SyntaxProvider
+        var exportGroups = context.SyntaxProvider
             .ForAttributeWithMetadataName(
                 AttributeMetadataName,
                 static (node, _) => node is MethodDeclarationSyntax,
-                static (attributeContext, _) => CreateModel(attributeContext))
-            .Where(static model => model is not null)
+                static (attributeContext, _) => CreateModels(attributeContext))
+            .Where(static models => !models.IsDefaultOrEmpty)
             .Collect();
 
         var assemblyName = context.CompilationProvider
             .Select(static (compilation, _) => compilation.AssemblyName ?? "Assembly");
 
         context.RegisterSourceOutput(
-            exports.Combine(assemblyName),
+            exportGroups.Combine(assemblyName),
             static (productionContext, source) => Emit(productionContext, source.Left!, source.Right));
     }
 
-    private static ExportModel? CreateModel(GeneratorAttributeSyntaxContext context)
+    private static ImmutableArray<ExportModel> CreateModels(GeneratorAttributeSyntaxContext context)
     {
         if (context.TargetSymbol is not IMethodSymbol method ||
             !SysAbiExportShape.IsAccessibleFromGeneratedCode(method))
         {
-            return null;
+            return ImmutableArray<ExportModel>.Empty;
         }
 
         var shape = SysAbiExportShape.Classify(method, out var typedParameterKinds);
         if (shape == SysAbiExportShape.HandlerShape.Invalid)
         {
-            return null;
+            return ImmutableArray<ExportModel>.Empty;
         }
 
-        var attribute = context.Attributes[0];
-        var arguments = SysAbiExportShape.ReadArguments(attribute);
-        var nid = arguments.Nid;
-        var exportName = arguments.ExportName;
-
-        // Mirror ModuleManager.ResolveExportInfo: a missing NID resolves from the export
-        // name (algorithmically — equivalent to the runtime catalog lookup, which was
-        // built with the same computation); a missing name falls back to the method name.
-        if (string.IsNullOrWhiteSpace(nid) && !string.IsNullOrWhiteSpace(exportName))
+        var models = ImmutableArray.CreateBuilder<ExportModel>(context.Attributes.Length);
+        foreach (var attribute in context.Attributes)
         {
-            nid = Ps5Nid.Compute(exportName);
+            var arguments = SysAbiExportShape.ReadArguments(attribute);
+            var nid = arguments.Nid;
+            var exportName = arguments.ExportName;
+
+            // Mirror ModuleManager.ResolveExportInfo: a missing NID resolves from the
+            // export name. A missing name falls back to the method name.
+            if (string.IsNullOrWhiteSpace(nid) && !string.IsNullOrWhiteSpace(exportName))
+            {
+                nid = Ps5Nid.Compute(exportName);
+            }
+
+            if (string.IsNullOrWhiteSpace(nid))
+            {
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(exportName))
+            {
+                exportName = method.Name;
+            }
+
+            var libraryName = string.IsNullOrWhiteSpace(arguments.LibraryName) ? "libKernel" : arguments.LibraryName;
+            models.Add(new ExportModel(
+                method.ContainingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                method.Name,
+                shape,
+                typedParameterKinds,
+                libraryName,
+                nid!,
+                exportName!,
+                arguments.Target,
+                arguments.PreferLle));
         }
 
-        if (string.IsNullOrWhiteSpace(nid))
-        {
-            return null;
-        }
-
-        if (string.IsNullOrWhiteSpace(exportName))
-        {
-            exportName = method.Name;
-        }
-
-        var libraryName = string.IsNullOrWhiteSpace(arguments.LibraryName) ? "libKernel" : arguments.LibraryName;
-        return new ExportModel(
-            method.ContainingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
-            method.Name,
-            shape,
-            typedParameterKinds,
-            libraryName,
-            nid!,
-            exportName!,
-            arguments.Target);
+        return models.ToImmutable();
     }
 
     private static void Emit(
         SourceProductionContext context,
-        ImmutableArray<ExportModel?> exports,
+        ImmutableArray<ImmutableArray<ExportModel>> exportGroups,
         string assemblyName)
     {
         // No exports, no registry: an assembly that merely references the analyzer
         // (e.g. SharpEmu.HLE itself) must not mint a colliding
         // SharpEmu.Generated.SysAbiExportRegistry type.
-        if (exports.IsDefaultOrEmpty)
+        var exportCount = 0;
+        foreach (var group in exportGroups)
+        {
+            exportCount += group.Length;
+        }
+        if (exportCount == 0)
         {
             return;
         }
@@ -175,24 +198,23 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
         builder.AppendLine("    public static global::System.Collections.Generic.IReadOnlyList<global::SharpEmu.HLE.ExportedFunction> CreateExports(");
         builder.AppendLine("        global::SharpEmu.HLE.Generation registrationGeneration)");
         builder.AppendLine("    {");
-        builder.AppendLine($"        var exports = new global::System.Collections.Generic.List<global::SharpEmu.HLE.ExportedFunction>({exports.Length});");
+        builder.AppendLine($"        var exports = new global::System.Collections.Generic.List<global::SharpEmu.HLE.ExportedFunction>({exportCount});");
 
-        foreach (var export in exports)
+        foreach (var group in exportGroups)
         {
-            if (export is null)
+            foreach (var export in group)
             {
-                continue;
+                var function = export.Shape switch
+                {
+                    SysAbiExportShape.HandlerShape.ContextOnly => $"{export.ContainingType}.{export.MethodName}",
+                    SysAbiExportShape.HandlerShape.Parameterless => $"static _ => {export.ContainingType}.{export.MethodName}()",
+                    _ => TypedThunk(export),
+                };
+                builder.AppendLine(
+                    $"        Add(exports, registrationGeneration, {Literal(export.LibraryName)}, {Literal(export.Nid)}, " +
+                    $"{Literal(export.ExportName)}, (global::SharpEmu.HLE.Generation){export.Target}, " +
+                    $"{(export.PreferLle ? "true" : "false")}, {function});");
             }
-
-            var function = export.Shape switch
-            {
-                SysAbiExportShape.HandlerShape.ContextOnly => $"{export.ContainingType}.{export.MethodName}",
-                SysAbiExportShape.HandlerShape.Parameterless => $"static _ => {export.ContainingType}.{export.MethodName}()",
-                _ => TypedThunk(export),
-            };
-            builder.AppendLine(
-                $"        Add(exports, registrationGeneration, {Literal(export.LibraryName)}, {Literal(export.Nid)}, " +
-                $"{Literal(export.ExportName)}, (global::SharpEmu.HLE.Generation){export.Target}, {function});");
         }
 
         builder.AppendLine("        return exports;");
@@ -205,6 +227,7 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
         builder.AppendLine("        string nid,");
         builder.AppendLine("        string exportName,");
         builder.AppendLine("        global::SharpEmu.HLE.Generation attributeTarget,");
+        builder.AppendLine("        bool preferLle,");
         builder.AppendLine("        global::SharpEmu.HLE.SysAbiFunction function)");
         builder.AppendLine("    {");
         builder.AppendLine("        var target = attributeTarget == global::SharpEmu.HLE.Generation.None ? registrationGeneration : attributeTarget;");
@@ -213,7 +236,7 @@ public sealed class SysAbiExportGenerator : IIncrementalGenerator
         builder.AppendLine("            return;");
         builder.AppendLine("        }");
         builder.AppendLine();
-        builder.AppendLine("        exports.Add(new global::SharpEmu.HLE.ExportedFunction(libraryName, nid, exportName, target, function));");
+        builder.AppendLine("        exports.Add(new global::SharpEmu.HLE.ExportedFunction(libraryName, nid, exportName, target, function, preferLle));");
         builder.AppendLine("    }");
         builder.AppendLine("}");
 

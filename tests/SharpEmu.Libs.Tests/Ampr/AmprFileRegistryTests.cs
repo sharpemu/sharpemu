@@ -11,6 +11,127 @@ namespace SharpEmu.Libs.Tests.Ampr;
 [Collection("AmprFileRegistry")]
 public class AmprFileRegistryTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ResolveCollidingPaths_PreservesBothHandles(bool reverseOrder)
+    {
+        AmprFileRegistry.ClearForTests();
+        const string firstPath = "$/assets/bce5a816.bin";
+        const string secondPath = "$/assets/1b9e7058.bin";
+        Assert.Equal(AmprFileRegistry.ComputeFileId(firstPath), AmprFileRegistry.ComputeFileId(secondPath));
+        var firstHost = Path.Combine(Path.GetTempPath(), "apr-first.bin");
+        var secondHost = Path.Combine(Path.GetTempPath(), "apr-second.bin");
+        if (reverseOrder)
+            AmprFileRegistry.Register(secondPath, secondHost);
+        var firstId = AmprFileRegistry.Register(firstPath, firstHost);
+        var secondId = AmprFileRegistry.Register(secondPath, secondHost);
+        Assert.NotEqual(firstId, secondId);
+        Assert.NotEqual(uint.MaxValue, firstId);
+        Assert.True(AmprFileRegistry.TryGetHostPath(firstId, out var firstResult));
+        Assert.True(AmprFileRegistry.TryGetHostPath(secondId, out var secondResult));
+        Assert.Equal(firstHost, firstResult);
+        Assert.Equal(secondHost, secondResult);
+        Assert.Equal(firstId, AmprFileRegistry.Register(firstPath, firstHost));
+        Assert.False(AmprFileRegistry.TryGetHostPath(AmprFileRegistry.ComputeFileId(firstPath), out _));
+        AmprFileRegistry.RegisterApp0RelativeForTests("assets/1b9e7058.bin", secondHost);
+        Assert.True(AmprFileRegistry.TryGetHostPath(firstId, out firstResult));
+        Assert.Equal(firstHost, firstResult);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GuestPathSpellingOwnsIdOverCompatibilityAlias(bool reverseOrder)
+    {
+        // Demon's Souls: the cooked "/app0/" id of this animation collides with
+        // the emulator-only "app0/" alias of an unrelated texture.
+        AmprFileRegistry.ClearForTests();
+        const string animation = "characters/c0000_main/animation/a202/_cmn/bp202_weapontakeoutrightshoulder_run.cani";
+        const string texture = "parts/m_8120_ancientking/textures/_ps5/hd_m_8120_ancientking_mud_nml.chunk0.ctxc";
+        var cookedId = AmprFileRegistry.ComputeFileId("/app0/" + animation);
+        Assert.Equal(cookedId, AmprFileRegistry.ComputeFileId("app0/" + texture));
+        var animationHost = Path.Combine(Path.GetTempPath(), "apr-animation.cani");
+        var textureHost = Path.Combine(Path.GetTempPath(), "apr-texture.ctxc");
+
+        if (reverseOrder)
+        {
+            AmprFileRegistry.RegisterApp0RelativeForTests(texture, textureHost);
+            AmprFileRegistry.RegisterApp0RelativeForTests(animation, animationHost);
+        }
+        else
+        {
+            AmprFileRegistry.RegisterApp0RelativeForTests(animation, animationHost);
+            AmprFileRegistry.RegisterApp0RelativeForTests(texture, textureHost);
+        }
+
+        Assert.True(AmprFileRegistry.TryGetHostPath(cookedId, out var resolved));
+        Assert.Equal(animationHost, resolved);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TitleResolvedPathKeepsIdAgainstLaterCollidingAlias(bool aliasFirst)
+    {
+        AmprFileRegistry.ClearForTests();
+        const string firstPath = "$/assets/bce5a816.bin";
+        const string secondRelative = "assets/1b9e7058.bin";
+        var firstHost = Path.Combine(Path.GetTempPath(), "apr-first.bin");
+        var secondHost = Path.Combine(Path.GetTempPath(), "apr-second.bin");
+
+        if (aliasFirst)
+            AmprFileRegistry.RegisterApp0RelativeForTests(secondRelative, secondHost);
+        var id = AmprFileRegistry.RegisterAprResolvedPath(firstPath, firstHost);
+        AmprFileRegistry.RegisterApp0RelativeForTests(secondRelative, secondHost);
+
+        Assert.True(AmprFileRegistry.TryGetHostPath(id, out var resolved));
+        Assert.Equal(firstHost, resolved);
+    }
+
+    [Fact]
+    public void AprResolve_UniquePath_ReturnsGuestPathHash()
+    {
+        AmprFileRegistry.ClearForTests();
+        const string guestPath = "/app0/levels/m08_tutorial/a.cmsh";
+        var host = Path.Combine(Path.GetTempPath(), "apr-unique.bin");
+
+        var id = AmprFileRegistry.RegisterAprResolvedPath(guestPath, host);
+
+        Assert.Equal(AmprFileRegistry.ComputeFileId(guestPath), id);
+        Assert.Equal(id, AmprFileRegistry.RegisterAprResolvedPath(guestPath, host));
+        Assert.True(AmprFileRegistry.TryGetHostPath(id, out var result));
+        Assert.Equal(host, result);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AprResolve_CollidingPaths_ReadTheirOwnFiles(bool indexFirst)
+    {
+        AmprFileRegistry.ClearForTests();
+        const string firstPath = "$/assets/bce5a816.bin";
+        const string secondPath = "$/assets/1b9e7058.bin";
+        var firstHost = Path.Combine(Path.GetTempPath(), "apr-first.bin");
+        var secondHost = Path.Combine(Path.GetTempPath(), "apr-second.bin");
+        if (indexFirst)
+        {
+            AmprFileRegistry.RegisterApp0RelativeForTests("assets/bce5a816.bin", firstHost);
+            AmprFileRegistry.RegisterApp0RelativeForTests("assets/1b9e7058.bin", secondHost);
+        }
+
+        var firstId = AmprFileRegistry.RegisterAprResolvedPath(firstPath, firstHost);
+        var secondId = AmprFileRegistry.RegisterAprResolvedPath(secondPath, secondHost);
+        // A later alias publish of the partner must not re-poison either id.
+        AmprFileRegistry.RegisterApp0RelativeForTests("assets/1b9e7058.bin", secondHost);
+
+        Assert.NotEqual(firstId, secondId);
+        Assert.True(AmprFileRegistry.TryGetHostPath(firstId, out var firstResult));
+        Assert.True(AmprFileRegistry.TryGetHostPath(secondId, out var secondResult));
+        Assert.Equal(firstHost, firstResult);
+        Assert.Equal(secondHost, secondResult);
+    }
+
     [Fact]
     public void ComputeFileId_matches_utf8_fnv1a()
     {
@@ -149,6 +270,6 @@ public class AmprFileRegistryTests
             hash *= prime;
         }
 
-        return hash;
+        return hash & 0x7fffffff;
     }
 }

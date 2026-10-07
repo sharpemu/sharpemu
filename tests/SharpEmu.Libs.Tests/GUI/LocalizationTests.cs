@@ -83,6 +83,46 @@ public sealed class LocalizationTests : IDisposable
     }
 
     [Fact]
+    public void DiscordButtonContentUpdatesWhenLanguageChanges()
+    {
+        var localization = new Localization(_languagesDirectory);
+        localization.Load("en");
+        var englishLabel = localization.Get("About.DiscordButton");
+        var button = new Button();
+        button.Bind(
+            Button.ContentProperty,
+            new Binding("[About.DiscordButton]") { Source = localization });
+
+        Assert.Equal(englishLabel, button.Content);
+
+        localization.Load("ru");
+
+        Assert.NotEqual(englishLabel, localization.Get("About.DiscordButton"));
+        Assert.Equal(localization.Get("About.DiscordButton"), button.Content);
+    }
+
+    [Fact]
+    public void EmbeddedLanguagesProvideDiscordButtonLabels()
+    {
+        var assembly = typeof(Localization).Assembly;
+        var resourceNames = assembly.GetManifestResourceNames()
+            .Where(name =>
+                name.StartsWith("Languages.", StringComparison.Ordinal) &&
+                name.EndsWith(".json", StringComparison.Ordinal))
+            .ToArray();
+        Assert.NotEmpty(resourceNames);
+
+        foreach (var resourceName in resourceNames)
+        {
+            var language = ReadEmbeddedLanguage(assembly, resourceName);
+            Assert.True(language.TryGetValue("About.DiscordButton", out var label),
+                $"{resourceName} has no Discord button label.");
+            Assert.False(string.IsNullOrWhiteSpace(label));
+            Assert.DoesNotContain("About.DiscordComingSoon", language.Keys);
+        }
+    }
+
+    [Fact]
     public void ComboBoxSelection_KeepsLiveLocalizedChoiceAsSelectionBoxItem()
     {
         var localization = new Localization(_languagesDirectory);

@@ -16,12 +16,27 @@ SPDX-License-Identifier: GPL-2.0-or-later
 ---
 
 <p align="center">
+  <a href="https://discord.gg/zdTuUU9Uwn">
+    <img src="https://img.shields.io/badge/Discord-Join%20our%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord">
+  </a>
+</p>
+
+<p align="center">
+  <strong>Join our official Discord server for development updates, compatibility discussions, support, and community chat.</strong>
+</p>
+
+---
+
+<p align="center">
   <a href="#support">
     <img src="https://img.shields.io/badge/Support-GitHub%20Sponsors%20%26%20Crypto-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white" alt="Support SharpEmu">
   </a>
 </p>
 
 ---
+
+> [!IMPORTANT]
+> **Official channels:** Only **sharpemu.app** and the links listed in this GitHub repository are affiliated with SharpEmu. Any other websites, accounts, or donation pages are unofficial and unauthorized.
 
 > [!NOTE]  
 > SharpEmu supports Windows x64, Linux x64, and macOS x64. Apple Silicon Macs
@@ -43,32 +58,21 @@ Our goal is **not** to emulate PS4 games, as there is already an excellent emula
 
 ## Games Tested
 
-|               Demons Souls Remake                   |                     Dreaming Sarah                         |
+|               Demon's Souls Remake                   |                     ASTRO BOT                        |
 | :-----------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
-| ![Bloodborne screenshot](./.github/images/demons-souls.jpg) | ![Dreaming Sarah](./.github/images/dreaming-sarah.jpg) |
+| ![DeS screenshot](./.github/images/demons-souls.jpg) | ![Astro Bot](./.github/images/astro-bot.jpg) |
 
-|                  Void Terrarium                     |                 Dead Cells                    |
+|                  ASTRO's PLAYROOM                    |                 Dead Cells                    |
 | :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Void Terrarium](./.github/images/void-terrarium.jpg) | ![Dead Cells](./.github/images/dead-cells.jpg) |
+| ![Astro's Playroom](./.github/images/astros-playroom.jpg) | ![Dead Cells](./.github/images/dead-cells.jpg) |
+
+|                  God of War: Sons of Sparta                    |                 Tomb Raider V Remastered                    |
+| :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
+| ![GoW SOS](./.github/images/gow-sos.jpg) | ![Tomb Raider V](./.github/images/tomb-raider-v-remastered.jpg) |
 
 ## Status
 
-The emulator can currently load the `eboot.bin` of real games, execute native CPU instructions, and partially handle kernel-related functionality. However, several critical components are still missing.
-
-Current capabilities include:
-
-* Loading `eboot.bin` and `.elf` files
-* Executing native CPU instructions
-* Reading basic game metadata (title, version, etc.)
-* Loading system modules (`prx` / `sys_module`)
-* Partial support for some kernel functions  
-* `Fiber` and `AMPR` exports
-* PlayGo scenarios
-* Initial loading game files
-* Shader/resource submits and AGC initial
-* Video outputs in some games
-
-Some games have reached like `sceVideoOut` and AGC stages.
+The emulator can currently load the `eboot.bin` of real games, execute native CPU instructions, and partially handle gpu-related functionality. Included 3D games.
 
 SharpEmu supports Windows, Linux, and macOS hosts. Video output uses Vulkan on
 Windows and Linux, and MoltenVK on macOS. Platform support is still experimental,
@@ -79,11 +83,12 @@ so compatibility and performance vary by game, operating system, and GPU driver.
 Download the release archive for your operating system, extract it, and launch
 SharpEmu with the path to a legally obtained game's `eboot.bin`.
 
+Or command line;
+
 Windows PowerShell:
 
 ```powershell
-.\SharpEmu.exe "C:\path\to\game\eboot.bin" 2>&1 |
-  Tee-Object -FilePath "SharpEmu.log"
+.\SharpEmu.exe "C:\path\to\game\eboot.bin" --log-to-file
 ```
 
 Linux and macOS:
@@ -91,9 +96,12 @@ Linux and macOS:
 ```bash
 chmod +x ./SharpEmu
 
-./SharpEmu "/path/to/game/eboot.bin" 2>&1 |
-  tee SharpEmu.log
+./SharpEmu "/path/to/game/eboot.bin" --log-to-file
 ```
+
+SharpEmu supports environment variables that can be configured from the GUI. Undocumented variables are listed here: [docs/sharpemu-gui-undocumented-env-vars.md](docs/sharpemu-gui-undocumented-env-vars.md)
+
+You can set them per game or globally in the GUI, or pass them directly through the CLI.
 
 A Vulkan-capable GPU and current graphics driver are required. The macOS
 release includes the MoltenVK Vulkan implementation.

@@ -7,10 +7,11 @@ namespace SharpEmu.Libs.VideoOut;
 
 /// <summary>
 /// Self-time accounting for the render thread, enabled with
-/// SHARPEMU_PROFILE_RENDER=1. The existing videoout counters report how much
-/// work was done (draws, pipelines, SPIR-V) but not where the render thread's
-/// second went, which is the number that decides whether a low frame rate is
-/// the emulator recording commands, the GPU executing them, or neither.
+/// SHARPEMU_PROFILE_RENDER=1 or the unified performance profile. The existing
+/// videoout counters report how much work was done (draws, pipelines, SPIR-V)
+/// but not where the render thread's second went, which is the number that
+/// decides whether a low frame rate is the emulator recording commands, the
+/// GPU executing them, or neither.
 ///
 /// Scopes nest: entering a phase suspends the enclosing one and resumes it on
 /// dispose, so a <see cref="Phase.QueueSubmit"/> inside
@@ -22,27 +23,75 @@ internal static class RenderPhaseProfile
     {
         /// <summary>Outside any measured phase — loop overhead.</summary>
         Unattributed = 0,
-        /// <summary>Parked because no guest work and no newer flip exist.</summary>
+        /// <summary>Parked because no command stream or newer flip exists.</summary>
         Idle,
+        IdleBlockedCommands,
+        IdlePendingPresentation,
+        IdleNoQueuedWork,
+        WindowEventPolling,
+        WindowEventHandling,
         /// <summary>Blocked on the frame slot's fence: the GPU is behind.</summary>
         FrameSlotWait,
         /// <summary>Reaping completed guest submissions (fence polls).</summary>
         Collect,
-        Evict,
-        /// <summary>Dequeuing the next guest work item.</summary>
-        TakeWork,
-        /// <summary>Building the diagnostic label for a work item.</summary>
-        Describe,
-        /// <summary>Publishing a work item's completion to its waiters.</summary>
-        CompleteWork,
         /// <summary>Selecting the presentation to show this iteration.</summary>
         TakePresentation,
+        /// <summary>Running one slice of the guest command stream.</summary>
+        CommandStream,
+        CommandMemorySync,
+        CommandMemoryRead,
+        CommandGpuWait,
+        CommandMemoryTransfer,
+        CommandEndOfPipe,
+        CommandDrawTranslation,
+        CommandDispatchTranslation,
+        GeometrySnapshotValidation,
+        CommandDrawStateCreation,
+        VertexProgramSetup,
+        VertexProgramEvaluation,
+        VertexMetadataResolution,
+        PixelProgramSetup,
+        PixelProgramEvaluation,
+        GraphicsProgramCache,
+        GraphicsBindingDescription,
+        StageResourceDescription,
+        ResourceSnapshotCreation,
+        VertexInputDescription,
+        DrawTargetResolution,
+        DrawAttachmentPreparation,
+        DrawDynamicStatePreparation,
+        DrawDynamicStateRecording,
+        DrawRenderingSetup,
+        DrawExecutor,
+        DrawProgramResolution,
+        DrawResourcePreparation,
+        DrawVertexBufferAcquisition,
+        DrawIndexBufferAcquisition,
+        BufferMappedRangeValidation,
+        BufferAcquisitionChecks,
+        BufferCacheLookup,
+        BufferDirtySynchronization,
+        BufferDirtySyncWritten,
+        BufferDirtySyncTexel,
+        BufferDirtySyncUpload,
+        BufferStreamUpload,
+        BufferStagingUpload,
+        DrawVertexShaderSetup,
+        DrawVertexEvaluation,
+        DrawBindingAssembly,
+        ProgramPreparation,
+        ProgramSourceRead,
+        VertexInputResolution,
+        PixelInputResolution,
+        ProgramCacheLookup,
+        ProgramPermutationLookup,
+        ProgramResourceAssembly,
+        ResourceMaterialization,
+        ProgramCompile,
+        PipelineCreation,
+        DescriptorPreparation,
+        DescriptorCommit,
         Draw,
-        Compute,
-        ColorClear,
-        ImageWrite,
-        OrderedAction,
-        Flip,
         /// <summary>Closing and submitting the batched guest command buffer.</summary>
         Flush,
         /// <summary>vkQueueSubmit itself.</summary>
@@ -53,23 +102,60 @@ internal static class RenderPhaseProfile
         Present,
         /// <summary>vkQueuePresentKHR.</summary>
         QueuePresent,
+        BufferFaults,
+        ImageReadback,
+        ImageCollect,
+        BufferCollect,
+        ImageLookup,
+        ImageAcquire,
+        ImageCreate,
+        ImageDelete,
+        ImageRefresh,
+        ImageUpload,
+        ImageDownload,
+        ImageOverlap,
+        ImageTracking,
+        ImageTiling,
+        ImageTransitions,
+        DrawResources,
+        BufferResources,
+        DescriptorSetup,
+        PipelineSetup,
+        DrawRecording,
+        ResourceDestroy,
+        ImageVersions,
+        QueueRelay,
+        WindowLoop,
+        WindowEvents,
+        CursorUpdate,
+        GamepadPoll,
+        WindowState,
+        WindowDelay,
+        QueueContext,
+        PresentationPreparation,
+        GpuCompletionWait,
+        SubmissionCapacity,
+        CompletedSubmissionCleanup,
+        MovieFramePolling,
         Count,
     }
 
-    public static readonly bool Enabled = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_RENDER"),
-        "1",
-        StringComparison.Ordinal);
+    public static readonly bool Enabled =
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_RENDER"),
+            "1",
+            StringComparison.Ordinal) ||
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE"),
+            "1",
+            StringComparison.Ordinal);
 
-    /// <summary>
-    /// Breaks down the CPU-visible actions which are deliberately serialized
-    /// behind guest GPU work. This stays opt-in because it is diagnostic data,
-    /// not a normal render-thread cost.
-    /// </summary>
-    public static readonly bool OrderedActionDetailsEnabled = string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_ORDERED_ACTION"),
-        "1",
-        StringComparison.Ordinal);
+    internal static readonly bool FrameTraceEnabled =
+        Enabled &&
+        string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE"),
+            "1",
+            StringComparison.Ordinal);
 
     private static readonly double _reportSeconds =
         double.TryParse(
@@ -82,14 +168,158 @@ internal static class RenderPhaseProfile
     private static readonly long[] _ticks = new long[(int)Phase.Count];
     private static readonly long[] _entries = new long[(int)Phase.Count];
     private static long _frames;
-    private static long _windowStart = Stopwatch.GetTimestamp();
-    private static readonly Dictionary<string, OrderedActionStats> _orderedActions =
-        new(StringComparer.Ordinal);
+    private const int FrameTraceCapacity = 4096;
+    private static long[] _framePhaseTicks => FrameTraceStorage.PhaseTicks;
+    private static long[] _frameTrace => FrameTraceStorage.Records;
+    private static class FrameTraceStorage
+    {
+        internal static readonly long[] PhaseTicks = new long[(int)Phase.Count];
+        internal static readonly long[] Records = new long[FrameTraceCapacity * ((int)Phase.Count + 4)];
+    }
+    private static long _frameTraceCount;
+    private static long _previousFrameTimestamp;
+    private static long _lastSubmissionTimestamp;
+    private static long _submissionCount;
 
+    internal static void RecordSubmissionArrival()
+    {
+        if (!FrameTraceEnabled) return;
+        Interlocked.Exchange(ref _lastSubmissionTimestamp, Stopwatch.GetTimestamp());
+        Interlocked.Increment(ref _submissionCount);
+    }
+
+    // Keep recent presentation intervals in memory; format them only after the window stops.
+    internal static void WriteFrameTrace()
+    {
+        if (!FrameTraceEnabled) return;
+        var stride = (int)Phase.Count + 4;
+        var first = Math.Max(0, _frameTraceCount - FrameTraceCapacity);
+        Console.Error.WriteLine($"[PERF][FRAME_TRACE] frequency={Stopwatch.Frequency} retained={_frameTraceCount - first} overwritten={first}");
+        for (var sequence = first; sequence < _frameTraceCount; sequence++)
+        {
+            var offset = (int)(sequence % FrameTraceCapacity) * stride;
+            var parts = new List<string>();
+            for (var phase = 0; phase < (int)Phase.Count; phase++)
+            {
+                var ticks = _frameTrace[offset + 4 + phase];
+                if (ticks != 0) parts.Add($"{(Phase)phase}={ticks * 1000.0 / Stopwatch.Frequency:F3}");
+            }
+            Console.Error.WriteLine($"[PERF][FRAME] sequence={sequence} timestamp={_frameTrace[offset]} gap_ms={_frameTrace[offset + 1] * 1000.0 / Stopwatch.Frequency:F3} last_submission={_frameTrace[offset + 2]} submissions_total={_frameTrace[offset + 3]} {string.Join(" ", parts)}");
+        }
+        _frameTraceCount = 0;
+        _previousFrameTimestamp = 0;
+    }
+    internal enum CommandReadKind { Header, Payload, RegisterTable, Operand32, Operand64, Other, Count }
+    private static readonly long[] _commandReadCalls = new long[(int)CommandReadKind.Count];
+    private static readonly long[] _commandReadBytes = new long[(int)CommandReadKind.Count];
+
+    internal static void RecordCommandRead(CommandReadKind kind, int bytes)
+    {
+        if (!Enabled || _scopeDepth == 0)
+        {
+            return;
+        }
+
+        _commandReadCalls[(int)kind]++;
+        _commandReadBytes[(int)kind] += bytes;
+    }
+    internal static bool ImageUploadDetailsEnabled => Enabled && _scopeDepth > 0;
+
+    private readonly record struct ImageUploadKey(ulong Address, uint Width, uint Height, uint Depth,
+        uint Layers, uint Levels, uint Format, uint TileMode, string Reason,
+        string UploadPath, ulong WriteAddress, ulong WriteSize);
+
+    internal sealed class ImageUploadStatistics
+    {
+        public long Count;
+        public ulong SourceBytes;
+        public long WatchTicks;
+        public long SourceTicks;
+        public long RecordTicks;
+
+        public void Add(ulong sourceBytes, long watchTicks, long sourceTicks, long recordTicks)
+        {
+            Count++;
+            SourceBytes += sourceBytes;
+            WatchTicks += watchTicks;
+            SourceTicks += sourceTicks;
+            RecordTicks += recordTicks;
+        }
+    }
+
+    private static readonly Dictionary<ImageUploadKey, ImageUploadStatistics> _imageUploads = new();
+    private static ImageUploadStatistics _otherImageUploads = new();
+
+    internal static void RecordImageUpload(in SharpEmu.Libs.Gpu.Images.ImageDescription description,
+        string reason, long watchTicks, long sourceTicks, long recordTicks,
+        string uploadPath = "unknown", ulong writeAddress = 0, ulong writeSize = 0)
+    {
+        if (!ImageUploadDetailsEnabled)
+        {
+            return;
+        }
+
+        var key = new ImageUploadKey(description.Data.Address, description.Extent.Width,
+            description.Extent.Height, description.Extent.Depth, description.Resources.Layers,
+            description.Resources.Levels, (uint)description.PixelFormat, (uint)description.TileMode, reason,
+            uploadPath, writeAddress, writeSize);
+        if (!_imageUploads.TryGetValue(key, out var statistics))
+        {
+            // Bound diagnostic memory when a frame creates many distinct images.
+            if (_imageUploads.Count >= 256)
+            {
+                _otherImageUploads.Add(description.Data.Size, watchTicks, sourceTicks, recordTicks);
+                return;
+            }
+
+            statistics = new ImageUploadStatistics();
+            _imageUploads.Add(key, statistics);
+        }
+
+        statistics.Add(description.Data.Size, watchTicks, sourceTicks, recordTicks);
+    }
+
+    private static string FormatImageUploadStatistics(ImageUploadStatistics statistics) =>
+        $"uploads={statistics.Count} source_bytes={statistics.SourceBytes} " +
+        $"watch_ms={statistics.WatchTicks * 1000.0 / Stopwatch.Frequency:F2} " +
+        $"source_ms={statistics.SourceTicks * 1000.0 / Stopwatch.Frequency:F2} " +
+        $"record_ms={statistics.RecordTicks * 1000.0 / Stopwatch.Frequency:F2}";
+
+    private static void ReportImageUploads()
+    {
+        var ranked = _imageUploads.OrderByDescending(static pair =>
+            pair.Value.WatchTicks + pair.Value.SourceTicks + pair.Value.RecordTicks).ToArray();
+        foreach (var (key, statistics) in ranked.Take(8))
+        {
+            Console.Error.WriteLine($"[PERF][IMAGE_UPLOAD] address=0x{key.Address:X16} " +
+                $"size={key.Width}x{key.Height}x{key.Depth} layers={key.Layers} levels={key.Levels} " +
+                $"format={key.Format} tile={key.TileMode} reason={key.Reason} path={key.UploadPath} " +
+                $"write_address=0x{key.WriteAddress:X16} write_bytes={key.WriteSize} {FormatImageUploadStatistics(statistics)}");
+        }
+
+        foreach (var (_, statistics) in ranked.Skip(8))
+        {
+            _otherImageUploads.Count += statistics.Count;
+            _otherImageUploads.SourceBytes += statistics.SourceBytes;
+            _otherImageUploads.WatchTicks += statistics.WatchTicks;
+            _otherImageUploads.SourceTicks += statistics.SourceTicks;
+            _otherImageUploads.RecordTicks += statistics.RecordTicks;
+        }
+
+        if (_otherImageUploads.Count > 0)
+        {
+            Console.Error.WriteLine($"[PERF][IMAGE_UPLOAD] other=1 {FormatImageUploadStatistics(_otherImageUploads)}");
+        }
+
+        _imageUploads.Clear();
+        _otherImageUploads = new ImageUploadStatistics();
+    }
+    private static long _windowStart = Stopwatch.GetTimestamp();
     // The render loop is single-threaded, so plain fields are enough and keep
     // the per-scope cost to two timestamp reads.
     [ThreadStatic] private static Phase _current;
     [ThreadStatic] private static long _lastTimestamp;
+    [ThreadStatic] private static int _scopeDepth;
 
     internal readonly ref struct Scope
     {
@@ -110,6 +340,19 @@ internal static class RenderPhaseProfile
             }
 
             Charge(_previous);
+            _scopeDepth--;
+        }
+
+        // Switch sequential work in this scope. Nested scopes must finish first.
+        public void SwitchPhase(Phase phase)
+        {
+            if (!_active)
+            {
+                return;
+            }
+
+            Charge(phase);
+            _entries[(int)phase]++;
         }
     }
 
@@ -121,25 +364,17 @@ internal static class RenderPhaseProfile
         }
 
         var previous = Charge(phase);
+        _scopeDepth++;
         _entries[(int)phase]++;
         return new Scope(previous);
     }
 
-    public static void RecordOrderedAction(string debugName, bool completed)
-    {
-        if (!OrderedActionDetailsEnabled)
-        {
-            return;
-        }
+    // Cache calls on other threads must not enter the render-thread counters.
+    // Check the switch first to avoid thread-local storage allocation when profiling is disabled.
+    internal static Scope MeasureDetail(Phase phase) =>
+        Enabled && _scopeDepth > 0 ? Measure(phase) : default;
 
-        var category = GetOrderedActionCategory(debugName);
-        ref var stats = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(
-            _orderedActions,
-            category,
-            out _);
-        stats.Executed += completed ? 1 : 0;
-        stats.Deferred += completed ? 0 : 1;
-    }
+    internal static bool DetailMeasurementsEnabled => Enabled && _scopeDepth > 0;
 
     /// <summary>
     /// Closes out the running phase and switches to <paramref name="next"/>,
@@ -152,6 +387,10 @@ internal static class RenderPhaseProfile
         if (_lastTimestamp != 0)
         {
             _ticks[(int)previous] += now - _lastTimestamp;
+            if (FrameTraceEnabled)
+            {
+                _framePhaseTicks[(int)previous] += now - _lastTimestamp;
+            }
         }
 
         _lastTimestamp = now;
@@ -168,7 +407,21 @@ internal static class RenderPhaseProfile
         }
 
         _frames++;
+        Charge(_current);
         var now = Stopwatch.GetTimestamp();
+        if (FrameTraceEnabled)
+        {
+            var traceOffset = (int)(_frameTraceCount % FrameTraceCapacity) * ((int)Phase.Count + 4);
+            _frameTrace[traceOffset] = now;
+            _frameTrace[traceOffset + 1] = _previousFrameTimestamp == 0 ? 0 : now - _previousFrameTimestamp;
+            _frameTrace[traceOffset + 2] = Interlocked.Read(ref _lastSubmissionTimestamp);
+            _frameTrace[traceOffset + 3] = Interlocked.Read(ref _submissionCount);
+            Array.Copy(_framePhaseTicks, 0, _frameTrace, traceOffset + 4, (int)Phase.Count);
+            Array.Clear(_framePhaseTicks);
+            _previousFrameTimestamp = now;
+            _frameTraceCount++;
+        }
+
         var elapsedTicks = now - _windowStart;
         if (elapsedTicks < _reportSeconds * Stopwatch.Frequency)
         {
@@ -180,7 +433,7 @@ internal static class RenderPhaseProfile
         var frames = _frames;
         _frames = 0;
 
-        var parts = new List<(Phase Phase, double Percent, long Entries)>((int)Phase.Count);
+        var parts = new List<(Phase Phase, double Percent, long Entries, double Milliseconds)>((int)Phase.Count);
         var accounted = 0L;
         for (var index = 0; index < (int)Phase.Count; index++)
         {
@@ -194,7 +447,8 @@ internal static class RenderPhaseProfile
                 continue;
             }
 
-            parts.Add(((Phase)index, phaseTicks * 100.0 / elapsedTicks, entries));
+            parts.Add(((Phase)index, phaseTicks * 100.0 / elapsedTicks, entries,
+                phaseTicks * 1000.0 / Stopwatch.Frequency));
         }
 
         parts.Sort(static (left, right) => right.Percent.CompareTo(left.Percent));
@@ -207,46 +461,34 @@ internal static class RenderPhaseProfile
                     $"{part.Phase}={part.Percent:F1}%" +
                     (part.Entries > 0 ? $"/n{part.Entries}" : string.Empty))));
 
-        if (OrderedActionDetailsEnabled && _orderedActions.Count != 0)
+        Console.Error.WriteLine(
+            $"[PERF][RENDER_MS] window_s={seconds:F1} frames={frames} " +
+            string.Join(" ", parts.Select(part => $"{part.Phase}={part.Milliseconds:F2}ms/n{part.Entries}")));
+
+        ReportImageUploads();
+        BufferUploadProfile.Report();
+        Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeReport());
+        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Buffers.GuestBufferCache.TakeAsyncReadbackReport());
+        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Images.GuestImageCache.TakeLookupReport());
+        SharpEmu.ShaderCompiler.Resources.ResourceMaterializationProfile.WriteReport();
+        SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.WriteReport();
+        SharpEmu.HLE.GpuMemory.GpuMemoryAccessProfile.WriteReport();
+        WindowPollProfile.Report();
+        SharpEmu.HLE.GuestMemory.GuestMemoryProfile.WriteReport();
+        var commandReads = new List<string>();
+        for (var index = 0; index < (int)CommandReadKind.Count; index++)
         {
-            var ordered = _orderedActions
-                .OrderByDescending(static pair => pair.Value.Executed + pair.Value.Deferred)
-                .Take(12)
-                .Select(static pair =>
-                    $"{pair.Key}=ok{pair.Value.Executed}/defer{pair.Value.Deferred}");
-            Console.Error.WriteLine($"[PERF][ORDERED] {string.Join(" ", ordered)}");
-            _orderedActions.Clear();
+            if (_commandReadCalls[index] != 0)
+            {
+                commandReads.Add($"{(CommandReadKind)index}={_commandReadCalls[index]}/bytes{_commandReadBytes[index]}");
+            }
+            _commandReadCalls[index] = 0;
+            _commandReadBytes[index] = 0;
+        }
+        if (commandReads.Count != 0)
+        {
+            Console.Error.WriteLine($"[PERF][COMMAND_READS] window_s={seconds:F1} {string.Join(" ", commandReads)}");
         }
     }
 
-    private static string GetOrderedActionCategory(string debugName)
-    {
-        if (debugName.EndsWith(" completion", StringComparison.Ordinal))
-        {
-            return "completion";
-        }
-
-        var firstSpace = debugName.IndexOf(' ');
-        if (firstSpace < 0)
-        {
-            return debugName;
-        }
-
-        // AGC labels conventionally begin with "agc <packet>". Keeping the
-        // packet token separates DMA, submit and register traffic without
-        // retaining guest addresses in the diagnostic key.
-        if (debugName.StartsWith("agc ", StringComparison.Ordinal))
-        {
-            var secondSpace = debugName.IndexOf(' ', firstSpace + 1);
-            return secondSpace < 0 ? debugName : debugName[..secondSpace];
-        }
-
-        return debugName[..firstSpace];
-    }
-
-    private struct OrderedActionStats
-    {
-        public long Executed;
-        public long Deferred;
-    }
 }

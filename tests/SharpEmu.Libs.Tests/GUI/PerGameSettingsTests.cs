@@ -8,6 +8,34 @@ namespace SharpEmu.Libs.Tests.GUI;
 
 public sealed class PerGameSettingsTests
 {
+    [Fact]
+    public void NewGameInheritsWritableApp0AndGlobalCrashCapture()
+    {
+        var global = new GuiSettings();
+        global.EnvironmentToggles.Add("SHARPEMU_CRASH_CAPTURE");
+        var effective = EffectiveLaunchSettings.Resolve(global, new PerGameSettings());
+        Assert.Contains("SHARPEMU_WRITABLE_APP0", effective.EnvironmentToggles);
+        Assert.Contains("SHARPEMU_CRASH_CAPTURE", effective.EnvironmentToggles);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GameCrashDumpOverrideSurvivesReload(bool enabled)
+    {
+        var global = new GuiSettings();
+        if (!enabled)
+            global.EnvironmentToggles.Add("SHARPEMU_CRASH_CAPTURE");
+        var perGame = new PerGameSettings { EnvironmentToggles = ["SHARPEMU_WRITABLE_APP0"] };
+        if (enabled)
+            perGame.EnvironmentToggles.Add("SHARPEMU_CRASH_CAPTURE");
+        perGame.RemoveInheritedValues(global);
+        var restored = PerGameSettings.NormalizeFromJson(System.Text.Json.JsonSerializer.Serialize(perGame));
+        var effective = EffectiveLaunchSettings.Resolve(global, restored);
+        Assert.Equal(enabled, effective.EnvironmentToggles.Contains("SHARPEMU_CRASH_CAPTURE"));
+        Assert.Contains("SHARPEMU_WRITABLE_APP0", effective.EnvironmentToggles);
+    }
+
     // Invalid entries must not reach Environment.SetEnvironmentVariable.
     [Fact]
     public void NormalizeFromJson_NullOrEmptyToggleEntries_AreFilteredOut()

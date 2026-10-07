@@ -49,6 +49,7 @@ public sealed class AmprWriteAddressTests
         context[CpuRegister.Rdx] = 0x100;
 
         Assert.Equal(0, AmprExports.CommandBufferConstructor(context));
+        Assert.Equal(0, AmprExports.CommandBufferSetBuffer(context));
 
         context[CpuRegister.Rdi] = commandBufferAddress;
         context[CpuRegister.Rsi] = watcherAddress;

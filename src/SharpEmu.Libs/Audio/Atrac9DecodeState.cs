@@ -20,6 +20,8 @@ internal readonly record struct Atrac9DecodeResult(
     ulong TotalDecodedSamples,
     uint Frames);
 
+internal readonly record struct Atrac9Gapless(uint TotalSamples, ushort SkipSamples, ushort SkippedSamples);
+
 internal sealed class Atrac9DecodeState
 {
     internal const int ResultNotInitialized = 0x00000001;
@@ -47,6 +49,33 @@ internal sealed class Atrac9DecodeState
     private int _containerHeaderLength;
     private int _compressedLength;
     private ulong _totalDecodedSamples;
+    private Atrac9Gapless _gaplessInit;
+    private Atrac9Gapless _gapless;
+
+    public Atrac9Gapless Gapless
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _gapless;
+            }
+        }
+    }
+
+    public void SetGapless(uint totalSamples, ushort skipSamples, bool reset)
+    {
+        lock (_gate)
+        {
+            _gaplessInit = new Atrac9Gapless(totalSamples, skipSamples, 0);
+            if (reset || _gapless == default)
+            {
+                _gapless = _gaplessInit;
+            }
+        }
+    }
+
+    private bool HasSampleLimit => _gaplessInit.TotalSamples is not 0 and not uint.MaxValue;
 
     public Atrac9Config? Config
     {
@@ -82,6 +111,7 @@ internal sealed class Atrac9DecodeState
                 _compressedLength = 0;
                 _totalDecodedSamples = 0;
                 _containerHeaderLength = 0;
+                _gapless = _gaplessInit;
                 Trace(
                     $"initialized config={Convert.ToHexString(normalizedConfig)} channels={config.ChannelCount} " +
                     $"rate={config.SampleRate} frame_samples={config.FrameSamples} " +
@@ -114,6 +144,7 @@ internal sealed class Atrac9DecodeState
             _compressedLength = 0;
             _totalDecodedSamples = 0;
             _containerHeaderLength = 0;
+            _gapless = _gaplessInit;
             if (_compressed is not null)
             {
                 Array.Clear(_compressed);
@@ -153,7 +184,6 @@ internal sealed class Atrac9DecodeState
             }
 
             var bytesPerSample = GetBytesPerSample(encoding);
-            var outputBytesPerSuperframe = checked(config.SuperframeSamples * channels * bytesPerSample);
             var consumed = 0;
             var written = 0;
             uint frames = 0;
@@ -162,6 +192,11 @@ internal sealed class Atrac9DecodeState
             while (_compressedLength == config.SuperframeBytes ||
                    consumed < input.Length)
             {
+                if (HasSampleLimit && _gapless.TotalSamples == 0)
+                {
+                    break;
+                }
+
                 // Titles that stream whole .at9 files hand AJM the RIFF/WAVE
                 // container rather than a pointer into its `data` chunk, so the
                 // stream has to be advanced past the header before the first
@@ -202,7 +237,15 @@ internal sealed class Atrac9DecodeState
                     break;
                 }
 
-                if (output.Length - written < outputBytesPerSuperframe)
+                var skip = Math.Min(config.SuperframeSamples, (int)_gapless.SkipSamples);
+                var samples = config.SuperframeSamples - skip;
+                if (HasSampleLimit)
+                {
+                    samples = (int)Math.Min((uint)samples, _gapless.TotalSamples);
+                }
+
+                var outputBytes = checked(samples * channels * bytesPerSample);
+                if (output.Length - written < outputBytes)
                 {
                     status |= ResultNotEnoughRoom;
                     break;
@@ -231,14 +274,19 @@ internal sealed class Atrac9DecodeState
 
                 WriteInterleaved(
                     _planarPcm,
-                    output.Slice(written, outputBytesPerSuperframe),
-                    config.SuperframeSamples,
+                    output.Slice(written, outputBytes),
+                    skip,
+                    samples,
                     channels,
                     encoding);
 
-                written += outputBytesPerSuperframe;
+                _gapless = new Atrac9Gapless(
+                    HasSampleLimit ? _gapless.TotalSamples - (uint)samples : _gapless.TotalSamples,
+                    (ushort)(_gapless.SkipSamples - skip),
+                    (ushort)Math.Min(ushort.MaxValue, _gapless.SkippedSamples + config.SuperframeSamples - samples));
+                written += outputBytes;
                 _compressedLength = 0;
-                _totalDecodedSamples += unchecked((uint)config.SuperframeSamples);
+                _totalDecodedSamples += unchecked((uint)samples);
                 frames += unchecked((uint)config.FramesPerSuperframe);
 
                 if (!multipleFrames)
@@ -353,12 +401,13 @@ internal sealed class Atrac9DecodeState
     private static void WriteInterleaved(
         short[][] source,
         Span<byte> destination,
+        int firstSample,
         int samples,
         int channels,
         Atrac9PcmEncoding encoding)
     {
         var offset = 0;
-        for (var sample = 0; sample < samples; sample++)
+        for (var sample = firstSample; sample < firstSample + samples; sample++)
         {
             for (var channel = 0; channel < channels; channel++)
             {

@@ -18,18 +18,20 @@ public static class SysAbiExportShape
 
     public readonly struct Arguments
     {
-        public Arguments(string libraryName, string nid, string exportName, int target)
+        public Arguments(string libraryName, string nid, string exportName, int target, bool preferLle)
         {
             LibraryName = libraryName;
             Nid = nid;
             ExportName = exportName;
             Target = target;
+            PreferLle = preferLle;
         }
 
         public string LibraryName { get; }
         public string Nid { get; }
         public string ExportName { get; }
         public int Target { get; }
+        public bool PreferLle { get; }
     }
 
     /// <summary>
@@ -205,6 +207,7 @@ public static class SysAbiExportShape
         var nid = string.Empty;
         var exportName = string.Empty;
         var target = 0;
+        var preferLle = false;
         foreach (var argument in attribute.NamedArguments)
         {
             switch (argument.Key)
@@ -221,9 +224,12 @@ public static class SysAbiExportShape
                 case "Target":
                     target = argument.Value.Value is int value ? value : 0;
                     break;
+                case "PreferLle":
+                    preferLle = argument.Value.Value is bool boolValue && boolValue;
+                    break;
             }
         }
 
-        return new Arguments(libraryName, nid, exportName, target);
+        return new Arguments(libraryName, nid, exportName, target, preferLle);
     }
 }

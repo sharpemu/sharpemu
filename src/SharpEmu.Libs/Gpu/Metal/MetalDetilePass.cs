@@ -7,23 +7,8 @@ using SharpEmu.ShaderCompiler.Metal;
 
 namespace SharpEmu.Libs.Gpu.Metal;
 
-/// <summary>
-/// Metal twin of <c>VulkanDetilePass</c>: runs the ExactXor detile equation from
-/// <see cref="GnmTiling.GetDetileParams"/> as a Metal compute kernel
-/// (<see cref="MslFixedShaders.CreateDetileCompute"/>), writing a linear buffer
-/// and blitting it into the sampled texture.
-///
-/// <see cref="RecordDetile"/> records the compute dispatch + blit onto a caller's
-/// command buffer and returns its transient buffers for the caller to release
-/// once that command buffer completes — the async, non-blocking shape (Metal
-/// hazard-tracks the compute-write → blit-read → sample dependency automatically,
-/// so no manual barriers are needed).
-///
-/// Only ExactXor 4-bytes/element surfaces are handled. NOTE: authored on Windows;
-/// the MSL and every Metal call here are <b>Mac-untested</b> — mirrors the
-/// verified Vulkan logic and the existing Metal message-send conventions, but
-/// must be validated on a real Metal device.
-/// </summary>
+/// <summary>Converts four-byte ExactXor surfaces into sampled textures.
+/// Keep temporary buffers until the recorded commands complete.</summary>
 internal sealed unsafe class MetalDetilePass : IDisposable
 {
     private const uint LocalSize = 8;

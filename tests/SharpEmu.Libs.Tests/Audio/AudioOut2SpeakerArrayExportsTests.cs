@@ -12,7 +12,6 @@ public sealed class AudioOut2SpeakerArrayExportsTests
 {
     private const ulong MemoryBase = 0x1_0000_0000;
     private const ulong OutHandleAddress = MemoryBase + 0x100;
-    private const ulong ReservedAddress = MemoryBase + 0x120;
     private const ulong ParamAddress = MemoryBase + 0x200;
     private const ulong SpeakerMemoryAddress = MemoryBase + 0x400;
 
@@ -34,6 +33,13 @@ public sealed class AudioOut2SpeakerArrayExportsTests
         Span<byte> bytes = stackalloc byte[8];
         Assert.True(memory.TryRead(address, bytes));
         return BinaryPrimitives.ReadUInt64LittleEndian(bytes);
+    }
+
+    private static void WriteU32(FakeCpuMemory memory, ulong address, uint value)
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        Assert.True(memory.TryWrite(address, bytes));
     }
 
     private static uint ReadU32(FakeCpuMemory memory, ulong address)
@@ -69,62 +75,57 @@ public sealed class AudioOut2SpeakerArrayExportsTests
         Assert.Equal(0x640UL, ctx[CpuRegister.Rax]);
     }
 
+    // ABI: sceAudioOut2SpeakerArrayCreate(SceAudioOut2SpeakerArrayHandle *pHandle,
+    // const SceAudioOut2SpeakerArrayParam *pVbapParams,
+    // const SceAudioOut2AmbisonicsDecodeParam *pAmbiParams).
     [Fact]
-    public void SpeakerArrayCreate_PublishesObjectPointerAndLeavesReservedSizeAlone()
+    public void SpeakerArrayCreate_PublishesTheHandleToRdi()
     {
         var ctx = CreateContext(out var memory);
-        // Stage a size in the reserved slot the way callers do before Create.
-        WriteU64(memory, ReservedAddress, 0x100);
-        ctx[CpuRegister.Rdi] = ParamAddress;
-        ctx[CpuRegister.Rsi] = OutHandleAddress;
-        ctx[CpuRegister.Rdx] = ReservedAddress;
-        ctx[CpuRegister.Rcx] = 2;
+        // pVbapParams: uiNumSpeakers@0x08 = 2, pBuffer@0x10 = 0 (no caller buffer).
+        WriteU32(memory, ParamAddress + 0x08, 2);
+        ctx[CpuRegister.Rdi] = OutHandleAddress;
+        ctx[CpuRegister.Rsi] = ParamAddress;
+        ctx[CpuRegister.Rdx] = 0;
 
         var result = AudioOut2Exports.AudioOut2SpeakerArrayCreate(ctx);
 
         Assert.Equal(0, result);
-        Assert.NotEqual(0UL, ctx[CpuRegister.Rax]);
-        Assert.NotEqual(0x100UL, ctx[CpuRegister.Rax]);
-        Assert.Equal(ctx[CpuRegister.Rax], ReadU64(memory, OutHandleAddress));
-        // Reserved/size slot must remain untouched — writing it corrupted canaries.
-        Assert.Equal(0x100UL, ReadU64(memory, ReservedAddress));
+        var handle = ReadU64(memory, OutHandleAddress);
+        Assert.NotEqual(0UL, handle);
+        Assert.NotEqual(0x10000UL, handle);
     }
 
     [Fact]
-    public void SpeakerArrayCreate_PublishesHandleForTypicalCallShape()
+    public void SpeakerArrayCreate_UsesTheCallerSuppliedBufferAsTheHandle()
+    {
+        var ctx = CreateContext(out var memory);
+        WriteU32(memory, ParamAddress + 0x08, 2);
+        WriteU64(memory, ParamAddress + 0x10, SpeakerMemoryAddress);
+        WriteU64(memory, ParamAddress + 0x18, 0x1000);
+        ctx[CpuRegister.Rdi] = OutHandleAddress;
+        ctx[CpuRegister.Rsi] = ParamAddress;
+        ctx[CpuRegister.Rdx] = 0;
+
+        var result = AudioOut2Exports.AudioOut2SpeakerArrayCreate(ctx);
+
+        Assert.Equal(0, result);
+        Assert.Equal(SpeakerMemoryAddress, ReadU64(memory, OutHandleAddress));
+        // The object header records the speaker count the param block declared.
+        Assert.Equal(2u, ReadU32(memory, SpeakerMemoryAddress + 4));
+    }
+
+    [Fact]
+    public void SpeakerArrayCreate_RejectsANullHandleSlot()
     {
         var ctx = CreateContext(out _);
-        ctx[CpuRegister.Rdi] = ParamAddress;
-        ctx[CpuRegister.Rsi] = OutHandleAddress;
-        ctx[CpuRegister.Rdx] = ReservedAddress;
-        ctx[CpuRegister.Rcx] = 2;
+        ctx[CpuRegister.Rdi] = 0;
+        ctx[CpuRegister.Rsi] = ParamAddress;
+        ctx[CpuRegister.Rdx] = 0;
 
         var result = AudioOut2Exports.AudioOut2SpeakerArrayCreate(ctx);
 
-        Assert.Equal(0, result);
-        Assert.NotEqual(0UL, ctx[CpuRegister.Rax]);
-        Assert.NotEqual(0x10000UL, ctx[CpuRegister.Rax]);
-        Assert.NotEqual((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, result);
-    }
-
-    [Fact]
-    public void SpeakerArrayCreate_IgnoresCorruptedParamBufferFields()
-    {
-        var ctx = CreateContext(out var memory);
-        // Simulate PortGetState having overwritten param+0x18 (size) with a
-        // state blob — Create must NOT adopt that as an in-place buffer.
-        WriteU64(memory, ParamAddress + 0x10, SpeakerMemoryAddress);
-        WriteU64(memory, ParamAddress + 0x18, 0x100);
-        ctx[CpuRegister.Rdi] = ParamAddress;
-        ctx[CpuRegister.Rsi] = OutHandleAddress;
-        ctx[CpuRegister.Rdx] = ReservedAddress;
-        ctx[CpuRegister.Rcx] = 2;
-
-        var result = AudioOut2Exports.AudioOut2SpeakerArrayCreate(ctx);
-
-        Assert.Equal(0, result);
-        Assert.NotEqual(SpeakerMemoryAddress, ctx[CpuRegister.Rax]);
-        Assert.NotEqual(0x100UL, ctx[CpuRegister.Rax]);
+        Assert.Equal(unchecked((int)0x8026800C), result);
     }
 
     [Fact]

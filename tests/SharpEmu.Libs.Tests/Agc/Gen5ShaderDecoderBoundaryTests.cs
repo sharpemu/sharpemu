@@ -14,7 +14,7 @@ public sealed class Gen5ShaderDecoderBoundaryTests
     private const uint Export = 0xF8000000;
     private const uint Nop = 0xBF800000;
     private const uint EndPgm = 0xBF810000;
-    private const int MaximumInstructionCount = 16384;
+    private const int MaximumInstructionCount = 1024 * 1024 / sizeof(uint);
 
     [Fact]
     public void MissingAddress_IsRejectedWithoutReadingGuestMemory()
@@ -89,7 +89,7 @@ public sealed class Gen5ShaderDecoderBoundaryTests
 
         Assert.False(decoded);
         Assert.Empty(program.Instructions);
-        Assert.Equal("unterminated", error);
+        Assert.StartsWith("unterminated", error, StringComparison.Ordinal);
         Assert.Equal(MaximumInstructionCount, memory.Reads.Count);
         Assert.All(memory.Reads, read => Assert.True(read.Succeeded));
         Assert.Equal(
@@ -115,6 +115,43 @@ public sealed class Gen5ShaderDecoderBoundaryTests
         Assert.Equal(words.Length, program.Instructions.Count);
         Assert.Equal("SEndpgm", program.Instructions[^1].Opcode);
         Assert.Equal(words.Length, memory.Reads.Count);
+    }
+
+    [Fact]
+    public void TrailingBackwardBranch_StopsBeforeMetadataTrailer()
+    {
+        // Astro Bot: an out-of-line loop block after S_ENDPGM ends with an
+        // S_BRANCH back into the loop, followed by the "sl00" metadata block.
+        const uint CBranchScc0OverEndPgm = 0xBF840001u;
+        const uint BranchBackToStart = 0xBF82FFFCu;
+        const uint MetadataWord = 0x5D000040u;
+        var memory = RecordingCpuMemory.FromWords(
+            ShaderAddress,
+            [CBranchScc0OverEndPgm, EndPgm, Nop, BranchBackToStart, MetadataWord]);
+
+        var decoded = Decode(memory, ShaderAddress, out var program, out var error);
+
+        Assert.True(decoded, error);
+        Assert.Equal(4, program.Instructions.Count);
+        Assert.Equal("SBranch", program.Instructions[^1].Opcode);
+    }
+
+    [Fact]
+    public void DebuggerBranchPastEndPgm_DoesNotDecodeDebuggerStub()
+    {
+        // Astro Bot: S_CBRANCH_CDBGSYS jumps to a debugger stub after
+        // S_ENDPGM that loads descriptors from a devkit-only address.
+        const uint CBranchCdbgsysOverEndPgm = 0xBF970001u;
+        const uint StubMove = 0xBE8003FFu;
+        var memory = RecordingCpuMemory.FromWords(
+            ShaderAddress,
+            [CBranchCdbgsysOverEndPgm, EndPgm, StubMove]);
+
+        var decoded = Decode(memory, ShaderAddress, out var program, out var error);
+
+        Assert.True(decoded, error);
+        Assert.Equal(2, program.Instructions.Count);
+        Assert.Equal("SEndpgm", program.Instructions[^1].Opcode);
     }
 
     private static bool Decode(

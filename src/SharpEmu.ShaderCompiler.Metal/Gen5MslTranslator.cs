@@ -7,44 +7,7 @@ using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.ShaderCompiler.Metal;
 
-/// <summary>
-/// Gen5 (gfx10) -> Metal Shading Language codegen. Consumes the backend-neutral
-/// (Gen5ShaderState, Gen5ShaderEvaluation) contract out of Gen5ShaderTranslator /
-/// Gen5ShaderScalarEvaluator and emits MSL source text; the Metal renderer compiles
-/// it with MTLLibrary at bind time.
-///
-/// The execution model mirrors Gen5SpirvTranslator: one GPU invocation is one GCN
-/// lane (wave32 — natively the Apple simdgroup width), the register file is typeless
-/// 32-bit uints (float ALU bitcasts through as_type&lt;float&gt;), and control flow is a
-/// PC-dispatcher loop — a bounded while over a switch of GCN basic blocks — rather
-/// than reconstructed structured control flow. EXEC/VCC live in their architectural
-/// SGPRs (s106/s107, s126/s127) as raw data, with per-lane bools as synced views.
-/// Graphics stages model a single logical wave lane (lane 0, ballots degrade to bit
-/// 0, shuffle-family selects resolve to the lane's own value) — the SPIR-V
-/// translator's no-subgroup fallback — because Metal leaves simdgroup ops undefined
-/// inside the divergent dispatcher loop. Compute threads map one-to-one onto real
-/// simdgroup lanes and shuffle for real.
-///
-/// Wave64: 64-bit masks are carried faithfully as data — every B64 mask op,
-/// saveexec, and VCCZ/EXECZ test reads and writes the full register pair. A
-/// wave64 guest wave is two 32-wide Apple simdgroups co-resident in one
-/// threadgroup; cross-lane ops that span the full 64 lanes (ballots into
-/// EXEC/VCC, read-first-lane) rendezvous the two halves through threadgroup
-/// scratch with a barrier — the guest's scalar PC keeps all 64 lanes lockstep
-/// through the dispatcher, so the barriers are reached uniformly. This mirrors
-/// the SPIR-V translator's bridge and shares its scope: the scratch is indexed
-/// by half, so it is correct for a one-wave (64-thread) workgroup; readlane
-/// across halves stays a 32-wide shuffle (same as the SPIR-V path). Wave-
-/// agnostic wave64 kernels translate per-thread unchanged.
-///
-/// Buffer argument contract (documented for the Metal backend):
-///   [[buffer(globalBufferBase + i)]]  global memory binding i, in
-///                                     Gen5ShaderEvaluation.GlobalMemoryBindings order
-///   [[buffer(uniformsIndex)]]         one SharpEmuUniforms constant buffer holding the
-///                                     compute dispatch limit and per-buffer byte
-///                                     lengths, where uniformsIndex is
-///                                     globalBufferBase + totalGlobalBufferCount
-/// </summary>
+// Compiles shader requests into Metal source with argument-buffer bindings.
 public static partial class Gen5MslTranslator
 {
     private const uint ScalarRegisterFileCount = 128;
@@ -61,52 +24,8 @@ public static partial class Gen5MslTranslator
     private const uint ExecLoRegister = 126;
     private const uint ExecHiRegister = 127;
 
-    public static bool TryCompilePixelShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        Gen5PixelOutputKind outputKind,
-        out Gen5MslShader shader,
-        out string error,
-        int globalBufferBase = 0,
-        int totalGlobalBufferCount = -1,
-        int imageBindingBase = 0,
-        int initialScalarBufferIndex = -1,
-        int pixelRenderTargetSlot = 0,
-        uint pixelInputEnable = 0,
-        uint pixelInputAddress = 0,
-        IReadOnlyList<uint>? pixelInputCntl = null,
-        ulong storageBufferOffsetAlignment = 1) =>
-        TryCompilePixelShader(
-            state,
-            evaluation,
-            [new Gen5PixelOutputBinding((uint)pixelRenderTargetSlot, 0, outputKind)],
-            out shader,
-            out error,
-            globalBufferBase,
-            totalGlobalBufferCount,
-            imageBindingBase,
-            initialScalarBufferIndex,
-            pixelInputEnable,
-            pixelInputAddress,
-            pixelInputCntl,
-            storageBufferOffsetAlignment);
-
-    public static bool TryCompilePixelShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        IReadOnlyList<Gen5PixelOutputBinding> outputs,
-        out Gen5MslShader shader,
-        out string error,
-        int globalBufferBase = 0,
-        int totalGlobalBufferCount = -1,
-        int imageBindingBase = 0,
-        int initialScalarBufferIndex = -1,
-        uint pixelInputEnable = 0,
-        uint pixelInputAddress = 0,
-        IReadOnlyList<uint>? pixelInputCntl = null,
-        ulong storageBufferOffsetAlignment = 1)
+    private static bool ValidatePixelOutputs(IReadOnlyList<Gen5PixelOutputBinding> outputs, out string error)
     {
-        shader = default!;
         error = string.Empty;
         if (outputs.Count > 8)
         {
@@ -149,81 +68,7 @@ public static partial class Gen5MslTranslator
             }
         }
 
-        var context = new CompilationContext(
-            Gen5MslStage.Pixel,
-            state,
-            evaluation,
-            1,
-            1,
-            1,
-            globalBufferBase,
-            totalGlobalBufferCount,
-            initialScalarBufferIndex,
-            waveLaneCount: 32,
-            storageBufferOffsetAlignment,
-            pixelOutputBindings: outputs,
-            imageBindingBase: imageBindingBase,
-            pixelInputEnable: pixelInputEnable,
-            pixelInputAddress: pixelInputAddress,
-            pixelInputCntl: pixelInputCntl);
-        return context.TryCompile(out shader, out error);
-    }
-
-    public static bool TryCompileVertexShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        out Gen5MslShader shader,
-        out string error,
-        int globalBufferBase = 0,
-        int totalGlobalBufferCount = -1,
-        int imageBindingBase = 0,
-        int initialScalarBufferIndex = -1,
-        int requiredVertexOutputCount = 0,
-        ulong storageBufferOffsetAlignment = 1)
-    {
-        var context = new CompilationContext(
-            Gen5MslStage.Vertex,
-            state,
-            evaluation,
-            1,
-            1,
-            1,
-            globalBufferBase,
-            totalGlobalBufferCount,
-            initialScalarBufferIndex,
-            waveLaneCount: 32,
-            storageBufferOffsetAlignment,
-            imageBindingBase: imageBindingBase,
-            requiredVertexOutputCount: requiredVertexOutputCount);
-        return context.TryCompile(out shader, out error);
-    }
-
-    public static bool TryCompileComputeShader(
-        Gen5ShaderState state,
-        Gen5ShaderEvaluation evaluation,
-        uint localSizeX,
-        uint localSizeY,
-        uint localSizeZ,
-        out Gen5MslShader shader,
-        out string error,
-        int totalGlobalBufferCount = -1,
-        int initialScalarBufferIndex = -1,
-        uint waveLaneCount = 32,
-        ulong storageBufferOffsetAlignment = 1)
-    {
-        var context = new CompilationContext(
-            Gen5MslStage.Compute,
-            state,
-            evaluation,
-            Math.Max(localSizeX, 1),
-            Math.Max(localSizeY, 1),
-            Math.Max(localSizeZ, 1),
-            globalBufferBase: 0,
-            totalGlobalBufferCount,
-            initialScalarBufferIndex,
-            waveLaneCount,
-            storageBufferOffsetAlignment);
-        return context.TryCompile(out shader, out error);
+        return true;
     }
 
     private sealed partial class CompilationContext
@@ -238,38 +83,19 @@ public static partial class Gen5MslTranslator
                 ? maxSteps
                 : 100_000;
 
-        private const long InitialScalarDefinition = -1;
-        private const long ConflictingScalarDefinition = -2;
-        private const long UnreachableScalarDefinition = -3;
-
         private readonly Gen5MslStage _stage;
-        private readonly Gen5ShaderState _state;
-        private readonly Gen5ShaderEvaluation _evaluation;
         private readonly uint _localSizeX;
         private readonly uint _localSizeY;
         private readonly uint _localSizeZ;
-        private readonly int _globalBufferBase;
-        private readonly int _totalGlobalBufferCount;
-        private readonly int _initialScalarBufferIndex;
         private readonly uint _waveLaneCount;
-        private readonly ulong _storageBufferOffsetAlignment;
-        private readonly Dictionary<uint, long[]> _scalarDefinitionsBeforePc = [];
         private readonly IReadOnlyList<Gen5PixelOutputBinding> _pixelOutputBindings;
-        private readonly int _imageBindingBase;
+        private readonly bool _usesPixelValidMask;
         private readonly uint _pixelInputEnable;
         private readonly uint _pixelInputAddress;
         private readonly uint[] _pixelInputCntl;
-        private readonly Dictionary<uint, int> _imageBindingByPc = [];
-        private readonly Dictionary<uint, int> _bufferBindingByPc = [];
-        private readonly List<(bool IsStorage, string ComponentKind)> _imageKinds = [];
-        // Per storage-image binding: whether the body reads it, writes it, or
-        // both. Metal caps access::read_write textures at 8 per function, so each
-        // binding is declared with the minimal access it actually uses.
-        private bool[] _imageBindingReads = [];
-        private bool[] _imageBindingWrites = [];
         private readonly SortedSet<uint> _pixelAttributes = [];
         private readonly SortedSet<uint> _vertexOutputs = [];
-        private readonly Dictionary<uint, Gen5VertexInputBinding> _vertexInputsByPc = [];
+        private readonly Dictionary<uint, ShaderVertexInput> _vertexInputsByPc = [];
         private readonly int _requiredVertexOutputCount;
         private readonly StringBuilder _body = new();
         private int _indent;
@@ -283,62 +109,6 @@ public static partial class Gen5MslTranslator
         /// single-lane model regardless of guest wave size).</summary>
         private bool IsWave64 => _waveLaneCount == 64 && _stage == Gen5MslStage.Compute;
 
-        public CompilationContext(
-            Gen5MslStage stage,
-            Gen5ShaderState state,
-            Gen5ShaderEvaluation evaluation,
-            uint localSizeX,
-            uint localSizeY,
-            uint localSizeZ,
-            int globalBufferBase,
-            int totalGlobalBufferCount,
-            int initialScalarBufferIndex,
-            uint waveLaneCount,
-            ulong storageBufferOffsetAlignment,
-            IReadOnlyList<Gen5PixelOutputBinding>? pixelOutputBindings = null,
-            int imageBindingBase = 0,
-            uint pixelInputEnable = 0,
-            uint pixelInputAddress = 0,
-            IReadOnlyList<uint>? pixelInputCntl = null,
-            int requiredVertexOutputCount = 0)
-        {
-            _pixelOutputBindings = pixelOutputBindings ?? [];
-            _imageBindingBase = imageBindingBase;
-            _pixelInputEnable = pixelInputEnable;
-            _pixelInputAddress = pixelInputAddress;
-            _pixelInputCntl = new uint[32];
-            for (uint i = 0; i < 32u; i++)
-            {
-                _pixelInputCntl[i] = pixelInputCntl is not null && i < (uint)pixelInputCntl.Count
-                    ? pixelInputCntl[(int)i]
-                    : i;
-            }
-            _requiredVertexOutputCount = requiredVertexOutputCount;
-            _stage = stage;
-            _state = state;
-            _evaluation = evaluation;
-            _localSizeX = localSizeX;
-            _localSizeY = localSizeY;
-            _localSizeZ = localSizeZ;
-            _globalBufferBase = globalBufferBase;
-            _totalGlobalBufferCount = totalGlobalBufferCount < 0
-                ? evaluation.GlobalMemoryBindings.Count
-                : totalGlobalBufferCount;
-            _initialScalarBufferIndex = initialScalarBufferIndex;
-            _waveLaneCount = waveLaneCount == 64 ? 64u : 32u;
-            if (storageBufferOffsetAlignment == 0 ||
-                (storageBufferOffsetAlignment & (storageBufferOffsetAlignment - 1)) != 0 ||
-                storageBufferOffsetAlignment > uint.MaxValue)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(storageBufferOffsetAlignment),
-                    storageBufferOffsetAlignment,
-                    "storage-buffer offset alignment must be a uint-sized power of two");
-            }
-
-            _storageBufferOffsetAlignment = storageBufferOffsetAlignment;
-        }
-
         public bool TryCompile(out Gen5MslShader shader, out string error)
         {
             shader = default!;
@@ -351,19 +121,23 @@ public static partial class Gen5MslTranslator
                 // ops are wave-size-agnostic and need no scratch.
                 _usesWaveScratch = IsWave64 && UsesWaveSensitiveOperations();
 
-                var blocks = BuildBasicBlocks(_state.Program.Instructions);
+                var blocks = BuildBasicBlocks(_request.Program.Instructions);
                 if (blocks.Count == 0)
                 {
                     error = "shader contains no executable blocks";
                     return false;
                 }
 
-                BuildScalarDefinitionInfo(blocks, _state.Program.Instructions);
-                DeclareImageKinds();
-                foreach (var instruction in _state.Program.Instructions)
                 {
-                    _usesLds |= instruction.Control is Gen5DataShareControl { Gds: false };
-                    _usesFormatLoads |= IsFormatBufferLoad(instruction.Opcode);
+                    DeclareLayoutBindings();
+                }
+
+                foreach (var instruction in _request.Program.Instructions)
+                {
+                    _usesLds |= instruction.Control is Gen5DataShareControl { Gds: false } &&
+                        instruction.Opcode is not ("DsSwizzleB32" or "DsBpermuteB32");
+                    _usesFormatLoads |= IsFormatBufferLoad(instruction.Opcode) ||
+                        instruction.Opcode.StartsWith("TBufferStoreFormat", StringComparison.Ordinal);
                     if (instruction.Control is Gen5InterpolationControl interpolationControl)
                     {
                         _pixelAttributes.Add(interpolationControl.Attribute);
@@ -387,7 +161,7 @@ public static partial class Gen5MslTranslator
                         _vertexOutputs.Add(location);
                     }
 
-                    foreach (var input in _evaluation.VertexInputs ?? [])
+                    foreach (var input in _request.VertexInputs)
                     {
                         if (input.ComponentCount is >= 1 and <= 4)
                         {
@@ -428,25 +202,16 @@ public static partial class Gen5MslTranslator
                     source.ToString(),
                     EntryPointName,
                     _stage,
-                    _evaluation.GlobalMemoryBindings,
-                    _evaluation.ImageBindings,
                     AttributeCount: _stage switch
                     {
                         Gen5MslStage.Pixel => (uint)_pixelAttributes.Count,
                         Gen5MslStage.Vertex => (uint)_vertexOutputs.Count,
                         _ => 0,
                     },
-                    VertexInputs: _stage == Gen5MslStage.Vertex
-                        ? _evaluation.VertexInputs ?? []
-                        : [],
                     _localSizeX,
                     _localSizeY,
                     _localSizeZ,
-                    UniformsBufferIndex: UniformsBufferIndex,
-                    ImageBindingBase: _imageBindingBase,
-                    SamplerSlots: _samplerSlots,
-                    SamplerCount: _samplerCount,
-                    SamplerArgBufferIndex: _samplerCount > 0 ? SamplerArgBufferIndex : -1);
+                    ArgumentLayout: _argumentLayout);
                 return true;
             }
             catch (Exception exception)
@@ -461,12 +226,13 @@ public static partial class Gen5MslTranslator
         /// A program without them is wave-size-agnostic.</summary>
         private bool UsesWaveSensitiveOperations()
         {
-            foreach (var instruction in _state.Program.Instructions)
+            foreach (var instruction in _request.Program.Instructions)
             {
                 if (instruction.Control is Gen5DppControl or Gen5Dpp8Control ||
                     instruction.Opcode is "VPermlane16B32" or "VPermlanex16B32"
                         or "VReadlaneB32" or "VReadfirstlaneB32"
-                        or "VMbcntLoU32B32" or "VMbcntHiU32B32" ||
+                        or "VMbcntLoU32B32" or "VMbcntHiU32B32"
+                        or "DsAppend" or "DsConsume" ||
                     instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) ||
                     instruction.Opcode.StartsWith("SCbranchExec", StringComparison.Ordinal) ||
                     instruction.Opcode.StartsWith("SCbranchVcc", StringComparison.Ordinal) ||
@@ -525,8 +291,6 @@ public static partial class Gen5MslTranslator
             _ => "gen5_cs",
         };
 
-        private int UniformsBufferIndex => _globalBufferBase + _totalGlobalBufferCount;
-
         private void EmitModule(StringBuilder source, int blockCount)
         {
             source.AppendLine("// Generated by SharpEmu Gen5MslTranslator.");
@@ -543,16 +307,12 @@ public static partial class Gen5MslTranslator
                 EmitFormatLoadPrelude(source);
             }
 
-            source.AppendLine("struct SharpEmuUniforms");
-            source.AppendLine("{");
-            source.AppendLine("    uint dispatch_limit_x;");
-            source.AppendLine("    uint dispatch_limit_y;");
-            source.AppendLine("    uint dispatch_limit_z;");
-            source.AppendLine("    uint reserved;");
-            source.AppendLine($"    uint buffer_bytes[{Math.Max(_totalGlobalBufferCount, 1)}];");
-            source.AppendLine("};");
-            source.AppendLine();
-            EmitSamplerArgumentBufferStruct(source);
+            {
+                // A request binds one argument buffer per stage; its lengths replace the uniforms.
+                EmitResourcePrelude(source);
+                EmitResourceStruct(source);
+            }
+
             EmitPrelude(source);
             source.AppendLine();
 
@@ -573,9 +333,15 @@ public static partial class Gen5MslTranslator
                             continue;
                         }
 
+                        var componentType = input.NumberFormat switch
+                        {
+                            4u => "uint",
+                            5u => "int",
+                            _ => "float",
+                        };
                         var fieldType = input.ComponentCount == 1
-                            ? "float"
-                            : $"float{input.ComponentCount}";
+                            ? componentType
+                            : $"{componentType}{input.ComponentCount}";
                         source.AppendLine(
                             $"    {fieldType} in{input.Location} [[attribute({input.Location})]];");
                     }
@@ -607,15 +373,19 @@ public static partial class Gen5MslTranslator
                 source.AppendLine("struct Gen5PsIn");
                 source.AppendLine("{");
                 source.AppendLine("    float4 sharpemu_frag_coord [[position]];");
-                foreach (var attribute in _pixelAttributes)
+                var attributes = _pixelAttributes.ToArray();
+                var locations = Gen5PixelInputMapping.ResolveLocations(
+                    _pixelInputCntl,
+                    attributes);
+                for (var index = 0; index < attributes.Length; index++)
                 {
+                    var attribute = attributes[index];
                     var cntl = attribute < (uint)_pixelInputCntl.Length
                         ? _pixelInputCntl[attribute]
                         : attribute;
-                    var location = cntl & 0x1Fu;
                     var flat = (cntl & 0x400u) != 0 ? ", flat" : string.Empty;
                     source.AppendLine(
-                        $"    float4 attr{attribute} [[user(locn{location}){flat}]];");
+                        $"    float4 attr{attribute} [[user(locn{locations[index]}){flat}]];");
                 }
 
                 source.AppendLine("};");
@@ -644,24 +414,10 @@ public static partial class Gen5MslTranslator
                 source.AppendLine($"kernel void {EntryPointName}(");
             }
 
-            for (var index = 0; index < _evaluation.GlobalMemoryBindings.Count; index++)
             {
-                source.AppendLine(
-                    $"    device uint* b{index} [[buffer({_globalBufferBase + index})]],");
+                EmitResourceParameters(source);
             }
 
-            if (_initialScalarBufferIndex >= 0)
-            {
-                // The per-dispatch scalar-state buffer sits at its flat slot,
-                // past every stage's global bindings; the shader only reads it.
-                source.AppendLine(
-                    $"    const device uint* b{_initialScalarBufferIndex} " +
-                    $"[[buffer({_initialScalarBufferIndex})]],");
-            }
-
-            source.AppendLine(
-                $"    constant SharpEmuUniforms& sharpemu_uniforms [[buffer({UniformsBufferIndex})]],");
-            EmitImageArguments(source);
             if (_stage == Gen5MslStage.Compute)
             {
                 source.AppendLine("    uint3 sharpemu_local_id [[thread_position_in_threadgroup]],");
@@ -779,9 +535,13 @@ public static partial class Gen5MslTranslator
             source.AppendLine("    }");
             if (_stage == Gen5MslStage.Pixel)
             {
-                // A lane still removed from EXEC when the guest shader exits is
-                // a killed fragment; it must not contribute color or blending.
-                source.AppendLine("    if (!exec)");
+                // EXP.VM publishes EXEC as the pixel-valid mask. EXEC can be
+                // restored afterward, so only malformed shaders without VM
+                // fall back to the final EXEC value.
+                source.AppendLine(
+                    _usesPixelValidMask
+                        ? "    if (!pixel_valid_mask_active)"
+                        : "    if (!exec)");
                 source.AppendLine("    {");
                 source.AppendLine("        discard_fragment();");
                 source.AppendLine("    }");
@@ -846,7 +606,7 @@ public static partial class Gen5MslTranslator
 
             var layoutCases = new StringBuilder();
             var first = true;
-            foreach (var (component, format, bytes, bitOffset, bitCount) in FormatComponentLayouts())
+            foreach (var (component, format, bytes, bitOffset, bitCount) in Gfx10UnifiedFormat.ComponentLayouts)
             {
                 if (!first)
                 {
@@ -864,62 +624,15 @@ public static partial class Gen5MslTranslator
                 ("layout_cases", layoutCases.ToString())));
         }
 
-        /// <summary>
-        /// The legacy DATA_FORMAT component layouts the SPIR-V translator encodes
-        /// in LoadGfx10BufferFormatComponent, as (component, format, byteOffset,
-        /// bitOffset, bitCount) tuples.
-        /// </summary>
-        private static IEnumerable<(uint Component, uint Format, uint Bytes, uint BitOffset, uint BitCount)> FormatComponentLayouts()
-        {
-            // Component 0.
-            yield return (0, 1, 0, 0, 8);
-            yield return (0, 2, 0, 0, 16);
-            yield return (0, 3, 0, 0, 8);
-            yield return (0, 4, 0, 0, 32);
-            yield return (0, 5, 0, 0, 16);
-            yield return (0, 6, 0, 0, 10);
-            yield return (0, 7, 0, 0, 11);
-            yield return (0, 8, 0, 0, 10);
-            yield return (0, 9, 0, 0, 2);
-            yield return (0, 10, 0, 0, 8);
-            yield return (0, 11, 0, 0, 32);
-            yield return (0, 12, 0, 0, 16);
-            yield return (0, 13, 0, 0, 32);
-            yield return (0, 14, 0, 0, 32);
-            // Component 1.
-            yield return (1, 3, 1, 0, 8);
-            yield return (1, 5, 2, 0, 16);
-            yield return (1, 6, 0, 10, 11);
-            yield return (1, 7, 0, 11, 11);
-            yield return (1, 8, 0, 10, 10);
-            yield return (1, 9, 0, 2, 10);
-            yield return (1, 10, 1, 0, 8);
-            yield return (1, 11, 4, 0, 32);
-            yield return (1, 12, 2, 0, 16);
-            yield return (1, 13, 4, 0, 32);
-            yield return (1, 14, 4, 0, 32);
-            // Component 2.
-            yield return (2, 6, 0, 21, 11);
-            yield return (2, 7, 0, 22, 10);
-            yield return (2, 8, 0, 20, 10);
-            yield return (2, 9, 0, 12, 10);
-            yield return (2, 10, 2, 0, 8);
-            yield return (2, 12, 4, 0, 16);
-            yield return (2, 13, 8, 0, 32);
-            yield return (2, 14, 8, 0, 32);
-            // Component 3.
-            yield return (3, 8, 0, 30, 2);
-            yield return (3, 9, 0, 22, 10);
-            yield return (3, 10, 3, 0, 8);
-            yield return (3, 12, 6, 0, 16);
-            yield return (3, 14, 12, 0, 32);
-        }
-
         private void EmitRegisterFile(StringBuilder source)
         {
             source.AppendLine($"    uint s[{ScalarRegisterFileCount}] = {{}};");
             source.AppendLine($"    uint v[{VectorRegisterFileCount}] = {{}};");
             source.AppendLine("    bool exec = true;");
+            if (_usesPixelValidMask)
+            {
+                source.AppendLine("    bool pixel_valid_mask_active = true;");
+            }
             source.AppendLine("    bool vcc = false;");
             source.AppendLine("    bool scc = false;");
             source.AppendLine("    uint pc = 0u;");
@@ -929,49 +642,8 @@ public static partial class Gen5MslTranslator
 
         private void EmitInitialState(StringBuilder source)
         {
-            if (_initialScalarBufferIndex >= 0)
             {
-                // Initial scalar registers arrive in a per-dispatch buffer so
-                // animated user data reuses one translation, mirroring the
-                // SPIR-V translator. Word 256+i of the same buffer carries the
-                // per-binding byte bias for suballocated guest buffers.
-                var consumed = Gen5ShaderTranslator.ComputeConsumedScalarMask(_state.Program);
-                for (uint index = 0;
-                     index < _evaluation.InitialScalarRegisters.Count &&
-                     index < ScalarRegisterFileCount;
-                     index++)
-                {
-                    if (Gen5ShaderTranslator.IsScalarConsumed(consumed, index))
-                    {
-                        source.AppendLine(
-                            $"    s[{index}] = b{_initialScalarBufferIndex}[{index}];");
-                    }
-                }
-
-                var biasCount = _globalBufferBase + _evaluation.GlobalMemoryBindings.Count;
-                source.AppendLine($"    uint bias[{Math.Max(biasCount, 1)}] = {{}};");
-                for (var binding = 0; binding < biasCount; binding++)
-                {
-                    source.AppendLine(
-                        $"    bias[{binding}] = b{_initialScalarBufferIndex}[{256 + binding}];");
-                }
-            }
-            else
-            {
-                for (uint index = 0;
-                     index < _evaluation.InitialScalarRegisters.Count &&
-                     index < ScalarRegisterFileCount;
-                     index++)
-                {
-                    var value = _evaluation.InitialScalarRegisters[(int)index];
-                    if (value != 0)
-                    {
-                        source.AppendLine($"    s[{index}] = 0x{value:X}u;");
-                    }
-                }
-
-                var biasCount = _globalBufferBase + _evaluation.GlobalMemoryBindings.Count;
-                source.AppendLine($"    uint bias[{Math.Max(biasCount, 1)}] = {{}};");
+                EmitLayoutInitialState(source);
             }
 
             if (_stage == Gen5MslStage.Compute)
@@ -984,13 +656,13 @@ public static partial class Gen5MslTranslator
                 // guest dispatch stay inactive, matching the SPIR-V bounds
                 // check driven by the same uniform.
                 source.AppendLine(
-                    $"    active = (sharpemu_group_id.x * {_localSizeX}u + sharpemu_local_id.x) < sharpemu_uniforms.dispatch_limit_x");
+                    $"    active = (sharpemu_group_id.x * {_localSizeX}u + sharpemu_local_id.x) < {ComputeThreadLimit(0)}");
                 source.AppendLine(
-                    $"        && (sharpemu_group_id.y * {_localSizeY}u + sharpemu_local_id.y) < sharpemu_uniforms.dispatch_limit_y");
+                    $"        && (sharpemu_group_id.y * {_localSizeY}u + sharpemu_local_id.y) < {ComputeThreadLimit(1)}");
                 source.AppendLine(
-                    $"        && (sharpemu_group_id.z * {_localSizeZ}u + sharpemu_local_id.z) < sharpemu_uniforms.dispatch_limit_z;");
+                    $"        && (sharpemu_group_id.z * {_localSizeZ}u + sharpemu_local_id.z) < {ComputeThreadLimit(2)};");
 
-                if (_state.ComputeSystemRegisters is { } registers)
+                if (_request.ComputeSystemRegisters is { } registers)
                 {
                     EmitComputeSystemRegister(source, registers.WorkGroupXRegister, "sharpemu_group_id.x");
                     EmitComputeSystemRegister(source, registers.WorkGroupYRegister, "sharpemu_group_id.y");
@@ -1075,7 +747,7 @@ public static partial class Gen5MslTranslator
         {
             error = string.Empty;
             var block = blocks[blockIndex];
-            var instructions = _state.Program.Instructions;
+            var instructions = _request.Program.Instructions;
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
                 var instruction = instructions[index];
@@ -1186,6 +858,11 @@ public static partial class Gen5MslTranslator
                 "SCbranchVccnz" => $"(s[{VccLoRegister}] | s[{VccHiRegister}]) != 0u",
                 "SCbranchExecz" => $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) == 0u",
                 "SCbranchExecnz" => $"(s[{ExecLoRegister}] | s[{ExecHiRegister}]) != 0u",
+                // The emulator does not expose a shader debug session.
+                "SCbranchCdbgsys" or
+                "SCbranchCdbguser" or
+                "SCbranchCdbgsysOrUser" or
+                "SCbranchCdbgsysAndUser" => "false",
                 _ => string.Empty,
             };
             return condition.Length != 0;
@@ -1227,10 +904,16 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             switch (instruction.Opcode)
             {
+                // No shader trap handler is installed, so S_TRAP has no effect.
+                case "STrap":
+                    return true;
                 case "SNop":
+                case "SSetregB32":
                 case "SWaitcnt":
                 case "SInstPrefetch":
                 case "STtraceData":
+                // Wave scheduling priority hint; no effect on results.
+                case "SSetprio":
                 case "SClause":
                 case "VNop":
                 // NGG shaders bracket their exports with s_sendmsg
@@ -1300,48 +983,9 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
-            var scalarAddress = instruction.Sources.Count != 0 &&
-                instruction.Sources[0].Kind == Gen5OperandKind.ScalarRegister
-                ? instruction.Sources[0].Value
-                : uint.MaxValue;
-            if (!TryResolveDominatingBufferBinding(
-                    instruction.Pc,
-                    scalarAddress,
-                    registerCount: instruction.Opcode.StartsWith(
-                        "SBufferLoad",
-                        StringComparison.Ordinal) ? 4u : 2u,
-                    out var bindingIndex))
             {
-                foreach (var destination in instruction.Destinations)
-                {
-                    if (destination.Kind == Gen5OperandKind.ScalarRegister)
-                    {
-                        StoreScalar(destination.Value, "0u");
-                    }
-                }
-
-                return true;
+                return TryEmitLayoutScalarMemory(instruction, control, out error);
             }
-
-            var offset = control.DynamicOffsetRegister is { } register
-                ? $"(s[{register}] + 0x{unchecked((uint)control.ImmediateOffsetBytes):X}u)"
-                : $"0x{unchecked((uint)control.ImmediateOffsetBytes):X}u";
-            var address = Temp("uint", ApplyByteBias(bindingIndex, offset));
-            for (var index = 0; index < instruction.Destinations.Count; index++)
-            {
-                var destination = instruction.Destinations[index];
-                if (destination.Kind != Gen5OperandKind.ScalarRegister)
-                {
-                    error = "invalid scalar-memory destination";
-                    return false;
-                }
-
-                StoreScalar(
-                    destination.Value,
-                    LoadWord(bindingIndex, $"({address} + {index * 4}u)"));
-            }
-
-            return true;
         }
 
         private bool TryEmitGlobalMemory(
@@ -1350,29 +994,9 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
-            if (!TryResolveDominatingBufferBinding(
-                    instruction.Pc,
-                    control.ScalarAddress,
-                    registerCount: 2,
-                    out var bindingIndex))
             {
-                error = "missing global-memory binding";
-                return false;
+                return TryEmitLayoutGlobalMemory(instruction, control, out error);
             }
-
-            var address = Temp(
-                "uint",
-                ApplyByteBias(
-                    bindingIndex,
-                    $"(v[{control.VectorAddress}] + 0x{unchecked((uint)control.OffsetBytes):X}u)"));
-            return TryEmitResolvedMemoryAccess(
-                instruction.Opcode,
-                bindingIndex,
-                address,
-                control.VectorData,
-                control.DwordCount,
-                control.Glc,
-                out error);
         }
 
         private bool TryEmitBufferMemory(
@@ -1381,26 +1005,38 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
+            if (control.Typed && instruction.Opcode.Contains("D16", StringComparison.Ordinal))
+            {
+                error = $"unsupported buffer opcode {instruction.Opcode}";
+                return false;
+            }
+
             if (_stage == Gen5MslStage.Vertex &&
                 _vertexInputsByPc.TryGetValue(instruction.Pc, out var vertexInput))
             {
                 return TryEmitVertexInputFetch(control, vertexInput, out error);
             }
 
-            if (!TryResolveDominatingBufferBinding(
-                    instruction.Pc,
-                    control.ScalarResource,
-                    registerCount: 4,
-                    out var bindingIndex))
+            int bindingIndex;
+            string stride;
+            string descriptorWord3;
+            uint descriptorFormat;
             {
-                error = "missing buffer-memory binding";
-                return false;
+                // The dense buffer, its stride and its format come from the specialization.
+                if (!TryResolveLayoutBuffer(instruction.Pc, out bindingIndex, out var specialized))
+                {
+                    error = "missing buffer-memory binding";
+                    return false;
+                }
+
+                stride = FormatUInt(specialized.PackedStride & 0x3FFF);
+                descriptorFormat = specialized.DescriptorFormat;
+                descriptorWord3 = FormatUInt((specialized.DescriptorFormat << 12) | (specialized.DescriptorSwizzle & 0xFFF));
             }
 
             var scalarOffset = instruction.Sources.Count > 2
                 ? SourceExpression(instruction.Sources[2], instruction)
                 : "0u";
-            var stride = $"((s[{control.ScalarResource + 1}] >> 16) & 0x3FFFu)";
             var vectorIndex = control.IndexEnabled
                 ? $"v[{control.VectorAddress}]"
                 : "0u";
@@ -1412,25 +1048,56 @@ public static partial class Gen5MslTranslator
                 ApplyByteBias(
                     bindingIndex,
                     $"(0x{unchecked((uint)control.OffsetBytes):X}u + {scalarOffset} + {vectorOffset} + ({vectorIndex} * {stride}))"));
-            // Typed MUBUF/MTBUF loads convert through the descriptor's unified
-            // format; raw dword loads and every store take the byte path below
-            // (format stores write raw dwords, matching the SPIR-V translator).
-            if (IsFormatBufferLoad(instruction.Opcode) &&
-                !instruction.Opcode.StartsWith("BufferStore", StringComparison.Ordinal))
+            if (instruction.Opcode is "BufferStoreFormatX" or "BufferStoreFormatXy" or
+                "BufferStoreFormatXyz" or "BufferStoreFormatXyzw")
             {
-                EmitBufferFormatLoad(
-                    bindingIndex,
-                    address,
-                    control.ScalarResource,
-                    control.VectorData,
-                    control.DwordCount);
+                if (descriptorFormat == 0)
+                {
+                    return true;
+                }
+
+                if (!TryEmitBufferFormatStore(bindingIndex, address, control, descriptorWord3, descriptorFormat))
+                {
+                    error = $"unsupported buffer store format {descriptorFormat}";
+                    return false;
+                }
+
                 return true;
+            }
+
+            if (control.Typed &&
+                instruction.Opcode.StartsWith("TBufferStore", StringComparison.Ordinal) &&
+                TryEmitBufferFormatStore(bindingIndex, address, control, descriptorWord3, control.TypedFormat))
+            {
+                return true;
+            }
+
+            // A typed load converts with the instruction format, a formatted untyped load
+            // with the descriptor format and swizzle; raw accesses take the byte path below.
+            if (IsFormatBufferLoad(instruction.Opcode))
+            {
+                if (!control.Typed)
+                {
+                    EmitBufferFormatLoad(
+                        bindingIndex,
+                        address,
+                        descriptorWord3,
+                        control.VectorData,
+                        control.DwordCount);
+                    return true;
+                }
+
+                if (TryEmitTypedBufferFormatLoad(bindingIndex, address, control, descriptorWord3))
+                {
+                    return true;
+                }
             }
 
             return TryEmitResolvedMemoryAccess(
                 instruction.Opcode,
                 bindingIndex,
                 address,
+                control.VectorData,
                 control.VectorData,
                 control.DwordCount,
                 control.Glc,
@@ -1440,49 +1107,210 @@ public static partial class Gen5MslTranslator
         private void EmitBufferFormatLoad(
             int bindingIndex,
             string byteAddress,
-            uint scalarResource,
+            string descriptorWord3,
             uint vectorData,
             uint componentCount)
         {
-            // Format and destination swizzle come from descriptor word 3 at
-            // execution time; the prelude table decodes the unified format the
-            // same way descriptor evaluation does.
-            var word3 = Temp("uint", ScalarExpression(scalarResource + 3));
+            // Format and destination swizzle come from descriptor word 3, a register
+            // or a specialization constant; the prelude table decodes the unified format.
+            var word3 = Temp("uint", descriptorWord3);
             var entry = Temp("uint", $"sharpemu_gfx10_formats[({word3} >> 12) & 0x7Fu]");
             var dataFormat = Temp("uint", $"{entry} & 0xFFu");
             var numberFormat = Temp("uint", $"({entry} >> 8) & 0xFFu");
             var canonical = new string[4];
+            var componentBounds = new string[4];
             for (var component = 0; component < 4; component++)
             {
-                var byteOff = Temp("uint", "0u");
-                var bitOff = Temp("uint", "0u");
-                var bits = Temp("uint", "0u");
-                Line($"sharpemu_format_layout({dataFormat}, {component}u, {byteOff}, {bitOff}, {bits});");
-                var packed = Temp(
-                    "uint",
-                    LoadWord(bindingIndex, $"({byteAddress} + {byteOff})"));
-                var raw = Temp(
-                    "uint",
-                    $"{bits} == 0u ? 0u : extract_bits({packed}, {bitOff}, {bits})");
                 var missing = component == 3
                     ? $"sharpemu_format_one({numberFormat})"
                     : "0u";
-                canonical[component] = Temp(
-                    "uint",
-                    $"{bits} == 0u ? {missing} : sharpemu_format_convert({raw}, {bits}, {numberFormat}, {dataFormat})");
+                canonical[component] = LoadFormatComponent(
+                    bindingIndex,
+                    byteAddress,
+                    dataFormat,
+                    numberFormat,
+                    component,
+                    missing,
+                    out componentBounds[component]);
+            }
+
+            // Only selected memory components contribute to the shared bounds check.
+            var selectors = new string[componentCount];
+            var inBounds = Temp("bool", "true");
+            for (uint destination = 0; destination < componentCount; destination++)
+            {
+                var selector = Temp("uint", $"({word3} >> {destination * 3}u) & 7u");
+                selectors[destination] = selector;
+                Line($"{inBounds} = {inBounds} && ({selector} == 4u ? {componentBounds[0]} : " +
+                    $"{selector} == 5u ? {componentBounds[1]} : {selector} == 6u ? {componentBounds[2]} : " +
+                    $"{selector} == 7u ? {componentBounds[3]} : true);");
             }
 
             for (uint destination = 0; destination < componentCount; destination++)
             {
-                var selector = Temp("uint", $"({word3} >> {destination * 3}u) & 7u");
+                var selector = selectors[destination];
+                var constant = Temp("uint", $"{selector} == 1u ? sharpemu_format_one({numberFormat}) : 0u");
                 StoreVector(
                     vectorData + destination,
-                    $"{selector} == 1u ? sharpemu_format_one({numberFormat}) : " +
+                    $"!{inBounds} ? {constant} : " +
                     $"{selector} == 4u ? {canonical[0]} : " +
                     $"{selector} == 5u ? {canonical[1]} : " +
                     $"{selector} == 6u ? {canonical[2]} : " +
-                    $"{selector} == 7u ? {canonical[3]} : 0u");
+                    $"{selector} == 7u ? {canonical[3]} : {constant}");
             }
+        }
+
+        // Check the required range as one access, without an overflowing end address.
+        private string ElementInBounds(int bindingIndex, string byteAddress, string elementBytes)
+        {
+            var bytes = BufferBytes(bindingIndex);
+            return Temp("bool", $"{elementBytes} <= {bytes} && {byteAddress} <= {bytes} - {elementBytes}");
+        }
+
+        // Component i of a typed load comes from memory component i; components the
+        // format does not have read as zero. An unbound descriptor reads as zero.
+        private bool TryEmitTypedBufferFormatLoad(
+            int bindingIndex,
+            string byteAddress,
+            Gen5BufferMemoryControl control,
+            string descriptorWord3)
+        {
+            if (!Gfx10UnifiedFormat.TryDecode(control.TypedFormat, out var dataFormat, out var numberFormat))
+            {
+                return false;
+            }
+
+            var componentCount = Gfx10UnifiedFormat.ComponentCount(dataFormat);
+            if (componentCount == 0)
+            {
+                return false;
+            }
+
+            // All transferred components must be bound and inside the binding.
+            var accessBytes = Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, control.DwordCount);
+            var inBounds = ElementInBounds(bindingIndex, byteAddress, $"{accessBytes}u");
+            var valid = Temp(
+                "bool",
+                $"(({descriptorWord3} >> 12) & 0x7Fu) != 0u && {inBounds}");
+            for (uint destination = 0; destination < control.DwordCount; destination++)
+            {
+                var value = destination < componentCount
+                    ? LoadFormatComponent(
+                        bindingIndex,
+                        byteAddress,
+                        $"{dataFormat}u",
+                        $"{numberFormat}u",
+                        (int)destination,
+                        "0u",
+                        out _)
+                    : "0u";
+                StoreVector(control.VectorData + destination, $"{valid} ? {value} : 0u");
+            }
+
+            return true;
+        }
+
+        // A formatted store converts each register with the selected number format and places
+        // the bits at the component's offset; all transferred components are stored or dropped.
+        private bool TryEmitBufferFormatStore(
+            int bindingIndex,
+            string byteAddress,
+            Gen5BufferMemoryControl control,
+            string descriptorWord3,
+            uint unifiedFormat)
+        {
+            if (!Gfx10UnifiedFormat.TryDecode(unifiedFormat, out var dataFormat, out var numberFormat))
+            {
+                return false;
+            }
+
+            var componentCount = Math.Min(control.DwordCount, Gfx10UnifiedFormat.ComponentCount(dataFormat));
+            if (componentCount == 0)
+            {
+                return false;
+            }
+
+            var elementBytes = Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, componentCount);
+            var inBounds = ElementInBounds(bindingIndex, byteAddress, $"{elementBytes}u");
+            var allowed = Temp(
+                "bool",
+                $"(({descriptorWord3} >> 12) & 0x7Fu) != 0u && {inBounds}");
+            Line($"if (exec && {allowed})");
+            Line("{");
+            _indent++;
+            if (Gfx10UnifiedFormat.HasWholeDwordComponents(dataFormat))
+            {
+                // Dword components are dword aligned and keep their register bits.
+                for (uint component = 0; component < componentCount; component++)
+                {
+                    Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out var byteOffset, out _, out _);
+                    var address = byteOffset == 0 ? byteAddress : $"({byteAddress} + {byteOffset}u)";
+                    Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {address}, v[{control.VectorData + component}], 4u);");
+                }
+            }
+            else
+            {
+                var dwordCount = (elementBytes + 3) / 4;
+                var values = new string[4];
+                var masks = new uint[4];
+                Array.Fill(values, "0u");
+                for (uint component = 0; component < componentCount; component++)
+                {
+                    Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out var byteOffset, out var bitOffset, out var bitCount);
+                    var encoded = Temp(
+                        "uint",
+                        $"sharpemu_format_encode(v[{control.VectorData + component}], {bitCount}u, {numberFormat}u, {dataFormat}u)");
+                    var dword = (int)(byteOffset / 4);
+                    var bit = ((byteOffset & 3) * 8) + bitOffset;
+                    var placed = bit == 0 ? encoded : $"({encoded} << {bit}u)";
+                    values[dword] = values[dword] == "0u" ? placed : $"{values[dword]} | {placed}";
+                    masks[dword] |= ((1u << (int)bitCount) - 1) << (int)bit;
+                }
+
+                Line(
+                    $"sharpemu_store_element(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {dwordCount}u, " +
+                    $"uint4({values[0]}, {values[1]}, {values[2]}, {values[3]}), " +
+                    $"uint4(0x{masks[0]:X}u, 0x{masks[1]:X}u, 0x{masks[2]:X}u, 0x{masks[3]:X}u));");
+            }
+
+            _indent--;
+            Line("}");
+            return true;
+        }
+
+        private string LoadFormatComponent(
+            int bindingIndex,
+            string byteAddress,
+            string dataFormat,
+            string numberFormat,
+            int component,
+            string missing,
+            out string componentInBounds)
+        {
+            var byteOffset = Temp("uint", "0u");
+            var bitOffset = Temp("uint", "0u");
+            var bitCount = Temp("uint", "0u");
+            Line($"sharpemu_format_layout({dataFormat}, {component}u, {byteOffset}, {bitOffset}, {bitCount});");
+            var componentBytes = Temp("uint", $"({bitOffset} + {bitCount} + 7u) >> 3u");
+            var rangeInBounds = ElementInBounds(bindingIndex, $"({byteAddress} + {byteOffset})", componentBytes);
+            componentInBounds = Temp("bool", $"{bitCount} == 0u || {rangeInBounds}");
+            var packed = Temp(
+                "uint",
+                LoadWord(bindingIndex, $"({byteAddress} + {byteOffset})"));
+            var raw = Temp(
+                "uint",
+                $"{bitCount} == 0u ? 0u : extract_bits({packed}, {bitOffset}, {bitCount})");
+            return Temp(
+                "uint",
+                $"{bitCount} == 0u ? {missing} : sharpemu_format_convert({raw}, {bitCount}, {numberFormat}, {dataFormat})");
+        }
+
+        private string LdsIndex(string address, uint offsetBytes)
+        {
+            var wordMask = _stage == Gen5MslStage.Compute ? LdsDwordMask : PrivateLdsDwordCount - 1;
+            return offsetBytes == 0
+                ? $"((({address}) >> 2) & {wordMask}u)"
+                : $"(((({address}) + {offsetBytes}u) >> 2) & {wordMask}u)";
         }
 
         private bool TryEmitDataShare(
@@ -1493,17 +1321,10 @@ public static partial class Gen5MslTranslator
             error = string.Empty;
             if (control.Gds)
             {
-                error = "GDS data share is not implemented";
-                return false;
+                {
+                    return TryEmitGlobalDataShare(instruction, control, out error);
+                }
             }
-
-            var ldsMask = _stage == Gen5MslStage.Compute
-                ? LdsDwordMask
-                : PrivateLdsDwordCount - 1;
-            string LdsIndex(string address, uint offsetBytes) =>
-                offsetBytes == 0
-                    ? $"((({address}) >> 2) & {ldsMask}u)"
-                    : $"(((({address}) + {offsetBytes}u) >> 2) & {ldsMask}u)";
 
             void StoreLds(string index, string value)
             {
@@ -1513,6 +1334,72 @@ public static partial class Gen5MslTranslator
 
             switch (instruction.Opcode)
             {
+                case "DsSwizzleB32":
+                    return TryEmitDataShareSwizzle(instruction, control, out error);
+                case "DsBpermuteB32":
+                    return TryEmitDataShareBpermute(instruction, control, out error);
+                case "DsAppend":
+                case "DsConsume":
+                {
+                    if (instruction.Sources.Count < 1 || instruction.Destinations.Count < 1)
+                    {
+                        error = $"missing {instruction.Opcode} operand";
+                        return false;
+                    }
+
+                    var offset = control.SingleOffsetBytes;
+                    var m0 = Temp("uint", RawSource(instruction, 0));
+                    var baseAddress = Temp("uint", $"{m0} >> 16u");
+                    var sizeBytes = Temp("uint", $"{m0} & 0xFFFFu");
+                    var inBounds = Temp("bool", $"{offset + 3}u < {sizeBytes}");
+                    var index = LdsIndex(baseAddress, offset);
+                    var destination = instruction.Destinations[0].Value;
+                    var operation = instruction.Opcode == "DsAppend" ? "add" : "sub";
+
+                    // Graphics stages use the existing one-lane LDS model.
+                    if (_stage != Gen5MslStage.Compute)
+                    {
+                        var original = Temp("uint", $"sharpemu_lds[{index}]");
+                        var assignment = operation == "add" ? "+=" : "-=";
+                        Line($"if (exec && {inBounds}) {{ sharpemu_lds[{index}] {assignment} 1u; }}");
+                        StoreVector(destination, $"{inBounds} ? {original} : 0u");
+                        return true;
+                    }
+
+                    string count;
+                    string first;
+                    if (IsWave64)
+                    {
+                        Line("sharpemu_wave_scratch[(sharpemu_lane >> 5) & 1u] = sharpemu_ballot(exec);");
+                        Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                        var low = Temp("uint", "sharpemu_wave_scratch[0]");
+                        var high = Temp("uint", "sharpemu_wave_scratch[1]");
+                        count = Temp("uint", $"popcount({low}) + popcount({high})");
+                        first = Temp(
+                            "uint",
+                            $"({low} != 0u) ? (uint)ctz({low}) : (({high} != 0u) ? (32u + (uint)ctz({high})) : 0u)");
+                        Line("threadgroup_barrier(mem_flags::mem_threadgroup);");
+                        var atomic =
+                            $"atomic_fetch_{operation}_explicit((threadgroup atomic_uint*)&sharpemu_lds[{index}], {count}, memory_order_relaxed)";
+                        var broadcast = EmitWave64ReadFirstLane($"{inBounds} ? {atomic} : 0u");
+                        StoreVector(destination, $"{inBounds} ? {broadcast} : 0u");
+                        return true;
+                    }
+
+                    var mask = Temp("uint", "sharpemu_ballot(exec)");
+                    count = Temp("uint", $"popcount({mask})");
+                    first = Temp("uint", $"{mask} == 0u ? 0u : (uint)ctz({mask})");
+                    var firstValue = Temp("uint", "0u");
+                    Line($"if (exec && {inBounds} && sharpemu_lane == {first})");
+                    Line("{");
+                    _indent++;
+                    Line($"{firstValue} = atomic_fetch_{operation}_explicit((threadgroup atomic_uint*)&sharpemu_lds[{index}], {count}, memory_order_relaxed);");
+                    _indent--;
+                    Line("}");
+                    var result = Temp("uint", $"simd_broadcast({firstValue}, {first})");
+                    StoreVector(destination, $"{inBounds} ? {result} : 0u");
+                    return true;
+                }
                 case "DsAddU32":
                 {
                     var address = Temp("uint", RawSource(instruction, 0));
@@ -1520,22 +1407,28 @@ public static partial class Gen5MslTranslator
                     Line("if (exec)");
                     Line("{");
                     _indent++;
-                    Line($"atomic_fetch_add_explicit((threadgroup atomic_uint*)&sharpemu_lds[{LdsIndex(address, control.Offset0)}], {value}, memory_order_relaxed);");
+                    Line($"atomic_fetch_add_explicit((threadgroup atomic_uint*)&sharpemu_lds[{LdsIndex(address, control.SingleOffsetBytes)}], {value}, memory_order_relaxed);");
                     _indent--;
                     Line("}");
                     return true;
                 }
                 case "DsWriteB32":
+                case "DsWriteAddtidB32":
                 {
                     var address = Temp("uint", RawSource(instruction, 0));
-                    StoreLds(LdsIndex(address, control.Offset0), RawSource(instruction, 1));
+                    if (instruction.Opcode == "DsWriteAddtidB32")
+                    {
+                        address = Temp("uint", $"({address} & 0xFFFFu) + (sharpemu_lane << 2u)");
+                    }
+                    StoreLds(LdsIndex(address, control.SingleOffsetBytes), RawSource(instruction, 1));
                     return true;
                 }
                 case "DsWriteB64":
                 {
                     var address = Temp("uint", RawSource(instruction, 0));
-                    StoreLds(LdsIndex(address, control.Offset0), RawSource(instruction, 1));
-                    StoreLds(LdsIndex(address, control.Offset0 + sizeof(uint)), RawSource(instruction, 2));
+                    var offset = control.SingleOffsetBytes;
+                    StoreLds(LdsIndex(address, offset), RawSource(instruction, 1));
+                    StoreLds(LdsIndex(address, offset + sizeof(uint)), RawSource(instruction, 2));
                     return true;
                 }
                 case "DsWriteB96":
@@ -1543,15 +1436,19 @@ public static partial class Gen5MslTranslator
                 {
                     var dwordCount = instruction.Opcode == "DsWriteB128" ? 4 : 3;
                     var address = Temp("uint", RawSource(instruction, 0));
+                    var offset = control.SingleOffsetBytes;
                     for (var dword = 0; dword < dwordCount; dword++)
                     {
                         StoreLds(
-                            LdsIndex(address, control.Offset0 + (uint)(dword * sizeof(uint))),
+                            LdsIndex(address, offset + (uint)(dword * sizeof(uint))),
                             RawSource(instruction, 1 + dword));
                     }
 
                     return true;
                 }
+                case "DsWrite2B64":
+                case "DsWrite2St64B64":
+                    return TryEmitDataShareWritePair64(instruction, control, out error);
                 case "DsWrite2B32":
                 case "DsWrite2St64B32":
                 {
@@ -1566,17 +1463,23 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
                 case "DsReadB32":
+                case "DsReadAddtidB32":
                 {
                     var address = Temp("uint", RawSource(instruction, 0));
+                    if (instruction.Opcode == "DsReadAddtidB32")
+                    {
+                        address = Temp("uint", $"({address} & 0xFFFFu) + (sharpemu_lane << 2u)");
+                    }
                     StoreVector(
                         instruction.Destinations[0].Value,
-                        $"sharpemu_lds[{LdsIndex(address, control.Offset0)}]");
+                        $"sharpemu_lds[{LdsIndex(address, control.SingleOffsetBytes)}]");
                     return true;
                 }
+                case "DsReadB64":
                 case "DsReadB96":
                 case "DsReadB128":
                 {
-                    var dwordCount = instruction.Opcode == "DsReadB128" ? 4 : 3;
+                    var dwordCount = instruction.Opcode switch { "DsReadB64" => 2, "DsReadB96" => 3, _ => 4 };
                     if (instruction.Destinations.Count < dwordCount)
                     {
                         error = "missing LDS read operand";
@@ -1584,15 +1487,18 @@ public static partial class Gen5MslTranslator
                     }
 
                     var address = Temp("uint", RawSource(instruction, 0));
+                    var offset = control.SingleOffsetBytes;
                     for (var dword = 0; dword < dwordCount; dword++)
                     {
                         StoreVector(
                             instruction.Destinations[dword].Value,
-                            $"sharpemu_lds[{LdsIndex(address, control.Offset0 + (uint)(dword * sizeof(uint)))}]");
+                            $"sharpemu_lds[{LdsIndex(address, offset + (uint)(dword * sizeof(uint)))}]");
                     }
 
                     return true;
                 }
+                case "DsRead2B64":
+                    return TryEmitDataShareReadPair64(instruction, control, out error);
                 case "DsRead2B32":
                 case "DsRead2St64B32":
                 {
@@ -1625,7 +1531,8 @@ public static partial class Gen5MslTranslator
             string opcode,
             int bindingIndex,
             string byteAddress,
-            uint vectorData,
+            uint sourceVectorRegister,
+            uint destinationVectorRegister,
             uint dwordCount,
             bool glc,
             out string error)
@@ -1645,10 +1552,10 @@ public static partial class Gen5MslTranslator
                 _indent++;
                 var original = Temp(
                     "uint",
-                    $"{function}((device atomic_uint*)(b{bindingIndex} + ({byteAddress} >> 2)), v[{vectorData}], memory_order_relaxed)");
+                    $"{function}((device atomic_uint*)(b{bindingIndex} + ({byteAddress} >> 2)), v[{sourceVectorRegister}], memory_order_relaxed)");
                 if (glc)
                 {
-                    Line($"v[{vectorData}] = {original};");
+                    Line($"v[{destinationVectorRegister}] = {original};");
                 }
 
                 _indent--;
@@ -1659,7 +1566,8 @@ public static partial class Gen5MslTranslator
             }
 
             if (opcode.StartsWith("GlobalStore", StringComparison.Ordinal) ||
-                opcode.StartsWith("BufferStore", StringComparison.Ordinal))
+                opcode.StartsWith("BufferStore", StringComparison.Ordinal) ||
+                opcode.StartsWith("TBufferStore", StringComparison.Ordinal))
             {
                 Line("if (exec)");
                 Line("{");
@@ -1667,15 +1575,15 @@ public static partial class Gen5MslTranslator
                 if (TryGetSubdwordStoreInfo(opcode, out var storeBytes, out var sourceShift))
                 {
                     var source = sourceShift == 0
-                        ? $"v[{vectorData}]"
-                        : $"(v[{vectorData}] >> {sourceShift})";
+                        ? $"v[{sourceVectorRegister}]"
+                        : $"(v[{sourceVectorRegister}] >> {sourceShift})";
                     Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {source}, {storeBytes}u);");
                 }
                 else
                 {
                     for (uint index = 0; index < dwordCount; index++)
                     {
-                        Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress} + {index * 4}u, v[{vectorData + index}], 4u);");
+                        Line($"sharpemu_store_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress} + {index * 4}u, v[{sourceVectorRegister + index}], 4u);");
                     }
                 }
 
@@ -1691,26 +1599,27 @@ public static partial class Gen5MslTranslator
                     $"sharpemu_load_bytes(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress}, {loadBytes}u, {(signExtend ? "true" : "false")})");
                 if (!d16)
                 {
-                    StoreVector(vectorData, loaded);
+                    StoreVector(destinationVectorRegister, loaded);
                     return true;
                 }
 
                 // D16 loads merge into one half of the destination register.
                 StoreVector(
-                    vectorData,
+                    destinationVectorRegister,
                     d16High
-                        ? $"(v[{vectorData}] & 0x0000FFFFu) | (({loaded} & 0xFFFFu) << 16)"
-                        : $"(v[{vectorData}] & 0xFFFF0000u) | ({loaded} & 0xFFFFu)");
+                        ? $"(v[{destinationVectorRegister}] & 0x0000FFFFu) | (({loaded} & 0xFFFFu) << 16)"
+                        : $"(v[{destinationVectorRegister}] & 0xFFFF0000u) | ({loaded} & 0xFFFFu)");
                 return true;
             }
 
             if (opcode.StartsWith("GlobalLoad", StringComparison.Ordinal) ||
-                opcode.StartsWith("BufferLoad", StringComparison.Ordinal))
+                opcode.StartsWith("BufferLoad", StringComparison.Ordinal) ||
+                opcode.StartsWith("TBufferLoad", StringComparison.Ordinal))
             {
                 for (uint index = 0; index < dwordCount; index++)
                 {
                     StoreVector(
-                        vectorData + index,
+                        destinationVectorRegister + index,
                         LoadWord(bindingIndex, $"({byteAddress} + {index * 4}u)"));
                 }
 
@@ -1753,73 +1662,16 @@ public static partial class Gen5MslTranslator
 
         private static bool IsFormatBufferLoad(string opcode) =>
             opcode.StartsWith("BufferLoadFormat", StringComparison.Ordinal) ||
-            opcode.StartsWith("TBufferLoad", StringComparison.Ordinal);
+            opcode.StartsWith("TBufferLoadFormat", StringComparison.Ordinal);
 
         private string BufferBytes(int bindingIndex) =>
-            $"sharpemu_uniforms.buffer_bytes[{_globalBufferBase + bindingIndex}]";
+            $"{ResourcesName}.buffer_bytes[{bindingIndex}]";
 
         private string LoadWord(int bindingIndex, string byteAddress) =>
             $"sharpemu_load_word(b{bindingIndex}, {BufferBytes(bindingIndex)}, {byteAddress})";
 
         private string ApplyByteBias(int bindingIndex, string byteAddress) =>
-            $"({byteAddress} + bias[{_globalBufferBase + bindingIndex}])";
-
-        // ---- binding resolution (ports the SPIR-V dominating-definition scheme) ----
-
-        private bool TryResolveDominatingBufferBinding(
-            uint pc,
-            uint scalarAddress,
-            uint registerCount,
-            out int bindingIndex)
-        {
-            if (_bufferBindingByPc.TryGetValue(pc, out bindingIndex))
-            {
-                return true;
-            }
-
-            var candidates = _evaluation.GlobalMemoryBindings;
-            for (var index = 0; index < candidates.Count; index++)
-            {
-                var binding = candidates[index];
-                foreach (var bindingPc in binding.InstructionPcs)
-                {
-                    if (bindingPc == pc)
-                    {
-                        bindingIndex = index;
-                        _bufferBindingByPc.Add(pc, index);
-                        return true;
-                    }
-                }
-            }
-
-            // No direct PC match: accept a binding only when the descriptor
-            // registers hold the exact same definitions here as at one of the
-            // binding's own access points — the scalar-definition dataflow the
-            // SPIR-V translator uses for descriptors shared across sites.
-            for (var index = 0; index < candidates.Count; index++)
-            {
-                var binding = candidates[index];
-                if (binding.ScalarAddress != scalarAddress)
-                {
-                    continue;
-                }
-
-                foreach (var candidatePc in binding.InstructionPcs)
-                {
-                    if (!HasSameScalarDefinitions(candidatePc, pc, scalarAddress, registerCount))
-                    {
-                        continue;
-                    }
-
-                    bindingIndex = index;
-                    _bufferBindingByPc.Add(pc, index);
-                    return true;
-                }
-            }
-
-            bindingIndex = -1;
-            return false;
-        }
+            $"({byteAddress} + bias[{bindingIndex}])";
 
         // ---- writer helpers ----
 
@@ -2063,199 +1915,6 @@ public static partial class Gen5MslTranslator
 
             block = -1;
             return false;
-        }
-
-        // ---- scalar-definition dataflow (ports BuildScalarDefinitionInfo) ----
-
-        private void BuildScalarDefinitionInfo(
-            IReadOnlyList<ShaderBlock> blocks,
-            IReadOnlyList<Gen5ShaderInstruction> instructions)
-        {
-            var predecessors = new HashSet<int>[blocks.Count];
-            for (var index = 0; index < blocks.Count; index++)
-            {
-                predecessors[index] = [];
-            }
-
-            void AddEdge(int source, int destination)
-            {
-                if (destination < 0 || destination >= blocks.Count)
-                {
-                    return;
-                }
-
-                predecessors[destination].Add(source);
-            }
-
-            for (var blockIndex = 0; blockIndex < blocks.Count; blockIndex++)
-            {
-                var block = blocks[blockIndex];
-                var terminator = instructions[block.EndIndex - 1];
-                var hasFallthrough = blockIndex + 1 < blocks.Count;
-                if (terminator.Opcode == "SEndpgm")
-                {
-                    continue;
-                }
-
-                if (terminator.Opcode == "SBranch")
-                {
-                    if (TryGetBranchTargetPc(terminator, out var targetPc) &&
-                        TryFindBlock(blocks, targetPc, out var targetBlock))
-                    {
-                        AddEdge(blockIndex, targetBlock);
-                    }
-
-                    continue;
-                }
-
-                if (terminator.Opcode.StartsWith("SCbranch", StringComparison.Ordinal))
-                {
-                    if (TryGetBranchTargetPc(terminator, out var targetPc) &&
-                        TryFindBlock(blocks, targetPc, out var targetBlock))
-                    {
-                        AddEdge(blockIndex, targetBlock);
-                    }
-
-                    if (hasFallthrough)
-                    {
-                        AddEdge(blockIndex, blockIndex + 1);
-                    }
-
-                    continue;
-                }
-
-                if (hasFallthrough)
-                {
-                    AddEdge(blockIndex, blockIndex + 1);
-                }
-            }
-
-            var blockInputs = new long[blocks.Count][];
-            var blockOutputs = new long[blocks.Count][];
-            var hasOutput = new bool[blocks.Count];
-            var initialDefinitions = new long[ScalarRegisterFileCount];
-            Array.Fill(initialDefinitions, InitialScalarDefinition);
-
-            static void MergeDefinitions(
-                long[] destination,
-                long[] source,
-                ref bool hasInput)
-            {
-                if (!hasInput)
-                {
-                    Array.Copy(source, destination, (int)ScalarRegisterFileCount);
-                    hasInput = true;
-                    return;
-                }
-
-                for (var register = 0; register < ScalarRegisterFileCount; register++)
-                {
-                    if (destination[register] != source[register])
-                    {
-                        destination[register] = ConflictingScalarDefinition;
-                    }
-                }
-            }
-
-            static void ApplyScalarDefinitions(
-                long[] definitions,
-                ShaderBlock block,
-                IReadOnlyList<Gen5ShaderInstruction> blockInstructions)
-            {
-                for (var instructionIndex = block.StartIndex;
-                     instructionIndex < block.EndIndex;
-                     instructionIndex++)
-                {
-                    var instruction = blockInstructions[instructionIndex];
-                    foreach (var destination in instruction.Destinations)
-                    {
-                        if (destination.Kind == Gen5OperandKind.ScalarRegister &&
-                            destination.Value < ScalarRegisterFileCount)
-                        {
-                            definitions[destination.Value] = instruction.Pc + 1L;
-                        }
-                    }
-                }
-            }
-
-            var changed = true;
-            while (changed)
-            {
-                changed = false;
-                for (var blockIndex = 0; blockIndex < blocks.Count; blockIndex++)
-                {
-                    var input = new long[ScalarRegisterFileCount];
-                    Array.Fill(input, UnreachableScalarDefinition);
-                    var hasInput = false;
-                    if (blockIndex == 0)
-                    {
-                        MergeDefinitions(input, initialDefinitions, ref hasInput);
-                    }
-
-                    foreach (var predecessor in predecessors[blockIndex])
-                    {
-                        if (hasOutput[predecessor])
-                        {
-                            MergeDefinitions(
-                                input,
-                                blockOutputs[predecessor],
-                                ref hasInput);
-                        }
-                    }
-
-                    if (!hasInput)
-                    {
-                        continue;
-                    }
-
-                    var output = (long[])input.Clone();
-                    ApplyScalarDefinitions(output, blocks[blockIndex], instructions);
-                    if (!hasOutput[blockIndex] ||
-                        !blockInputs[blockIndex].AsSpan().SequenceEqual(input) ||
-                        !blockOutputs[blockIndex].AsSpan().SequenceEqual(output))
-                    {
-                        blockInputs[blockIndex] = input;
-                        blockOutputs[blockIndex] = output;
-                        hasOutput[blockIndex] = true;
-                        changed = true;
-                    }
-                }
-            }
-
-            _scalarDefinitionsBeforePc.Clear();
-            for (var blockIndex = 0; blockIndex < blocks.Count; blockIndex++)
-            {
-                if (!hasOutput[blockIndex])
-                {
-                    continue;
-                }
-
-                var definitions = (long[])blockInputs[blockIndex].Clone();
-                var block = blocks[blockIndex];
-                for (var instructionIndex = block.StartIndex;
-                     instructionIndex < block.EndIndex;
-                     instructionIndex++)
-                {
-                    var instruction = instructions[instructionIndex];
-                    if (instruction.Control is Gen5ImageControl or
-                            Gen5ScalarMemoryControl or
-                            Gen5GlobalMemoryControl or
-                            Gen5BufferMemoryControl)
-                    {
-                        _scalarDefinitionsBeforePc[instruction.Pc] =
-                            (long[])definitions.Clone();
-                    }
-
-                    foreach (var destination in instruction.Destinations)
-                    {
-                        if (destination.Kind == Gen5OperandKind.ScalarRegister &&
-                            destination.Value < ScalarRegisterFileCount)
-                        {
-                            definitions[destination.Value] = instruction.Pc + 1L;
-                        }
-                    }
-                }
-            }
         }
     }
 }

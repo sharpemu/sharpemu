@@ -20,12 +20,21 @@ const ui = {
 };
 
 const byId = (id) => document.getElementById(id);
+const csrfToken = document.querySelector('meta[name="sharpemu-csrf-token"]')?.content || "";
 
 async function api(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (options.body !== undefined) headers.set("Content-Type", "application/json");
+  if (path.startsWith("/api/")) {
+    if (!csrfToken) throw new Error("Frontend security token is unavailable. Reload the page.");
+    headers.set("X-SharpEmu-CSRF-Token", csrfToken);
+  }
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
     cache: "no-store",
+    credentials: "same-origin",
+    redirect: "error",
     ...options,
+    headers,
   });
   let payload;
   try {

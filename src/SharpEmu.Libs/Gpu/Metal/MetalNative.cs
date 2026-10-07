@@ -60,6 +60,12 @@ internal struct MtlOrigin
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct NsRange
+{
+    public nuint Location;
+    public nuint Length;
+}
+
 internal struct MtlScissorRect
 {
     public nuint X;
@@ -248,6 +254,21 @@ internal static partial class MetalNative
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendSetBuffer(nint receiver, nint selector, nint buffer, nuint offset, nuint index);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendFillBuffer(nint receiver, nint selector, nint buffer, NsRange range, byte value);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendCopyBuffer(nint receiver, nint selector, nint source, nuint sourceOffset, nint destination, nuint destinationOffset, nuint size);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendUseResource(nint receiver, nint selector, nint resource, nuint usage, nuint stages);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendUseResourceUsage(nint receiver, nint selector, nint resource, nuint usage);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial ulong SendGpuAddress(nint receiver, nint selector);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidScissor(nint receiver, nint selector, MtlScissorRect rect);

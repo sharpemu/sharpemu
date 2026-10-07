@@ -52,6 +52,31 @@ public sealed class AjmExportsTests : IDisposable
     }
 
     [Fact]
+    public void Initialize_Gen5AcceptsOpaqueInitializationValueAndWritesContext()
+    {
+        _ctx[CpuRegister.Rdi] = 0x0000000300000000;
+        _ctx[CpuRegister.Rsi] = ContextAddress;
+
+        Assert.Equal(0, AjmExports.AjmInitialize(_ctx));
+        var contextId = ReadUInt32(ContextAddress);
+        Assert.NotEqual(0u, contextId);
+        Assert.Equal(0, RegisterCodec(contextId, 1));
+    }
+
+    [Fact]
+    public void Initialize_Gen4StillRejectsNonzeroReservedValue()
+    {
+        var context = new CpuContext(_memory, Generation.Gen4);
+        const uint sentinel = 0xCCCCCCCC;
+        WriteUInt32(ContextAddress, sentinel);
+        context[CpuRegister.Rdi] = 0x0000000300000000;
+        context[CpuRegister.Rsi] = ContextAddress;
+
+        Assert.Equal(unchecked((int)0x806A0001), AjmExports.AjmInitialize(context));
+        Assert.Equal(sentinel, ReadUInt32(ContextAddress));
+    }
+
+    [Fact]
     public void InstanceCreate_UnregisteredCodecDoesNotWriteOutput()
     {
         var contextId = Initialize();
@@ -81,6 +106,30 @@ public sealed class AjmExportsTests : IDisposable
         Assert.Equal(0, RegisterCodec(contextId, 1));
         Assert.Equal(CodecAlreadyRegistered, RegisterCodec(contextId, 1));
         Assert.Equal(InvalidContext, RegisterCodec(contextId + 1, 1));
+    }
+
+    [Fact]
+    public void ModuleUnregister_RemovesRegisteredCodecAndRejectsUnknownContext()
+    {
+        var contextId = Initialize();
+
+        Assert.Equal(0, RegisterCodec(contextId, 1));
+        Assert.Equal(0, UnregisterCodec(contextId, 1));
+        // The codec is actually gone, not just a no-op stub: it's unusable
+        // for a new instance, and re-registering no longer hits
+        // CodecAlreadyRegistered.
+        Assert.Equal(CodecNotRegistered, CreateInstance(contextId, 1, 0x401, InstanceAddress));
+        Assert.Equal(0, RegisterCodec(contextId, 1));
+
+        Assert.Equal(InvalidContext, UnregisterCodec(contextId + 1, 1));
+    }
+
+    [Fact]
+    public void ModuleUnregister_UnknownCodecIsToleratedAsANoOp()
+    {
+        var contextId = Initialize();
+
+        Assert.Equal(0, UnregisterCodec(contextId, 1));
     }
 
     [Fact]
@@ -204,8 +253,35 @@ public sealed class AjmExportsTests : IDisposable
         Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(result.AsSpan(12)));    // stream.output_written
         Assert.Equal(1u, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(24)));  // mframe.num_frames
 
-        // The batch cursor advanced past the job plus its descriptors.
-        Assert.True(ReadUInt64(BatchInfoAddress + 8) > 0);
+        // SCE_AJM_JOB_RUN_SPLIT_SIZE(3) = 32 + (16 * 3).
+        Assert.Equal(80ul, ReadUInt64(BatchInfoAddress + 8));
+    }
+
+    [Fact]
+    public void BatchJobSetGaplessDecode_UsesFifthArgumentForResult()
+    {
+        const ulong gaplessAddress = MemoryBase + 0x600;
+        const ulong resultAddress = MemoryBase + 0x680;
+
+        var contextId = Initialize();
+        Assert.Equal(0, RegisterCodec(contextId, 1));
+        Assert.Equal(0, CreateInstance(contextId, 1, 0x401, InstanceAddress));
+        var instanceId = ReadUInt32(InstanceAddress);
+
+        InitializeBatch(BatchBufferAddress, 48, BatchInfoAddress);
+        Span<byte> sentinel = stackalloc byte[8];
+        sentinel.Fill(0xCC);
+        Assert.True(_memory.TryWrite(resultAddress, sentinel));
+
+        _ctx[CpuRegister.Rdi] = BatchInfoAddress;
+        _ctx[CpuRegister.Rsi] = instanceId;
+        _ctx[CpuRegister.Rdx] = gaplessAddress;
+        _ctx[CpuRegister.Rcx] = 1; // iReset, not a result pointer.
+        _ctx[CpuRegister.R8] = resultAddress;
+
+        Assert.Equal(0, AjmExports.AjmBatchJobSetGaplessDecode(_ctx));
+        Assert.Equal(48ul, ReadUInt64(BatchInfoAddress + 8));
+        Assert.All(ReadBytes(resultAddress, 8), value => Assert.Equal(0, value));
     }
 
     [Fact]
@@ -351,6 +427,13 @@ public sealed class AjmExportsTests : IDisposable
         _ctx[CpuRegister.Rsi] = codecType;
         _ctx[CpuRegister.Rdx] = 0;
         return AjmExports.AjmModuleRegister(_ctx);
+    }
+
+    private int UnregisterCodec(uint contextId, uint codecType)
+    {
+        _ctx[CpuRegister.Rdi] = contextId;
+        _ctx[CpuRegister.Rsi] = codecType;
+        return AjmExports.AjmModuleUnregister(_ctx);
     }
 
     private int RegisterMemory(uint contextId, ulong address, ulong pages)

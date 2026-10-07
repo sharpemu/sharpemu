@@ -63,6 +63,15 @@ internal static partial class MetalNative
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     private static partial void SendDispatch(nint receiver, nint selector, MtlSize threadgroups, MtlSize threadsPerThreadgroup);
 
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    private static partial void SendUseResource(nint receiver, nint selector, nint resource, nuint usage);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    private static partial ulong SendULong(nint receiver, nint selector);
+
+    // MTLResourceUsageRead | MTLResourceUsageWrite for buffers reached through an argument buffer.
+    private const nuint ReadWriteUsage = 3;
+
     private static readonly Lazy<nint> Device = new(() =>
         OperatingSystem.IsMacOS() ? MTLCreateSystemDefaultDevice() : 0);
 
@@ -122,37 +131,90 @@ internal static partial class MetalNative
         return true;
     }
 
-    /// <summary>
-    /// Runs one thread of a compute kernel with the guest data buffer and the
-    /// SharpEmuUniforms constant buffer bound at the caller-supplied indices
-    /// (per the Gen5MslTranslator contract the uniforms index equals the
-    /// global-buffer count), then returns the data buffer contents.
-    /// </summary>
-    public static bool TryExecuteSingleThread(
+    /// <summary>Runs a kernel compiled through a compile request: the argument buffer
+    /// is filled directly from the layout with the data buffer's address and length
+    /// (every buffer field points at the one data buffer), push data at slot 1.</summary>
+    public static bool TryExecuteWithArgumentBuffer(
         nint library,
         string entryPoint,
         byte[] bufferContents,
-        byte[] uniformsContents,
-        nuint dataIndex,
-        nuint uniformsIndex,
-        out byte[] result,
-        out string error) =>
-        TryExecuteThreadgroup(
-            library, entryPoint, bufferContents, uniformsContents,
-            dataIndex, uniformsIndex, threadsPerThreadgroup: 1, out result, out error);
-
-    /// <summary>Runs the kernel as a single threadgroup of
-    /// <paramref name="threadsPerThreadgroup"/> threads, so wave64 fixtures can
-    /// exercise both 32-wide simdgroups of one guest wave under a threadgroup
-    /// barrier.</summary>
-    public static bool TryExecuteThreadgroup(
-        nint library,
-        string entryPoint,
-        byte[] bufferContents,
-        byte[] uniformsContents,
-        nuint dataIndex,
-        nuint uniformsIndex,
+        byte[] pushData,
+        Gen5MslArgumentLayout layout,
         uint threadsPerThreadgroup,
+        out byte[] result,
+        out string error)
+    {
+        result = [];
+        var buffer = SharedBuffer(bufferContents);
+        if (buffer == 0)
+        {
+            error = "failed to create the data buffer";
+            return false;
+        }
+
+        var address = SendULong(buffer, Selector("gpuAddress"));
+        var arguments = new byte[Math.Max(layout.ByteSize, 8)];
+        foreach (var field in layout.Fields)
+        {
+            for (var element = 0; element < field.Count; element++)
+            {
+                switch (field.FieldKind)
+                {
+                    case MslArgumentFieldKind.BufferPointers:
+                        BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset + (element * 8)), address);
+                        break;
+                    case MslArgumentFieldKind.BufferByteCounts:
+                        BitConverter.TryWriteBytes(arguments.AsSpan((int)field.ByteOffset + (element * 4)), (uint)bufferContents.Length);
+                        break;
+                }
+            }
+        }
+
+        var argumentBuffer = SharedBuffer(arguments);
+        var pushBuffer = SharedBuffer(pushData.Length == 0 ? new byte[4] : pushData);
+        if (argumentBuffer == 0 || pushBuffer == 0)
+        {
+            error = "failed to create the argument or push buffer";
+            return false;
+        }
+
+        return RunKernel(
+            library,
+            entryPoint,
+            [(argumentBuffer, (nuint)Gen5MslArgumentLayout.ResourcesBufferIndex), (pushBuffer, (nuint)Gen5MslArgumentLayout.PushDataBufferIndex)],
+            [buffer],
+            threadsPerThreadgroup,
+            buffer,
+            bufferContents.Length,
+            out result,
+            out error);
+    }
+
+    // options 0 = MTLResourceStorageModeShared: CPU-visible for readback.
+    private static nint SharedBuffer(byte[] contents)
+    {
+        unsafe
+        {
+            fixed (byte* bytes = contents)
+            {
+                return SendBuffer(
+                    Device.Value,
+                    Selector("newBufferWithBytes:length:options:"),
+                    (nint)bytes,
+                    (nuint)contents.Length,
+                    0);
+            }
+        }
+    }
+
+    private static bool RunKernel(
+        nint library,
+        string entryPoint,
+        IReadOnlyList<(nint Buffer, nuint Index)> bindings,
+        IReadOnlyList<nint> residentBuffers,
+        uint threadsPerThreadgroup,
+        nint resultBuffer,
+        int resultLength,
         out byte[] result,
         out string error)
     {
@@ -179,46 +241,25 @@ internal static partial class MetalNative
         }
 
         var queue = Send(Device.Value, Selector("newCommandQueue"));
-        nint buffer;
-        unsafe
+        if (queue == 0)
         {
-            fixed (byte* contents = bufferContents)
-            {
-                // options 0 = MTLResourceStorageModeShared: CPU-visible for readback.
-                buffer = SendBuffer(
-                    Device.Value,
-                    Selector("newBufferWithBytes:length:options:"),
-                    (nint)contents,
-                    (nuint)bufferContents.Length,
-                    0);
-            }
-        }
-
-        nint uniforms;
-        unsafe
-        {
-            fixed (byte* contents = uniformsContents)
-            {
-                uniforms = SendBuffer(
-                    Device.Value,
-                    Selector("newBufferWithBytes:length:options:"),
-                    (nint)contents,
-                    (nuint)uniformsContents.Length,
-                    0);
-            }
-        }
-
-        if (queue == 0 || buffer == 0 || uniforms == 0)
-        {
-            error = "failed to create command queue or buffer";
+            error = "failed to create the command queue";
             return false;
         }
 
         var commandBuffer = Send(queue, Selector("commandBuffer"));
         var encoder = Send(commandBuffer, Selector("computeCommandEncoder"));
         SendVoid(encoder, Selector("setComputePipelineState:"), pipeline);
-        SendSetBuffer(encoder, Selector("setBuffer:offset:atIndex:"), buffer, 0, dataIndex);
-        SendSetBuffer(encoder, Selector("setBuffer:offset:atIndex:"), uniforms, 0, uniformsIndex);
+        foreach (var (buffer, index) in bindings)
+        {
+            SendSetBuffer(encoder, Selector("setBuffer:offset:atIndex:"), buffer, 0, index);
+        }
+
+        foreach (var resident in residentBuffers)
+        {
+            SendUseResource(encoder, Selector("useResource:usage:"), resident, ReadWriteUsage);
+        }
+
         var oneGroup = new MtlSize { Width = 1, Height = 1, Depth = 1 };
         var threads = new MtlSize { Width = threadsPerThreadgroup, Height = 1, Depth = 1 };
         SendDispatch(encoder, Selector("dispatchThreadgroups:threadsPerThreadgroup:"), oneGroup, threads);
@@ -226,14 +267,14 @@ internal static partial class MetalNative
         SendVoid(commandBuffer, Selector("commit"));
         SendVoid(commandBuffer, Selector("waitUntilCompleted"));
 
-        var contentsPointer = Send(buffer, Selector("contents"));
+        var contentsPointer = Send(resultBuffer, Selector("contents"));
         if (contentsPointer == 0)
         {
             error = "buffer contents unavailable after execution";
             return false;
         }
 
-        result = new byte[bufferContents.Length];
+        result = new byte[resultLength];
         Marshal.Copy(contentsPointer, result, 0, result.Length);
         return true;
     }

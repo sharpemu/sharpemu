@@ -1,0 +1,84 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+namespace SharpEmu.Libs.VideoOut;
+
+// This partial releases Vulkan host infrastructure.
+internal static unsafe partial class VulkanVideoPresenter
+{
+    private sealed partial class Presenter
+    {
+        private void DisposeVulkan()
+        {
+            if (!_vulkanReady)
+            {
+                return;
+            }
+
+            ShutdownScheduler();
+            if (_debugUtils is not null && _debugMessenger.Handle != 0)
+            {
+                _debugUtils.DestroyDebugUtilsMessenger(_instance, _debugMessenger, null);
+            }
+            _vulkanReady = false;
+            lock (_queueGate)
+            {
+                _vk.DeviceWaitIdle(_device);
+            }
+
+            StopShaderPrewarm();
+            DrainPendingComputePipelines();
+            SavePipelineCache(force: true);
+            DrainFrameSlots();
+            CollectCompletedGuestSubmissions(waitForOldest: false);
+            DestroyFeedbackSnapshotPool();
+            DestroyRenderPipelines();
+            _descriptorHeap.Dispose();
+            _imageCache.Dispose();
+            _samplerStore.Dispose();
+            _bufferCache.AsyncReadback?.Dispose();
+            _bufferCache.AsyncReadback = null;
+            _bufferCache.Dispose();
+            PerfOverlay.SetGuestCacheStatistics(0, 0, _deviceInfo.LiveAllocations, _deviceInfo.PeakAllocations);
+            _hostBufferPool.Dispose();
+            foreach (var guestImageVersion in _guestImageVersions.Values)
+            {
+                DestroyGuestImage(guestImageVersion);
+            }
+            _guestImageVersions.Clear();
+            while (_deferredGuestImageVersionDestroys.TryDequeue(out var deferredVersion))
+            {
+                DestroyGuestImage(deferredVersion.Image);
+            }
+
+            DrainFlipSnapshotPool();
+            DestroySwapchainResources();
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] vk.device_memory live_allocations={_deviceInfo.LiveAllocations} " +
+                $"peak_allocations={_deviceInfo.PeakAllocations} limit={_deviceInfo.MaxMemoryAllocationCount}");
+            if (_device.Handle != 0)
+            {
+                _scheduler.Dispose();
+                _deviceInfo.Slabs.Destroy();
+                DestroyGuestPipelineCaches();
+                if (_pipelineCache.Handle != 0)
+                {
+                    _vk.DestroyPipelineCache(_device, _pipelineCache, null);
+                    _pipelineCache = default;
+                }
+                _vk.DestroyDevice(_device, null);
+                _device = default;
+            }
+            if (_surface.Handle != 0)
+            {
+                _surfaceApi.DestroySurface(_instance, _surface, null);
+                _surface = default;
+            }
+            if (_instance.Handle != 0)
+            {
+                _vk.DestroyInstance(_instance, null);
+                _instance = default;
+            }
+        }
+    }
+}

@@ -38,11 +38,12 @@ public static class KernelRuntimeCompatExports
     private const ulong ModuleInfoExSegmentsOffset = 0x160;
     private const ulong ModuleInfoExSegmentCountOffset = 0x1A0;
     private const int ModuleInfoSegmentSize = 16;
+    private const ulong GuestExecutableAddressFloor = 0x0000000800000000UL;
+    private const ulong GuestExecutableAddressCeiling = 0x0000000880000000UL;
+    private const ulong HostUnwindBoundarySize = 0x10_0000UL;
     private const ulong DefaultKernelTscFrequency = 10_000_000UL;
     private const ulong PrtAreaStartAddress = 0x0000001000000000UL;
     private const ulong PrtAreaSize = 0x000000EC00000000UL;
-    private const int MapFlagFixed = 0x10;
-    private const ulong DefaultVirtualRangeAlignment = 0x4000UL;
     private const int AioInitParamSize = 0x3C;
     private const uint MemCommit = 0x1000;
     private const uint MemReserve = 0x2000;
@@ -58,8 +59,6 @@ public static class KernelRuntimeCompatExports
             : AllocateStackChkGuardObject();
     private static ulong _applicationHeapApiAddress;
     private static ulong _processProcParamAddress;
-    private static ulong _nextReservedVirtualBase = 0x6000_0000_0UL;
-    private static readonly List<ReleasedVirtualRange> _releasedVirtualRanges = new();
     private static uint _gpoStateBits;
     private static readonly HashSet<int> _loadedSysmodules = new();
     private static readonly object _prtApertureGate = new();
@@ -77,7 +76,6 @@ public static class KernelRuntimeCompatExports
     private static readonly bool _stopwatchTicksAreNanoseconds =
         Stopwatch.Frequency == 1_000_000_000L;
 
-    private readonly record struct ReleasedVirtualRange(ulong Address, ulong Length);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate ulong RdtscDelegate();
@@ -204,8 +202,20 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        long seconds;
-        long nanoseconds;
+        GetClockTime(clockId, out var seconds, out var nanoseconds);
+
+        if (!ctx.TryWriteUInt64(timeAddress, unchecked((ulong)seconds)) ||
+            !ctx.TryWriteUInt64(timeAddress + sizeof(long), unchecked((ulong)nanoseconds)))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    internal static void GetClockTime(int clockId, out long seconds, out long nanoseconds)
+    {
         if (clockId == 0)
         {
             var now = DateTimeOffset.UtcNow;
@@ -214,7 +224,8 @@ public static class KernelRuntimeCompatExports
         }
         else
         {
-            var elapsedTicks = Stopwatch.GetTimestamp() - _processStartCounter;
+            var processStartCounter = _processStartCounter;
+            var elapsedTicks = Stopwatch.GetTimestamp() - processStartCounter;
             if (_stopwatchTicksAreNanoseconds)
             {
                 // Constant divisors let the JIT strength-reduce the division;
@@ -228,15 +239,6 @@ public static class KernelRuntimeCompatExports
                 nanoseconds = (elapsedTicks % Stopwatch.Frequency) * 1_000_000_000L / Stopwatch.Frequency;
             }
         }
-
-        if (!ctx.TryWriteUInt64(timeAddress, unchecked((ulong)seconds)) ||
-            !ctx.TryWriteUInt64(timeAddress + sizeof(long), unchecked((ulong)nanoseconds)))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -303,16 +305,14 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libKernel")]
     public static int KernelReadTsc(CpuContext ctx)
     {
-        if (TryReadHostTsc(out ulong counter))
-        {
-            ctx[CpuRegister.Rax] = counter;
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-        }
-
-        var stopwatchTicks = Stopwatch.GetTimestamp();
-        ctx[CpuRegister.Rax] = unchecked((ulong)Math.Max(0, stopwatchTicks));
+        ctx[CpuRegister.Rax] = ReadTscCounter();
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    internal static ulong TscFrequency => _kernelTscFrequency;
+
+    internal static ulong ReadTscCounter() =>
+        TryReadHostTsc(out var counter) ? counter : unchecked((ulong)Math.Max(0, Stopwatch.GetTimestamp()));
 
     [SysAbiExport(
         Nid = "1j3S3n-tTW4",
@@ -332,10 +332,15 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libKernel")]
     public static int KernelGetProcessTime(CpuContext ctx)
     {
+        ctx[CpuRegister.Rax] = ReadProcessTimeMicroseconds();
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    internal static ulong ReadProcessTimeMicroseconds()
+    {
         var elapsedTicks = Stopwatch.GetTimestamp() - _processStartCounter;
         var micros = elapsedTicks * 1_000_000L / Stopwatch.Frequency;
-        ctx[CpuRegister.Rax] = unchecked((ulong)Math.Max(0, micros));
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return unchecked((ulong)Math.Max(0, micros));
     }
 
     [SysAbiExport(
@@ -345,9 +350,17 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libKernel")]
     public static int KernelGetProcessTimeCounter(CpuContext ctx)
     {
-        var elapsedTicks = Stopwatch.GetTimestamp() - _processStartCounter;
-        ctx[CpuRegister.Rax] = unchecked((ulong)Math.Max(0, elapsedTicks));
+        ctx[CpuRegister.Rax] = ReadProcessTimeCounter();
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    internal static ulong ReadProcessTimeCounter()
+        => ReadProcessTimeCounterAt(Stopwatch.GetTimestamp());
+
+    internal static ulong ReadProcessTimeCounterAt(long timestamp)
+    {
+        var elapsedTicks = timestamp - _processStartCounter;
+        return unchecked((ulong)Math.Max(0, elapsedTicks));
     }
 
     [SysAbiExport(
@@ -734,145 +747,9 @@ public static class KernelRuntimeCompatExports
         ExportName = "sceKernelReserveVirtualRange",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelReserveVirtualRange(CpuContext ctx)
-    {
-        var inOutAddressPointer = ctx[CpuRegister.Rdi];
-        var length = ctx[CpuRegister.Rsi];
-        var flags = unchecked((int)ctx[CpuRegister.Rdx]);
-        var alignment = ctx[CpuRegister.Rcx];
-        if (inOutAddressPointer == 0 || length == 0)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
-
-        if (!ctx.TryReadUInt64(inOutAddressPointer, out var requestedAddress))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        var effectiveAlignment = alignment == 0 ? DefaultVirtualRangeAlignment : alignment;
-        var fixedMapping = (flags & MapFlagFixed) != 0;
-        ulong desiredAddress;
-        lock (_stateGate)
-        {
-            desiredAddress = requestedAddress != 0
-                ? requestedAddress
-                : AlignUp(_nextReservedVirtualBase, effectiveAlignment);
-        }
-
-        ulong releasedAddress = 0;
-        var reusedReleasedRange = !fixedMapping && requestedAddress == 0 &&
-            TryTakeReleasedVirtualRange(length, effectiveAlignment, out releasedAddress);
-        var alreadyBacked = fixedMapping && requestedAddress != 0 &&
-            KernelMemoryCompatExports.IsGuestRangeBacked(ctx, requestedAddress, length);
-        ulong mappedAddress;
-        if (reusedReleasedRange)
-        {
-            mappedAddress = releasedAddress;
-        }
-        else if (alreadyBacked)
-        {
-            mappedAddress = requestedAddress;
-        }
-        else if (!TryReserveVirtualRange(
-                     ctx,
-                     desiredAddress,
-                     length,
-                     effectiveAlignment,
-                     allowSearch: !fixedMapping,
-                     out mappedAddress))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-        }
-
-        if (ShouldTraceVirtualMemory())
-        {
-            Console.Error.WriteLine(
-                $"[LOADER][TRACE] reserve_virtual_range: req=0x{requestedAddress:X16} desired=0x{desiredAddress:X16} mapped=0x{mappedAddress:X16} len=0x{length:X16} flags=0x{flags:X8} align=0x{effectiveAlignment:X16} already_backed={alreadyBacked} reused={reusedReleasedRange}");
-        }
-
-        if (!ctx.TryWriteUInt64(inOutAddressPointer, mappedAddress))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        lock (_stateGate)
-        {
-            _nextReservedVirtualBase = Math.Max(_nextReservedVirtualBase, mappedAddress + length);
-        }
-
-        KernelMemoryCompatExports.RegisterReservedVirtualRange(mappedAddress, length);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
-    }
-
-    internal static void RegisterReleasedVirtualRange(ulong address, ulong length)
-    {
-        if (address == 0 || length == 0 || ulong.MaxValue - address < length)
-        {
-            return;
-        }
-
-        lock (_stateGate)
-        {
-            var start = address;
-            var end = address + length;
-            for (var i = _releasedVirtualRanges.Count - 1; i >= 0; i--)
-            {
-                var existing = _releasedVirtualRanges[i];
-                var existingEnd = existing.Address + existing.Length;
-                if (end < existing.Address || existingEnd < start)
-                {
-                    continue;
-                }
-
-                start = Math.Min(start, existing.Address);
-                end = Math.Max(end, existingEnd);
-                _releasedVirtualRanges.RemoveAt(i);
-            }
-
-            _releasedVirtualRanges.Add(new ReleasedVirtualRange(start, end - start));
-        }
-    }
-
-    private static bool TryTakeReleasedVirtualRange(
-        ulong length,
-        ulong alignment,
-        out ulong address)
-    {
-        address = 0;
-        lock (_stateGate)
-        {
-            for (var i = 0; i < _releasedVirtualRanges.Count; i++)
-            {
-                var range = _releasedVirtualRanges[i];
-                var rangeEnd = range.Address + range.Length;
-                var aligned = AlignUp(range.Address, alignment);
-                if (aligned >= rangeEnd || length > rangeEnd - aligned)
-                {
-                    continue;
-                }
-
-                _releasedVirtualRanges.RemoveAt(i);
-                if (aligned > range.Address)
-                {
-                    _releasedVirtualRanges.Add(
-                        new ReleasedVirtualRange(range.Address, aligned - range.Address));
-                }
-
-                var allocationEnd = aligned + length;
-                if (allocationEnd < rangeEnd)
-                {
-                    _releasedVirtualRanges.Add(
-                        new ReleasedVirtualRange(allocationEnd, rangeEnd - allocationEnd));
-                }
-
-                address = aligned;
-                return true;
-            }
-        }
-
-        return false;
-    }
+    public static int KernelReserveVirtualRange(CpuContext ctx) =>
+        KernelMemoryCompatExports.ReserveBackingRange(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi],
+            ctx[CpuRegister.Rdx], ctx[CpuRegister.Rcx]);
 
     [SysAbiExport(
         Nid = "BohYr-F7-is",
@@ -925,6 +802,17 @@ public static class KernelRuntimeCompatExports
         }
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    internal static bool ContainsPrtRange(ulong address, ulong size)
+    {
+        if (size == 0 || address > ulong.MaxValue - size)
+            return false;
+        lock (_prtApertureGate)
+        {
+            return _prtApertures.Any(aperture => address >= aperture.Base &&
+                size <= aperture.Size && address - aperture.Base <= aperture.Size - size);
+        }
     }
 
     [SysAbiExport(
@@ -1003,14 +891,34 @@ public static class KernelRuntimeCompatExports
 
         if (!KernelModuleRegistry.TryGetModuleByAddress(queriedAddress, out var module))
         {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-        }
+            if (queriedAddress >= GuestExecutableAddressFloor &&
+                queriedAddress < GuestExecutableAddressCeiling)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+            }
 
-        if (!TryWriteModuleInfoForUnwind(ctx, outInfoAddress, module))
+            if (!TryWriteHostBoundaryModuleInfoForUnwind(ctx, outInfoAddress, queriedAddress))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+        }
+        else if (!TryWriteModuleInfoForUnwind(ctx, outInfoAddress, module))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "crb5j7mkk1c",
+        ExportName = "_is_signal_return",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelIsSignalReturn(CpuContext ctx)
+    {
+        // SharpEmu calls guest exception handlers without a signal-return frame.
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -1110,8 +1018,7 @@ public static class KernelRuntimeCompatExports
         LibraryName = "libKernel")]
     public static int KernelDebugRaiseException(CpuContext ctx)
     {
-        _ = ctx;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        return KernelDebugRaiseExceptionCore(ctx, "sceKernelDebugRaiseException");
     }
 
     [SysAbiExport(
@@ -1120,6 +1027,34 @@ public static class KernelRuntimeCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelDebugRaiseExceptionOnReleaseMode(CpuContext ctx)
+    {
+        return KernelDebugRaiseExceptionCore(ctx, "sceKernelDebugRaiseExceptionOnReleaseMode");
+    }
+
+    private static int KernelDebugRaiseExceptionCore(CpuContext ctx, string exportName)
+    {
+        var error = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var unknown = unchecked((long)ctx[CpuRegister.Rsi]);
+        if (unknown != 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        // libkernel treats this as a fatal debug exception. Callers commonly place
+        // UD2 immediately after the noreturn call, so returning normally turns the
+        // guest's intended termination into a host illegal-instruction fault.
+        Console.Error.WriteLine($"[LOADER][ERROR] {exportName}: error=0x{error:X8}");
+        GuestThreadExecution.RequestCurrentEntryExit(exportName, unchecked((ulong)error));
+        ctx[CpuRegister.Rax] = error;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "cfwBSQyr5Ys",
+        ExportName = "sceKernelDebugWriteCppExceptionInfo",
+        Target = Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelDebugWriteCppExceptionInfo(CpuContext ctx)
     {
         _ = ctx;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1227,31 +1162,48 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        int handle = 0;
-        if (TryReadUtf8Z(ctx, modulePathAddress, 512, out var modulePath) &&
+        if (!TryReadUtf8Z(ctx, modulePathAddress, 512, out var modulePath) ||
+            string.IsNullOrWhiteSpace(modulePath))
+        {
+            return ReturnModuleLoadError(
+                ctx,
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        int handle;
+        var hasDirectory = modulePath.Contains('/') || modulePath.Contains('\\');
+        var isApp0Path = modulePath.StartsWith("/app0/", StringComparison.OrdinalIgnoreCase) ||
+            modulePath.StartsWith("app0/", StringComparison.OrdinalIgnoreCase);
+        var loadResult = hasDirectory
+            ? KernelModuleRegistry.LoadModule(modulePath)
+            : default;
+        if (loadResult.Succeeded)
+        {
+            handle = loadResult.Handle;
+        }
+        else if (!isApp0Path &&
             KernelModuleRegistry.TryFindByPathOrName(modulePath, out var moduleByPath))
         {
             handle = moduleByPath.Handle;
         }
-        else if (!string.IsNullOrWhiteSpace(modulePath))
-        {
-            handle = KernelModuleRegistry.RegisterSyntheticModule(
-                Path.GetFileName(modulePath),
-                isSystemModule: false);
-        }
-        else if (KernelModuleRegistry.TryGetFirstModule(out var firstModule))
-        {
-            handle = firstModule.Handle;
-        }
         else
         {
-            handle = KernelModuleRegistry.RegisterSyntheticModule("module.sprx", isSystemModule: false);
+            loadResult = hasDirectory
+                ? loadResult
+                : KernelModuleRegistry.LoadModule(modulePath);
+            if (!loadResult.Succeeded)
+            {
+                return ReturnModuleLoadError(ctx, loadResult.Error);
+            }
+
+            handle = loadResult.Handle;
         }
 
         if (KernelModuleRegistry.TryBeginModuleStart(handle, out var moduleToStart))
         {
             var scheduler = GuestThreadExecution.Scheduler;
             string? startError = null;
+            ulong startResult = 0;
             var started = scheduler is not null && scheduler.TryCallGuestFunction(
                 ctx,
                 moduleToStart.InitEntryPoint,
@@ -1259,7 +1211,9 @@ public static class KernelRuntimeCompatExports
                 argumentAddress,
                 0,
                 0,
+                0,
                 $"sceKernelLoadStartModule:{moduleToStart.Name}",
+                out startResult,
                 out startError);
             KernelModuleRegistry.CompleteModuleStart(handle, started);
             if (!started)
@@ -1267,14 +1221,16 @@ public static class KernelRuntimeCompatExports
                 Console.Error.WriteLine(
                     $"[LOADER][ERROR] sceKernelLoadStartModule failed to start '{moduleToStart.Name}' " +
                     $"at 0x{moduleToStart.InitEntryPoint:X16}: {startError ?? "guest scheduler unavailable"}");
-                var error = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_CPU_TRAP;
-                if (resultAddress != 0)
-                {
-                    _ = TryWriteInt32(ctx, resultAddress, error);
-                }
+                return ReturnModuleLoadError(
+                    ctx,
+                    (int)OrbisGen2Result.ORBIS_GEN2_ERROR_CPU_TRAP);
+            }
 
-                ctx[CpuRegister.Rax] = unchecked((ulong)(long)error);
-                return error;
+            if (resultAddress != 0 && !TryWriteInt32(ctx, resultAddress, unchecked((int)startResult)))
+            {
+                return ReturnModuleLoadError(
+                    ctx,
+                    (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
             Console.Error.WriteLine(
@@ -1284,6 +1240,12 @@ public static class KernelRuntimeCompatExports
 
         ctx[CpuRegister.Rax] = unchecked((uint)handle);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static int ReturnModuleLoadError(CpuContext ctx, int error)
+    {
+        ctx[CpuRegister.Rax] = unchecked((ulong)(long)error);
+        return error;
     }
 
     [SysAbiExport(
@@ -1340,25 +1302,15 @@ public static class KernelRuntimeCompatExports
         var timesecAddress = ctx[CpuRegister.Rdx];
         var dstSecondsAddress = ctx[CpuRegister.Rcx];
 
-        if (localTimeAddress == 0)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
+        var timezone = GetStandardTimezone();
+        var localSeconds = ConvertUtcToLocaltimeSeconds(
+            utcSeconds,
+            timezone.MinutesWest,
+            timezone.DstSeconds);
+        var westSeconds = unchecked((uint)(-timezone.MinutesWest * 60));
 
-        var utc = DateTimeOffset.FromUnixTimeSeconds(utcSeconds);
-        var local = TimeZoneInfo.ConvertTime(utc, TimeZoneInfo.Local);
-        var offset = local.Offset;
-        var localSeconds = utcSeconds + (long)offset.TotalSeconds;
-        var dstSeconds = TimeZoneInfo.Local.IsDaylightSavingTime(local.DateTime)
-            ? (uint)Math.Max(0, TimeZoneInfo.Local.GetAdjustmentRules()
-                .Where(rule => rule.DateStart <= local.Date && rule.DateEnd >= local.Date)
-                .Select(rule => rule.DaylightDelta.TotalSeconds)
-                .DefaultIfEmpty(0)
-                .Max())
-            : 0u;
-        var westSeconds = unchecked((uint)(int)offset.TotalSeconds);
-
-        if (!ctx.TryWriteUInt64(localTimeAddress, unchecked((ulong)localSeconds)))
+        if (localTimeAddress != 0 &&
+            !ctx.TryWriteUInt64(localTimeAddress, unchecked((ulong)localSeconds)))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1368,14 +1320,17 @@ public static class KernelRuntimeCompatExports
             Span<byte> timesec = stackalloc byte[OrbisTimesecSize];
             BinaryPrimitives.WriteInt64LittleEndian(timesec, utcSeconds);
             BinaryPrimitives.WriteUInt32LittleEndian(timesec.Slice(sizeof(long), sizeof(uint)), westSeconds);
-            BinaryPrimitives.WriteUInt32LittleEndian(timesec.Slice(sizeof(long) + sizeof(uint), sizeof(uint)), dstSeconds);
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                timesec.Slice(sizeof(long) + sizeof(uint), sizeof(uint)),
+                unchecked((uint)timezone.DstSeconds));
             if (!ctx.Memory.TryWrite(timesecAddress, timesec))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
         }
 
-        if (dstSecondsAddress != 0 && !ctx.TryWriteUInt64(dstSecondsAddress, dstSeconds))
+        if (dstSecondsAddress != 0 &&
+            !ctx.TryWriteUInt64(dstSecondsAddress, unchecked((ulong)timezone.DstSeconds)))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1393,28 +1348,27 @@ public static class KernelRuntimeCompatExports
     {
         var localSeconds = unchecked((long)ctx[CpuRegister.Rdi]);
         var utcTimeAddress = ctx[CpuRegister.Rdx];
-        var timezoneAddress = ctx[CpuRegister.Rcx];
+        var timeResultAddress = ctx[CpuRegister.Rcx];
         var dstSecondsAddress = ctx[CpuRegister.R8];
 
-        if (timezoneAddress == 0)
+        if (timeResultAddress == 0)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        var localDate = DateTimeOffset.FromUnixTimeSeconds(localSeconds).DateTime;
-        var offset = TimeZoneInfo.Local.GetUtcOffset(localDate);
-        var utcSeconds = localSeconds - (long)offset.TotalSeconds;
-        var dstSeconds = TimeZoneInfo.Local.IsDaylightSavingTime(localDate)
-            ? (int)Math.Max(0, TimeZoneInfo.Local.GetAdjustmentRules()
-                .Where(rule => rule.DateStart <= localDate.Date && rule.DateEnd >= localDate.Date)
-                .Select(rule => rule.DaylightDelta.TotalSeconds)
-                .DefaultIfEmpty(0)
-                .Max())
-            : 0;
-        var minutesWest = unchecked((int)-offset.TotalMinutes);
-
-        if (!TryWriteInt32(ctx, timezoneAddress, minutesWest) ||
-            !TryWriteInt32(ctx, timezoneAddress + sizeof(int), dstSeconds / 60))
+        var timezone = GetStandardTimezone();
+        var utcSeconds = ConvertLocaltimeToUtcSeconds(
+            localSeconds,
+            timezone.MinutesWest,
+            timezone.DstSeconds);
+        // Both conversion directions return seconds and UTC offsets in the same layout.
+        Span<byte> timeResult = stackalloc byte[OrbisTimesecSize];
+        BinaryPrimitives.WriteInt64LittleEndian(timeResult, utcSeconds);
+        BinaryPrimitives.WriteInt32LittleEndian(timeResult.Slice(sizeof(long), sizeof(int)), -timezone.MinutesWest * 60);
+        BinaryPrimitives.WriteInt32LittleEndian(
+            timeResult.Slice(sizeof(long) + sizeof(int), sizeof(int)),
+            timezone.DstSeconds);
+        if (!ctx.Memory.TryWrite(timeResultAddress, timeResult))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
@@ -1424,13 +1378,27 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        if (dstSecondsAddress != 0 && !TryWriteInt32(ctx, dstSecondsAddress, dstSeconds))
+        if (dstSecondsAddress != 0 && !TryWriteInt32(ctx, dstSecondsAddress, timezone.DstSeconds))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    internal static long ConvertLocaltimeToUtcSeconds(long localSeconds, int minutesWest, int dstSeconds) =>
+        unchecked(localSeconds + (long)minutesWest * 60 - dstSeconds);
+
+    internal static long ConvertUtcToLocaltimeSeconds(long utcSeconds, int minutesWest, int dstSeconds) =>
+        unchecked(utcSeconds - (long)minutesWest * 60 + dstSeconds);
+
+    private static (int MinutesWest, int DstSeconds) GetStandardTimezone()
+    {
+        // Use the standard UTC offset; daylight-saving settings are not modeled.
+        var timezone = TimeZoneInfo.Local;
+        var baseOffset = timezone.BaseUtcOffset;
+        return (unchecked((int)-baseOffset.TotalMinutes), 0);
     }
 
     [SysAbiExport(
@@ -1492,6 +1460,14 @@ public static class KernelRuntimeCompatExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    [SysAbiExport(
+        Nid = "4fU5yvOkVG4",
+        ExportName = "sceSysmoduleGetModuleInfoForUnwind",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSysmodule")]
+    public static int SysmoduleGetModuleInfoForUnwind(CpuContext ctx) =>
+        KernelGetModuleInfoForUnwind(ctx);
 
     [SysAbiExport(
         Nid = "fMP5NHUOaMk",
@@ -1701,6 +1677,29 @@ public static class KernelRuntimeCompatExports
             payload.AsSpan(0x128),
             module.EndAddress - module.BaseAddress);
         return ctx.Memory.TryWrite(outInfoAddress, payload);
+    }
+
+    private static bool TryWriteHostBoundaryModuleInfoForUnwind(
+        CpuContext ctx,
+        ulong outInfoAddress,
+        ulong queriedAddress)
+    {
+        var boundaryBase = queriedAddress & ~(HostUnwindBoundarySize - 1);
+        var module = new KernelModuleRegistry.ModuleEntry(
+            Handle: 0,
+            Name: "SharpEmuHostBoundary",
+            Path: string.Empty,
+            BaseAddress: boundaryBase,
+            EndAddress: boundaryBase + HostUnwindBoundarySize,
+            EntryPoint: 0,
+            InitEntryPoint: 0,
+            EhFrameHeaderAddress: 0,
+            EhFrameAddress: 0,
+            EhFrameSize: 0,
+            StartState: KernelModuleRegistry.ModuleStartState.Started,
+            IsMain: false,
+            IsSystemModule: false);
+        return TryWriteModuleInfoForUnwind(ctx, outInfoAddress, module);
     }
 
     private static void WriteModuleName(Span<byte> payload, string moduleName)
@@ -2016,25 +2015,6 @@ public static class KernelRuntimeCompatExports
     private static unsafe nint VirtualAlloc(nint lpAddress, nuint dwSize, uint flAllocationType, uint flProtect) =>
         (nint)HostMemory.Alloc((void*)lpAddress, dwSize, flAllocationType, flProtect);
 
-    private static bool TryReserveVirtualRange(
-        CpuContext ctx,
-        ulong desiredAddress,
-        ulong length,
-        ulong alignment,
-        bool allowSearch,
-        out ulong mappedAddress)
-    {
-        return KernelVirtualRangeAllocator.TryReserve(
-            ctx,
-            desiredAddress,
-            length,
-            executable: false,
-            alignment,
-            allowSearch,
-            allowAllocateAtAlternative: allowSearch,
-            "reserve_virtual_range",
-            out mappedAddress);
-    }
 
     private static ulong AlignUp(ulong value, ulong alignment)
     {
@@ -2047,10 +2027,6 @@ public static class KernelRuntimeCompatExports
         return (value + mask) & ~mask;
     }
 
-    private static bool ShouldTraceVirtualMemory()
-    {
-        return string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIRTUAL_MEMORY"), "1", StringComparison.Ordinal);
-    }
     [SysAbiExport(
         Nid = "QvsZxomvUHs",
         ExportName = "sceKernelNanosleep",
