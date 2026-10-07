@@ -50,15 +50,22 @@ internal static class RosettaGcBudget
         }
         environment.Add($"{BudgetVariable}={Budget}");
 
-        var argv = new string[args.Length + 1];
-        argv[0] = path;
-        args.CopyTo(argv, 1);
-
+        var argv = BuildArguments(path, Environment.GetCommandLineArgs()[0], args);
+        var nativeArguments = ToNullTerminated(argv);
+        var nativeEnvironment = ToNullTerminated(environment);
         // Only returns on failure; the emulator then runs with the default budget.
-        _ = Execve(path, ToNullTerminated(argv), ToNullTerminated(environment));
+        _ = Execve(path, nativeArguments, nativeEnvironment);
+        var error = Marshal.GetLastPInvokeError();
+        foreach (var pointer in nativeArguments) Marshal.FreeCoTaskMem(pointer);
+        foreach (var pointer in nativeEnvironment) Marshal.FreeCoTaskMem(pointer);
         Console.Error.WriteLine(
-            $"[LOADER][WARN] Could not restart with a larger GC budget under Rosetta: errno={Marshal.GetLastPInvokeError()}");
+            $"[LOADER][WARN] Could not restart with a larger GC budget under Rosetta: errno={error}");
     }
+
+    internal static string[] BuildArguments(string executable, string entryAssembly, string[] args) =>
+        Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase)
+            ? [executable, entryAssembly, .. args]
+            : [executable, .. args];
 
     private static bool IsTranslated()
     {
