@@ -66,13 +66,14 @@ public sealed class ImportedRelocationCapacityTests
         var descriptor = loader.GetNestedType("RelocationDescriptor", BindingFlags.NonPublic)!;
         var valueKind = loader.GetNestedType("RelocationValueKind", BindingFlags.NonPublic)!;
         var writeKind = loader.GetNestedType("RelocationWriteKind", BindingFlags.NonPublic)!;
-        var values = Array.CreateInstance(descriptor, rows.Length);
+        var listType = typeof(List<>).MakeGenericType(descriptor);
+        var values = (System.Collections.IList)Activator.CreateInstance(listType, rows.Length)!;
         var constructor = descriptor.GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
             .Single(candidate => candidate.GetParameters().Length == 8);
         for (var index = 0; index < rows.Length; index++)
         {
             var row = rows[index];
-            values.SetValue(constructor.Invoke([row.Target, row.Addend, row.Nid, 0ul, Enum.ToObject(valueKind, row.Kind), row.Data, Enum.ToObject(writeKind, 0), false]), index);
+            values.Add(constructor.Invoke([row.Target, row.Addend, row.Nid, 0ul, Enum.ToObject(valueKind, row.Kind), row.Data, Enum.ToObject(writeKind, 0), false]));
         }
         return (IReadOnlyList<ImportedSymbolRelocation>)loader.GetMethod("BuildImportedRelocations", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [values])!;
     }

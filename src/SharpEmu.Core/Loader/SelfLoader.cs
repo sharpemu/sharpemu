@@ -1420,18 +1420,20 @@ public sealed class SelfLoader : ISelfLoader
     }
 
     private static IReadOnlyList<ImportedSymbolRelocation> BuildImportedRelocations(
-        IReadOnlyList<RelocationDescriptor> descriptors)
+        List<RelocationDescriptor> descriptors)
     {
         if (descriptors.Count == 0)
         {
             return Array.Empty<ImportedSymbolRelocation>();
         }
 
-        // The locally built descriptor list is stable during these scans.
+        // This private method receives the locally built list; neither scan mutates
+        // it or invokes callbacks. Keep that ownership invariant while using its span.
         // Relative relocations can dominate it; reserve only records retained
         // in the imported-symbol table rather than every relocation descriptor.
+        var descriptorSpan = CollectionsMarshal.AsSpan(descriptors);
         var importedCount = 0;
-        foreach (var descriptor in descriptors)
+        foreach (ref readonly var descriptor in descriptorSpan)
         {
             if (descriptor.ImportNid is not null && descriptor.ValueKind == RelocationValueKind.Pointer)
             {
@@ -1445,7 +1447,7 @@ public sealed class SelfLoader : ISelfLoader
         }
 
         var importedRelocations = new List<ImportedSymbolRelocation>(importedCount);
-        foreach (var descriptor in descriptors)
+        foreach (ref readonly var descriptor in descriptorSpan)
         {
             if (descriptor.ImportNid is null || descriptor.ValueKind != RelocationValueKind.Pointer)
             {
