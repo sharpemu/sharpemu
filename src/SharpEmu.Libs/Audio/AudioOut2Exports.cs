@@ -22,7 +22,6 @@ public static class AudioOut2Exports
     // SceAudioOut2ContextParam: 6 x uint32 + uint32 reserved[10].
     private const int AudioOut2ContextParamSize = 0x40;
     private const int AudioOut2ContextMemorySize = 0x4000;
-    private const int AudioOut2ContextMemoryAlignment = 0x100;
     // Exact object body size. Do not page-align to 64K — the RAGE Main Thread
     // stack-allocates this and a 64K VLA is what planted 0x10000 on the canary.
     private const int SpeakerArrayHeaderSize = 0x40;
@@ -36,6 +35,17 @@ public static class AudioOut2Exports
     private const int SpeakerArrayDivisorFieldOffset = 0x34;
     private const int SpeakerArrayResultFieldOffset = 0x3C;
     private const uint SpeakerArrayDefaultDivisor = 1;
+    private const int SpeakerArrayCoefficientBytes = 0x400;
+
+    private static readonly string _stackOutBufferModes =
+        Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_OUT2_STACK_WRITES") ?? "1";
+
+    private static bool AllowStackOut(string which) =>
+        string.Equals(_stackOutBufferModes, "1", StringComparison.Ordinal) ||
+        _stackOutBufferModes
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Contains(which, StringComparer.OrdinalIgnoreCase);
+
     // SceAudioOut2SpeakerArrayParam: Position* (0x00), uint uiNumSpeakers (0x08),
     // uint8 ucIs3d (0x0C), void* pBuffer (0x10), size_t szSize (0x18),
     // SceAudioOut2VbapCorrectionParam sVbapCorrection (0x20, 0x20 bytes).
@@ -60,6 +70,7 @@ public static class AudioOut2Exports
     // SceAudioOut2Attribute: u32 attributeId, 4 pad, const void* value, size_t valueSize.
     private const int AttributeEntrySize = 0x18;
     private const uint PortAttributeIdPcm = 0;
+    private const ushort AudioOut2PortTypeVibration = 6;
     private const uint PortAttributeIdGain = 1;
     private const uint PortAttributeIdPassthrough = 5;
     private const uint PortAttributeIdAmbisonics = 8;
@@ -88,6 +99,11 @@ public static class AudioOut2Exports
     private static long _pushTraceCount;
     private static long _submitTraceCount;
     private static long _submitSkipTraceCount;
+    private static long _bedWriteTraceCount;
+    private static long _portCreateTraceCount;
+    private static long _portDestroyTraceCount;
+    private static long _portStateTraceCount;
+    private static long _attributeCallTraceCount;
     private static long _attributePcmTraceCount;
 
     private static readonly ConcurrentDictionary<ulong, byte> SpeakerArrays = new();
@@ -212,7 +228,7 @@ public static class AudioOut2Exports
         public uint Ambisonics = AmbisonicsNone;
         public uint Passthrough;
 
-        public int PcmPending;
+        public byte[]? PcmData;
 
     }
 
@@ -226,6 +242,7 @@ public static class AudioOut2Exports
     private static string SecondaryBackendName = "none";
     private static ulong PrimaryContextHandle;
     private static readonly object HostSubmitGate = new();
+    private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
 
     [SysAbiExport(
         Nid = "g2tViFIohHE",
@@ -248,6 +265,16 @@ public static class AudioOut2Exports
         Target = Generation.Gen5,
         LibraryName = "libSceAudioOut2")]
     public static int AudioOut2MasteringInit(CpuContext ctx)
+    {
+        return SetReturn(ctx, 0);
+    }
+
+    [SysAbiExport(
+        Nid = "v8iOE+j8a5o",
+        ExportName = "sceAudioOut2MasteringSetParam",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAudioOut2")]
+    public static int AudioOut2MasteringSetParam(CpuContext ctx)
     {
         return SetReturn(ctx, 0);
     }
@@ -305,8 +332,8 @@ public static class AudioOut2Exports
         // ABI: int32_t sceAudioOut2ContextQueryMemory(const SceAudioOut2ContextParam *pParams,
         // size_t *pMemorySize) — rdi is the param block, rsi is the one and only out pointer.
         var paramAddress = ctx[CpuRegister.Rdi];
-        var memoryInfoAddress = ctx[CpuRegister.Rsi];
-        if (paramAddress == 0 || memoryInfoAddress == 0)
+        var memorySizeAddress = ctx[CpuRegister.Rsi];
+        if (paramAddress == 0 || memorySizeAddress == 0)
         {
             return SetReturn(ctx, AudioOut2ErrorInvalidPointer);
         }
@@ -324,13 +351,12 @@ public static class AudioOut2Exports
             contextMemorySize = checked(0x10000UL + (queueDepth * 0x590UL));
         }
 
-        // The output is a single size_t wherever it lives. Titles keep other locals right after it
-        // (Octopath Traveler II divides by the dword at +12), so nothing else may be written.
         Span<byte> memorySize = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(memorySize, contextMemorySize);
         Console.Error.WriteLine(
-            $"[LOADER][TRACE] audio_out2.context-query-memory out=0x{memoryInfoAddress:X} size=0x{contextMemorySize:X}");
-        return ctx.Memory.TryWrite(memoryInfoAddress, memorySize)
+            $"[LOADER][TRACE] audio_out2.context-query-memory " +
+            $"out=0x{memorySizeAddress:X} size=0x{contextMemorySize:X}");
+        return ctx.Memory.TryWrite(memorySizeAddress, memorySize)
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, AudioOut2ErrorInvalidPointer);
     }
@@ -391,8 +417,20 @@ public static class AudioOut2Exports
         LibraryName = "libSceAudioOut2")]
     public static int AudioOut2ContextDestroy(CpuContext ctx)
     {
-        // Shared backend lifetime is process-wide; just drop the context entry.
-        Contexts.TryRemove(ctx[CpuRegister.Rdi], out _);
+        var contextHandle = ctx[CpuRegister.Rdi];
+        Contexts.TryRemove(contextHandle, out _);
+        foreach (var (portHandle, port) in Ports)
+        {
+            if (port.ContextHandle != contextHandle ||
+                !Ports.TryRemove(portHandle, out var removedPort))
+            {
+                continue;
+            }
+
+            Interlocked.Exchange(ref removedPort.PcmData, null);
+            removedPort.PcmAddress = 0;
+        }
+
         return SetReturn(ctx, 0);
     }
 
@@ -401,7 +439,38 @@ public static class AudioOut2Exports
         ExportName = "sceAudioOut2ContextBedWrite",
         Target = Generation.Gen5,
         LibraryName = "libSceAudioOut2")]
-    public static int AudioOut2ContextBedWrite(CpuContext ctx) => SetReturn(ctx, 0);
+    public static int AudioOut2ContextBedWrite(CpuContext ctx)
+    {
+        var n = Interlocked.Increment(ref _bedWriteTraceCount);
+        if (n <= 8 || n % 500 == 0)
+        {
+            TraceAudioOut2(
+                $"context-bed-write#{n} context=0x{ctx[CpuRegister.Rdi]:X} " +
+                $"rsi=0x{ctx[CpuRegister.Rsi]:X} rdx=0x{ctx[CpuRegister.Rdx]:X} " +
+                $"rcx=0x{ctx[CpuRegister.Rcx]:X} r8=0x{ctx[CpuRegister.R8]:X} " +
+                $"r9=0x{ctx[CpuRegister.R9]:X}");
+
+            Span<byte> probe = stackalloc byte[0x40];
+            foreach (var (name, address) in new[]
+            {
+                ("rsi", ctx[CpuRegister.Rsi]),
+                ("rdx", ctx[CpuRegister.Rdx]),
+                ("rcx", ctx[CpuRegister.Rcx]),
+                ("r8", ctx[CpuRegister.R8]),
+                ("r9", ctx[CpuRegister.R9]),
+            })
+            {
+                if (address != 0 && ctx.Memory.TryRead(address, probe))
+                {
+                    TraceAudioOut2(
+                        $"context-bed-write-probe#{n} {name}=0x{address:X} " +
+                        $"bytes={Convert.ToHexString(probe)}");
+                }
+            }
+        }
+
+        return SetReturn(ctx, 0);
+    }
 
     [SysAbiExport(
         Nid = "aII9h5nli9U",
@@ -494,11 +563,6 @@ public static class AudioOut2Exports
         // [rbp-0x10] zeroed the canary low half and killed Bink Snd @ eboot+0xAE36.
         var outLevelAddress = ctx[CpuRegister.Rsi];
         var outAvailableAddress = ctx[CpuRegister.Rdx];
-        if (outLevelAddress == 0)
-        {
-            outLevelAddress = outAvailableAddress;
-            outAvailableAddress = 0;
-        }
 
         // Titles size their rendering by these: Wwise renders exactly puiAvailableQueues grains per
         // update and pushes them non-blocking, so a queue always reported empty made it render a
@@ -550,6 +614,41 @@ public static class AudioOut2Exports
         var portHandle = ctx[CpuRegister.Rdi];
         var attributesAddress = ctx[CpuRegister.Rsi];
         var attributeCount = unchecked((uint)ctx[CpuRegister.Rdx]);
+        var attributeStride = unchecked((uint)ctx[CpuRegister.Rcx]);
+        var traceCall = Interlocked.Increment(ref _attributeCallTraceCount);
+        if (traceCall <= 8 && attributesAddress != 0)
+        {
+            Span<byte> descriptorProbe = stackalloc byte[0x40];
+            if (ctx.Memory.TryRead(attributesAddress, descriptorProbe))
+            {
+                TraceAudioOut2(
+                    $"port-set-attributes-raw#{traceCall} port=0x{portHandle:X} " +
+                    $"count={attributeCount} stride={attributeStride} address=0x{attributesAddress:X} " +
+                    $"bytes={Convert.ToHexString(descriptorProbe)}");
+
+                Span<byte> targetProbe = stackalloc byte[0x20];
+                for (var offset = 0; offset <= descriptorProbe.Length - sizeof(ulong); offset += sizeof(ulong))
+                {
+                    var candidate = BinaryPrimitives.ReadUInt64LittleEndian(descriptorProbe[offset..]);
+                    if (!IsWritableOutBuffer(candidate) ||
+                        !ctx.Memory.TryRead(candidate, targetProbe))
+                    {
+                        continue;
+                    }
+
+                    TraceAudioOut2(
+                        $"port-set-attributes-target#{traceCall} offset=0x{offset:X} " +
+                        $"address=0x{candidate:X} bytes={Convert.ToHexString(targetProbe)}");
+                }
+            }
+            else
+            {
+                TraceAudioOut2(
+                    $"port-set-attributes-raw#{traceCall} read-failed address=0x{attributesAddress:X} " +
+                    $"count={attributeCount} stride={attributeStride}");
+            }
+        }
+
         if (!Ports.TryGetValue(portHandle, out var port))
         {
             return SetReturn(ctx, 0);
@@ -622,14 +721,38 @@ public static class AudioOut2Exports
                 continue;
             }
 
-            port.PcmAddress = BinaryPrimitives.ReadUInt64LittleEndian(pcm);
-            Volatile.Write(ref port.PcmPending, port.PcmAddress != 0 ? 1 : 0);
+            var pcmAddress = BinaryPrimitives.ReadUInt64LittleEndian(pcm);
+            byte[]? pcmData = null;
+            if (pcmAddress != 0 &&
+                TryDecodeDataFormat(port.DataFormat, out var channels, out var bytesPerSample, out _) &&
+                IsSnapshotPcmPort(port.PortType, channels))
+            {
+                int byteLength;
+                try
+                {
+                    byteLength = checked((int)port.GrainSamples * channels * bytesPerSample);
+                }
+                catch (OverflowException)
+                {
+                    return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+                }
+
+                pcmData = new byte[byteLength];
+                if (!ctx.Memory.TryRead(pcmAddress, pcmData))
+                {
+                    return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+            }
+
+            port.PcmAddress = pcmAddress;
+            Volatile.Write(ref port.PcmData, pcmData);
             var n = Interlocked.Increment(ref _attributePcmTraceCount);
             if (n <= 8 || n % 500 == 0)
             {
                 TraceAudioOut2(
                     $"port-set-pcm#{n} port=0x{portHandle:X} pcm=0x{port.PcmAddress:X} " +
-                    $"format=0x{port.DataFormat:X} grains={port.GrainSamples}");
+                    $"bytes={pcmData?.Length ?? 0} format=0x{port.DataFormat:X} " +
+                    $"grains={port.GrainSamples}");
             }
         }
 
@@ -645,10 +768,10 @@ public static class AudioOut2Exports
     {
         // ABI: sceAudioOut2PortCreate(SceAudioOut2ContextHandle hCtx,
         // const SceAudioOut2PortParam *pParams, SceAudioOut2PortHandle *phVPort) —
-        // rdx is the only out pointer.
         var contextHandle = ctx[CpuRegister.Rdi];
         var paramAddress = ctx[CpuRegister.Rsi];
-        var outPortAddress = ctx[CpuRegister.Rdx];
+        var outPortAddress = ResolveGuestOutBuffer(ctx[CpuRegister.Rdx], ctx[CpuRegister.Rcx]);
+        var traceCreate = Interlocked.Increment(ref _portCreateTraceCount);
         if (outPortAddress == 0)
         {
             return SetReturn(ctx, AudioOut2ErrorInvalidPointer);
@@ -669,6 +792,14 @@ public static class AudioOut2Exports
             Span<byte> param = stackalloc byte[PortParamSize];
             if (ctx.Memory.TryRead(paramAddress, param))
             {
+                if (traceCreate <= 8 || traceCreate % 500 == 0)
+                {
+                    TraceAudioOut2(
+                        $"port-create-param#{traceCreate} context=0x{contextHandle:X} " +
+                        $"address=0x{paramAddress:X} out=0x{outPortAddress:X} " +
+                        $"bytes={Convert.ToHexString(param)}");
+                }
+
                 portType = BinaryPrimitives.ReadUInt16LittleEndian(param);
                 dataFormat = BinaryPrimitives.ReadUInt32LittleEndian(param[0x04..]);
                 var freq = BinaryPrimitives.ReadUInt32LittleEndian(param[0x08..]);
@@ -719,13 +850,16 @@ public static class AudioOut2Exports
             return SetReturn(ctx, AudioOut2ErrorInvalidPointer);
         }
 
+        if (IsGuestStackAddress(stateAddress) &&
+            !(AllowStackOut("portstate") && Ports.ContainsKey(portHandle)))
+        {
+            TraceAudioOut2(
+                $"port-get-state skip-stack handle=0x{portHandle:X} state=0x{stateAddress:X}");
+            return SetReturn(ctx, 0);
+        }
+
         Span<byte> state = stackalloc byte[PortStateSize];
         state.Clear();
-        //   +0x00 u16 output         = OUTPUT_PRIMARY (1)
-        //   +0x02 u8  numChannels    = from port format when known, else 2
-        //   +0x04 s16 volume         = -1 (not applicable outside PADSPK)
-        //   +0x06 u16 rerouteCounter = 0 (the host mixer never reroutes)
-        //   +0x08 u32 flags          = 0 (no 3D, not mono-forced)
         byte channels = 2;
         if (Ports.TryGetValue(portHandle, out var port) &&
             TryDecodeDataFormat(port.DataFormat, out var decodedChannels, out _, out _))
@@ -735,15 +869,21 @@ public static class AudioOut2Exports
 
         BinaryPrimitives.WriteUInt16LittleEndian(state[0x00..], PortStateOutputConnectedPrimary);
         state[0x02] = channels;
-        BinaryPrimitives.WriteInt16LittleEndian(state[0x04..], -1);
+        BinaryPrimitives.WriteInt16LittleEndian(state[0x04..], 127);
 
         if (!ctx.Memory.TryWrite(stateAddress, state))
         {
             return SetReturn(ctx, AudioOut2ErrorInvalidPointer);
         }
 
-        TraceAudioOut2(
-            $"port-get-state handle=0x{portHandle:X} state=0x{stateAddress:X} bytes=0x{PortStateSize:X}");
+        var traceState = Interlocked.Increment(ref _portStateTraceCount);
+        if (traceState <= 8 || traceState % 500 == 0)
+        {
+            TraceAudioOut2(
+                $"port-get-state#{traceState} handle=0x{portHandle:X} state=0x{stateAddress:X} " +
+                $"bytes={Convert.ToHexString(state)}");
+        }
+
         return SetReturn(ctx, 0);
     }
 
@@ -972,7 +1112,17 @@ public static class AudioOut2Exports
         LibraryName = "libSceAudioOut2")]
     public static int AudioOut2PortDestroy(CpuContext ctx)
     {
-        Ports.TryRemove(ctx[CpuRegister.Rdi], out _);
+        var portHandle = ctx[CpuRegister.Rdi];
+        var removed = Ports.TryRemove(portHandle, out var port);
+        var n = Interlocked.Increment(ref _portDestroyTraceCount);
+        if (n <= 8 || n % 500 == 0)
+        {
+            TraceAudioOut2(
+                $"port-destroy#{n} handle=0x{portHandle:X} removed={removed} " +
+                $"context=0x{port?.ContextHandle ?? 0:X} pcm=0x{port?.PcmAddress ?? 0:X} " +
+                $"remaining={Ports.Count}");
+        }
+
         return SetReturn(ctx, 0);
     }
 
@@ -1064,13 +1214,20 @@ public static class AudioOut2Exports
                 {
                     try
                     {
-                        var audio = HostPlatform.Current.Audio;
-                        // Deeper host queue than classic AudioOut: FMOD's bursty
-                        // AudioOut2 Push pattern underran a 32 KiB (~171 ms) bed.
-                        PrimaryBackend = audio.OpenStereoPcm16Stream(
-                            context.Frequency,
-                            maxQueuedPcmBytes: 128 * 1024);
-                        PrimaryBackendName = audio.BackendName + "-primary";
+                        var streamFactory = Volatile.Read(ref _streamFactoryForTests);
+                        if (streamFactory is not null)
+                        {
+                            PrimaryBackend = streamFactory(context.Frequency);
+                            PrimaryBackendName = PrimaryBackend is null ? "silent" : "test-primary";
+                        }
+                        else
+                        {
+                            var audio = HostPlatform.Current.Audio;
+                            PrimaryBackend = audio.OpenStereoPcm16Stream(
+                                context.Frequency,
+                                maxQueuedPcmBytes: 128 * 1024);
+                            PrimaryBackendName = audio.BackendName + "-primary";
+                        }
                     }
                     catch (Exception exception)
                     {
@@ -1088,11 +1245,20 @@ public static class AudioOut2Exports
             {
                 try
                 {
-                    var audio = HostPlatform.Current.Audio;
-                    SecondaryBackend = audio.OpenStereoPcm16Stream(
-                        context.Frequency,
-                        maxQueuedPcmBytes: 128 * 1024);
-                    SecondaryBackendName = audio.BackendName + "-secondary";
+                    var streamFactory = Volatile.Read(ref _streamFactoryForTests);
+                    if (streamFactory is not null)
+                    {
+                        SecondaryBackend = streamFactory(context.Frequency);
+                        SecondaryBackendName = SecondaryBackend is null ? "silent" : "test-secondary";
+                    }
+                    else
+                    {
+                        var audio = HostPlatform.Current.Audio;
+                        SecondaryBackend = audio.OpenStereoPcm16Stream(
+                            context.Frequency,
+                            maxQueuedPcmBytes: 128 * 1024);
+                        SecondaryBackendName = audio.BackendName + "-secondary";
+                    }
                 }
                 catch (Exception exception)
                 {
@@ -1155,7 +1321,6 @@ public static class AudioOut2Exports
         lock (HostSubmitGate)
         {
             var mix = ArrayPool<float>.Shared.Rent(frames * 2);
-            var source = ArrayPool<byte>.Shared.Rent(frames * 16 * sizeof(float));
             var output = ArrayPool<byte>.Shared.Rent(frames * AudioPcmConversion.OutputFrameSize);
             try
             {
@@ -1164,29 +1329,42 @@ public static class AudioOut2Exports
                 foreach (var port in Ports.Values)
                 {
                     if (port.ContextHandle != context.Handle ||
-                        port.PcmAddress == 0 ||
-                        Interlocked.Exchange(ref port.PcmPending, 0) == 0 ||
-                        !TryDecodeDataFormat(port.DataFormat, out var ch, out var bps, out var isFloat) ||
-                        !TryGetStereoGains(port.PortType, ch, port.Gain, port.Ambisonics, port.Passthrough,
-                            out var leftGain, out var rightGain))
+                        !TryDecodeDataFormat(port.DataFormat, out var ch, out var bps, out var isFloat))
+                    {
+                        continue;
+                    }
+
+                    var pcmData = TakePortPcmSnapshot(port);
+                    if (pcmData is null)
+                    {
+                        continue;
+                    }
+
+                    if (!TryGetStereoGains(
+                            port.PortType,
+                            ch,
+                            port.Gain,
+                            port.Ambisonics,
+                            port.Passthrough,
+                            out var leftGain,
+                            out var rightGain))
                     {
                         continue;
                     }
 
                     var byteLength = checked(frames * ch * bps);
-                    if (byteLength <= 0 || byteLength > source.Length)
+                    if (byteLength <= 0 || byteLength > checked(frames * 16 * sizeof(float)))
                     {
                         continue;
                     }
 
-                    var sourceSpan = source.AsSpan(0, byteLength);
-                    if (!ctx.Memory.TryRead(port.PcmAddress, sourceSpan))
+                    if (pcmData.Length < byteLength)
                     {
                         continue;
                     }
 
                     MixPortIntoStereo(
-                        sourceSpan,
+                        pcmData.AsSpan(0, byteLength),
                         mix.AsSpan(0, frames * 2),
                         frames,
                         ch,
@@ -1238,10 +1416,68 @@ public static class AudioOut2Exports
             finally
             {
                 ArrayPool<float>.Shared.Return(mix);
-                ArrayPool<byte>.Shared.Return(source);
                 ArrayPool<byte>.Shared.Return(output);
             }
         }
+    }
+
+    internal static byte[]? GetPortPcmSnapshotForTests(ulong portHandle)
+    {
+        if (!Ports.TryGetValue(portHandle, out var port))
+        {
+            return null;
+        }
+
+        var snapshot = Volatile.Read(ref port.PcmData);
+        return snapshot?.ToArray();
+    }
+
+    internal static bool HasPortForTests(ulong portHandle) => Ports.ContainsKey(portHandle);
+
+    internal static byte[]? TakePortPcmSnapshotForTests(ulong portHandle)
+    {
+        return Ports.TryGetValue(portHandle, out var port)
+            ? TakePortPcmSnapshot(port)
+            : null;
+    }
+
+    private static byte[]? TakePortPcmSnapshot(PortState port) =>
+        Interlocked.Exchange(ref port.PcmData, null);
+
+    internal static void SetStreamFactoryForTests(Func<uint, IHostAudioStream?>? streamFactory) =>
+        Volatile.Write(ref _streamFactoryForTests, streamFactory);
+
+    internal static void ResetForTests()
+    {
+        Contexts.Clear();
+        Ports.Clear();
+        SpeakerArrays.Clear();
+        Interlocked.Exchange(ref _nextContextHandle, 1);
+        Interlocked.Exchange(ref _nextUserHandle, 1);
+        Interlocked.Exchange(ref _nextPortId, 0);
+        Interlocked.Exchange(ref _pushTraceCount, 0);
+        Interlocked.Exchange(ref _submitTraceCount, 0);
+        Interlocked.Exchange(ref _submitSkipTraceCount, 0);
+        Interlocked.Exchange(ref _attributePcmTraceCount, 0);
+
+        lock (HostBackendGate)
+        {
+            PrimaryBackend?.Dispose();
+            SecondaryBackend?.Dispose();
+            PrimaryBackend = null;
+            SecondaryBackend = null;
+            PrimaryBackendName = "none";
+            SecondaryBackendName = "none";
+            PrimaryContextHandle = 0;
+        }
+
+        Volatile.Write(ref _streamFactoryForTests, null);
+    }
+
+    private static bool IsMainOrBgmPort(ushort portType)
+    {
+        var kind = portType & 0xFF;
+        return kind is 0 or 1;
     }
 
     internal static bool RoutesToSpeakers(ushort portType) => (portType & 0xFF) is 0 or 1 or 2;
@@ -1297,6 +1533,11 @@ public static class AudioOut2Exports
 
         return false;
     }
+
+    private static bool IsSnapshotPcmPort(ushort portType, int channels) =>
+        RoutesToSpeakers(portType) &&
+        (portType & 0xFF) != AudioOut2PortTypeVibration &&
+        (!IsObjectPort(portType) || channels == 1);
 
     internal static void MixPortIntoStereo(
         ReadOnlySpan<byte> source,
@@ -1453,12 +1694,18 @@ public static class AudioOut2Exports
     private static bool IsDirectMemoryWindowAddress(ulong value) =>
         value >= 0x0000_1400_0000_0000UL && value < 0x0000_1800_0000_0000UL;
 
-    // Only sceAudioOut2ContextQueryMemory and sceAudioOut2ContextGetQueueLevel still
-    // pick an out buffer by host address range; both are left untouched here so they do
-    // not collide with the changes already in flight for them, and these two predicates
-    // go away with the last of their callers.
     private static bool IsGuestStackAddress(ulong value) =>
         value >= 0x0000_7FF0_0000_0000UL && value <= 0x0000_7FFF_FFFF_FFFFUL;
+
+    private static ulong ResolveGuestOutBuffer(ulong primary, ulong secondary)
+    {
+        if (IsWritableOutBuffer(primary))
+        {
+            return primary;
+        }
+
+        return IsWritableOutBuffer(secondary) ? secondary : 0;
+    }
 
     private static bool IsWritableOutBuffer(ulong value) =>
         value != 0 &&

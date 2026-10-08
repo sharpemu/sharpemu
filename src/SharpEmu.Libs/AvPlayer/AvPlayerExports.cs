@@ -882,6 +882,32 @@ public static class AvPlayerExports
     }
 
     [SysAbiExport(
+        Nid = "N6Oy-EjduiY",
+        ExportName = "sceAvPlayerSetAvailableBandwidth",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    [SysAbiExport(
+        Nid = "+7xJ+lFxmkQ",
+        ExportName = "sceAvPlayerSetAvailableBW",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerSetAvailableBandwidth(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        var availableBandwidth = ctx[CpuRegister.Rsi];
+        lock (StateGate)
+        {
+            if (!Players.ContainsKey(handle))
+            {
+                return SetReturn(ctx, InvalidParameters);
+            }
+
+            Trace($"set_available_bandwidth handle=0x{handle:X16} bandwidth={availableBandwidth}");
+            return SetReturn(ctx, 0);
+        }
+    }
+
+    [SysAbiExport(
         Nid = "ODJK2sn9w4A",
         ExportName = "sceAvPlayerEnableStream",
         Target = Generation.Gen4 | Generation.Gen5,

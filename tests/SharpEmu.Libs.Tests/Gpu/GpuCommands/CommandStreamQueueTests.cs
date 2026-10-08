@@ -155,6 +155,83 @@ public sealed class CommandStreamQueueTests
     }
 
     [Fact]
+    public void ControlBarrier_RunsBetweenTheAcceptedSliceAndLaterAdmissions()
+    {
+        var (host, queue) = NewQueue();
+        Enqueue(host, queue, Graphics, 1, CreateInstanceCountPacket(1));
+        var cancelled = false;
+        host.PendingCommands.Enqueue(() =>
+        {
+            Assert.True(queue.TryEnqueueControlBarrier(
+                () => host.Calls.Add("mapping_change"),
+                () => cancelled = true));
+            Enqueue(host, queue, Graphics + 0x100, 2, CreateInstanceCountPacket(2));
+        });
+
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.DoesNotContain("mapping_change", host.Calls);
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+
+        var first = host.Calls.IndexOf("begin 0 1");
+        var barrier = host.Calls.IndexOf("mapping_change");
+        var second = host.Calls.IndexOf("begin 0 2");
+        Assert.True(first >= 0 && barrier > first && second > barrier, string.Join(", ", host.Calls));
+        Assert.False(cancelled);
+    }
+
+    [Fact]
+    public void ControlBarrier_PreservesCrossQueueProgressWhileAnOlderHeadIsBlocked()
+    {
+        var (host, queue) = NewQueue();
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, Graphics, 1, WaitEqual(Label, 1));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.True(queue.TryEnqueueControlBarrier(() => host.Calls.Add("mapping_change"), () => { }));
+        EnqueueCompute(host, queue, 0x20, Compute, 2, CreateInstanceCountPacket(2));
+
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.DoesNotContain("mapping_change", host.Calls);
+        host.WriteDword(Label, 1);
+        queue.RetryBlocked();
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+
+        var compute = host.Calls.IndexOf("begin 1 2");
+        var retriedGraphics = host.Calls.FindLastIndex(call => call == "begin 0 1");
+        var barrier = host.Calls.IndexOf("mapping_change");
+        Assert.True(compute >= 0 && retriedGraphics > compute && barrier > retriedGraphics, string.Join(", ", host.Calls));
+    }
+
+    [Fact]
+    public void ControlBarrier_IsCancelledWhenTheQueueIsDiscarded()
+    {
+        var (_, queue) = NewQueue();
+        var ran = false;
+        var cancelled = false;
+        Assert.True(queue.TryEnqueueControlBarrier(() => ran = true, () => cancelled = true));
+
+        queue.DiscardAll();
+
+        Assert.False(ran);
+        Assert.True(cancelled);
+        Assert.False(queue.HasPending);
+    }
+
+    [Fact]
+    public void ShutdownDrain_RunsAnAcceptedControlBarrier()
+    {
+        var (_, queue) = NewQueue();
+        var ran = false;
+        Assert.True(queue.TryEnqueueControlBarrier(() => ran = true, () => { }));
+        queue.StopAccepting();
+
+        Assert.Equal(IdleOutcome.Completed, queue.DrainForShutdown(cancelBlockedOnNoProgress: true));
+        Assert.True(ran);
+        Assert.False(queue.HasPending);
+    }
+
+    [Fact]
     public void BlockedHead_IsRequeuedAndRetriedWithoutStoppingOtherQueues()
     {
         var (host, queue) = NewQueue();

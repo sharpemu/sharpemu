@@ -169,6 +169,14 @@ public static class JsonExports
     }
 
     [SysAbiExport(
+        Nid = "GvGvswb0v34",
+        ExportName = "_ZN3sce4Json14InitParameter2C2Ev",
+        Target = Generation.Gen5,
+        LibraryName = "libSceJson")]
+    public static int InitParameter2BaseConstructor(CpuContext ctx) =>
+        InitParameter2Constructor(ctx);
+
+    [SysAbiExport(
         Nid = "I2QC8PYhJWY",
         ExportName = "_ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv",
         Target = Generation.Gen5,
@@ -192,6 +200,14 @@ public static class JsonExports
         ctx[CpuRegister.Rax] = thisAddress;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    [SysAbiExport(
+        Nid = "W72B9ylU2JA",
+        ExportName = "_ZN3sce4Json18InitParameterRtti216setAllocatorRttiEPNS0_14AllocParamRttiEPv",
+        Target = Generation.Gen5,
+        LibraryName = "libSceJson")]
+    public static int InitParameterRtti2SetAllocatorRtti(CpuContext ctx) =>
+        InitParameter2SetAllocator(ctx);
 
     [SysAbiExport(
         Nid = "Eu95jmqn5Rw",

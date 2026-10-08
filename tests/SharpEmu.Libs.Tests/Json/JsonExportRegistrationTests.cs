@@ -26,6 +26,8 @@ public sealed class JsonExportRegistrationTests
         ("9KUZFjI1IxA", "_ZN3sce4Json6StringC1EPKc"),
         ("cG1VE2HMl6c", "_ZN3sce4Json6StringD1Ev"),
         ("+drDFyAS6u4", "_ZN3sce4Json11Initializer27setGlobalNullAccessCallbackEPFRKNS0_5ValueENS0_9ValueTypeEPS3_PvES7_"),
+        ("GvGvswb0v34", "_ZN3sce4Json14InitParameter2C2Ev"),
+        ("W72B9ylU2JA", "_ZN3sce4Json18InitParameterRtti216setAllocatorRttiEPNS0_14AllocParamRttiEPv"),
     };
 
     private static ModuleManager CreateRegisteredManager()
@@ -130,5 +132,37 @@ public sealed class JsonExportRegistrationTests
         Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, result);
         Assert.Equal(0x1_0000_0000UL, ctx[CpuRegister.Rax]);
         Assert.Equal(JsonValueKind.Null, JsonObjectHeap.Values[0x1_0000_0000].Kind);
+    }
+
+    [Fact]
+    public void InitParameter2Aliases_InitializeAndWriteTheirDocumentedFields()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong parameterAddress = memoryBase + 0x100;
+        const ulong allocatorAddress = 0x8_0012_3000;
+        const ulong userDataAddress = memoryBase + 0x500;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var manager = CreateRegisteredManager();
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(memory.TryWrite(parameterAddress, Enumerable.Repeat((byte)0xA5, 0x28).ToArray()));
+
+        ctx[CpuRegister.Rdi] = parameterAddress;
+        Assert.True(manager.TryDispatch("GvGvswb0v34", ctx, out var constructorResult));
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, constructorResult);
+
+        var parameter = new byte[0x28];
+        Assert.True(memory.TryRead(parameterAddress, parameter));
+        Assert.All(parameter, value => Assert.Equal(0, value));
+
+        ctx[CpuRegister.Rdi] = parameterAddress;
+        ctx[CpuRegister.Rsi] = allocatorAddress;
+        ctx[CpuRegister.Rdx] = userDataAddress;
+        Assert.True(manager.TryDispatch("W72B9ylU2JA", ctx, out var allocatorResult));
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, allocatorResult);
+
+        Assert.True(memory.TryRead(parameterAddress, parameter));
+        Assert.Equal(allocatorAddress, BitConverter.ToUInt64(parameter, 0));
+        Assert.Equal(userDataAddress, BitConverter.ToUInt64(parameter, 8));
+        Assert.All(parameter[0x10..], value => Assert.Equal(0, value));
     }
 }

@@ -12,29 +12,82 @@ public static class Http2Exports
     private const int Http2ErrorInvalidVersion = unchecked((int)0x817B106A);
     private const int Http2ErrorInvalidId = unchecked((int)0x817B1100);
     private const int Http2ErrorInvalidValue = unchecked((int)0x817B11FE);
+    private const int Http2ErrorNullPointer = unchecked((int)0x817B1225);
     private const int Http2ErrorProhibited = unchecked((int)0x817B5224);
 
     private static readonly ConcurrentDictionary<int, Http2Context> Contexts = new();
     private static readonly ConcurrentDictionary<int, Http2Template> Templates = new();
     private static readonly ConcurrentDictionary<int, Http2Request> Requests = new();
+    private static readonly ConcurrentDictionary<int, Http2CookieBox> CookieBoxes = new();
     private static int _nextContextId;
     private static int _nextTemplateId = 0x1000;
     private static int _nextRequestId = 0x2000;
+    private static int _nextCookieBoxId = 0x3000;
 
     private sealed record Http2Context(int NetId, int SslId, ulong PoolSize, int MaxRequests);
 
-    private sealed record Http2Template(int ContextId, string UserAgent, int HttpVersion, bool AutoProxyConfig);
+    private sealed record Http2CookieBox;
 
-    private sealed record Http2Request(int TemplateId, string Method, string Url, ulong ContentLength);
+    private sealed record Http2Options(
+        uint MinimumSslVersion,
+        uint SslOptions,
+        ulong RedirectCallback,
+        ulong RedirectUserArgument,
+        bool AutoRedirect,
+        int CookieBoxId,
+        uint ConnectTimeoutMicroseconds,
+        uint ReceiveTimeoutMicroseconds,
+        uint SendTimeoutMicroseconds,
+        bool AuthEnabled,
+        ulong SslCallback,
+        ulong SslUserArgument)
+    {
+        public static readonly Http2Options Default = new(0, 0, 0, 0, true, 0, 0, 0, 0, false, 0, 0);
+    }
+
+    private sealed record Http2Header(string Name, string Value, uint Mode);
+
+    private sealed record Http2Template(
+        int ContextId,
+        string UserAgent,
+        int HttpVersion,
+        bool AutoProxyConfig,
+        Http2Options Options);
+
+    private sealed record Http2Request(
+        int TemplateId,
+        string Method,
+        string Url,
+        ulong ContentLength,
+        Http2Options Options,
+        Http2Header[] Headers);
+
+    internal readonly record struct Http2OptionsSnapshot(
+        uint MinimumSslVersion,
+        uint SslOptions,
+        ulong RedirectCallback,
+        ulong RedirectUserArgument,
+        bool AutoRedirect,
+        int CookieBoxId,
+        uint ConnectTimeoutMicroseconds,
+        uint ReceiveTimeoutMicroseconds,
+        uint SendTimeoutMicroseconds,
+        bool AuthEnabled,
+        ulong SslCallback,
+        ulong SslUserArgument);
+
+    internal readonly record struct Http2HeaderSnapshot(string Name, string Value, uint Mode);
 
     public static void ResetRuntimeState()
     {
         Contexts.Clear();
         Templates.Clear();
         Requests.Clear();
+        CookieBoxes.Clear();
         _nextContextId = 0;
         _nextTemplateId = 0x1000;
         _nextRequestId = 0x2000;
+        _nextCookieBoxId = 0x3000;
     }
 
     [SysAbiExport(
@@ -119,7 +172,12 @@ public static class Http2Exports
         }
 
         var id = Interlocked.Increment(ref _nextTemplateId);
-        Templates[id] = new Http2Template(contextId, userAgent, httpVersion, autoProxyConfig != 0);
+        Templates[id] = new Http2Template(
+            contextId,
+            userAgent,
+            httpVersion,
+            autoProxyConfig != 0,
+            Http2Options.Default);
         TraceHttp2("create_template", id, unchecked((ulong)contextId), ctx[CpuRegister.Rsi], unchecked((ulong)httpVersion), unchecked((ulong)autoProxyConfig));
         return ctx.SetReturn(id);
     }
@@ -141,13 +199,182 @@ public static class Http2Exports
     }
 
     [SysAbiExport(
+        Nid = "09tk+kIA1Ns",
+        ExportName = "sceHttp2SetMinSslVersion",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SetMinSslVersion(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var minimumSslVersion = unchecked((uint)ctx[CpuRegister.Rsi]);
+
+        return TryUpdateOptions(id, options => options with { MinimumSslVersion = minimumSslVersion })
+            ? TraceAndReturn(ctx, "set_min_ssl_version", id, minimumSslVersion, 0, 0, 0)
+            : ctx.SetReturn(Http2ErrorInvalidId);
+    }
+
+    [SysAbiExport(
+        Nid = "B37SruheQ5Y",
+        ExportName = "sceHttp2SslDisableOption",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SslDisableOption(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var flags = unchecked((uint)ctx[CpuRegister.Rsi]);
+        return TryUpdateOptions(id, options => options with { SslOptions = options.SslOptions & ~flags })
+            ? TraceAndReturn(ctx, "ssl_disable_option", id, flags, 0, 0, 0)
+            : ctx.SetReturn(Http2ErrorInvalidId);
+    }
+
+    [SysAbiExport(
+        Nid = "EWcwMpbr5F8",
+        ExportName = "sceHttp2SslEnableOption",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SslEnableOption(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var flags = unchecked((uint)ctx[CpuRegister.Rsi]);
+        return TryUpdateOptions(id, options => options with { SslOptions = options.SslOptions | flags })
+            ? TraceAndReturn(ctx, "ssl_enable_option", id, flags, 0, 0, 0)
+            : ctx.SetReturn(Http2ErrorInvalidId);
+    }
+
+    [SysAbiExport(
+        Nid = "BJgi0CH7al4",
+        ExportName = "sceHttp2SetRedirectCallback",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SetRedirectCallback(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var callback = ctx[CpuRegister.Rsi];
+        var userArgument = ctx[CpuRegister.Rdx];
+        return TryUpdateOptions(
+                id,
+                options => options with
+                {
+                    RedirectCallback = callback,
+                    RedirectUserArgument = userArgument,
+                })
+            ? TraceAndReturn(ctx, "set_redirect_callback", id, callback, userArgument, 0, 0)
+            : ctx.SetReturn(Http2ErrorInvalidId);
+    }
+
+    [SysAbiExport(
+        Nid = "b9AvoIaOuHI",
+        ExportName = "sceHttp2SetAutoRedirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SetAutoRedirect(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var enabled = unchecked((int)ctx[CpuRegister.Rsi]) != 0;
+        return TryUpdateOptions(id, options => options with { AutoRedirect = enabled })
+            ? TraceAndReturn(ctx, "set_auto_redirect", id, enabled ? 1UL : 0UL, 0, 0, 0)
+            : ctx.SetReturn(Http2ErrorInvalidId);
+    }
+
+    [SysAbiExport(
+        Nid = "N4UfjvWJsMw",
+        ExportName = "sceHttp2CreateCookieBox",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2CreateCookieBox(CpuContext ctx)
+    {
+        var id = Interlocked.Increment(ref _nextCookieBoxId);
+        CookieBoxes[id] = new Http2CookieBox();
+        TraceHttp2("create_cookie_box", id, 0, 0, 0, 0);
+        return ctx.SetReturn(id);
+    }
+
+    [SysAbiExport(
+        Nid = "jrVHsKCXA0g",
+        ExportName = "sceHttp2SetCookieBox",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SetCookieBox(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var cookieBoxId = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (cookieBoxId != 0 && !CookieBoxes.ContainsKey(cookieBoxId))
+        {
+            return ctx.SetReturn(Http2ErrorInvalidId);
+        }
+
+        return TryUpdateOptions(id, options => options with { CookieBoxId = cookieBoxId })
+            ? TraceAndReturn(ctx, "set_cookie_box", id, unchecked((ulong)cookieBoxId), 0, 0, 0)
+            : ctx.SetReturn(Http2ErrorInvalidId);
+    }
+
+    [SysAbiExport(
+        Nid = "-HIO4VT87v8",
+        ExportName = "sceHttp2SetConnectTimeOut",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SetConnectTimeOut(CpuContext ctx) =>
+        SetTimeout(ctx, static (options, value) => options with { ConnectTimeoutMicroseconds = value }, "connect");
+
+    [SysAbiExport(
+        Nid = "izvHhqgDt44",
+        ExportName = "sceHttp2SetRecvTimeOut",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SetRecvTimeOut(CpuContext ctx) =>
+        SetTimeout(ctx, static (options, value) => options with { ReceiveTimeoutMicroseconds = value }, "recv");
+
+    [SysAbiExport(
+        Nid = "XPtW45xiLHk",
+        ExportName = "sceHttp2SetSendTimeOut",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SetSendTimeOut(CpuContext ctx) =>
+        SetTimeout(ctx, static (options, value) => options with { SendTimeoutMicroseconds = value }, "send");
+
+    [SysAbiExport(
+        Nid = "jjFahkBPCYs",
+        ExportName = "sceHttp2SetAuthEnabled",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SetAuthEnabled(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var enabled = unchecked((int)ctx[CpuRegister.Rsi]) != 0;
+        return TryUpdateOptions(id, options => options with { AuthEnabled = enabled })
+            ? TraceAndReturn(ctx, "set_auth_enabled", id, enabled ? 1UL : 0UL, 0, 0, 0)
+            : ctx.SetReturn(Http2ErrorInvalidId);
+    }
+
+    [SysAbiExport(
+        Nid = "YrWX+DhPHQY",
+        ExportName = "sceHttp2SetSslCallback",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SetSslCallback(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var callback = ctx[CpuRegister.Rsi];
+        var userArgument = ctx[CpuRegister.Rdx];
+        return TryUpdateOptions(
+                id,
+                options => options with
+                {
+                    SslCallback = callback,
+                    SslUserArgument = userArgument,
+                })
+            ? TraceAndReturn(ctx, "set_ssl_callback", id, callback, userArgument, 0, 0)
+            : ctx.SetReturn(Http2ErrorInvalidId);
+    }
+
+    [SysAbiExport(
         ExportName = "sceHttp2CreateRequestWithURL",
         Target = Generation.Gen5,
         LibraryName = "libSceHttp2")]
     public static int Http2CreateRequestWithUrl(CpuContext ctx)
     {
         var templateId = unchecked((int)ctx[CpuRegister.Rdi]);
-        if (!Templates.ContainsKey(templateId))
+        if (!Templates.TryGetValue(templateId, out var template))
         {
             return ctx.SetReturn(Http2ErrorInvalidId);
         }
@@ -159,9 +386,71 @@ public static class Http2Exports
         }
 
         var id = Interlocked.Increment(ref _nextRequestId);
-        Requests[id] = new Http2Request(templateId, method, url, ctx[CpuRegister.Rcx]);
+        Requests[id] = new Http2Request(
+            templateId,
+            method,
+            url,
+            ctx[CpuRegister.Rcx],
+            template.Options,
+            []);
         TraceHttp2("create_request", id, unchecked((ulong)templateId), ctx[CpuRegister.Rsi], ctx[CpuRegister.Rdx], ctx[CpuRegister.Rcx]);
         return ctx.SetReturn(id);
+    }
+
+    [SysAbiExport(
+        Nid = "nrPfOE8TQu0",
+        ExportName = "sceHttp2AddRequestHeader",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2AddRequestHeader(CpuContext ctx)
+    {
+        var requestId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var nameAddress = ctx[CpuRegister.Rsi];
+        var valueAddress = ctx[CpuRegister.Rdx];
+        var mode = unchecked((uint)ctx[CpuRegister.Rcx]);
+        if (nameAddress == 0 || valueAddress == 0)
+        {
+            return ctx.SetReturn(Http2ErrorNullPointer);
+        }
+
+        if (!TryReadUtf8Z(ctx, nameAddress, 4096, out var name) ||
+            !TryReadUtf8Z(ctx, valueAddress, 16384, out var value))
+        {
+            return ctx.SetReturn(Http2ErrorInvalidValue);
+        }
+
+        while (Requests.TryGetValue(requestId, out var request))
+        {
+            var headers = new Http2Header[request.Headers.Length + 1];
+            Array.Copy(request.Headers, headers, request.Headers.Length);
+            headers[^1] = new Http2Header(name, value, mode);
+            if (Requests.TryUpdate(requestId, request with { Headers = headers }, request))
+            {
+                return TraceAndReturn(ctx, "add_request_header", requestId, nameAddress, valueAddress, mode, 0);
+            }
+        }
+
+        return ctx.SetReturn(Http2ErrorInvalidId);
+    }
+
+    [SysAbiExport(
+        Nid = "FSAFOzi0FpM",
+        ExportName = "sceHttp2SetRequestContentLength",
+        Target = Generation.Gen5,
+        LibraryName = "libSceHttp2")]
+    public static int Http2SetRequestContentLength(CpuContext ctx)
+    {
+        var requestId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var contentLength = ctx[CpuRegister.Rsi];
+        while (Requests.TryGetValue(requestId, out var request))
+        {
+            if (Requests.TryUpdate(requestId, request with { ContentLength = contentLength }, request))
+            {
+                return TraceAndReturn(ctx, "set_request_content_length", requestId, contentLength, 0, 0, 0);
+            }
+        }
+
+        return ctx.SetReturn(Http2ErrorInvalidId);
     }
 
     [SysAbiExport(
@@ -200,6 +489,100 @@ public static class Http2Exports
                 Requests.TryRemove(request.Key, out _);
             }
         }
+    }
+
+    private static int SetTimeout(
+        CpuContext ctx,
+        Func<Http2Options, uint, Http2Options> update,
+        string timeoutName)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var microseconds = unchecked((uint)ctx[CpuRegister.Rsi]);
+        return TryUpdateOptions(id, options => update(options, microseconds))
+            ? TraceAndReturn(ctx, $"set_{timeoutName}_timeout", id, microseconds, 0, 0, 0)
+            : ctx.SetReturn(Http2ErrorInvalidId);
+    }
+
+    private static bool TryUpdateOptions(int id, Func<Http2Options, Http2Options> update)
+    {
+        while (Templates.TryGetValue(id, out var template))
+        {
+            if (Templates.TryUpdate(id, template with { Options = update(template.Options) }, template))
+            {
+                return true;
+            }
+        }
+
+        while (Requests.TryGetValue(id, out var request))
+        {
+            if (Requests.TryUpdate(id, request with { Options = update(request.Options) }, request))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    internal static bool TryGetOptionsForTests(int id, out Http2OptionsSnapshot snapshot)
+    {
+        var options = Templates.TryGetValue(id, out var template)
+            ? template.Options
+            : Requests.TryGetValue(id, out var request)
+                ? request.Options
+                : null;
+        if (options is null)
+        {
+            snapshot = default;
+            return false;
+        }
+
+        snapshot = new Http2OptionsSnapshot(
+            options.MinimumSslVersion,
+            options.SslOptions,
+            options.RedirectCallback,
+            options.RedirectUserArgument,
+            options.AutoRedirect,
+            options.CookieBoxId,
+            options.ConnectTimeoutMicroseconds,
+            options.ReceiveTimeoutMicroseconds,
+            options.SendTimeoutMicroseconds,
+            options.AuthEnabled,
+            options.SslCallback,
+            options.SslUserArgument);
+        return true;
+    }
+
+    internal static Http2HeaderSnapshot[] GetRequestHeadersForTests(int requestId) =>
+        Requests.TryGetValue(requestId, out var request)
+            ? request.Headers
+                .Select(static header => new Http2HeaderSnapshot(header.Name, header.Value, header.Mode))
+                .ToArray()
+            : [];
+
+    internal static bool TryGetRequestContentLengthForTests(int requestId, out ulong contentLength)
+    {
+        if (Requests.TryGetValue(requestId, out var request))
+        {
+            contentLength = request.ContentLength;
+            return true;
+        }
+
+        contentLength = 0;
+        return false;
+    }
+
+    private static int TraceAndReturn(
+        CpuContext ctx,
+        string operation,
+        int id,
+        ulong arg0,
+        ulong arg1,
+        ulong arg2,
+        ulong arg3)
+    {
+        TraceHttp2(operation, id, arg0, arg1, arg2, arg3);
+        return ctx.SetReturn(0);
     }
 
     private static bool TryReadUtf8Z(CpuContext ctx, ulong address, int maxLength, out string value)

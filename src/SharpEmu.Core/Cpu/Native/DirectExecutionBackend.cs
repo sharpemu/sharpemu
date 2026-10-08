@@ -3978,6 +3978,33 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	public bool SupportsGuestContextTransfer => true;
 
+	public bool TryGetGuestThreadStackBounds(
+		ulong threadHandle,
+		out ulong stackBase,
+		out ulong stackSize)
+	{
+		stackBase = 0;
+		stackSize = 0;
+		if (threadHandle == 0)
+		{
+			return false;
+		}
+
+		lock (_guestThreadGate)
+		{
+			if (!_guestThreads.TryGetValue(threadHandle, out var thread) ||
+				thread.StackBase == 0 ||
+				thread.StackSize == 0)
+			{
+				return false;
+			}
+
+			stackBase = thread.StackBase;
+			stackSize = thread.StackSize;
+			return true;
+		}
+	}
+
 	public void RegisterGuestThreadContext(ulong threadHandle, CpuContext context)
 	{
 		if (threadHandle == 0)

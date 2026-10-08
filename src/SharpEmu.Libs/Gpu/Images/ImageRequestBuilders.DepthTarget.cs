@@ -58,8 +58,6 @@ public static partial class ImageRequestBuilders
         return Format.Undefined;
     }
 
-    private static bool HtileStencilCompatible(bool hasStencil, bool hasHtile, bool htileStencilDisabled) => !hasStencil || !hasHtile || htileStencilDisabled;
-
     // Builds the request for the bound depth target. Null when no depth or stencil state is active.
     // Reused while the words and the device are the same, as ColorTarget's requests are.
     public static DepthTargetResolution? DepthTarget(in DepthTargetWords depthWords, IImageFormatSupport device)
@@ -147,7 +145,7 @@ public static partial class ImageRequestBuilders
 
         if (hasStencil)
         {
-            if (depthWords.StencilFormat != GuestStencilFormat.Stencil8UInt || !HtileStencilCompatible(hasStencil, hasHtile, depthWords.HtileStencilDisabled) ||
+            if (depthWords.StencilFormat != GuestStencilFormat.Stencil8UInt ||
                 stencilAddress == 0 || (!copyMode && !depthWords.StencilWriteDisabled && depthWords.StencilWriteBase != depthWords.StencilReadBase) || (stencilAddress & 0xFFFF) != 0)
             {
                 throw SubmissionScheduler.Fatal(

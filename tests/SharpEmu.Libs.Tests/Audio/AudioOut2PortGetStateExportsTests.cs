@@ -42,9 +42,12 @@ public sealed class AudioOut2PortGetStateExportsTests
         // SceAudioOut2PortState: output@0, numChannels@2, volume@4.
         Assert.Equal(1, BinaryPrimitives.ReadUInt16LittleEndian(state));
         Assert.Equal(2, state[2]);
-        Assert.Equal(-1, BinaryPrimitives.ReadInt16LittleEndian(state[4..]));
+        Assert.Equal(0, state[3]);
+        Assert.Equal(127, BinaryPrimitives.ReadInt16LittleEndian(state[4..]));
+        Assert.Equal(0, BinaryPrimitives.ReadUInt16LittleEndian(state[6..]));
         Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(state[8..]));
-        // sizeof(SceAudioOut2PortState) is 0x40; nothing past it may be touched.
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(state[0x0C..]));
+        Assert.All(state[0x10..0x40].ToArray(), value => Assert.Equal(0, value));
         Assert.Equal(0xAB, state[0x40]);
         Assert.Equal(0xAB, state[0x7F]);
     }
@@ -102,15 +105,19 @@ public sealed class AudioOut2PortGetStateExportsTests
         Assert.Equal(0, result);
         Span<byte> info = stackalloc byte[0x80];
         Assert.True(memory.TryRead(StateAddress, info));
-        // type@0 = SPEAKER_TYPE_TV, availableBits@4 = FRONT_LEFT | FRONT_RIGHT.
         Assert.Equal(0, info[0]);
-        Assert.Equal(3u, BinaryPrimitives.ReadUInt32LittleEndian(info[4..]));
+        Assert.Equal(0, info[1]);
+        Assert.Equal(0, BinaryPrimitives.ReadInt16LittleEndian(info[2..]));
+        Assert.Equal(0x3u, BinaryPrimitives.ReadUInt32LittleEndian(info[4..]));
         Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(info[8..]));
-        // aSpeakerAngle[0..1] = { -30, 0 }, { +30, 0 } degrees.
+        Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(info[0x0C..]));
         Assert.Equal(-30, BinaryPrimitives.ReadInt16LittleEndian(info[0x10..]));
+        Assert.Equal(0, BinaryPrimitives.ReadInt16LittleEndian(info[0x12..]));
         Assert.Equal(30, BinaryPrimitives.ReadInt16LittleEndian(info[0x14..]));
-        // sizeof(SceAudioOut2SpeakerInfo) is 0x50.
+        Assert.Equal(0, BinaryPrimitives.ReadInt16LittleEndian(info[0x16..]));
+        Assert.All(info[0x18..0x50].ToArray(), value => Assert.Equal(0, value));
         Assert.Equal(0xCD, info[0x50]);
+        Assert.Equal(0xCD, info[0x7F]);
     }
 
     [Fact]

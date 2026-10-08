@@ -67,6 +67,31 @@ public sealed class Gen5ExecFullAnalysisTests
     }
 
     [Fact]
+    public void AfterAnSdwaVectorCompareIntoExec_ExecIsUnknown()
+    {
+        var before = VectorAdd();
+        var pc = _pc;
+        _program.Add(new Gen5ShaderInstruction(
+            pc,
+            Gen5ShaderEncoding.Vopc,
+            "VCmpxNltF32",
+            [0u],
+            [Gen5Operand.Vector(0), Gen5Operand.Vector(1)],
+            [],
+            new Gen5SdwaControl(0, 0, 6, 6, false, false, 0, 0, 0, false, 106)));
+        _pc += 4;
+        var save = Scalar("SMovB64", 22, Gen5Operand.Scalar(Exec));
+        VectorAdd();
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(22));
+        var after = VectorAdd();
+
+        var full = Analyze();
+        Assert.Contains(before, full);
+        Assert.DoesNotContain(save, full);
+        Assert.DoesNotContain(after, full);
+    }
+
+    [Fact]
     public void RestoringASavedFullExec_MakesItFullAgain()
     {
         Scalar("SMovB64", 40, Gen5Operand.Scalar(Exec));
