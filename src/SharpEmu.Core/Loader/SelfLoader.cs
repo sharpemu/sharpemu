@@ -1427,7 +1427,24 @@ public sealed class SelfLoader : ISelfLoader
             return Array.Empty<ImportedSymbolRelocation>();
         }
 
-        var importedRelocations = new List<ImportedSymbolRelocation>(descriptors.Count);
+        // The locally built descriptor list is stable during these scans.
+        // Relative relocations can dominate it; reserve only records retained
+        // in the imported-symbol table rather than every relocation descriptor.
+        var importedCount = 0;
+        foreach (var descriptor in descriptors)
+        {
+            if (descriptor.ImportNid is not null && descriptor.ValueKind == RelocationValueKind.Pointer)
+            {
+                importedCount++;
+            }
+        }
+
+        if (importedCount == 0)
+        {
+            return Array.Empty<ImportedSymbolRelocation>();
+        }
+
+        var importedRelocations = new List<ImportedSymbolRelocation>(importedCount);
         foreach (var descriptor in descriptors)
         {
             if (descriptor.ImportNid is null || descriptor.ValueKind != RelocationValueKind.Pointer)
