@@ -9,8 +9,18 @@ public static class Gen5PixelInputMapping
         ReadOnlySpan<uint> controls,
         ReadOnlySpan<uint> activeInputs)
     {
-        Span<bool> usedLocations = stackalloc bool[32];
         var locations = new uint[activeInputs.Length];
+        ResolveLocations(controls, activeInputs, locations);
+        return locations;
+    }
+
+    // Fills `locations` (one slot per active input) without allocating.
+    public static void ResolveLocations(
+        ReadOnlySpan<uint> controls,
+        ReadOnlySpan<uint> activeInputs,
+        Span<uint> locations)
+    {
+        Span<bool> usedLocations = stackalloc bool[32];
 
         for (var index = 0; index < activeInputs.Length; index++)
         {
@@ -39,7 +49,5 @@ public static class Gen5PixelInputMapping
                 usedLocations[(int)location] = true;
             }
         }
-
-        return locations;
     }
 }

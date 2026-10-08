@@ -52,39 +52,7 @@ public static partial class Gen5SpirvTranslator
                 }
 
                 var value = GetRawSource(instruction, 0);
-                if (_subgroupInvocationIdInput != 0)
-                {
-                    if (_emulateWave64)
-                    {
-                        value = BroadcastFirstWave64Active(value);
-                    }
-                    else
-                    {
-                        // SPIR-V's BroadcastFirst uses the first host-active
-                        // invocation. Guest EXEC is modeled as data, so obtain the
-                        // guest-active mask explicitly and broadcast from its first
-                        // set lane instead. This also updates the private SGPR copy
-                        // for lanes that are currently disabled and may be restored
-                        // by a later saveexec sequence.
-                        var activeLanes = _module.AddInstruction(
-                            SpirvOp.GroupNonUniformBallot,
-                            _uvec4Type,
-                            UInt(3),
-                            Load(_boolType, _exec));
-                        var activeLow = _module.AddInstruction(
-                            SpirvOp.CompositeExtract,
-                            _uintType,
-                            activeLanes,
-                            0);
-                        var firstActiveLane = Ext(73, _uintType, activeLow);
-                        value = _module.AddInstruction(
-                            SpirvOp.GroupNonUniformBroadcast,
-                            _uintType,
-                            UInt(3),
-                            value,
-                            firstActiveLane);
-                    }
-                }
+                value = BroadcastFirstWaveActive(value);
 
                 StoreS(instruction.Destinations[0].Value, value);
                 return true;
@@ -3393,9 +3361,7 @@ public static partial class Gen5SpirvTranslator
             var left = GetRawSource64(instruction, 0);
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
-                var oldExec = _emulateWave64 && _subgroupInvocationIdInput != 0
-                    ? LoadS64(126)
-                    : BooleanToWaveMask(Load(_boolType, _exec));
+                var oldExec = CurrentExecMask();
                 var notLeft = _module.AddInstruction(SpirvOp.Not, _ulongType, left);
                 var newExec = instruction.Opcode switch
                 {
@@ -3464,12 +3430,7 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
-                if (!_emulateWave64 && _waveLaneCount != 64)
-                {
-                    newExec = BitwiseAnd64(
-                        newExec,
-                        _module.Constant64(_ulongType, 0xFFFF_FFFFUL));
-                }
+                newExec = NormalizeExecMask(newExec);
 
                 StoreS64(destination, oldExec);
                 StoreS64(126, newExec);
@@ -4929,52 +4890,6 @@ public static partial class Gen5SpirvTranslator
         private uint GuestLaneSelect(uint selector) =>
             BitwiseAnd(selector, UInt(_waveLaneCount == 64 ? 63u : RdnaWaveLaneCount - 1));
 
-        // An emulated wave64 spans two host subgroups, so a subgroup broadcast cannot reach
-        // the other half. The selected guest lane publishes through workgroup scratch, like
-        // BroadcastFirstWave64Active.
-        private uint BroadcastWave64Lane(uint value, uint lane) =>
-            ExchangeWave64Value(_module.AddInstruction(SpirvOp.IEqual, _boolType, GuestWaveLane(), lane), value);
-
-        private uint BroadcastFirstWave64Active(uint value)
-        {
-            var lane = GuestWaveLane();
-            var upperHalf = ShiftRightLogical(lane, UInt(5));
-            var activeInHalf = OwnHalfBallot(Load(_boolType, _exec));
-            var halfHasActive = IsNotZero(activeInHalf);
-            var firstInHalf = _module.AddInstruction(
-                SpirvOp.Select,
-                _uintType,
-                halfHasActive,
-                Ext(73, _uintType, activeInHalf),
-                UInt(0));
-            var halfBase = BitwiseAnd(Load(_uintType, _subgroupInvocationIdInput), UInt(~31u));
-            var halfValue = _module.AddInstruction(
-                SpirvOp.GroupNonUniformBroadcast,
-                _uintType,
-                UInt(3),
-                value,
-                IAdd(halfBase, firstInHalf));
-            var exchange = BeginWave64Exchange();
-            EmitConditional(IsHalfWaveLeader(lane), () =>
-            {
-                Store(Wave64ExchangePointer(exchange, upperHalf), halfValue);
-                Store(
-                    Wave64ExchangePointer(exchange, IAdd(UInt(2), upperHalf)),
-                    _module.AddInstruction(SpirvOp.Select, _uintType, halfHasActive, UInt(1), UInt(0)));
-            });
-            EmitWave64Barrier();
-            var lowerValue = Load(_uintType, Wave64ExchangePointer(exchange, UInt(0)));
-            var upperValue = Load(_uintType, Wave64ExchangePointer(exchange, UInt(1)));
-            var lowerActive = IsNotZero(Load(_uintType, Wave64ExchangePointer(exchange, UInt(2))));
-            var upperActive = IsNotZero(Load(_uintType, Wave64ExchangePointer(exchange, UInt(3))));
-            return _module.AddInstruction(
-                SpirvOp.Select,
-                _uintType,
-                _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, LogicalNot(lowerActive), upperActive),
-                upperValue,
-                lowerValue);
-        }
-
         private void StoreCarryOut(
             Gen5ShaderInstruction instruction,
             uint carry)
@@ -5009,20 +4924,15 @@ public static partial class Gen5SpirvTranslator
             var sourceValue = GetRawSource(instruction, 0);
             var selectedLane = BitwiseAnd(GetRawSource(instruction, 1), UInt(LaneSelectMask));
 
-            if (_emulateWave64)
+            if (_stage == Gen5SpirvStage.Compute && _waveLowering is EmulatedWave64Lowering)
             {
                 // The selected guest lane can belong to another host subgroup.
                 // Read it even when the guest execution mask disables that lane.
-                StoreS(destination, BroadcastWave64Lane(sourceValue, selectedLane));
+                StoreS(destination, BroadcastWaveLane(sourceValue, selectedLane));
             }
             else if (_subgroupInvocationIdInput != 0 && _stage == Gen5SpirvStage.Compute)
             {
-                var broadcast = _module.AddInstruction(
-                    SpirvOp.GroupNonUniformBroadcast,
-                    _uintType,
-                    UInt(3),
-                    sourceValue,
-                    selectedLane);
+                var broadcast = BroadcastWaveLane(sourceValue, selectedLane);
                 StoreS(destination, ReadLaneSpillSlot(instruction, selectedLane, broadcast));
             }
             else

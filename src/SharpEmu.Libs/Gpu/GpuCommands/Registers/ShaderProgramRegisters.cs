@@ -199,6 +199,9 @@ public sealed class VertexStageRegisters
     public UserScalarRegisters LegacyVertexUserScalars = new();
     public UserScalarRegisters ExportUserScalars = new();
 
+    // The same registers sharing the user scalar sets, which a writer then copies one by one.
+    public VertexStageRegisters ShallowCopy() => (VertexStageRegisters)MemberwiseClone();
+
     public VertexStageRegisters Copy()
     {
         var copy = (VertexStageRegisters)MemberwiseClone();
@@ -216,6 +219,8 @@ public sealed class PixelStageRegisters
     public PixelResource1 Resource1;
     public PixelResource2 Resource2;
     public UserScalarRegisters UserScalars = new();
+
+    public PixelStageRegisters ShallowCopy() => (PixelStageRegisters)MemberwiseClone();
 
     public PixelStageRegisters Copy()
     {
@@ -253,6 +258,8 @@ public sealed class ComputeStageRegisters
     public byte SharedVectorRegisters;
     public UserScalarRegisters UserScalars = new();
 
+    public ComputeStageRegisters ShallowCopy() => (ComputeStageRegisters)MemberwiseClone();
+
     public ComputeStageRegisters Copy()
     {
         var copy = (ComputeStageRegisters)MemberwiseClone();
@@ -264,6 +271,9 @@ public sealed class ComputeStageRegisters
 // The shader bank: the program registers of every stage and their user scalars.
 public sealed class ShaderProgramRegisters
 {
+    // A bank holding the same stage objects, for a snapshot that shares them.
+    public ShaderProgramRegisters ShareStages() => (ShaderProgramRegisters)MemberwiseClone();
+
     public VertexStageRegisters Vertex = new();
     public PixelStageRegisters Pixel = new();
     public ComputeStageRegisters Compute = new();

@@ -120,6 +120,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 // Drain accepted submissions before closing the relay.
                 // Cancel blocked submissions if a full retry cycle makes no progress.
                 _commandStream.StopAccepting();
+                // The command stream thread ends after its slice; the rest drains here.
+                _commandThread?.Stop(() => RunCommandStreamSlices(long.MaxValue));
                 var outcome = _commandStream.DrainForShutdown(cancelBlockedOnNoProgress: true);
                 FlushBatchedGuestCommands();
                 Console.Error.WriteLine(

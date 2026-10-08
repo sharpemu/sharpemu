@@ -110,20 +110,81 @@ internal static unsafe partial class VulkanVideoPresenter
             DepthCompare: image.DepthCompare,
             Atomic: image.Atomic);
 
+        // The last lookup of one image of one program. A draw binds the same descriptor as the
+        // previous draw of its program most of the time; while no image the lookup could find has
+        // changed (the cache's lookup generation), the request and the image found are the same.
+        private struct ImageBindingMemo
+        {
+            public uint[]? Words;
+            public ulong Generation;
+            public TextureRequestResolution Resolution;
+            public ResourceSlotIdentifier Found;
+
+            public readonly bool Matches(uint[] words, ulong generation) =>
+                Words is not null && Generation == generation && words.AsSpan().SequenceEqual(Words);
+        }
+
+        private Dictionary<ShaderProgramInfo, ImageBindingMemo[]>? _imageBindingMemos;
+        private ShaderProgramInfo? _lastMemoProgram;
+        private ImageBindingMemo[] _lastMemos = [];
+
+        // A draw's images resolve one after another for one program, so the last program's memos
+        // are kept at hand.
+        private ref ImageBindingMemo ImageBindingMemoOf(ShaderProgramInfo program, int index)
+        {
+            if (!ReferenceEquals(program, _lastMemoProgram) || index >= _lastMemos.Length)
+            {
+                var all = _imageBindingMemos ??= new Dictionary<ShaderProgramInfo, ImageBindingMemo[]>(ReferenceEqualityComparer.Instance);
+                if (!all.TryGetValue(program, out var memos) || index >= memos.Length)
+                {
+                    Array.Resize(ref memos, Math.Max(index + 1, program.Resources?.Info.Images.Count ?? 0));
+                    all[program] = memos;
+                }
+
+                _lastMemoProgram = program;
+                _lastMemos = memos;
+            }
+
+            return ref _lastMemos[index];
+        }
+
         // Render-state discovery for one shader image; the view is acquired later with the draw.
         private TextureResource ResolveImageBinding(ImageResource image, uint[] words, ShaderProgramInfo program, int index)
         {
+            ref var memo = ref ImageBindingMemoOf(program, index);
             if (words.Length < 4)
             {
                 throw SubmissionScheduler.Fatal($"An image descriptor is too short: image={index} words={words.Length} hash=0x{program.Hash:X16}.");
             }
 
             var storage = image.ResourceClass == ShaderCompiler.Resources.ImageResourceClass.Storage;
-            var resolution = ImageRequestBuilders.Texture(words, ShapeOf(image));
             _ = BeginBatchedGuestCommands();
-            var request = resolution.Request;
-            var imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
-            resolution = resolution with { Request = request };
+            TextureRequestResolution resolution;
+            ResourceSlotIdentifier imageIdentifier;
+            if (memo.Matches(words, _imageCache.LookupGeneration) && _imageCache.TryTouchRemembered(memo.Found))
+            {
+                resolution = memo.Resolution;
+                imageIdentifier = memo.Found;
+            }
+            else
+            {
+                resolution = ImageRequestBuilders.Texture(words, ShapeOf(image));
+                var request = resolution.Request;
+                imageIdentifier = _imageCache.FindImage(ref request, resolution.ExactFormat);
+                resolution = resolution with { Request = request };
+                // An empty range or DCC metadata needs the full lookup on every draw.
+                memo = !ImageDescription.IsEmptyRange(request.Description.Data) &&
+                    _imageCache.GetImage(imageIdentifier).Description.DccSliceSize == 0
+                    ? new ImageBindingMemo
+                    {
+                        Words = (uint[])words.Clone(),
+                        Generation = _imageCache.LookupGeneration,
+                        Resolution = resolution,
+                        Found = imageIdentifier,
+                    }
+                    : default;
+            }
+
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
             BindImage(imageIdentifier, storage);
             var descriptor = new TextureDescriptorWords(words);
@@ -141,16 +202,47 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"guestFormat={(uint)description.GuestFormat} imageTile={(uint)description.TileMode} " +
                     $"backing={cached.Backing.Extent.Width}x{cached.Backing.Extent.Height} format={cached.Backing.Format}");
             }
-            return new TextureResource
+            var texture = RentTextureResource();
+            texture.Address = descriptor.BaseAddress;
+            texture.ImageIdentifier = imageIdentifier;
+            texture.Request = resolution.Request;
+            texture.IsStorage = storage;
+            texture.DestinationSelect = words[3] & 0xFFFu;
+            texture.Width = descriptor.Width;
+            texture.Height = descriptor.Height;
+            return texture;
+        }
+
+        // Binding descriptions are large (an image request carries its whole mip layout) and one is made
+        // per shader image per draw, so they are reused once the submission that read them has retired.
+        // Only the render thread rents and returns them.
+        // Sized for the bindings of every draw still in flight (a few frames of a thousand draws each);
+        // a smaller cap drops returns during busy scenes and the pool allocates again.
+        private const int MaxPooledTextureResources = 32768;
+        private Stack<TextureResource>? _texturePool;
+
+        private TextureResource RentTextureResource()
+        {
+            if (_texturePool is not null && _texturePool.TryPop(out var texture))
             {
-                Address = descriptor.BaseAddress,
-                ImageIdentifier = imageIdentifier,
-                Request = request,
-                IsStorage = storage,
-                DestinationSelect = words[3] & 0xFFFu,
-                Width = descriptor.Width,
-                Height = descriptor.Height,
-            };
+                texture.InPool = false;
+                return texture;
+            }
+
+            return new TextureResource { Pooled = true };
+        }
+
+        private void ReturnTextureResource(TextureResource texture)
+        {
+            _texturePool ??= new Stack<TextureResource>();
+            if (!texture.Pooled || texture.InPool || _texturePool.Count >= MaxPooledTextureResources)
+            {
+                return;
+            }
+
+            texture.Reset();
+            texture.InPool = true;
+            _texturePool.Push(texture);
         }
 
         // Compare bits stay only on depth-compare samplers; a forced point sampler drops its filters.
@@ -758,8 +850,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     throw SubmissionScheduler.Fatal($"A stage does not belong to the bind point: stage={stage.Program.Stage} bindPoint={bindPoint}.");
                 }
 
-                foreach (var binding in stage.Layout.Descriptors)
+                // Indexed loops over the layout's lists: a foreach on IReadOnlyList allocates an enumerator per draw.
+                var countedBindings = stage.Layout.Descriptors;
+                for (var bindingIndex = 0; bindingIndex < countedBindings.Count; bindingIndex++)
                 {
+                    var binding = countedBindings[bindingIndex];
                     writeCount++;
                     var count = (int)DescriptorWriter.DescriptorCount(binding);
                     if (ImageDescriptorBinding.ResourceClass(binding.Kind) != ShaderCompiler.Resources.ImageResourceClass.None || binding.Kind == DescriptorBindingKind.Samplers)
@@ -852,8 +947,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
                     var occurrences = occurrenceScratch[..descriptors.Images.Length];
                     occurrences.Clear();
-                    foreach (var binding in stage.Layout.Descriptors)
+                    var bindings = stage.Layout.Descriptors;
+                    for (var bindingIndex = 0; bindingIndex < bindings.Count; bindingIndex++)
                     {
+                        var binding = bindings[bindingIndex];
+                        var resources = binding.Resources;
                         var write = new WriteDescriptorSet
                         {
                             SType = StructureType.WriteDescriptorSet,
@@ -865,8 +963,9 @@ internal static unsafe partial class VulkanVideoPresenter
                         var imageStart = imageIndex;
                         if (ImageDescriptorBinding.ResourceClass(binding.Kind) != ShaderCompiler.Resources.ImageResourceClass.None)
                         {
-                            foreach (var resource in binding.Resources)
+                            for (var resourceIndex = 0; resourceIndex < resources.Count; resourceIndex++)
                             {
+                                var resource = resources[resourceIndex];
                                 imageInfos[imageIndex++] = ImageInfo(descriptors.Images[(int)resource], occurrences[(int)resource]++, program, (int)resource);
                             }
                         }
@@ -875,8 +974,9 @@ internal static unsafe partial class VulkanVideoPresenter
                             switch (binding.Kind)
                             {
                                 case DescriptorBindingKind.Buffers:
-                                    foreach (var resource in binding.Resources)
+                                    for (var resourceIndex = 0; resourceIndex < resources.Count; resourceIndex++)
                                     {
+                                        var resource = resources[resourceIndex];
                                         var view = descriptors.Buffers[(int)resource];
                                         if (view.Buffer.Handle == 0)
                                         {
@@ -915,8 +1015,9 @@ internal static unsafe partial class VulkanVideoPresenter
                                 }
 
                                 case DescriptorBindingKind.Samplers:
-                                    foreach (var resource in binding.Resources)
+                                    for (var resourceIndex = 0; resourceIndex < resources.Count; resourceIndex++)
                                     {
+                                        var resource = resources[resourceIndex];
                                         var sampler = descriptors.Samplers[(int)resource];
                                         if (sampler.Handle == 0)
                                         {

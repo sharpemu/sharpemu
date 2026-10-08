@@ -28,7 +28,7 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        var value = is64Bit ? ReadQword(address) : ReadDword(address);
+        var value = ReadWaitOperand(address, is64Bit);
         if (!WaitOperation.TryCompare(value, reference, mask, compareFunction, out var satisfied))
         {
             throw _host.Fatal($"The wait compare function is unknown: function={compareFunction} address=0x{address:X16}.");

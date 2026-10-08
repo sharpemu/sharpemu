@@ -276,7 +276,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     RecycleHostBuffer(texture.StagingBuffer, texture.StagingMemory);
                 }
+
+                ReturnTextureResource(texture);
             }
+
+            resources.Textures = [];
 
             foreach (var snapshot in resources.FeedbackSnapshots)
             {

@@ -266,6 +266,9 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         executor.DrawAuto(1, Banks(), Auto(3));
         executor.DrawAuto(2, Banks(), Auto(3));
         executor.DrawAuto(3, Banks(PrimitiveTriangleStrip), Auto(4));
+        // The lookup key is reused across draws: after another pipeline, the first is found again.
+        executor.DrawAuto(4, Banks(), Auto(3));
+        executor.DrawAuto(5, Banks(PrimitiveTriangleStrip), Auto(4));
 
         Assert.Equal(2, guest.Host.GraphicsPipelines.Count);
         Assert.Equal(2, cache.GraphicsPipelineCount);

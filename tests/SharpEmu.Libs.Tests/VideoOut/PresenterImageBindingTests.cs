@@ -92,6 +92,41 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
         harness.Shutdown();
     }
 
+    [Fact]
+    public void RepeatedBinding_ReusesTheLookupUntilTheImageIsRemoved()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var fatal = new FatalScope();
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, new byte[0x10000]);
+        presenter.Run(() =>
+        {
+            var resource = new ImageResource
+            {
+                ResourceClass = PlanImageResourceClass.Sampled,
+                NumericClass = ImageNumericClass.Float,
+                Dimension = ImageDimension.Dim2D,
+                Read = true,
+            };
+            var program = new ShaderProgramInfo();
+            var words = RegisterWords.Texture(address, GuestPixelFormat.Bits32Float, 48, 24);
+            var first = (ResourceSlotIdentifier)GetFieldValue(presenter.InvokeMethod("ResolveImageBinding", resource, words, program, 0)!, "ImageIdentifier");
+            var second = (ResourceSlotIdentifier)GetFieldValue(presenter.InvokeMethod("ResolveImageBinding", resource, words, program, 0)!, "ImageIdentifier");
+            Assert.Equal(first, second);
+
+            // A removed image is not served again: the binding looks the descriptor up afresh.
+            var generation = harness.Images.LookupGeneration;
+            typeof(GuestImageCache).GetMethod("DeleteImage", InstanceMembers)!.Invoke(harness.Images, [first]);
+            Assert.NotEqual(generation, harness.Images.LookupGeneration);
+            var third = (ResourceSlotIdentifier)GetFieldValue(presenter.InvokeMethod("ResolveImageBinding", resource, words, program, 0)!, "ImageIdentifier");
+            Assert.True(harness.Images.TryGetImage(third, out var image) && image.Registered);
+            presenter.RenderHost.ResetBindings();
+        });
+        harness.Shutdown();
+    }
+
     [Theory]
     [InlineData(true, 1u, false)]
     [InlineData(true, 2u, true)]

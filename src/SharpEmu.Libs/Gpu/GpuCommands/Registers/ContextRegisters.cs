@@ -338,8 +338,15 @@ public sealed class ScreenViewportRegisters
 
     public ScreenViewportRegisters Copy()
     {
-        var copy = (ScreenViewportRegisters)MemberwiseClone();
+        var copy = CopySharingViewports();
         copy.Viewports = (ViewportRegisters[])Viewports.Clone();
+        return copy;
+    }
+
+    // A copy that shares the viewport array, the largest part, until RegisterBanks copies it.
+    public ScreenViewportRegisters CopySharingViewports()
+    {
+        var copy = (ScreenViewportRegisters)MemberwiseClone();
         copy.ClipRectangleLeft = (int[])ClipRectangleLeft.Clone();
         copy.ClipRectangleTop = (int[])ClipRectangleTop.Clone();
         copy.ClipRectangleRight = (int[])ClipRectangleRight.Clone();
@@ -387,6 +394,9 @@ public sealed class ContextRegisters
     public PolygonOffsetRegisters PolygonOffset = new();
     public EnhancedQualityAntialiasingRegisters EnhancedQualityAntialiasing;
     public ShaderInterfaceRegisters ShaderInterface = new();
+
+    // A copy that shares every nested part; RegisterBanks copies a part before writing it.
+    public ContextRegisters ShallowCopy() => (ContextRegisters)MemberwiseClone();
 
     public uint RenderTargetMaskForSlot(uint slot) => (RenderTargetMask >> (int)(slot * 4)) & 0xFu;
 

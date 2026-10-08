@@ -279,7 +279,23 @@ public sealed class RenderExecutorComputeTests : IDisposable
 
         Assert.Contains($"clear_image {MetadataAddress:X} 1000 {ClearValue:X8}", _host.Calls);
         Assert.Contains($"absorb_dcc {MetadataAddress:X} 1000 {ClearValue:X8}", _host.Calls);
+        Assert.Contains($"fill_dcc {MetadataAddress:X} 1000 {ClearValue:X8}", _host.Calls);
         AssertDispatched(4, 1, 1);
+    }
+
+    // A pending surface's metadata the host knows is filled there: as a dispatch it would be GPU-written
+    // and read back at every later bind.
+    [Fact]
+    public void PendingMetadataTheHostKnows_IsFilledOnTheHost()
+    {
+        _host.HostFillableDcc.Add(MetadataAddress);
+        ConfigureClearKernel(256);
+        _executor.Dispatch(1, Banks(), 256, 1, 1, ClearInitiator);
+
+        Assert.Contains($"absorb_dcc {MetadataAddress:X} 1000 {ClearValue:X8}", _host.Calls);
+        Assert.Contains($"fill_dcc {MetadataAddress:X} 1000 {ClearValue:X8}", _host.Calls);
+        AssertNotDispatched();
+        Assert.Contains("reset_bindings", _host.Calls);
     }
 
     [Fact]

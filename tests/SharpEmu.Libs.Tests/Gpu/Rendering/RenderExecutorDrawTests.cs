@@ -22,9 +22,21 @@ public sealed class RenderExecutorDrawTests : IDisposable
     private readonly RenderExecutor _executor;
     private readonly FatalScope _fatal = new();
 
-    public RenderExecutorDrawTests() => _executor = new RenderExecutor(_host, _pipelines);
+    private readonly InputsCheckingPrefetch _prefetch;
 
-    public void Dispose() => _fatal.Dispose();
+    public RenderExecutorDrawTests()
+    {
+        _executor = new RenderExecutor(_host, _pipelines);
+        _prefetch = new InputsCheckingPrefetch(_host);
+        _executor.Prefetch = _prefetch;
+    }
+
+    // Every draw of these tests also checks that its program inputs follow from its registers.
+    public void Dispose()
+    {
+        _fatal.Dispose();
+        Assert.Empty(_prefetch.Mismatches);
+    }
 
     private void AssertOrder(params string[] prefixes)
     {

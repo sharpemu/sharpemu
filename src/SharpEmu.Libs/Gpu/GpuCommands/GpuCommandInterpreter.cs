@@ -394,7 +394,12 @@ public sealed partial class GpuCommandInterpreter
     {
         RenderPhaseProfile.RecordCommandRead(readKind, sizeof(uint));
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
-        if (!_host.TryReadGuest(address, bytes))
+        // The packets themselves are command data; anything else is an operand earlier work may write.
+        var read = readKind is RenderPhaseProfile.CommandReadKind.Header or RenderPhaseProfile.CommandReadKind.Payload or
+            RenderPhaseProfile.CommandReadKind.RegisterTable
+            ? _host.TryReadGuest(address, bytes)
+            : _host.TryReadGuestOperand(address, bytes);
+        if (!read)
         {
             throw _host.Fatal($"The command stream cannot read guest memory: address=0x{address:X16} size=4.");
         }
@@ -406,7 +411,7 @@ public sealed partial class GpuCommandInterpreter
     {
         RenderPhaseProfile.RecordCommandRead(RenderPhaseProfile.CommandReadKind.Operand64, sizeof(ulong));
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
-        if (!_host.TryReadGuest(address, bytes))
+        if (!_host.TryReadGuestOperand(address, bytes))
         {
             throw _host.Fatal($"The command stream cannot read guest memory: address=0x{address:X16} size=8.");
         }
@@ -414,10 +419,24 @@ public sealed partial class GpuCommandInterpreter
         return BinaryPrimitives.ReadUInt64LittleEndian(bytes);
     }
 
+    private ulong ReadWaitOperand(ulong address, bool is64Bit)
+    {
+        RenderPhaseProfile.RecordCommandRead(is64Bit ? RenderPhaseProfile.CommandReadKind.Operand64 : RenderPhaseProfile.CommandReadKind.Operand32,
+            is64Bit ? sizeof(ulong) : sizeof(uint));
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        var size = is64Bit ? sizeof(ulong) : sizeof(uint);
+        if (!_host.TryReadGuestWaitOperand(address, bytes[..size]))
+        {
+            throw _host.Fatal($"The command stream cannot read guest memory: address=0x{address:X16} size={size}.");
+        }
+
+        return is64Bit ? BinaryPrimitives.ReadUInt64LittleEndian(bytes) : BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+    }
+
     internal void ReadBytes(ulong address, Span<byte> destination)
     {
         RenderPhaseProfile.RecordCommandRead(RenderPhaseProfile.CommandReadKind.Other, destination.Length);
-        if (!_host.TryReadGuest(address, destination))
+        if (!_host.TryReadGuestOperand(address, destination))
         {
             throw _host.Fatal($"The command stream cannot read guest memory: address=0x{address:X16} size={destination.Length}.");
         }

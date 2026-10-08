@@ -26,7 +26,7 @@ public sealed partial class GpuCommandInterpreter
         }
 
         // A compare-swap loop applies once per try and suspends while the compare fails.
-        if (!atomic.TryApply(_host.TryReadGuest, _host.Memory, out var priorValue, out _, out var comparePassed))
+        if (!atomic.TryApply(_host.TryReadGuestOperand, _host.Memory, out var priorValue, out _, out var comparePassed))
         {
             throw _host.Fatal($"The atomic address cannot be accessed: address=0x{atomic.Address:X16} size={atomic.ByteCount}.");
         }
@@ -68,7 +68,7 @@ public sealed partial class GpuCommandInterpreter
 
         if (semaphore.IsSignal)
         {
-            if (!Packets.MemorySemaphorePacket.TrySignal(_host.TryReadGuest, _host.Memory, semaphore.Address, semaphore.WriteSignal, out _))
+            if (!Packets.MemorySemaphorePacket.TrySignal(_host.TryReadGuestOperand, _host.Memory, semaphore.Address, semaphore.WriteSignal, out _))
             {
                 throw _host.Fatal($"The semaphore cannot be signaled: address=0x{semaphore.Address:X16}.");
             }
@@ -77,7 +77,7 @@ public sealed partial class GpuCommandInterpreter
         }
 
         // A wait takes one token, or suspends until a signal adds one.
-        if (!Packets.MemorySemaphorePacket.TryConsume(_host.TryReadGuest, _host.Memory, semaphore.Address, out var priorValue))
+        if (!Packets.MemorySemaphorePacket.TryConsume(_host.TryReadGuestOperand, _host.Memory, semaphore.Address, out var priorValue))
         {
             throw _host.Fatal($"The semaphore cannot be read: address=0x{semaphore.Address:X16}.");
         }

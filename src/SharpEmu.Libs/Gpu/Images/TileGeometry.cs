@@ -21,6 +21,24 @@ public struct TileLevelSpan
 
 public readonly record struct TilePaddedSize(uint Width, uint Height);
 
+// The per-level output arrays of the layout queries, kept per thread: every draw that resolves a
+// target or a texture needs them for a moment and reads them before the next query.
+internal static class MipLayoutScratch
+{
+    [ThreadStatic] private static TileLevelSpan[]? _spans;
+    [ThreadStatic] private static TilePaddedSize[]? _padded;
+
+    // Zeroed, as a new array would be, so a level the query leaves out reads as empty.
+    public static (TileLevelSpan[] Spans, TilePaddedSize[] Padded) Rent()
+    {
+        var spans = _spans ??= new TileLevelSpan[TiledSurfaceLayout.MaxLevels];
+        var padded = _padded ??= new TilePaddedSize[TiledSurfaceLayout.MaxLevels];
+        Array.Clear(spans);
+        Array.Clear(padded);
+        return (spans, padded);
+    }
+}
+
 public enum TileBlockKind : uint
 {
     Standard256B,
