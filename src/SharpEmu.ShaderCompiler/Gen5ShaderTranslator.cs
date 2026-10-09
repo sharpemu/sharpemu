@@ -1356,6 +1356,11 @@ public static partial class Gen5ShaderTranslator
             0x30D => "VAddNcI16",
             0x30E => "VSubNcI16",
             0x314 => "VLshlrevB16",
+            0x305 => "VMulLoU16",
+            0x311 => "VPackB32F16",
+            0x340 => "VMadU16",
+            0x35E => "VMadI16",
+            0x375 => "VMadI32I16",
             // VOP3-encoded 64-bit VOPC (opcode < 0x100): V_CMP_*_U64 / V_CMPX_*_U64.
             0x0E0 => "VCmpFU64",
             0x0E1 => "VCmpLtU64",

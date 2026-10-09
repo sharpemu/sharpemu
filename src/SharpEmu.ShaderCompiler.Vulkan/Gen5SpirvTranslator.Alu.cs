@@ -1551,6 +1551,56 @@ public static partial class Gen5SpirvTranslator
                     }
 
                     break;
+                case "VMulLoU16":
+                case "VMadU16":
+                case "VMadI16":
+                {
+                    // D.u16 = S0.u16 * S1.u16 (+ S2.u16): the low half of the product; the signed
+                    // multiply-add differs only in how the halves were extended, not in the bits.
+                    if (instruction.Control is Gen5Vop3Control { Clamp: true })
+                    {
+                        error = $"{instruction.Opcode}: clamped 16-bit integer results are not supported";
+                        return false;
+                    }
+
+                    var signed = instruction.Opcode == "VMadI16";
+                    var value = _module.AddInstruction(
+                        SpirvOp.IMul,
+                        _uintType,
+                        GetInt16Source(instruction, 0, signed),
+                        GetInt16Source(instruction, 1, signed));
+                    if (instruction.Opcode != "VMulLoU16")
+                    {
+                        value = IAdd(value, GetInt16Source(instruction, 2, signed));
+                    }
+
+                    result = EmitInt16Result(instruction, destination, value);
+                    break;
+                }
+                case "VMadI32I16":
+                {
+                    // D.i32 = S0.i16 * S1.i16 + S2.i32.
+                    if (instruction.Control is Gen5Vop3Control { Clamp: true })
+                    {
+                        error = $"{instruction.Opcode}: clamped results are not supported";
+                        return false;
+                    }
+
+                    result = IAdd(
+                        _module.AddInstruction(
+                            SpirvOp.IMul,
+                            _uintType,
+                            GetInt16Source(instruction, 0, signed: true),
+                            GetInt16Source(instruction, 1, signed: true)),
+                        GetRawSource(instruction, 2));
+                    break;
+                }
+                case "VPackB32F16":
+                    // D[31:16] = S1.f16, D[15:0] = S0.f16, each the half op_sel picks; the bits move unconverted.
+                    result = BitwiseOr(
+                        GetInt16Source(instruction, 0, signed: false),
+                        ShiftLeftLogical(GetInt16Source(instruction, 1, signed: false), UInt(16)));
+                    break;
                 case "VAddNcI16":
                 case "VSubNcU16":
                 case "VSubNcI16":

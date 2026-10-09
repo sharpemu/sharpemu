@@ -37,6 +37,27 @@ public sealed class Gen5Integer16Tests
     }
 
     [Theory]
+    [InlineData(0x305u, "VMulLoU16")]
+    [InlineData(0x311u, "VPackB32F16")]
+    [InlineData(0x340u, "VMadU16")]
+    [InlineData(0x35Eu, "VMadI16")]
+    [InlineData(0x375u, "VMadI32I16")]
+    public void Vop3MultiplyAndPackOpsDecodeAndCompile(uint opcode, string name)
+    {
+        // v_xxx v0, v1, v2, v3
+        var program = Decode(
+        [
+            (0x35u << 26) | (opcode << 16),
+            257u | (258u << 9) | (259u << 18),
+            SEndpgm,
+        ]);
+
+        Assert.Equal([name, "SEndpgm"], program.Instructions.Select(instruction => instruction.Opcode));
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+    }
+
+    [Theory]
     [InlineData(0x00u, "VPkMadI16")]
     [InlineData(0x01u, "VPkMulLoU16")]
     [InlineData(0x02u, "VPkAddI16")]
