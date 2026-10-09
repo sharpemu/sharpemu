@@ -100,6 +100,10 @@ public interface ICommandStreamHost
 
     void Flush();
 
+    // A frame boundary: submits what the frame recorded. The submitter resumes once it returns, so a
+    // host that runs the stream ahead of its recording returns only after the frame is recorded.
+    void FlushFrame() => Flush();
+
     void FlushAndWait();
 
     void SynchronizeGpu();
