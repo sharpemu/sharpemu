@@ -178,6 +178,19 @@ public partial class MainWindow : Window
     private GameEntry? _lastSelectedGame;
     private double _libraryRailRowHeight = 188;
     private double _libraryGridRowHeight = 216;
+    private const double CarouselLeadingPadding = 20;
+    private const double CarouselItemMargin = 12;
+    private bool _carouselAnimating;
+    private readonly TranslateTransform _carouselTransform = new();
+    private double _carouselOffset;
+    private double _carouselScrollFrom;
+    private double _carouselScrollTo;
+    private long _carouselScrollStartedAt;
+    private bool _carouselPointerDown;
+    private bool _carouselDragging;
+    private Point _carouselDragStart;
+    private double _carouselDragStartOffset;
+    private double _carouselWheelAccumulator;
 
     // Bundled key art shown whenever no game-specific backdrop applies; the
     // plain window color remains the fallback when the asset fails to load.
@@ -245,6 +258,27 @@ public partial class MainWindow : Window
         {
             _libraryLayoutTimer.Stop();
             UpdateLibraryLayoutMetrics();
+        };
+        CarouselAddFolderButton.Click += (_, _) => StartAddFolderFromTile();
+        GameList.AddHandler(PointerPressedEvent, OnCarouselPointerPressed, RoutingStrategies.Tunnel, handledEventsToo: true);
+        GameList.AddHandler(PointerMovedEvent, OnCarouselPointerMoved, RoutingStrategies.Tunnel, handledEventsToo: true);
+        GameList.AddHandler(PointerReleasedEvent, OnCarouselPointerReleased, RoutingStrategies.Tunnel, handledEventsToo: true);
+        GameList.AddHandler(
+            PointerCaptureLostEvent,
+            (_, e) =>
+            {
+                if (ReferenceEquals(e.Source, GameList))
+                {
+                    EndCarouselDrag(select: false);
+                }
+            },
+            RoutingStrategies.Tunnel | RoutingStrategies.Bubble,
+            handledEventsToo: true);
+        LibraryPage.AddHandler(PointerWheelChangedEvent, OnCarouselPointerWheel, RoutingStrategies.Tunnel, handledEventsToo: true);
+        GameList.SizeChanged += (_, _) =>
+        {
+            UpdateCarouselPadding();
+            Dispatcher.UIThread.Post(() => AnchorCarouselSelection(animate: false), DispatcherPriority.Loaded);
         };
 
         TitleBar.PointerPressed += OnTitleBarPointerPressed;
@@ -376,13 +410,7 @@ public partial class MainWindow : Window
         Closing += (_, _) => BeginWindowClosing();
         Closed += (_, _) => CompleteWindowClosing();
 
-        SdlLauncherGamepad.EnsureStarted();
-        _gamepadTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(50),
-        };
         EnvRenderDocToggle.IsCheckedChanged += (_, _) =>
-
             SetEnvironmentToggle(
                 "SHARPEMU_RENDERDOC",
                 EnvRenderDocToggle.IsChecked == true);
@@ -390,24 +418,6 @@ public partial class MainWindow : Window
             SetEnvironmentToggle(
                 "SHARPEMU_VK_DISABLE_IMPLICITS",
                 EnvDisableVkImplicitLayersToggle.IsChecked == true);
-        DefaultProfileBox.TextChanged += (_, _) =>
-            _settings.DefaultProfile = GuiSettings.NormalizeDefaultProfile(DefaultProfileBox.Text);
-        LanguageBox.SelectionChanged += (_, _) => OnLanguageChanged();
-
-        GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
-        AddHandler(KeyDownEvent, OnPreviewKeyDown, RoutingStrategies.Tunnel);
-        CtxLaunch.Click += (_, _) => LaunchSelected();
-        CtxOpenFolder.Click += (_, _) => OpenSelectedGameFolder();
-        CtxCopyPath.Click += async (_, _) =>
-            await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.Path);
-        CtxCopyTitleId.Click += async (_, _) =>
-            await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.TitleId);
-        CtxGameSettings.Click += (_, _) => OpenSelectedGameSettings();
-        CtxRemove.Click += (_, _) => RemoveSelectedFromLibrary();
-
-        Opened += async (_, _) => await OnOpenedAsync();
-        Closing += (_, _) => BeginWindowClosing();
-        Closed += (_, _) => CompleteWindowClosing();
 
         SdlLauncherGamepad.EnsureStarted();
         _gamepadTimer = new DispatcherTimer
@@ -492,12 +502,25 @@ public partial class MainWindow : Window
                 () => SetOptionsNavigationIndicator(_optionsSectionIndex, animate: false),
                 DispatcherPriority.Loaded);
         }
+        else
+        {
+            FocusLibrarySelection();
+        }
     }
 
     private void SetLibraryLayout(bool grid)
     {
         _isLibraryGridLayout = grid;
+        var selectedTile = GameList.SelectedItem;
+        _libraryTiles.IncludeAddFolderTile = grid;
+        if (selectedTile is GameEntry && !ReferenceEquals(GameList.SelectedItem, selectedTile))
+        {
+            GameList.SelectedItem = selectedTile;
+        }
+
+        CarouselAddFolderButton.IsVisible = !grid;
         SetClass(GameList, "gridLayout", grid);
+        UpdateCarouselPadding();
         SetClass(LibrarySelectedDetails, "gridLayout", grid);
         LibraryPage.Margin = new Thickness(0, 6, 0, 0);
         UpdateLibraryLayoutMetrics();
@@ -506,7 +529,11 @@ public partial class MainWindow : Window
         if (GameList.SelectedItem is { } selected)
         {
             Dispatcher.UIThread.Post(
-                () => GameList.ScrollIntoView(selected),
+                () =>
+                {
+                    GameList.ScrollIntoView(selected);
+                    AnchorCarouselSelection(animate: false);
+                },
                 DispatcherPriority.Loaded);
         }
     }
@@ -518,8 +545,17 @@ public partial class MainWindow : Window
         Resources["LibraryTileWidth"] = metrics.ItemWidth;
         Resources["LibraryRailItemHeight"] = metrics.RailItemHeight;
         Resources["LibraryGridItemHeight"] = metrics.GridItemHeight;
-        _libraryRailRowHeight = metrics.RailItemHeight + 16;
+        _libraryRailRowHeight = metrics.RailItemHeight + 16 + 48;
+        CarouselAddFolderButton.Margin = new Thickness(0, metrics.RailItemHeight + 24, 0, 0);
         _libraryGridRowHeight = metrics.GridItemHeight + 16;
+        UpdateCarouselPadding();
+        Dispatcher.UIThread.Post(
+            () =>
+            {
+                UpdateCarouselPadding();
+                AnchorCarouselSelection(animate: false);
+            },
+            DispatcherPriority.Loaded);
 
         GameList.MaxHeight = double.PositiveInfinity;
         UpdateLibraryMinimumHeight();
@@ -850,11 +886,28 @@ public partial class MainWindow : Window
         if (ShouldNavigate(left, ref _navLeftNextAt, now))
         {
             MoveSelection(-1);
+            ReturnFocusFromCarouselAddFolder();
         }
 
         if (ShouldNavigate(right, ref _navRightNextAt, now))
         {
             MoveSelection(1);
+            ReturnFocusFromCarouselAddFolder();
+        }
+
+        if (!_isLibraryGridLayout)
+        {
+            var up = (pad.Buttons & HostGamepadButtons.Up) != 0 || pad.LeftY < 64;
+            var down = (pad.Buttons & HostGamepadButtons.Down) != 0 || pad.LeftY > 192;
+            if (ShouldNavigate(down, ref _navDownNextAt, now))
+            {
+                CarouselAddFolderButton.Focus(NavigationMethod.Directional);
+            }
+
+            if (ShouldNavigate(up, ref _navUpNextAt, now))
+            {
+                ReturnFocusFromCarouselAddFolder();
+            }
         }
 
         if (_isLibraryGridLayout)
@@ -877,7 +930,14 @@ public partial class MainWindow : Window
         var pressed = pad.Buttons & ~_previousPadButtons;
         if ((pressed & HostGamepadButtons.Cross) != 0)
         {
-            LaunchSelected();
+            if (!_isLibraryGridLayout && CarouselAddFolderButton.IsFocused)
+            {
+                StartAddFolderFromTile();
+            }
+            else
+            {
+                LaunchSelected();
+            }
         }
 
         _previousPadButtons = pad.Buttons;
@@ -940,6 +1000,10 @@ public partial class MainWindow : Window
             : Math.Clamp(GameList.SelectedIndex + delta, 0, _libraryTiles.Count - 1);
         GameList.SelectedIndex = index;
         GameList.ScrollIntoView(index);
+        if (GameList.IsKeyboardFocusWithin && GameList.ContainerFromIndex(index) is { } container)
+        {
+            container.Focus(NavigationMethod.Unspecified);
+        }
     }
 
     private async Task OnOpenedAsync()
@@ -953,6 +1017,7 @@ public partial class MainWindow : Window
                 : $" · UNOFFICIAL {BuildInfo.CommitSha}";
         VersionText.Text = display;
         Title = $"SharpEmu {display}";
+        ReportGuiRenderer();
         ToolTip.SetTip(VersionText, BuildInfo.Banner);
 
         _settings = GuiSettings.Load();
@@ -970,7 +1035,66 @@ public partial class MainWindow : Window
         }
 
         SeedLibraryFromCache();
+        FocusLibrarySelection();
         await RescanLibraryAsync();
+        FocusLibrarySelection();
+    }
+
+    private void ReturnFocusFromCarouselAddFolder()
+    {
+        if (CarouselAddFolderButton.IsFocused)
+        {
+            FocusLibrarySelection();
+        }
+    }
+
+    private void ReportGuiRenderer()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        try
+        {
+            var angle = Process.GetCurrentProcess().Modules
+                .Cast<ProcessModule>()
+                .Any(static module => string.Equals(module.ModuleName, "av_libglesv2.dll", StringComparison.OrdinalIgnoreCase));
+            AppendConsoleLine(
+                angle ? "[GUI] Renderer: GPU (ANGLE/Direct3D)" : "[GUI] Renderer: software (ANGLE not loaded)",
+                angle ? DimLineBrush : WarningLineBrush);
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private void FocusLibrarySelection()
+    {
+        Dispatcher.UIThread.Post(
+            () =>
+            {
+                if (_activePageIndex != 0 || _isGameSettingsOpen)
+                {
+                    return;
+                }
+
+                if (GameList.SelectedIndex < 0 && _visibleGames.Count > 0)
+                {
+                    GameList.SelectedIndex = 0;
+                }
+
+                AnchorCarouselSelection(animate: false);
+                if (GameList.SelectedIndex >= 0 && GameList.ContainerFromIndex(GameList.SelectedIndex) is { } container)
+                {
+                    container.Focus(NavigationMethod.Unspecified);
+                }
+                else
+                {
+                    GameList.Focus(NavigationMethod.Unspecified);
+                }
+            },
+            DispatcherPriority.Loaded);
     }
 
     private void PopulateLanguageBox()
@@ -1884,21 +2008,7 @@ public partial class MainWindow : Window
                         continue;
                     }
 
-                    long size = 0;
-                    try
-                    {
-                        size = new FileInfo(fullPath).Length;
-                    }
-                    catch (IOException exception)
-                    {
-                        Console.Error.WriteLine(
-                            $"[GUI][WARN] Could not inspect executable '{fullPath}': {exception.Message}");
-                    }
-
-                    var (title, titleId, version) = TryReadParamJson(fullPath);
-                    games.Add(new GameEntry(
-                        title ?? GameNameFor(fullPath), titleId, version, fullPath, size,
-                        FindCoverFor(fullPath), FindBackgroundFor(fullPath)));
+                    games.Add(CreateGameEntry(fullPath));
                 }
             }
             catch (Exception exception)
@@ -1909,7 +2019,39 @@ public partial class MainWindow : Window
         }
 
         games.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+        AddBundledDemo(games, excludedPaths);
         return games;
+    }
+
+    private static void AddBundledDemo(List<GameEntry> games, IReadOnlySet<string> excludedPaths)
+    {
+        var demo = BundledDemo.FindEboot(AppContext.BaseDirectory);
+        if (demo is null || excludedPaths.Contains(demo))
+        {
+            return;
+        }
+
+        games.RemoveAll(game => string.Equals(game.Path, demo, GameLibraryPath.Comparison));
+        games.Insert(0, CreateGameEntry(demo));
+    }
+
+    private static GameEntry CreateGameEntry(string fullPath)
+    {
+        long size = 0;
+        try
+        {
+            size = new FileInfo(fullPath).Length;
+        }
+        catch (IOException exception)
+        {
+            Console.Error.WriteLine(
+                $"[GUI][WARN] Could not inspect executable '{fullPath}': {exception.Message}");
+        }
+
+        var (title, titleId, version) = TryReadParamJson(fullPath);
+        return new GameEntry(
+            title ?? GameNameFor(fullPath), titleId, version, fullPath, size,
+            FindCoverFor(fullPath), FindBackgroundFor(fullPath));
     }
 
     /// <summary>
@@ -2083,6 +2225,195 @@ public partial class MainWindow : Window
 
         _lastSelectedGame = GameList.SelectedItem as GameEntry;
         UpdateSelectedGame();
+        Dispatcher.UIThread.Post(() => AnchorCarouselSelection(animate: true), DispatcherPriority.Loaded);
+    }
+
+    private double CarouselItemStride() =>
+        (Resources.TryGetValue("LibraryTileWidth", out var width) && width is double tileWidth ? tileWidth : 0) +
+        CarouselItemMargin;
+
+    private void UpdateCarouselPadding()
+    {
+        if (GameList.ItemsPanelRoot is not { } panel)
+        {
+            return;
+        }
+
+        if (_isLibraryGridLayout)
+        {
+            panel.ClearValue(MarginProperty);
+            if (ReferenceEquals(panel.RenderTransform, _carouselTransform))
+            {
+                panel.RenderTransform = null;
+            }
+
+            return;
+        }
+
+        panel.Margin = new Thickness(CarouselLeadingPadding, 0, 0, 0);
+        if (!ReferenceEquals(panel.RenderTransform, _carouselTransform))
+        {
+            panel.RenderTransform = _carouselTransform;
+        }
+
+        SetCarouselOffset(_carouselOffset);
+    }
+
+    private double MaximumCarouselOffset() =>
+        Math.Max(0, (_visibleGames.Count - 1) * CarouselItemStride());
+
+    private void SetCarouselOffset(double offset)
+    {
+        _carouselOffset = Math.Clamp(offset, 0, MaximumCarouselOffset());
+        _carouselTransform.X = -_carouselOffset;
+    }
+
+    private void AnchorCarouselSelection(bool animate)
+    {
+        if (_isLibraryGridLayout || GameList.SelectedIndex < 0 || _carouselPointerDown)
+        {
+            return;
+        }
+
+        var target = Math.Clamp(GameList.SelectedIndex * CarouselItemStride(), 0, MaximumCarouselOffset());
+        if (!animate)
+        {
+            _carouselAnimating = false;
+            SetCarouselOffset(target);
+            return;
+        }
+
+        _carouselScrollFrom = _carouselOffset;
+        _carouselScrollTo = target;
+        _carouselScrollStartedAt = Stopwatch.GetTimestamp();
+        if (!_carouselAnimating)
+        {
+            _carouselAnimating = true;
+            RequestAnimationFrame(OnCarouselAnimationFrame);
+        }
+    }
+
+    private void OnCarouselPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (_isLibraryGridLayout || !e.GetCurrentPoint(GameList).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        _carouselPointerDown = true;
+        _carouselDragging = false;
+        _carouselDragStart = e.GetPosition(GameList);
+        _carouselDragStartOffset = _carouselOffset;
+    }
+
+    private void OnCarouselPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (!_carouselPointerDown)
+        {
+            return;
+        }
+
+        var deltaX = e.GetPosition(GameList).X - _carouselDragStart.X;
+        if (!_carouselDragging)
+        {
+            if (Math.Abs(deltaX) < 8)
+            {
+                return;
+            }
+
+            _carouselDragging = true;
+            _carouselAnimating = false;
+            _carouselDragStartOffset = _carouselOffset;
+            _carouselDragStart = e.GetPosition(GameList);
+            deltaX = 0;
+            e.Pointer.Capture(GameList);
+        }
+
+        SetCarouselOffset(_carouselDragStartOffset - deltaX);
+        e.Handled = true;
+    }
+
+    private void OnCarouselPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        if (!_carouselPointerDown)
+        {
+            return;
+        }
+
+        var dragged = _carouselDragging;
+        EndCarouselDrag(select: true);
+        if (dragged)
+        {
+            e.Pointer.Capture(null);
+            e.Handled = true;
+        }
+    }
+
+    private void EndCarouselDrag(bool select)
+    {
+        var dragged = _carouselDragging;
+        _carouselPointerDown = false;
+        _carouselDragging = false;
+        if (!dragged || !select || _visibleGames.Count == 0)
+        {
+            if (!dragged)
+            {
+                AnchorCarouselSelection(animate: true);
+            }
+
+            return;
+        }
+
+        var stride = CarouselItemStride();
+        var index = stride <= 0 ? 0 : (int)Math.Round(_carouselOffset / stride);
+        index = Math.Clamp(index, 0, _visibleGames.Count - 1);
+        if (GameList.SelectedIndex == index)
+        {
+            AnchorCarouselSelection(animate: true);
+        }
+        else
+        {
+            GameList.SelectedIndex = index;
+        }
+    }
+
+    private void OnCarouselPointerWheel(object? sender, PointerWheelEventArgs e)
+    {
+        if (_isLibraryGridLayout || _isGameSettingsOpen || _activePageIndex != 0 || _visibleGames.Count == 0)
+        {
+            return;
+        }
+
+        var delta = Math.Abs(e.Delta.X) > Math.Abs(e.Delta.Y) ? -e.Delta.X : e.Delta.Y;
+        _carouselWheelAccumulator += delta;
+        while (Math.Abs(_carouselWheelAccumulator) >= 1)
+        {
+            var step = _carouselWheelAccumulator > 0 ? -1 : 1;
+            _carouselWheelAccumulator += step;
+            MoveSelection(step);
+        }
+
+        e.Handled = true;
+    }
+
+    private void OnCarouselAnimationFrame(TimeSpan frameTime)
+    {
+        if (!_carouselAnimating || _carouselDragging)
+        {
+            _carouselAnimating = false;
+            return;
+        }
+
+        var progress = Math.Min(1.0, Stopwatch.GetElapsedTime(_carouselScrollStartedAt).TotalMilliseconds / 260.0);
+        var eased = 1 - Math.Pow(1 - progress, 3);
+        SetCarouselOffset(_carouselScrollFrom + (_carouselScrollTo - _carouselScrollFrom) * eased);
+        if (progress >= 1)
+        {
+            _carouselAnimating = false;
+            return;
+        }
+
+        RequestAnimationFrame(OnCarouselAnimationFrame);
     }
 
     private void OnGameListDoubleTapped(object? sender, TappedEventArgs e)

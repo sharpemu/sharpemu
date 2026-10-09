@@ -299,6 +299,21 @@ SPDX-License-Identifier: GPL-2.0-or-later
               </DataTemplate>
             </ListBox.DataTemplates>
             </ListBox>
+            <Button x:Name="CarouselAddFolderButton"
+                    Classes="ghost"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Top"
+                    IsVisible="False"
+                    AutomationProperties.Name="{Binding [Library.AddFolder], Source={x:Static local:Localization.Instance}}">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Text="+"
+                           FontSize="16"
+                           FontWeight="Light"
+                           VerticalAlignment="Center" />
+                <TextBlock Text="{Binding [Library.AddFolder], Source={x:Static local:Localization.Instance}}"
+                           VerticalAlignment="Center" />
+              </StackPanel>
+            </Button>
           </Panel>
 
           <!-- Selected-game identity and actions share one detail surface so

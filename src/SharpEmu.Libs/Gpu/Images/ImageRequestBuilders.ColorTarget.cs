@@ -278,7 +278,9 @@ public static partial class ImageRequestBuilders
         }
         else
         {
-            pitch = width;
+            // A linear color buffer uses the same 256-byte row alignment as a linear texture of the same memory;
+            // an unaligned pitch made the target and a later texture view of it two different cached images.
+            pitch = TileGeometry.TexturePitch(transferFormat, width, GuestTileMode.Linear);
         }
 
         var (mipSpans, mipPadded) = MipLayoutScratch.Rent();

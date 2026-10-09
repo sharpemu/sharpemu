@@ -180,4 +180,71 @@ SPDX-License-Identifier: GPL-2.0-or-later
       SkipUnchangedFiles="true" />
   </Target>
 
+  <PropertyGroup>
+    <SharpEmuDemoTag>e3a6dd3</SharpEmuDemoTag>
+    <SharpEmuDemoFolderName>demo</SharpEmuDemoFolderName>
+    <SharpEmuDemoCacheDir>$(BaseIntermediateOutputPath)sharpemu-demo/$(SharpEmuDemoTag)</SharpEmuDemoCacheDir>
+    <SharpEmuDemoArchive>$(SharpEmuDemoCacheDir)/sharpemu-demo.zip</SharpEmuDemoArchive>
+    <SharpEmuDemoDir>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '..', 'SharpEmu.Demo'))</SharpEmuDemoDir>
+    <SharpEmuDemoStamp>$(SharpEmuDemoDir).tag</SharpEmuDemoStamp>
+  </PropertyGroup>
+
+  <Target Name="FetchSharpEmuDemo" BeforeTargets="Publish;Build">
+    <ReadLinesFromFile File="$(SharpEmuDemoStamp)" Condition="Exists('$(SharpEmuDemoStamp)')">
+      <Output TaskParameter="Lines" PropertyName="_SharpEmuDemoExtractedTag" />
+    </ReadLinesFromFile>
+    <PropertyGroup>
+      <_SharpEmuDemoCurrent Condition="'$(SharpEmuDemoTag)' != '' And '$(_SharpEmuDemoExtractedTag)' == '$(SharpEmuDemoTag)'">true</_SharpEmuDemoCurrent>
+    </PropertyGroup>
+    <DownloadFile
+      SourceUrl="https://github.com/sharpemu/sharpemu-demo/releases/download/$(SharpEmuDemoTag)/sharpemu-demo.zip"
+      DestinationFolder="$(SharpEmuDemoCacheDir)"
+      Condition="'$(SharpEmuDemoTag)' != '' And '$(_SharpEmuDemoCurrent)' != 'true' And !Exists('$(SharpEmuDemoArchive)')"
+      ContinueOnError="WarnAndContinue" />
+    <RemoveDir Directories="$(SharpEmuDemoDir)" Condition="'$(_SharpEmuDemoCurrent)' != 'true'" />
+    <Unzip
+      SourceFiles="$(SharpEmuDemoArchive)"
+      DestinationFolder="$(SharpEmuDemoDir)"
+      Condition="'$(SharpEmuDemoTag)' != '' And '$(_SharpEmuDemoCurrent)' != 'true' And Exists('$(SharpEmuDemoArchive)')"
+      ContinueOnError="WarnAndContinue" />
+    <PropertyGroup>
+      <SharpEmuDemoComplete Condition="Exists('$(SharpEmuDemoDir)eboot.bin') And Exists('$(SharpEmuDemoDir)sce_sys/param.json') And Exists('$(SharpEmuDemoDir)sce_sys/icon0.png') And Exists('$(SharpEmuDemoDir)sce_sys/pic0.png')">true</SharpEmuDemoComplete>
+    </PropertyGroup>
+    <WriteLinesToFile
+      File="$(SharpEmuDemoStamp)"
+      Lines="$(SharpEmuDemoTag)"
+      Overwrite="true"
+      Condition="'$(SharpEmuDemoComplete)' == 'true' And '$(_SharpEmuDemoCurrent)' != 'true'" />
+    <RemoveDir Directories="$(SharpEmuDemoDir)" Condition="'$(SharpEmuDemoComplete)' != 'true'" />
+    <Delete Files="$(SharpEmuDemoArchive)" Condition="'$(SharpEmuDemoComplete)' != 'true' And Exists('$(SharpEmuDemoArchive)')" />
+  </Target>
+
+  <Target Name="BuildSharpEmuDemo" AfterTargets="Build" DependsOnTargets="FetchSharpEmuDemo">
+    <ItemGroup>
+      <_SharpEmuDemoFiles Include="$(SharpEmuDemoDir)**/*" Exclude="$(SharpEmuDemoStamp)" Condition="'$(SharpEmuDemoComplete)' == 'true'" />
+    </ItemGroup>
+    <RemoveDir
+      Directories="$(OutDir)$(SharpEmuDemoFolderName)"
+      Condition="'$(SharpEmuDemoComplete)' != 'true'"
+      ContinueOnError="WarnAndContinue" />
+    <Copy
+      SourceFiles="@(_SharpEmuDemoFiles)"
+      DestinationFiles="@(_SharpEmuDemoFiles->'$(OutDir)$(SharpEmuDemoFolderName)/%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="PublishSharpEmuDemo" AfterTargets="Publish" DependsOnTargets="FetchSharpEmuDemo">
+    <ItemGroup>
+      <_SharpEmuDemoFiles Include="$(SharpEmuDemoDir)**/*" Exclude="$(SharpEmuDemoStamp)" Condition="'$(SharpEmuDemoComplete)' == 'true'" />
+    </ItemGroup>
+    <RemoveDir
+      Directories="$(PublishDir)$(SharpEmuDemoFolderName)"
+      Condition="'$(SharpEmuDemoComplete)' != 'true'"
+      ContinueOnError="WarnAndContinue" />
+    <Copy
+      SourceFiles="@(_SharpEmuDemoFiles)"
+      DestinationFiles="@(_SharpEmuDemoFiles->'$(PublishDir)$(SharpEmuDemoFolderName)/%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>

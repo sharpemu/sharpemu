@@ -15,6 +15,7 @@ namespace SharpEmu.GUI;
 public sealed class LibraryTileCollection : IReadOnlyList<LibraryTile>, IList, INotifyCollectionChanged
 {
     private readonly ObservableCollection<GameEntry> _games;
+    private bool _includeAddFolderTile = true;
 
     public LibraryTileCollection(ObservableCollection<GameEntry> games)
     {
@@ -24,7 +25,22 @@ public sealed class LibraryTileCollection : IReadOnlyList<LibraryTile>, IList, I
 
     public event NotifyCollectionChangedEventHandler? CollectionChanged;
 
-    public int Count => _games.Count + 1;
+    public bool IncludeAddFolderTile
+    {
+        get => _includeAddFolderTile;
+        set
+        {
+            if (_includeAddFolderTile == value)
+            {
+                return;
+            }
+
+            _includeAddFolderTile = value;
+            CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+        }
+    }
+
+    public int Count => _games.Count + (_includeAddFolderTile ? 1 : 0);
 
     bool IList.IsFixedSize => false;
 
@@ -43,7 +59,7 @@ public sealed class LibraryTileCollection : IReadOnlyList<LibraryTile>, IList, I
                 return _games[index];
             }
 
-            if (index == _games.Count)
+            if (_includeAddFolderTile && index == _games.Count)
             {
                 return AddFolderTile.Instance;
             }
@@ -65,7 +81,10 @@ public sealed class LibraryTileCollection : IReadOnlyList<LibraryTile>, IList, I
             yield return game;
         }
 
-        yield return AddFolderTile.Instance;
+        if (_includeAddFolderTile)
+        {
+            yield return AddFolderTile.Instance;
+        }
     }
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
@@ -79,7 +98,7 @@ public sealed class LibraryTileCollection : IReadOnlyList<LibraryTile>, IList, I
     int IList.IndexOf(object? value) => value switch
     {
         GameEntry game => _games.IndexOf(game),
-        AddFolderTile => _games.Count,
+        AddFolderTile when _includeAddFolderTile => _games.Count,
         _ => -1,
     };
 

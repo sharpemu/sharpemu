@@ -241,6 +241,21 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     }
 
     [Fact]
+    public void ColorTarget_LinearTargetPitchMatchesTheLinearTexturePitch()
+    {
+        var target = ImageRequestBuilders.ColorTarget(RegisterWords.Color(Base, 816, 604), 0xF, 0, false);
+        var texture = ImageRequestBuilders.Texture(RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UNorm, 816, 604), Sampled2D);
+
+        Assert.NotNull(target);
+        var description = target.Value.Request.Description;
+        Assert.Equal(new Extent3D(816, 604, 1), description.Extent);
+        Assert.Equal(832u, description.Pitch);
+        Assert.Equal(832UL * 604 * 4, description.Data.Size);
+        Assert.Equal(texture.Request.Description.Pitch, description.Pitch);
+        Assert.Equal(texture.Request.Description.Data.Size, description.Data.Size);
+    }
+
+    [Fact]
     public void Texture_LinearTwoDimensionalFromDescriptor()
     {
         var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UNorm, 64, 64);
