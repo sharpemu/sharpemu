@@ -486,13 +486,16 @@ public sealed partial class ResourceTracker
             // implement. Rather than fail shader recompilation outright, degrade to a null
             // descriptor for that one access and let it read as a null/black texture,
             // mirroring KytyPS5's fallback for the same case (feat/shader-control-dependent-
-            // descriptor). Buffer/sampler-adjacent handles or any other validation failure
-            // still hard-fail, since those aren't safe to silently zero.
+            // descriptor). A sampler none of whose words is known reads as a null sampler too: a
+            // shader that builds it in SGPRs inside a block an s_cbranch_execz can skip reaches the
+            // join with the registers unwritten on the skip edge. Buffer handles or any other
+            // validation failure still hard-fail, since those aren't safe to silently zero.
             var dynamicImageFallback = expected is (ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle) &&
                 (controlDependent || HasUndefinedOrigin(source.Dwords[badDword], "BufferLoadFormat") ||
                  (nonContiguousImage && source.Dwords.Any(dword => HasUndefinedOrigin(dword, "SAndB32"))) ||
                  (expected == ScalarValueKind.ImageHandle && _plan.Stage != ShaderStage.Compute &&
-                  source.Dwords.Any(HasLaneChosenValue)));
+                  source.Dwords.Any(HasLaneChosenValue)) ||
+                 (expected == ScalarValueKind.SamplerHandle && source.Dwords.All(dword => dword.IsUndefined)));
             if (dynamicImageFallback)
             {
                 source = new DescriptorSource
