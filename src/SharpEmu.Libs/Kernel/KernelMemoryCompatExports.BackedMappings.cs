@@ -494,6 +494,9 @@ public static partial class KernelMemoryCompatExports
         if (candidate > UserAddressLimit - length)
         {
             candidate = AlignUp(SparseReservationBase, alignment);
+            // A range too large for the aperture can only live at the guest's own hint.
+            if (candidate > UserAddressLimit - length)
+                candidate = AlignUp(requested, alignment);
             if (candidate == 0 || candidate > UserAddressLimit - length)
                 return false;
         }

@@ -319,6 +319,25 @@ public sealed class KernelBackedMemoryTests
     }
 
     [Fact]
+    public void ReservationTooLargeForTheSparseApertureKeepsTheGuestHint()
+    {
+        using var test = new BackedKernelMemory();
+        const ulong hint = 0x1000000000;
+        const ulong size = 0xC000000000;
+        test.Host.FailReserveHoleWhen = (_, requestedSize) => requestedSize >= size;
+        Assert.True(test.Context.TryWriteUInt64(test.Output, hint));
+        test.Context[CpuRegister.Rdi] = test.Output;
+        test.Context[CpuRegister.Rsi] = size;
+        test.Context[CpuRegister.Rdx] = 0;
+        test.Context[CpuRegister.Rcx] = 0x200000;
+
+        Assert.Equal(0, KernelRuntimeCompatExports.KernelReserveVirtualRange(test.Context));
+        Assert.True(test.Context.TryReadUInt64(test.Output, out var address));
+        Assert.Equal(hint, address);
+        Assert.Equal((hint, hint + size), test.Query(hint));
+    }
+
+    [Fact]
     public void AddressSearchUsesTheFullReservationExtent()
     {
         using var test = new BackedKernelMemory();
