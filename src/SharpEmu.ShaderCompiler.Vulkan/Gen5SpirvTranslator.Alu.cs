@@ -760,6 +760,40 @@ public static partial class Gen5SpirvTranslator
                     result = EmitFloat16Result(instruction, destination, value);
                     break;
                 }
+                case "VMin3I16":
+                case "VMin3U16":
+                case "VMax3I16":
+                case "VMax3U16":
+                case "VMed3I16":
+                case "VMed3U16":
+                {
+                    if (instruction.Control is Gen5Vop3Control { Clamp: true })
+                    {
+                        error = $"{instruction.Opcode}: clamped 16-bit integer results are not supported";
+                        return false;
+                    }
+
+                    // The halves are sign- or zero-extended to 32 bits, so the 32-bit min and max
+                    // of the extended values are the 16-bit ones.
+                    var signed = instruction.Opcode.EndsWith("I16", StringComparison.Ordinal);
+                    uint Minimum(uint a, uint b) => signed
+                        ? Bitcast(_uintType, Ext(39, _intType, Bitcast(_intType, a), Bitcast(_intType, b)))
+                        : Ext(38, _uintType, a, b);
+                    uint Maximum(uint a, uint b) => signed
+                        ? Bitcast(_uintType, Ext(42, _intType, Bitcast(_intType, a), Bitcast(_intType, b)))
+                        : Ext(41, _uintType, a, b);
+                    var a = GetInt16Source(instruction, 0, signed);
+                    var b = GetInt16Source(instruction, 1, signed);
+                    var c = GetInt16Source(instruction, 2, signed);
+                    var value = instruction.Opcode switch
+                    {
+                        "VMin3I16" or "VMin3U16" => Minimum(Minimum(a, b), c),
+                        "VMax3I16" or "VMax3U16" => Maximum(Maximum(a, b), c),
+                        _ => Maximum(Minimum(a, b), Minimum(Maximum(a, b), c)),
+                    };
+                    result = EmitInt16Result(instruction, destination, value);
+                    break;
+                }
                 case "VMin3F32":
                     result = EmitFloatTernaryExt(instruction, 37);
                     break;
@@ -1489,11 +1523,21 @@ public static partial class Gen5SpirvTranslator
                     }
 
                     break;
+                case "VPkMadI16":
+                case "VPkMadU16":
+                case "VPkMulLoU16":
+                case "VPkLshlrevB16":
+                case "VPkLshrrevB16":
+                case "VPkAshrrevI16":
                 case "VPkAddI16":
-                    result = EmitPackedI16Arithmetic(instruction, subtract: false);
-                    break;
                 case "VPkSubI16":
-                    result = EmitPackedI16Arithmetic(instruction, subtract: true);
+                case "VPkAddU16":
+                case "VPkSubU16":
+                case "VPkMaxI16":
+                case "VPkMinI16":
+                case "VPkMaxU16":
+                case "VPkMinU16":
+                    result = EmitPackedI16Arithmetic(instruction);
                     break;
                 case "VPkFmacF16":
                     result = EmitPackedF16Fmac(instruction, destination);
@@ -1760,35 +1804,61 @@ public static partial class Gen5SpirvTranslator
             return true;
         }
 
-        // V_PK_ADD/SUB_I16 operates on the selected 16-bit halves of src0 and
-        // src1. The packed integer result is modulo 16 bits in each lane; the
-        // signed and unsigned forms therefore share the same bit-level
-        // implementation.
-        private uint EmitPackedI16Arithmetic(Gen5ShaderInstruction instruction, bool subtract)
+        // The packed 16-bit integer ops (V_PK_MAD/MUL_LO/ADD/SUB/LSHLREV/LSHRREV/ASHRREV/MAX/MIN_x16) operate
+        // on the selected 16-bit halves of the sources. The result is modulo 16 bits in each lane, so the
+        // signed and unsigned forms of the arithmetic ops are the same bits; max, min and the arithmetic
+        // shift see the sign-extended halves of the signed forms. The reverse shifts take the count from
+        // the low four bits of src0 and shift src1. The clamp bit is not applied (as for V_PK_ADD_I16).
+        private uint EmitPackedI16Arithmetic(Gen5ShaderInstruction instruction)
         {
             var control = (Gen5Vop3pControl)instruction.Control!;
-            var left = GetRawSource(instruction, 0);
-            var right = GetRawSource(instruction, 1);
-            uint Arithmetic(uint a, uint b) => subtract ? ISubU(a, b) : IAdd(a, b);
-
-            uint SelectHalf(uint value, uint mask, int source)
+            var opcode = instruction.Opcode;
+            var signed = opcode.EndsWith("I16", StringComparison.Ordinal);
+            var sourceCount = opcode is "VPkMadI16" or "VPkMadU16" ? 3 : 2;
+            var raw = new uint[sourceCount];
+            for (var index = 0; index < sourceCount; index++)
             {
-                return ((mask >> source) & 1) != 0
-                    ? ShiftRightLogical(value, UInt(16))
-                    : value;
+                raw[index] = GetRawSource(instruction, index);
             }
 
-            var low = BitwiseAnd(
-                Arithmetic(
-                    BitwiseAnd(SelectHalf(left, control.OpSelMask, 0), UInt(0xFFFF)),
-                    BitwiseAnd(SelectHalf(right, control.OpSelMask, 1), UInt(0xFFFF))),
-                UInt(0xFFFF));
-            var high = BitwiseAnd(
-                Arithmetic(
-                    BitwiseAnd(SelectHalf(left, control.OpSelHiMask, 0), UInt(0xFFFF)),
-                    BitwiseAnd(SelectHalf(right, control.OpSelHiMask, 1), UInt(0xFFFF))),
-                UInt(0xFFFF));
-            return BitwiseOr(low, ShiftLeftLogical(high, UInt(16)));
+            uint Operation(uint[] half) => opcode switch
+            {
+                "VPkAddI16" or "VPkAddU16" => IAdd(half[0], half[1]),
+                "VPkSubI16" or "VPkSubU16" => ISubU(half[0], half[1]),
+                "VPkMulLoU16" => _module.AddInstruction(SpirvOp.IMul, _uintType, half[0], half[1]),
+                "VPkMadI16" or "VPkMadU16" => IAdd(
+                    _module.AddInstruction(SpirvOp.IMul, _uintType, half[0], half[1]),
+                    half[2]),
+                "VPkLshlrevB16" => ShiftLeftLogical(half[1], BitwiseAnd(half[0], UInt(15))),
+                "VPkLshrrevB16" => ShiftRightLogical(half[1], BitwiseAnd(half[0], UInt(15))),
+                "VPkAshrrevI16" => ShiftRightArithmetic(half[1], BitwiseAnd(half[0], UInt(15))),
+                "VPkMaxI16" => Bitcast(_uintType, Ext(42, _intType, Bitcast(_intType, half[0]), Bitcast(_intType, half[1]))),
+                "VPkMinI16" => Bitcast(_uintType, Ext(39, _intType, Bitcast(_intType, half[0]), Bitcast(_intType, half[1]))),
+                "VPkMaxU16" => Ext(41, _uintType, half[0], half[1]),
+                _ => Ext(38, _uintType, half[0], half[1]),
+            };
+
+            uint Lane(uint selectMask)
+            {
+                var half = new uint[sourceCount];
+                for (var index = 0; index < sourceCount; index++)
+                {
+                    var selected = BitwiseAnd(
+                        ((selectMask >> index) & 1) != 0
+                            ? ShiftRightLogical(raw[index], UInt(16))
+                            : raw[index],
+                        UInt(0xFFFF));
+                    half[index] = signed
+                        ? ShiftRightArithmetic(ShiftLeftLogical(selected, UInt(16)), UInt(16))
+                        : selected;
+                }
+
+                return BitwiseAnd(Operation(half), UInt(0xFFFF));
+            }
+
+            return BitwiseOr(
+                Lane(control.OpSelMask),
+                ShiftLeftLogical(Lane(control.OpSelHiMask), UInt(16)));
         }
 
         // V_FMA_MIX_F32 / _MIXLO_F16 / _MIXHI_F16 (VOP3P opcodes 0x20 / 0x21 /
