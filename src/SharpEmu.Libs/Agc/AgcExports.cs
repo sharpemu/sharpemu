@@ -19,6 +19,8 @@ namespace SharpEmu.Libs.Agc;
 public static partial class AgcExports
 {
     private const uint ItNop = 0x10;
+    private const uint Type2FillerHeader = 0x8000_0000u;
+    private const uint MaximumNopDwords = 0x4001;
     private const uint ItSetBase = 0x11;
     private const uint ItIndexBufferSize = 0x13;
     private const uint ItIndexBase = 0x26;

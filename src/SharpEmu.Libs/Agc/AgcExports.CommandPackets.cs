@@ -87,13 +87,14 @@ public static partial class AgcExports
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var dwordCount = (uint)ctx[CpuRegister.Rsi];
-        if (commandBufferAddress == 0 || dwordCount < 2 || dwordCount > 0x4001)
+        if (commandBufferAddress == 0 || dwordCount == 0 || dwordCount > MaximumNopDwords)
         {
             return ReturnPointer(ctx, 0);
         }
 
+        // A type-3 packet is at least two dwords; a single dword is the type-2 filler.
         if (!TryAllocateCommandDwords(ctx, commandBufferAddress, dwordCount, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(dwordCount, ItNop, RZero)))
+            !TryWriteUInt32(ctx, commandAddress, dwordCount == 1 ? Type2FillerHeader : Pm4(dwordCount, ItNop, RZero)))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -109,9 +110,9 @@ public static partial class AgcExports
         return ReturnPointer(ctx, commandAddress);
     }
 
-    // RenderThread/Subrender probe this before writing a NOP. Unresolved
-    // GetSize returns NOT_FOUND and leaves command-buffer sizing broken.
-    // CbNop rejects dwordCount < 2, so report that floor.
+    // Titles probe this before writing a NOP and reserve the bytes it reports. Unresolved
+    // GetSize returns NOT_FOUND and leaves command-buffer sizing broken. The argument is
+    // the NOP's length in dwords; a length CbNop does not write reports no size.
     [SysAbiExport(
         Nid = "t7PlZ9nt5Lc",
         ExportName = "sceAgcCbNopGetSize",
@@ -119,7 +120,10 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int CbNopGetSize(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 2u * sizeof(uint);
+        var dwordCount = (uint)ctx[CpuRegister.Rdi];
+        ctx[CpuRegister.Rax] = dwordCount is >= 1 and <= MaximumNopDwords
+            ? dwordCount * sizeof(uint)
+            : 0;
         return (int)ctx[CpuRegister.Rax];
     }
 
