@@ -558,6 +558,9 @@ public static class KernelEventQueueCompatExports
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
     }
 
+    // The user event id is an int that the kernel stores in a uintptr_t ident, so -1 becomes 0xFFFFFFFFFFFFFFFF.
+    private static ulong UserEventIdent(CpuContext ctx) => unchecked((ulong)(int)ctx[CpuRegister.Rsi]);
+
     [SysAbiExport(
         Nid = "WDszmSbWuDk",
         ExportName = "sceKernelAddUserEventEdge",
@@ -568,7 +571,7 @@ public static class KernelEventQueueCompatExports
         var handle = ctx[CpuRegister.Rdi];
         var registered = RegisterEvent(
             handle,
-            ctx[CpuRegister.Rsi],
+            UserEventIdent(ctx),
             KernelEventFilterUser,
             0,
             KernelEventFlagClear);
@@ -588,7 +591,7 @@ public static class KernelEventQueueCompatExports
         var handle = ctx[CpuRegister.Rdi];
         var registered = RegisterEvent(
             handle,
-            ctx[CpuRegister.Rsi],
+            UserEventIdent(ctx),
             KernelEventFilterUser,
             0,
             flags: 0);
@@ -608,7 +611,7 @@ public static class KernelEventQueueCompatExports
         var handle = ctx[CpuRegister.Rdi];
         var deleted = DeleteRegisteredEvent(
             handle,
-            ctx[CpuRegister.Rsi],
+            UserEventIdent(ctx),
             KernelEventFilterUser);
         TraceEventQueue(ctx, "delete_user", handle);
         return deleted
@@ -626,7 +629,7 @@ public static class KernelEventQueueCompatExports
         var handle = ctx[CpuRegister.Rdi];
         var triggered = TriggerRegisteredEvent(
             handle,
-            ctx[CpuRegister.Rsi],
+            UserEventIdent(ctx),
             KernelEventFilterUser,
             userData: ctx[CpuRegister.Rdx]);
         TraceEventQueue(ctx, "trigger_user", handle);
