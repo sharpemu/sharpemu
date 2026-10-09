@@ -114,7 +114,9 @@ public static partial class ImageRequestBuilders
             throw SubmissionScheduler.Fatal($"The depth view is invalid: base={depthWords.SliceStart} last={depthWords.SliceMax}.");
         }
 
-        if (depthWords.CopyDepthToColor || depthWords.CopyStencilToColor || depthWords.CopyCentroid || depthWords.CopySample != 0 || depthWords.ZExpClear || depthWords.StencilExpClear ||
+        // EXPCLEAR only changes how the hardware reads the state of a tile in HTILE; the image cache keeps a clear flag per
+        // slice and no per-tile HTILE state, so the bits do not change what is rendered.
+        if (depthWords.CopyDepthToColor || depthWords.CopyStencilToColor || depthWords.CopyCentroid || depthWords.CopySample != 0 ||
             depthWords.ZPartiallyResident || depthWords.StencilPartiallyResident || depthWords.MaxMip != 0 || depthWords.ViewMipLevel != 0 || unsupportedShadingRate ||
             depthAddress == 0 || (!copyMode && !depthWords.DepthWriteDisabled && depthWords.ZWriteBase != depthWords.ZReadBase) || (depthAddress & 0xFFFF) != 0 || depthWords.DepthCompare > 7)
         {

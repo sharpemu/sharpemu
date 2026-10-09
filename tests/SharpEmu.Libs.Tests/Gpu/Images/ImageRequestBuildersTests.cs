@@ -483,6 +483,32 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     }
 
     [Fact]
+    public void DepthTarget_ExpClearAccelerationLeavesTheAttachmentUnchanged()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var fatal = new FatalScope();
+        var plain = RegisterWords.Depth(Base, 64, 64, stencilBase: Base + 0x80000) with
+        {
+            ZInfo = (uint)GuestDepthFormat.Z32Float | (1u << 29),
+            StencilInfo = 0x00100981,
+            HtileBase = Base + 0x100000,
+        };
+        var expClear = plain with { ZInfo = plain.ZInfo | (1u << 27), StencilInfo = plain.StencilInfo | (1u << 27) };
+
+        var expected = ImageRequestBuilders.DepthTarget(plain, _vulkan.DeviceInfo);
+        var actual = ImageRequestBuilders.DepthTarget(expClear, _vulkan.DeviceInfo);
+
+        Assert.NotNull(expected);
+        Assert.NotNull(actual);
+        Assert.Equal(expected.Value.Format, actual.Value.Format);
+        Assert.Equal(expected.Value.HasHtile, actual.Value.HasHtile);
+        Assert.Equal(expected.Value.DepthSize, actual.Value.DepthSize);
+        Assert.Equal(expected.Value.StencilSize, actual.Value.StencilSize);
+        Assert.Equal(expected.Value.HtileSize, actual.Value.HtileSize);
+        Assert.Empty(fatal.Messages);
+    }
+
+    [Fact]
     public void DepthTarget_NoAttachmentWhenNothingIsActive()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
