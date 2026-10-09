@@ -16,6 +16,21 @@ public sealed class ResourceTrackerTests
     private const uint ImageType2D = 9;
     private const uint IdentitySwizzle = 0xFAC;
 
+    [Theory]
+    [InlineData("ImageAtomicUmax", 3u, true)]
+    [InlineData("ImageAtomicUmax", 1u, false)]
+    [InlineData("ImageAtomicCmpswap", 0xFu, true)]
+    [InlineData("ImageAtomicCmpswap", 3u, false)]
+    public void ImageAtomicOnTwoDataDwordsIsMarkedWide(string opcode, uint dmask, bool wide)
+    {
+        // An atomic names its texel width by the data dwords: two (compare-swap: four) are a 64-bit texel.
+        var plan = Extract(Program(Image(0, opcode, 0, dmask: dmask), EndProgram(8)));
+
+        var image = Assert.Single(plan.Info.Images);
+        Assert.True(image.Atomic);
+        Assert.Equal(wide, image.Atomic64);
+    }
+
     [Fact]
     public void DenseBufferTracking()
     {

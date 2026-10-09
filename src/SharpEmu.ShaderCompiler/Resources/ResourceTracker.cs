@@ -768,7 +768,12 @@ public sealed partial class ResourceTracker
         image.Read |= !write || atomic;
         image.Written |= write;
         image.Atomic |= atomic;
+        image.Atomic64 |= atomic && IsWideImageAtomic(memory);
     }
+
+    // IMAGE_ATOMIC_* names a 64-bit texel by two data dwords (compare-swap: the new value and the comparison, four).
+    private static bool IsWideImageAtomic(MemoryAccessInfo memory) =>
+        System.Numerics.BitOperations.PopCount(memory.Dmask) == (memory.Opcode == "ImageAtomicCmpswap" ? 4 : 2);
 
     private uint AddSampler(uint source, uint pc)
     {

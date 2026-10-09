@@ -330,20 +330,36 @@ public static partial class Gen5SpirvTranslator
             // they just get there through a bitcast + integer compare-exchange
             // (see Gen5SpirvTranslator.cs's ImageAtomicFmax/Fmin case) instead
             // of through the declared image/sampled type.
-            var kind = atomic
-                ? ImageComponentKind.Uint
-                : numericClass switch
-                {
-                    ImageNumericClass.Uint => ImageComponentKind.Uint,
-                    ImageNumericClass.Sint => ImageComponentKind.Sint,
-                    _ => ImageComponentKind.Float,
-                };
+            // An atomic on a 64-bit texel (a 32_32 UINT image) is declared R64ui with 64-bit unsigned texels.
+            var wide = numericClass == ImageNumericClass.Uint64;
+            var kind = wide
+                ? ImageComponentKind.Uint64
+                : atomic
+                    ? ImageComponentKind.Uint
+                    : numericClass switch
+                    {
+                        ImageNumericClass.Uint => ImageComponentKind.Uint,
+                        ImageNumericClass.Sint => ImageComponentKind.Sint,
+                        _ => ImageComponentKind.Float,
+                    };
             var componentType = kind switch
             {
                 ImageComponentKind.Sint => _intType,
                 ImageComponentKind.Uint => _uintType,
+                ImageComponentKind.Uint64 => _ulongType,
                 _ => _floatType,
             };
+            if (wide)
+            {
+                _module.AddCapability(SpirvCapability.Int64Atomics);
+                _module.AddCapability(SpirvCapability.Int64ImageExt);
+                if (!_declaredImageInt64Extension)
+                {
+                    _declaredImageInt64Extension = true;
+                    _module.AddExtension("SPV_EXT_shader_image_int64");
+                }
+            }
+
             // The image request builder binds guest 1D textures through 1D views,
             // so the shader declaration must be 1D as well.
             var spirvDimension = dimension switch
@@ -358,7 +374,7 @@ public static partial class Gen5SpirvTranslator
             }
             var arrayed = dimension is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray or ImageDimension.Dim2DMsaaArray;
             var multisampled = dimension is ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray;
-            var format = atomic ? SpirvImageFormat.R32ui : SpirvImageFormat.Unknown;
+            var format = wide ? SpirvImageFormat.R64ui : atomic ? SpirvImageFormat.R32ui : SpirvImageFormat.Unknown;
             if (isStorage && !atomic)
             {
                 _module.AddCapability(SpirvCapability.StorageImageReadWithoutFormat);

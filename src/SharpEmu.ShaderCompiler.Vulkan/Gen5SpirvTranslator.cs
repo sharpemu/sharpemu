@@ -202,12 +202,15 @@ public static partial class Gen5SpirvTranslator
         private Ir.Gen5Wave64HalfMaskPlan? _halfMaskPlan;
         private uint? _emittingPc;
         private uint _glsl;
+        private bool _declaredImageInt64Extension;
 
         private enum ImageComponentKind
         {
             Float,
             Sint,
             Uint,
+            // 64-bit unsigned texels, which only image atomics address.
+            Uint64,
         }
 
         private enum VertexInputComponentKind
@@ -3066,6 +3069,57 @@ public static partial class Gen5SpirvTranslator
                 value());
         }
 
+        // IMAGE_ATOMIC_* on two data dwords (compare-swap: four) is an atomic on a 64-bit texel: the data registers
+        // hold the low and the high dword, the value that comes back with glc likewise.
+        private bool TryEmitWideImageAtomic(
+            Gen5ShaderInstruction instruction,
+            Gen5ImageControl image,
+            SpirvImageResource resource,
+            out string error)
+        {
+            error = string.Empty;
+            if (!_request.SupportsImageInt64Atomics)
+            {
+                error = "64-bit image atomics need the device feature shaderImageInt64Atomics";
+                return false;
+            }
+
+            if (!TryGetAtomicOp(instruction.Opcode["ImageAtomic".Length..], out var atomicOp))
+            {
+                error = $"unsupported storage image opcode {instruction.Opcode}";
+                return false;
+            }
+
+            var coordinates = BuildIntegerCoordinates(image, 0, ImageCoordinateComponentCount(resource));
+            EmitExecConditional(() =>
+            {
+                var pointer = _module.AddInstruction(
+                    SpirvOp.ImageTexelPointer,
+                    _module.TypePointer(SpirvStorageClass.Image, _ulongType),
+                    resource.Variable,
+                    coordinates,
+                    UInt(0));
+                uint LoadWide(uint register) => BitwiseOr64(
+                    Widen(LoadV(register)),
+                    ShiftLeftLogical64(Widen(LoadV(register + 1)), ULong(32)));
+                var original = EmitAtomic(
+                    atomicOp,
+                    _ulongType,
+                    pointer,
+                    scope: 1,
+                    semantics: 0x808,
+                    value: () => LoadWide(image.VectorData),
+                    comparator: () => LoadWide(image.VectorData + 2));
+                if (image.Glc)
+                {
+                    StoreV(image.VectorData, Narrow(original));
+                    StoreV(image.VectorData + 1, Narrow(ShiftRightLogical64(original, ULong(32))));
+                }
+            });
+
+            return true;
+        }
+
         // The LDS of a graphics stage is a per-invocation Private array (see DeclareLds). SPIR-V atomics are invalid on Private
         // memory and the driver's pipeline compiler can crash on them. Nothing else can reach that array, so there the operation
         // is a plain read-modify-write that returns the original value.
@@ -5095,6 +5149,13 @@ public static partial class Gen5SpirvTranslator
             out string error)
         {
             error = string.Empty;
+            if (resource.ComponentKind == ImageComponentKind.Uint64 &&
+                !instruction.Opcode.StartsWith("ImageAtomic", StringComparison.Ordinal))
+            {
+                error = $"{instruction.Opcode} addresses an image that only 64-bit atomics use";
+                return false;
+            }
+
             if (instruction.Opcode == "ImageGetResinfo")
             {
                 var sizeComponentCount = ImageCoordinateComponentCount(resource);
@@ -5249,6 +5310,11 @@ public static partial class Gen5SpirvTranslator
                 {
                     error = "image atomic is not bound as storage";
                     return false;
+                }
+
+                if (resource.ComponentKind == ImageComponentKind.Uint64)
+                {
+                    return TryEmitWideImageAtomic(instruction, image, resource, out error);
                 }
 
                 // IMAGE_ATOMIC_FMIN/FMAX target float-format storage images and

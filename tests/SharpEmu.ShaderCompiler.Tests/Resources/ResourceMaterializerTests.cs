@@ -54,6 +54,52 @@ public sealed class ResourceMaterializerTests
     }
 
     [Theory]
+    [InlineData(20u, 1u, true)]
+    [InlineData(62u, 3u, true)]
+    [InlineData(62u, 1u, false)]
+    [InlineData(20u, 3u, false)]
+    public void AtomicImageOfAnUnsupportedFormatIsRejected(uint format, uint dmask, bool supported)
+    {
+        // One data dword is an atomic on a 32 bit texel (format 20, R32_UINT); two are an atomic on a 64 bit texel
+        // (format 62, 32_32_UINT). A width and a format that do not match have no lowering.
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        uint[] words = [0x1000, format << 20, 3 | (3 << 14), 0xFAC | (1u << 16) | (ImageType2D << 28), 0, 0, 0, 0];
+        for (uint dword = 0; dword < 8; dword++)
+        {
+            instructions.Add(MoveScalar(pc, 16 + dword, words[dword]));
+            pc += 8;
+        }
+
+        for (uint register = 1; register <= 3; register++)
+        {
+            instructions.Add(MoveVector(pc, register, 0));
+            pc += 8;
+        }
+
+        instructions.Add(Image(pc, "ImageAtomicUmax", 16, vectorAddress: 1, dmask: dmask));
+        pc += 8;
+        instructions.Add(EndProgram(pc));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        var success = ResourceMaterializer.Materialize(
+            plan, Inputs([]), ref snapshot, ref specialization, out var failure);
+
+        Assert.Equal(supported, success);
+        Assert.Equal(
+            supported ? ResourceMaterializationFailure.None : ResourceMaterializationFailure.Other,
+            failure);
+        if (supported)
+        {
+            Assert.Equal(
+                dmask == 3 ? ImageNumericClass.Uint64 : ImageNumericClass.Uint,
+                Assert.Single(specialization.Images).NumericClass);
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void IncompatibleImageCapturePreservesFailureAndPublishedState(bool captureEnabled)
