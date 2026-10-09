@@ -1503,6 +1503,7 @@ public static partial class Gen5ShaderTranslator
             0x3C => "DsReadU16",
             0x3D => "DsConsume",
             0x3E => "DsAppend",
+            0x3F => "DsOrderedCount",
             // gfx10 groups the 64-bit LDS atomics at 0x40..0x4C, directly ahead
             // of DS_WRITE_B64 (0x4D). Only the no-return forms are named here:
             // the RTN variants cannot be split into two 32-bit atomics without
@@ -2543,6 +2544,8 @@ public static partial class Gen5ShaderTranslator
                 sources = opcode switch
                 {
                     "DsAppend" or "DsConsume" or "DsReadAddtidB32" => [Gen5Operand.Scalar(124)],
+                    // The count comes from the ADDR register of the first active lane.
+                    "DsOrderedCount" => [Gen5Operand.Scalar(124), Gen5Operand.Vector(vectorAddress)],
                     "DsWriteAddtidB32" => [Gen5Operand.Scalar(124), Gen5Operand.Vector(vectorData0)],
                     "DsWriteB32" or "DsWriteB8" or "DsWriteB16" or "DsWriteB8D16Hi" or "DsWriteB16D16Hi" => [
                         Gen5Operand.Vector(vectorAddress),
@@ -2616,7 +2619,7 @@ public static partial class Gen5ShaderTranslator
                 };
                 destinations = opcode switch
                 {
-                    "DsAppend" or "DsConsume" => [
+                    "DsAppend" or "DsConsume" or "DsOrderedCount" => [
                         Gen5Operand.Vector(vectorDestination),
                     ],
                     "DsReadB32" or "DsReadI8" or "DsReadU8" or "DsReadI16" or "DsReadU16" or
