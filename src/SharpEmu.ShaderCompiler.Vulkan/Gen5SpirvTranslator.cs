@@ -2298,6 +2298,39 @@ public static partial class Gen5SpirvTranslator
                         GetRawSource(instruction, 1));
                     return true;
                 }
+                case "DsWriteB8":
+                case "DsWriteB16":
+                {
+                    if (instruction.Sources.Count < 2)
+                    {
+                        error = "missing LDS sub-dword write source";
+                        return false;
+                    }
+
+                    // The LDS is an array of dwords: replace the byte or half-word the address selects. Lanes of
+                    // a compute workgroup write neighbouring bytes of one dword, so the shared array is updated
+                    // with an AND that clears the field and an OR that sets it (EmitLdsAtomic is a plain
+                    // read-modify-write on the Private array of a graphics stage).
+                    var halfWord = instruction.Opcode == "DsWriteB16";
+                    var writeAddress = GetRawSource(instruction, 0);
+                    var writeByteAddress = control.SingleOffsetBytes == 0
+                        ? writeAddress
+                        : IAdd(writeAddress, UInt(control.SingleOffsetBytes));
+                    var field = halfWord ? 0xFFFFu : 0xFFu;
+                    var writeShift = ShiftLeftLogical(BitwiseAnd(writeByteAddress, UInt(halfWord ? 2u : 3u)), UInt(3));
+                    var clearMask = _module.AddInstruction(
+                        SpirvOp.Not,
+                        _uintType,
+                        ShiftLeftLogical(UInt(field), writeShift));
+                    var fieldValue = ShiftLeftLogical(BitwiseAnd(GetRawSource(instruction, 1), UInt(field)), writeShift);
+                    var fieldPointer = LdsPointer(writeAddress, control.SingleOffsetBytes);
+                    EmitExecConditional(() =>
+                    {
+                        EmitLdsAtomic(SpirvOp.AtomicAnd, fieldPointer, value: () => clearMask, comparator: () => clearMask);
+                        EmitLdsAtomic(SpirvOp.AtomicOr, fieldPointer, value: () => fieldValue, comparator: () => fieldValue);
+                    });
+                    return true;
+                }
                 case "DsWriteB64":
                 {
                     if (instruction.Sources.Count < 3)
@@ -2480,6 +2513,36 @@ public static partial class Gen5SpirvTranslator
                         UInt(0),
                         UInt(8));
                     StoreV(instruction.Destinations[0].Value, Bitcast(_uintType, signedByte));
+                    return true;
+                }
+                case "DsReadU8":
+                case "DsReadI16":
+                case "DsReadU16":
+                {
+                    if (instruction.Destinations.Count < 1 || instruction.Sources.Count < 1)
+                    {
+                        error = "missing LDS sub-dword read operand";
+                        return false;
+                    }
+
+                    var address = GetRawSource(instruction, 0);
+                    var byteAddress = control.SingleOffsetBytes == 0
+                        ? address
+                        : IAdd(address, UInt(control.SingleOffsetBytes));
+                    var word = Load(_uintType, LdsPointer(address, control.SingleOffsetBytes));
+                    var shift = ShiftLeftLogical(
+                        BitwiseAnd(byteAddress, UInt(instruction.Opcode == "DsReadU8" ? 3u : 2u)),
+                        UInt(3));
+                    var packed = ShiftRightLogical(word, shift);
+                    var value = instruction.Opcode switch
+                    {
+                        "DsReadU8" => BitwiseAnd(packed, UInt(0xFF)),
+                        "DsReadU16" => BitwiseAnd(packed, UInt(0xFFFF)),
+                        _ => Bitcast(
+                            _uintType,
+                            _module.AddInstruction(SpirvOp.BitFieldSExtract, _intType, Bitcast(_intType, packed), UInt(0), UInt(16))),
+                    };
+                    StoreV(instruction.Destinations[0].Value, value);
                     return true;
                 }
                 case "DsReadB64":
