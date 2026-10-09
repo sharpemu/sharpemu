@@ -2343,20 +2343,14 @@ public static partial class Gen5SpirvTranslator
                         {
                             // OR is bitwise-independent: no dword influences the
                             // other, so two 32-bit ORs are the 64-bit OR.
-                            EmitAtomic(
+                            EmitLdsAtomic(
                                 SpirvOp.AtomicOr,
-                                _uintType,
                                 lowPointer,
-                                scope: 2,
-                                semantics: 0x108,
                                 value: () => lowValue,
                                 comparator: () => lowValue);
-                            EmitAtomic(
+                            EmitLdsAtomic(
                                 SpirvOp.AtomicOr,
-                                _uintType,
                                 highPointer,
-                                scope: 2,
-                                semantics: 0x108,
                                 value: () => highValue,
                                 comparator: () => highValue);
                             return;
@@ -2367,12 +2361,9 @@ public static partial class Gen5SpirvTranslator
                         // pre-add value its atomic returned and adds exactly one
                         // carry, so the high dword ends up with the true count of
                         // wraps however the lanes interleave.
-                        var originalLow = EmitAtomic(
+                        var originalLow = EmitLdsAtomic(
                             SpirvOp.AtomicIAdd,
-                            _uintType,
                             lowPointer,
-                            scope: 2,
-                            semantics: 0x108,
                             value: () => lowValue,
                             comparator: () => lowValue);
                         var sumLow = IAdd(originalLow, lowValue);
@@ -2388,12 +2379,9 @@ public static partial class Gen5SpirvTranslator
                             UInt(1),
                             UInt(0));
                         var highWithCarry = IAdd(highValue, carry);
-                        EmitAtomic(
+                        EmitLdsAtomic(
                             SpirvOp.AtomicIAdd,
-                            _uintType,
                             highPointer,
-                            scope: 2,
-                            semantics: 0x108,
                             value: () => highWithCarry,
                             comparator: () => highWithCarry);
                     });
@@ -2737,12 +2725,9 @@ public static partial class Gen5SpirvTranslator
                                 _uintType,
                                 GetRawSource(instruction, 1))),
                         GetRawSource(instruction, 2));
-                    EmitAtomic(
+                    EmitLdsAtomic(
                         SpirvOp.AtomicCompareExchange,
-                        _uintType,
                         maskedPointer,
-                        scope: 2,
-                        semantics: 0x108,
                         value: () => updated,
                         comparator: () => original);
                 });
@@ -2797,12 +2782,9 @@ public static partial class Gen5SpirvTranslator
             var pointer = LdsPointer(address, control.SingleOffsetBytes);
             EmitExecConditional(() =>
             {
-                var original = EmitAtomic(
+                var original = EmitLdsAtomic(
                     atomicOp,
-                    _uintType,
                     pointer,
-                    scope: 2,
-                    semantics: 0x108,
                     // DS_CMPST sources: DATA0 is the comparator, DATA1 the new value.
                     value: () => GetRawSource(
                         instruction,
@@ -2817,6 +2799,17 @@ public static partial class Gen5SpirvTranslator
             return true;
         }
 
+        private uint DataShareFloatReplaces(uint observed, uint compare, bool maxValue)
+        {
+            var observedFloat = Bitcast(_floatType, observed);
+            var compareFloat = Bitcast(_floatType, compare);
+            return _module.AddInstruction(
+                maxValue ? SpirvOp.FOrdGreaterThan : SpirvOp.FOrdLessThan,
+                _boolType,
+                maxValue ? observedFloat : compareFloat,
+                maxValue ? compareFloat : observedFloat);
+        }
+
         private void EmitDataShareFloatAtomic(
             uint pointer,
             uint data,
@@ -2825,6 +2818,20 @@ public static partial class Gen5SpirvTranslator
             uint scope,
             uint semantics)
         {
+            if (_stage != Gen5SpirvStage.Compute)
+            {
+                var current = Load(_uintType, pointer);
+                Store(
+                    pointer,
+                    _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        DataShareFloatReplaces(current, compare, maxValue),
+                        data,
+                        current));
+                return;
+            }
+
             var preheader = _module.AllocateId();
             var header = _module.AllocateId();
             var continueLabel = _module.AllocateId();
@@ -2849,13 +2856,7 @@ public static partial class Gen5SpirvTranslator
                 preheader,
                 exchanged,
                 continueLabel);
-            var observedFloat = Bitcast(_floatType, observed);
-            var compareFloat = Bitcast(_floatType, compare);
-            var replace = _module.AddInstruction(
-                maxValue ? SpirvOp.FOrdGreaterThan : SpirvOp.FOrdLessThan,
-                _boolType,
-                maxValue ? observedFloat : compareFloat,
-                maxValue ? compareFloat : observedFloat);
+            var replace = DataShareFloatReplaces(observed, compare, maxValue);
             var next = _module.AddInstruction(SpirvOp.Select, _uintType, replace, data, observed);
 
             _module.AddStatement(
@@ -3000,6 +3001,69 @@ public static partial class Gen5SpirvTranslator
                 UInt(scope),
                 UInt(semantics),
                 value());
+        }
+
+        // The LDS of a graphics stage is a per-invocation Private array (see DeclareLds). SPIR-V atomics are invalid on Private
+        // memory and the driver's pipeline compiler can crash on them. Nothing else can reach that array, so there the operation
+        // is a plain read-modify-write that returns the original value.
+        private uint EmitLdsAtomic(
+            SpirvOp op,
+            uint pointer,
+            Func<uint> value,
+            Func<uint> comparator)
+        {
+            if (_stage == Gen5SpirvStage.Compute)
+            {
+                return EmitAtomic(op, _uintType, pointer, scope: 2, semantics: 0x108, value, comparator);
+            }
+
+            var original = Load(_uintType, pointer);
+            uint Choose(SpirvOp comparison, uint operand) =>
+                _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    _module.AddInstruction(comparison, _boolType, original, operand),
+                    original,
+                    operand);
+
+            uint updated;
+            switch (op)
+            {
+                case SpirvOp.AtomicIIncrement:
+                    updated = IAdd(original, UInt(1));
+                    break;
+                case SpirvOp.AtomicIDecrement:
+                    updated = ISubU(original, UInt(1));
+                    break;
+                case SpirvOp.AtomicCompareExchange:
+                {
+                    var matches = _module.AddInstruction(SpirvOp.IEqual, _boolType, original, comparator());
+                    updated = _module.AddInstruction(SpirvOp.Select, _uintType, matches, value(), original);
+                    break;
+                }
+                default:
+                {
+                    var operand = value();
+                    updated = op switch
+                    {
+                        SpirvOp.AtomicIAdd => IAdd(original, operand),
+                        SpirvOp.AtomicISub => ISubU(original, operand),
+                        SpirvOp.AtomicAnd => BitwiseAnd(original, operand),
+                        SpirvOp.AtomicOr => BitwiseOr(original, operand),
+                        SpirvOp.AtomicXor => BitwiseXor(original, operand),
+                        SpirvOp.AtomicExchange => operand,
+                        SpirvOp.AtomicSMin => Choose(SpirvOp.SLessThan, operand),
+                        SpirvOp.AtomicUMin => Choose(SpirvOp.ULessThan, operand),
+                        SpirvOp.AtomicSMax => Choose(SpirvOp.SGreaterThan, operand),
+                        SpirvOp.AtomicUMax => Choose(SpirvOp.UGreaterThan, operand),
+                        _ => throw new InvalidOperationException($"unsupported LDS atomic {op}"),
+                    };
+                    break;
+                }
+            }
+
+            Store(pointer, updated);
+            return original;
         }
 
         private bool TryEmitInterpolation(
