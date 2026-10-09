@@ -2303,6 +2303,8 @@ public static partial class Gen5SpirvTranslator
                 }
                 case "DsWriteB8":
                 case "DsWriteB16":
+                case "DsWriteB8D16Hi":
+                case "DsWriteB16D16Hi":
                 {
                     if (instruction.Sources.Count < 2)
                     {
@@ -2314,7 +2316,7 @@ public static partial class Gen5SpirvTranslator
                     // a compute workgroup write neighbouring bytes of one dword, so the shared array is updated
                     // with an AND that clears the field and an OR that sets it (EmitLdsAtomic is a plain
                     // read-modify-write on the Private array of a graphics stage).
-                    var halfWord = instruction.Opcode == "DsWriteB16";
+                    var halfWord = instruction.Opcode is "DsWriteB16" or "DsWriteB16D16Hi";
                     var writeAddress = GetRawSource(instruction, 0);
                     var writeByteAddress = control.SingleOffsetBytes == 0
                         ? writeAddress
@@ -2325,7 +2327,14 @@ public static partial class Gen5SpirvTranslator
                         SpirvOp.Not,
                         _uintType,
                         ShiftLeftLogical(UInt(field), writeShift));
-                    var fieldValue = ShiftLeftLogical(BitwiseAnd(GetRawSource(instruction, 1), UInt(field)), writeShift);
+                    // The D16_HI forms store the field the data register's upper half holds.
+                    var writeData = GetRawSource(instruction, 1);
+                    if (instruction.Opcode.EndsWith("D16Hi", StringComparison.Ordinal))
+                    {
+                        writeData = ShiftRightLogical(writeData, UInt(16));
+                    }
+
+                    var fieldValue = ShiftLeftLogical(BitwiseAnd(writeData, UInt(field)), writeShift);
                     var fieldPointer = LdsPointer(writeAddress, control.SingleOffsetBytes);
                     EmitExecConditional(() =>
                     {
@@ -2521,6 +2530,12 @@ public static partial class Gen5SpirvTranslator
                 case "DsReadU8":
                 case "DsReadI16":
                 case "DsReadU16":
+                case "DsReadU8D16":
+                case "DsReadU8D16Hi":
+                case "DsReadI8D16":
+                case "DsReadI8D16Hi":
+                case "DsReadU16D16":
+                case "DsReadU16D16Hi":
                 {
                     if (instruction.Destinations.Count < 1 || instruction.Sources.Count < 1)
                     {
@@ -2533,18 +2548,26 @@ public static partial class Gen5SpirvTranslator
                         ? address
                         : IAdd(address, UInt(control.SingleOffsetBytes));
                     var word = Load(_uintType, LdsPointer(address, control.SingleOffsetBytes));
-                    var shift = ShiftLeftLogical(
-                        BitwiseAnd(byteAddress, UInt(instruction.Opcode == "DsReadU8" ? 3u : 2u)),
-                        UInt(3));
+                    var byteRead = instruction.Opcode.StartsWith("DsReadU8", StringComparison.Ordinal) ||
+                        instruction.Opcode.StartsWith("DsReadI8", StringComparison.Ordinal);
+                    var signedRead = instruction.Opcode.StartsWith("DsReadI", StringComparison.Ordinal);
+                    var shift = ShiftLeftLogical(BitwiseAnd(byteAddress, UInt(byteRead ? 3u : 2u)), UInt(3));
                     var packed = ShiftRightLogical(word, shift);
-                    var value = instruction.Opcode switch
-                    {
-                        "DsReadU8" => BitwiseAnd(packed, UInt(0xFF)),
-                        "DsReadU16" => BitwiseAnd(packed, UInt(0xFFFF)),
-                        _ => Bitcast(
+                    var value = signedRead
+                        ? Bitcast(
                             _uintType,
-                            _module.AddInstruction(SpirvOp.BitFieldSExtract, _intType, Bitcast(_intType, packed), UInt(0), UInt(16))),
-                    };
+                            _module.AddInstruction(SpirvOp.BitFieldSExtract, _intType, Bitcast(_intType, packed), UInt(0), UInt(byteRead ? 8u : 16u)))
+                        : BitwiseAnd(packed, UInt(byteRead ? 0xFFu : 0xFFFFu));
+                    if (instruction.Opcode.Contains("D16", StringComparison.Ordinal))
+                    {
+                        // The D16 forms return a 16-bit value into one half of the destination and keep the other half.
+                        var half = BitwiseAnd(value, UInt(0xFFFF));
+                        var current = LoadV(instruction.Destinations[0].Value);
+                        value = instruction.Opcode.EndsWith("D16Hi", StringComparison.Ordinal)
+                            ? BitwiseOr(BitwiseAnd(current, UInt(0x0000_FFFF)), ShiftLeftLogical(half, UInt(16)))
+                            : BitwiseOr(BitwiseAnd(current, UInt(0xFFFF_0000)), half);
+                    }
+
                     StoreV(instruction.Destinations[0].Value, value);
                     return true;
                 }

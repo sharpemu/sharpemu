@@ -22,6 +22,14 @@ public sealed class Gen5DataShareSubwordTests
     [InlineData(0x3Au, "DsReadU8")]
     [InlineData(0x3Bu, "DsReadI16")]
     [InlineData(0x3Cu, "DsReadU16")]
+    [InlineData(0xA0u, "DsWriteB8D16Hi")]
+    [InlineData(0xA1u, "DsWriteB16D16Hi")]
+    [InlineData(0xA2u, "DsReadU8D16")]
+    [InlineData(0xA3u, "DsReadU8D16Hi")]
+    [InlineData(0xA4u, "DsReadI8D16")]
+    [InlineData(0xA5u, "DsReadI8D16Hi")]
+    [InlineData(0xA6u, "DsReadU16D16")]
+    [InlineData(0xA7u, "DsReadU16D16Hi")]
     public void ByteAndHalfWordOpsDecode(uint opcode, string name)
     {
         // ds_xxx v4, v1 offset:0x144 / ds_xxx v1, v2 offset:0x144
@@ -41,6 +49,14 @@ public sealed class Gen5DataShareSubwordTests
     [InlineData("DsReadU8", true)]
     [InlineData("DsReadI16", true)]
     [InlineData("DsReadU16", true)]
+    [InlineData("DsWriteB8D16Hi", false)]
+    [InlineData("DsWriteB16D16Hi", false)]
+    [InlineData("DsReadU8D16", true)]
+    [InlineData("DsReadU8D16Hi", true)]
+    [InlineData("DsReadI8D16", true)]
+    [InlineData("DsReadI8D16Hi", true)]
+    [InlineData("DsReadU16D16", true)]
+    [InlineData("DsReadU16D16Hi", true)]
     public void ByteAndHalfWordOpsCompileInEveryStage(string opcode, bool read)
     {
         var program = Program(
@@ -56,6 +72,8 @@ public sealed class Gen5DataShareSubwordTests
     [Theory]
     [InlineData("DsWriteB8")]
     [InlineData("DsWriteB16")]
+    [InlineData("DsWriteB8D16Hi")]
+    [InlineData("DsWriteB16D16Hi")]
     public void SubwordWritesAreAtomicOnTheSharedLdsOnly(string opcode)
     {
         var program = Program(

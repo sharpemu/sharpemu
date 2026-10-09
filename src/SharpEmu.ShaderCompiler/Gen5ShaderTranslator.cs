@@ -1515,6 +1515,14 @@ public static partial class Gen5ShaderTranslator
             0x4F => "DsWrite2St64B64",
             0x76 => "DsReadB64",
             0x77 => "DsRead2B64",
+            0xA0 => "DsWriteB8D16Hi",
+            0xA1 => "DsWriteB16D16Hi",
+            0xA2 => "DsReadU8D16",
+            0xA3 => "DsReadU8D16Hi",
+            0xA4 => "DsReadI8D16",
+            0xA5 => "DsReadI8D16Hi",
+            0xA6 => "DsReadU16D16",
+            0xA7 => "DsReadU16D16Hi",
             0xB0 => "DsWriteAddtidB32",
             0xB1 => "DsReadAddtidB32",
             0xB3 => "DsBpermuteB32",
@@ -2536,7 +2544,7 @@ public static partial class Gen5ShaderTranslator
                 {
                     "DsAppend" or "DsConsume" or "DsReadAddtidB32" => [Gen5Operand.Scalar(124)],
                     "DsWriteAddtidB32" => [Gen5Operand.Scalar(124), Gen5Operand.Vector(vectorData0)],
-                    "DsWriteB32" or "DsWriteB8" or "DsWriteB16" => [
+                    "DsWriteB32" or "DsWriteB8" or "DsWriteB16" or "DsWriteB8D16Hi" or "DsWriteB16D16Hi" => [
                         Gen5Operand.Vector(vectorAddress),
                         Gen5Operand.Vector(vectorData0),
                     ],
@@ -2612,6 +2620,7 @@ public static partial class Gen5ShaderTranslator
                         Gen5Operand.Vector(vectorDestination),
                     ],
                     "DsReadB32" or "DsReadI8" or "DsReadU8" or "DsReadI16" or "DsReadU16" or
+                    "DsReadU8D16" or "DsReadU8D16Hi" or "DsReadI8D16" or "DsReadI8D16Hi" or "DsReadU16D16" or "DsReadU16D16Hi" or
                     "DsReadAddtidB32" or "DsSwizzleB32" or "DsBpermuteB32" => [
                         Gen5Operand.Vector(vectorDestination),
                     ],
