@@ -26,10 +26,11 @@ public sealed class Ngs2ParseWaveformExportsTests
     private const int InvalidOutAddress = unchecked((int)0x804A8010);
     private const int InvalidWaveformAddress = unchecked((int)0x804A8055);
     private const int InvalidWaveformData = unchecked((int)0x804A8430);
+    private const int InvalidWaveformFormat = unchecked((int)0x804A8431);
 
-    private static CpuContext CreateContext(out FakeCpuMemory memory)
+    private static CpuContext CreateContext(out FakeCpuMemory memory, int memorySize = 0x2000)
     {
-        memory = new FakeCpuMemory(MemoryBase, 0x2000);
+        memory = new FakeCpuMemory(MemoryBase, memorySize);
         return new CpuContext(memory, Generation.Gen5);
     }
 
@@ -63,6 +64,16 @@ public sealed class Ngs2ParseWaveformExportsTests
         BinaryPrimitives.WriteUInt32BigEndian(span[0x10..], sampleRate);
         span[0x1E] = 1;
         return file;
+    }
+
+    private static byte[] AppendRiffChunk(byte[] file, ReadOnlySpan<byte> id, ReadOnlySpan<byte> body)
+    {
+        var appended = new byte[file.Length + 8 + body.Length + (body.Length & 1)];
+        file.CopyTo(appended, 0);
+        id.CopyTo(appended.AsSpan(file.Length, 4));
+        BinaryPrimitives.WriteUInt32LittleEndian(appended.AsSpan(file.Length + 4), (uint)body.Length);
+        body.CopyTo(appended.AsSpan(file.Length + 8));
+        return appended;
     }
 
     private static int Parse(CpuContext ctx, FakeCpuMemory memory, byte[] image)
@@ -109,6 +120,60 @@ public sealed class Ngs2ParseWaveformExportsTests
         // numDelaySamples@0x40 is 0 for PCM, numBlocks@0x44 = 1.
         Assert.Equal(0u, Field(memory, 0x40));
         Assert.Equal(1u, Field(memory, 0x44));
+    }
+
+    [Fact]
+    public void ParseWaveformData_IgnoresChunksPastTheDeclaredRiffBoundary()
+    {
+        var ctx = CreateContext(out var memory);
+        var image = BuildPcm16Wave(frames: 1, channels: 1, sampleRate: 48000);
+        var outsideFormat = new byte[16];
+        BinaryPrimitives.WriteUInt16LittleEndian(outsideFormat, 3); // IEEE float
+        BinaryPrimitives.WriteUInt16LittleEndian(outsideFormat.AsSpan(2), 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(outsideFormat.AsSpan(4), 48000);
+        BinaryPrimitives.WriteUInt16LittleEndian(outsideFormat.AsSpan(12), 4);
+        BinaryPrimitives.WriteUInt16LittleEndian(outsideFormat.AsSpan(14), 32);
+        image = AppendRiffChunk(image, "fmt "u8, outsideFormat);
+
+        Assert.Equal(0, Parse(ctx, memory, image));
+        Assert.Equal(WaveformTypePcmI16L, Field(memory, 0x00));
+        Assert.Equal(44u, Field(memory, 0x18));
+        Assert.Equal(2u, Field(memory, 0x1C));
+    }
+
+    [Fact]
+    public void ParseWaveformData_DoesNotIncludeBytesPastTheDeclaredRiffBoundaryInData()
+    {
+        var wave = BuildPcm16Wave(frames: 1, channels: 1, sampleRate: 48000);
+        var image = new byte[wave.Length + 0x2000];
+        var ctx = CreateContext(out var memory, memorySize: image.Length + 0x1000);
+        wave.CopyTo(image, 0);
+        image.AsSpan(wave.Length).Fill(0x5A);
+
+        Assert.Equal(0, Parse(ctx, memory, image));
+        Assert.Equal(44u, Field(memory, 0x18));
+        Assert.Equal(2u, Field(memory, 0x1C));
+    }
+
+    [Fact]
+    public void ParseWaveformData_RejectsChunksWhenRiffDeclaresOnlyTheWaveFormType()
+    {
+        var ctx = CreateContext(out var memory);
+        var image = BuildPcm16Wave(frames: 1, channels: 1, sampleRate: 48000);
+        BinaryPrimitives.WriteUInt32LittleEndian(image.AsSpan(4), 4);
+
+        Assert.Equal(InvalidWaveformFormat, Parse(ctx, memory, image));
+    }
+
+    [Fact]
+    public void ParseWaveformData_ExpandsLargeDataChunksBeyondTheHeaderReadLimit()
+    {
+        var ctx = CreateContext(out var memory);
+        const int frames = 2048;
+
+        Assert.Equal(0, Parse(ctx, memory, BuildPcm16Wave(frames, channels: 1, sampleRate: 48000)));
+        Assert.Equal((uint)(frames * 2), Field(memory, 0x1C));
+        Assert.Equal((uint)frames, Field(memory, 0x28));
     }
 
     [Fact]

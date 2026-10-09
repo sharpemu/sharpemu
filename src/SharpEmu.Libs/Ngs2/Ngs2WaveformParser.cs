@@ -73,6 +73,7 @@ internal static class Ngs2WaveformParser
 
         public uint DataOffset;
         public uint DataSize;
+        public uint DataSizeLimit;
         public uint LoopBeginPosition;
         public uint LoopEndPosition;
         public uint NumSamples;
@@ -193,13 +194,20 @@ internal static class Ngs2WaveformParser
         uint loopBegin = 0;
         uint loopEnd = 0;
         uint declaredSamples = 0;
+        var declaredRiffEnd = 8UL + BinaryPrimitives.ReadUInt32LittleEndian(data[4..]);
+        if (declaredRiffEnd < 12)
+        {
+            return false;
+        }
+
+        var riffEnd = (int)Math.Min((ulong)data.Length, declaredRiffEnd);
         var offset = 12;
-        while (offset + 8 <= data.Length)
+        while (offset + 8 <= riffEnd)
         {
             var chunkId = data.Slice(offset, 4);
             var chunkSize = BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(offset + 4, 4));
             var body = offset + 8;
-            var bodySize = (int)Math.Min(chunkSize, (uint)(data.Length - body));
+            var bodySize = (int)Math.Min(chunkSize, (uint)(riffEnd - body));
             if (chunkId.SequenceEqual("fmt "u8))
             {
                 if (!TryParseFormatChunk(data.Slice(body, bodySize), ref info))
@@ -213,6 +221,7 @@ internal static class Ngs2WaveformParser
             {
                 dataOffset = (uint)body;
                 dataSize = (uint)bodySize;
+                info.DataSizeLimit = (uint)Math.Min(chunkSize, declaredRiffEnd - (ulong)body);
             }
             else if (chunkId.SequenceEqual("fact"u8) && bodySize >= 4)
             {
