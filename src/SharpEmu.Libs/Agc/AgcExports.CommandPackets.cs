@@ -825,6 +825,14 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "w8HVkEeXPv8",
+        ExportName = "sceAgcDcbDispatchIndirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDispatchIndirectGetSize(CpuContext ctx) =>
+        ctx.SetReturn(3 * sizeof(uint));
+
+    [SysAbiExport(
         Nid = "+kSrjIVxKFE",
         ExportName = "sceAgcDcbPushMarker",
         Target = Generation.Gen5,
