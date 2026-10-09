@@ -12,6 +12,9 @@ namespace SharpEmu.Libs.AppContent;
 public static class AppContentExports
 {
     private const ulong FallbackAvailableSpaceKb = 1024UL * 1024UL; // 1 GiB
+    private const int AppContentErrorParameter = unchecked((int)0x80D90002);
+    private const int AppContentErrorDrmNoEntitlement = unchecked((int)0x80D90007);
+    private const int MountPointSize = 16;
     private const ulong BootParamAttrOffset = 4;
     private const string Temp0MountPoint = "/temp0";
     private const uint AppParamSkuFlag = 0;
@@ -97,6 +100,29 @@ public static class AppContentExports
 
         TraceAppContent($"app_param_get_int id={paramId} value={value}");
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "VANhIWcqYak",
+        ExportName = "sceAppContentAddcontMount",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAppContent")]
+    public static int AppContentAddcontMount(CpuContext ctx)
+    {
+        var entitlementLabelAddress = ctx[CpuRegister.Rsi];
+        var mountPointAddress = ctx[CpuRegister.Rdx];
+        if (entitlementLabelAddress == 0 || mountPointAddress == 0)
+        {
+            return ctx.SetReturn(AppContentErrorParameter);
+        }
+
+        Span<byte> emptyMountPoint = stackalloc byte[MountPointSize];
+        if (!ctx.Memory.TryWrite(mountPointAddress, emptyMountPoint))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return ctx.SetReturn(AppContentErrorDrmNoEntitlement);
     }
 
     [SysAbiExport(

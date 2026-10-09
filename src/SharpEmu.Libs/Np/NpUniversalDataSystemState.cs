@@ -64,9 +64,14 @@ internal static class NpUniversalDataSystemState
     {
         lock (Gate)
         {
-            ResetLocked();
-            _initialized = true;
+            if (!_initialized)
+            {
+                ResetLocked();
+                _initialized = true;
+            }
+
             _poolSize = poolSize;
+            UpdateMaximumInUseLocked();
             return true;
         }
     }
@@ -85,8 +90,7 @@ internal static class NpUniversalDataSystemState
         {
             if (!_initialized)
             {
-                context = 0;
-                return false;
+                _initialized = true;
             }
 
             context = NextPositiveId(ref _nextContext);
@@ -480,13 +484,15 @@ internal static class NpUniversalDataSystemState
         }
     }
 
-    internal static void ResetForTests()
+    internal static void ResetRuntimeState()
     {
         lock (Gate)
         {
             ResetLocked();
         }
     }
+
+    internal static void ResetForTests() => ResetRuntimeState();
 
     private static ulong CreateObjectLocked(UdsObjectNode node)
     {

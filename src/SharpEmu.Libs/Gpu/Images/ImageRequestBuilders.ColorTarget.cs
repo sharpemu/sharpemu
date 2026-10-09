@@ -43,24 +43,38 @@ public static partial class ImageRequestBuilders
 
     public static uint SampleCount(uint encodedLog2) => encodedLog2 <= 3 ? 1u << (int)encodedLog2 : 0;
 
+    private static bool DccAlphaOnMsb(in ColorTargetWords words)
+    {
+        switch (words.Layout)
+        {
+            case ChannelLayout.Bits10_10_10_2:
+            case ChannelLayout.Bits10_10_10_2Float:
+            case ChannelLayout.Bits5_5_5_1:
+                return true;
+            case ChannelLayout.Bits2_10_10_10:
+            case ChannelLayout.Bits1_5_5_5:
+                return false;
+        }
+
+        var components = GuestPixelFormats.ResolveRenderTargetEncoding(words.Layout, words.NumberType).Components;
+        if (components == 1)
+        {
+            return words.Order != ChannelOrder.Standard;
+        }
+
+        return components == 3 || words.Order is ChannelOrder.Standard or ChannelOrder.Alternate;
+    }
+
     // DCC clears use the target's packed clear word; the fixed-clear set is a format allow-list.
     private static (bool Supported, bool FixedSupported, ClearColorValue Value) DccClearInfo(Format format, bool hasDcc, uint packedClear)
     {
         ClearColorValue value = default;
         var supported = hasDcc && PackedClearValue.TryDecodeColor(format, packedClear, out value);
-        var fixedSupported = hasDcc && SupportsDccFixedClear(format);
+        var fixedSupported = hasDcc && PackedClearValue.SupportsDccFixedColor(format);
         return (supported, fixedSupported, supported ? value : default);
     }
 
-    public static bool SupportsDccFixedClear(Format format) => format switch
-    {
-        Format.R8Unorm or Format.R8G8Unorm or Format.R8G8B8A8Unorm or Format.R8G8B8A8Srgb or Format.B8G8R8A8Unorm or Format.B8G8R8A8Srgb or
-        Format.A2B10G10R10UnormPack32 or Format.A2R10G10B10UnormPack32 or Format.R5G6B5UnormPack16 or Format.A1R5G5B5UnormPack16 or
-        Format.R4G4B4A4UnormPack16 or Format.R16Unorm or Format.R16G16Unorm or Format.R16G16B16A16Unorm or Format.R16Sfloat or
-        Format.R16G16Sfloat or Format.R16G16B16A16Sfloat or Format.R32Sfloat or Format.R32G32Sfloat or Format.R32G32B32A32Sfloat or
-        Format.B10G11R11UfloatPack32 => true,
-        _ => false,
-    };
+    public static bool SupportsDccFixedClear(Format format) => PackedClearValue.SupportsDccFixedColor(format);
 
     // Every draw rebuilds its targets' requests (a whole mip layout) from the same register words,
     // twice: once for the attachments and once for the pixel outputs. The build reads nothing but
@@ -371,8 +385,14 @@ public static partial class ImageRequestBuilders
         if (hasDcc)
         {
             // DCC lives in its own allocation; the address lets the cache match fills seen before the target.
+            _ = TileGeometry.TryGetDccSize(
+                width, height, volume ? depth : view.ImageLayers, bytesPerElement, levels, tileMode,
+                out var metadataSize, words.FragmentsLog2);
             description.Metadata.Kind = MetadataKind.Dcc;
-            description.Metadata.Range = new GuestSpan(words.DccAddress, 0);
+            description.Metadata.Range = new GuestSpan(words.DccAddress, metadataSize.Size);
+            description.Metadata.DccClearWord = words.ClearWord0;
+            description.Metadata.DccClearRegisterValid = true;
+            description.Metadata.DccAlphaMsb = DccAlphaOnMsb(words);
         }
 
         for (var level = 0; level < levels; level++)

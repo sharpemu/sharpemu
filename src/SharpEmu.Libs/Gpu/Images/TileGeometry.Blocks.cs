@@ -230,6 +230,75 @@ public static partial class TileGeometry
         }
     }
 
+    private static uint Gen5RenderTargetOffset(uint x, uint y, uint bytesPerElement)
+    {
+        uint offset = 0;
+        switch (bytesPerElement)
+        {
+            case 1:
+                offset ^= (y << 2) & 0x0008;
+                offset ^= (y << 4) & 0x0010;
+                offset ^= (y << 3) & 0x00a0;
+                offset ^= (y << 5) & 0x0f00;
+                offset ^= (y << 6) & 0x1000;
+                offset ^= (y << 7) & 0x4000;
+                offset ^= x & 0x0007;
+                offset ^= (x << 3) & 0x0040;
+                offset ^= (x << 5) & 0x0300;
+                offset ^= (x << 4) & 0x0400;
+                offset ^= (x << 6) & 0x0800;
+                offset ^= (x << 7) & 0x2000;
+                offset ^= (x << 8) & 0x8000;
+                return offset;
+            case 2:
+                offset ^= (y << 4) & 0x0070;
+                offset ^= (y << 5) & 0x0f00;
+                offset ^= (y << 8) & 0x5000;
+                offset ^= (x << 1) & 0x000e;
+                offset ^= (x << 4) & 0x0480;
+                offset ^= (x << 5) & 0x0300;
+                offset ^= (x << 6) & 0x0800;
+                offset ^= (x << 7) & 0x2000;
+                offset ^= (x << 8) & 0x8000;
+                return offset;
+            case 4:
+                offset ^= (y << 4) & 0x0070;
+                offset ^= (y << 5) & 0x0f00;
+                offset ^= (y << 9) & 0x1000;
+                offset ^= (y << 8) & 0x4000;
+                offset ^= (x << 2) & 0x000c;
+                offset ^= (x << 5) & 0x0380;
+                offset ^= (x << 4) & 0x0400;
+                offset ^= (x << 6) & 0x0800;
+                offset ^= (x << 9) & 0xa000;
+                return offset;
+            case 8:
+                offset ^= (y << 4) & 0x0010;
+                offset ^= (y << 6) & 0x0080;
+                offset ^= (y << 5) & 0x0f00;
+                offset ^= (y << 10) & 0x5000;
+                offset ^= (x << 3) & 0x0008;
+                offset ^= (x << 4) & 0x0460;
+                offset ^= (x << 5) & 0x0300;
+                offset ^= (x << 6) & 0x0800;
+                offset ^= (x << 10) & 0x2000;
+                offset ^= (x << 9) & 0x8000;
+                return offset;
+            case 16:
+                offset ^= (x << 4) & 0x0410;
+                offset ^= (x << 5) & 0x0340;
+                offset ^= (x << 6) & 0x0800;
+                offset ^= (x << 11) & 0xa000;
+                offset ^= (y << 5) & 0x0f20;
+                offset ^= (y << 6) & 0x0080;
+                offset ^= (y << 10) & 0x1000;
+                offset ^= (y << 11) & 0x4000;
+                return offset;
+            default:
+                throw SubmissionScheduler.Fatal($"The Gen5 render-target tile block does not support this element size: bytes={bytesPerElement}.");
+        }
+    }
+
     private static uint Depth64KB8X(uint x) =>
         (x & 0x0001) ^ ((x << 1) & 0x0004) ^ ((x << 2) & 0x0010) ^ ((x << 3) & 0x0040) ^ ((x << 5) & 0x0300) ^
         ((x << 4) & 0x0400) ^ ((x << 6) & 0x0800) ^ ((x << 7) & 0x2000) ^ ((x << 8) & 0x8000);
@@ -319,6 +388,14 @@ public static partial class TileGeometry
 
                 offset = RenderTargetOffset(x, y, bytes);
                 break;
+            case TileBlockKind.RenderTarget64KBGen5:
+                if (bytes > 16)
+                {
+                    return false;
+                }
+
+                offset = Gen5RenderTargetOffset(x, y, bytes);
+                break;
             case TileBlockKind.Depth64KB:
                 switch (bytes)
                 {
@@ -364,17 +441,19 @@ public static partial class TileGeometry
 
             byteOffset = Depth64KB64X(blockX * layout.BlockWidth) ^ Depth64KB64Y(blockY * layout.BlockHeight);
         }
-        else if (layout.Kind == TileBlockKind.RenderTarget64KB)
+        else if (layout.Kind is TileBlockKind.RenderTarget64KB or TileBlockKind.RenderTarget64KBGen5)
         {
             if (blockX > uint.MaxValue / layout.BlockWidth || blockY > uint.MaxValue / layout.BlockHeight || layout.BytesPerElement > 16)
             {
                 return false;
             }
 
-            byteOffset = RenderTargetOffset(blockX * layout.BlockWidth, blockY * layout.BlockHeight, layout.BytesPerElement);
+            byteOffset = layout.Kind == TileBlockKind.RenderTarget64KBGen5
+                ? Gen5RenderTargetOffset(blockX * layout.BlockWidth, blockY * layout.BlockHeight, layout.BytesPerElement)
+                : RenderTargetOffset(blockX * layout.BlockWidth, blockY * layout.BlockHeight, layout.BytesPerElement);
         }
 
-        if (layout.Kind is TileBlockKind.RenderTarget64KB or TileBlockKind.Depth64KB)
+        if (layout.Kind is TileBlockKind.RenderTarget64KB or TileBlockKind.RenderTarget64KBGen5 or TileBlockKind.Depth64KB)
         {
             byteOffset ^= ((blockZ & 8) << 5) ^ ((blockZ & 4) << 7) ^ ((blockZ & 2) << 9) ^ ((blockZ & 1) << 11);
         }

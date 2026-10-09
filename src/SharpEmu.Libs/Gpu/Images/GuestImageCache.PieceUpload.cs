@@ -25,7 +25,7 @@ public sealed partial class GuestImageCache
     private static ColorTransferPlan? PieceHashPlan(CachedImage image, in ImageRequest request)
     {
         ref readonly var info = ref image.Description;
-        if (request.Role is not (ImageRole.Texture or ImageRole.StorageImage) || info.IsVolume || info.IsDepth ||
+        if (request.Role is not (ImageRole.Texture or ImageRole.StorageImage) || image.DepthOwner.IsValid || info.IsVolume || info.IsDepth ||
             info.Data.Size < PieceHashMinimumImageSize)
         {
             return null;

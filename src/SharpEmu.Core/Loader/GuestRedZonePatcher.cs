@@ -19,6 +19,44 @@ internal static class GuestRedZonePatcher
     private const ulong PageSize = 0x1000;
     private const ulong AllocationAlignment = 0x10000;
     private const ulong MaximumRelativeJumpDistance = 0x7FFF_FFFF;
+    private const int MaximumJumpTableEntries = 4096;
+    private const int MaximumJumpTableSetupInstructions = 6;
+    private const ulong LargeExecutableBytes = 32UL << 20;
+    private static readonly TimeSpan ProgressInterval = TimeSpan.FromSeconds(2);
+
+    private sealed class Progress(string hostName, string phase, int total)
+    {
+        private readonly long _started = System.Diagnostics.Stopwatch.GetTimestamp();
+        private long _lastReport = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        public void Report(int done)
+        {
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(_lastReport, now) < ProgressInterval)
+            {
+                return;
+            }
+
+            _lastReport = now;
+            Console.Error.WriteLine(
+                $"[LOADER] {hostName} red-zone {phase}: {done}/{total} ({(total == 0 ? 100 : done * 100L / total)}%) " +
+                $"after {System.Diagnostics.Stopwatch.GetElapsedTime(_started, now).TotalSeconds:F0} s");
+        }
+    }
+
+    private static ulong ExecutableBytes(IReadOnlyList<ProgramHeader> programHeaders)
+    {
+        var bytes = 0UL;
+        foreach (var header in programHeaders)
+        {
+            if (header.HeaderType == ProgramHeaderType.Load && (header.Flags & ProgramHeaderFlags.Execute) != 0)
+            {
+                bytes += header.FileSize;
+            }
+        }
+
+        return bytes;
+    }
 
     internal enum SpanRefusal
     {
@@ -27,6 +65,7 @@ internal static class GuestRedZonePatcher
         BranchTargetAfter,
         StackAfter,
         TooShort,
+        IndirectBranch,
     }
 
     public static PatchResult Patch(
@@ -62,8 +101,19 @@ internal static class GuestRedZonePatcher
             return default;
         }
 
+        var executableBytes = ExecutableBytes(programHeaders);
+        var large = executableBytes >= LargeExecutableBytes;
+        if (large)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER] {hostName} red-zone patch: scanning {functionStarts.Length} functions in {executableBytes >> 20} MB of code; " +
+                "a large executable takes a while before the game window opens.");
+        }
+
         var sites = CollectPatchSites(
-            memory, programHeaders, imageBase, functionStarts, protectRedZone, splitVectorStores, rewriteSha, out var scan);
+            memory, programHeaders, imageBase, functionStarts, protectRedZone, splitVectorStores, rewriteSha, out var scan,
+            large ? new Progress(hostName, "scan", functionStarts.Length) : null);
+        sites.Sort(static (left, right) => left.Address.CompareTo(right.Address));
         if (sites.Count == 0)
         {
             Console.Error.WriteLine(
@@ -94,8 +144,10 @@ internal static class GuestRedZonePatcher
         var patched = 0;
         var failed = 0;
         var previousEnd = 0UL;
+        var patchProgress = large ? new Progress(hostName, "patch", sites.Count) : null;
         foreach (var site in sites)
         {
+            patchProgress?.Report(patched + failed);
             // Sites are produced in increasing address order. Patching two that
             // overlap would write one jump over another and send the trampoline
             // into whatever follows, so refuse rather than corrupt guest code.
@@ -128,6 +180,7 @@ internal static class GuestRedZonePatcher
             BranchTargetRefusals = scan.BranchTargetRefusals,
             StackRefusals = scan.StackRefusals,
             TooShortRefusals = scan.TooShortRefusals,
+            IndirectBranchRefusals = scan.IndirectBranchRefusals,
             TrampolineBytes = trampolineCursor - trampolineBase,
         };
         Console.Error.WriteLine(
@@ -135,7 +188,8 @@ internal static class GuestRedZonePatcher
             $"sites={result.PatchedSites}/{result.CandidateSites} failed={result.FailedSites} " +
             $"unrelocatable={result.UnrelocatableSites} " +
             $"(control_flow={result.ControlFlowRefusals} branch_target_after={result.BranchTargetRefusals} " +
-            $"stack_after={result.StackRefusals} too_short={result.TooShortRefusals}) " +
+            $"stack_after={result.StackRefusals} too_short={result.TooShortRefusals} " +
+            $"indirect_branch={result.IndirectBranchRefusals}) " +
             $"rosetta_vector_stores={result.VectorStoreCount} sha_rewrites={result.ShaInstructionCount} " +
             $"trampolines=0x{trampolineBase:X16}+0x{result.TrampolineBytes:X}.");
         return result;
@@ -149,15 +203,17 @@ internal static class GuestRedZonePatcher
         bool protectRedZone,
         bool splitVectorStores,
         bool rewriteSha,
-        out PatchResult result)
+        out PatchResult result,
+        Progress? progress = null)
     {
         var sites = new List<PatchSite>();
+        var scannedFunctions = 0;
         var functionCount = 0;
         var redZoneFunctionCount = 0;
         var instructionCount = 0;
         var vectorStoreCount = 0;
         var unrelocatableSites = 0;
-        var refusalCounts = new int[5];
+        var refusalCounts = new int[6];
         var shaInstructionCount = 0;
 
         foreach (var header in programHeaders)
@@ -190,6 +246,7 @@ internal static class GuestRedZonePatcher
 
             for (var functionIndex = 0; functionIndex < segmentFunctions.Length; functionIndex++)
             {
+                progress?.Report(scannedFunctions++);
                 var functionStart = segmentFunctions[functionIndex];
                 var functionEnd = functionIndex + 1 < segmentFunctions.Length
                     ? segmentFunctions[functionIndex + 1]
@@ -222,6 +279,14 @@ internal static class GuestRedZonePatcher
                     redZoneFunctionCount++;
                 }
                 var branchTargets = CollectBranchTargets(decoded);
+                var canBorrowFollowingInstructions = TryCollectJumpTableTargets(
+                    memory,
+                    programHeaders,
+                    imageBase,
+                    decoded,
+                    functionStart,
+                    functionEnd,
+                    branchTargets);
 
                 var lastSiteEnd = 0UL;
 
@@ -236,24 +301,29 @@ internal static class GuestRedZonePatcher
                         continue;
                     }
 
-                    // A backward span reaches instructions that an earlier site
-                    // may already have replaced with its own jump. Two jumps
-                    // written over each other corrupt control flow, so a span is
-                    // only usable when it starts at or after the end of the last
-                    // one. Forward spans cannot overlap by construction; the
-                    // check costs nothing and documents the invariant.
-                    var backward = false;
-                    if (!TryBuildPatchSpan(decoded, instructionIndex, branchTargets, out var span, out var refusal))
+                    var span = default(PatchSite);
+                    var refusal = SpanRefusal.TooShort;
+                    var forward = TryBuildPatchSpan(
+                        decoded,
+                        instructionIndex,
+                        branchTargets,
+                        canBorrowFollowingInstructions,
+                        out span,
+                        out refusal);
+                    var backward = !forward &&
+                        canBorrowFollowingInstructions &&
+                        TryBuildEnclosingPatchSpan(decoded, instructionIndex, branchTargets, out span);
+                    if (!forward && !backward)
                     {
-                        backward = TryBuildEnclosingPatchSpan(decoded, instructionIndex, branchTargets, out span);
-                    }
-
-                    if ((!backward && refusal != SpanRefusal.None) || span.Address < lastSiteEnd)
-                    {
-                        // Refused spans never enter the site list, so they are
-                        // invisible in FailedSites. Count them separately.
                         unrelocatableSites++;
                         refusalCounts[(int)refusal]++;
+                        continue;
+                    }
+
+                    if (span.Address < lastSiteEnd)
+                    {
+                        unrelocatableSites++;
+                        refusalCounts[(int)SpanRefusal.TooShort]++;
                         continue;
                     }
 
@@ -268,8 +338,6 @@ internal static class GuestRedZonePatcher
                         shaInstructionCount += span.Instructions.Count(static instruction => ShaInstructionRewrite.CanRewrite(instruction));
                     }
 
-                    // A backward span already ends at the current instruction, so
-                    // only a forward one consumes the instructions that follow.
                     if (!backward)
                     {
                         instructionIndex += span.Instructions.Count - 1;
@@ -290,6 +358,7 @@ internal static class GuestRedZonePatcher
             BranchTargetRefusals = refusalCounts[(int)SpanRefusal.BranchTargetAfter],
             StackRefusals = refusalCounts[(int)SpanRefusal.StackAfter],
             TooShortRefusals = refusalCounts[(int)SpanRefusal.TooShort],
+            IndirectBranchRefusals = refusalCounts[(int)SpanRefusal.IndirectBranch],
             ShaInstructionCount = shaInstructionCount,
         };
         return sites;
@@ -347,6 +416,321 @@ internal static class GuestRedZonePatcher
         return targets;
     }
 
+    private static bool TryCollectJumpTableTargets(
+        IVirtualMemory memory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase,
+        IReadOnlyList<DecodedInstruction> decoded,
+        ulong functionStart,
+        ulong functionEnd,
+        HashSet<ulong> branchTargets)
+    {
+        List<ulong>? resolvedTargets = null;
+        HashSet<ulong>? instructionBoundaries = null;
+        for (var instructionIndex = 0; instructionIndex < decoded.Count; instructionIndex++)
+        {
+            if (decoded[instructionIndex].Instruction.FlowControl != FlowControl.IndirectBranch)
+            {
+                continue;
+            }
+
+            instructionBoundaries ??= decoded
+                .Select(static entry => entry.Instruction.IP)
+                .ToHashSet();
+            resolvedTargets ??= new List<ulong>();
+            if (!TryResolveJumpTable(
+                    memory,
+                    programHeaders,
+                    imageBase,
+                    decoded,
+                    instructionIndex,
+                    functionStart,
+                    functionEnd,
+                    instructionBoundaries,
+                    branchTargets,
+                    resolvedTargets))
+            {
+                return false;
+            }
+        }
+
+        if (resolvedTargets is not null)
+        {
+            branchTargets.UnionWith(resolvedTargets);
+        }
+
+        return true;
+    }
+
+    private static bool TryResolveJumpTable(
+        IVirtualMemory memory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase,
+        IReadOnlyList<DecodedInstruction> decoded,
+        int jumpIndex,
+        ulong functionStart,
+        ulong functionEnd,
+        IReadOnlySet<ulong> instructionBoundaries,
+        IReadOnlySet<ulong> knownBranchTargets,
+        List<ulong> targets)
+    {
+        if (jumpIndex < 4)
+        {
+            return false;
+        }
+
+        var jump = decoded[jumpIndex].Instruction;
+        var add = decoded[jumpIndex - 1].Instruction;
+        var load = decoded[jumpIndex - 2].Instruction;
+        if (jump.OpCount != 1 || jump.GetOpKind(0) != OpKind.Register ||
+            add.Mnemonic != Mnemonic.Add || add.OpCount != 2 ||
+            add.GetOpKind(0) != OpKind.Register || add.GetOpKind(1) != OpKind.Register ||
+            load.Mnemonic != Mnemonic.Movsxd || load.OpCount != 2 ||
+            load.GetOpKind(0) != OpKind.Register || load.GetOpKind(1) != OpKind.Memory ||
+            load.MemorySize.GetSize() != sizeof(int) || load.MemoryIndexScale != sizeof(int) ||
+            load.MemoryBase == Register.None || load.MemoryIndex == Register.None ||
+            load.MemoryDisplacement64 != 0)
+        {
+            return false;
+        }
+
+        var targetRegister = jump.GetOpRegister(0).GetFullRegister();
+        var tableRegister = add.GetOpRegister(1).GetFullRegister();
+        var selectorRegister = load.MemoryIndex.GetFullRegister();
+        if (targetRegister != add.GetOpRegister(0).GetFullRegister() ||
+            targetRegister != load.GetOpRegister(0).GetFullRegister() ||
+            tableRegister != load.MemoryBase.GetFullRegister() ||
+            targetRegister.GetSize() != sizeof(ulong) ||
+            tableRegister.GetSize() != sizeof(ulong) ||
+            selectorRegister.GetSize() != sizeof(ulong) ||
+            tableRegister == selectorRegister)
+        {
+            return false;
+        }
+
+        var branchIndex = -1;
+        for (var index = jumpIndex - 3;
+             index >= 1 && index >= jumpIndex - MaximumJumpTableSetupInstructions;
+             index--)
+        {
+            var candidate = decoded[index].Instruction;
+            if (candidate.Mnemonic == Mnemonic.Ja)
+            {
+                branchIndex = index;
+                break;
+            }
+
+            if (candidate.Mnemonic != Mnemonic.Lea)
+            {
+                return false;
+            }
+        }
+
+        if (branchIndex < 1)
+        {
+            return false;
+        }
+
+        for (var index = branchIndex + 1; index <= jumpIndex; index++)
+        {
+            if (knownBranchTargets.Contains(decoded[index].Instruction.IP))
+            {
+                return false;
+            }
+        }
+
+        var boundsBranch = decoded[branchIndex].Instruction;
+        var boundsCompare = decoded[branchIndex - 1].Instruction;
+        if (boundsBranch.FlowControl != FlowControl.ConditionalBranch ||
+            !TryGetNearBranchTarget(boundsBranch, out var defaultTarget) ||
+            defaultTarget < functionStart || defaultTarget >= functionEnd ||
+            boundsCompare.Mnemonic != Mnemonic.Cmp || boundsCompare.OpCount != 2 ||
+            boundsCompare.GetOpKind(0) != OpKind.Register ||
+            boundsCompare.GetOpRegister(0).GetFullRegister() != selectorRegister ||
+            boundsCompare.GetOpRegister(0).GetSize() != sizeof(int) ||
+            !TryGetNonNegativeImmediate(boundsCompare, 1, out var maximumIndex) ||
+            maximumIndex >= MaximumJumpTableEntries)
+        {
+            return false;
+        }
+
+        var tableAddress = 0UL;
+        var tableDefinitionFound = false;
+        for (var index = branchIndex + 1; index <= jumpIndex - 3; index++)
+        {
+            var candidate = decoded[index].Instruction;
+            if (candidate.OpCount < 1 || candidate.GetOpKind(0) != OpKind.Register)
+            {
+                return false;
+            }
+
+            var writtenRegister = candidate.GetOpRegister(0).GetFullRegister();
+            if (writtenRegister == selectorRegister)
+            {
+                return false;
+            }
+
+            if (writtenRegister != tableRegister)
+            {
+                continue;
+            }
+
+            if (tableDefinitionFound || candidate.OpCount != 2 ||
+                candidate.GetOpKind(1) != OpKind.Memory || !candidate.IsIPRelativeMemoryOperand)
+            {
+                return false;
+            }
+
+            tableAddress = candidate.IPRelativeMemoryAddress;
+            tableDefinitionFound = true;
+        }
+
+        if (!tableDefinitionFound)
+        {
+            return false;
+        }
+
+        var entryCount = checked((int)maximumIndex + 1);
+        var tableBytes = checked(entryCount * sizeof(int));
+        if (!IsRangeInReadableLoad(programHeaders, imageBase, tableAddress, (ulong)tableBytes))
+        {
+            return false;
+        }
+
+        var entries = GC.AllocateUninitializedArray<byte>(tableBytes);
+        if (!memory.TryRead(tableAddress, entries))
+        {
+            return false;
+        }
+
+        var firstTarget = targets.Count;
+        for (var index = 0; index < entryCount; index++)
+        {
+            var relative = BinaryPrimitives.ReadInt32LittleEndian(entries.AsSpan(index * sizeof(int)));
+            if (!TryAddSignedOffset(tableAddress, relative, out var target) ||
+                target < functionStart || target >= functionEnd ||
+                !instructionBoundaries.Contains(target))
+            {
+                targets.RemoveRange(firstTarget, targets.Count - firstTarget);
+                return false;
+            }
+
+            targets.Add(target);
+        }
+
+        return true;
+    }
+
+    private static bool IsRangeInReadableLoad(
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase,
+        ulong address,
+        ulong length)
+    {
+        foreach (var header in programHeaders)
+        {
+            if (header.HeaderType != ProgramHeaderType.Load ||
+                (header.Flags & ProgramHeaderFlags.Read) == 0 ||
+                header.FileSize == 0 ||
+                header.VirtualAddress > ulong.MaxValue - imageBase)
+            {
+                continue;
+            }
+
+            var start = imageBase + header.VirtualAddress;
+            if (address < start || address - start > header.FileSize ||
+                length > header.FileSize - (address - start))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryAddSignedOffset(ulong address, int offset, out ulong result)
+    {
+        if (offset >= 0)
+        {
+            var positive = (ulong)offset;
+            if (positive <= ulong.MaxValue - address)
+            {
+                result = address + positive;
+                return true;
+            }
+        }
+        else
+        {
+            var negative = (ulong)-(long)offset;
+            if (negative <= address)
+            {
+                result = address - negative;
+                return true;
+            }
+        }
+
+        result = 0;
+        return false;
+    }
+
+    private static bool TryGetNearBranchTarget(in Instruction instruction, out ulong target)
+    {
+        for (var operand = 0; operand < instruction.OpCount; operand++)
+        {
+            switch (instruction.GetOpKind(operand))
+            {
+                case OpKind.NearBranch16:
+                    target = instruction.NearBranch16;
+                    return true;
+                case OpKind.NearBranch32:
+                    target = instruction.NearBranch32;
+                    return true;
+                case OpKind.NearBranch64:
+                    target = instruction.NearBranch64;
+                    return true;
+            }
+        }
+
+        target = 0;
+        return false;
+    }
+
+    private static bool TryGetNonNegativeImmediate(in Instruction instruction, int operand, out ulong value)
+    {
+        switch (instruction.GetOpKind(operand))
+        {
+            case OpKind.Immediate8:
+                value = instruction.Immediate8;
+                return true;
+            case OpKind.Immediate16:
+                value = instruction.Immediate16;
+                return true;
+            case OpKind.Immediate32:
+                value = instruction.Immediate32;
+                return true;
+            case OpKind.Immediate64:
+                value = instruction.Immediate64;
+                return true;
+            case OpKind.Immediate8to16 when instruction.Immediate8to16 >= 0:
+                value = (ulong)instruction.Immediate8to16;
+                return true;
+            case OpKind.Immediate8to32 when instruction.Immediate8to32 >= 0:
+                value = (ulong)instruction.Immediate8to32;
+                return true;
+            case OpKind.Immediate8to64 when instruction.Immediate8to64 >= 0:
+                value = (ulong)instruction.Immediate8to64;
+                return true;
+            case OpKind.Immediate32to64 when instruction.Immediate32to64 >= 0:
+                value = (ulong)instruction.Immediate32to64;
+                return true;
+            default:
+                value = 0;
+                return false;
+        }
+    }
+
     /// <summary>
     /// Runs the enclosing-span search over a raw instruction range, so the
     /// behaviour can be pinned on the byte sequences that occur in real guest
@@ -376,7 +760,7 @@ internal static class GuestRedZonePatcher
         }
 
         if (siteIndex < 0 ||
-            !TryBuildPatchSpan(decoded, siteIndex, CollectBranchTargets(decoded), out var site, out _))
+            !TryBuildPatchSpan(decoded, siteIndex, CollectBranchTargets(decoded), true, out var site, out _))
         {
             return false;
         }
@@ -417,7 +801,10 @@ internal static class GuestRedZonePatcher
             return false;
         }
 
-        if (!TryBuildEnclosingPatchSpan(decoded, faultIndex, CollectBranchTargets(decoded), out var site))
+        var hasIndirectBranch = decoded.Any(static entry =>
+            entry.Instruction.FlowControl == FlowControl.IndirectBranch);
+        if (hasIndirectBranch ||
+            !TryBuildEnclosingPatchSpan(decoded, faultIndex, CollectBranchTargets(decoded), out var site))
         {
             return false;
         }
@@ -551,12 +938,13 @@ internal static class GuestRedZonePatcher
         int startIndex,
         IReadOnlySet<ulong> branchTargets,
         out PatchSite site) =>
-        TryBuildPatchSpan(decoded, startIndex, branchTargets, out site, out _);
+        TryBuildPatchSpan(decoded, startIndex, branchTargets, true, out site, out _);
 
     private static bool TryBuildPatchSpan(
         IReadOnlyList<DecodedInstruction> decoded,
         int startIndex,
         IReadOnlySet<ulong> branchTargets,
+        bool canBorrowFollowingInstructions,
         out PatchSite site,
         out SpanRefusal refusal)
     {
@@ -568,6 +956,7 @@ internal static class GuestRedZonePatcher
         {
             var instruction = decoded[index].Instruction;
             if (index != startIndex &&
+                canBorrowFollowingInstructions &&
                 !branchTargets.Contains(instruction.IP) &&
                 IsRelocatableDirectBranch(instruction))
             {
@@ -578,7 +967,11 @@ internal static class GuestRedZonePatcher
                 break;
             }
 
-            if (instruction.FlowControl != FlowControl.Next)
+            if (index != startIndex && !canBorrowFollowingInstructions)
+            {
+                refusal = SpanRefusal.IndirectBranch;
+            }
+            else if (instruction.FlowControl != FlowControl.Next)
             {
                 refusal = SpanRefusal.ControlFlow;
             }
@@ -1088,6 +1481,8 @@ internal static class GuestRedZonePatcher
         public int StackRefusals { get; init; }
 
         public int TooShortRefusals { get; init; }
+
+        public int IndirectBranchRefusals { get; init; }
 
         public ulong TrampolineBytes { get; init; }
     }

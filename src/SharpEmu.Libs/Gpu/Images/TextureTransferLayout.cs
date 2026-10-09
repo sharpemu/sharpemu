@@ -451,7 +451,9 @@ public sealed class TextureTransferLayout
                     transfer.Width = Math.Max((region.ImageExtent.Width + texture.TexelWidth - 1) / texture.TexelWidth, 1);
                     transfer.Height = Math.Max((logicalHeight + texture.TexelHeight - 1) / texture.TexelHeight, 1);
                     transfer.Depth = 1;
-                    transfer.SurfaceZ = block.Kind is TileBlockKind.RenderTarget64KB or TileBlockKind.Depth64KB ? region.ImageSubresource.BaseArrayLayer : 0;
+                    transfer.SurfaceZ = block.Kind is TileBlockKind.RenderTarget64KB or TileBlockKind.RenderTarget64KBGen5 or TileBlockKind.Depth64KB
+                        ? region.ImageSubresource.BaseArrayLayer
+                        : 0;
                     transfer.Pitch = Math.Max((pitch + texture.TexelWidth - 1) / texture.TexelWidth, 1);
                     transfer.Tail = tail;
                     transfer.TailX = tail ? mip.TailX : 0;

@@ -15,6 +15,7 @@ public enum TilerBlockShape
     Prt64KB3D,
     RenderTarget64KB,
     Depth64KB,
+    RenderTarget64KBGen5,
 }
 
 // Assembles the tiler compute shaders: block copies per shape and element size,
@@ -251,6 +252,15 @@ public static class TilerShaders
         return offset;
     }
 
+    private static Term[] Gen5RenderTargetTerms(uint bytes) => bytes switch
+    {
+        1 => [Y(2, 0x008), Y(4, 0x010), Y(3, 0x0a0), Y(5, 0xf00), Y(6, 0x1000), Y(7, 0x4000), X(0, 0x007), X(3, 0x040), X(5, 0x300), X(4, 0x400), X(6, 0x800), X(7, 0x2000), X(8, 0x8000)],
+        2 => [Y(4, 0x070), Y(5, 0xf00), Y(8, 0x5000), X(1, 0x00e), X(4, 0x480), X(5, 0x300), X(6, 0x800), X(7, 0x2000), X(8, 0x8000)],
+        4 => [Y(4, 0x070), Y(5, 0xf00), Y(9, 0x1000), Y(8, 0x4000), X(2, 0x00c), X(5, 0x380), X(4, 0x400), X(6, 0x800), X(9, 0xa000)],
+        8 => [Y(4, 0x010), Y(6, 0x080), Y(5, 0xf00), Y(10, 0x5000), X(3, 0x008), X(4, 0x460), X(5, 0x300), X(6, 0x800), X(10, 0x2000), X(9, 0x8000)],
+        _ => [X(4, 0x410), X(5, 0x340), X(6, 0x800), X(11, 0xa000), Y(5, 0xf20), Y(6, 0x080), Y(10, 0x1000), Y(11, 0x4000)],
+    };
+
     private static Term[] DepthTerms(uint bytes) => bytes switch
     {
         1 => [X(0, 1), X(1, 0x004), X(2, 0x010), X(3, 0x040), X(5, 0x300), X(4, 0x400), X(6, 0x800), X(7, 0x2000), X(8, 0x8000), Y(1, 0x002), Y(2, 0x008), Y(3, 0x0a0), Y(5, 0xf00), Y(6, 0x1000), Y(7, 0x4000)],
@@ -314,7 +324,7 @@ public static class TilerShaders
         TilerBlockShape.Standard256B => (ThinExtent(256, bytes, 16, 8, 4), 256),
         TilerBlockShape.Standard4KB => (ThinExtent(4096, bytes, 64, 32, 16), 4096),
         TilerBlockShape.Standard4KB3D => (Thick4KBExtent(bytes), 4096),
-        TilerBlockShape.Standard64KB or TilerBlockShape.Prt64KB or TilerBlockShape.RenderTarget64KB => (ThinExtent(65536, bytes, 256, 128, 64), 65536),
+        TilerBlockShape.Standard64KB or TilerBlockShape.Prt64KB or TilerBlockShape.RenderTarget64KB or TilerBlockShape.RenderTarget64KBGen5 => (ThinExtent(65536, bytes, 256, 128, 64), 65536),
         TilerBlockShape.Standard64KB3D or TilerBlockShape.Prt64KB3D => (Thick64KBExtent(bytes), 65536),
         TilerBlockShape.Depth64KB => (ThinExtent(65536, bytes, 256, 128, 128), 65536),
         _ => throw new ArgumentOutOfRangeException(nameof(shape)),
@@ -348,6 +358,8 @@ public static class TilerShaders
             }
             case TilerBlockShape.RenderTarget64KB:
                 return shaderModule.Xor(RenderTargetOffset(shaderModule, x, y, bytes), ZSpread(shaderModule, z));
+            case TilerBlockShape.RenderTarget64KBGen5:
+                return shaderModule.Xor(XorTerms(shaderModule, x, y, z, Gen5RenderTargetTerms(bytes)), ZSpread(shaderModule, z));
             case TilerBlockShape.Depth64KB:
                 return shaderModule.Xor(ZSpread(shaderModule, z), XorTerms(shaderModule, x, y, z, DepthTerms(bytes)));
             default:

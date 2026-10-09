@@ -399,7 +399,7 @@ public static class KernelExports
         ExportName = "sceKernelOpen",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int KernelOpen(CpuContext ctx) => KernelMemoryCompatExports.KernelOpenUnderscore(ctx);
+    public static int KernelOpen(CpuContext ctx) => KernelMemoryCompatExports.KernelOpenCore(ctx);
 
     [SysAbiExport(
         Nid = "mqQMh1zPPT8",

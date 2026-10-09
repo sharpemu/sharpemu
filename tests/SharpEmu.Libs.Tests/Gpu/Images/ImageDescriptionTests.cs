@@ -154,6 +154,21 @@ public sealed class ImageDescriptionTests
         Assert.False(ImageDescription.CanUseDisplayNativeWithoutUpload(DisplayCompression.Unsupported, renderTarget: true, gpuModified: true, guestModified: false));
     }
 
+    [Theory]
+    [InlineData(true, 0.0f, 1.0f)]
+    [InlineData(false, 1.0f, 0.0f)]
+    public void DccFixedClear_RespectsTheAlphaPosition(bool alphaMsb, float red, float alpha)
+    {
+        var metadata = new MetadataDescription { DccAlphaMsb = alphaMsb };
+        Assert.True(PackedClearValue.TryDecodeDccColor(
+            Format.A2B10G10R10UnormPack32, 0x40404040, metadata, false, out var clear));
+        Assert.Equal((red, 0.0f, 0.0f, alpha), (clear.Float32_0, clear.Float32_1, clear.Float32_2, clear.Float32_3));
+        Assert.False(PackedClearValue.TryDecodeDccColor(
+            Format.A2B10G10R10UnormPack32, 0x40400040, metadata, false, out _));
+        Assert.False(PackedClearValue.TryDecodeDccColor(
+            Format.A2B10G10R10UnormPack32, 0xffffffff, metadata, false, out _));
+    }
+
     [Fact]
     public void PackedClears_DecodePerFormat()
     {

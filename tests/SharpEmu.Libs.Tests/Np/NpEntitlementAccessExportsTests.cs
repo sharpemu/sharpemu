@@ -12,6 +12,29 @@ public sealed class NpEntitlementAccessExportsTests
 {
     private const ulong MemoryBase = 0x1_0000_0000;
 
+    [Fact]
+    public void GetGameTrialsFlagReportsAFullGameAndOnlyWritesOneWord()
+    {
+        var memory = new FakeCpuMemory(MemoryBase, 0x100);
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(memory.TryWrite(MemoryBase, new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }));
+        context[CpuRegister.Rdi] = MemoryBase;
+        Assert.Equal(0, NpEntitlementAccessExports.NpEntitlementAccessGetGameTrialsFlag(context));
+        Span<byte> actual = stackalloc byte[8];
+        Assert.True(memory.TryRead(MemoryBase, actual));
+        Assert.Equal(new byte[] { 0, 0, 0, 0, 5, 6, 7, 8 }, actual.ToArray());
+    }
+
+    [Theory]
+    [InlineData(0UL, unchecked((int)0x817D0002))]
+    [InlineData(0x2_0000_0000UL, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT)]
+    public void GetGameTrialsFlagValidatesOutputMemory(ulong address, int expected)
+    {
+        var context = new CpuContext(new FakeCpuMemory(MemoryBase, 0x100), Generation.Gen5);
+        context[CpuRegister.Rdi] = address;
+        Assert.Equal(expected, NpEntitlementAccessExports.NpEntitlementAccessGetGameTrialsFlag(context));
+    }
+
     [Theory]
     [InlineData("GHOST2APP0000000")]
     [InlineData("GHOST2BASE000000")]

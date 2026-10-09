@@ -21,6 +21,7 @@ public static class HleDataSymbols
     private static readonly nint _stackChkGuardAddress = Allocate(sizeof(ulong) * 2);
     private static readonly nint _progNameBufferAddress = Allocate(ProgNameMaxBytes + 1);
     private static readonly nint _progNamePointerAddress = Allocate(nint.Size);
+    private static readonly nint _argumentVectorAddress = Allocate(nint.Size * 2);
     private static readonly nint _libcNeedFlagAddress = Allocate(sizeof(uint));
     private static readonly nint _libcInternalNeedFlagAddress = Allocate(sizeof(uint));
 
@@ -55,6 +56,12 @@ public static class HleDataSymbols
         yield return LibcInternalNeedFlagNid;
     }
 
+    public static int ProcessArgumentCount =>
+        _progNameBufferAddress != 0 && _argumentVectorAddress != 0 ? 1 : 0;
+
+    public static ulong ProcessArgumentVectorAddress =>
+        unchecked((ulong)_argumentVectorAddress);
+
     public static void ConfigureProcessImageName(string? processImageName)
     {
         var effectiveName = string.IsNullOrWhiteSpace(processImageName)
@@ -65,7 +72,9 @@ public static class HleDataSymbols
 
         lock (_gate)
         {
-            if (_progNameBufferAddress == 0 || _progNamePointerAddress == 0)
+            if (_progNameBufferAddress == 0 ||
+                _progNamePointerAddress == 0 ||
+                _argumentVectorAddress == 0)
             {
                 return;
             }
@@ -77,6 +86,8 @@ public static class HleDataSymbols
 
             Marshal.Copy(encodedName, 0, _progNameBufferAddress, byteCount);
             WritePointer(_progNamePointerAddress, _progNameBufferAddress);
+            WritePointer(_argumentVectorAddress, _progNameBufferAddress);
+            WritePointer(IntPtr.Add(_argumentVectorAddress, nint.Size), 0);
         }
     }
 

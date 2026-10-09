@@ -74,21 +74,40 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     }
 
     [Theory]
+    [InlineData(GuestImageType.Color2D, 1u, false)]
     [InlineData(GuestImageType.Color2D, 1u, true)]
     [InlineData(GuestImageType.Color3D, 32u, false)]
+    [InlineData(GuestImageType.Color3D, 32u, true)]
     [InlineData(GuestImageType.Color2DArray, 4u, false)]
-    public void CompressedTexture_CarriesDccMetadataOnlyForSingleLayer2D(GuestImageType type, uint layers, bool expected)
+    [InlineData(GuestImageType.Color2DArray, 4u, true)]
+    public void CompressedTexture_CarriesDccMetadataForEverySlice(GuestImageType type, uint layers, bool storage)
     {
         const ulong metadata = 0x1_2000_0000;
         var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UNorm, 32, 32, type, GuestTileMode.RenderTarget, layers: layers);
         words[6] |= (1u << 21) | (uint)(((metadata >> 8) & 0xFF) << 24);
         words[7] = (uint)(metadata >> 16);
-        var shape = Sampled2D with { Volume = type == GuestImageType.Color3D, Arrayed = type == GuestImageType.Color2DArray };
+        var shape = Sampled2D with { Volume = type == GuestImageType.Color3D, Arrayed = type == GuestImageType.Color2DArray, Storage = storage };
 
         var description = ImageRequestBuilders.Texture(words, shape).Request.Description;
 
-        Assert.Equal(expected ? MetadataKind.Dcc : MetadataKind.None, description.Metadata.Kind);
-        Assert.Equal(expected ? metadata : 0UL, description.Metadata.Range.Address);
+        Assert.Equal(MetadataKind.Dcc, description.Metadata.Kind);
+        Assert.Equal(metadata, description.Metadata.Range.Address);
+        Assert.Equal((ulong)layers * 0x1000, description.Metadata.Range.Size);
+    }
+
+    [Fact]
+    public void DemonSlayerColorLut_CarriesItsVolumeDccFootprintAndAlphaPosition()
+    {
+        uint[] words = [0x606D4E00, 0xC3200000, 0x0007C007, 0xA1B00FAC, 0x0000001F, 0x00700000, 0x006B0000, 0x00606D6E];
+        var description = ImageRequestBuilders.Texture(words, Sampled2D with { Volume = true }).Request.Description;
+
+        Assert.Equal(GuestImageType.Color3D, description.Type);
+        Assert.Equal(new Extent3D(32, 32, 32), description.Extent);
+        Assert.Equal(Format.A2B10G10R10UnormPack32, description.PixelFormat);
+        Assert.Equal(MetadataKind.Dcc, description.Metadata.Kind);
+        Assert.Equal(0x606D6E0000UL, description.Metadata.Range.Address);
+        Assert.Equal(0x20000UL, description.Metadata.Range.Size);
+        Assert.True(description.Metadata.DccAlphaMsb);
     }
 
     private readonly HeadlessVulkan? _vulkan;

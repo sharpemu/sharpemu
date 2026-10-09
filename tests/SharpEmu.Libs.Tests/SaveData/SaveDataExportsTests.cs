@@ -248,6 +248,25 @@ public sealed class SaveDataExportsTests : IDisposable
     }
 
     [Fact]
+    public void GetMountInfo_WritesOnlyTheGuestStructure()
+    {
+        Assert.Equal(0, Mount());
+        WriteAscii(MountPointStr, MountPoint);
+        Span<byte> sentinel = stackalloc byte[0x10];
+        sentinel.Fill(0xCD);
+        Assert.True(_memory.TryWrite(MountInfo + 0x30, sentinel));
+
+        Assert.Equal(
+            0,
+            SaveDataExports.SaveDataGetMountInfo(
+                Reg(rdi: MountPointStr, rsi: MountInfo)));
+
+        Span<byte> after = stackalloc byte[0x10];
+        Assert.True(_memory.TryRead(MountInfo + 0x30, after));
+        Assert.True(after.SequenceEqual(sentinel));
+    }
+
+    [Fact]
     public void DirNameSearch_ReportsBlockCapacityAndRemainingBlocks()
     {
         Directory.CreateDirectory(SlotDir);

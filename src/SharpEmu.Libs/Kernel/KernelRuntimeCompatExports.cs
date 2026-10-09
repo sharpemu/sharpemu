@@ -81,6 +81,13 @@ public static class KernelRuntimeCompatExports
     private delegate ulong RdtscDelegate();
 
     [SysAbiExport(
+        Nid = "uvT2iYBBnkY",
+        ExportName = "sceKernelSync",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelSync(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
         Nid = "1jfXLRVzisc",
         ExportName = "sceKernelUsleep",
         Target = Generation.Gen4 | Generation.Gen5,

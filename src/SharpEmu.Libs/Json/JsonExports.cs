@@ -142,6 +142,25 @@ public static class JsonExports
     #pragma warning restore SHEM004
 
     [SysAbiExport(
+        Nid = "i1393UBWu1U",
+        ExportName = "_ZN3sce4Json11Initializer28setGlobalSpecialFloatHandlerEPFKNS0_5ValueENS0_12FunctionTypeEdPS3_PvPbES6_",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceJson")]
+    public static int InitializerSetGlobalSpecialFloatHandler(CpuContext ctx)
+    {
+        var thisAddress = ctx[CpuRegister.Rdi];
+        if (thisAddress == 0)
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        JsonObjectHeap.GlobalSpecialFloatHandler = ctx[CpuRegister.Rsi];
+        JsonObjectHeap.GlobalSpecialFloatHandlerContext = ctx[CpuRegister.Rdx];
+        TraceJson("Initializer.setGlobalSpecialFloatHandler", thisAddress, ctx[CpuRegister.Rsi]);
+        return SetReturn(ctx, 0);
+    }
+
+    [SysAbiExport(
         Nid = "WSOuge5IsCg",
         ExportName = "_ZN3sce4Json14InitParameter2C1Ev",
         Target = Generation.Gen5,
@@ -220,6 +239,30 @@ public static class JsonExports
         if (thisAddress == 0 || !ctx.TryWriteUInt64(thisAddress + 0x10, ctx[CpuRegister.Rsi]))
         {
             return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        ctx[CpuRegister.Rax] = thisAddress;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "WVZBP4IyM+E",
+        ExportName = "_ZN3sce4Json14InitParameter225setSpecialFloatFormatTypeENS0_22SpecialFloatFormatTypeE",
+        Target = Generation.Gen5,
+        LibraryName = "libSceJson")]
+    public static int InitParameter2SetSpecialFloatFormatType(CpuContext ctx)
+    {
+        var thisAddress = ctx[CpuRegister.Rdi];
+        if (thisAddress == 0)
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        Span<byte> field = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(field, unchecked((uint)ctx[CpuRegister.Rsi]));
+        if (!ctx.Memory.TryWrite(thisAddress + 0x18, field))
+        {
+            return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         ctx[CpuRegister.Rax] = thisAddress;

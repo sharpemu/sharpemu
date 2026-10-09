@@ -582,7 +582,8 @@ internal static unsafe partial class VulkanVideoPresenter
             const byte DccClearToZero = 0x00;
             foreach (var binding in bindings)
             {
-                if (binding.IsHostMovie || binding.CachedImage is not { } image || image.Description.Metadata.Kind != MetadataKind.Dcc)
+                if (binding.IsHostMovie || binding.CachedImage is not { } image || image.Description.Metadata.Kind != MetadataKind.Dcc ||
+                    image.Description.Metadata.Range.Size != 0)
                 {
                     continue;
                 }

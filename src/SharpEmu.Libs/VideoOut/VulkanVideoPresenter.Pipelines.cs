@@ -107,6 +107,8 @@ internal static unsafe partial class VulkanVideoPresenter
         bool IShaderPipelineHost.GraphicsSubgroupOperationsEnabled => GraphicsSubgroupOperationsEnabled;
 
         bool IShaderPipelineHost.SharedInt64AtomicsEnabled => SharedInt64AtomicsEnabled;
+        bool IShaderPipelineHost.ShaderSignedZeroInfNanPreserveFloat32Supported =>
+            _supportsShaderSignedZeroInfNanPreserveFloat32;
         // NVIDIA's compiler rejects the elided-EXEC wave64 compute module with NVVM error 3.
         bool IShaderPipelineHost.ExecGuardElisionEnabled => _physicalDeviceVendorId != NvidiaVendorId;
         bool IShaderPipelineHost.PerVertexPixelInputsSupported => _supportsPerVertexPixelInputs;

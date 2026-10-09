@@ -14,28 +14,42 @@ namespace SharpEmu.Libs.Network;
 
 public static class NetExports
 {
+    private const int NetErrorNoEntry = unchecked((int)0x80410102);
     private const int NetErrorBadFileDescriptor = unchecked((int)0x80410109);
     private const int NetErrorFault = unchecked((int)0x8041010E);
+    private const int NetErrorAlreadyExists = unchecked((int)0x80410111);
     private const int NetErrorInvalidArgument = unchecked((int)0x80410116);
     private const int NetErrorTooManyFiles = unchecked((int)0x80410118);
     private const int NetErrorWouldBlock = unchecked((int)0x80410123);
     private const int NetErrorAddressInUse = unchecked((int)0x80410130);
+    private const int NetErrorTooManyOpenFiles = unchecked((int)0x80410118);
     private const int NetErrorResolverNoDns = unchecked((int)0x804101E1);
     private const int NetErrorNotInitialized = unchecked((int)0x804101C8);
+    private const int NetErrnoNoEntry = 2;
     private const int NetErrnoBadFileDescriptor = 9;
     private const int NetErrnoFault = 14;
+    private const int NetErrnoAlreadyExists = 17;
     private const int NetErrnoInvalidArgument = 22;
     private const int NetErrnoTooManyFiles = 24;
     private const int NetErrnoWouldBlock = 35;
     private const int NetErrnoAddressInUse = 48;
+    private const int NetErrnoTooManyOpenFiles = 24;
     private const int NetErrnoNotInitialized = 200;
     private const int NetErrnoResolverNoDns = 225;
     private const int MaxNameLength = 256;
+    private const int EpollIdBase = 1024;
+    private const int EpollCapacity = 32;
+    private const int NetEpollEventSize = 24;
+    private const uint NetEpollIn = 0x00000001;
+    private const uint NetEpollOut = 0x00000002;
+    private const uint NetEpollError = 0x00000008;
     private static ReadOnlySpan<byte> OfflineMacAddress => [0x02, 0x53, 0x48, 0x41, 0x52, 0x50];
 
     private static readonly ConcurrentDictionary<int, NetPool> _pools = new();
     private static readonly ConcurrentDictionary<int, ResolverContext> _resolvers = new();
     private static readonly ConcurrentDictionary<int, Socket> _sockets = new();
+    private static readonly object EpollGate = new();
+    private static readonly Dictionary<int, NetEpollContext> _epolls = new();
     private static int _nextPoolId;
     private static int _nextResolverId = 0x2000;
     private static int _nextSocketId = 255;
@@ -51,6 +65,26 @@ public static class NetExports
     private sealed record NetPool(string Name, int Size, int Flags);
 
     private sealed record ResolverContext(string Name, int PoolId, int Flags, int LastError);
+
+    private sealed class NetEpollContext(string name)
+    {
+        public string Name { get; } = name;
+
+        public List<NetEpollRegistration> Registrations { get; } = [];
+    }
+
+    private readonly record struct NetEpollRegistration(int SocketId, NetEpollEvent Event);
+
+    private readonly record struct NetEpollEvent(uint Events, ulong Data);
+
+    internal static void ResetEpollsForTests()
+    {
+        lock (EpollGate)
+        {
+            _epolls.Clear();
+            Monitor.PulseAll(EpollGate);
+        }
+    }
 
     internal static bool TryGetReadEventState(
         int socketId,
@@ -116,6 +150,11 @@ public static class NetExports
         _initialized = false;
         _pools.Clear();
         _resolvers.Clear();
+        lock (EpollGate)
+        {
+            _epolls.Clear();
+            Monitor.PulseAll(EpollGate);
+        }
         foreach (var socket in _sockets.Values)
         {
             socket.Dispose();
@@ -195,6 +234,12 @@ public static class NetExports
     public static int NetSocketClose(CpuContext ctx)
     {
         var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (KernelSocketCompatExports.TryCloseSocketFd(id))
+        {
+            TraceNet("socket.close.posix", id, 0, 0, 0);
+            return ctx.SetReturn(0);
+        }
+
         if (!_sockets.TryRemove(id, out var socket))
         {
             return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
@@ -716,6 +761,291 @@ public static class NetExports
     }
 
     [SysAbiExport(
+        Nid = "SF47kB2MNTo",
+        ExportName = "sceNetEpollCreate",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetEpollCreate(CpuContext ctx)
+    {
+        if (!_initialized)
+        {
+            return SetNetError(ctx, NetErrorNotInitialized, NetErrnoNotInitialized);
+        }
+
+        var nameAddress = ctx[CpuRegister.Rdi];
+        var flags = unchecked((int)ctx[CpuRegister.Rsi]);
+        if (nameAddress == 0 || flags != 0 ||
+            !TryReadUtf8Z(ctx, nameAddress, MaxNameLength, out var name))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        lock (EpollGate)
+        {
+            for (var index = 0; index < EpollCapacity; index++)
+            {
+                var id = EpollIdBase + index;
+                if (_epolls.ContainsKey(id))
+                {
+                    continue;
+                }
+
+                _epolls.Add(id, new NetEpollContext(name));
+                TraceNet("epoll.create", id, nameAddress, 0, 0);
+                return ctx.SetReturn(id);
+            }
+        }
+
+        return SetNetError(ctx, NetErrorTooManyOpenFiles, NetErrnoTooManyOpenFiles);
+    }
+
+    [SysAbiExport(
+        Nid = "ZVw46bsasAk",
+        ExportName = "sceNetEpollControl",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetEpollControl(CpuContext ctx)
+    {
+        const int EpollControlAdd = 1;
+        const int EpollControlModify = 2;
+        const int EpollControlDelete = 3;
+
+        var epollId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var operation = unchecked((int)ctx[CpuRegister.Rsi]);
+        var socketId = unchecked((int)ctx[CpuRegister.Rdx]);
+        var eventAddress = ctx[CpuRegister.Rcx];
+
+        if (operation is < EpollControlAdd or > EpollControlDelete ||
+            (operation is EpollControlAdd or EpollControlModify && eventAddress == 0) ||
+            (operation == EpollControlDelete && eventAddress != 0))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        if (!_sockets.ContainsKey(socketId))
+        {
+            return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+        }
+
+        NetEpollEvent requestedEvent = default;
+        if (eventAddress != 0 && !TryReadNetEpollEvent(ctx, eventAddress, out requestedEvent))
+        {
+            return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+        }
+
+        lock (EpollGate)
+        {
+            if (!_epolls.TryGetValue(epollId, out var epoll))
+            {
+                return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+            }
+
+            var registrationIndex = epoll.Registrations.FindIndex(value => value.SocketId == socketId);
+            switch (operation)
+            {
+                case EpollControlAdd when registrationIndex >= 0:
+                    return SetNetError(ctx, NetErrorAlreadyExists, NetErrnoAlreadyExists);
+                case EpollControlAdd:
+                    epoll.Registrations.Add(new NetEpollRegistration(socketId, requestedEvent));
+                    break;
+                case EpollControlModify when registrationIndex < 0:
+                    return SetNetError(ctx, NetErrorNoEntry, NetErrnoNoEntry);
+                case EpollControlModify:
+                    epoll.Registrations[registrationIndex] =
+                        new NetEpollRegistration(socketId, requestedEvent);
+                    break;
+                case EpollControlDelete when registrationIndex < 0:
+                    return SetNetError(ctx, NetErrorNoEntry, NetErrnoNoEntry);
+                case EpollControlDelete:
+                    epoll.Registrations.RemoveAt(registrationIndex);
+                    break;
+            }
+
+            Monitor.PulseAll(EpollGate);
+        }
+
+        TraceNet(
+            "epoll.control",
+            epollId,
+            unchecked((uint)operation),
+            unchecked((uint)socketId),
+            requestedEvent.Events);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "drjIbDbA7UQ",
+        ExportName = "sceNetEpollWait",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetEpollWait(CpuContext ctx)
+    {
+        var epollId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var eventsAddress = ctx[CpuRegister.Rsi];
+        var maxEvents = unchecked((int)ctx[CpuRegister.Rdx]);
+        var timeoutMicroseconds = unchecked((int)ctx[CpuRegister.Rcx]);
+
+        if (eventsAddress == 0)
+        {
+            return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+        }
+
+        if (maxEvents <= 0 || timeoutMicroseconds < -1)
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        NetEpollRegistration[] registrations;
+        lock (EpollGate)
+        {
+            if (!_epolls.TryGetValue(epollId, out var epoll))
+            {
+                return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+            }
+
+            if (epoll.Registrations.Count == 0 && timeoutMicroseconds != 0)
+            {
+                if (timeoutMicroseconds < 0)
+                {
+                    while (_epolls.TryGetValue(epollId, out epoll) && epoll.Registrations.Count == 0)
+                    {
+                        Monitor.Wait(EpollGate);
+                    }
+                }
+                else
+                {
+                    Monitor.Wait(
+                        EpollGate,
+                        TimeSpan.FromTicks((long)timeoutMicroseconds * TimeSpan.TicksPerMicrosecond));
+                }
+
+                if (!_epolls.TryGetValue(epollId, out epoll))
+                {
+                    return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+                }
+            }
+
+            registrations = epoll.Registrations.ToArray();
+        }
+
+        if (registrations.Length == 0)
+        {
+            TraceNet("epoll.wait", epollId, unchecked((uint)maxEvents), unchecked((uint)timeoutMicroseconds), 0);
+            return ctx.SetReturn(0);
+        }
+
+        var readSockets = new List<Socket>();
+        var writeSockets = new List<Socket>();
+        var errorSockets = new List<Socket>();
+        var hostRegistrations = new Dictionary<Socket, NetEpollRegistration>();
+        foreach (var registration in registrations)
+        {
+            if (!_sockets.TryGetValue(registration.SocketId, out var socket))
+            {
+                continue;
+            }
+
+            hostRegistrations[socket] = registration;
+            if ((registration.Event.Events & NetEpollIn) != 0)
+            {
+                readSockets.Add(socket);
+            }
+            if ((registration.Event.Events & NetEpollOut) != 0)
+            {
+                writeSockets.Add(socket);
+            }
+            errorSockets.Add(socket);
+        }
+
+        if (hostRegistrations.Count == 0)
+        {
+            return ctx.SetReturn(0);
+        }
+
+        try
+        {
+            Socket.Select(readSockets, writeSockets, errorSockets, timeoutMicroseconds);
+        }
+        catch (ObjectDisposedException)
+        {
+            return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+        }
+        catch (SocketException)
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        var readyCount = 0;
+        foreach (var (socket, registration) in hostRegistrations)
+        {
+            uint readyEvents = 0;
+            if (readSockets.Contains(socket))
+            {
+                readyEvents |= NetEpollIn;
+            }
+            if (writeSockets.Contains(socket))
+            {
+                readyEvents |= NetEpollOut;
+            }
+            if (errorSockets.Contains(socket))
+            {
+                readyEvents |= NetEpollError;
+            }
+            if (readyEvents == 0)
+            {
+                continue;
+            }
+
+            var outputAddress = eventsAddress + (ulong)(readyCount * NetEpollEventSize);
+            if (!TryWriteNetEpollEvent(
+                    ctx,
+                    outputAddress,
+                    readyEvents,
+                    registration.SocketId,
+                    registration.Event.Data))
+            {
+                return SetNetError(ctx, NetErrorFault, NetErrnoFault);
+            }
+
+            readyCount++;
+            if (readyCount == maxEvents)
+            {
+                break;
+            }
+        }
+
+        TraceNet(
+            "epoll.wait",
+            epollId,
+            unchecked((uint)maxEvents),
+            unchecked((uint)timeoutMicroseconds),
+            unchecked((uint)readyCount));
+        return ctx.SetReturn(readyCount);
+    }
+
+    [SysAbiExport(
+        Nid = "Inp1lfL+Jdw",
+        ExportName = "sceNetEpollDestroy",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetEpollDestroy(CpuContext ctx)
+    {
+        var epollId = unchecked((int)ctx[CpuRegister.Rdi]);
+        lock (EpollGate)
+        {
+            if (!_epolls.Remove(epollId))
+            {
+                return SetNetError(ctx, NetErrorBadFileDescriptor, NetErrnoBadFileDescriptor);
+            }
+
+            Monitor.PulseAll(EpollGate);
+        }
+
+        TraceNet("epoll.destroy", epollId, 0, 0, 0);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
         Nid = "dgJBaeJnGpo",
         ExportName = "sceNetPoolCreate",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -814,6 +1144,53 @@ public static class NetExports
         // dispatch status without going through SetReturn, which would overwrite Rax with 0.
         ctx[CpuRegister.Rax] = BinaryPrimitives.ReverseEndianness(value);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "v6M4txecCuo",
+        ExportName = "sceNetEtherNtostr",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNet")]
+    public static int NetEtherNtostr(CpuContext ctx)
+    {
+        const int EtherStringLength = 18;
+        const string HexDigits = "0123456789abcdef";
+
+        var address = ctx[CpuRegister.Rdi];
+        var destination = ctx[CpuRegister.Rsi];
+        var destinationLength = ctx[CpuRegister.Rdx];
+        if (address == 0 || destination == 0 || destinationLength < EtherStringLength)
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        Span<byte> macAddress = stackalloc byte[6];
+        if (!ctx.Memory.TryRead(address, macAddress))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        Span<byte> text = stackalloc byte[EtherStringLength];
+        for (var index = 0; index < macAddress.Length; index++)
+        {
+            var value = macAddress[index];
+            var offset = index * 3;
+            text[offset] = unchecked((byte)HexDigits[value >> 4]);
+            text[offset + 1] = unchecked((byte)HexDigits[value & 0xF]);
+            if (index != macAddress.Length - 1)
+            {
+                text[offset + 2] = (byte)':';
+            }
+        }
+        text[^1] = 0;
+
+        if (!ctx.Memory.TryWrite(destination, text))
+        {
+            return SetNetError(ctx, NetErrorInvalidArgument, NetErrnoInvalidArgument);
+        }
+
+        TraceNet("ether_ntostr", 0, address, destination, destinationLength);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -1023,6 +1400,39 @@ public static class NetExports
 
         value = Encoding.UTF8.GetString(bytes, 0, count);
         return true;
+    }
+
+    private static bool TryReadNetEpollEvent(
+        CpuContext ctx,
+        ulong address,
+        out NetEpollEvent epollEvent)
+    {
+        Span<byte> bytes = stackalloc byte[NetEpollEventSize];
+        if (!ctx.Memory.TryRead(address, bytes))
+        {
+            epollEvent = default;
+            return false;
+        }
+
+        epollEvent = new NetEpollEvent(
+            BinaryPrimitives.ReadUInt32LittleEndian(bytes),
+            BinaryPrimitives.ReadUInt64LittleEndian(bytes[16..]));
+        return true;
+    }
+
+    private static bool TryWriteNetEpollEvent(
+        CpuContext ctx,
+        ulong address,
+        uint events,
+        int socketId,
+        ulong data)
+    {
+        Span<byte> bytes = stackalloc byte[NetEpollEventSize];
+        bytes.Clear();
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, events);
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes[8..], unchecked((uint)socketId));
+        BinaryPrimitives.WriteUInt64LittleEndian(bytes[16..], data);
+        return ctx.Memory.TryWrite(address, bytes);
     }
 
     [SysAbiExport(

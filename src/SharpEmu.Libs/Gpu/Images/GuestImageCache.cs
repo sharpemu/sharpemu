@@ -123,28 +123,48 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             return GetNullImage(request);
         }
 
-        var found = LookUpImage(ref request, exactFormat);
+        var metadataBaseLayer = request.View.BaseLayer;
+        var result = LookUpImage(ref request, exactFormat);
+
         if (request.Role is ImageRole.Texture or ImageRole.StorageImage)
         {
-            if (request.Description.Metadata.Kind == MetadataKind.Dcc)
+            ulong metadataAddress;
+            ulong sliceSize;
+            using (var held = _lock.Hold())
             {
-                using var held = _lock.Hold();
-                var image = _slots[found];
-                if (image.Description.Metadata.Kind == MetadataKind.None)
+                var image = _slots[result];
+                if (request.Description.Metadata.Kind == MetadataKind.Dcc && request.Description.Metadata.Range.Size == 0 &&
+                    image.Description.Metadata.Kind == MetadataKind.None)
                 {
-                    image.Description.Metadata.Kind = MetadataKind.Dcc;
-                    image.Description.Metadata.Range = request.Description.Metadata.Range;
+                    image.Description.Metadata = request.Description.Metadata;
                 }
+
+                ref readonly var description = ref image.Description;
+                metadataAddress = description.Metadata.Range.Address;
+                sliceSize = description.DccSliceSize;
             }
 
-            ref readonly var description = ref _slots[found].Description;
-            if (description.DccSliceSize is var sliceSize and not 0)
+            if (sliceSize != 0)
             {
-                SynchronizeGuestDccMetadata(description.Metadata.Range.Address, sliceSize, request.View.BaseLayer, request.View.LayerCount);
+                SynchronizeGuestDccMetadata(metadataAddress, sliceSize, request.View.BaseLayer, request.View.LayerCount);
             }
         }
 
-        return found;
+        MaterializeDccClear(result, request, metadataBaseLayer);
+        if (request.Role == ImageRole.DisplaySurface && request.Description.Metadata.Compression != DisplayCompression.Uncompressed)
+        {
+            using var held = _lock.Hold();
+            var image = _slots[result];
+            var guestDirty = image.IsBufferModified || image.IsCpuDirty;
+            var nativeCurrent = (image.Uses.RenderTarget || image.IsGpuModified) && !guestDirty;
+            if (!nativeCurrent)
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"A compressed display surface can only be read from clean native GPU contents: address=0x{image.Description.Data.Address:X16} bufferModified={image.IsBufferModified} cpuDirty={image.IsCpuDirty} gpuModified={image.IsGpuModified}.");
+            }
+        }
+
+        return result;
     }
 
     private ResourceSlotIdentifier LookUpImage(ref ImageRequest request, bool exactFormat)
@@ -231,17 +251,6 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         }
 
         var image = _slots[result];
-        if (request.Role == ImageRole.DisplaySurface && request.Description.Metadata.Compression != DisplayCompression.Uncompressed)
-        {
-            var guestDirty = image.IsBufferModified || image.IsCpuDirty;
-            var nativeCurrent = (image.Uses.RenderTarget || image.IsGpuModified) && !guestDirty;
-            if (!nativeCurrent)
-            {
-                throw SubmissionScheduler.Fatal(
-                    $"A compressed display surface can only be read from clean native GPU contents: address=0x{image.Description.Data.Address:X16} bufferModified={image.IsBufferModified} cpuDirty={image.IsCpuDirty} gpuModified={image.IsGpuModified}.");
-            }
-        }
-
         if (viewMip >= 0)
         {
             request.View = request.View with { BaseLevel = (uint)viewMip };
@@ -353,8 +362,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         image.MarkGpuModified();
         image.Uses.RenderTarget = true;
         RefreshFromGuest(imageIdentifier, request);
-        // DCC lives in its own allocation; it is registered at bind time, keeping a pending fill.
-        if (request.Description.Metadata.Kind == MetadataKind.Dcc)
+        if (request.Description.Metadata.Kind == MetadataKind.Dcc && request.Description.Metadata.Range.Size == 0)
         {
             image.Description.Metadata = request.Description.Metadata;
             var address = request.Description.Metadata.Range.Address;

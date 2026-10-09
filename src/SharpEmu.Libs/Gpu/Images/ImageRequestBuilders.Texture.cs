@@ -299,12 +299,15 @@ public static partial class ImageRequestBuilders
         description.BytesPerBlock = blockBytes != 0 ? blockBytes : GuestPixelFormats.BytesPerElement(format);
         description.Samples = samples;
         description.TileMode = tile;
-        var metadataAddress = descriptor.MetadataAddress << 8;
-        if (!storage && type == GuestImageType.Color2D && samples == 1 && levels == 1 && tile == GuestTileMode.RenderTarget && descriptor.MetadataCompress &&
-            metadataAddress != 0 && metadataAddress < TrackerLayout.SpaceBytes)
+        if (!shape.R128 && words.Length >= 8 && descriptor.MetadataCompress &&
+            tile != GuestTileMode.Depth && !description.IsDepth)
         {
+            _ = TileGeometry.TryGetDccSize(
+                width, height, volume ? depth : imageLayers, description.BytesPerBlock, levels, tile,
+                out var metadataSize, (uint)System.Numerics.BitOperations.TrailingZeroCount(samples));
             description.Metadata.Kind = MetadataKind.Dcc;
-            description.Metadata.Range = new GuestSpan(metadataAddress, 0);
+            description.Metadata.Range = new GuestSpan(descriptor.MetadataAddress << 8, metadataSize.Size);
+            description.Metadata.DccAlphaMsb = descriptor.DccAlphaMsb;
         }
 
         if (samples > 1)

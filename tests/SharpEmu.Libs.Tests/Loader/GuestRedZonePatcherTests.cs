@@ -190,8 +190,6 @@ public sealed class GuestRedZonePatcherTests
         Assert.Equal(expected, ((delegate* unmanaged<ulong, ulong>)image.Base)(image.Base));
     }
 
-    // Demon's Souls FUN_800ad8fe0: a two-byte AND whose successor is a branch
-    // target is patched by starting the span at the instruction before it.
     [Fact]
     public unsafe void PatchesShortAccessBeforeBranchTargetFromThePreviousInstruction()
     {
@@ -201,14 +199,14 @@ public sealed class GuestRedZonePatcherTests
         var argument = OperatingSystem.IsWindows() ? (byte)0x91 : (byte)0x97;
         byte[] function =
         [
-            0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // mov rax, value
-            0x48, 0x89, 0x44, 0x24, 0xF8,                               // mov [rsp-8], rax
-            0x48, 0x8D, argument, 0x00, 0x20, 0x00, 0x00,               // lea rdx, [arg+0x2000]
-            0xB8, 0xFE, 0xFF, 0xFF, 0xFF,                               // mov eax, 0xFFFFFFFE
-            0x21, 0x02,                                                 // and [rdx], eax
-            0x48, 0x8B, 0x44, 0x24, 0xF8,                               // target: mov rax, [rsp-8]
-            0xC3,                                                       // ret
-            0xEB, 0xF8,                                                 // jmp target
+            0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+            0x48, 0x89, 0x44, 0x24, 0xF8,
+            0x48, 0x8D, argument, 0x00, 0x20, 0x00, 0x00,
+            0xB8, 0xFE, 0xFF, 0xFF, 0xFF,
+            0x21, 0x02,
+            0x48, 0x8B, 0x44, 0x24, 0xF8,
+            0xC3,
+            0xEB, 0xF8,
         ];
 
         using var image = PatchedImage.Create(function, [(0x2000, 7u)]);
@@ -216,6 +214,44 @@ public sealed class GuestRedZonePatcherTests
         {
             Assert.Equal(1, image.Result.PatchedSites);
             Assert.Equal(0xE9, image.ReadByte(22));
+        }
+
+        Assert.Equal(0x1122_3344_5566_7788UL, ((delegate* unmanaged<ulong, ulong>)image.Base)(image.Base));
+        Assert.Equal(6u, image.ReadUInt32(0x2000));
+    }
+
+    [Fact]
+    public unsafe void LeavesShortAccessBeforeBranchTargetUnchangedWhenAnIndirectBranchIsUnresolved()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var argument = OperatingSystem.IsWindows() ? (byte)0x91 : (byte)0x97;
+        byte[] function =
+        [
+            0x48, 0xB8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+            0x48, 0x89, 0x44, 0x24, 0xF8,
+            0x48, 0x8D, argument, 0x00, 0x20, 0x00, 0x00,
+            0xB8, 0xFE, 0xFF, 0xFF, 0xFF,
+            0x21, 0x02,
+            0x48, 0x8B, 0x44, 0x24, 0xF8,
+            0xC3,
+            0xEB, 0xF8,
+            0xFF, 0xE0,
+        ];
+
+        using var image = PatchedImage.Create(function, [(0x2000, 7u)]);
+        Assert.Equal(0, image.Result.PatchedSites);
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        {
+            Assert.Equal(1, image.Result.RedZoneFunctions);
+            Assert.Equal(1, image.Result.UnrelocatableSites);
+            Assert.Equal(1, image.Result.IndirectBranchRefusals);
+        }
+
+        for (var index = 0; index < function.Length; index++)
+        {
+            Assert.Equal(function[index], image.ReadByte((ulong)index));
         }
 
         Assert.Equal(0x1122_3344_5566_7788UL, ((delegate* unmanaged<ulong, ulong>)image.Base)(image.Base));

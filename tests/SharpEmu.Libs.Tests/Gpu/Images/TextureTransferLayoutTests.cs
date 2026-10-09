@@ -97,7 +97,7 @@ public sealed class TextureTransferLayoutTests
         var target = TextureTransferLayout.Compute(GuestPixelFormat.Bits8_8_8_8UNorm, 128, 128, 1, 2, GuestTileMode.RenderTarget, 0, false, false, "test");
         Assert.True(target.TryBuildTileTransfers(2 * 65536, target.BuildCopies(), 1, out var targetTransfers));
         Assert.Equal(1u, targetTransfers[1].SurfaceZ);
-        Assert.Equal(TileBlockKind.RenderTarget64KB, targetTransfers[1].Kind);
+        Assert.Equal(TileBlockKind.RenderTarget64KBGen5, targetTransfers[1].Kind);
     }
 
     [Fact]

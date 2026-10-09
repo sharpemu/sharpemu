@@ -45,6 +45,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private ulong _minStorageBufferOffsetAlignment = 1;
         private bool _supportsIndependentBlend;
         private bool _supportsDepthBiasClamp;
+        private bool _supportsShaderSignedZeroInfNanPreserveFloat32;
         private uint _maxColorAttachments;
         private Device _device;
         private PipelineCache _pipelineCache;
@@ -583,10 +584,15 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 SType = StructureType.PhysicalDevicePushDescriptorPropertiesKhr,
             };
+            var floatControls = new PhysicalDeviceFloatControlsProperties
+            {
+                SType = StructureType.PhysicalDeviceFloatControlsProperties,
+                PNext = &pushDescriptorProperties,
+            };
             var subgroupSizeControl = new PhysicalDeviceSubgroupSizeControlProperties
             {
                 SType = StructureType.PhysicalDeviceSubgroupSizeControlProperties,
-                PNext = &pushDescriptorProperties,
+                PNext = &floatControls,
             };
             var subgroup = new PhysicalDeviceSubgroupProperties
             {
@@ -599,6 +605,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 PNext = &subgroup,
             };
             _vk.GetPhysicalDeviceProperties2(_physicalDevice, &properties2);
+            _supportsShaderSignedZeroInfNanPreserveFloat32 =
+                floatControls.ShaderSignedZeroInfNanPreserveFloat32;
             SetNativeSubgroupCapabilities(subgroup.SubgroupSize, subgroup.SupportedStages);
             _canRequireComputeSubgroup32 =
                 subgroup.SubgroupSize != RdnaSubgroupSize &&
@@ -661,6 +669,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 _ when GraphicsSubgroupOperationsEnabled => "auto-native-wave32",
                 _ => "auto-fallback",
             };
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] Vulkan shaderSignedZeroInfNanPreserveFloat32 " +
+                $"enabled={_supportsShaderSignedZeroInfNanPreserveFloat32}");
             Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan graphics subgroup operations " +
                 $"enabled={GraphicsSubgroupOperationsEnabled} " +

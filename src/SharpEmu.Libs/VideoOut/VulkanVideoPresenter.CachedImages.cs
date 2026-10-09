@@ -307,7 +307,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool ResolveDccAttachmentClear(ColorAttachment target, out ClearColorValue clearValue)
         {
             clearValue = default;
-            if (target.Request.Description.Metadata.Kind != MetadataKind.Dcc)
+            if (target.Request.Description.Metadata.Kind != MetadataKind.Dcc || target.Request.Description.Metadata.Range.Size != 0)
             {
                 return false;
             }

@@ -213,6 +213,7 @@ public enum SpirvCapability : uint
     ShaderViewportIndexLayerExt = 5254,
     RuntimeDescriptorArray = 5302,
     PhysicalStorageBufferAddresses = 5347,
+    SignedZeroInfNanPreserve = 4466,
 }
 
 public enum SpirvStorageClass : uint
@@ -242,6 +243,7 @@ public enum SpirvExecutionMode : uint
     OriginUpperLeft = 7,
     DepthReplacing = 12,
     LocalSize = 17,
+    SignedZeroInfNanPreserve = 4461,
 }
 
 public enum SpirvDecoration : uint

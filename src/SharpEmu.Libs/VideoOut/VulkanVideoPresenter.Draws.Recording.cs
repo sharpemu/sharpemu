@@ -91,10 +91,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 "1",
                 StringComparison.Ordinal);
         private static readonly bool _traceTextureBindingsEnabled =
-            string.Equals(
-                Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TEXTURE_BINDINGS"),
-                "1",
-                StringComparison.Ordinal);
+            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TEXTURE_BINDINGS") is "1" or "volume";
+        private static readonly bool _traceVolumeTextureBindingsOnly =
+            Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TEXTURE_BINDINGS") == "volume";
         private static readonly uint _traceGuestImageWidth =
             uint.TryParse(
                 Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GUEST_IMAGE_WIDTH"),

@@ -78,7 +78,7 @@ public static class SaveDataExports
     private const uint EventTypeSaveDataMemorySyncEnd = 3;
     private const int SaveDataTitleIdStructSize = 0x10;
     private const int SaveDataEventSize = 0x68;
-    private const int MountInfoSize = 0x40;
+    private const int MountInfoSize = 0x30;
     private const uint SaveDataBlockSize = 65536;
     private const ulong SaveDataBlocksMax = 16384;
 

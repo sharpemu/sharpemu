@@ -274,7 +274,7 @@ public static partial class KernelMemoryCompatExports
 
         try
         {
-            using var stream = new FileStream(hostPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+            using var stream = new FileStream(hostPath, FileMode.Open, FileAccess.Write, GuestFileShare);
             stream.SetLength(length);
         }
         catch (FileNotFoundException)

@@ -28,6 +28,29 @@ public sealed class NpUniversalDataSystemExportsTests : IDisposable
     public void Dispose() => NpUniversalDataSystemState.ResetForTests();
 
     [Fact]
+    public void ContextBootstrap_PreservesHandlesAcrossExplicitInitialization()
+    {
+        var context = CreateContext(userId: 7, serviceLabel: 3, options: 0x11);
+        var serviceHandle = CreateServiceHandle();
+        var before = NpUniversalDataSystemState.GetMemoryStat();
+        Assert.True(before.CurrentInUseSize > 0);
+
+        Initialize(poolSize: 0x20_0000);
+        Initialize(poolSize: 0x40_0000);
+
+        SetRegisters((ulong)(uint)context, (ulong)(uint)serviceHandle, 0x22);
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemRegisterContext(_context));
+        var after = NpUniversalDataSystemState.GetMemoryStat();
+        Assert.Equal(0x40_0000UL, after.PoolSize);
+        Assert.True(after.CurrentInUseSize >= before.CurrentInUseSize);
+        Assert.True(after.MaximumInUseSize >= before.MaximumInUseSize);
+
+        AssertSuccess(NpUniversalDataSystemExports.NpUniversalDataSystemTerminate(_context));
+        SetRegisters((ulong)(uint)context, (ulong)(uint)serviceHandle, 0x22);
+        Assert.Equal(ErrorInvalidArgument, NpUniversalDataSystemExports.NpUniversalDataSystemRegisterContext(_context));
+    }
+
+    [Fact]
     public void FullLifecycle_PreservesAttachedChildAfterItsHandleIsDestroyed()
     {
         Initialize(poolSize: 0x20_0000);
