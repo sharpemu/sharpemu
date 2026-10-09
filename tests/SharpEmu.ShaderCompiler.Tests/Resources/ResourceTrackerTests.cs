@@ -143,6 +143,68 @@ public sealed class ResourceTrackerTests
         Assert.True(plan.Memory[index].DeviceDescriptor);
     }
 
+    // A waterfall loop picks the descriptor per wave: v_readfirstlane reads a per-lane index, S_BUFFER_LOAD fetches the T# from a
+    // table at that offset and the sample uses it. Such a descriptor has no single source, so it reads as a null image like the
+    // control-dependent lookups instead of failing the whole shader.
+    [Fact]
+    public void ImageDescriptorLoadedAtALaneChosenIndex_ReadsAsANullImage()
+    {
+        var program = LaneIndexedImageProgram();
+
+        var plan = Extract(program, stage: ShaderStage.Pixel);
+
+        var image = Assert.Single(plan.DescriptorSources, source => source.DwordCount == 8);
+        Assert.All(image.Dwords, dword => Assert.True(dword.IsConstant && dword.ConstantU32 == 0));
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program, ShaderStage.Pixel), out var shader, out var error), error);
+        Assert.NotEmpty(shader.Spirv);
+    }
+
+    // Compute keeps rejecting an index no bound was proved for (see DirectImageTableTests).
+    [Fact]
+    public void ImageDescriptorLoadedAtALaneChosenIndexInCompute_IsStillRejected()
+    {
+        var program = LaneIndexedImageProgram();
+
+        var error = Assert.Throws<ResourcePlanException>(() => Extract(program, stage: ShaderStage.Compute));
+        Assert.Contains("not a valid runtime value", error.Message);
+    }
+
+    // The fallback is for images only: a sampler is still rejected when a lane chose its bits.
+    [Fact]
+    public void SamplerLoadedAtALaneChosenIndex_IsStillRejected()
+    {
+        var program = Program(
+            MoveScalarRegister(0, 16, 0),
+            MoveScalarRegister(4, 17, 1),
+            MoveScalarRegister(8, 18, 2),
+            MoveScalarRegister(12, 19, 3),
+            Vop2(16, "VLshlrevB32", 1, Operand(12), Gen5Operand.Vector(0)),
+            ReadFirstLane(20, 106, 1),
+            ScalarBufferLoad(24, 16, destination: 24, count: 4, dynamicOffsetRegister: 106),
+            Image(32, "ImageSample", 8, 24),
+            EndProgram(40));
+
+        var error = Assert.Throws<ResourcePlanException>(() => Extract(program, stage: ShaderStage.Pixel));
+        Assert.Contains("not a valid runtime value", error.Message);
+    }
+
+    private static Gen5ShaderProgram LaneIndexedImageProgram() => Program(
+        // The table V# in s16..s19 and the sampler in s24..s27 come from user data.
+        MoveScalarRegister(0, 16, 0),
+        MoveScalarRegister(4, 17, 1),
+        MoveScalarRegister(8, 18, 2),
+        MoveScalarRegister(12, 19, 3),
+        MoveScalarRegister(16, 24, 4),
+        MoveScalarRegister(20, 25, 5),
+        MoveScalarRegister(24, 26, 6),
+        MoveScalarRegister(28, 27, 7),
+        // s106 = readfirstlane(v7) << 5: the byte offset of the T# the first lane asks for.
+        ReadFirstLane(32, 106, 7),
+        Sop2(36, "SLshlB32", 106, Gen5Operand.Scalar(106), Operand(5)),
+        ScalarBufferLoad(40, 16, destination: 0, count: 8, dynamicOffsetRegister: 106),
+        Image(48, "ImageSample", 0, 24),
+        EndProgram(56));
+
     [Fact]
     public void SamplerWithDivergentBits_IsRejected()
     {

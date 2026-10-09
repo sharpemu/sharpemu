@@ -181,6 +181,37 @@ public sealed partial class ResourceTracker
         return origins.Count == 0 ? string.Empty : $" (undefined from: {string.Join(", ", origins)})";
     }
 
+    // A value one lane picked for the wave (v_readfirstlane of a per-lane register, as a waterfall loop over a bindless
+    // descriptor index does) has no source the host can evaluate. Compute keeps rejecting it: its dense-table support
+    // proves a bound for the index first.
+    private static bool HasLaneChosenValue(ScalarValue value)
+    {
+        var seen = new HashSet<ScalarValue>();
+        var pending = new Stack<ScalarValue>();
+        pending.Push(value);
+        while (pending.Count != 0)
+        {
+            var current = pending.Pop();
+            if (!seen.Add(current))
+            {
+                continue;
+            }
+
+            if (current.Kind == ScalarValueKind.FirstLane && current.Operands.Length == 2 &&
+                current.Operands[0].Kind == ScalarValueKind.Undefined)
+            {
+                return true;
+            }
+
+            foreach (var operand in current.Operands)
+            {
+                pending.Push(operand);
+            }
+        }
+
+        return false;
+    }
+
     private bool HasUndefinedOrigin(ScalarValue value, string opcodePrefix)
     {
         var seen = new HashSet<ScalarValue>();
@@ -459,7 +490,9 @@ public sealed partial class ResourceTracker
             // still hard-fail, since those aren't safe to silently zero.
             var dynamicImageFallback = expected is (ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle) &&
                 (controlDependent || HasUndefinedOrigin(source.Dwords[badDword], "BufferLoadFormat") ||
-                 (nonContiguousImage && source.Dwords.Any(dword => HasUndefinedOrigin(dword, "SAndB32"))));
+                 (nonContiguousImage && source.Dwords.Any(dword => HasUndefinedOrigin(dword, "SAndB32"))) ||
+                 (expected == ScalarValueKind.ImageHandle && _plan.Stage != ShaderStage.Compute &&
+                  source.Dwords.Any(HasLaneChosenValue)));
             if (dynamicImageFallback)
             {
                 source = new DescriptorSource
