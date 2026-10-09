@@ -258,6 +258,16 @@ public static partial class Gen5MslTranslator
                 "VCvtU32F32" => $"(uint)({F(instruction, 0)})",
                 "VCvtU16F16" =>
                     $"(uint)clamp(trunc(isnan({F16(instruction, 0)}) ? 0.0f : {F16(instruction, 0)}), 0.0f, 65535.0f)",
+                "VCvtF16U16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"(float){I16(instruction, 0, signed: false)}"),
+                "VCvtF16I16" => Float16Result(
+                    instruction,
+                    destination,
+                    $"(float){I16(instruction, 0, signed: true)}"),
+                "VCvtI16F16" =>
+                    $"(as_type<uint>((int)clamp(trunc(isnan({F16(instruction, 0)}) ? 0.0f : {F16(instruction, 0)}), -32768.0f, 32767.0f)) & 0xFFFFu)",
                 "VCvtI32F32" => AsUInt($"(int)({F(instruction, 0)})"),
                 // RPI rounds toward positive infinity; FLR toward negative.
                 "VCvtRpiI32F32" => AsUInt($"(int)ceil({F(instruction, 0)})"),
@@ -1902,6 +1912,21 @@ public static partial class Gen5MslTranslator
             }
 
             return expression;
+        }
+
+        /// <summary>Reads the selected 16-bit half as an integer, sign-extended when requested.</summary>
+        private string I16(Gen5ShaderInstruction instruction, int sourceIndex, bool signed)
+        {
+            var raw = RawSource(
+                instruction,
+                sourceIndex,
+                applySdwaIntegerModifiers: false);
+            var shift = instruction.Control is Gen5Vop3Control control &&
+                (control.OperandSelect & (1u << sourceIndex)) != 0
+                    ? 16
+                    : 0;
+            var half = $"((({raw}) >> {shift}) & 0xFFFFu)";
+            return signed ? $"int(short({half}))" : half;
         }
 
         /// <summary>Rounds to f16 and preserves the unselected VGPR half.</summary>
