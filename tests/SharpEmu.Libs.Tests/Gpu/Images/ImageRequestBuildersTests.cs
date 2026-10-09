@@ -383,6 +383,35 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     }
 
     [Fact]
+    public void Texture_AnAtomicOnA64BitTexelViewsTheImageAsR64()
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits32_32UInt, 64, 64);
+        var shape = Sampled2D with { Storage = true, NumericClass = TextureNumericClass.Uint, Atomic = true, Atomic64 = true };
+        var wide = ImageRequestBuilders.Texture(words, shape);
+        var narrow = ImageRequestBuilders.Texture(words, shape with { Atomic64 = false });
+
+        // The image keeps its two-dword texels; the shader sees each as one 64-bit integer.
+        Assert.Equal(ImageRole.StorageImage, wide.Request.Role);
+        Assert.Equal(Format.R32G32Uint, wide.Request.Description.PixelFormat);
+        Assert.Equal(Format.R64Uint, wide.Request.View.Format);
+        Assert.Equal(ImageUsageFlags.StorageBit, wide.Request.View.Usage);
+        Assert.Equal(Format.R32Uint, narrow.Request.View.Format);
+    }
+
+    [Fact]
+    public void Texture_NullDescriptorOfA64BitAtomicBindsAnR64Image()
+    {
+        var storage = ImageRequestBuilders.Texture(
+            new uint[8], Sampled2D with { Storage = true, NumericClass = TextureNumericClass.Uint, Atomic = true, Atomic64 = true });
+
+        Assert.Equal(ImageRole.StorageImage, storage.Request.Role);
+        Assert.Equal(Format.R64Uint, storage.Request.Description.PixelFormat);
+        Assert.Equal(Format.R64Uint, storage.Request.View.Format);
+        Assert.Equal(8u, storage.Request.Description.BytesPerBlock);
+        Assert.Equal(ImageUsageFlags.StorageBit, storage.Request.View.Usage);
+    }
+
+    [Fact]
     public void Texture_StorageViewOfAnSrgbImageUsesTheLinearFormat()
     {
         var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8Srgb, 64, 64);

@@ -92,7 +92,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private static TextureNumericClass NumericClassOf(ImageResource image) => image.NumericClass switch
         {
-            ImageNumericClass.Uint => TextureNumericClass.Uint,
+            ImageNumericClass.Uint or ImageNumericClass.Uint64 => TextureNumericClass.Uint,
             ImageNumericClass.Sint => TextureNumericClass.Sint,
             _ => TextureNumericClass.Float,
         };
@@ -108,7 +108,8 @@ internal static unsafe partial class VulkanVideoPresenter
             R128: image.R128,
             Multisampled: image.Dimension is ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray,
             DepthCompare: image.DepthCompare,
-            Atomic: image.Atomic);
+            Atomic: image.Atomic,
+            Atomic64: image.NumericClass == ImageNumericClass.Uint64);
 
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _tracedTextureBindings = new();
 

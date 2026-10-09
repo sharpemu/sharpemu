@@ -25,6 +25,7 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
     private const uint Format32Uint = 20;
     private const uint Format32Sint = 21;
     private const uint Format32Float = 22;
+    private const uint Format32x2Uint = 62;
     private const uint ImageType2D = 9;
     private const uint ResultRegister = 8;
     private const uint ResultBytes = 64;
@@ -92,22 +93,41 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         return Program([.. instructions]);
     }
 
-    private static ImageDescription Describe(ulong guestOffset, Format format, GuestPixelFormat guestFormat, uint width, uint height, uint levels)
+    // Three 64-bit unsigned maxes on texel (0, 0): (high 9, low 5), (high 4, low 0xFFFFFFFF) and (high 9, low 6).
+    private static Gen5ShaderProgram WideAtomicMaxProgram()
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, FirstImageRegister, FirstImageAddress, Format32x2Uint));
+        instructions.Add(MoveVector(pc, 1, 0)); pc += 8;
+        instructions.Add(MoveVector(pc, 2, 0)); pc += 8;
+        foreach (var (low, high) in new (uint, uint)[] { (5, 9), (0xFFFF_FFFF, 4), (6, 9) })
+        {
+            instructions.Add(MoveVector(pc, 4, low)); pc += 8;
+            instructions.Add(MoveVector(pc, 5, high)); pc += 8;
+            instructions.Add(Image(pc, "ImageAtomicUmax", FirstImageRegister, vectorAddress: 1, dmask: 3)); pc += 8;
+        }
+
+        instructions.Add(EndProgram(pc));
+        return Program([.. instructions]);
+    }
+
+    private static ImageDescription Describe(ulong guestOffset, Format format, GuestPixelFormat guestFormat, uint width, uint height, uint levels, uint bytesPerBlock = 4)
     {
         var description = ImageDescription.Create();
-        description.Data = new GuestSpan(ArrayBackedSpace.Base + guestOffset, (ulong)width * height * 4 * 2);
+        description.Data = new GuestSpan(ArrayBackedSpace.Base + guestOffset, (ulong)width * height * bytesPerBlock * 2);
         description.PixelFormat = format;
         description.GuestFormat = guestFormat;
         description.Extent = new Extent3D(width, height, 1);
         description.Resources = new SubresourceCount(levels, 1);
         description.Pitch = width;
-        description.BytesPerBlock = 4;
+        description.BytesPerBlock = bytesPerBlock;
         return description;
     }
 
     private sealed class Run : IDisposable
     {
-        public Run(HeadlessVulkan vulkan, Gen5ShaderProgram program, uint[] registers, uint threadCount)
+        public Run(HeadlessVulkan vulkan, Gen5ShaderProgram program, uint[] registers, uint threadCount, bool imageInt64Atomics = false)
         {
             Plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, 0x5348_4152_5045_4D55, 0, 64);
             var snapshot = new ResourceSnapshot();
@@ -121,7 +141,10 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
                 false,
                 ShaderCompileRequest.RequiresFlattenedTable(Plan, Resources),
                 false);
-            Request = new ShaderCompileRequest(Plan, Resources, layout) { LocalSizeX = threadCount, ThreadCountX = threadCount };
+            Request = new ShaderCompileRequest(Plan, Resources, layout)
+            {
+                LocalSizeX = threadCount, ThreadCountX = threadCount, SupportsImageInt64Atomics = imageInt64Atomics,
+            };
             Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request, out var shader, out var error), error);
             Harness = new ImageTestHarness(vulkan);
             Runner = new LayoutComputeRunner(Harness, Request, shader.Spirv);
@@ -477,6 +500,46 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         });
         Assert.Equal(expected, BinaryPrimitives.ReadUInt32LittleEndian(runner.ReadBack(result, 0, sizeof(uint))));
         harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
+    public void ImageAtomicOnA64BitTexel_UpdatesBothDwordsOnTheDevice()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan) || !vulkan!.SupportsImageInt64Atomics)
+        {
+            return;
+        }
+
+        using var run = new Run(vulkan, WideAtomicMaxProgram(), UserData(), 1, imageInt64Atomics: true);
+        Assert.Equal(ImageNumericClass.Uint64, run.Resources.Info.Images[0].NumericClass);
+
+        // A 32_32 UINT image whose texels the shader sees as one 64-bit integer each.
+        var description = Describe(0, Format.R32G32Uint, GuestPixelFormat.Bits32_32UInt, 4, 4, 1, bytesPerBlock: 8);
+        var target = run.Harness.CreateImage(description);
+        var copies = ImageTestHarness.WholeImageCopies(description, 0);
+        var texelBytes = ImageTestHarness.WholeImageBytes(description);
+        var texels = Enumerable.Repeat(0xAAAA_AAAAu, (int)(texelBytes / 4)).ToArray();
+        texels[0] = 0;
+        texels[1] = 3;
+        run.Harness.UploadImage(target, MemoryMarshal.AsBytes<uint>(texels), copies);
+        var wideView = new DescriptorImageInfo
+        {
+            ImageView = target.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R64Uint, Usage = ImageUsageFlags.StorageBit }),
+            ImageLayout = ImageLayout.General,
+        };
+        var views = new Dictionary<int, DescriptorImageInfo[]> { [0] = [wideView] };
+        run.Dispatch(run.BindImages(views), command =>
+            target.Transition(ImageLayout.General, AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit, null, command));
+
+        var result = MemoryMarshal.Cast<byte, uint>(run.Harness.ReadImage(target, copies, texelBytes)).ToArray();
+        // The second atomic had the larger low dword but the smaller high dword, so it must not win.
+        Assert.Equal(6u, result[0]);
+        Assert.Equal(9u, result[1]);
+        Assert.Equal(0xAAAA_AAAAu, result[2]);
+        Assert.Equal(0xAAAA_AAAAu, result[3]);
+        run.Harness.AssertNoValidationMessages();
+        output.WriteLine($"Verified a 64-bit image atomic on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
     }
 
     [Fact]
