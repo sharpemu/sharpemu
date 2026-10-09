@@ -1806,6 +1806,8 @@ public static partial class Gen5ShaderTranslator
             0x3E => "ImageSampleCBClO",
             0x3F => "ImageSampleCLzO",
             0x40 => "ImageGather4",
+            // The level of detail follows the coordinates; OpImageGather has no Lod operand and reads the base level.
+            0x44 => "ImageGather4L",
             0x47 => "ImageGather4Lz",
             0x48 => "ImageGather4C",
             0x4E => "ImageGather4CBCl",
