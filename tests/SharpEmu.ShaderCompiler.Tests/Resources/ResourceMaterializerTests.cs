@@ -241,6 +241,39 @@ public sealed class ResourceMaterializerTests
         Assert.Equal([0x12345678u], snapshot.FlattenedResourceTable);
     }
 
+    // A shader that loads through an absolute address it carries itself reads a table of the system that no guest mapping
+    // backs (not data of the title): those words read as zero instead of failing the dispatch.
+    [Fact]
+    public void ScalarLoadAtAnUnmappedAbsoluteAddress_ReadsZero()
+    {
+        var plan = Extract(Program(
+            MoveScalar(0, 4, 0xE0040000),
+            MoveScalar(8, 5, 0xF),
+            ScalarLoad(16, 4, destination: 6),
+            EndProgram(24)));
+        var reads = 0;
+        var inputs = Inputs([], readMemory: (ulong address, out uint word) => { reads++; word = 0xDEADBEEF; return false; });
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.True(reads > 0);
+        Assert.Equal([0u], snapshot.FlattenedResourceTable);
+    }
+
+    // Only an address the shader carries is a platform table: a pointer the title passes in user data that nothing maps
+    // is still a failure.
+    [Fact]
+    public void ScalarLoadThroughAnUnmappedUserDataPointer_StillFails()
+    {
+        var plan = Extract(Program(ScalarLoad(0, 4, destination: 6), EndProgram(8)));
+        var inputs = Inputs([0, 0, 0, 0, 0xE0040000, 0xF], readMemory: (ulong address, out uint word) => { word = 0xDEADBEEF; return false; });
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+    }
+
     [Fact]
     public void UnbasedFlatCacheHit_Materializes()
     {

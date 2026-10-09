@@ -288,6 +288,7 @@ internal sealed class CompiledResourceEvaluator
                     if (buffer) Load(3);
                     else Constant(0);
                     Constant(unchecked((ulong)(long)(int)plan.Memory[value.MemoryIndex].Offset));
+                    il.Emit(RuntimeValueEvaluator.IsAbsoluteAddress(value.Kind, handle) ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
                     il.Emit(OpCodes.Ldloca, result);
                     Call(nameof(RuntimeValueEvaluator.ReadRawWord));
                     il.Emit(OpCodes.Brfalse, failed);
