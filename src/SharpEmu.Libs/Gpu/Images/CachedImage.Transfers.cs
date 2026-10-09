@@ -306,6 +306,12 @@ public sealed unsafe partial class CachedImage
         _scheduler.EndRendering();
         var levels = Math.Min(source.Backing.MipLevels, Backing.MipLevels);
         var baseDepth = Backing.ImageType == ImageType.Type3D ? Backing.Extent.Depth : source.Backing.Extent.Depth;
+        if (source.Backing.ImageType == ImageType.Type3D)
+        {
+            // A deeper destination has slices the source never had.
+            baseDepth = Math.Min(baseDepth, source.Backing.Extent.Depth);
+        }
+
         var sourceAspect = ViewFormatRules.FullAspects(source.Backing.Format) & ~ImageAspectFlags.StencilBit;
         var destinationAspect = ViewFormatRules.FullAspects(Backing.Format) & ~ImageAspectFlags.StencilBit;
         var copies = new ImageCopy[levels];
