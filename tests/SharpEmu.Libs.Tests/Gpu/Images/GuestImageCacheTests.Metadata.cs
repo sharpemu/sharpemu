@@ -158,6 +158,53 @@ public sealed partial class GuestImageCacheTests
     }
 
     [Fact]
+    public void CmaskFastClear_IsTrackedByFillValueAndConsumedOnce()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var cmask = address + 0x10000;
+        var other = address + 0x11000;
+        var htile = address + 0x12000;
+
+        void Bind(ulong data, ulong metadata)
+        {
+            var request = LinearRequest(data, 4, Format.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+            request = AsColorTarget(request);
+            request.Description.Metadata.Kind = MetadataKind.CMask;
+            request.Description.Metadata.Range = new GuestSpan(metadata, 0);
+            _ = harness.Acquire(ref request);
+        }
+
+        // Titles clear a surface before they bind it; only a fill of zero is a clear.
+        Assert.False(harness.Images.TryAbsorbDccFill(cmask, 0x1000, 0));
+        Assert.False(harness.Images.TryAbsorbDccFill(other, 0x1000, uint.MaxValue));
+        Assert.False(harness.Images.IsMetadata(cmask));
+        harness.Images.RegisterHtileMetadataForTest(htile);
+
+        Bind(address + 0xc000, cmask);
+        Bind(address + 0xd000, other);
+        Bind(address + 0xe000, htile);
+        Assert.True(harness.Images.IsMetadata(cmask));
+        Assert.True(harness.Images.IsMetadataCleared(cmask, 0));
+        Assert.False(harness.Images.IsMetadataCleared(other, 0));
+        Assert.False(harness.Images.TryConsumeCmaskClear(other, 0, 1));
+        Assert.False(harness.Images.TryConsumeCmaskClear(htile, 0, 1));
+        Assert.True(harness.Images.TryConsumeCmaskClear(cmask, 0, 1));
+        Assert.False(harness.Images.TryConsumeCmaskClear(cmask, 0, 1));
+
+        // Once the target is bound, a compute fill of its CMASK is absorbed by its value.
+        Assert.True(harness.Images.TryAbsorbDccFill(cmask, 0x1000, 0));
+        Assert.True(harness.Images.IsMetadataCleared(cmask, 0));
+        Assert.True(harness.Images.TryAbsorbDccFill(cmask, 0x1000, uint.MaxValue));
+        Assert.False(harness.Images.IsMetadataCleared(cmask, 0));
+        Assert.False(harness.Images.ClearMetadata(cmask));
+        Assert.False(harness.Images.TryConsumeCmaskClear(cmask, 0, 0));
+        Assert.False(harness.Images.TryConsumeCmaskClear(cmask, 32, 1));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void DccVolumeOverThirtyTwoSlices_MaterializesAndConsumesEveryUniformSlice()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
