@@ -147,6 +147,41 @@ public sealed class RtcExportsTests
         Assert.Equal(dosValue, packed);
     }
 
+    [Theory]
+    [InlineData(1979)] // wraps to 2107 without the range check
+    [InlineData(1900)]
+    [InlineData(2108)] // wraps to 1980 without the range check
+    [InlineData(9999)]
+    public void GetDosTime_YearOutsideDosRange_IsRejected(int year)
+    {
+        // Every one of these is a year the other libSceRtc exports accept, so only the DOS
+        // conversion itself can reject them.
+        WriteRtc(TimeAddress, year, 6, 15, 13, 45, 30, 0);
+        _ctx[CpuRegister.Rdi] = TimeAddress;
+        _ctx[CpuRegister.Rsi] = OutAddress;
+
+        Assert.Equal(unchecked((int)0x80B50008), RtcExports.RtcGetDosTime(_ctx));
+    }
+
+    [Theory]
+    [InlineData(1980)]
+    [InlineData(2107)]
+    public void GetDosTime_DosRangeBoundaries_RoundTrip(int year)
+    {
+        // The round trip is the point: an encodable year decodes back to itself, which is
+        // what the rejected years above cannot do.
+        WriteRtc(TimeAddress, year, 6, 15, 13, 45, 30, 0);
+        _ctx[CpuRegister.Rdi] = TimeAddress;
+        _ctx[CpuRegister.Rsi] = OutAddress;
+        Assert.Equal(0, RtcExports.RtcGetDosTime(_ctx));
+        Assert.True(_ctx.TryReadUInt32(OutAddress, out var packed));
+
+        _ctx[CpuRegister.Rdi] = TimeAddress;
+        _ctx[CpuRegister.Rsi] = packed;
+        Assert.Equal(0, RtcExports.RtcSetDosTime(_ctx));
+        AssertRtc(TimeAddress, year, 6, 15, 13, 45, 30, 0);
+    }
+
     [Fact]
     public void GetTickResolution_IsOneMicrosecond()
     {
