@@ -1228,6 +1228,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			_importResultLogSamples.Clear();
 		}
+		_knownUnresolvedNids.Clear();
 		lock (_lazyCommitRangeGate)
 		{
 			_prtLazyCommitRanges.Clear();
