@@ -1042,6 +1042,11 @@ public static class Ngs2Exports
         if ((ulong)header.Length < totalDataSize && totalDataSize > parsed.DataOffset)
         {
             var available = totalDataSize - parsed.DataOffset;
+            if (parsed.DataSizeLimit != 0)
+            {
+                available = Math.Min(available, parsed.DataSizeLimit);
+            }
+
             parsed.DataSize = (uint)Math.Min(available, uint.MaxValue);
             if (parsed.AudioUnitSize != 0 &&
                 parsed.WaveformType != Ngs2WaveformParser.WaveformTypeAtrac9)
