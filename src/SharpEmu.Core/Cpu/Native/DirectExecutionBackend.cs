@@ -39,6 +39,58 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const int DefaultImportLoopGuardSeconds = 5;
 
+	// The profile keeps its costs per import slot, so it needs the slot names
+	// once rather than a string per dispatch.
+	private void PublishImportProfileNames()
+	{
+		if (!ImportProfile.Enabled)
+		{
+			return;
+		}
+
+		var names = new string[_importEntries.Length];
+		for (var i = 0; i < names.Length; i++)
+		{
+			var entry = _importEntries[i];
+			names[i] = entry.Export is { } export
+				? $"{export.LibraryName}:{export.Name}"
+				: entry.Nid;
+		}
+
+		ImportProfile.Configure(names);
+	}
+
+	// Every NID-keyed decision the dispatch path makes, as one bit each.
+	// DispatchImportCore used to re-derive these with string comparisons on
+	// every guest call - about twenty of them, several unconditional - for
+	// diagnostics that are off in a normal run and for a handful of specially
+	// routed imports. The NID of an import slot never changes, so the whole set
+	// is decided once at stub setup and tested as a bitmask afterwards.
+	[Flags]
+	private enum ImportTraits : uint
+	{
+		None = 0,
+		BootstrapBridge = 1 << 0,
+		DynlibDlsym = 1 << 1,
+		Il2CppApiLookupSymbol = 1 << 2,
+		PrtLazyCommit = 1 << 3,
+		Il2CppExceptionDiagnostic = 1 << 4,
+		MapDirectDiagnostic = 1 << 5,
+		StackCheckFail = 1 << 6,
+		ReturnAddressProbe = 1 << 7,
+		TraceMemset = 1 << 8,
+		TraceCxaAtexit = 1 << 9,
+		TraceEnvSetup = 1 << 10,
+		TracePeriodicFrequent = 1 << 11,
+
+		/// <summary>Any trait that makes the prologue do more than the common case.</summary>
+		PrologueWork = StackCheckFail | ReturnAddressProbe | TraceMemset |
+			TraceCxaAtexit | TraceEnvSetup,
+
+		/// <summary>Any trait that routes the call away from Export.Function.</summary>
+		SpecialDispatch = BootstrapBridge | DynlibDlsym | Il2CppApiLookupSymbol,
+	}
+
 	private readonly struct ImportStubEntry
 	{
 		public ulong Address { get; }
@@ -64,6 +116,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		public ulong NidHash { get; }
 
+		public ImportTraits Traits { get; }
+
+		/// <summary>
+		/// The one failure code this import returns in normal operation, or 0 if
+		/// it has none. A trylock reporting BUSY and a file probe reporting
+		/// NOT_FOUND are routine; logging them would drown the log and cost a
+		/// string-keyed sample lookup per call. Each of these NIDs expects
+		/// exactly one code, so one integer compare replaces the thirteen string
+		/// comparisons the result check used to make.
+		/// </summary>
+		public int ExpectedBenignResult { get; }
+
 		public ImportStubEntry(
 			ulong address,
 			string nid,
@@ -83,8 +147,72 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			SuppressStrlenTrace = suppressStrlenTrace;
 			IsLoopGuardBoundary = isLoopGuardBoundary;
 			NidHash = nidHash;
+			Traits = ClassifyImportTraits(nid);
+			ExpectedBenignResult = ClassifyExpectedBenignResult(nid);
 		}
 	}
+
+	private static ImportTraits ClassifyImportTraits(string nid)
+	{
+		var traits = ImportTraits.None;
+		if (string.Equals(nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
+		{
+			traits |= ImportTraits.BootstrapBridge;
+		}
+
+		if (string.Equals(nid, RuntimeStubNids.KernelDynlibDlsym, StringComparison.Ordinal) ||
+			string.Equals(nid, "LwG8g3niqwA", StringComparison.Ordinal))
+		{
+			traits |= ImportTraits.DynlibDlsym;
+		}
+
+		traits |= nid switch
+		{
+			"r8mvOaWdi28" => ImportTraits.Il2CppApiLookupSymbol,
+			"BohYr-F7-is" => ImportTraits.PrtLazyCommit,
+			"cfwBSQyr5Ys" => ImportTraits.Il2CppExceptionDiagnostic,
+			"L-Q3LEjIbgA" => ImportTraits.MapDirectDiagnostic,
+			"Ou3iL1abvng" => ImportTraits.StackCheckFail,
+			"2Z+PpY6CaJg" => ImportTraits.ReturnAddressProbe,
+			"8zTFvBIAIN8" => ImportTraits.TraceMemset,
+			"tsvEmnenz48" => ImportTraits.TraceCxaAtexit | ImportTraits.TracePeriodicFrequent,
+			"bzQExy189ZI" or "8G2LB+A3rzg" => ImportTraits.TraceEnvSetup,
+			"rTXw65xmLIA" => ImportTraits.TracePeriodicFrequent,
+			_ => ImportTraits.None,
+		};
+
+		return traits;
+	}
+
+	// internal for the classification tests: these tables decide what the
+	// dispatch path does without consulting the NID again, so a wrong entry is
+	// silent at runtime.
+	internal static int ClassifyExpectedBenignResult(string nid) => nid switch
+	{
+		// sceKernelStat / sceKernelOpen / sceKernelAprResolveFilepathsToIdsAndFileSizes:
+		// a title probing for an optional file.
+		"eV9wAD2riIA" or "1G3lF1Gg1k8" or "gEpBkcwxUjw" =>
+			unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND),
+		"27bAgiJmOh0" => 60,
+		"fzyMKs9kim0" => unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT),
+		// scePthreadCondTimedwait and sceKernelWaitEventFlag report an elapsed timeout.
+		"BmMjYxmew1w" or "JTvBflhYazQ" =>
+			unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT),
+		// scePthreadMutexLock on an error-checking mutex the caller already owns;
+		// titles use it to build their own recursive locks.
+		"9UK1vLZQft4" => unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK),
+		// scePadReadState on a handle that is not open; titles poll every pad slot.
+		"YndgXqQVV7c" => unchecked((int)0x80920003),
+		"K-jXhbt2gn4" or "upoVrzMHFeE" =>
+			unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY),
+		"H2a+IN9TP0E" => unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN),
+		"12wOHk8ywb0" => unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY),
+		"PIWqhn9oSxc" => unchecked((int)0x80410123),
+		"yH17Q6NWtVg" => unchecked((int)0x80960007),
+		"D-CzAxQL0XI" => unchecked((int)0x80960009),
+		"uWIYLFkkwqk" => unchecked((int)0x80B2000C),
+		_ => 0,
+	};
 
 	private readonly record struct RecentImportTraceEntry(
 		long DispatchIndex,
@@ -1399,6 +1527,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			num++;
 		}
 		Console.Error.WriteLine($"[LOADER][INFO] Setup {num2}/{importStubs.Count} import stubs (direct bridge, lle_redirects={num3}, fast_path_stubs={_guestFastPathStubCount})");
+		PublishImportProfileNames();
 		return num2 == importStubs.Count;
 	}
 

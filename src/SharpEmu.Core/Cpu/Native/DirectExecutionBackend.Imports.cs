@@ -58,6 +58,21 @@ public sealed partial class DirectExecutionBackend
 				return r;
 			}
 
+			if (ImportProfile.Enabled)
+			{
+				var profiled = ImportProfile.Begin();
+				try
+				{
+					var profiledResult = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
+					directExecutionBackend.ClearActiveImportIndex();
+					return profiledResult;
+				}
+				finally
+				{
+					ImportProfile.End(importIndex, profiled);
+				}
+			}
+
 			var result = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
 			directExecutionBackend.ClearActiveImportIndex();
 			return result;
@@ -163,7 +178,9 @@ public sealed partial class DirectExecutionBackend
 			LastError = $"Import dispatch index out of range: {importIndex}";
 			return 18446744071562199042uL;
 		}
-		ImportStubEntry importStubEntry = _importEntries[importIndex];
+		// By reference: the entry is 48 bytes of per-import classification that
+		// nothing here mutates, and copying it was pure cost on every guest call.
+		ref readonly ImportStubEntry importStubEntry = ref _importEntries[importIndex];
 		using var registerPacketImport = SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.MeasureImport(importStubEntry.Nid);
 		if (_perfHleHistogram)
 		{
@@ -179,21 +196,46 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine($"[LOADER][TRACE] Raw sentinel recoveries: {num2} (last import index={importIndex})");
 			_lastReportedRawSentinelRecoveries = num2;
 		}
-		if (importStubEntry.IsLeaf &&
-			TryDispatchHotMemoryLeaf(cpuContext, importStubEntry, argPackPtr, out var hotMemoryResult))
+		// The leaf paths skip the rest of the gateway entirely, so they mark
+		// their own body: without this the profile charges a memcpy's whole cost
+		// to "transition" and hides the work it actually did.
+		if (importStubEntry.IsLeaf)
 		{
-			return hotMemoryResult;
+			ImportProfile.MarkBodyStart();
+			var hotMemoryHandled = TryDispatchHotMemoryLeaf(
+				cpuContext,
+				importStubEntry,
+				argPackPtr,
+				out var hotMemoryResult);
+			ImportProfile.MarkBodyEnd();
+			if (hotMemoryHandled)
+			{
+				return hotMemoryResult;
+			}
 		}
 
 		if (importStubEntry.IsTrivialLeaf && !_disableTrivialLeafDispatch)
 		{
-			return DispatchTrivialLeaf(cpuContext, in importStubEntry, argPackPtr, num);
+			ImportProfile.MarkBodyStart();
+			var trivialResult = DispatchTrivialLeaf(cpuContext, in importStubEntry, argPackPtr, num);
+			ImportProfile.MarkBodyEnd();
+			return trivialResult;
 		}
 
-		if (importStubEntry.IsLeaf &&
-			TryDispatchLeafImport(cpuContext, importStubEntry, argPackPtr, num, out var leafResult))
+		if (importStubEntry.IsLeaf)
 		{
-			return leafResult;
+			ImportProfile.MarkBodyStart();
+			var leafHandled = TryDispatchLeafImport(
+				cpuContext,
+				importStubEntry,
+				argPackPtr,
+				num,
+				out var leafResult);
+			ImportProfile.MarkBodyEnd();
+			if (leafHandled)
+			{
+				return leafResult;
+			}
 		}
 
 		cpuContext.Rip = importStubEntry.Address;
@@ -202,42 +244,57 @@ public sealed partial class DirectExecutionBackend
 			cpuContext.ActiveImportIndex = importIndex;
 		}
 		LoadImportVolatileArguments(cpuContext, argPackPtr);
-		cpuContext[CpuRegister.Rdi] = *(ulong*)argPackPtr;
-		cpuContext[CpuRegister.Rsi] = *(ulong*)(argPackPtr + 8);
-		cpuContext[CpuRegister.Rdx] = *(ulong*)(argPackPtr + 16);
-		cpuContext[CpuRegister.Rcx] = *(ulong*)(argPackPtr + 24);
-		cpuContext[CpuRegister.R8] = *(ulong*)(argPackPtr + 32);
-		cpuContext[CpuRegister.R9] = *(ulong*)(argPackPtr + 40);
-		cpuContext[CpuRegister.Rbx] = *(ulong*)(argPackPtr + 48);
-		cpuContext[CpuRegister.Rbp] = *(ulong*)(argPackPtr + 56);
-		cpuContext[CpuRegister.R12] = *(ulong*)(argPackPtr + 64);
-		cpuContext[CpuRegister.R13] = *(ulong*)(argPackPtr + 72);
-		cpuContext[CpuRegister.R14] = *(ulong*)(argPackPtr + 80);
-		cpuContext[CpuRegister.R15] = *(ulong*)(argPackPtr + 88);
-		cpuContext[CpuRegister.Rsp] = (ulong)argPackPtr + 96uL;
+		// Read the trampoline's register pack once into locals and publish it in
+		// one pass. Writing twelve registers through the indexer and then
+		// reading all twelve back out of the context - which is what this did -
+		// is 24 bounds-checked array accesses plus a Rax-write test each, for
+		// values already in hand.
+		ulong value = *(ulong*)argPackPtr;
+		ulong value2 = *(ulong*)(argPackPtr + 8);
+		ulong num3 = *(ulong*)(argPackPtr + 16);
+		ulong num4 = *(ulong*)(argPackPtr + 24);
+		ulong num5 = *(ulong*)(argPackPtr + 32);
+		ulong num6 = *(ulong*)(argPackPtr + 40);
+		ulong value3 = *(ulong*)(argPackPtr + 48);
+		ulong value4 = *(ulong*)(argPackPtr + 56);
+		ulong value5 = *(ulong*)(argPackPtr + 64);
+		ulong value6 = *(ulong*)(argPackPtr + 72);
+		ulong value7 = *(ulong*)(argPackPtr + 80);
+		ulong value8 = *(ulong*)(argPackPtr + 88);
+		cpuContext.LoadImportRegisters(
+			value,
+			value2,
+			num3,
+			num4,
+			num5,
+			num6,
+			value3,
+			value4,
+			value5,
+			value6,
+			value7,
+			value8,
+			(ulong)argPackPtr + 96uL);
+		// Read once and reuse: the guest-thread snapshot below wanted the same
+		// six slots, and recomputing them there read the guest stack twice per
+		// dispatch.
+		var stackArg0 = ReadImportStackArgument(argPackPtr, 0);
+		var stackArg1 = ReadImportStackArgument(argPackPtr, 1);
+		var stackArg2 = ReadImportStackArgument(argPackPtr, 2);
+		var stackArg3 = ReadImportStackArgument(argPackPtr, 3);
+		var stackArg4 = ReadImportStackArgument(argPackPtr, 4);
+		var stackArg5 = ReadImportStackArgument(argPackPtr, 5);
 		cpuContext.SetImportStackArguments(
-			ReadImportStackArgument(argPackPtr, 0),
-			ReadImportStackArgument(argPackPtr, 1),
-			ReadImportStackArgument(argPackPtr, 2),
-			ReadImportStackArgument(argPackPtr, 3),
-			ReadImportStackArgument(argPackPtr, 4),
-			ReadImportStackArgument(argPackPtr, 5));
-		ulong value = cpuContext[CpuRegister.Rdi];
-		ulong value2 = cpuContext[CpuRegister.Rsi];
-		ulong num3 = cpuContext[CpuRegister.Rdx];
-		ulong num4 = cpuContext[CpuRegister.Rcx];
-		ulong num5 = cpuContext[CpuRegister.R8];
-		ulong num6 = cpuContext[CpuRegister.R9];
-		ulong value3 = cpuContext[CpuRegister.Rbx];
-		ulong value4 = cpuContext[CpuRegister.Rbp];
-		ulong value5 = cpuContext[CpuRegister.R12];
-		ulong value6 = cpuContext[CpuRegister.R13];
-		ulong value7 = cpuContext[CpuRegister.R14];
-		ulong value8 = cpuContext[CpuRegister.R15];
+			stackArg0,
+			stackArg1,
+			stackArg2,
+			stackArg3,
+			stackArg4,
+			stackArg5);
 		ulong num7 = *(ulong*)(argPackPtr + 96);
 		var importStackPointer = (ulong)argPackPtr + 96;
 		var probeTarget = (_probeImportReturnAddress != 0 && num7 == _probeImportReturnAddress) ||
-			(string.Equals(importStubEntry.Nid, "2Z+PpY6CaJg", StringComparison.Ordinal) &&
+			((importStubEntry.Traits & ImportTraits.ReturnAddressProbe) != 0 &&
 			 importStackPointer >= 0x00006FFFAC1FF000UL &&
 			 importStackPointer < 0x00006FFFAC200000UL);
 		if (probeTarget &&
@@ -275,11 +332,8 @@ public sealed partial class DirectExecutionBackend
 		// well-known compiler epilogue back through its register/stack unwind.
 		// Keep the byte-pattern check strict so the opt-in cannot guess at an
 		// unrelated function layout.
-		if (string.Equals(importStubEntry.Nid, "Ou3iL1abvng", StringComparison.Ordinal) &&
-			string.Equals(
-				Environment.GetEnvironmentVariable("SHARPEMU_IGNORE_STACK_CHK"),
-				"1",
-				StringComparison.Ordinal) &&
+		if ((importStubEntry.Traits & ImportTraits.StackCheckFail) != 0 &&
+			_ignoreStackCheck &&
 			num7 >= 0x20)
 		{
 			var returnCode = (byte*)num7;
@@ -306,12 +360,12 @@ public sealed partial class DirectExecutionBackend
 			activeGuestThreadState.LastImportRcx = num4;
 			activeGuestThreadState.LastImportR8 = num5;
 			activeGuestThreadState.LastImportR9 = num6;
-			activeGuestThreadState.LastImportStack0 = ReadImportStackArgument(argPackPtr, 0);
-			activeGuestThreadState.LastImportStack1 = ReadImportStackArgument(argPackPtr, 1);
-			activeGuestThreadState.LastImportStack2 = ReadImportStackArgument(argPackPtr, 2);
-			activeGuestThreadState.LastImportStack3 = ReadImportStackArgument(argPackPtr, 3);
-			activeGuestThreadState.LastImportStack4 = ReadImportStackArgument(argPackPtr, 4);
-			activeGuestThreadState.LastImportStack5 = ReadImportStackArgument(argPackPtr, 5);
+			activeGuestThreadState.LastImportStack0 = stackArg0;
+			activeGuestThreadState.LastImportStack1 = stackArg1;
+			activeGuestThreadState.LastImportStack2 = stackArg2;
+			activeGuestThreadState.LastImportStack3 = stackArg3;
+			activeGuestThreadState.LastImportStack4 = stackArg4;
+			activeGuestThreadState.LastImportStack5 = stackArg5;
 			Volatile.Write(ref activeGuestThreadState.LastImportResultValid, 0);
 			Volatile.Write(ref activeGuestThreadState.LastReturnRip, num7);
 			// Publish the NID last so readers cannot pair a new import name with
@@ -335,7 +389,7 @@ public sealed partial class DirectExecutionBackend
 			TraceGuestContext(
 				$"import dispatch={num} nid={importStubEntry.Nid} ret=0x{num7:X16} managed={Environment.CurrentManagedThreadId} guest=0x{GuestThreadExecution.CurrentGuestThreadHandle:X16} fiber=0x{GuestThreadExecution.CurrentFiberAddress:X16} active={HasActiveExecutionThread}");
 		}
-		if (_logBootstrap && string.Equals(importStubEntry.Nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
+		if (_logBootstrap && (importStubEntry.Traits & ImportTraits.BootstrapBridge) != 0)
 		{
 			string symbolText = "<unreadable>";
 			if (TryReadAsciiZ(value2, 256, out var sym))
@@ -377,8 +431,8 @@ public sealed partial class DirectExecutionBackend
 			(num >= 240 && num <= 400) ||
 			(num >= 900 && num <= 1300) ||
 			num % 100000 == 0L ||
-			(importStubEntry.Nid == "tsvEmnenz48" && (num <= 256 || num % 1000 == 0L)) ||
-			(importStubEntry.Nid == "rTXw65xmLIA" && (num <= 256 || num % 128 == 0)) ||
+			((importStubEntry.Traits & ImportTraits.TraceCxaAtexit) != 0 && (num <= 256 || num % 1000 == 0L)) ||
+			((importStubEntry.Traits & ImportTraits.TracePeriodicFrequent) != 0 && (num <= 256 || num % 128 == 0)) ||
 			flag ||
 			flag2 ||
 			flag3);
@@ -439,17 +493,22 @@ public sealed partial class DirectExecutionBackend
 				cpuContext[CpuRegister.Rsi],
 				cpuContext[CpuRegister.Rdx]);
 		}
-		if (importStubEntry.Nid == "8zTFvBIAIN8" && num <= 256)
+		// One bitmask test stands in for the four NID string comparisons these
+		// startup traces used to make on every guest call.
+		if ((importStubEntry.Traits & ImportTraits.PrologueWork) != 0)
 		{
-			Console.Error.WriteLine($"[LOADER][TRACE] memset#{num}: dst=0x{cpuContext[CpuRegister.Rdi]:X16} val=0x{cpuContext[CpuRegister.Rsi] & 0xFF:X2} len=0x{cpuContext[CpuRegister.Rdx]:X16} ret=0x{num7:X16}");
-		}
-		if (importStubEntry.Nid == "tsvEmnenz48" && num <= 64)
-		{
-			Console.Error.WriteLine($"[LOADER][TRACE] __cxa_atexit#{num}: func=0x{cpuContext[CpuRegister.Rdi]:X16} arg=0x{cpuContext[CpuRegister.Rsi]:X16} dso=0x{cpuContext[CpuRegister.Rdx]:X16} ret=0x{num7:X16}");
-		}
-		if (importStubEntry.Nid == "bzQExy189ZI" || importStubEntry.Nid == "8G2LB+A3rzg")
-		{
-			Console.Error.WriteLine($"[LOADER][TRACE] {importStubEntry.Nid}#{num}: rdi=0x{cpuContext[CpuRegister.Rdi]:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} rdx=0x{cpuContext[CpuRegister.Rdx]:X16} ret=0x{num7:X16}");
+			if ((importStubEntry.Traits & ImportTraits.TraceMemset) != 0 && num <= 256)
+			{
+				Console.Error.WriteLine($"[LOADER][TRACE] memset#{num}: dst=0x{cpuContext[CpuRegister.Rdi]:X16} val=0x{cpuContext[CpuRegister.Rsi] & 0xFF:X2} len=0x{cpuContext[CpuRegister.Rdx]:X16} ret=0x{num7:X16}");
+			}
+			if ((importStubEntry.Traits & ImportTraits.TraceCxaAtexit) != 0 && num <= 64)
+			{
+				Console.Error.WriteLine($"[LOADER][TRACE] __cxa_atexit#{num}: func=0x{cpuContext[CpuRegister.Rdi]:X16} arg=0x{cpuContext[CpuRegister.Rsi]:X16} dso=0x{cpuContext[CpuRegister.Rdx]:X16} ret=0x{num7:X16}");
+			}
+			if ((importStubEntry.Traits & ImportTraits.TraceEnvSetup) != 0)
+			{
+				Console.Error.WriteLine($"[LOADER][TRACE] {importStubEntry.Nid}#{num}: rdi=0x{cpuContext[CpuRegister.Rdi]:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} rdx=0x{cpuContext[CpuRegister.Rdx]:X16} ret=0x{num7:X16}");
+			}
 		}
 		if (flag6 || flag || flag2 || flag3)
 		{
@@ -489,7 +548,7 @@ public sealed partial class DirectExecutionBackend
 				Console.Error.Flush();
 			}
 		}
-		if (importStubEntry.Nid == "Ou3iL1abvng")
+		if ((importStubEntry.Traits & ImportTraits.StackCheckFail) != 0)
 		{
 			if (_logStackCheck)
 			{
@@ -534,24 +593,23 @@ public sealed partial class DirectExecutionBackend
 				ActiveGuestReturnSlotAddress);
 			try
 			{
-				if (string.Equals(importStubEntry.Nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
+				// The common case is the final branch; checking the three special
+				// routes as one bitmask keeps their NID comparisons off it.
+				if ((importStubEntry.Traits & ImportTraits.SpecialDispatch) != 0)
 				{
-					orbisGen2Result = DispatchBootstrapBridge();
-				}
-				else if (string.Equals(importStubEntry.Nid, RuntimeStubNids.KernelDynlibDlsym, StringComparison.Ordinal) ||
-					string.Equals(importStubEntry.Nid, "LwG8g3niqwA", StringComparison.Ordinal))
-				{
-					orbisGen2Result = DispatchKernelDynlibDlsym();
-				}
-				else if (string.Equals(importStubEntry.Nid, "r8mvOaWdi28", StringComparison.Ordinal))
-				{
-					orbisGen2Result = DispatchIl2CppApiLookupSymbol();
+					orbisGen2Result = (importStubEntry.Traits & ImportTraits.BootstrapBridge) != 0
+						? DispatchBootstrapBridge()
+						: (importStubEntry.Traits & ImportTraits.DynlibDlsym) != 0
+							? DispatchKernelDynlibDlsym()
+							: DispatchIl2CppApiLookupSymbol();
 				}
 				else if (importStubEntry.Export is { } cachedExport &&
 					(cachedExport.Target & cpuContext.TargetGeneration) != 0)
 				{
 					cpuContext.ClearRaxWriteFlag();
+					ImportProfile.MarkBodyStart();
 					var returnValue = cachedExport.Function(cpuContext);
+					ImportProfile.MarkBodyEnd();
 					if (!cpuContext.WasRaxWritten)
 					{
 						cpuContext[CpuRegister.Rax] = unchecked((ulong)returnValue);
@@ -578,18 +636,15 @@ public sealed partial class DirectExecutionBackend
 			StoreImportVectorReturn(cpuContext, argPackPtr);
 			if (dispatchResolved &&
 				orbisGen2Result == OrbisGen2Result.ORBIS_GEN2_OK &&
-				string.Equals(importStubEntry.Nid, "BohYr-F7-is", StringComparison.Ordinal))
+				(importStubEntry.Traits & ImportTraits.PrtLazyCommit) != 0)
 			{
 				RegisterPrtLazyCommitRange(value2, num3);
 			}
 			if (!dispatchResolved)
 			{
 				LastError = "Missing HLE export for NID: " + importStubEntry.Nid;
-				if (string.Equals(importStubEntry.Nid, "cfwBSQyr5Ys", StringComparison.Ordinal) &&
-					string.Equals(
-						Environment.GetEnvironmentVariable("SHARPEMU_LOG_IL2CPP_EXCEPTION"),
-						"1",
-						StringComparison.Ordinal) &&
+				if ((importStubEntry.Traits & ImportTraits.Il2CppExceptionDiagnostic) != 0 &&
+					_logIl2CppException &&
 					Interlocked.Increment(ref _il2CppExceptionDiagnosticCount) <= 4)
 				{
 					DumpIl2CppExceptionDiagnostic(cpuContext, value, num7);
@@ -597,7 +652,7 @@ public sealed partial class DirectExecutionBackend
 				Console.Error.WriteLine(
 					$"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} ret=0x{num7:X16} " +
 					$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
-				if (importStubEntry.Nid == "L-Q3LEjIbgA")
+				if ((importStubEntry.Traits & ImportTraits.MapDirectDiagnostic) != 0)
 				{
 					string value18 = string.Join(" ", importStubEntry.Nid.Select(delegate (char c)
 					{
@@ -615,21 +670,22 @@ public sealed partial class DirectExecutionBackend
 			}
 			else if (orbisGen2Result != OrbisGen2Result.ORBIS_GEN2_OK)
 			{
-				if (ShouldLogImportResult(importStubEntry.Nid, orbisGen2Result))
+				if (ShouldLogImportResult(in importStubEntry, orbisGen2Result))
 				{
 					Console.Error.WriteLine(
 						$"[LOADER][WARN] Import#{num} result: {orbisGen2Result} ({importStubEntry.Nid}) " +
 						$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} ret=0x{num7:X16}");
 				}
 			}
-			cpuContext[CpuRegister.Rbx] = value3;
-			cpuContext[CpuRegister.Rbp] = value4;
-			cpuContext[CpuRegister.R12] = value5;
-			cpuContext[CpuRegister.R13] = value6;
-			cpuContext[CpuRegister.R14] = value7;
-			cpuContext[CpuRegister.R15] = value8;
-			cpuContext[CpuRegister.Rdi] = value;
-			cpuContext[CpuRegister.Rsi] = value2;
+			cpuContext.RestoreImportCallerRegisters(
+				value3,
+				value4,
+				value5,
+				value6,
+				value7,
+				value8,
+				value,
+				value2);
 			if (GuestThreadExecution.TryConsumeCurrentContextTransfer(out var transferTarget))
 			{
 				if (!TryPrepareGuestContextTransfer(
@@ -1467,7 +1523,7 @@ public sealed partial class DirectExecutionBackend
 		if (returnValue != (int)OrbisGen2Result.ORBIS_GEN2_OK)
 		{
 			var returnResult = (OrbisGen2Result)returnValue;
-			if (ShouldLogImportResult(importStubEntry.Nid, returnResult))
+			if (ShouldLogImportResult(in importStubEntry, returnResult))
 			{
 				Console.Error.WriteLine(
 					$"[LOADER][WARN] Import#{dispatchIndex} result: {returnResult} ({importStubEntry.Nid}) " +
@@ -1525,7 +1581,18 @@ public sealed partial class DirectExecutionBackend
 	// import bookkeeping costs more than the export itself. Each one reads only
 	// argument registers (RDI..R9) and thread-local state, returns in RAX, never
 	// blocks, yields, calls back into the guest or reads the guest stack.
-	private static bool IsTrivialLeafImport(string nid) =>
+	// Exports that read only argument registers, never block, never read a
+	// stack argument and never call back into guest code. DispatchTrivialLeaf
+	// runs them without the import-boundary bookkeeping the general path owes a
+	// call that might park the thread or unwind through it.
+	//
+	// Adding one here is worth real time: the import profile measures the
+	// gateway around sceSystemGestureGetTouchEventsCount at 302 ns against a
+	// 23 ns export body, over 12.4 million calls in a two-minute Quake run.
+	// Every entry below was checked for those four properties - a poll that
+	// takes a host lock still qualifies, because the lock is the emulator's own
+	// and cannot park the guest thread.
+	internal static bool IsTrivialLeafImport(string nid) =>
 		nid is
 			"0-KXaS70xy4" or // pthread_getspecific
 			"eoht7mQOCmo" or // scePthreadGetspecific
@@ -1538,7 +1605,14 @@ public sealed partial class DirectExecutionBackend
 			"1j3S3n-tTW4" or // sceKernelGetTscFrequency
 			"ob5xAW4ln-0" or // strchr
 			"9yDWMxEFdJU" or // strrchr
-			"V++UgBtQhn0";   // sceAgcGetDataPacketPayloadAddress
+			"V++UgBtQhn0" or // sceAgcGetDataPacketPayloadAddress
+			// Per-frame polls a title runs on every input and playback tick.
+			"h8uongcBNVs" or // sceSystemGestureGetTouchEventsCount
+			"n88vx3C5nW8" or // gettimeofday
+			"lLMT9vJAck0" or // clock_gettime
+			"UbQoYawOsfY" or // sceAvPlayerIsActive
+			"JdksQu8pNdQ" or // sceAvPlayerGetVideoDataEx
+			"YndgXqQVV7c";   // scePadReadState
 
 	private unsafe ulong DispatchTrivialLeaf(
 		CpuContext cpuContext,
@@ -1569,7 +1643,7 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		if (returnValue != (int)OrbisGen2Result.ORBIS_GEN2_OK &&
-			ShouldLogImportResult(importStubEntry.Nid, (OrbisGen2Result)returnValue))
+			ShouldLogImportResult(in importStubEntry, (OrbisGen2Result)returnValue))
 		{
 			Console.Error.WriteLine(
 				$"[LOADER][WARN] Import#{dispatchIndex} result: {(OrbisGen2Result)returnValue} ({importStubEntry.Nid}) " +
@@ -1580,7 +1654,7 @@ public sealed partial class DirectExecutionBackend
 		return cpuContext[CpuRegister.Rax];
 	}
 
-	private static bool IsNoBlockLeafImport(string nid) =>
+	internal static bool IsNoBlockLeafImport(string nid) =>
 		nid is
 			"8aI7R7WaOlc" or // sceAmprCommandBufferConstructor
 			"a8uLzYY--tM" or // sceAmprAprCommandBufferConstructor
@@ -1620,7 +1694,7 @@ public sealed partial class DirectExecutionBackend
 			"DfivPArhucg" or // memcmp
 			"8zTFvBIAIN8";   // memset
 
-	private bool ShouldLogImportResult(string nid, OrbisGen2Result result)
+	private bool ShouldLogImportResult(in ImportStubEntry entry, OrbisGen2Result result)
 	{
 		var resultValue = unchecked((int)result);
 		if (resultValue > 0)
@@ -1628,72 +1702,22 @@ public sealed partial class DirectExecutionBackend
 			return false;
 		}
 
-		var expectedFileProbeMiss =
-			result == OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND &&
-			IsExpectedFileProbeNotFoundNid(nid);
-		var expectedTimedWaitTimeout =
-			string.Equals(nid, "27bAgiJmOh0", StringComparison.Ordinal) &&
-			unchecked((int)result) == 60;
-		var expectedEqueueTimeout =
-			string.Equals(nid, "fzyMKs9kim0", StringComparison.Ordinal) &&
-			result == OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
-		// scePthreadCondTimedwait and sceKernelWaitEventFlag report an elapsed timeout.
-		var expectedWaitTimeout =
-			(nid is "BmMjYxmew1w" or "JTvBflhYazQ") &&
-			result == OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
-		// scePthreadMutexLock on an error-checking mutex the caller already owns; titles use it
-		// to build their own recursive locks.
-		var expectedErrorCheckRelock =
-			string.Equals(nid, "9UK1vLZQft4", StringComparison.Ordinal) &&
-			result == OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
-		// scePadReadState on a handle that is not open; titles poll every pad slot.
-		var expectedPadNotOpen =
-			string.Equals(nid, "YndgXqQVV7c", StringComparison.Ordinal) &&
-			resultValue == unchecked((int)0x80920003);
-		var expectedMutexTrylockBusy =
-			(nid is "K-jXhbt2gn4" or "upoVrzMHFeE") &&
-			result == OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
-		var expectedSemaphoreTrywaitAgain =
-			string.Equals(nid, "H2a+IN9TP0E", StringComparison.Ordinal) &&
-			result == OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN;
-		var expectedPollSemaBusy =
-			string.Equals(nid, "12wOHk8ywb0", StringComparison.Ordinal) &&
-			result == OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
-		var expectedNetAcceptWouldBlock =
-			string.Equals(nid, "PIWqhn9oSxc", StringComparison.Ordinal) &&
-			resultValue == unchecked((int)0x80410123);
-		var expectedUserServiceNoEvent =
-			string.Equals(nid, "yH17Q6NWtVg", StringComparison.Ordinal) &&
-			resultValue == unchecked((int)0x80960007);
-		var expectedPrivacyInvalidParameter =
-			string.Equals(nid, "D-CzAxQL0XI", StringComparison.Ordinal) &&
-			resultValue == unchecked((int)0x80960009);
-		var expectedPlayGoChunkEnumerationEnd =
-			string.Equals(nid, "uWIYLFkkwqk", StringComparison.Ordinal) &&
-			resultValue == unchecked((int)0x80B2000C);
-		if (!expectedFileProbeMiss &&
-			!expectedTimedWaitTimeout &&
-			!expectedEqueueTimeout &&
-			!expectedWaitTimeout &&
-			!expectedErrorCheckRelock &&
-			!expectedPadNotOpen &&
-			!expectedMutexTrylockBusy &&
-			!expectedSemaphoreTrywaitAgain &&
-			!expectedPollSemaBusy &&
-			!expectedNetAcceptWouldBlock &&
-			!expectedUserServiceNoEvent &&
-			!expectedPrivacyInvalidParameter &&
-			!expectedPlayGoChunkEnumerationEnd)
+		// Routine failures - a trylock reporting BUSY, a file probe reporting
+		// NOT_FOUND, a timed wait timing out - are the common case on this path,
+		// and deciding used to cost thirteen eagerly evaluated string comparisons
+		// against the NID. The one code each of those imports expects is resolved
+		// at stub setup, so the decision is now a single integer compare.
+		if (resultValue != entry.ExpectedBenignResult)
 		{
 			return true;
 		}
 
-		if (!ShouldLogExpectedImportResults())
+		if (!_logExpectedImportResults)
 		{
 			return false;
 		}
 
-		var key = nid + "\0" + resultValue;
+		var key = entry.Nid + "\0" + resultValue;
 		int count;
 		lock (_importResultLogSampleGate)
 		{
@@ -1705,17 +1729,25 @@ public sealed partial class DirectExecutionBackend
 		return count <= 8 || count % 10000 == 0;
 	}
 
-	private static bool ShouldLogExpectedImportResults() =>
+	// Read once: these gate per-dispatch work, so a getenv on the call itself
+	// cost more than the diagnostic it guards.
+	private static readonly bool _logExpectedImportResults =
 		string.Equals(
 			Environment.GetEnvironmentVariable("SHARPEMU_LOG_EXPECTED_IMPORT_RESULTS"),
 			"1",
 			StringComparison.Ordinal);
 
-	private static bool IsExpectedFileProbeNotFoundNid(string nid) =>
-		nid is
-			"eV9wAD2riIA" or // sceKernelStat
-			"1G3lF1Gg1k8" or // sceKernelOpen
-			"gEpBkcwxUjw";   // sceKernelAprResolveFilepathsToIdsAndFileSizes
+	private static readonly bool _ignoreStackCheck =
+		string.Equals(
+			Environment.GetEnvironmentVariable("SHARPEMU_IGNORE_STACK_CHK"),
+			"1",
+			StringComparison.Ordinal);
+
+	private static readonly bool _logIl2CppException =
+		string.Equals(
+			Environment.GetEnvironmentVariable("SHARPEMU_LOG_IL2CPP_EXCEPTION"),
+			"1",
+			StringComparison.Ordinal);
 
 	private bool IsLeafImport(string nid)
 	{
