@@ -40,19 +40,43 @@ internal sealed class FlexibleBackingPool
             return false;
 
         var planned = new List<Block>();
-        var remaining = size;
-        var current = address;
-        foreach (var range in _free)
+        // One mapping wants one run of backing bytes. The guest address range is
+        // contiguous either way, but a mapping split across free ranges is not
+        // contiguous in the backing, and a host that maps the backing no-copy can
+        // then neither bind nor write back any buffer or image that crosses the seam:
+        // it stages a copy per submission instead, and a GPU-written image over such
+        // a range has nowhere to go. Smallest range that fits, so the big ranges stay
+        // whole for the next large mapping.
+        var best = -1;
+        for (var index = 0; index < _free.Count; index++)
         {
-            var count = Math.Min(remaining, range.Value);
-            planned.Add(new Block(current, count, range.Key));
-            remaining -= count;
-            current += count;
-            if (remaining == 0)
-                break;
+            if (_free.Values[index] < size || (best >= 0 && _free.Values[index] >= _free.Values[best]))
+                continue;
+            best = index;
         }
-        if (remaining != 0)
-            return false;
+
+        if (best >= 0)
+        {
+            planned.Add(new Block(address, size, _free.Keys[best]));
+        }
+        else
+        {
+            // Nothing holds it whole; fall back to filling it from several ranges.
+            var remaining = size;
+            var current = address;
+            foreach (var range in _free)
+            {
+                var count = Math.Min(remaining, range.Value);
+                planned.Add(new Block(current, count, range.Key));
+                remaining -= count;
+                current += count;
+                if (remaining == 0)
+                    break;
+            }
+
+            if (remaining != 0)
+                return false;
+        }
 
         for (var index = 0; index < planned.Count; index++)
         {
