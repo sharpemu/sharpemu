@@ -1527,6 +1527,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			num++;
 		}
 		Console.Error.WriteLine($"[LOADER][INFO] Setup {num2}/{importStubs.Count} import stubs (direct bridge, lle_redirects={num3}, fast_path_stubs={_guestFastPathStubCount})");
+		// A thunked import never reaches the gateway, so it never appears in the
+		// import profile. Say how many were thunked, or a profile comparison
+		// would read the missing rows as calls that stopped happening.
+		Console.Error.WriteLine(
+			$"[LOADER][INFO] native_import_thunks constant_zero={_nativeConstantThunkCount} " +
+			$"allowed={_nativeConstantThunksAllowed} (SHARPEMU_NATIVE_IMPORT_THUNKS=0 to disable)");
 		PublishImportProfileNames();
 		return num2 == importStubs.Count;
 	}
