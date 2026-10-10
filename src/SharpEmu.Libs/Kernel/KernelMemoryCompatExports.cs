@@ -7187,6 +7187,43 @@ public static partial class KernelMemoryCompatExports
     private static bool TrustsIndexAbsence(string hostPath) =>
         !_writableApp0 && !App0Archive.IsMounted && IsUnderApp0(hostPath);
 
+    /// <summary>
+    /// The length of a read-only game-image file that path resolution has
+    /// already measured, without asking the host again.
+    /// </summary>
+    /// <remarks>
+    /// Opening an asset for AMPR streaming needs its length to bound the read.
+    /// RandomAccess.GetLength is an fstat of an inode that resolving the very
+    /// same path just stat'ed, which on the external game volume is a second
+    /// cold metadata read; Demon's Souls pays it 10.6k times per boot. The
+    /// answer is only served for the read-only /app0 image, where it cannot go
+    /// stale under us - anywhere a guest or the emulator can write, the caller
+    /// must measure the file itself.
+    /// </remarks>
+    internal static bool TryGetReadOnlyImageLength(string hostPath, out long length)
+    {
+        length = -1;
+        if (string.IsNullOrEmpty(hostPath) || !TrustsIndexAbsence(hostPath))
+        {
+            return false;
+        }
+
+        if (_aprFileSizeCache.TryGetValue(hostPath, out var cached))
+        {
+            length = unchecked((long)cached);
+            return length >= 0;
+        }
+
+        var indexed = HostDirectoryIndex.Describe(hostPath);
+        if (indexed.Verdict != HostDirectoryIndex.Verdict.File || indexed.Length < 0)
+        {
+            return false;
+        }
+
+        length = indexed.Length;
+        return true;
+    }
+
     private static bool IsUnderApp0(string cachePath)
     {
         var app0Root = ResolveApp0Root();
