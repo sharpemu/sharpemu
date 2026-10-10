@@ -164,6 +164,40 @@ public sealed class PthreadMutexSemanticsTests
         Assert.NotEqual(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
     }
 
+    /// <summary>
+    /// #748 deliberately reverted NORMAL self-relock to a real EDEADLK (the
+    /// silent compatibility recursion it replaced was starving other
+    /// threads), but that revert only touched the SyncRoot-protected check;
+    /// a second, uncontended-fast-path copy of the same NORMAL-self-owned
+    /// case still returned OK. This pins the fast path to the same,
+    /// intentional EDEADLK outcome.
+    /// </summary>
+    [Fact]
+    public void NormalMutex_SelfRelockIsADeadlockNotSilentRecursion()
+    {
+        const ulong memoryBase = 0x1_0012_0000;
+        const ulong attrAddress = memoryBase + 0x100;
+        const ulong mutexAddress = memoryBase + 0x200;
+        var memory = new AllocatingCpuMemory(memoryBase, 0x4000);
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        context[CpuRegister.Rdi] = attrAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexattrInit(context));
+        context[CpuRegister.Rsi] = 3; // Normal.
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexattrSettype(context));
+
+        context[CpuRegister.Rdi] = mutexAddress;
+        context[CpuRegister.Rsi] = attrAddress;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexInit(context));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(context));
+
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK,
+            KernelPthreadCompatExports.PthreadMutexLock(context));
+
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+    }
+
     [Fact]
     public async Task ContendedMutex_HandsOffOneHostWaiterAtATime()
     {
