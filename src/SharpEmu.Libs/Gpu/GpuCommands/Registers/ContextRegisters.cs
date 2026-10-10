@@ -161,7 +161,11 @@ public struct EnhancedQualityAntialiasingRegisters
     public bool HighQualityIntersections;
     public bool IncoherentReads;
     public bool InterpolateComponentZ;
+    public bool InterpolateSourceZ;
     public bool StaticAnchorAssociations;
+    public bool AlphaToMaskEqaaDisable;
+    public byte OverrasterizationAmount;
+    public bool EnablePostZOverrasterization;
 
     public static EnhancedQualityAntialiasingRegisters Decode(uint value) => new()
     {
@@ -172,7 +176,11 @@ public struct EnhancedQualityAntialiasingRegisters
         HighQualityIntersections = RegisterField.Bit(value, 16),
         IncoherentReads = RegisterField.Bit(value, 17),
         InterpolateComponentZ = RegisterField.Bit(value, 18),
+        InterpolateSourceZ = RegisterField.Bit(value, 19),
         StaticAnchorAssociations = RegisterField.Bit(value, 20),
+        AlphaToMaskEqaaDisable = RegisterField.Bit(value, 21),
+        OverrasterizationAmount = (byte)RegisterField.Get(value, 24, 0x7),
+        EnablePostZOverrasterization = RegisterField.Bit(value, 27),
     };
 }
 
@@ -194,6 +202,7 @@ public struct ColorControlRegisters
 
 public struct DepthRenderOverrideRegisters
 {
+    public bool ForceShaderDepthOrder;
     public bool ForceZValid;
     public bool ForceZDirty;
     public bool ForceStencilValid;
@@ -201,6 +210,7 @@ public struct DepthRenderOverrideRegisters
 
     public static DepthRenderOverrideRegisters Decode(uint value) => new()
     {
+        ForceShaderDepthOrder = RegisterField.Bit(value, 6),
         ForceZValid = (value & 0x2000_0000u) != 0,
         ForceZDirty = (value & 0x0800_0000u) != 0,
         ForceStencilValid = (value & 0x4000_0000u) != 0,
@@ -253,10 +263,11 @@ public struct DepthShaderControlRegisters
     public bool DualExportEnable;
     public bool ExecuteOnNoop;
     public bool AlphaToMaskDisable;
+    public bool DepthBeforeShader;
 
     public static DepthShaderControlRegisters Decode(uint value) => new()
     {
-        RemainingBits = value & 0xFFFF_908Eu,
+        RemainingBits = value & 0xFFFF_808Eu,
         ConservativeDepthExport = (byte)RegisterField.Get(value, 13, 0x3),
         DepthExportOrder = (byte)RegisterField.Get(value, 4, 0x3),
         KillEnable = RegisterField.Bit(value, 6),
@@ -265,6 +276,7 @@ public struct DepthShaderControlRegisters
         DualExportEnable = RegisterField.Bit(value, 9),
         ExecuteOnNoop = RegisterField.Bit(value, 10),
         AlphaToMaskDisable = RegisterField.Bit(value, 11),
+        DepthBeforeShader = RegisterField.Bit(value, 12),
     };
 }
 
@@ -291,6 +303,17 @@ public sealed class SampleLocationRegisters
 
     public ulong CentroidPriority;
     public uint[] Locations = new uint[LocationCount];
+
+    // Four-bit signed offsets per coordinate, relative to the pixel center.
+    public (float X, float Y) Position(uint pixel, uint sample)
+    {
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(pixel, 4u);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(sample, 16u);
+        var packed = Locations[pixel * 4 + sample / 4] >> (int)((sample % 4) * 8);
+        var x = (int)(packed << 28) >> 28;
+        var y = (int)(packed << 24) >> 28;
+        return ((x + 8) / 16f, (y + 8) / 16f);
+    }
 
     public SampleLocationRegisters Copy()
     {
@@ -366,7 +389,11 @@ public sealed class ContextRegisters
     public ColorControlRegisters ColorControl = new();
     public DepthRenderOverrideRegisters DepthRenderOverride;
     public ScanModeRegisters ScanMode = new();
+    public uint ScanModeControl1;
     public SampleLocationRegisters SampleLocations = new();
+    public uint ShaderSampleExclusionMask;
+    public uint SampleCoverageMaskX0Y0X1Y0 = uint.MaxValue;
+    public uint SampleCoverageMaskX0Y1X1Y1 = uint.MaxValue;
     public AntialiasingConfigRegisters AntialiasingConfig;
     public uint ShaderStages;
     public DepthTargetWords DepthTarget;

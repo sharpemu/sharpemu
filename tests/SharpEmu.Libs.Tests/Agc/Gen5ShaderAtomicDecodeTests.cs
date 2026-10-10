@@ -153,6 +153,15 @@ public sealed class Gen5ShaderAtomicDecodeTests
     }
 
     [Fact]
+    public void SSleep_Decodes()
+    {
+        // S_SLEEP 2 (SOPP op 0x0E)
+        var instruction = DecodeSingle(0xBF8E0002);
+
+        Assert.Equal("SSleep", instruction.Opcode);
+    }
+
+    [Fact]
     public void DsAddU32_HasAddressAndDataSourcesButNoDestination()
     {
         // DS_ADD_U32 v0, v1
@@ -327,6 +336,36 @@ public sealed class Gen5ShaderAtomicDecodeTests
         Assert.Equal("VAlignbyteB32", instruction.Opcode);
         Assert.Equal(new[] { Gen5Operand.Vector(2), Gen5Operand.Vector(2), Gen5Operand.Vector(3) }, instruction.Sources);
         Assert.Equal(new[] { Gen5Operand.Vector(1) }, instruction.Destinations);
+    }
+
+    [Theory]
+    [InlineData(0x7E060903u, 0u, "VCvtF64I32")]
+    [InlineData(0x7E062D03u, 0u, "VCvtF64U32")]
+    [InlineData(0x7E065F03u, 0u, "VRcpF64")]
+    [InlineData(0x7E066103u, 0u, "VRsqF64")]
+    [InlineData(0x7E066903u, 0u, "VSqrtF64")]
+    [InlineData(0xD5650003u, 0x000E0B03u, "VMulF64")]
+    [InlineData(0xD54C0003u, 0x042E0B03u, "VFmaF64")]
+    [InlineData(0xD5840003u, 0x00000103u, "VCvtF64I32")]
+    [InlineData(0xD5960003u, 0x00000103u, "VCvtF64U32")]
+    [InlineData(0xD5AF0003u, 0x00000103u, "VRcpF64")]
+    [InlineData(0xD5B00003u, 0x00000103u, "VRsqF64")]
+    [InlineData(0xD5B40003u, 0x00000103u, "VSqrtF64")]
+    public void Binary64ResultWritesBothDestinationWords(uint first, uint second, string opcode)
+    {
+        var instruction = DecodeSingle(second == 0 ? [first] : [first, second]);
+        Assert.Equal(opcode, instruction.Opcode);
+        Assert.Equal(new[] { Gen5Operand.Vector(3), Gen5Operand.Vector(4) }, instruction.Destinations);
+    }
+
+    [Theory]
+    [InlineData(0x7E061F03u, 0u)]
+    [InlineData(0xD58F0003u, 0x00000103u)]
+    public void Binary64ToBinary32WritesOnlyOneDestinationWord(uint first, uint second)
+    {
+        var instruction = DecodeSingle(second == 0 ? [first] : [first, second]);
+        Assert.Equal("VCvtF32F64", instruction.Opcode);
+        Assert.Equal(new[] { Gen5Operand.Vector(3) }, instruction.Destinations);
     }
 
     private static Gen5ShaderInstruction DecodeSingle(params uint[] words)

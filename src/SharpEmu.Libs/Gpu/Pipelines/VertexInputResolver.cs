@@ -360,7 +360,24 @@ public static class VertexInputResolver
         for (var bufferIndex = 0; bufferIndex < buffers.Count; bufferIndex++)
         {
             var buffer = buffers[bufferIndex];
-            result[bufferIndex] = new VertexInputBuffer(buffer.Address, buffer.Stride, buffer.RecordCount, buffer.FetchIndex != 0);
+            uint minimumFetchBytes = 0;
+            foreach (var resourceIndex in buffer.AttributeIndices)
+            {
+                var resource = resources[resourceIndex];
+                var descriptor = resource.Descriptor;
+                // OOB_SELECT=2 only tests for an unbound (zero-record) descriptor.
+                // A constant stream still reads the whole formatted element, even
+                // when NUM_RECORDS is smaller than that element's byte width.
+                if (descriptor.Stride == 0 && descriptor.OutOfBounds == 2 && descriptor.RecordCount != 0 &&
+                    VertexAttributeFormats.TryResolve(in descriptor, 4, out var format, out _))
+                {
+                    minimumFetchBytes = Math.Max(minimumFetchBytes, Images.ViewFormatRules.BlockBytes(format));
+                }
+            }
+            result[bufferIndex] = new VertexInputBuffer(buffer.Address, buffer.Stride, buffer.RecordCount, buffer.FetchIndex != 0)
+            {
+                MinimumFetchBytes = minimumFetchBytes,
+            };
             foreach (var resourceIndex in buffer.AttributeIndices)
             {
                 var resource = resources[resourceIndex];

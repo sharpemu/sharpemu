@@ -15,6 +15,58 @@ public sealed class KernelEventQueueWaiterLifetimeTests
     private const ulong EventsAddress = BaseAddress + 0x200;
     private const ulong OutCountAddress = BaseAddress + 0x300;
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void EventFlag_CompletedWaitDoesNotRemainInCancelCount(bool signal)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(memory.TryWrite(EventsAddress, "wait-lifetime\0"u8));
+        ctx[CpuRegister.Rdi] = HandleAddress;
+        ctx[CpuRegister.Rsi] = EventsAddress;
+        ctx[CpuRegister.Rdx] = 0x20;
+        Assert.Equal(0, KernelEventFlagCompatExports.KernelCreateEventFlag(ctx));
+        var handle = ReadUInt64(memory, HandleAddress);
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var previousThread = GuestThreadExecution.EnterGuestThread(0x703);
+            var previousFrame = GuestThreadExecution.EnterImportCallFrame(0x10000, 0x20000, 0x30000);
+            IGuestThreadBlockWaiter waiter;
+            try
+            {
+                ctx[CpuRegister.Rdi] = handle;
+                ctx[CpuRegister.Rsi] = 1;
+                ctx[CpuRegister.Rdx] = 0x12;
+                ctx[CpuRegister.Rcx] = 0;
+                ctx[CpuRegister.R8] = OutCountAddress;
+                Assert.Equal(0, KernelEventFlagCompatExports.KernelWaitEventFlag(ctx));
+                Assert.True(GuestThreadExecution.TryConsumeCurrentThreadBlock(
+                    out _, out _, out _, out _, out var staged, out _));
+                waiter = Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(staged);
+            }
+            finally
+            {
+                GuestThreadExecution.RestoreImportCallFrame(previousFrame);
+                GuestThreadExecution.RestoreGuestThread(previousThread);
+            }
+            if (signal)
+            {
+                ctx[CpuRegister.Rdi] = handle;
+                ctx[CpuRegister.Rsi] = 1;
+                Assert.Equal(0, KernelEventFlagCompatExports.KernelSetEventFlag(ctx));
+                Assert.True(waiter.TryWake());
+            }
+            Assert.Equal(signal ? 0 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT, waiter.Resume());
+        }
+        ctx[CpuRegister.Rdi] = handle;
+        ctx[CpuRegister.Rsi] = 0;
+        ctx[CpuRegister.Rdx] = OutCountAddress;
+        Assert.Equal(0, KernelEventFlagCompatExports.KernelCancelEventFlag(ctx));
+        Assert.Equal(0u, ReadUInt32(memory, OutCountAddress));
+        ctx[CpuRegister.Rdi] = handle;
+        Assert.Equal(0, KernelEventFlagCompatExports.KernelDeleteEventFlag(ctx));
+    }
     [Fact]
     public void DeleteEqueue_CompletesStagedWaiterAsDeleted()
     {

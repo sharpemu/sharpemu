@@ -71,6 +71,17 @@ public static partial class ImageRequestBuilders
         var hasStencil = depthWords.StencilFormat != GuestStencilFormat.Invalid;
         if (!copyMode)
         {
+            // With both formats INVALID the DB has no depth or stencil surface: depth and stencil
+            // tests and writes do not happen, whatever DB_DEPTH_CONTROL and the other fields say.
+            if (depthWords.DepthFormat == GuestDepthFormat.Invalid && !hasStencil)
+            {
+                if (Rendering.RenderTrace.Enabled)
+                {
+                    Rendering.RenderTrace.Write("DepthAttachmentRejected reason=invalid-formats");
+                }
+                return null;
+            }
+
             var depthActive = depthWords.DepthTestEnabled || depthWords.DepthWriteEnabled || depthWords.DepthBoundsEnabled || depthWords.DepthClearEnabled || depthWords.CopyDepthToColor;
             var stencilActive = hasStencil && (depthWords.StencilTestEnabled || depthWords.StencilClearEnabled || depthWords.CopyStencilToColor);
             if (!depthActive && !stencilActive)
@@ -144,9 +155,9 @@ public static partial class ImageRequestBuilders
                 throw SubmissionScheduler.Fatal($"The HTile metadata address is invalid: htile=0x{depthWords.HtileBase:X16}.");
             }
 
-            if (depthWords.SliceMax >= 32)
+            if (depthWords.SliceMax >= SurfaceMetadata.MaxSlices)
             {
-                throw SubmissionScheduler.Fatal($"HTile clear tracking supports at most 32 slices: last={depthWords.SliceMax}.");
+                throw SubmissionScheduler.Fatal($"HTile clear tracking supports at most {SurfaceMetadata.MaxSlices} slices: last={depthWords.SliceMax}.");
             }
         }
 

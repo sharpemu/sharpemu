@@ -11,6 +11,24 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class DirectImageTableTests
 {
+    [Theory]
+    [InlineData(0x80000000u, true)]
+    [InlineData(0x10000000u, false)]
+    public void ImageCandidatesDistinguishResourceLevelFromReservedBits(uint bit, bool valid)
+    {
+        var plan = ShaderResourcePlan.Extract(CreateWaveIndexedDescriptorProgram(), ShaderStage.Compute, Hash, 0, 2);
+        bool Read(ulong address, out uint word)
+        {
+            if (!ReadWaveIndexedMemory(address, out word)) return false;
+            if (address >= 0x1100 && (address - 0x1100) % 32 == 8) word |= bit;
+            return true;
+        }
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization));
+        Assert.Equal(valid, snapshot.Images.Any(image => image[0] != 0));
+        if (valid) Assert.All(snapshot.Images, image => Assert.Equal(bit, image[2] & bit));
+    }
+
     internal static Gen5ShaderProgram CreateWaveIndexedDescriptorProgram()
     {
         return Program(
@@ -166,6 +184,29 @@ public sealed class DirectImageTableTests
         Assert.Single(snapshot.Images, image => image.All(word => word == 0));
     }
 
+    [Fact]
+    public void IndirectTableWithOnlyIncompatibleDimensionsBindsTypedNullCandidates()
+    {
+        var program = CreateWaveIndexedDescriptorProgram();
+        program = program with
+        {
+            Instructions = program.Instructions.Select(instruction =>
+                instruction.Pc == 64
+                    ? Image(64, "ImageLoad", 4, dimension: 6, dmask: 1, vectorAddress: 1)
+                    : instruction).ToArray(),
+        };
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(
+            plan, Inputs([0x1000, 0], readCleanMemory: ReadWaveIndexedMemory),
+            ref snapshot, ref specialization, out var failure), $"materialize {failure}");
+        Assert.Equal(2, snapshot.Images.Length);
+        Assert.All(snapshot.Images, image => Assert.All(image, word => Assert.Equal(0u, word)));
+        Assert.All(specialization.Images, image => Assert.Equal(ImageDimension.Dim2DMsaa, image.Dimension));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -190,11 +231,16 @@ public sealed class DirectImageTableTests
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
     }
 
+    // Without the restored EXEC the loop is no waterfall: no wave-indexed table is planned,
+    // and the load reads the descriptor its registers hold at run time.
     [Fact]
     public void ReadLaneWithoutRestoredExecutionIsNotWaveIndexed()
     {
-        Assert.Throws<ResourcePlanException>(() =>
-            ShaderResourcePlan.Extract(CreateWaveIndexedReadLaneProgram(selfAddressed: true, restoreExec: false), ShaderStage.Compute, Hash, 0, 2));
+        var plan = ShaderResourcePlan.Extract(CreateWaveIndexedReadLaneProgram(selfAddressed: true, restoreExec: false), ShaderStage.Compute, Hash, 0, 2);
+
+        Assert.Empty(plan.IndirectImages);
+        Assert.Contains(plan.Memory.Entries, entry => entry.RuntimeDescriptor);
+        Assert.Empty(plan.Info.NullDescriptorFallbacks);
     }
 
     private static bool ReadWaveIndexedMemory(ulong address, out uint word)
@@ -340,10 +386,15 @@ public sealed class DirectImageTableTests
         }
     }
 
+    // An unbounded index still plans no direct table; the load reads its descriptor at run time.
     [Fact]
-    public void UnboundedDirectTableIsStillRejected()
+    public void UnboundedDirectTableIsReadAtRuntime()
     {
-        Assert.Throws<ResourcePlanException>(() => ShaderResourcePlan.Extract(CreateProgram(bitScan: false), ShaderStage.Compute, Hash, 0, 2));
+        var plan = ShaderResourcePlan.Extract(CreateProgram(bitScan: false), ShaderStage.Compute, Hash, 0, 2);
+
+        Assert.Empty(plan.IndirectImages);
+        Assert.Contains(plan.Memory.Entries, entry => entry.RuntimeDescriptor);
+        Assert.Empty(plan.Info.NullDescriptorFallbacks);
     }
 
     [Theory]
@@ -552,11 +603,11 @@ public sealed class DirectImageTableTests
         bool Read(ulong address, out uint word)
         {
             var success = ReadDescriptor(address, out word);
-            if (address == 0x1000 + 344 + 12)
-            {
-                if (!incompatible) return false;
-                word = (word & 0x0FFFFFFF) | (11u << 28);
-            }
+            // A converted format cannot share a case with a directly sampled one.
+            if (incompatible && address == 0x1000 + 344 + 4)
+                word = (word & ~(0x1FFu << 20)) | (GuestImageFormat.Format11x2x10Uint << 20);
+            if (!incompatible && address == 0x1000 + 344 + 12)
+                return false;
             return success;
         }
         Assert.False(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization,
@@ -564,5 +615,51 @@ public sealed class DirectImageTableTests
         Assert.Equal(incompatible ? ResourceMaterializationFailure.IncompatibleImageCandidates : ResourceMaterializationFailure.Other, failure);
         Assert.Same(original, snapshot);
         Assert.Same(originalSpecialization, specialization);
+    }
+
+    // Vulkan cannot sample a multisample image. A sample instruction reads sample 0 of the texel
+    // its coordinate falls in (as shadPS4 lowers it); a gather has no such reading and is refused.
+    [Theory]
+    [InlineData("ImageSampleA", true)]
+    [InlineData("ImageSampleLz", true)]
+    [InlineData("ImageGather4Lz", false)]
+    [InlineData("ImageLoad", true)]
+    public void MultisampleDescriptorsRequireLoadsInsteadOfInvalidSamplingModules(string opcode, bool accepted)
+    {
+        var gather = opcode.StartsWith("ImageGather", StringComparison.Ordinal);
+        var program = Program([Image(0, opcode, 0, samplerRegister: 8, dmask: 1), EndProgram(8)]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, Hash, 0, 12);
+        var inputs = new ResourceRuntimeInputs { UserData = [0x1000, GuestImageFormat.Format32Float << 20, 0,
+            0xFAC | (1u << 16) | (GuestImageFormat.ImageType2DMsaa << 28), 0, 0x10, 0, 0,
+            0, 0xFFF000, 0, 0] };
+        ResourceSnapshot snapshot = new(); ResourceSpecialization specialization = new();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        var resources = ResourceMaterializer.ApplyTo(plan, specialization);
+        Assert.Equal(ImageDimension.Dim2DMsaa, resources.Info.Images[0].Dimension);
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 0, 12),
+            false, ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
+        Assert.Equal(accepted, Gen5SpirvTranslator.TryCompileProgram(new ShaderCompileRequest(plan, resources, layout), out var shader, out var error));
+        if (gather) Assert.Contains("multisample sampling semantics", error);
+        if (accepted) Gen5LargeDispatcherValidationTests.ValidateWithSpirvToolsWhenAvailable(shader.Spirv);
+    }
+
+    // A table in a scalar buffer, indexed by a lane value: planned as a dense table it binds
+    // every record of the buffer on each draw. An access the runtime table can read binds only
+    // the records it reads; one it cannot (a storage write) keeps the dense table.
+    [Theory]
+    [InlineData("ImageLoad", true)]
+    [InlineData("ImageStore", false)]
+    public void BufferTableImagesAreReadAtRuntimeWhenTheAccessAllowsIt(string opcode, bool runtime)
+    {
+        var program = Program(
+            ReadFirstLane(0, 106, 0),
+            Sop2(4, "SMulI32", 106, Gen5Operand.Scalar(106), Operand(384)),
+            ScalarBufferLoad(12, 0, 16, 8, dynamicOffsetRegister: 106),
+            Image(20, opcode, 16, dmask: 1, vectorAddress: 4),
+            EndProgram(28));
+        var plan = Extract(program, userDataCount: 4);
+
+        Assert.Equal(runtime, plan.Info.UsesRuntimeDescriptors);
+        Assert.Equal(!runtime, plan.DescriptorSources.Any(source => source.IndirectImage?.BufferTableStride == 384));
     }
 }

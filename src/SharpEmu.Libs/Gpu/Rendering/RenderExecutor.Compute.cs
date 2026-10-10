@@ -1,8 +1,10 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
@@ -13,6 +15,7 @@ public readonly record struct ComputeImageClear(BufferDescriptorWords Descriptor
 
 public sealed partial class RenderExecutor
 {
+
     private const uint DispatchInitiatorUseThreadDimensions = 1u << 5;
     private const uint DispatchInitiatorBaseBits = 0x41;
     private const uint DispatchInitiatorModifierBits = 0xA038;
@@ -51,6 +54,35 @@ public sealed partial class RenderExecutor
         }
 
         var useThreadDimensions = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0;
+        // A zero dimension executes no work. Check before materializing shaders: an indirect
+        // buffer can be read here only when no pending GPU write can change its contents.
+        var zeroDispatch = false;
+        if (indirectArgumentsAddress == 0 || useThreadDimensions)
+        {
+            zeroDispatch = groupsX == 0 || groupsY == 0 || groupsZ == 0;
+        }
+        else
+        {
+            Span<byte> arguments = stackalloc byte[3 * sizeof(uint)];
+            if (_host.TryReadCleanGuestBytes(indirectArgumentsAddress, arguments))
+            {
+                zeroDispatch = BinaryPrimitives.ReadUInt32LittleEndian(arguments) == 0 ||
+                    BinaryPrimitives.ReadUInt32LittleEndian(arguments[sizeof(uint)..]) == 0 ||
+                    BinaryPrimitives.ReadUInt32LittleEndian(arguments[(2 * sizeof(uint))..]) == 0;
+            }
+        }
+
+        if (zeroDispatch)
+        {
+            if (RenderTrace.Enabled && RenderTrace.ZeroDispatch())
+            {
+                RenderTrace.Write($"Skipping a zero-sized dispatch: groups={groupsX}x{groupsY}x{groupsZ} " +
+                    $"indirect=0x{indirectArgumentsAddress:X16} initiator=0x{dispatchInitiator:X8} shader=0x{compute.Address:X16}");
+            }
+
+            return;
+        }
+
         var computeProgram = _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator, groupsX, groupsY, groupsZ);
         if (computeProgram.Consumed)
         {
@@ -130,16 +162,6 @@ public sealed partial class RenderExecutor
                     $"Converted thread dimensions to groups: threads={threadsX}x{threadsY}x{threadsZ} " +
                     $"local={Math.Max(compute.ThreadsX, 1)}x{Math.Max(compute.ThreadsY, 1)}x{Math.Max(compute.ThreadsZ, 1)} groups={groupsX}x{groupsY}x{groupsZ}");
             }
-        }
-
-        if (indirectArgumentsAddress == 0 && (groupsX == 0 || groupsY == 0 || groupsZ == 0))
-        {
-            if (RenderTrace.Enabled && RenderTrace.ZeroDispatch())
-            {
-                RenderTrace.Write($"Skipping a zero-sized dispatch: groups={groupsX}x{groupsY}x{groupsZ} initiator=0x{dispatchInitiator:X8} shader=0x{compute.Address:X16}");
-            }
-
-            return;
         }
 
         _host.EndRendering();
@@ -228,6 +250,13 @@ public sealed partial class RenderExecutor
         return BufferDescriptorWords.From(words);
     }
 
+    // The program's packed stride against the descriptor's. With runtime strides the
+    // program carries only the flags and indexes with the descriptor's stride.
+    private static bool StrideMatches(uint programStride, uint descriptorStride) =>
+        (programStride & ~BufferSpecialization.StrideMask) == (descriptorStride & ~BufferSpecialization.StrideMask) &&
+        ((programStride & BufferSpecialization.StrideMask) == 0 ||
+         (programStride & BufferSpecialization.StrideMask) == (descriptorStride & BufferSpecialization.StrideMask));
+
     // A full overwrite of registered metadata by a compute shader becomes a tracked clear.
     private bool TryConsumeMetadataClear(ComputeInputInfo input)
     {
@@ -283,7 +312,9 @@ public sealed partial class RenderExecutor
     {
         var program = input.Stage.Program ?? throw _host.Fatal("The compute stage has no program.");
         var resources = input.Stage.Resources;
-        if (program.ConstantStoreValue is not { } value ||
+        if (program.ConstantStoreValue is not { } value || program.ImmediateConstantFill is not { } fill ||
+            program.UserDataBase != 0 || fill.GroupScalarRegister != (uint)input.WorkgroupRegister ||
+            fill.DestinationScalarResource + 4 > resources.UserData.Length ||
             program.Buffers.Length != 1 || resources.Buffers.Length != 1 || resources.Buffers[0].Length != 4 ||
             program.Images.Length != 0 || program.SamplerCount != 0 || program.UsesDeviceAddresses)
         {
@@ -292,6 +323,8 @@ public sealed partial class RenderExecutor
 
         var info = program.Buffers[0];
         var descriptor = BufferDescriptorWords.From(resources.Buffers[0]);
+        if (!resources.UserData.AsSpan((int)fill.DestinationScalarResource, 4).SequenceEqual(resources.Buffers[0]))
+            return null;
         var threads = (ulong)groupsX * input.ThreadsX;
         if (!info.Formatted || !info.Written || info.Read || info.Atomic || info.Scalar || info.MaxByteExtent != sizeof(uint) ||
             descriptor.Stride != sizeof(uint) || descriptor.Format != BufferDescriptorWords.Format32UInt || descriptor.SwizzleEnabled ||
@@ -314,7 +347,10 @@ public sealed partial class RenderExecutor
     {
         var program = input.Stage.Program ?? throw _host.Fatal("The compute stage has no program.");
         var resources = input.Stage.Resources;
-        if (program.Buffers.Length != 2 || resources.Buffers.Length != 2 || program.Images.Length != 0 || program.SamplerCount != 0 ||
+        if (program.ConstantFill is not { } fill || program.UserDataBase != 0 ||
+            fill.GroupScalarRegister != (uint)input.WorkgroupRegister ||
+            fill.DestinationScalarResource + 4 > resources.UserData.Length || fill.SourceScalarResource + 4 > resources.UserData.Length ||
+            program.Buffers.Length != 2 || resources.Buffers.Length != 2 || program.Images.Length != 0 || program.SamplerCount != 0 ||
             program.UsesDeviceAddresses || resources.Images.Length != 0 || resources.Samplers.Length != 0 ||
             resources.Buffers[0].Length != 4 || resources.Buffers[1].Length != 4)
         {
@@ -342,6 +378,9 @@ public sealed partial class RenderExecutor
 
         var descriptor = BufferDescriptorWords.From(resources.Buffers[target]);
         var valueDescriptor = BufferDescriptorWords.From(resources.Buffers[source]);
+        if (!resources.UserData.AsSpan((int)fill.DestinationScalarResource, 4).SequenceEqual(resources.Buffers[target]) ||
+            !resources.UserData.AsSpan((int)fill.SourceScalarResource, 4).SequenceEqual(resources.Buffers[source]))
+            return null;
         var threads = (ulong)groupsX * input.ThreadsX;
         if (descriptor.Stride != sizeof(uint) || descriptor.Format != BufferDescriptorWords.Format32UInt || descriptor.SwizzleEnabled ||
             descriptor.IndexStride != 0 || descriptor.AddThreadId || descriptor.RecordCount == 0 ||
@@ -384,7 +423,7 @@ public sealed partial class RenderExecutor
         var descriptor = BufferDescriptorWords.From(words);
         if (!resource.Formatted || !resource.Written || resource.Read || resource.Atomic || resource.Scalar || resource.MaxByteExtent != ImageClearStride ||
             descriptor.Stride != ImageClearStride || descriptor.Format != BufferDescriptorWords.Format32x4UInt || descriptor.SwizzleEnabled ||
-            descriptor.IndexStride != 0 || descriptor.AddThreadId || resource.PackedStride != descriptor.PackedStride ||
+            descriptor.IndexStride != 0 || descriptor.AddThreadId || !StrideMatches(resource.PackedStride, descriptor.PackedStride) ||
             program.UserDataBase != 0 || resources.UserData.Length != ImageClearUserDataCount)
         {
             return null;

@@ -15,6 +15,38 @@ namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
 public sealed class ScalarAbsoluteDeviceTests(HeadlessVulkanFixture fixture) : IClassFixture<HeadlessVulkanFixture>
 {
+    [Fact]
+    public void LeadingBitCountsUnsignedZerosAndPreservesCondition()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var program = Program(
+            Sop2(0, "SCmpEqI32", 0, Gen5Operand.Scalar(8), Gen5Operand.Scalar(8)) with { Encoding = Gen5ShaderEncoding.Sopc, Destinations = [] },
+            Sop1(4, "SFlbitI32B32", 10, Gen5Operand.Scalar(8)),
+            MoveVectorFromScalar(8, 12, 10),
+            Sop2(12, "SCselectB32", 11, Operand(1), Operand(0)),
+            MoveVectorFromScalar(16, 13, 11),
+            BufferAccess(20, "BufferStoreDwordx2", 4, dwords: 2, vectorData: 12), EndProgram(28));
+        var (plan, resources, layout) = Prepare(program);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var result = runner.CreateBuffer(64);
+        var bindings = new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [result] };
+        var registers = new uint[256];
+        registers[6] = 64;
+        foreach (var (input, expected) in new (uint, uint)[] { (0, uint.MaxValue), (0xCCCC, 16), (0xFFFF3333, 0), (0x7FFFFFFF, 1), (0x80000000, 0), (uint.MaxValue, 0) })
+        {
+            registers[8] = input;
+            harness.Run(() => runner.Dispatch(registers, bindings, 1));
+            var actual = runner.ReadBack(result, 0, 8);
+            Assert.Equal(expected, BinaryPrimitives.ReadUInt32LittleEndian(actual));
+            Assert.Equal(1u, BinaryPrimitives.ReadUInt32LittleEndian(actual.AsSpan(4)));
+        }
+        harness.AssertNoValidationMessages();
+    }
+
     [Theory]
     [InlineData(false, false, false)]
     [InlineData(false, true, true)]

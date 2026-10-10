@@ -130,6 +130,11 @@ public sealed class ShaderCompileRequest
 
     public Gen5ShaderProgram Program { get; }
     public ShaderStage Stage { get; }
+    public Gen5TessellationInfo? Tessellation { get; init; }
+    // Merged LS/HS workgroups can contain several independently branching waves.
+    // The Vulkan lowering rendezvous all waves before an LDS phase transition.
+    public Gen5TessellationHullInfo? TessellationHull { get; init; }
+    public bool CooperativeWave64Workgroup { get; init; }
     public ulong Hash { get; }
     public MemoryAccessTable Memory { get; }
     public SpecializedResourceInfo Resources { get; }
@@ -171,11 +176,57 @@ public sealed class ShaderCompileRequest
     // 64-bit atomics are emitted as real 64-bit atomics instead of a pair of
     // 32-bit ones, which is not atomic as a pair.
     public bool SupportsSharedInt64Atomics { get; init; }
+
+    // shaderFloat16 with round-to-nearest-even, denormal and signed zero/Inf/NaN
+    // preservation for f16 (float controls). Conversions and packed fused arithmetic
+    // may use native instructions; devices missing any guarantee use the software path.
+    public bool SupportsExactFloat16Conversions { get; init; }
+
+    // Descriptor indexing with a per-invocation index (shader*ArrayNonUniformIndexing): an
+    // indirect image table is then read by index instead of one case per candidate.
+    public bool SupportsNonUniformImageIndexing { get; init; }
+
+    // Emits the program-counter dispatcher even when the block graph can be structured, to
+    // compare the two control-flow forms.
+    public bool ForceDispatcher { get; init; }
+
+    // Formatted buffer accesses whose format is known when the shader is translated still
+    // go through the run-time format decoder. For tests that compare the two.
+    public bool ForceGenericBufferFormats { get; init; }
+
+    // True only when the host measured GLSL UnpackHalf2x16 / PackHalf2x16 to be bit-exact
+    // against the emulator's own f16 conversion on this device, for every half bit pattern
+    // and every rounding boundary. The packed-f16 paths then convert with those two ext
+    // instructions instead of the branchless integer sequences, which is what a driver
+    // lowers to one hardware convert. Default false: the spec leaves f16 rounding and
+    // subnormal behaviour to the implementation, so the exact emulation is the only safe
+    // default and native is opted into by a device probe, never by a capability bit.
+    public bool NativeHalfConversionExact { get; init; }
+
+    // True only when the host measured that a storage-buffer read past the end of its descriptor
+    // range reads zero on this device (robustBufferAccess2 that the device actually honours).
+    // Every guest buffer word is then loaded directly: the range test, the address clamp and the
+    // zero select around it exist only to produce the zero the device already returns. Default
+    // false, because an out-of-range read is undefined without that promise.
+    public bool ZeroOutOfBoundsBufferReads { get; init; }
     public bool ShaderSignedZeroInfNanPreserveFloat32Supported { get; init; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
 
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];
     public uint PixelInputEnable { get; init; }
+    // Explicit interpolation sample without requiring a fragment invocation per sample.
+    // The caller must select a sample valid for the pipeline's rasterization count.
+    public uint? PixelInterpolationSample { get; init; }
+    // Offsets relative to pixel center over a row-major 2x2 grid. A fixed sample uses
+    // four offsets; per-sample interpolation uses rasterizationSamples offsets per pixel.
+    public IReadOnlyList<(float X, float Y)> PixelCustomSampleOffsets { get; init; } = [];
+    public bool EarlyFragmentTests { get; init; }
+    // Samples excluded from triggering guest fragment execution after early depth/stencil tests.
+    public uint PixelShaderSampleExclusionMask { get; init; }
+    public bool PixelDepthExportEnable { get; init; }
+    public bool PixelSampleMaskExportEnable { get; init; }
+    public uint PixelMaskExportSamples { get; init; } = 1;
+    public uint PixelRasterizationSamples { get; init; } = 1;
     public uint PixelCustomInterpolationMask { get; init; }
 
     // False when the device cannot read one vertex's value of a pixel input (PerVertexKHR).

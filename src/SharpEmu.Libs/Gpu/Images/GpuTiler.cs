@@ -91,6 +91,7 @@ public sealed unsafe class GpuTiler : IDisposable
     private Pipeline _d24ToD16;
     private Pipeline _d32ToD16;
     private Pipeline _swapBgra16;
+    private readonly Pipeline[] _narrowColorConversions = new Pipeline[4];
 
     public GpuTiler(GpuDeviceInfo device, SubmissionScheduler scheduler, GpuRingBuffer stream)
     {
@@ -146,10 +147,14 @@ public sealed unsafe class GpuTiler : IDisposable
         DestroyPipeline(_d24ToD16);
         DestroyPipeline(_d32ToD16);
         DestroyPipeline(_swapBgra16);
+        foreach (var pipeline in _narrowColorConversions)
+            DestroyPipeline(pipeline);
         _pools.Dispose();
         lock (_scratchGate)
         {
             _scratchDisposed = true;
+            _uploadRing?.Dispose();
+            _uploadRing = null;
             foreach (var pooled in _scratchPool.Values)
             {
                 foreach (var buffer in pooled)
@@ -197,6 +202,27 @@ public sealed unsafe class GpuTiler : IDisposable
     private readonly Dictionary<int, Stack<GpuBuffer>> _scratchPool = new();
     private ulong _scratchPooledBytes;
 
+    // Scratches only return when their tick completes, so one long tick full of uploads
+    // (a streaming burst) holds all of them; past this budget the next draw ends the tick.
+    internal ulong OutstandingScratchBudget { get; set; } = 256UL << 20;
+    private ulong _outstandingScratch;
+
+    public bool ScratchOverBudget => Interlocked.Read(ref _outstandingScratch) > OutstandingScratchBudget;
+    internal ulong OutstandingScratchBytes => Interlocked.Read(ref _outstandingScratch);
+    internal ulong PooledScratchBytes { get { lock (_scratchGate) return _scratchPooledBytes; } }
+
+    public void ReleaseUnusedScratch()
+    {
+        lock (_scratchGate)
+        {
+            // Only completion callbacks return these buffers. Pending GPU uses
+            // remain outside the pool, so trimming cannot invalidate them.
+            foreach (var pooled in _scratchPool.Values)
+                while (pooled.TryPop(out var buffer)) buffer.Dispose();
+            _scratchPooledBytes = 0;
+        }
+    }
+
     // The scratch stays alive through the current tick; the caller sees exactly `size` bytes.
     private TilerBufferSpan AllocateScratch(ulong size)
     {
@@ -219,8 +245,51 @@ public sealed unsafe class GpuTiler : IDisposable
         buffer ??= new GpuBuffer(_device, _scheduler, GpuBufferUsage.DeviceLocal, 0,
             BufferUsageFlags.StorageBufferBit | BufferUsageFlags.TransferSrcBit | BufferUsageFlags.TransferDstBit,
             shift >= 63 ? size : 1UL << shift);
-        _scheduler.QueueCompletionAction(() => ReturnScratch(shift, buffer));
+        var held = buffer.Size;
+        Interlocked.Add(ref _outstandingScratch, held);
+        _scheduler.QueueCompletionAction(() =>
+        {
+            Interlocked.Add(ref _outstandingScratch, unchecked(0UL - held));
+            ReturnScratch(shift, buffer);
+        });
         return new TilerBufferSpan(buffer.Handle, 0, size);
+    }
+
+    // Upload scratch comes from one ring reused across uploads and ticks. Pooled scratch only
+    // returns when its tick completes, and a tick cannot end inside a draw, so a bindless
+    // draw that materializes thousands of textures would hold one scratch per texture.
+    // Every tile record starts with an all-commands barrier on its target range, which also
+    // orders it after earlier reads of that range, so reusing the ring stays safe.
+    private const ulong UploadRingSize = 256UL << 20;
+    private const ulong UploadRingAlignment = 256;
+    private GpuBuffer? _uploadRing;
+    private ulong _uploadRingOffset;
+
+    private TilerBufferSpan AllocateUploadScratch(ulong size)
+    {
+        size = (size + 3) & ~3UL;
+        if (size > UploadRingSize)
+        {
+            return AllocateScratch(size);
+        }
+
+        _uploadRing ??= new GpuBuffer(_device, _scheduler, GpuBufferUsage.DeviceLocal, 0,
+            BufferUsageFlags.StorageBufferBit | BufferUsageFlags.TransferSrcBit | BufferUsageFlags.TransferDstBit, UploadRingSize);
+        var alignment = Math.Max(UploadRingAlignment, StorageAlignment);
+        var offset = (_uploadRingOffset + alignment - 1) / alignment * alignment;
+        if (offset + size > UploadRingSize)
+        {
+            // Wrapping: all earlier ring accesses finish before the ring is written again.
+            offset = 0;
+            _scheduler.EndRendering();
+            var barrier = Barrier(_uploadRing.Handle, 0, UploadRingSize,
+                AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit, AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit);
+            VulkanSynchronization.PipelineBarrier(_device.Vk, new CommandBuffer(_scheduler.Current.Handle),
+                PipelineStageFlags.AllCommandsBit, PipelineStageFlags.AllCommandsBit, 0, 0, null, 1, &barrier, 0, null);
+        }
+
+        _uploadRingOffset = offset + size;
+        return new TilerBufferSpan(_uploadRing.Handle, offset, size);
     }
 
     private void ReturnScratch(int shift, GpuBuffer buffer)
@@ -601,9 +670,9 @@ public sealed unsafe class GpuTiler : IDisposable
         var sourceBase = tiledOffset & (StorageAlignment - 1);
         var dispatches = new List<TransferDispatch>();
         Prepare(false, tiledCapacity, linearCapacity, transfers, sourceBase, 0, dispatches);
-        var scratch = AllocateScratch((linearCapacity + 3) & ~3UL);
-        Record(false, tiled, tiledOffset, tiledCapacity, scratch.Buffer, 0, scratch.Size, dispatches, true);
-        return new TilerBufferSpan(scratch.Buffer, 0, linearCapacity);
+        var scratch = AllocateUploadScratch(linearCapacity);
+        Record(false, tiled, tiledOffset, tiledCapacity, scratch.Buffer, scratch.Offset, scratch.Size, dispatches, true);
+        return new TilerBufferSpan(scratch.Buffer, scratch.Offset, linearCapacity);
     }
 
     public void Tile(VkBuffer linear, ulong linearOffset, ulong linearCapacity, VkBuffer tiled, ulong tiledOffset, ulong tiledCapacity, ReadOnlySpan<TileTransfer> transfers)
@@ -709,10 +778,29 @@ public sealed unsafe class GpuTiler : IDisposable
             pipeline = CreateComputePipeline(spirv, $"depth16 {direction} d32={useFloat32Depth}");
         }
 
-        var sourceElement = direction == DepthConversionDirection.Widen ? 2UL : 4UL;
-        var targetElement = direction == DepthConversionDirection.Widen ? 4UL : 2UL;
-        var sourceActive = layout.Width * sourceElement;
-        var targetActive = layout.Width * targetElement;
+        ConvertElements(source, target, pipeline, direction == DepthConversionDirection.Widen ? 2u : 4u,
+            direction == DepthConversionDirection.Widen ? 4u : 2u, layout);
+    }
+
+    public void ConvertNarrowColor(TilerBufferSpan source, TilerBufferSpan target, uint channels, bool widen, in DepthConversionLayout layout)
+    {
+        if (channels is not (1 or 2))
+            throw new ArgumentOutOfRangeException(nameof(channels));
+        var wideOffset = widen ? target.Offset : source.Offset;
+        var wideRow = widen ? layout.TargetRowStride : layout.SourceRowStride;
+        var wideSlice = widen ? layout.TargetSliceStride : layout.SourceSliceStride;
+        if (((wideOffset | wideRow | wideSlice) & 3) != 0)
+            throw SubmissionScheduler.Fatal("The RGBA color conversion storage must be dword aligned.");
+        ref var pipeline = ref _narrowColorConversions[(channels - 1) * 2 + (widen ? 0 : 1)];
+        if (pipeline.Handle == 0)
+            pipeline = CreateComputePipeline(TilerShaders.CreateNarrowColorConversion(channels, widen), $"narrow color channels={channels} widen={widen}");
+        ConvertElements(source, target, pipeline, widen ? channels : 4u, widen ? 4u : channels, layout);
+    }
+
+    private void ConvertElements(TilerBufferSpan source, TilerBufferSpan target, Pipeline pipeline, uint sourceElement, uint targetElement, in DepthConversionLayout layout)
+    {
+        var sourceActive = (ulong)layout.Width * sourceElement;
+        var targetActive = (ulong)layout.Width * targetElement;
         if (layout.Width == 0 || layout.SourceRowStride > uint.MaxValue || layout.TargetRowStride > uint.MaxValue)
         {
             throw SubmissionScheduler.Fatal($"The depth conversion layout is invalid: width={layout.Width} sourceRowStride={layout.SourceRowStride} targetRowStride={layout.TargetRowStride}.");
@@ -845,7 +933,7 @@ public sealed unsafe class GpuTiler : IDisposable
             throw SubmissionScheduler.Fatal($"The BGRA16 swap input size is invalid: size={input.Size}.");
         }
 
-        var result = AllocateScratch(input.Size);
+        var result = AllocateUploadScratch(input.Size);
         SwapBgra16(input, result, (uint)(input.Size / 8));
         return result;
     }

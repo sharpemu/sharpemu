@@ -7,15 +7,18 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 // Reads one dword of guest memory; false when the address cannot be read.
 public delegate bool GuestWordReader(ulong address, out uint word);
+// A contiguous clean range; false makes the caller use its individual word reads.
+public delegate bool GuestWordsReader(ulong address, Span<uint> words);
 
 // What one draw supplies to materialise a plan: its user data, the shader base and
 // the two memory readers. The clean reader refuses memory the GPU may still own.
-public sealed class ResourceRuntimeInputs
+public sealed record ResourceRuntimeInputs
 {
     public IReadOnlyList<uint> UserData { get; init; } = [];
     public ulong ShaderBase { get; init; }
     public GuestWordReader? ReadMemory { get; init; }
     public GuestWordReader? ReadCleanMemory { get; init; }
+    public GuestWordsReader? ReadCleanWords { get; init; }
     public ComputeSelectorState? ComputeState { get; init; }
 
     // Told true before the flattened table's words are evaluated and false after, so a reader
@@ -26,10 +29,8 @@ public sealed class ResourceRuntimeInputs
 
     public bool ReadsClean { get; init; }
 
-    public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => new()
+    public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => this with
     {
-        UserData = UserData,
-        ShaderBase = ShaderBase,
         ReadMemory = reader,
         ReadCleanMemory = ReadCleanMemory,
         ComputeState = ComputeState,

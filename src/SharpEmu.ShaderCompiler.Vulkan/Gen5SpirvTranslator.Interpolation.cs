@@ -16,6 +16,7 @@ public static partial class Gen5SpirvTranslator
         private uint _perspectiveBarycentric;
         private readonly Dictionary<int, uint> _barycentricInputs = [];
         private uint _interpolationSampleId;
+        private readonly HashSet<uint> _fixedSampleInterpolants = [];
         private uint _frontFacingInput;
         private uint _ancillaryLayerInput;
         private uint _sampleMaskInput;
@@ -23,8 +24,36 @@ public static partial class Gen5SpirvTranslator
         private const uint InterpolateAtSample = 77;
         private const uint InterpolateAtOffset = 78;
 
+        private void DecorateSampleInterpolant(uint variable)
+        {
+            // Only a single active interpolation mode establishes one sample position
+            // for ordinary VINTRP inputs. Mixed modes require source-aware lowering.
+            var modes = _pixelInputEnable & _pixelInputAddress & 0x7Fu;
+            if (modes is not (0x1u or 0x10u))
+                return;
+            _module.AddCapability(SpirvCapability.SampleRateShading);
+            if (modes == 0x10u)
+                _module.AddDecoration(variable, SpirvDecoration.NoPerspective);
+            if (_request.PixelInterpolationSample.HasValue)
+            {
+                _module.AddCapability(SpirvCapability.InterpolationFunction);
+                _fixedSampleInterpolants.Add(variable);
+            }
+            else _module.AddDecoration(variable, SpirvDecoration.Sample);
+        }
+
         private void DeclareInterpolationParameters()
         {
+            var offsetCount = _request.PixelInterpolationSample.HasValue ? 4u : 4u * _request.PixelRasterizationSamples;
+            if (_request.PixelCustomSampleOffsets.Count != 0 &&
+                (_request.PixelCustomSampleOffsets.Count != offsetCount ||
+                 (!_request.PixelInterpolationSample.HasValue &&
+                  (_request.PixelRasterizationSamples is < 2 or > 16 ||
+                   (_request.PixelRasterizationSamples & (_request.PixelRasterizationSamples - 1)) != 0)) ||
+                 _request.PixelCustomSampleOffsets.Any(offset => !float.IsFinite(offset.X) || !float.IsFinite(offset.Y) ||
+                     offset.X < -.5f || offset.X > .5f || offset.Y < -.5f || offset.Y > .5f)))
+                throw new NotSupportedException("Custom-sample interpolation requires four finite offsets per selected sample within the pixel.");
+
             foreach (var instruction in _request.Program.Instructions)
             {
                 if (instruction.Opcode == "VInterpMovF32" &&
@@ -92,7 +121,7 @@ public static partial class Gen5SpirvTranslator
                 _barycentricInputs.Add(bit, variable);
             }
 
-            if ((enabledInputs & 0x11u) != 0)
+            if ((enabledInputs & 0x11u) != 0 && !_request.PixelInterpolationSample.HasValue)
             {
                 _module.AddCapability(SpirvCapability.SampleRateShading);
                 _interpolationSampleId = _module.AddGlobalVariable(
@@ -183,10 +212,12 @@ public static partial class Gen5SpirvTranslator
             vgpr++;
         }
 
-        // The perspective barycentrics a smooth slot sharing a per-vertex input is rebuilt with.
+        // Barycentrics used to reconstruct a smooth slot sharing a per-vertex input.
         private void DeclarePerspectiveBarycentric()
         {
-            foreach (var bit in new[] { 0, 1, 2 })
+            var modes = _pixelInputEnable & _pixelInputAddress & 0x7Fu;
+            var linear = (modes & 0x70u) != 0 && (modes & 0x7u) == 0;
+            foreach (var bit in linear ? new[] { 4, 5, 6 } : new[] { 0, 1, 2 })
             {
                 if (_barycentricInputs.TryGetValue(bit, out var existing))
                 {
@@ -197,7 +228,8 @@ public static partial class Gen5SpirvTranslator
 
             _perspectiveBarycentric = _module.AddGlobalVariable(
                 _module.TypePointer(SpirvStorageClass.Input, _vec3Type), SpirvStorageClass.Input);
-            _module.AddDecoration(_perspectiveBarycentric, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.BaryCoordKhr);
+            _module.AddDecoration(_perspectiveBarycentric, SpirvDecoration.BuiltIn,
+                (uint)(linear ? SpirvBuiltIn.BaryCoordNoPerspKhr : SpirvBuiltIn.BaryCoordKhr));
             _interfaces.Add(_perspectiveBarycentric);
         }
 
@@ -216,7 +248,10 @@ public static partial class Gen5SpirvTranslator
             var value = LoadVertex(0);
             if (!flat)
             {
-                var barycentric = Load(_vec3Type, _perspectiveBarycentric);
+                var modes = _pixelInputEnable & _pixelInputAddress & 0x7Fu;
+                var bit = modes switch { 1u => 0, 2u => 1, 4u => 2, 16u => 4, 32u => 5, 64u => 6, _ => -1 };
+                var barycentric = bit >= 0 ? LoadBarycentricCoordinates(bit, _perspectiveBarycentric)
+                    : Load(_vec3Type, _perspectiveBarycentric);
                 value = _module.AddInstruction(SpirvOp.FMul, _floatType, value,
                     _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, barycentric, 0));
                 for (uint vertex = 1; vertex < 3; vertex++)
@@ -230,10 +265,85 @@ public static partial class Gen5SpirvTranslator
             StoreV(destination, Bitcast(_uintType, value));
         }
 
+        private void DeclareFrontFaceInput()
+        {
+            if ((_pixelInputAddress & _pixelInputEnable & (1u << 12)) == 0)
+            {
+                return;
+            }
+
+            _frontFacingInput = _module.AddGlobalVariable(
+                _module.TypePointer(SpirvStorageClass.Input, _boolType), SpirvStorageClass.Input);
+            _module.AddDecoration(_frontFacingInput, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.FrontFacing);
+            _interfaces.Add(_frontFacingInput);
+        }
+
+        private void EmitFrontFaceInput(ref uint vgpr)
+        {
+            if ((_pixelInputAddress & (1u << 12)) == 0)
+            {
+                return;
+            }
+
+            if (_frontFacingInput != 0)
+            {
+                // The guest register contains the bits of 1.0f for a front face and zero for a back face.
+                var value = _module.AddInstruction(SpirvOp.Select, _uintType,
+                    Load(_boolType, _frontFacingInput), UInt(0x3F800000u), UInt(0));
+                StoreV(vgpr, value, guardWithExec: false);
+            }
+
+            vgpr++;
+        }
+
+        private uint InterpolationSampleIndex() => _request.PixelInterpolationSample is uint sample
+            ? _module.Constant(_intType, sample)
+            : Load(_intType, _interpolationSampleId);
+
+        private uint ExplicitSampleInterpolation(uint type, uint variable)
+        {
+            if (_request.PixelCustomSampleOffsets.Count == 0)
+                return _module.AddInstruction(SpirvOp.ExtInst, type, _glsl, InterpolateAtSample, variable, InterpolationSampleIndex());
+            var coord = Load(_vec4Type, _fragCoordInput);
+            uint Odd(int component)
+            {
+                var integer = _module.AddInstruction(SpirvOp.ConvertFToU, _uintType,
+                    _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, coord, (uint)component));
+                return _module.AddInstruction(SpirvOp.INotEqual, _boolType,
+                    _module.AddInstruction(SpirvOp.BitwiseAnd, _uintType, integer, UInt(1)), UInt(0));
+            }
+            var samplesPerPixel = _request.PixelInterpolationSample.HasValue ? 1u : _request.PixelRasterizationSamples;
+            var sampleId = _request.PixelInterpolationSample.HasValue ? UInt(0) :
+                Bitcast(_uintType, Load(_intType, _interpolationSampleId));
+            uint Offset(int pixel)
+            {
+                uint At(uint sample)
+                {
+                    var value = _request.PixelCustomSampleOffsets[(int)(pixel * samplesPerPixel + sample)];
+                    return _module.ConstantComposite(_vec2Type, Float(value.X), Float(value.Y));
+                }
+                var selected = At(0);
+                for (uint sample = 1; sample < samplesPerPixel; sample++)
+                {
+                    var matches = _module.AddInstruction(SpirvOp.IEqual, _boolType, sampleId, UInt(sample));
+                    selected = _module.AddInstruction(SpirvOp.Select, _vec2Type, matches, At(sample), selected);
+                }
+                return selected;
+            }
+            var xOdd = Odd(0);
+            var row0 = _module.AddInstruction(SpirvOp.Select, _vec2Type, xOdd, Offset(1), Offset(0));
+            var row1 = _module.AddInstruction(SpirvOp.Select, _vec2Type, xOdd, Offset(3), Offset(2));
+            var offset = _module.AddInstruction(SpirvOp.Select, _vec2Type, Odd(1), row1, row0);
+            return _module.AddInstruction(SpirvOp.ExtInst, type, _glsl, InterpolateAtOffset, variable, offset);
+        }
+
+        private uint LoadOrdinaryInterpolant(uint variable) => _fixedSampleInterpolants.Contains(variable)
+            ? ExplicitSampleInterpolation(_vec4Type, variable)
+            : Load(_vec4Type, variable);
+
         private uint LoadBarycentricCoordinates(int bit, uint variable) => bit switch
         {
-            0 or 4 => _module.AddInstruction(SpirvOp.ExtInst, _vec3Type, _glsl, InterpolateAtSample,
-                variable, Load(_intType, _interpolationSampleId)),
+            0 or 4 => ExplicitSampleInterpolation(_vec3Type, variable),
             2 or 6 => _module.AddInstruction(SpirvOp.ExtInst, _vec3Type, _glsl, InterpolateAtCentroid, variable),
             _ => _module.AddInstruction(SpirvOp.ExtInst, _vec3Type, _glsl, InterpolateAtOffset,
                 variable, _module.ConstantNull(_vec2Type)),

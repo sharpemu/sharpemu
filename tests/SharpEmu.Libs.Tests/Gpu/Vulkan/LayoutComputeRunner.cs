@@ -19,6 +19,7 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
 {
     private readonly ImageTestHarness _harness;
     private readonly ShaderCompileRequest _request;
+    private readonly DescriptorSetLayout _globalSetLayout;
     private readonly DescriptorSetLayout _setLayout;
     private readonly PipelineLayout _pipelineLayout;
     private readonly DescriptorPool _pool;
@@ -33,10 +34,12 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         : ImageDescriptorBinding.ResourceClass(kind) == ImageResourceClass.Storage ? DescriptorType.StorageImage
         : DescriptorType.StorageBuffer;
 
-    public LayoutComputeRunner(ImageTestHarness harness, ShaderCompileRequest request, byte[] spirv)
+    public LayoutComputeRunner(ImageTestHarness harness, ShaderCompileRequest request, byte[] spirv,
+        DescriptorSetLayout globalSetLayout = default)
     {
         _harness = harness;
         _request = request;
+        _globalSetLayout = globalSetLayout;
         var vk = harness.Vk;
         var device = harness.Device.Device;
         var descriptors = request.Bindings.Descriptors;
@@ -59,13 +62,27 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         };
         Require(vk.CreateDescriptorSetLayout(device, &layoutInfo, null, out _setLayout), "vkCreateDescriptorSetLayout");
         var push = new PushConstantRange(ShaderStageFlags.ComputeBit, 0, PushData.ByteSize);
-        fixed (DescriptorSetLayout* layout = &_setLayout)
+        if (_globalSetLayout.Handle != 0)
         {
+            var layouts = stackalloc DescriptorSetLayout[] { _globalSetLayout, _setLayout };
+            var pipelineLayoutInfo = new PipelineLayoutCreateInfo
+            {
+                SType = StructureType.PipelineLayoutCreateInfo,
+                SetLayoutCount = 2,
+                PSetLayouts = layouts,
+                PushConstantRangeCount = request.Bindings.UsesPushData ? 1u : 0u,
+                PPushConstantRanges = &push,
+            };
+            Require(vk.CreatePipelineLayout(device, &pipelineLayoutInfo, null, out _pipelineLayout), "vkCreatePipelineLayout");
+        }
+        else
+        {
+            var layout = _setLayout;
             var pipelineLayoutInfo = new PipelineLayoutCreateInfo
             {
                 SType = StructureType.PipelineLayoutCreateInfo,
                 SetLayoutCount = 1,
-                PSetLayouts = layout,
+                PSetLayouts = &layout,
                 PushConstantRangeCount = request.Bindings.UsesPushData ? 1u : 0u,
                 PPushConstantRanges = &push,
             };
@@ -181,12 +198,21 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         uint[]? flattenedTable = null,
         IReadOnlyDictionary<DescriptorBindingKind, DescriptorImageInfo[]>? boundImages = null,
         ulong shaderBase = 0,
-        uint[]? dispatchThreadLimits = null)
+        uint[]? dispatchThreadLimits = null,
+        uint[]? bufferStrides = null,
+        uint[]? tessellationData = null,
+        DescriptorSet globalSet = default)
     {
         var vk = _harness.Vk;
         var device = _harness.Device.Device;
         var layout = _request.Bindings;
         var shaderData = new uint[layout.ShaderDataDwordCount];
+        if (layout.UsesTessellationData)
+        {
+            if (tessellationData is not { Length: (int)Gen5TessellationData.DwordCount })
+                throw new InvalidOperationException("The tessellation kernel requires its runtime data.");
+            tessellationData.CopyTo(shaderData, (int)layout.TessellationDataDword);
+        }
         for (var index = 0; index < layout.UserDataRegisters.Count; index++)
         {
             var register = layout.UserDataRegisters[index];
@@ -197,6 +223,15 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         {
             shaderData[layout.ShaderBaseDword] = (uint)shaderBase;
             shaderData[layout.ShaderBaseDword + 1] = (uint)(shaderBase >> 32);
+        }
+
+        if (layout.UsesRuntimeBufferStrides)
+        {
+            // The host packs each buffer's descriptor stride, two per dword.
+            for (var index = 0; index < (bufferStrides?.Length ?? 0); index++)
+            {
+                shaderData[layout.BufferStrideDword + (uint)index / 2] |= (bufferStrides![index] & 0x3FFF) << ((index % 2) * 16);
+            }
         }
 
         if (layout.UsesDispatchThreadLimits)
@@ -297,7 +332,20 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         };
         VulkanSynchronization.PipelineBarrier(vk, command, PipelineStageFlags.AllCommandsBit | PipelineStageFlags.HostBit, PipelineStageFlags.ComputeShaderBit, 0, 1, &barrier, 0, null, 0, null);
         vk.CmdBindPipeline(command, PipelineBindPoint.Compute, _pipeline);
-        vk.CmdBindDescriptorSets(command, PipelineBindPoint.Compute, _pipelineLayout, 0, 1, &set, 0, null);
+        if (_globalSetLayout.Handle != 0)
+        {
+            if (globalSet.Handle == 0)
+            {
+                throw new InvalidOperationException("This pipeline needs the bindless descriptor set.");
+            }
+
+            vk.CmdBindDescriptorSets(command, PipelineBindPoint.Compute, _pipelineLayout, 0, 1, &globalSet, 0, null);
+            vk.CmdBindDescriptorSets(command, PipelineBindPoint.Compute, _pipelineLayout, 1, 1, &set, 0, null);
+        }
+        else
+        {
+            vk.CmdBindDescriptorSets(command, PipelineBindPoint.Compute, _pipelineLayout, 0, 1, &set, 0, null);
+        }
         if (layout.UsesPushData)
         {
             fixed (uint* pointer = pushData)
@@ -339,5 +387,107 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         vk.DestroyDescriptorPool(device, _pool, null);
         vk.DestroyPipelineLayout(device, _pipelineLayout, null);
         vk.DestroyDescriptorSetLayout(device, _setLayout, null);
+    }
+}
+
+// Tiny bindless set for runtime-descriptor GPU coverage. The production heap is persistent and
+// much larger; this deliberately keeps two fully populated sampled-image slots: zero is the null
+// image and one is the host-registered descriptor.
+internal sealed unsafe class RuntimeDescriptorImageHeap : IDisposable
+{
+    private readonly ImageTestHarness _harness;
+    private readonly DescriptorPool _pool;
+
+    public RuntimeDescriptorImageHeap(ImageTestHarness harness)
+    {
+        _harness = harness;
+        var vk = harness.Vk;
+        var device = harness.Device.Device;
+        var binding = new DescriptorSetLayoutBinding(
+            BindingLayout.BindlessSampledImageBinding,
+            DescriptorType.SampledImage,
+            2,
+            ShaderStageFlags.ComputeBit);
+        var flags = DescriptorBindingFlags.PartiallyBoundBit | DescriptorBindingFlags.UpdateAfterBindBit |
+            DescriptorBindingFlags.UpdateUnusedWhilePendingBit | DescriptorBindingFlags.VariableDescriptorCountBit;
+        var bindingFlags = new DescriptorSetLayoutBindingFlagsCreateInfo
+        {
+            SType = StructureType.DescriptorSetLayoutBindingFlagsCreateInfo,
+            BindingCount = 1,
+            PBindingFlags = &flags,
+        };
+        var layoutInfo = new DescriptorSetLayoutCreateInfo
+        {
+            SType = StructureType.DescriptorSetLayoutCreateInfo,
+            PNext = &bindingFlags,
+            Flags = DescriptorSetLayoutCreateFlags.UpdateAfterBindPoolBit,
+            BindingCount = 1,
+            PBindings = &binding,
+        };
+        Require(vk.CreateDescriptorSetLayout(device, &layoutInfo, null, out var createdLayout), "vkCreateDescriptorSetLayout(runtime heap)");
+        Layout = createdLayout;
+
+        var poolSize = new DescriptorPoolSize(DescriptorType.SampledImage, 2);
+        var poolInfo = new DescriptorPoolCreateInfo
+        {
+            SType = StructureType.DescriptorPoolCreateInfo,
+            Flags = DescriptorPoolCreateFlags.UpdateAfterBindBit,
+            MaxSets = 1,
+            PoolSizeCount = 1,
+            PPoolSizes = &poolSize,
+        };
+        Require(vk.CreateDescriptorPool(device, &poolInfo, null, out _pool), "vkCreateDescriptorPool(runtime heap)");
+        var descriptorCount = 2u;
+        var variableCounts = new DescriptorSetVariableDescriptorCountAllocateInfo
+        {
+            SType = StructureType.DescriptorSetVariableDescriptorCountAllocateInfo,
+            DescriptorSetCount = 1,
+            PDescriptorCounts = &descriptorCount,
+        };
+        var layout = Layout;
+        var allocate = new DescriptorSetAllocateInfo
+        {
+            SType = StructureType.DescriptorSetAllocateInfo,
+            PNext = &variableCounts,
+            DescriptorPool = _pool,
+            DescriptorSetCount = 1,
+            PSetLayouts = &layout,
+        };
+        Require(vk.AllocateDescriptorSets(device, &allocate, out var allocatedSet), "vkAllocateDescriptorSets(runtime heap)");
+        Set = allocatedSet;
+    }
+
+    public DescriptorSetLayout Layout { get; }
+
+    public DescriptorSet Set { get; }
+
+    public void Write(uint slot, ImageView view)
+    {
+        var info = new DescriptorImageInfo { ImageView = view, ImageLayout = ImageLayout.ShaderReadOnlyOptimal };
+        var write = new WriteDescriptorSet
+        {
+            SType = StructureType.WriteDescriptorSet,
+            DstSet = Set,
+            DstBinding = BindingLayout.BindlessSampledImageBinding,
+            DstArrayElement = slot,
+            DescriptorCount = 1,
+            DescriptorType = DescriptorType.SampledImage,
+            PImageInfo = &info,
+        };
+        _harness.Vk.UpdateDescriptorSets(_harness.Device.Device, 1, &write, 0, null);
+    }
+
+    public void Dispose()
+    {
+        _harness.Vk.DestroyDescriptorPool(_harness.Device.Device, _pool, null);
+        _harness.Vk.DestroyDescriptorSetLayout(_harness.Device.Device, Layout, null);
+    }
+
+    private static void Require(Result result, string operation)
+    {
+        if (result != Result.Success)
+        {
+            throw new InvalidOperationException($"{operation} failed with {result}");
+        }
     }
 }

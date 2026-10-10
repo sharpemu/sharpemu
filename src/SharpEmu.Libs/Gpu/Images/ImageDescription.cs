@@ -89,6 +89,11 @@ public struct ImageDescription
     public bool Bgra16;
     public MipLevelLayouts MipLayout;
 
+    // The first guest mip the image holds. A streamed texture names only its resident mips
+    // (base level > 0); the host image starts there, while Extent and MipLayout describe the
+    // whole guest chain the data is laid out in.
+    public uint FirstLevel;
+
     public static ImageDescription Create() => new()
     {
         HtileClearMask = uint.MaxValue,

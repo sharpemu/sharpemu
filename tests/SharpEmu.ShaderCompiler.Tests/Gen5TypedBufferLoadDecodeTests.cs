@@ -10,6 +10,15 @@ namespace SharpEmu.ShaderCompiler.Tests;
 // Typed buffer instructions keep their own unified format; formatted untyped ones do not carry one.
 public sealed class Gen5TypedBufferLoadDecodeTests
 {
+    [Fact]
+    public void ComparisonGatherWithExplicitLodDecodesItsOpcodeAndLength()
+    {
+        var program = Decode([0xF0000100u | (0x4Cu << 18), 0x00000004u, 0xBF810000u]);
+        var gather = program.Instructions[0];
+        Assert.Equal("ImageGather4CL", gather.Opcode);
+        Assert.Equal(Gen5ShaderEncoding.Mimg, gather.Encoding);
+        Assert.Equal(8u, program.Instructions[1].Pc);
+    }
     private const ulong ShaderAddress = 0x1000;
     private const uint Format32x4Float = 77;
 
@@ -66,6 +75,32 @@ public sealed class Gen5TypedBufferLoadDecodeTests
         Assert.Equal("BufferLoadFormatXyzw", program.Instructions[0].Opcode);
         Assert.False(control.Typed);
         Assert.Equal(0u, control.TypedFormat);
+    }
+
+    [Theory]
+    [InlineData(0x80u, "BufferLoadFormatD16X", 1u)]
+    [InlineData(0x81u, "BufferLoadFormatD16Xy", 1u)]
+    [InlineData(0x82u, "BufferLoadFormatD16Xyz", 2u)]
+    [InlineData(0x83u, "BufferLoadFormatD16Xyzw", 2u)]
+    [InlineData(0x84u, "BufferStoreFormatD16X", 1u)]
+    [InlineData(0x85u, "BufferStoreFormatD16Xy", 1u)]
+    [InlineData(0x86u, "BufferStoreFormatD16Xyz", 2u)]
+    [InlineData(0x87u, "BufferStoreFormatD16Xyzw", 2u)]
+    public void UntypedD16_UsesOpcodeBit25AndPackedRegisterCount(uint opcode, string expected, uint count)
+    {
+        var instruction = Decode([0xE0002000u | (opcode << 18), 0x80011A14u, 0xBF810000u]).Instructions[0];
+        Assert.Equal(expected, instruction.Opcode);
+        Assert.Equal(count, Assert.IsType<Gen5BufferMemoryControl>(instruction.Control).DwordCount);
+        Assert.Equal((int)count, instruction.Destinations.Count);
+        Assert.DoesNotContain(instruction.Destinations, destination => destination.Value == 28);
+    }
+
+    [Fact]
+    public void OddBufferOffset_DoesNotChangeOpcode()
+    {
+        var instruction = Decode([0xE00C2001u, 0x80011A14u, 0xBF810000u]).Instructions[0];
+        Assert.Equal("BufferLoadFormatXyzw", instruction.Opcode);
+        Assert.Equal(1, Assert.IsType<Gen5BufferMemoryControl>(instruction.Control).OffsetBytes);
     }
 
     private static Gen5ShaderProgram Decode(uint[] words)

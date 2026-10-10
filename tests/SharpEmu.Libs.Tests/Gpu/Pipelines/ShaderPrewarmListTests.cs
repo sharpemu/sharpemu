@@ -60,8 +60,8 @@ public sealed class ShaderPrewarmListTests : IDisposable
         var (record, code) = Assert.Single(reloaded.LoadedComputes());
         Assert.True(
             ShaderProgramCache.TryCompilePrewarm(
-                record, code, new FakeShaderCompiler(Compile), host.SharedInt64AtomicsEnabled, host.ExecGuardElisionEnabled,
-                host.ShaderSignedZeroInfNanPreserveFloat32Supported, out var compiled, out var layout, out var error),
+                record, code, new FakeShaderCompiler(Compile), host,
+                out var compiled, out var layout, out var error),
             error);
         Assert.NotNull(layout);
         Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
@@ -81,6 +81,38 @@ public sealed class ShaderPrewarmListTests : IDisposable
         var loaded = reloaded.LoadedComputes();
         Assert.Equal(2, loaded.Count);
         Assert.Same(loaded[0].Code.Ranges, loaded[1].Code.Ranges);
+    }
+
+    [Fact]
+    public void PrewarmUsesTheRuntimeDeviceFeaturesAndBindingLayout()
+    {
+        var guest = new PipelineTestGuest(Compile);
+        guest.Host.ExactFloat16ConversionsEnabled = true;
+        guest.Host.NonUniformImageIndexingEnabled = true;
+        guest.Host.RuntimeBufferStridesEnabled = true;
+        guest.Host.UsesBindlessImages = true;
+        using (var list = Open())
+        {
+            guest.Host.ShaderPrewarm = list;
+            guest.RegisterProgram(CodeAddress, HeaderAddress, PipelineTestGuest.FormatLoadProgram);
+            var cursor = 0u;
+            guest.Programs.GetOrCompile(guest.Source(CodeAddress, ShaderStage.Compute,
+                PipelineTestGuest.BufferDescriptor(BufferAddress, 4, 64, BufferDescriptorWords.Format32UInt)),
+                PipelineTestGuest.ComputeOptions(threadsX: 64), ref cursor, out _);
+        }
+
+        using var reloaded = Open();
+        var (record, code) = Assert.Single(reloaded.LoadedComputes());
+        var compiler = new FakeShaderCompiler(Compile);
+        Assert.True(ShaderProgramCache.TryCompilePrewarm(record, code, compiler,
+            guest.Host,
+            out var compiled, out var layout, out var error), error);
+        var request = Assert.Single(compiler.Shaders).Request;
+        Assert.True(request.SupportsExactFloat16Conversions);
+        Assert.True(request.SupportsNonUniformImageIndexing);
+        Assert.True(layout!.UsesBindlessImages);
+        Assert.True(layout.UsesRuntimeBufferStrides);
+        Assert.Equal(Assert.Single(guest.Compiler.Shaders).Spirv, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
     }
 
     [Fact]
@@ -107,6 +139,26 @@ public sealed class ShaderPrewarmListTests : IDisposable
 
         using var reloaded = Open();
         Assert.Equal(2, reloaded.LoadedComputeCount);
+    }
+
+    [Fact]
+    public void APrewarmFileFromAnOlderPlannerVersionIsDiscarded()
+    {
+        using (var list = Open())
+        {
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+        }
+
+        var path = Path.Combine(_directory, ShaderPrewarmList.FileName);
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read))
+        {
+            stream.Position = sizeof(uint);
+            stream.Write(BitConverter.GetBytes(1u));
+        }
+
+        using var reloaded = Open();
+        Assert.Empty(reloaded.LoadedComputes());
+        Assert.Equal(3 * sizeof(uint), new FileInfo(path).Length);
     }
 
     [Fact]

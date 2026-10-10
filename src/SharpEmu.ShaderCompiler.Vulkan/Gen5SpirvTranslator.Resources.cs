@@ -18,6 +18,27 @@ public static partial class Gen5SpirvTranslator
     public static bool TryCompileProgram(ShaderCompileRequest request, out Gen5SpirvShader shader, out string error)
     {
         shader = default!;
+        if (request.CooperativeWave64Workgroup && (request.Stage != ShaderStage.Compute || request.WaveSize != 64 ||
+            (ulong)request.LocalSizeX * request.LocalSizeY * request.LocalSizeZ is 0 or > 256 ||
+            (request.LocalSizeX * request.LocalSizeY * request.LocalSizeZ) % 64 != 0))
+        {
+            error = "Cooperative wave64 requires a compute workgroup containing one to four complete waves.";
+            return false;
+        }
+        if (request.TessellationHull is not null &&
+            (request.Stage != ShaderStage.Compute || !request.CooperativeWave64Workgroup || !request.Bindings.UsesTessellationData))
+        {
+            error = "A merged hull program requires cooperative compute execution and tessellation runtime data.";
+            return false;
+        }
+        if (request.Stage == ShaderStage.TessellationEvaluation &&
+            (request.Tessellation is not { } tessellation ||
+             !Enum.IsDefined(tessellation.Domain) || !Enum.IsDefined(tessellation.Spacing) ||
+             tessellation.Spacing == Gen5TessellationSpacing.PowerOfTwo))
+        {
+            error = "Tessellation evaluation requires a supported tessellation configuration; power-of-two partitioning needs factor conversion.";
+            return false;
+        }
         try
         {
             BindingLayoutValidator.Validate(
@@ -44,16 +65,20 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
+            // A dual-source second output shares location 0 with index 1; every other output
+            // has index 0 and its own location.
+            var targets = request.PixelOutputs.Count(output => output.Index == 0);
             if (request.PixelOutputs.Select(output => output.GuestSlot).Distinct().Count() != request.PixelOutputs.Count ||
-                request.PixelOutputs.Select(output => output.HostLocation).Distinct().Count() != request.PixelOutputs.Count)
+                request.PixelOutputs.Select(output => (output.HostLocation, output.Index)).Distinct().Count() != request.PixelOutputs.Count)
             {
                 error = "pixel output guest slots and host locations must be unique";
                 return false;
             }
 
-            if (request.PixelOutputs.Any(output => output.HostLocation >= request.PixelOutputs.Count))
+            if (request.PixelOutputs.Any(output => output.HostLocation >= targets || output.Index > 1 ||
+                    (output.Index == 1 && (output.HostLocation != 0 || targets != 1))))
             {
-                error = "pixel output host locations must be dense in the 0..N-1 range";
+                error = "pixel output host locations must be dense in the 0..N-1 range, with a second source only at location 0 of one target";
                 return false;
             }
         }
@@ -69,17 +94,42 @@ public static partial class Gen5SpirvTranslator
         private uint _pushData;
         private uint _shaderData;
         private uint _flattenedTable;
+        private uint _imageSlotTableDwordCount;
         private uint _pageTable;
         private uint _faultBuffer;
+        private uint _runtimeDescriptorTable;
+        private uint _runtimeDescriptorMisses;
+        private uint _runtimeSamplerArray;
+        private uint _runtimeSamplerPointer;
+        private readonly Dictionary<(ImageDimension Dimension, ImageNumericClass NumericClass),
+            (uint Variable, uint ImageType, uint ElementPointer, uint ComponentType, uint VectorType,
+                ImageComponentKind Kind, SpirvImageDim Dimension, bool Arrayed)> _runtimeImageArrays = [];
+        private uint _runtimeImageNumericClassTable;
         private uint _globalDataShare;
         private uint _samplerArray;
         private uint _samplerType;
         private uint _samplerPointer;
         private uint _storageUlongPointer;
         private uint _physicalUintPointer;
-        private uint _deviceEntryScratch;
         private uint _deviceWordScratch;
         private uint _deviceBufferWordScratch;
+
+        // The missing pages an invocation met, as one word of the fault bitmap and its bits.
+        // A page walk only merges into them; the invocation publishes them once when it ends
+        // (FlushPendingDeviceFaults). An atomic per page walk made the driver compile shaders
+        // with many device accesses for tens of seconds. Faults are residency hints read
+        // after the dispatch: a page in a second bitmap word is reported by a later dispatch,
+        // once the pages of the first word are resident and no longer fault.
+        private uint _pendingFaultWord;
+        private uint _pendingFaultBits;
+        private uint _pendingWrittenWord;
+        private uint _pendingWrittenBits;
+
+        // The element a typed device-address store writes, chosen by the runtime format:
+        // a value and a mask for each of its (at most four) dwords, and its byte count.
+        private readonly uint[] _deviceStoreValueScratch = new uint[4];
+        private readonly uint[] _deviceStoreMaskScratch = new uint[4];
+        private uint _deviceStoreBytesScratch;
         private uint _pushDataBlockPointer;
         private uint _wordRuntimeArray;
         private uint _addressRuntimeArray;
@@ -95,7 +145,8 @@ public static partial class Gen5SpirvTranslator
             bool Cube,
             bool Multisampled,
             SpirvImageDim Dimension,
-            IReadOnlyList<uint> Resources);
+            IReadOnlyList<uint> Resources,
+            uint SlotOffset);
 
         public CompilationContext(ShaderCompileRequest request)
         {
@@ -104,6 +155,7 @@ public static partial class Gen5SpirvTranslator
             {
                 ShaderStage.Vertex => Gen5SpirvStage.Vertex,
                 ShaderStage.Pixel => Gen5SpirvStage.Pixel,
+                ShaderStage.TessellationEvaluation => Gen5SpirvStage.TessellationEvaluation,
                 _ => Gen5SpirvStage.Compute,
             };
             _pixelOutputBindings = request.PixelOutputs;
@@ -111,12 +163,15 @@ public static partial class Gen5SpirvTranslator
                 _stage == Gen5SpirvStage.Pixel &&
                 request.Program.Instructions.Any(static instruction => instruction.Control is Gen5ExportControl { ValidMask: true });
             _enableGraphicsSubgroupOperations = _stage == Gen5SpirvStage.Compute || request.EnableGraphicsSubgroupOperations;
+            _nativeHalfConversionExact = request.NativeHalfConversionExact;
+            _zeroOutOfBoundsBufferReads = request.ZeroOutOfBoundsBufferReads;
             _waveLaneCount = request.WaveSize == 64 ? 64u : 32u;
             _localSizeX = Math.Max(request.LocalSizeX, 1);
             _localSizeY = Math.Max(request.LocalSizeY, 1);
             _localSizeZ = Math.Max(request.LocalSizeZ, 1);
             _physicalAxisOfLogical = ComputeWorkgroupAxisOrder(_localSizeX, _localSizeY, _localSizeZ);
-            _emulateWave64 = _stage == Gen5SpirvStage.Compute && _waveLaneCount == 64 && (ulong)_localSizeX * _localSizeY * _localSizeZ == 64;
+            _emulateWave64 = _stage == Gen5SpirvStage.Compute && _waveLaneCount == 64 &&
+                ((ulong)_localSizeX * _localSizeY * _localSizeZ == 64 || request.CooperativeWave64Workgroup);
             _requiredVertexOutputCount = request.RequiredVertexOutputCount;
             _pixelInputEnable = request.PixelInputEnable;
             _pixelInputAddress = request.PixelInputAddress;
@@ -150,29 +205,41 @@ public static partial class Gen5SpirvTranslator
             _storageUlongPointer = _module.TypePointer(SpirvStorageClass.StorageBuffer, _ulongType);
             foreach (var binding in layout.Descriptors)
             {
-                var number = BindingLayout.NativeBindingIndex(request.Stage, binding.Kind);
+                var isImage = ImageDescriptorBinding.ResourceClass(binding.Kind) != ImageResourceClass.None;
+                var number = layout.UsesBindlessImages && isImage
+                    ? ImageDescriptorBinding.ResourceClass(binding.Kind) == ImageResourceClass.Sampled
+                        ? BindingLayout.BindlessSampledImageBinding
+                        : BindingLayout.BindlessStorageImageBinding
+                    : BindingLayout.NativeBindingIndex(request.Stage, binding.Kind);
                 switch (binding.Kind)
                 {
                     case DescriptorBindingKind.Buffers:
-                        DeclareBufferArray((uint)binding.Resources.Count, number);
+                        DeclareBufferArray((uint)binding.Resources.Count, number, request.Bindings.UsesBindlessImages ? 1u : 0u);
                         break;
                     case DescriptorBindingKind.Samplers:
-                        DeclareSamplerArray((uint)binding.Resources.Count, number);
+                        DeclareSamplerArray((uint)binding.Resources.Count, number, request.Bindings.UsesBindlessImages ? 1u : 0u);
                         break;
                     case DescriptorBindingKind.GlobalDataShare:
-                        _globalDataShare = DeclareWordBlock("globalDataShare", number);
+                        _globalDataShare = DeclareWordBlock("globalDataShare", number, request.Bindings.UsesBindlessImages ? 1u : 0u);
                         break;
                     case DescriptorBindingKind.DeviceAddressPageTable:
-                        _pageTable = DeclareDeviceAddressPageTable(number);
+                        _pageTable = DeclareDeviceAddressPageTable(number, request.Bindings.UsesBindlessImages ? 1u : 0u);
                         break;
                     case DescriptorBindingKind.FaultBuffer:
-                        _faultBuffer = DeclareWordBlock("faultBuffer", number);
+                        _faultBuffer = DeclareWordBlock("faultBuffer", number, request.Bindings.UsesBindlessImages ? 1u : 0u);
                         break;
                     case DescriptorBindingKind.FlattenedResourceTable:
-                        _flattenedTable = DeclareWordBlock("flattenedResourceTable", number);
+                        _flattenedTable = DeclareWordBlock("flattenedResourceTable", number, request.Bindings.UsesBindlessImages ? 1u : 0u);
                         break;
                     case DescriptorBindingKind.ShaderData:
-                        _shaderData = DeclareWordBlock("shaderData", number);
+                        _shaderData = DeclareWordBlock("shaderData", number, request.Bindings.UsesBindlessImages ? 1u : 0u);
+                        _module.AddDecoration(_shaderData, SpirvDecoration.NonWritable);
+                        break;
+                    case DescriptorBindingKind.RuntimeDescriptorTable:
+                        _runtimeDescriptorTable = DeclareWordBlock("runtimeDescriptorTable", number, 1u);
+                        break;
+                    case DescriptorBindingKind.RuntimeDescriptorMisses:
+                        _runtimeDescriptorMisses = DeclareWordBlock("runtimeDescriptorMisses", number, 1u);
                         break;
                     default:
                         DeclareImageClass(binding, number);
@@ -182,8 +249,7 @@ public static partial class Gen5SpirvTranslator
 
             if (layout.UsesPushData)
             {
-                var arrayType = _module.TypeArray(_uintType, PushData.DwordCount);
-                _module.AddDecoration(arrayType, SpirvDecoration.ArrayStride, sizeof(uint));
+                var arrayType = _module.TypeArray(_uintType, PushData.DwordCount, sizeof(uint));
                 var block = _module.TypeStruct(arrayType);
                 _module.AddDecoration(block, SpirvDecoration.Block);
                 _module.AddMemberDecoration(block, 0, SpirvDecoration.Offset, 0);
@@ -208,19 +274,52 @@ public static partial class Gen5SpirvTranslator
                 _module.AddCapability(SpirvCapability.PhysicalStorageBufferAddresses);
                 _module.SetPhysicalStorageBuffer64MemoryModel();
                 _physicalUintPointer = _module.TypePointer(SpirvStorageClass.PhysicalStorageBuffer, _uintType);
-                var privateUlongPointer = _module.TypePointer(SpirvStorageClass.Private, _ulongType);
-                _deviceEntryScratch = _module.AddGlobalVariable(privateUlongPointer, SpirvStorageClass.Private, _module.Constant64(_ulongType, 0));
                 _deviceWordScratch = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
-                _module.AddName(_deviceEntryScratch, "deviceAddressEntry");
                 _module.AddName(_deviceWordScratch, "deviceAddressWord");
-                _interfaces.Add(_deviceEntryScratch);
                 _interfaces.Add(_deviceWordScratch);
-                if (request.Memory.Entries.Any(static memory => memory.DeviceDescriptor))
+                _pendingFaultWord = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
+                _pendingFaultBits = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
+                _module.AddName(_pendingFaultWord, "pendingFaultWord");
+                _module.AddName(_pendingFaultBits, "pendingFaultBits");
+                _interfaces.Add(_pendingFaultWord);
+                _interfaces.Add(_pendingFaultBits);
+                _pendingWrittenWord = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
+                _pendingWrittenBits = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
+                _module.AddName(_pendingWrittenWord, "pendingWrittenWord");
+                _module.AddName(_pendingWrittenBits, "pendingWrittenBits");
+                _interfaces.Add(_pendingWrittenWord);
+                _interfaces.Add(_pendingWrittenBits);
+                for (var index = 0; index < _deviceStoreValueScratch.Length; index++)
+                {
+                    _deviceStoreValueScratch[index] = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
+                    _deviceStoreMaskScratch[index] = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
+                    _module.AddName(_deviceStoreValueScratch[index], $"deviceStoreValue{index}");
+                    _module.AddName(_deviceStoreMaskScratch[index], $"deviceStoreMask{index}");
+                    _interfaces.Add(_deviceStoreValueScratch[index]);
+                    _interfaces.Add(_deviceStoreMaskScratch[index]);
+                }
+
+                _deviceStoreBytesScratch = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
+                _module.AddName(_deviceStoreBytesScratch, "deviceStoreBytes");
+                _interfaces.Add(_deviceStoreBytesScratch);
+                if (request.Memory.Entries.Any(static memory => memory.DeviceDescriptor) ||
+                    request.Program.Instructions.Any(instruction => IsFormatBufferLoad(instruction.Opcode)))
                 {
                     _deviceBufferWordScratch = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
                     _module.AddName(_deviceBufferWordScratch, "deviceBufferWord");
                     _interfaces.Add(_deviceBufferWordScratch);
                 }
+            }
+            else if (layout.UsesTessellationData)
+            {
+                _module.AddCapability(SpirvCapability.PhysicalStorageBufferAddresses);
+                _module.SetPhysicalStorageBuffer64MemoryModel();
+                _physicalUintPointer = _module.TypePointer(SpirvStorageClass.PhysicalStorageBuffer, _uintType);
+            }
+            if (request.TessellationHull is not null)
+            {
+                _tessellationVertexIndexScratch = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
+                _interfaces.Add(_tessellationVertexIndexScratch);
             }
 
             foreach (var memoryIndex in request.IndirectKeyMemoryIndices)
@@ -255,7 +354,7 @@ public static partial class Gen5SpirvTranslator
             return _addressRuntimeArray;
         }
 
-        private void DeclareBufferArray(uint count, uint bindingNumber)
+        private void DeclareBufferArray(uint count, uint bindingNumber, uint descriptorSet)
         {
             var runtimeArray = WordRuntimeArray();
             var block = _module.TypeStruct(runtimeArray);
@@ -266,26 +365,26 @@ public static partial class Gen5SpirvTranslator
             _storageBlockPointer = _module.TypePointer(SpirvStorageClass.StorageBuffer, block);
             _globalBuffers = _module.AddGlobalVariable(descriptorsPointer, SpirvStorageClass.StorageBuffer);
             _module.AddName(_globalBuffers, "guestBuffers");
-            _module.AddDecoration(_globalBuffers, SpirvDecoration.DescriptorSet, 0);
+            _module.AddDecoration(_globalBuffers, SpirvDecoration.DescriptorSet, descriptorSet);
             _module.AddDecoration(_globalBuffers, SpirvDecoration.Binding, bindingNumber);
             _interfaces.Add(_globalBuffers);
         }
 
         // One storage block holding a runtime array of dwords.
-        private uint DeclareWordBlock(string name, uint bindingNumber)
+        private uint DeclareWordBlock(string name, uint bindingNumber, uint descriptorSet)
         {
             var block = _module.TypeStruct(WordRuntimeArray());
             _module.AddDecoration(block, SpirvDecoration.Block);
             _module.AddMemberDecoration(block, 0, SpirvDecoration.Offset, 0);
             var variable = _module.AddGlobalVariable(_module.TypePointer(SpirvStorageClass.StorageBuffer, block), SpirvStorageClass.StorageBuffer);
             _module.AddName(variable, name);
-            _module.AddDecoration(variable, SpirvDecoration.DescriptorSet, 0);
+            _module.AddDecoration(variable, SpirvDecoration.DescriptorSet, descriptorSet);
             _module.AddDecoration(variable, SpirvDecoration.Binding, bindingNumber);
             _interfaces.Add(variable);
             return variable;
         }
 
-        private uint DeclareDeviceAddressPageTable(uint bindingNumber)
+        private uint DeclareDeviceAddressPageTable(uint bindingNumber, uint descriptorSet)
         {
             var block = _module.TypeStruct(AddressRuntimeArray());
             _module.AddDecoration(block, SpirvDecoration.Block);
@@ -293,20 +392,20 @@ public static partial class Gen5SpirvTranslator
             _module.AddMemberDecoration(block, 0, SpirvDecoration.NonWritable);
             var variable = _module.AddGlobalVariable(_module.TypePointer(SpirvStorageClass.StorageBuffer, block), SpirvStorageClass.StorageBuffer);
             _module.AddName(variable, "deviceAddressPageTable");
-            _module.AddDecoration(variable, SpirvDecoration.DescriptorSet, 0);
+            _module.AddDecoration(variable, SpirvDecoration.DescriptorSet, descriptorSet);
             _module.AddDecoration(variable, SpirvDecoration.Binding, bindingNumber);
             _interfaces.Add(variable);
             return variable;
         }
 
-        private void DeclareSamplerArray(uint count, uint bindingNumber)
+        private void DeclareSamplerArray(uint count, uint bindingNumber, uint descriptorSet)
         {
             _samplerType = _module.TypeSampler();
             var arrayType = _module.TypeArray(_samplerType, count);
             _samplerPointer = _module.TypePointer(SpirvStorageClass.UniformConstant, _samplerType);
             _samplerArray = _module.AddGlobalVariable(_module.TypePointer(SpirvStorageClass.UniformConstant, arrayType), SpirvStorageClass.UniformConstant);
             _module.AddName(_samplerArray, "samplers");
-            _module.AddDecoration(_samplerArray, SpirvDecoration.DescriptorSet, 0);
+            _module.AddDecoration(_samplerArray, SpirvDecoration.DescriptorSet, descriptorSet);
             _module.AddDecoration(_samplerArray, SpirvDecoration.Binding, bindingNumber);
             _interfaces.Add(_samplerArray);
         }
@@ -366,14 +465,22 @@ public static partial class Gen5SpirvTranslator
             }
 
             var imageType = _module.TypeImage(componentType, spirvDimension, depth: false, arrayed, multisampled, sampled: isStorage ? 2u : 1u, format);
-            var arrayType = _module.TypeArray(imageType, (uint)binding.Resources.Count);
+            var slotOffset = _imageSlotTableDwordCount;
+            _imageSlotTableDwordCount += (uint)binding.Resources.Count;
+            var arrayType = _request.Bindings.UsesBindlessImages
+                ? _module.TypeRuntimeArray(imageType)
+                : _module.TypeArray(imageType, (uint)binding.Resources.Count);
+            if (_request.Bindings.UsesBindlessImages)
+            {
+                _module.AddCapability(SpirvCapability.RuntimeDescriptorArray);
+            }
             var elementPointer = _module.TypePointer(SpirvStorageClass.UniformConstant, imageType);
             var variable = _module.AddGlobalVariable(_module.TypePointer(SpirvStorageClass.UniformConstant, arrayType), SpirvStorageClass.UniformConstant);
             _module.AddName(variable, $"{binding.Kind}");
             _module.AddDecoration(variable, SpirvDecoration.DescriptorSet, 0);
             _module.AddDecoration(variable, SpirvDecoration.Binding, bindingNumber);
             _interfaces.Add(variable);
-            _imageClasses[binding.Kind] = new LayoutImageClass(variable, imageType, elementPointer, componentType, kind, isStorage, arrayed, cube, multisampled, spirvDimension, binding.Resources);
+            _imageClasses[binding.Kind] = new LayoutImageClass(variable, imageType, elementPointer, componentType, kind, isStorage, arrayed, cube, multisampled, spirvDimension, binding.Resources, slotOffset);
         }
 
         // ---- initial state ----
@@ -413,9 +520,339 @@ public static partial class Gen5SpirvTranslator
             return LoadBlockWord(_shaderData, dwordIndex);
         }
 
+        // ---- runtime descriptors ----
+
+        // An access whose image descriptor has no plan-time source looks its words up in the
+        // host's table (RuntimeDescriptorTable). Sampling accesses retain the historical float
+        // view key. Image loads derive their numeric view from the descriptor format, then fetch
+        // through the matching bindless image array. A missing descriptor reads slot 0 and is
+        // recorded for the host.
+        private bool TryEmitRuntimeDescriptorImage(Gen5ShaderInstruction instruction, Gen5ImageControl image, MemoryAccessInfo entry, out string error)
+        {
+            if (_runtimeDescriptorTable == 0 || _runtimeDescriptorMisses == 0)
+            {
+                error = "runtime image descriptors without their table bindings";
+                return false;
+            }
+
+            var imageKey = new uint[1 + RuntimeDescriptorTable.ImageWordCount];
+            for (uint word = 0; word < RuntimeDescriptorTable.ImageWordCount; word++)
+            {
+                // A 128-bit descriptor has four words; the rest of the key is zero.
+                imageKey[1 + word] = entry.ImageR128 && word >= 4 ? UInt(0) : LoadS(image.ScalarResource + word);
+            }
+
+            if (!entry.NeedsSampler)
+            {
+                // The PS5 descriptor controls the numeric interpretation of an image load.
+                // Keep its format-driven class in the key so an R32_UINT and an R32_SINT view
+                // of the same image cannot alias each other in the table.
+                var numericClass = RuntimeImageNumericClass(imageKey[2]);
+                imageKey[0] = BitwiseOr(
+                    UInt(RuntimeDescriptorTable.ViewClass(entry.ImageDimension)),
+                    ShiftLeftLogical(numericClass, UInt(RuntimeDescriptorTable.ViewClassNumericShift)));
+                var runtimeImageSlot = LookupRuntimeDescriptor(imageKey, image: true);
+                _module.AddCapability(SpirvCapability.ShaderNonUniform);
+                _module.AddCapability(SpirvCapability.SampledImageArrayNonUniformIndexing);
+                _module.AddDecoration(runtimeImageSlot, SpirvDecoration.NonUniform);
+
+                string? branchError = null;
+                // A descriptor array element has one numeric view. Fetch only from the array
+                // matching that view rather than issuing invalid loads through the other typed
+                // declarations. Unknown formats use float and remain absent from the host table.
+                EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, numericClass, UInt(0)), () =>
+                    branchError ??= EmitRuntimeDescriptorFetch(instruction, image, entry, runtimeImageSlot, ImageNumericClass.Float));
+                EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, numericClass, UInt(1)), () =>
+                    branchError ??= EmitRuntimeDescriptorFetch(instruction, image, entry, runtimeImageSlot, ImageNumericClass.Uint));
+                EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, numericClass, UInt(2)), () =>
+                    branchError ??= EmitRuntimeDescriptorFetch(instruction, image, entry, runtimeImageSlot, ImageNumericClass.Sint));
+                error = branchError ?? string.Empty;
+                return branchError is null;
+            }
+
+            var view = RuntimeImageArray(entry.ImageDimension, ImageNumericClass.Float);
+            imageKey[0] = UInt(RuntimeDescriptorTable.ViewClass(entry.ImageDimension));
+            var samplerKey = new uint[RuntimeDescriptorTable.SamplerWordCount];
+            for (uint word = 0; word < samplerKey.Length; word++)
+            {
+                samplerKey[word] = LoadS(image.ScalarSampler + word);
+            }
+
+            if ((entry.ImageSampleFlags & ImageSampleFlags.Adjust) != 0)
+            {
+                samplerKey[3] = BitwiseAnd(samplerKey[3], UInt(~DescriptorConstants.SamplerDword3ReservedMask));
+            }
+            var imageSlot = LookupRuntimeDescriptor(imageKey, image: true);
+            var samplerSlot = LookupRuntimeDescriptor(samplerKey, image: false);
+
+            _module.AddCapability(SpirvCapability.ShaderNonUniform);
+            _module.AddCapability(SpirvCapability.SampledImageArrayNonUniformIndexing);
+            var imagePointer = _module.AddInstruction(SpirvOp.AccessChain, view.ElementPointer, view.Variable, imageSlot);
+            var imageValue = Load(view.ImageType, imagePointer);
+            var samplerArray = RuntimeSamplerArray();
+            var samplerPointer = _module.AddInstruction(SpirvOp.AccessChain, _runtimeSamplerPointer, samplerArray, samplerSlot);
+            var sampler = Load(_samplerType, samplerPointer);
+            var objectType = _module.TypeSampledImage(view.ImageType);
+            var imageObject = _module.AddInstruction(SpirvOp.SampledImage, objectType, imageValue, sampler);
+            foreach (var value in new[] { imageSlot, imagePointer, imageValue, samplerSlot, samplerPointer, sampler, imageObject })
+            {
+                _module.AddDecoration(value, SpirvDecoration.NonUniform);
+            }
+
+            // The host's view applies the descriptor's swizzle and format.
+            var resource = new SpirvImageResource(
+                imagePointer,
+                view.ImageType,
+                objectType,
+                view.ComponentType,
+                view.VectorType,
+                view.Kind,
+                IsStorage: false,
+                view.Arrayed,
+                Dimension: view.Dimension,
+                ShaderSwizzle: DescriptorConstants.IdentityImageSwizzle);
+            return EmitImageOperation(instruction, image, resource, imageObject, DescriptorConstants.IdentityImageSwizzle, UInt(0), out error);
+        }
+
+        private string? EmitRuntimeDescriptorFetch(Gen5ShaderInstruction instruction, Gen5ImageControl image,
+            MemoryAccessInfo entry, uint imageSlot, ImageNumericClass numericClass)
+        {
+            var view = RuntimeImageArray(entry.ImageDimension, numericClass);
+            var imagePointer = _module.AddInstruction(SpirvOp.AccessChain, view.ElementPointer, view.Variable, imageSlot);
+            var imageValue = Load(view.ImageType, imagePointer);
+            _module.AddDecoration(imagePointer, SpirvDecoration.NonUniform);
+            _module.AddDecoration(imageValue, SpirvDecoration.NonUniform);
+            var resource = new SpirvImageResource(
+                imagePointer,
+                view.ImageType,
+                view.ImageType,
+                view.ComponentType,
+                view.VectorType,
+                view.Kind,
+                IsStorage: false,
+                view.Arrayed,
+                Dimension: view.Dimension,
+                ShaderSwizzle: DescriptorConstants.IdentityImageSwizzle);
+            var mipLevel = instruction.Opcode == "ImageLoadMip"
+                ? LoadImageIntegerAddress(image, (int)ImageCoordinateComponentCount(resource))
+                : UInt(0);
+            return EmitImageOperation(instruction, image, resource, imageValue,
+                DescriptorConstants.IdentityImageSwizzle, mipLevel, out var error) ? null : error;
+        }
+
+        // The heap's sampled images of one dimension and numeric view, declared once per module.
+        private (uint Variable, uint ImageType, uint ElementPointer, uint ComponentType, uint VectorType,
+            ImageComponentKind Kind, SpirvImageDim Dimension, bool Arrayed) RuntimeImageArray(
+                ImageDimension dimension, ImageNumericClass numericClass)
+        {
+            var key = (dimension, numericClass);
+            if (_runtimeImageArrays.TryGetValue(key, out var declared))
+            {
+                return declared;
+            }
+
+            var spirvDimension = dimension switch
+            {
+                ImageDimension.Dim1D or ImageDimension.Dim1DArray => SpirvImageDim.Dim1D,
+                ImageDimension.Dim3D => SpirvImageDim.Dim3D,
+                _ => SpirvImageDim.Dim2D,
+            };
+            if (spirvDimension == SpirvImageDim.Dim1D)
+            {
+                _module.AddCapability(SpirvCapability.Sampled1D);
+            }
+
+            var arrayed = dimension is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray;
+            var kind = numericClass switch
+            {
+                ImageNumericClass.Uint => ImageComponentKind.Uint,
+                ImageNumericClass.Sint => ImageComponentKind.Sint,
+                _ => ImageComponentKind.Float,
+            };
+            var componentType = kind switch
+            {
+                ImageComponentKind.Uint => _uintType,
+                ImageComponentKind.Sint => _intType,
+                _ => _floatType,
+            };
+            var vectorType = _module.TypeVector(componentType, 4);
+            var imageType = _module.TypeImage(componentType, spirvDimension, depth: false, arrayed, multisampled: false, sampled: 1u, SpirvImageFormat.Unknown);
+            _module.AddCapability(SpirvCapability.RuntimeDescriptorArray);
+            var arrayType = _module.TypeRuntimeArray(imageType);
+            var elementPointer = _module.TypePointer(SpirvStorageClass.UniformConstant, imageType);
+            var variable = _module.AddGlobalVariable(_module.TypePointer(SpirvStorageClass.UniformConstant, arrayType), SpirvStorageClass.UniformConstant);
+            _module.AddName(variable, $"runtimeImages{dimension}{numericClass}");
+            _module.AddDecoration(variable, SpirvDecoration.DescriptorSet, 0);
+            _module.AddDecoration(variable, SpirvDecoration.Binding, BindingLayout.BindlessSampledImageBinding);
+            _interfaces.Add(variable);
+            declared = (variable, imageType, elementPointer, componentType, vectorType, kind, spirvDimension, arrayed);
+            _runtimeImageArrays.Add(key, declared);
+            return declared;
+        }
+
+        // Runtime descriptors are intentionally not specialized to the format observed while a
+        // pipeline is compiled. Use the same format classification as the host's descriptor
+        // materializer, represented compactly as float=0, uint=1 and sint=2.
+        private uint RuntimeImageNumericClass(uint descriptorWord1)
+        {
+            if (_runtimeImageNumericClassTable == 0)
+            {
+                var entries = new uint[GuestImageFormat.MaxFormat + 1];
+                for (uint tableFormat = 0; tableFormat < entries.Length; tableFormat++)
+                {
+                    entries[tableFormat] = RuntimeDescriptorTable.NumericClassCode(GuestImageFormat.SampledNumericClass(tableFormat));
+                }
+
+                var type = _module.TypeArray(_uintType, (uint)entries.Length);
+                _runtimeImageNumericClassTable = _module.AddGlobalVariable(
+                    _module.TypePointer(SpirvStorageClass.Private, type), SpirvStorageClass.Private,
+                    _module.ConstantComposite(type, entries.Select(UInt).ToArray()));
+                _module.AddName(_runtimeImageNumericClassTable, "runtimeImageNumericClasses");
+                _interfaces.Add(_runtimeImageNumericClassTable);
+            }
+
+            var descriptorFormat = BitwiseAnd(ShiftRightLogical(descriptorWord1, UInt(20)), UInt(0x1ff));
+            var inRange = _module.AddInstruction(SpirvOp.ULessThan, _boolType, descriptorFormat, UInt(GuestImageFormat.MaxFormat + 1));
+            var safeFormat = _module.AddInstruction(SpirvOp.Select, _uintType, inRange, descriptorFormat, UInt(0));
+            return Load(_uintType, _module.AddInstruction(SpirvOp.AccessChain, _privateUintPointer,
+                _runtimeImageNumericClassTable, safeFormat));
+        }
+
+        private uint RuntimeSamplerArray()
+        {
+            if (_runtimeSamplerArray != 0)
+            {
+                return _runtimeSamplerArray;
+            }
+
+            _samplerType = _module.TypeSampler();
+            _runtimeSamplerPointer = _module.TypePointer(SpirvStorageClass.UniformConstant, _samplerType);
+            _module.AddCapability(SpirvCapability.RuntimeDescriptorArray);
+            var arrayType = _module.TypeRuntimeArray(_samplerType);
+            _runtimeSamplerArray = _module.AddGlobalVariable(_module.TypePointer(SpirvStorageClass.UniformConstant, arrayType), SpirvStorageClass.UniformConstant);
+            _module.AddName(_runtimeSamplerArray, "runtimeSamplers");
+            _module.AddDecoration(_runtimeSamplerArray, SpirvDecoration.DescriptorSet, 0);
+            _module.AddDecoration(_runtimeSamplerArray, SpirvDecoration.Binding, BindingLayout.BindlessSamplerBinding);
+            _interfaces.Add(_runtimeSamplerArray);
+            return _runtimeSamplerArray;
+        }
+
+        // One shared lookup function per table (image, sampler), emitted after the program.
+        private readonly uint[] _runtimeLookupFunctions = new uint[2];
+
+        // The heap slot of a descriptor key. Every access calls one shared function: inlined, the
+        // hash and probes of each lookup made a shader with many runtime descriptor accesses
+        // several times larger and its pipeline many times slower to compile.
+        private uint LookupRuntimeDescriptor(uint[] key, bool image)
+        {
+            var kind = image ? 0 : 1;
+            if (_runtimeLookupFunctions[kind] == 0)
+            {
+                _runtimeLookupFunctions[kind] = _module.AllocateId();
+            }
+
+            var active = _module.AddInstruction(SpirvOp.Select, _uintType, Load(_boolType, _exec), UInt(1), UInt(0));
+            return _module.AddInstruction(SpirvOp.FunctionCall, _uintType, [_runtimeLookupFunctions[kind], .. key, active]);
+        }
+
+        private void EmitRuntimeLookupFunctions()
+        {
+            for (var kind = 0; kind < _runtimeLookupFunctions.Length; kind++)
+            {
+                var function = _runtimeLookupFunctions[kind];
+                if (function == 0)
+                {
+                    continue;
+                }
+
+                var image = kind == 0;
+                var keyWords = image ? 1 + (int)RuntimeDescriptorTable.ImageWordCount : (int)RuntimeDescriptorTable.SamplerWordCount;
+                var type = _module.TypeFunction(_uintType, [.. Enumerable.Repeat(_uintType, keyWords + 1)]);
+                _module.BeginFunction(_uintType, type, function, SpirvFunctionControl.DontInline);
+                _module.AddName(function, image ? "lookupRuntimeImage" : "lookupRuntimeSampler");
+                var key = new uint[keyWords];
+                for (var word = 0; word < keyWords; word++)
+                {
+                    key[word] = _module.AddFunctionParameter(_uintType);
+                }
+
+                var active = _module.AddFunctionParameter(_uintType);
+                _module.AddLabel();
+                _module.AddStatement(SpirvOp.ReturnValue, EmitRuntimeDescriptorProbe(key, image,
+                    _module.AddInstruction(SpirvOp.INotEqual, _boolType, active, UInt(0))));
+                _module.EndFunction();
+            }
+        }
+
+        // A bounded linear probe of the host table; slot 0 and a recorded miss when the table
+        // does not hold the key.
+        private uint EmitRuntimeDescriptorProbe(uint[] key, bool image, uint active)
+        {
+            var table = _runtimeDescriptorTable;
+            var capacity = LoadBlockWord(table, UInt(image ? RuntimeDescriptorTable.ImageCapacityDword : RuntimeDescriptorTable.SamplerCapacityDword));
+            var entries = LoadBlockWord(table, UInt(image ? RuntimeDescriptorTable.ImageEntriesDword : RuntimeDescriptorTable.SamplerEntriesDword));
+            var entryDwords = image ? RuntimeDescriptorTable.ImageEntryDwords : RuntimeDescriptorTable.SamplerEntryDwords;
+            var mask = _module.AddInstruction(SpirvOp.ISub, _uintType, capacity, UInt(1));
+            var hash = UInt(RuntimeDescriptorTable.HashSeed);
+            foreach (var word in key)
+            {
+                hash = _module.AddInstruction(SpirvOp.IMul, _uintType,
+                    _module.AddInstruction(SpirvOp.BitwiseXor, _uintType, hash, word), UInt(RuntimeDescriptorTable.HashPrime));
+            }
+
+            var empty = _module.AddInstruction(SpirvOp.IEqual, _boolType, capacity, UInt(0));
+            var slotPlusOne = UInt(0);
+            for (uint probe = 0; probe < RuntimeDescriptorTable.ProbeCount; probe++)
+            {
+                var index = BitwiseAnd(IAdd(hash, UInt(probe)), mask);
+                var entry = IAdd(entries, _module.AddInstruction(SpirvOp.IMul, _uintType, index, UInt(entryDwords)));
+                var stored = LoadBlockWord(table, entry);
+                var match = LogicalAnd(LogicalNot(empty), _module.AddInstruction(SpirvOp.INotEqual, _boolType, stored, UInt(0)));
+                for (var word = 0; word < key.Length; word++)
+                {
+                    var tableWord = LoadBlockWord(table, IAdd(entry, UInt((uint)word + 1)));
+                    match = LogicalAnd(match, _module.AddInstruction(SpirvOp.IEqual, _boolType, tableWord, key[word]));
+                }
+
+                var take = LogicalAnd(match, _module.AddInstruction(SpirvOp.IEqual, _boolType, slotPlusOne, UInt(0)));
+                slotPlusOne = _module.AddInstruction(SpirvOp.Select, _uintType, take, stored, slotPlusOne);
+            }
+
+            var missing = _module.AddInstruction(SpirvOp.IEqual, _boolType, slotPlusOne, UInt(0));
+            // Only an active lane reads its descriptor; an inactive one may hold anything.
+            EmitConditional(_module.AddInstruction(SpirvOp.LogicalAnd, _boolType, missing, active),
+                () => RecordRuntimeDescriptorMiss(key, image));
+            return _module.AddInstruction(SpirvOp.Select, _uintType, missing, UInt(0),
+                _module.AddInstruction(SpirvOp.ISub, _uintType, slotPlusOne, UInt(1)));
+        }
+
+        private void RecordRuntimeDescriptorMiss(uint[] key, bool image)
+        {
+            var misses = _runtimeDescriptorMisses;
+            var counter = BlockWordPointer(misses, UInt(image ? RuntimeDescriptorTable.ImageMissCountDword : RuntimeDescriptorTable.SamplerMissCountDword));
+            var record = _module.AddInstruction(SpirvOp.AtomicIAdd, _uintType, counter, UInt(1), UInt(0), UInt(1));
+            var capacity = image ? RuntimeDescriptorTable.ImageMissCapacity : RuntimeDescriptorTable.SamplerMissCapacity;
+            var recordDwords = image ? RuntimeDescriptorTable.ImageMissRecordDwords : RuntimeDescriptorTable.SamplerMissRecordDwords;
+            var offset = image ? RuntimeDescriptorTable.ImageMissOffset : RuntimeDescriptorTable.SamplerMissOffset;
+            EmitConditional(_module.AddInstruction(SpirvOp.ULessThan, _boolType, record, UInt(capacity)), () =>
+            {
+                var first = IAdd(UInt(offset), _module.AddInstruction(SpirvOp.IMul, _uintType, record, UInt(recordDwords)));
+                for (var word = 0; word < key.Length; word++)
+                {
+                    var dword = IAdd(first, UInt((uint)word));
+                    EmitConditional(IsBlockWordInRange(misses, dword), () => Store(BlockWordPointer(misses, dword), key[word]));
+                }
+            });
+        }
+
         // A bounds-checked dword of a storage block; outside the block reads zero.
         private uint LoadBlockWord(uint block, uint dwordIndex)
         {
+            if (_zeroOutOfBoundsBufferReads)
+            {
+                return Load(_uintType, BlockWordPointer(block, dwordIndex));
+            }
+
             var length = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, block, 0);
             var inRange = _module.AddInstruction(SpirvOp.ULessThan, _boolType, dwordIndex, length);
             var safeIndex = _module.AddInstruction(SpirvOp.Select, _uintType, inRange, dwordIndex, UInt(0));
@@ -434,15 +871,39 @@ public static partial class Gen5SpirvTranslator
                 dwordIndex,
                 _module.AddInstruction(SpirvOp.ArrayLength, _uintType, block, 0));
 
-        private uint LoadFlattenedWord(uint slot) => LoadBlockWord(_flattenedTable, slot);
+        private uint LoadFlattenedWord(uint slot)
+        {
+            if (_request.Bindings.UsesBindlessImages)
+            {
+                slot = IAdd(UInt(BindingLayout.ImageSlotTableDwordCount(_request.Resources.Info)), slot);
+            }
+
+            return LoadBlockWord(_flattenedTable, slot);
+        }
+
+        private uint LoadImageSlot(LayoutImageClass imageClass, uint element)
+        {
+            var slot = IAdd(UInt(imageClass.SlotOffset), element);
+            return LoadBlockWord(_flattenedTable, slot);
+        }
 
         // A planned slot is inside the table the host binds, so its load skips the runtime bounds
         // check. Large shaders make hundreds of these reads, and every check costs the Metal
         // compiler time (one large pixel shader made about 376 of them).
-        private uint LoadFlattenedSlot(uint slot) =>
-            slot < _request.FlattenedTableReservedWords
-                ? Load(_uintType, BlockWordPointer(_flattenedTable, UInt(slot)))
-                : LoadFlattenedWord(UInt(slot));
+        private uint LoadFlattenedSlot(uint slot)
+        {
+            if (slot >= _request.FlattenedTableReservedWords)
+            {
+                return LoadFlattenedWord(UInt(slot));
+            }
+
+            // Reserved slots address guest words, after the bindless image indices
+            // that the host prepends to the same buffer.
+            var prefix = _request.Bindings.UsesBindlessImages
+                ? BindingLayout.ImageSlotTableDwordCount(_request.Resources.Info)
+                : 0;
+            return Load(_uintType, BlockWordPointer(_flattenedTable, UInt(prefix + slot)));
+        }
 
         // The shader base the host pushes for this draw, as two dwords.
         private (uint Low, uint High) LoadShaderBase()
@@ -507,6 +968,7 @@ public static partial class Gen5SpirvTranslator
         // Resolves a guest address through the page table. A missing page records a
         // fault and resolves to an invalid pointer; an address past the table reads as unmapped.
         private uint _deviceAddressInstructionPc;
+        private uint? _deviceAddressInstructionPcValue;
 
         private (uint Pointer, uint Valid) ResolveDeviceAddress(uint address64)
         {
@@ -515,17 +977,17 @@ public static partial class Gen5SpirvTranslator
             var tableLength = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _pageTable, 0);
             var inTable = ULessThan64(pageIndex64, Widen(tableLength));
             var pageIndex = Narrow(pageIndex64);
-            Store(_deviceEntryScratch, ULong(0));
-            EmitConditional(inTable, () =>
-            {
-                var entryPointer = _module.AddInstruction(SpirvOp.AccessChain, _storageUlongPointer, _pageTable, UInt(0), pageIndex);
-                Store(_deviceEntryScratch, Load(_ulongType, entryPointer));
-            });
-            var entry = Load(_ulongType, _deviceEntryScratch);
+            // Read without a branch: an index outside the table reads entry 0 (the host always
+            // binds CachingPageCount entries) and the select discards it. A branch and a scratch
+            // variable per page walk cost the driver seconds on shaders with many device accesses.
+            var safeIndex = _module.AddInstruction(SpirvOp.Select, _uintType, inTable, pageIndex, UInt(0));
+            var entryPointer = _module.AddInstruction(SpirvOp.AccessChain, _storageUlongPointer, _pageTable, UInt(0), safeIndex);
+            var entry = _module.AddInstruction(SpirvOp.Select, _ulongType, inTable, Load(_ulongType, entryPointer), ULong(0));
             var mapped = _module.AddInstruction(SpirvOp.INotEqual, _boolType, entry, ULong(0));
-            EmitConditional(LogicalAnd(inTable, LogicalNot(mapped)), () =>
+            var missing = LogicalAnd(inTable, LogicalNot(mapped));
+            if (_request.TraceDeviceAddressFaults)
             {
-                if (_request.TraceDeviceAddressFaults)
+                EmitConditional(missing, () =>
                 {
                     var length = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _faultBuffer, 0);
                     var recordStart = _module.AddInstruction(SpirvOp.ISub, _uintType, length, UInt(8));
@@ -534,20 +996,79 @@ public static partial class Gen5SpirvTranslator
                     EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, claim, UInt(0)), () =>
                     {
                         uint[] values = [UInt((uint)_request.Hash), UInt((uint)(_request.Hash >> 32)),
-                            UInt(_deviceAddressInstructionPc), Narrow(address64),
+                            _deviceAddressInstructionPcValue ?? UInt(_deviceAddressInstructionPc), Narrow(address64),
                             Narrow(_module.AddInstruction(SpirvOp.ShiftRightLogical, _ulongType, address64, ULong(32))),
                             UInt((uint)_request.Stage), UInt(0)];
                         for (var index = 0; index < values.Length; index++)
                             Store(BlockWordPointer(_faultBuffer, IAdd(recordStart, UInt((uint)index + 1))), values[index]);
                     });
-                }
-                var word = ShiftRightLogical(pageIndex, UInt(5));
-                var bit = ShiftLeftLogical(UInt(1), BitwiseAnd(pageIndex, UInt(31)));
-                EmitConditional(IsBlockWordInRange(_faultBuffer, word), () =>
-                    _module.AddInstruction(SpirvOp.AtomicOr, _uintType, BlockWordPointer(_faultBuffer, word), UInt(1), UInt(0), bit));
-            });
+                });
+            }
+
+            // Merged by selects, not under a branch: a branch per page walk costs the driver
+            // nearly as much as the atomic it replaces.
+            var word = ShiftRightLogical(pageIndex, UInt(5));
+            var bit = ShiftLeftLogical(UInt(1), BitwiseAnd(pageIndex, UInt(31)));
+            var pendingWord = Load(_uintType, _pendingFaultWord);
+            var pendingBits = Load(_uintType, _pendingFaultBits);
+            var merge = LogicalAnd(missing, _module.AddInstruction(SpirvOp.LogicalOr, _boolType,
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, pendingBits, UInt(0)),
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, pendingWord, word)));
+            Store(_pendingFaultWord, _module.AddInstruction(SpirvOp.Select, _uintType, merge, word, pendingWord));
+            Store(_pendingFaultBits, _module.AddInstruction(SpirvOp.Select, _uintType, merge, BitwiseOr(pendingBits, bit), pendingBits));
             var pointer = IAdd64(entry, And64(masked, ULong(DeviceAddressPageSize - 1)));
             return (pointer, mapped);
+        }
+
+        // Reports the page of a store or atomic through a device address. The written-page bitmap
+        // follows the fault bitmap in the fault buffer; the host marks those pages GPU-owned, as it
+        // does for written bindings. An invocation merges pages of one bitmap word and publishes the
+        // word when it moves to another; a pixel invocation, which a discard can end, publishes at once.
+        private void NoteDeviceWrite(uint address64)
+        {
+            var masked = And64(address64, ULong(DeviceAddressMask));
+            var pageIndex = Narrow(_module.AddInstruction(SpirvOp.ShiftRightLogical, _ulongType, masked, ULong(DeviceAddressPageBits)));
+            var pageCount = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _pageTable, 0);
+            var word = IAdd(ShiftRightLogical(pageCount, UInt(5)), ShiftRightLogical(pageIndex, UInt(5)));
+            var bit = ShiftLeftLogical(UInt(1), BitwiseAnd(pageIndex, UInt(31)));
+            if (_stage == Gen5SpirvStage.Pixel)
+            {
+                EmitConditional(IsBlockWordInRange(_faultBuffer, word), () =>
+                    _module.AddInstruction(SpirvOp.AtomicOr, _uintType, BlockWordPointer(_faultBuffer, word), UInt(1), UInt(0), bit));
+                return;
+            }
+
+            var pendingWord = Load(_uintType, _pendingWrittenWord);
+            var pendingBits = Load(_uintType, _pendingWrittenBits);
+            var keep = _module.AddInstruction(SpirvOp.LogicalOr, _boolType,
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, pendingBits, UInt(0)),
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, pendingWord, word));
+            EmitConditional(LogicalAnd(LogicalNot(keep), IsBlockWordInRange(_faultBuffer, pendingWord)), () =>
+                _module.AddInstruction(SpirvOp.AtomicOr, _uintType, BlockWordPointer(_faultBuffer, pendingWord), UInt(1), UInt(0), pendingBits));
+            Store(_pendingWrittenWord, word);
+            Store(_pendingWrittenBits, _module.AddInstruction(SpirvOp.Select, _uintType, keep, BitwiseOr(pendingBits, bit), bit));
+        }
+
+        // Publishes the missing pages the invocation met, once, as it ends.
+        private void FlushPendingDeviceFaults()
+        {
+            if (_pendingWrittenBits != 0)
+            {
+                var writtenBits = Load(_uintType, _pendingWrittenBits);
+                var writtenWord = Load(_uintType, _pendingWrittenWord);
+                EmitConditional(LogicalAnd(_module.AddInstruction(SpirvOp.INotEqual, _boolType, writtenBits, UInt(0)), IsBlockWordInRange(_faultBuffer, writtenWord)), () =>
+                    _module.AddInstruction(SpirvOp.AtomicOr, _uintType, BlockWordPointer(_faultBuffer, writtenWord), UInt(1), UInt(0), writtenBits));
+            }
+
+            if (_pendingFaultBits == 0)
+            {
+                return;
+            }
+
+            var bits = Load(_uintType, _pendingFaultBits);
+            var word = Load(_uintType, _pendingFaultWord);
+            EmitConditional(LogicalAnd(_module.AddInstruction(SpirvOp.INotEqual, _boolType, bits, UInt(0)), IsBlockWordInRange(_faultBuffer, word)), () =>
+                _module.AddInstruction(SpirvOp.AtomicOr, _uintType, BlockWordPointer(_faultBuffer, word), UInt(1), UInt(0), bits));
         }
 
         private uint DeviceWordPointer(uint pointerValue) =>
@@ -567,7 +1088,10 @@ public static partial class Gen5SpirvTranslator
         {
             var (pointer, valid) = ResolveDeviceAddress(address64);
             EmitConditional(LogicalAnd(allowed, valid), () =>
-                _module.AddStatement(SpirvOp.Store, DeviceWordPointer(pointer), value, 2u, 4u));
+            {
+                _module.AddStatement(SpirvOp.Store, DeviceWordPointer(pointer), value, 2u, 4u);
+                NoteDeviceWrite(address64);
+            });
         }
 
         private void StoreDeviceMaskedWord(uint address64, uint value, uint mask, uint allowed)
@@ -578,6 +1102,7 @@ public static partial class Gen5SpirvTranslator
                 var (pointer, valid) = ResolveDeviceAddress(address64);
                 EmitConditional(valid, () =>
                 {
+                    NoteDeviceWrite(address64);
                     var wordPointer = DeviceWordPointer(pointer);
                     var full = _module.AddInstruction(SpirvOp.IEqual, _boolType, mask, UInt(uint.MaxValue));
                     EmitConditional(
@@ -917,6 +1442,7 @@ public static partial class Gen5SpirvTranslator
                         var (pointer, valid) = ResolveDeviceAddress(address);
                         EmitConditional(valid, () =>
                         {
+                            NoteDeviceWrite(address);
                             var original = EmitAtomic(
                                 atomicOp,
                                 _uintType,
@@ -1490,7 +2016,8 @@ public static partial class Gen5SpirvTranslator
             out uint imageObject,
             out uint dstSelect,
             out string error,
-            (uint Resource, uint Element)? fixedElement = null)
+            (uint Resource, uint Element)? fixedElement = null,
+            uint dynamicElement = uint.MaxValue)
         {
             error = string.Empty;
             resource = default;
@@ -1542,11 +2069,26 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            var elementIndex = UInt(fixedElement?.Element ?? (uint)element);
+            var localElementIndex = dynamicElement != uint.MaxValue ? dynamicElement : UInt(fixedElement?.Element ?? (uint)element);
+            var elementIndex = request.Bindings.UsesBindlessImages
+                ? LoadImageSlot(imageClass, localElementIndex)
+                : localElementIndex;
             var elementPointer = _module.AddInstruction(SpirvOp.AccessChain, imageClass.ElementPointer, imageClass.Variable, elementIndex);
             var imageValue = Load(imageClass.ImageType, elementPointer);
+            if (dynamicElement != uint.MaxValue)
+            {
+                // The index can differ between invocations of one draw.
+                _module.AddCapability(SpirvCapability.ShaderNonUniform);
+                _module.AddCapability(imageClass.IsStorage
+                    ? SpirvCapability.StorageImageArrayNonUniformIndexing
+                    : SpirvCapability.SampledImageArrayNonUniformIndexing);
+                _module.AddDecoration(elementIndex, SpirvDecoration.NonUniform);
+                _module.AddDecoration(elementPointer, SpirvDecoration.NonUniform);
+                _module.AddDecoration(imageValue, SpirvDecoration.NonUniform);
+            }
             uint objectType;
-            if (UsesSampler(instruction.Opcode))
+            // A multisample image is never sampled through a sampler (see EmitImageOperation).
+            if (UsesSampler(instruction.Opcode) && !imageClass.Multisampled)
             {
                 if (_samplerArray == 0)
                 {
@@ -1569,6 +2111,8 @@ public static partial class Gen5SpirvTranslator
                 var sampler = Load(_samplerType, samplerPointer);
                 objectType = _module.TypeSampledImage(imageClass.ImageType);
                 imageObject = _module.AddInstruction(SpirvOp.SampledImage, objectType, imageValue, sampler);
+                if (dynamicElement != uint.MaxValue)
+                    _module.AddDecoration(imageObject, SpirvDecoration.NonUniform);
             }
             else
             {
@@ -1590,7 +2134,8 @@ public static partial class Gen5SpirvTranslator
                 imageClass.Dimension,
                 imageInfo.ConversionFormat,
                 imageInfo.ShaderSwizzle,
-                imageInfo.EmulatedCompareFunction);
+                imageInfo.EmulatedCompareFunction,
+                (uint)resourceIndex);
             dstSelect = imageInfo.ShaderSwizzle;
             return true;
         }

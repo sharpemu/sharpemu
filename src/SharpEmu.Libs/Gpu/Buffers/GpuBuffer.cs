@@ -112,6 +112,13 @@ public unsafe class GpuBuffer : IDisposable
             }
         }
 
+        if (result is Result.ErrorOutOfDeviceMemory or Result.ErrorOutOfHostMemory)
+        {
+            vk.DestroyBuffer(device.Device, _handle, null);
+            _handle = default;
+            throw new OutOfMemoryException($"vkAllocateMemory({usage}, 0x{size:X} bytes) failed with {result}");
+        }
+
         RequireSuccess(result, $"vkAllocateMemory({usage}, 0x{size:X} bytes)");
         RequireSuccess(vk.BindBufferMemory(device.Device, _handle, _memory, _memoryOffset), "vkBindBufferMemory");
         _allocationSize = _slab?.Size ?? requirements.Size;
@@ -132,6 +139,8 @@ public unsafe class GpuBuffer : IDisposable
             {
                 throw SubmissionScheduler.Fatal("The buffer device address is unavailable.");
             }
+
+            GpuBufferAddressBook.Added(this, _deviceAddress, scheduler.CurrentTick);
         }
 
         // A dedicated allocation arrives zeroed; keep that for a block another buffer used.
@@ -148,6 +157,9 @@ public unsafe class GpuBuffer : IDisposable
     public Span<byte> Mapped => _mapped == null ? Span<byte>.Empty : new Span<byte>(_mapped, checked((int)Size));
 
     public bool IsCoherent { get; }
+
+    // The host mapping of the whole buffer, or null for memory the host cannot map.
+    public byte* MappedPointer => _mapped;
 
     public GpuBufferUsage Usage { get; }
 
@@ -167,6 +179,12 @@ public unsafe class GpuBuffer : IDisposable
         address >= CpuAddress && size <= Size && address - CpuAddress <= Size - size;
 
     public void AddStreamScore(int score) => StreamScore += score;
+
+    // The guest range whose CPU-write-hot pages a device-address read copied in the current
+    // memory visibility generation; the render thread owns these.
+    public long HotSyncGeneration;
+    public ulong HotSyncStart;
+    public ulong HotSyncEnd;
 
     // The highest scheduler tick whose command buffer may write this buffer on the GPU.
     // A readback of it only has to wait for that tick, not for all queued work.
@@ -314,6 +332,11 @@ public unsafe class GpuBuffer : IDisposable
             }
         }
 
+        if (_deviceAddress != 0)
+        {
+            GpuBufferAddressBook.Removed(this, _scheduler.CurrentTick);
+        }
+
         _device.Vk.DestroyBuffer(_device.Device, _handle, null);
         if (_slab is { } slab)
         {
@@ -339,6 +362,7 @@ public unsafe class GpuBuffer : IDisposable
         var (required, preferred, avoided) = usage switch
         {
             GpuBufferUsage.DeviceLocal => (MemoryPropertyFlags.None, MemoryPropertyFlags.DeviceLocalBit, MemoryPropertyFlags.None),
+            GpuBufferUsage.Unified => (MemoryPropertyFlags.HostVisibleBit | MemoryPropertyFlags.HostCoherentBit | MemoryPropertyFlags.DeviceLocalBit, MemoryPropertyFlags.HostCachedBit, MemoryPropertyFlags.None),
             GpuBufferUsage.Upload => (MemoryPropertyFlags.HostVisibleBit, MemoryPropertyFlags.HostCoherentBit, MemoryPropertyFlags.DeviceLocalBit),
             GpuBufferUsage.Download => (MemoryPropertyFlags.HostVisibleBit, MemoryPropertyFlags.HostCoherentBit | MemoryPropertyFlags.HostCachedBit, MemoryPropertyFlags.DeviceLocalBit),
             _ => (MemoryPropertyFlags.HostVisibleBit, MemoryPropertyFlags.HostCoherentBit | MemoryPropertyFlags.DeviceLocalBit, MemoryPropertyFlags.None),
@@ -391,6 +415,9 @@ public unsafe class GpuBuffer : IDisposable
             Size = size,
         };
     }
+
+    // Every memory type the buffer may use is full; the owner can free memory and try again.
+    internal sealed class OutOfMemoryException(string message) : Exception(message);
 
     private static void RequireSuccess(Result result, string operation)
     {

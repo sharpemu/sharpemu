@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Vulkan;
@@ -28,6 +29,7 @@ public sealed unsafe partial class GuestImageCache
         public bool Tiled;
         public bool SwapBgra16;
         public bool Valid;
+        public TileElementLayout Element;
     }
 
     private sealed class ImageDownloadPlan
@@ -46,6 +48,27 @@ public sealed unsafe partial class GuestImageCache
         }
 
         return size;
+    }
+
+    // A single-level linear target whose builder laid out one slice with the guest's pitch,
+    // which need not be aligned like a texture's. Textures leave the layout empty, and other
+    // shapes keep the format's linear layout.
+    private static MipLevelLayout[] GuestLinearLevels(in ImageDescription info, uint levels)
+    {
+        if (info.TileMode != GuestTileMode.Linear || levels != 1 || info.IsVolume || info.Resources.Layers == 0)
+        {
+            return [];
+        }
+
+        var slice = info.MipLayout[0];
+        if (slice.Size == 0 || slice.Pitch < info.Extent.Width || slice.Height < info.Extent.Height ||
+            (ulong)slice.Pitch * slice.Height * info.BytesPerBlock > slice.Size ||
+            slice.Size * info.Resources.Layers > info.Data.Size)
+        {
+            return [];
+        }
+
+        return [slice];
     }
 
     private static ColorTransferPlan PlanColorTransfer(CachedImage image, ImageRole role, TransferDirection direction)
@@ -107,7 +130,23 @@ public sealed unsafe partial class GuestImageCache
             plan.SwapBgra16 = info.Bgra16;
         }
 
-        plan.Layout = TextureTransferLayout.Compute(format, info.Extent.Width, info.Extent.Height, info.Resources.Levels, layers, info.TileMode, info.Data.Size, allowDepthTile, volume, owner);
+        var guestLevels = info.FirstLevel + info.Resources.Levels;
+        var guestLinearLevels = GuestLinearLevels(info, guestLevels);
+        plan.Layout = TextureTransferLayout.Compute(format, info.Extent.Width, info.Extent.Height, guestLevels, layers, info.TileMode, info.Data.Size, allowDepthTile, volume, owner,
+            guestLinearLevels);
+        if (guestLinearLevels.Length == 0 && role == ImageRole.ColorTarget && info.TileMode == GuestTileMode.Linear && info.FirstLevel == 0 && info.Resources.Levels == 1 && !volume)
+        {
+            // Linear color targets use the target register's pitch, not texture row alignment.
+            var slice = checked((ulong)info.Pitch * info.Extent.Height * info.BytesPerBlock);
+            if (slice > info.Data.Size / layers)
+                throw SubmissionScheduler.Fatal("The linear color target exceeds its guest allocation.");
+            plan.Layout.Pitch = info.Pitch;
+            plan.Layout.SliceStride = info.Data.Size / layers;
+            plan.Layout.Mips[0] = new TransferMipLayout
+            {
+                Size = slice, RowLength = info.Pitch, ImageHeight = info.Extent.Height,
+            };
+        }
         plan.Regions = plan.Layout.BuildCopies();
         if (info.IsDepth)
         {
@@ -119,15 +158,32 @@ public sealed unsafe partial class GuestImageCache
             }
         }
         plan.Tiled = plan.Layout.Surface.Description.TileMode != GuestTileMode.Linear;
+        if (!plan.Tiled && !TileGeometry.TryGetElementLayout(format, out plan.Element))
+        {
+            return plan;
+        }
         if (plan.Tiled)
         {
-            if (!plan.Layout.TryBuildTileTransfers(info.Data.Size, plan.Regions, info.Resources.Levels, out var tiles))
+            if (!plan.Layout.TryBuildTileTransfers(info.Data.Size, plan.Regions, guestLevels, out var tiles))
             {
                 return plan;
             }
 
             plan.Tiles = tiles;
             plan.LinearSize = LinearSizeOf(plan.Tiles);
+        }
+
+        // Only the resident mips have host levels: guest level L lands on host level L - FirstLevel.
+        var firstLevel = info.FirstLevel;
+        if (firstLevel != 0)
+        {
+            plan.Regions.RemoveAll(region => region.ImageSubresource.MipLevel < firstLevel);
+            for (var index = 0; index < plan.Regions.Count; index++)
+            {
+                var region = plan.Regions[index];
+                region.ImageSubresource.MipLevel -= firstLevel;
+                plan.Regions[index] = region;
+            }
         }
 
         plan.Valid = true;
@@ -138,11 +194,14 @@ public sealed unsafe partial class GuestImageCache
         SubmissionScheduler.Fatal(
             $"The color-attachment upload is invalid: address=0x{info.Data.Address:X16} size=0x{info.Data.Size:X} layers={info.Resources.Layers} samples={info.Samples} backingSamples={image.Backing.Samples} compression={info.Metadata.Compression}.");
 
+    private static int _linearReadbackOverflowWarned;
+
     private static ImageDownloadPlan PlanDownload(CachedImage image)
     {
         ref readonly var info = ref image.Description;
         var plan = new ImageDownloadPlan { Depth = info.IsDepth };
-        if (info.Samples != 1 || image.Backing.Samples != 1)
+        // A streamed texture holds only its resident mips; the guest chain is not all there.
+        if (info.Samples != 1 || image.Backing.Samples != 1 || info.FirstLevel != 0)
         {
             return plan;
         }
@@ -161,6 +220,20 @@ public sealed unsafe partial class GuestImageCache
 
         plan.Color = PlanColorTransfer(image, UploadRole(image), TransferDirection.Download);
         plan.Valid = plan.Color.Valid;
+        // A linear layout computed for the format can need more bytes than the guest
+        // range holds. Copying it would write past the readback's storage.
+        if (plan.Valid && !plan.Color.Tiled &&
+            TextureTransferLayout.CopyFootprint(plan.Color.Regions, plan.Color.Element) > info.Data.Size)
+        {
+            plan.Valid = false;
+            if (Interlocked.Exchange(ref _linearReadbackOverflowWarned, 1) == 0)
+            {
+                Console.Error.WriteLine(
+                    $"[GPU][WARN] A linear image readback was skipped: its copy layout needs 0x{TextureTransferLayout.CopyFootprint(plan.Color.Regions, plan.Color.Element):X} bytes " +
+                    $"but the guest range is 0x{info.Data.Size:X}. address=0x{info.Data.Address:X16} format={info.GuestFormat} extent={info.Extent.Width}x{info.Extent.Height} levels={info.Resources.Levels}.");
+            }
+        }
+
         return plan;
     }
 
@@ -230,11 +303,11 @@ public sealed unsafe partial class GuestImageCache
         image.UploadFromBuffer(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(copies), linear.Buffer, linear.Offset, linear.Size);
     }
 
-    private void UploadStencilPlane(CachedImage association, GpuBuffer source, ulong sourceOffset)
+    // The layout of a depth image's guest stencil plane at `plane`: one byte per texel.
+    private static ImageDescription StencilPlaneLayout(CachedImage depth, GuestSpan plane, string operation)
     {
-        var destination = _slots[association.DepthOwner];
-        var info = destination.Description;
-        info.Data = association.Description.Data;
+        var info = depth.Description;
+        info.Data = plane;
         info.GuestFormat = GuestPixelFormat.Bits8UInt;
         info.BytesPerBlock = 1;
         if (info.IsTiled)
@@ -242,12 +315,89 @@ public sealed unsafe partial class GuestImageCache
             info.Pitch = TileGeometry.DepthPitch(info.Extent.Width, 1);
         }
 
-        if (info.Samples != 1 || destination.Backing.Samples != 1 || info.Resources.Layers == 0 || info.Data.Size % info.Resources.Layers != 0)
+        if (info.Samples != 1 || depth.Backing.Samples != 1 || info.Resources.Layers == 0 || info.Data.Size % info.Resources.Layers != 0)
         {
             throw SubmissionScheduler.Fatal(
-                $"The stencil upload is invalid: address=0x{info.Data.Address:X16} size=0x{info.Data.Size:X} layers={info.Resources.Layers} samples={info.Samples} backingSamples={destination.Backing.Samples}.");
+                $"The stencil {operation} is invalid: address=0x{info.Data.Address:X16} size=0x{info.Data.Size:X} layers={info.Resources.Layers} samples={info.Samples} backingSamples={depth.Backing.Samples}.");
         }
 
+        return info;
+    }
+
+    // Writes the stencil aspect back to its guest plane once the current tick completes.
+    private void WriteBackStencilPlane(CachedImage depth, GuestSpan plane)
+    {
+        var info = StencilPlaneLayout(depth, plane, "write-back");
+        var download = _bufferCache.GetUtilityBuffer(GpuBufferUsage.Download);
+        if (!download.TryMap(plane.Size, out var offset, 4))
+        {
+            throw SubmissionScheduler.Fatal($"The reusable download ring cannot map the stencil plane: address=0x{plane.Address:X16} size=0x{plane.Size:X}.");
+        }
+
+        download.Commit();
+        var fullSliceSize = info.Data.Size / info.Resources.Layers;
+        var copies = DepthCopies(info, fullSliceSize, ImageAspectFlags.StencilBit);
+        if (info.IsTiled)
+        {
+            // Tiling fills only the plane's texels: the padding keeps its guest bytes.
+            if (!_backing.TryReadBacking(plane.Address, download.Mapped.Slice((int)offset, (int)plane.Size)))
+            {
+                throw SubmissionScheduler.Fatal($"The stencil plane cannot be read from guest memory: address=0x{plane.Address:X16} size=0x{plane.Size:X}.");
+            }
+
+            download.Flush(offset, plane.Size);
+            var tiles = DepthTileTransfers(info, DepthBlock(info), fullSliceSize);
+            _tiler.TileImage(depth, copies, download.Handle, offset, plane.Size, plane.Size, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(tiles));
+        }
+        else
+        {
+            for (var index = 0; index < copies.Length; index++)
+            {
+                copies[index].BufferOffset += offset;
+            }
+
+            depth.DownloadToBuffer(copies, download.Handle, offset, plane.Size);
+        }
+
+        var barrier = new BufferMemoryBarrier2
+        {
+            SType = StructureType.BufferMemoryBarrier2,
+            SrcAccessMask = AccessFlags2.MemoryWriteBit | AccessFlags2.TransferWriteBit | AccessFlags2.ShaderWriteBit,
+            DstAccessMask = AccessFlags2.HostReadBit,
+            SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            Buffer = download.Handle,
+            Offset = offset,
+            Size = plane.Size,
+        };
+        _scheduler.EndRendering();
+        VulkanSynchronization.PipelineBarrier(_device.Vk, new CommandBuffer(_scheduler.Current.Handle), PipelineStageFlags.AllCommandsBit, PipelineStageFlags.HostBit, 0, 0, null, 1, &barrier, 0, null);
+        var backing = _backing;
+        // Until the tick completes guest memory holds the plane this replaces; an upload of the
+        // range waits for it (AwaitPublishingDownloads).
+        var publishing = new PublishingDownload(plane.Address, plane.Size, _scheduler.CurrentTick);
+        lock (_publishingDownloads) _publishingDownloads.Add(publishing);
+        _scheduler.QueuePriorityCompletionAction(() =>
+        {
+            try
+            {
+                download.Invalidate(offset, plane.Size);
+                if (!backing.TryWriteBacking(plane.Address, download.Mapped.Slice((int)offset, (int)plane.Size)))
+                {
+                    throw SubmissionScheduler.Fatal($"The stencil plane could not be written to guest memory: address=0x{plane.Address:X16} size=0x{plane.Size:X}.");
+                }
+            }
+            finally
+            {
+                lock (_publishingDownloads) _publishingDownloads.Remove(publishing);
+            }
+        });
+    }
+
+    private void UploadStencilPlane(CachedImage association, GpuBuffer source, ulong sourceOffset)
+    {
+        var destination = _slots[association.DepthOwner];
+        var info = StencilPlaneLayout(destination, association.Description.Data, "upload");
         var fullSliceSize = info.Data.Size / info.Resources.Layers;
         var copies = DepthCopies(info, fullSliceSize, ImageAspectFlags.StencilBit);
         var linear = new TilerBufferSpan(source.Handle, sourceOffset, source.Size - sourceOffset);
@@ -258,6 +408,60 @@ public sealed unsafe partial class GuestImageCache
         }
 
         UploadRegions(destination, copies.ToList(), linear);
+    }
+
+    private static uint ExpandedColorChannels(CachedImage image) =>
+        image.Backing.Format is Format.R8G8B8A8Srgb or Format.R8G8B8A8Unorm
+            ? image.Description.GuestFormat switch
+            {
+                GuestPixelFormat.Bits8Srgb => 1u,
+                GuestPixelFormat.Bits8_8Srgb => 2u,
+                _ => 0u,
+            }
+            : 0u;
+
+    private static List<BufferImageCopy> ExpandedColorRegions(List<BufferImageCopy> guestRegions, out ulong size)
+    {
+        var result = new List<BufferImageCopy>(guestRegions.Count);
+        size = 0;
+        foreach (var guest in guestRegions)
+        {
+            var wide = guest;
+            wide.BufferOffset = size;
+            var pitch = guest.BufferRowLength == 0 ? guest.ImageExtent.Width : guest.BufferRowLength;
+            var height = guest.BufferImageHeight == 0 ? guest.ImageExtent.Height : guest.BufferImageHeight;
+            size = checked(size + (ulong)pitch * height * 4);
+            result.Add(wide);
+        }
+        return result;
+    }
+
+    private void ConvertExpandedColor(TilerBufferSpan guest, TilerBufferSpan wide,
+        List<BufferImageCopy> guestRegions, List<BufferImageCopy> wideRegions, uint channels, bool widen)
+    {
+        for (var index = 0; index < guestRegions.Count; index++)
+        {
+            var region = guestRegions[index];
+            if (region.ImageExtent.Depth != 1 || region.ImageSubresource.LayerCount != 1)
+                throw SubmissionScheduler.Fatal("Expanded color transfers require one slice per copy region.");
+            var pitch = region.BufferRowLength == 0 ? region.ImageExtent.Width : region.BufferRowLength;
+            var height = region.BufferImageHeight == 0 ? region.ImageExtent.Height : region.BufferImageHeight;
+            var narrowRow = checked((ulong)pitch * channels);
+            var wideRow = checked((ulong)pitch * 4);
+            if (region.BufferOffset > guest.Size || wideRegions[index].BufferOffset > wide.Size)
+                throw SubmissionScheduler.Fatal("Expanded color transfer offset exceeds its buffer span.");
+            var narrow = new TilerBufferSpan(guest.Buffer, checked(guest.Offset + region.BufferOffset), guest.Size - region.BufferOffset);
+            var expanded = new TilerBufferSpan(wide.Buffer, checked(wide.Offset + wideRegions[index].BufferOffset), wide.Size - wideRegions[index].BufferOffset);
+            _tiler.ConvertNarrowColor(widen ? narrow : expanded, widen ? expanded : narrow, channels, widen,
+                new DepthConversionLayout
+                {
+                    Width = region.ImageExtent.Width, Height = region.ImageExtent.Height, Layers = 1,
+                    SourceRowStride = widen ? narrowRow : wideRow,
+                    TargetRowStride = widen ? wideRow : narrowRow,
+                    SourceSliceStride = checked((widen ? narrowRow : wideRow) * height),
+                    TargetSliceStride = checked((widen ? wideRow : narrowRow) * height),
+                });
+        }
     }
 
     private void UploadFromBuffer(CachedImage image, in ImageRequest request, GpuBuffer source, ulong sourceOffset)
@@ -282,15 +486,31 @@ public sealed unsafe partial class GuestImageCache
             var linear = new TilerBufferSpan(source.Handle, sourceOffset, info.Data.Size);
             if (plan.Tiled)
             {
+                // Detile scratch is a real device-local allocation. Evict cold
+                // image cache entries before requesting a large dedicated
+                // buffer, otherwise the cache thresholds cannot protect this
+                // path from a single oversized upload.
+                CollectForAllocation(plan.LinearSize);
                 linear = _tiler.Detile(source.Handle, sourceOffset, info.Data.Size, plan.LinearSize, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(plan.Tiles));
             }
 
             if (plan.SwapBgra16)
             {
+                CollectForAllocation(linear.Size);
                 linear = _tiler.SwapBgra16(linear);
             }
 
-            UploadRegions(image, plan.Regions, linear);
+            if (ExpandedColorChannels(image) is var channels && channels != 0)
+            {
+                var wideRegions = ExpandedColorRegions(plan.Regions, out var wideSize);
+                var wide = _tiler.GetScratchBuffer(wideSize);
+                ConvertExpandedColor(linear, wide, plan.Regions, wideRegions, channels, widen: true);
+                UploadRegions(image, wideRegions, wide);
+            }
+            else
+            {
+                UploadRegions(image, plan.Regions, linear);
+            }
             return;
         }
 
@@ -309,6 +529,7 @@ public sealed unsafe partial class GuestImageCache
         if (info.TileMode != GuestTileMode.Linear)
         {
             var tiles = DepthTileTransfers(info, block, fullSliceSize);
+            CollectForAllocation(info.Data.Size);
             depthLinear = _tiler.Detile(source.Handle, sourceOffset, info.Data.Size, info.Data.Size, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(tiles));
         }
 
@@ -327,7 +548,9 @@ public sealed unsafe partial class GuestImageCache
                 throw SubmissionScheduler.Fatal($"The depth upload conversion size overflows: transferSlice={transferSlice} layers={layers}.");
             }
 
-            var widened = _tiler.GetScratchBuffer(transferSlice * layers);
+            var widenedSize = transferSlice * layers;
+            CollectForAllocation(widenedSize);
+            var widened = _tiler.GetScratchBuffer(widenedSize);
             _tiler.ConvertDepth16(depthLinear, widened, DepthConversionDirection.Widen, info.PixelFormat == Format.D32SfloatS8Uint, new DepthConversionLayout
             {
                 Width = info.Extent.Width,
@@ -355,6 +578,13 @@ public sealed unsafe partial class GuestImageCache
         var image = _slots[imageIdentifier];
         if (ImageDescription.IsEmptyRange(image.Description.Data))
         {
+            return;
+        }
+
+        AwaitPublishingDownloads(image.Description.Data);
+        if (!ReferenceEquals(_slots.TryGet(imageIdentifier), image))
+        {
+            // The image went away while the cache waited.
             return;
         }
 
@@ -557,9 +787,31 @@ public sealed unsafe partial class GuestImageCache
         }
 
         var color = plan.Color;
+        if (ExpandedColorChannels(image) is var channels && channels != 0)
+        {
+            var wideRegions = ExpandedColorRegions(color.Regions, out var wideSize);
+            var wide = _tiler.GetScratchBuffer(wideSize);
+            image.DownloadToBuffer(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(wideRegions), wide.Buffer, 0, wide.Size);
+            var guest = color.Tiled
+                ? _tiler.Detile(destination.Handle, destinationOffset, destinationSize, color.LinearSize,
+                    System.Runtime.InteropServices.CollectionsMarshal.AsSpan(color.Tiles))
+                : new TilerBufferSpan(destination.Handle, destinationOffset, destinationSize);
+            ConvertExpandedColor(guest, wide, color.Regions, wideRegions, channels, widen: false);
+            if (color.Tiled)
+                _tiler.Tile(guest.Buffer, guest.Offset, guest.Size, destination.Handle, destinationOffset, destinationSize,
+                    System.Runtime.InteropServices.CollectionsMarshal.AsSpan(color.Tiles));
+            return;
+        }
         var swap = color.SwapBgra16 ? ColorChannelSwap.SwapBgra16 : ColorChannelSwap.None;
         if (!color.Tiled)
         {
+            var footprint = TextureTransferLayout.CopyFootprint(color.Regions, color.Element);
+            if (footprint > destinationSize)
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"A linear image download exceeds its destination: needed=0x{footprint:X} destination=0x{destinationSize:X} address=0x{image.Description.Data.Address:X16}.");
+            }
+
             if (swap == ColorChannelSwap.SwapBgra16)
             {
                 var linear = _tiler.GetScratchBuffer(destinationSize);
@@ -624,17 +876,51 @@ public sealed unsafe partial class GuestImageCache
             }
         }
 
-        if (!selected.IsValid)
+        var synchronized = false;
+        if (selected.IsValid)
         {
-            return false;
+            var target = selected;
+            if (_slots.TryGet(target) is { DepthOwner.IsValid: true } proxy)
+            {
+                target = proxy.DepthOwner;
+            }
+
+            synchronized = TryDownloadImageToBuffer(_slots[target], buffer);
         }
 
-        if (_slots.TryGet(selected) is { DepthOwner.IsValid: true } proxy)
+        // Every other image the view covers is memory the shader can read or partly
+        // rewrite: its GPU-only contents move into the buffer before the bind hands
+        // the range to the buffer. Aliased images are left out, their order unknown.
+        var covered = new List<ResourceSlotIdentifier>();
+        foreach (var identifier in FindImagesInRange(address, size, pageOverlap: false))
         {
-            selected = proxy.DepthOwner;
+            if (identifier != selected && _slots.TryGet(identifier) is { DepthOwner.IsValid: false } candidate &&
+                candidate.Description.Data.Address >= address &&
+                candidate.Description.Data.Size <= address + size - candidate.Description.Data.Address)
+            {
+                covered.Add(identifier);
+            }
         }
 
-        var image = _slots[selected];
+        foreach (var identifier in covered)
+        {
+            var image = _slots[identifier];
+            if (image.BufferHoldsGpuContents || !CanReadBack(image) ||
+                (selected.IsValid && _slots[selected].Overlaps(image.Description.Data.Address, image.Description.Data.Size)) ||
+                covered.Any(other => other != identifier &&
+                    _slots[other].Overlaps(image.Description.Data.Address, image.Description.Data.Size)))
+            {
+                continue;
+            }
+
+            synchronized |= TryDownloadImageToBuffer(image, buffer);
+        }
+
+        return synchronized;
+    }
+
+    private bool TryDownloadImageToBuffer(CachedImage image, GpuBuffer buffer)
+    {
         ref readonly var info = ref image.Description;
         if (!buffer.IsInBounds(info.Data.Address, 1))
         {
@@ -703,9 +989,44 @@ public sealed unsafe partial class GuestImageCache
             }
         }
 
+        // The kept levels must fit the bytes the buffer covers, as in a full readback.
+        if (!plan.Depth && !plan.Color.Tiled &&
+            TextureTransferLayout.CopyFootprint(plan.Color.Regions, plan.Color.Element) > copySize)
+        {
+            return false;
+        }
+
+        // The mip layout can end before the tile plan does (Silent Hill: a 128x128 slice planned at
+        // the exact end of the mip chain aborted the process). Cover the whole plan when the buffer
+        // holds it; otherwise keep the guest bytes instead of copying a partial image.
+        if (!plan.Depth && plan.Color.Tiled)
+        {
+            var tiledEnd = TiledEndOf(plan.Color.Tiles);
+            if (tiledEnd > copySize)
+            {
+                if (tiledEnd > available)
+                {
+                    return false;
+                }
+
+                copySize = tiledEnd;
+            }
+        }
+
         DownloadToBuffer(image, buffer, bufferOffset, copySize, plan);
         image.MarkBufferHoldsGpuContents();
         return true;
+    }
+
+    private static ulong TiledEndOf(List<TileTransfer> tiles)
+    {
+        var end = 0UL;
+        foreach (var tile in tiles)
+        {
+            end = Math.Max(end, tile.TiledOffset + tile.TiledSize);
+        }
+
+        return end;
     }
 
     // Publishes a GPU-owned image to guest memory after its tick completes; false when it cannot.
@@ -758,17 +1079,65 @@ public sealed unsafe partial class GuestImageCache
         _scheduler.EndRendering();
         VulkanSynchronization.PipelineBarrier(_device.Vk,new CommandBuffer(_scheduler.Current.Handle), PipelineStageFlags.AllCommandsBit, PipelineStageFlags.HostBit, 0, 0, null, 1, &barrier, 0, null);
         var backing = _backing;
+        var publishing = new PublishingDownload(range.Address, range.Size, _scheduler.CurrentTick);
+        lock (_publishingDownloads) _publishingDownloads.Add(publishing);
         _scheduler.QueuePriorityCompletionAction(() =>
         {
-            download.Invalidate(offset, range.Size);
-            if (!backing.TryWriteBacking(range.Address, download.Mapped.Slice((int)offset, (int)range.Size)))
+            try
             {
-                throw SubmissionScheduler.Fatal($"The image readback could not be written to guest memory: address=0x{range.Address:X16} size=0x{range.Size:X}.");
+                download.Invalidate(offset, range.Size);
+                if (!backing.TryWriteBacking(range.Address, download.Mapped.Slice((int)offset, (int)range.Size)))
+                {
+                    throw SubmissionScheduler.Fatal($"The image readback could not be written to guest memory: address=0x{range.Address:X16} size=0x{range.Size:X}.");
+                }
+            }
+            finally
+            {
+                lock (_publishingDownloads) _publishingDownloads.Remove(publishing);
             }
         });
         // Completion actions wait for the priority readback before freeing spill buffers.
         if (download != ring) _scheduler.QueueCompletionAction(download.Dispose);
         return true;
+    }
+
+    private sealed record PublishingDownload(ulong Address, ulong Size, ulong Tick);
+
+    // Readbacks whose guest bytes are written only when their tick completes. Until then guest
+    // memory holds the contents they supersede.
+    private readonly List<PublishingDownload> _publishingDownloads = new();
+
+    // Waits until every readback that will publish into the range has written guest memory, so
+    // an upload does not read the bytes it replaces. The cache lock is released while waiting.
+    private void AwaitPublishingDownloads(GuestSpan range)
+    {
+        ulong tick = 0;
+        lock (_publishingDownloads)
+        {
+            foreach (var download in _publishingDownloads)
+            {
+                if (download.Address < range.Address + range.Size && range.Address < download.Address + download.Size)
+                    tick = Math.Max(tick, download.Tick);
+            }
+        }
+
+        if (tick == 0)
+        {
+            return;
+        }
+
+        if (_scheduler.InsideTickCallback)
+        {
+            throw SubmissionScheduler.Fatal($"An image upload cannot wait for a pending readback from a completion callback: address=0x{range.Address:X16} size=0x{range.Size:X}.");
+        }
+
+        _lock.Exit();
+        try
+        {
+            _scheduler.Wait(tick);
+            _scheduler.WaitForPriorityOperations(tick);
+        }
+        finally { _lock.Enter(); }
     }
 
     // Clears the one image that owns exactly this range; false when no single owner or clear value fits.

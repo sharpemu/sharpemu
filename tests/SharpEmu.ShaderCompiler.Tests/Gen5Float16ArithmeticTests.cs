@@ -14,6 +14,57 @@ public sealed class Gen5Float16ArithmeticTests
     private const ulong ShaderAddress = 0x1_0000_0000;
     private const uint SEndpgm = 0xBF810000;
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PackedTruncation_PointerMatchesRegisterStorage(bool elideExecGuards)
+    {
+        var program = Decode([0x5E101B0Du, SEndpgm]); // v_cvt_pkrtz_f16_f32 v8, v13, v13
+        var (plan, resources, bindings) = ResourceTestProgram.Prepare(program, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, bindings)
+        { EnableExecGuardElision = elideExecGuards };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        // The packed-half shadow of v8 is one variable; its pointer type must carry the storage
+        // class it is declared with (Function when the register files live in the function).
+        var pointers = new Dictionary<uint, (uint Storage, uint Pointee)>();
+        var vec2Types = new HashSet<uint>();
+        var packedHalfVariables = new List<(uint Type, uint Storage)>();
+        for (var offset = 20; offset < shader.Spirv.Length;)
+        {
+            uint Word(int index) => BinaryPrimitives.ReadUInt32LittleEndian(shader.Spirv.AsSpan(offset + index * 4));
+            var header = Word(0);
+            var opcode = (SpirvOp)(header & 0xFFFF);
+            if (opcode == SpirvOp.TypeVector && Word(3) == 2) vec2Types.Add(Word(1));
+            if (opcode == SpirvOp.TypePointer) pointers.Add(Word(1), (Word(2), Word(3)));
+            if (opcode == SpirvOp.Variable && vec2Types.Contains(pointers[Word(1)].Pointee))
+                packedHalfVariables.Add((Word(1), Word(3)));
+            offset += (int)(header >> 16) * 4;
+        }
+        Assert.NotEmpty(packedHalfVariables);
+        foreach (var variable in packedHalfVariables)
+            Assert.Equal(variable.Storage, pointers[variable.Type].Storage);
+        Gen5LargeDispatcherValidationTests.ValidateWithSpirvToolsWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PackedFma_WithExactNativeHalfSupport_DoesNotExpandRoundToOdd(bool fmac)
+    {
+        var program = fmac
+            ? Decode([0x78000501u, SEndpgm])
+            : Decode([0xCC0E4000u, 257u | (258u << 9) | (259u << 18) | (3u << 27), SEndpgm]);
+        var (plan, resources, bindings) = ResourceTestProgram.Prepare(program, userDataCount: 0);
+        var original = new SharpEmu.ShaderCompiler.ShaderCompileRequest(plan, resources, bindings);
+        var request = new SharpEmu.ShaderCompiler.ShaderCompileRequest(plan,
+            resources, bindings) { SupportsExactFloat16Conversions = true };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var native, out var error), error);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(original, out var fallback, out error), error);
+        Gen5LargeDispatcherValidationTests.ValidateWithSpirvToolsWhenAvailable(native.Spirv);
+        Assert.DoesNotContain((ushort)SpirvOp.FSub, ReadOpcodes(native.Spirv));
+        Assert.Contains((ushort)SpirvOp.FSub, ReadOpcodes(fallback.Spirv));
+    }
+
     [Fact]
     public void CompactFloat16ArithmeticDecodesAndCompilesWithoutNativeFloat16()
     {
@@ -138,7 +189,80 @@ public sealed class Gen5Float16ArithmeticTests
             error);
     }
 
-    private static Gen5ShaderProgram Decode(IReadOnlyList<uint> words)
+    // The native GLSL conversions are used only when the host measured them bit-exact on the
+    // device; otherwise the branchless integer sequences (FindUMsb = GLSL 75) stay in place.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PackedFloat16UsesNativeHalfConversionOnlyWhenTheHostMeasuredItExact(bool nativeExact)
+    {
+        var program = Decode(
+        [
+            (0x33u << 26) | (0x10u << 16) | 1u,
+            0xFFu | (258u << 9),
+            0x00002C00u,
+            SEndpgm,
+        ]);
+
+        Assert.Equal("VPkMulF16", program.Instructions[0].Opcode);
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, SharpEmu.ShaderCompiler.Resources.ShaderStage.Compute, 0, 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            NativeHalfConversionExact = nativeExact,
+        };
+
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var glsl = ReadGlslExtOpcodes(shader.Spirv);
+
+        // 62 = UnpackHalf2x16, 58 = PackHalf2x16, 75 = FindUMsb.
+        if (nativeExact)
+        {
+            Assert.Contains(62u, glsl);
+            Assert.Contains(58u, glsl);
+        }
+        else
+        {
+            Assert.DoesNotContain(62u, glsl);
+            Assert.DoesNotContain(58u, glsl);
+            Assert.Contains(75u, glsl);
+        }
+    }
+
+    // The GLSL.std.450 instruction number of every ExtInst in the module.
+    private static IReadOnlyList<uint> ReadGlslExtOpcodes(byte[] spirv)
+    {
+        var opcodes = new List<uint>();
+        foreach (var words in ReadInstructionWords(spirv))
+        {
+            if ((ushort)words[0] == (ushort)SpirvOp.ExtInst && words.Length >= 5)
+            {
+                opcodes.Add(words[4]);
+            }
+        }
+
+        return opcodes;
+    }
+
+    private static IEnumerable<uint[]> ReadInstructionWords(byte[] spirv)
+    {
+        Assert.Equal(0x07230203u, BinaryPrimitives.ReadUInt32LittleEndian(spirv));
+        for (var offset = 5 * sizeof(uint); offset < spirv.Length;)
+        {
+            var header = BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset));
+            var wordCount = checked((int)(header >> 16));
+            Assert.InRange(wordCount, 1, (spirv.Length - offset) / sizeof(uint));
+            var words = new uint[wordCount];
+            for (var index = 0; index < wordCount; index++)
+            {
+                words[index] = BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset + index * sizeof(uint)));
+            }
+
+            yield return words;
+            offset += wordCount * sizeof(uint);
+        }
+    }
+
+    public static Gen5ShaderProgram Decode(IReadOnlyList<uint> words)
     {
         var memory = new TestCpuMemory(ShaderAddress, words.Count * sizeof(uint));
         var bytes = new byte[words.Count * sizeof(uint)];

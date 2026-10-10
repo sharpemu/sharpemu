@@ -47,6 +47,11 @@ internal sealed class GuestBufferRegistry<TBuffer> : IDisposable where TBuffer :
 
     public int RegisteredCount => _registered.Count;
     public ulong RegisteredBytes { get; private set; }
+    private ulong _residentBytes;
+    private ulong _retiredBytes;
+    // Lookup removal does not release the GPU resource. Count it until disposal.
+    public ulong ResidentBytes => Interlocked.Read(ref _residentBytes);
+    public ulong RetiredBytes => Interlocked.Read(ref _retiredBytes);
 
     public ResourceSlotIdentifier AllocateBuffer(TBuffer resource, ulong address, ulong size)
     {
@@ -69,6 +74,7 @@ internal sealed class GuestBufferRegistry<TBuffer> : IDisposable where TBuffer :
             entry.State = BufferLifetimeState.Allocated;
             entry.LastUseTick = 0;
         }
+        Interlocked.Add(ref _residentBytes, size);
         return identifier;
     }
 
@@ -137,6 +143,7 @@ internal sealed class GuestBufferRegistry<TBuffer> : IDisposable where TBuffer :
         _registered.Remove(entry.Address);
         _recency.Remove(entry.RecencyNode!);
         RegisteredBytes -= entry.Size;
+        Interlocked.Add(ref _retiredBytes, entry.Size);
         entry.State = BufferLifetimeState.Retiring;
     }
 
@@ -219,11 +226,14 @@ internal sealed class GuestBufferRegistry<TBuffer> : IDisposable where TBuffer :
     private void ReleaseResource(Entry entry)
     {
         var resource = entry.Resource;
+        var retiring = entry.State == BufferLifetimeState.Retiring;
         entry.Resource = null;
         entry.State = BufferLifetimeState.Released;
         if (!_disposed && entry.Identifier.Generation != uint.MaxValue)
             _availableIndices.Push((int)entry.Identifier.Index);
         resource?.Dispose();
+        Interlocked.Add(ref _residentBytes, unchecked(0UL - entry.Size));
+        if (retiring) Interlocked.Add(ref _retiredBytes, unchecked(0UL - entry.Size));
     }
 
     private Entry? FindEntry(ResourceSlotIdentifier identifier) =>

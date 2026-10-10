@@ -148,8 +148,23 @@ public sealed class RuntimeValueEvaluator
                 return true;
             case ScalarValueKind.Phi:
             {
-                var invariant = _plan.Graph.ResolveInvariantPhi(value);
-                return invariant is not null && EvaluateWide(invariant, out result);
+                // Every leaf of an invariant phi is the same value; one may still be mid-
+                // evaluation higher up (a loop-carried register), so any leaf that evaluates
+                // gives the result.
+                if (_plan.Graph.ResolveInvariantPhi(value) is null)
+                {
+                    return false;
+                }
+
+                foreach (var leaf in PhiLeaves(value))
+                {
+                    if (EvaluateWide(leaf, out result))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
             }
             case ScalarValueKind.FirstLane:
             {
@@ -193,6 +208,32 @@ public sealed class RuntimeValueEvaluator
             default:
                 return false;
         }
+    }
+
+    private static List<ScalarValue> PhiLeaves(ScalarValue phi)
+    {
+        var leaves = new List<ScalarValue>();
+        var pending = new Stack<ScalarValue>();
+        var visited = new HashSet<ScalarValue>();
+        pending.Push(phi);
+        while (pending.TryPop(out var current))
+        {
+            if (current.Kind != ScalarValueKind.Phi)
+            {
+                leaves.Add(current);
+                continue;
+            }
+
+            if (visited.Add(current))
+            {
+                foreach (var operand in current.Operands)
+                {
+                    pending.Push(operand);
+                }
+            }
+        }
+
+        return leaves;
     }
 
     // A raw read adds the immediate and dynamic offsets to the 48-bit handle base, checks
@@ -282,8 +323,8 @@ public sealed class RuntimeValueEvaluator
             var size = stride == 0 ? (ulong)(uint)records : (ulong)stride * (uint)records;
             if (aligned > size || size - aligned < sizeof(uint))
             {
-                // An unbound (empty) V# reads as zero; overrunning a bound buffer stays a failure.
-                return (uint)records == 0 ? RawAddress.Zero : RawAddress.Failed;
+                // Scalar loads outside the descriptor range return zero.
+                return RawAddress.Zero;
             }
 
             address = ((baseAddress & ~3ul) + byteOffset) & ~3ul;

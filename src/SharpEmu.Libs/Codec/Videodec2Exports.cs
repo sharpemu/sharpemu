@@ -283,6 +283,11 @@ public static class Videodec2Exports
         return SetReturn(ctx, Ok);
     }
 
+    // SceVideodec2OutputInfo after the caller's thisSize: frameWidth (+0x10) and frameHeight (+0x18)
+    // are 32-bit fields; framePitch (+0x14) lies between them.
+    internal static bool TryWritePictureDimensions(CpuContext ctx, ulong address, uint width, uint height) =>
+        ctx.TryWriteUInt32(address + 0x10, width) && ctx.TryWriteUInt32(address + 0x18, height);
+
     [SysAbiExport(
         Nid = "NtXRa3dRzU0",
         ExportName = "sceVideodec2GetPictureInfo",

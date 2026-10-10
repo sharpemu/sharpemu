@@ -66,14 +66,16 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         Assert.True(backed.Backing.Exists);
         Assert.Equal(ImageAccessState.Initial, backed.Backing.State);
         Assert.Equal(256UL, backed.Description.Data.Size);
-        Assert.Equal(1024UL, backed.AccountedSize);
+        Assert.Equal(backed.Backing.AllocationSize, backed.AccountedSize);
+        Assert.True(backed.AccountedSize > 0);
 
         var unbacked = Color2D(8, 8);
         unbacked.Data = GuestSpan.Empty;
         unbacked.Pitch = 0;
         var fresh = harness.CreateImage(unbacked);
         Assert.False(fresh.IsCpuDirty);
-        Assert.Equal(0UL, fresh.AccountedSize);
+        Assert.Equal(fresh.Backing.AllocationSize, fresh.AccountedSize);
+        Assert.True(fresh.AccountedSize > 0);
 
         var association = ImageDescription.Create();
         association.Data = new GuestSpan(ArrayBackedSpace.Base, 0x100);
@@ -200,6 +202,27 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         Assert.Equal(PipelineStageFlags.TransferBit, wholeStages);
         Assert.Null(image.Backing.SubresourceStates);
         Assert.Equal(new ImageAccessState(PipelineStageFlags.ComputeShaderBit, AccessFlags.ShaderReadBit, ImageLayout.General), image.Backing.State);
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
+    public void Barriers_SkipReadsAfterReadsInOneLayoutButKeepEveryReaderForTheNextWriter()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(16, 16));
+        const ImageLayout readOnly = ImageLayout.ShaderReadOnlyOptimal;
+
+        Assert.Single(image.GetBarriers(readOnly, AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, null).Barriers);
+        var (reread, _) = image.GetBarriers(readOnly, AccessFlags.TransferReadBit, PipelineStageFlags.TransferBit, null);
+        Assert.Empty(reread);
+        Assert.Equal(new ImageAccessState(PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit,
+            AccessFlags.ShaderReadBit | AccessFlags.TransferReadBit, readOnly), image.Backing.State);
+
+        var (write, writeStages) = image.GetBarriers(ImageLayout.General, AccessFlags.ShaderWriteBit, PipelineStageFlags.ComputeShaderBit, null);
+        var barrier = Assert.Single(write);
+        Assert.Equal(PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit, writeStages);
+        Assert.Equal(AccessFlags2.ShaderReadBit | AccessFlags2.TransferReadBit, barrier.SrcAccessMask);
         harness.AssertNoValidationMessages();
     }
 

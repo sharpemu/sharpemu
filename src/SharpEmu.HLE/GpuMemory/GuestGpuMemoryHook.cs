@@ -8,7 +8,16 @@ public static class GuestGpuMemoryHook
     private static readonly ulong _tracePage = ParseTracePage();
     private static readonly bool _traceFirstDeviceFault = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GPU_MEMORY_ADDRESS"), "auto", StringComparison.OrdinalIgnoreCase);
+    // "coherence": the page of the first GPU-copy/guest divergence (SHARPEMU_TRACE_COHERENCE) is traced from then on.
+    private static readonly bool _traceFirstDivergence = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_GPU_MEMORY_ADDRESS"), "coherence", StringComparison.OrdinalIgnoreCase);
     private static long _selectedTracePage;
+
+    public static void SelectDivergenceTracePage(ulong address)
+    {
+        if (!_traceFirstDivergence || !TrySelectTracePage(ref _selectedTracePage, address)) return;
+        Trace(address, 1, "divergence-trace-selected");
+    }
 
     public static void SelectDeviceFaultTracePage(ulong address)
     {
@@ -33,9 +42,9 @@ public static class GuestGpuMemoryHook
     }
 
     public static ulong TraceAddress =>
-        _traceFirstDeviceFault ? unchecked((ulong)Interlocked.Read(ref _selectedTracePage)) : _tracePage;
+        _traceFirstDeviceFault || _traceFirstDivergence ? unchecked((ulong)Interlocked.Read(ref _selectedTracePage)) : _tracePage;
 
-    public static bool TraceEnabled => _traceFirstDeviceFault || _tracePage != 0;
+    public static bool TraceEnabled => _traceFirstDeviceFault || _traceFirstDivergence || _tracePage != 0;
 
     public static bool Traces(ulong address, ulong size) =>
         OverlapsTracePage(TraceAddress, address, size);

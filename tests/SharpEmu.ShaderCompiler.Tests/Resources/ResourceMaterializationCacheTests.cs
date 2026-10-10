@@ -71,6 +71,42 @@ public sealed class ResourceMaterializationCacheTests
     }
 
     [Fact]
+    public void GroupedDescriptorReads_PreserveMaterializationAndCacheInvalidation()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        var bulkReads = 0;
+        var inputs = Inputs([0x1000, 0], readCleanMemory: heap.Read) with
+        {
+            ReadCleanWords = (ulong address, Span<uint> words) =>
+            {
+                bulkReads++;
+                for (var i = 0; i < words.Length; i++)
+                    if (!heap.Words.TryGetValue(address + (ulong)i * 4, out words[i])) return false;
+                return !heap.GpuOwned;
+            },
+        };
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(cache.Materialize(plan, inputs, heap.ReadResident, ref snapshot, ref specialization, out _));
+        Assert.Equal(2, bulkReads);
+        var wordReads = heap.Reads;
+        var reference = new ResourceSnapshot();
+        var referenceSpecialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs with { ReadCleanWords = null },
+            ref reference, ref referenceSpecialization));
+        Assert.Equal(reference.Images.Select(image => image.ToArray()), snapshot.Images.Select(image => image.ToArray()));
+        Assert.Equal(16, heap.Reads - 2 * wordReads); // Two eight-dword descriptors replaced by two range reads.
+        Assert.True(cache.Materialize(plan, inputs, heap.ReadResident, ref snapshot, ref specialization, out _));
+        Assert.Equal(1, cache.Hits);
+        heap.Words[HeapBase + 0x100 + 5 * 32] = 0x3000;
+        Assert.True(cache.Materialize(plan, inputs, heap.ReadResident, ref snapshot, ref specialization, out _));
+        Assert.Equal(2, cache.Misses);
+        Assert.Equal(4, bulkReads);
+    }
+
+    [Fact]
     public void UnchangedMemoryReusesTheMaterialization()
     {
         var plan = Plan();
@@ -85,6 +121,39 @@ public sealed class ResourceMaterializationCacheTests
         Assert.Same(first, second);
         Assert.Same(firstSpecialization, secondSpecialization);
         Assert.Equal((1, 1), (cache.Hits, cache.Misses));
+    }
+
+    [Fact]
+    public void APlanWhoseInputsNeverRepeatStopsRecordingButKeepsItsResults()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        for (var draw = 0u; draw < 200; draw++)
+        {
+            Assert.True(Run(cache, plan, heap, [0x1000, 0], out var snapshot, out _, shaderBase: 0x10000 + draw * 0x100));
+            var reference = new ResourceSnapshot();
+            var referenceSpecialization = new ResourceSpecialization();
+            Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: heap.Read, shaderBase: 0x10000 + draw * 0x100),
+                ref reference, ref referenceSpecialization));
+            Assert.Equal(reference.Images.Select(image => image.ToArray()), snapshot.Images.Select(image => image.ToArray()));
+        }
+
+        Assert.True(cache.Bypassed > 100);
+        Assert.Equal(0, cache.Hits);
+    }
+
+    [Fact]
+    public void APlanThatKeepsHittingKeepsTheCache()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        for (var draw = 0; draw < 200; draw++)
+            Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _));
+
+        Assert.Equal(0, cache.Bypassed);
+        Assert.Equal(199, cache.Hits);
     }
 
     [Fact]

@@ -352,8 +352,10 @@ public static partial class Gen5MslTranslator
                 "VLshlOrU32" =>
                     $"((({RawSource(instruction, 0)}) << (({RawSource(instruction, 1)}) & 31u)) | ({RawSource(instruction, 2)}))",
                 "VLshlB32" => $"(({RawSource(instruction, 0)}) << (({RawSource(instruction, 1)}) & 31u))",
+                "VLshlrevB16" => EmitInteger16ShiftReverse(instruction, destination, left: true),
                 "VLshlrevB32" => $"(({RawSource(instruction, 1)}) << (({RawSource(instruction, 0)}) & 31u))",
                 "VLshrB32" => $"(({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))",
+                "VLshrrevB16" => EmitInteger16ShiftReverse(instruction, destination, left: false),
                 "VLshrrevB32" => $"(({RawSource(instruction, 1)}) >> (({RawSource(instruction, 0)}) & 31u))",
                 "VLshrrevB64" => EmitLshrrevB64(instruction, destination),
                 "VAshrI32" =>
@@ -1261,6 +1263,9 @@ public static partial class Gen5MslTranslator
                     StoreScalar(destination, result);
                     return true;
                 }
+                case "SFlbitI32B32":
+                    StoreScalar(destination, $"{left} == 0u ? 0xFFFFFFFFu : (uint)clz({left})");
+                    return true;
                 case "SBitset0B32":
                     StoreScalar(
                         destination,
@@ -1714,6 +1719,31 @@ public static partial class Gen5MslTranslator
         /// Raw 32-bit source with DPP/DPP8 lane remapping on src0 and SDWA
         /// byte/word selection + integer modifiers, mirroring GetRawSource.
         /// </summary>
+        private string EmitInteger16ShiftReverse(
+            Gen5ShaderInstruction instruction,
+            uint destination,
+            bool left)
+        {
+            var control = instruction.Control as Gen5Vop3Control;
+            var shift = RawSource(instruction, 0, applySdwaIntegerModifiers: false);
+            var value = RawSource(instruction, 1, applySdwaIntegerModifiers: false);
+            if ((control?.OperandSelect & 0x1) != 0)
+            {
+                shift = $"(({shift}) >> 16u)";
+            }
+
+            if ((control?.OperandSelect & 0x2) != 0)
+            {
+                value = $"(({value}) >> 16u)";
+            }
+
+            var operation = left ? "<<" : ">>";
+            var low16 = $"(((({value}) & 0xFFFFu) {operation} (({shift}) & 0xFu)) & 0xFFFFu)";
+            return (control?.OperandSelect & 0x8) != 0
+                ? $"((v[{destination}] & 0x0000FFFFu) | (({low16}) << 16u))"
+                : $"((v[{destination}] & 0xFFFF0000u) | ({low16}))";
+        }
+
         private string RawSource(
             Gen5ShaderInstruction instruction,
             int sourceIndex,

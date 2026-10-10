@@ -41,6 +41,14 @@ public static partial class ImageRequestBuilders
 {
     private static long _normalizedSliceRanges;
 
+    // Every draw resolves its color targets; the per-level scratch is copied into the
+    // description before returning, so one cleared pair per thread replaces two arrays per call.
+    [ThreadStatic]
+    private static TileLevelSpan[]? _colorTargetMipSpans;
+
+    [ThreadStatic]
+    private static TilePaddedSize[]? _colorTargetMipPadded;
+
     public static uint SampleCount(uint encodedLog2) => encodedLog2 <= 3 ? 1u << (int)encodedLog2 : 0;
 
     private static bool DccAlphaOnMsb(in ColorTargetWords words)
@@ -72,6 +80,28 @@ public static partial class ImageRequestBuilders
         var supported = hasDcc && PackedClearValue.TryDecodeColor(format, packedClear, out value);
         var fixedSupported = hasDcc && PackedClearValue.SupportsDccFixedColor(format);
         return (supported, fixedSupported, supported ? value : default);
+    }
+
+    // The color a fixed DCC clear code decompresses to; the register code (0x20) is not fixed.
+    public static bool TryFixedDccClearValue(byte code, out ClearColorValue value)
+    {
+        value = default;
+        switch (code)
+        {
+            case 0x00:
+                return true;
+            case 0x40:
+                value.Float32_3 = 1f;
+                return true;
+            case 0x80:
+                value.Float32_0 = value.Float32_1 = value.Float32_2 = 1f;
+                return true;
+            case 0xc0:
+                value.Float32_0 = value.Float32_1 = value.Float32_2 = value.Float32_3 = 1f;
+                return true;
+            default:
+                return false;
+        }
     }
 
     public static bool SupportsDccFixedClear(Format format) => PackedClearValue.SupportsDccFixedColor(format);
@@ -235,8 +265,10 @@ public static partial class ImageRequestBuilders
             pitch = TileGeometry.TexturePitch(transferFormat, width, GuestTileMode.Linear);
         }
 
-        var mipSpans = new TileLevelSpan[TiledSurfaceLayout.MaxLevels];
-        var mipPadded = new TilePaddedSize[TiledSurfaceLayout.MaxLevels];
+        var mipSpans = _colorTargetMipSpans ??= new TileLevelSpan[TiledSurfaceLayout.MaxLevels];
+        var mipPadded = _colorTargetMipPadded ??= new TilePaddedSize[TiledSurfaceLayout.MaxLevels];
+        Array.Clear(mipSpans);
+        Array.Clear(mipPadded);
         TiledSurfaceLayout? volumeLayout = null;
         ulong size;
         ulong backingSize = 0;

@@ -619,6 +619,10 @@ public static partial class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
     public static int KernelAioPollRequests(CpuContext ctx) => KernelAioComplete(ctx);
 
+    [SysAbiExport(Nid = "2pOuoWoCxdk", ExportName = "sceKernelAioPollRequest",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
+    public static int KernelAioPollRequest(CpuContext ctx) => KernelAioGetRequestState(ctx);
+
     [SysAbiExport(Nid = "lgK+oIWkJyA", ExportName = "sceKernelAioWaitRequests",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
     public static int KernelAioWaitRequests(CpuContext ctx)
@@ -633,7 +637,9 @@ public static partial class KernelMemoryCompatExports
 
     [SysAbiExport(Nid = "KOF-oJbQVvc", ExportName = "sceKernelAioWaitRequest",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int KernelAioWaitRequest(CpuContext ctx)
+    public static int KernelAioWaitRequest(CpuContext ctx) => KernelAioGetRequestState(ctx);
+
+    private static int KernelAioGetRequestState(CpuContext ctx)
     {
         var submitId = unchecked((uint)ctx[CpuRegister.Rdi]);
         if (!_aioResults.TryGetValue(submitId, out var completedState))

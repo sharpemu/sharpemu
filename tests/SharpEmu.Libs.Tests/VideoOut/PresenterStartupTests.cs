@@ -14,6 +14,54 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 [Collection(SchedulingStateCollection.Name)]
 public sealed class PresenterStartupTests
 {
+    [Theory]
+    [InlineData(1L, 2L, 0UL, true)]
+    [InlineData(1L, 2L, 1UL, true)]
+    [InlineData(2L, 1L, 1UL, false)]
+    public void EarlierVideoFrameIsNotDiscardedByALaterGuestFlip(
+        long videoSequence, long guestSequence, ulong requiredTick, bool canTake)
+    {
+        using var state = new StartupState();
+        var owner = typeof(VulkanVideoPresenter);
+        var presentationType = owner.GetNestedType("Presentation", BindingFlags.NonPublic)!;
+        var presenterType = owner.GetNestedType("Presenter", BindingFlags.NonPublic)!;
+        var presenter = RuntimeHelpers.GetUninitializedObject(presenterType);
+        object Make(long sequence, ulong tick) => Activator.CreateInstance(presentationType,
+            new object?[] { new byte[4], 1u, 1u, sequence, SharpEmu.ShaderCompiler.GuestDrawKind.None,
+                false, 0UL, 0L, false, tick, 0UL })!;
+        var video = owner.GetField("_pendingVideoPresentations", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        var guest = owner.GetField("_pendingGuestImagePresentations", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        var savedVideo = (Array)video.GetType().GetMethod("ToArray")!.Invoke(video, null)!;
+        var savedGuest = (Array)guest.GetType().GetMethod("ToArray")!.Invoke(guest, null)!;
+        void Clear(object queue) => queue.GetType().GetMethod("Clear")!.Invoke(queue, null);
+        void Enqueue(object queue, object frame) => queue.GetType().GetMethod("Enqueue")!.Invoke(queue, new[] { frame });
+        try
+        {
+            Clear(video);
+            Clear(guest);
+            Enqueue(video, Make(videoSequence, 0));
+            Enqueue(guest, Make(guestSequence, requiredTick));
+            var ready = (bool)presenterType.GetMethod("HasReadyPresentationLocked", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(presenter, null)!;
+            Assert.Equal(canTake, ready);
+            var args = new object?[] { null };
+            var took = (bool)presenterType.GetMethod("TryTakePresentation", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(presenter, args)!;
+            Assert.Equal(canTake, took);
+            if (took)
+            {
+                Assert.Equal(videoSequence, presentationType.GetProperty("Sequence")!.GetValue(args[0]));
+                Assert.Equal(1, guest.GetType().GetProperty("Count")!.GetValue(guest));
+                Assert.Equal(0, video.GetType().GetProperty("Count")!.GetValue(video));
+            }
+        }
+        finally
+        {
+            Clear(video);
+            Clear(guest);
+            foreach (var frame in savedVideo) Enqueue(video, frame!);
+            foreach (var frame in savedGuest) Enqueue(guest, frame!);
+        }
+    }
+
     private sealed class StartupState : IDisposable
     {
         private static readonly Type PresenterType = typeof(VulkanVideoPresenter);

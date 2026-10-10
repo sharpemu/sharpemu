@@ -98,6 +98,73 @@ public sealed class PthreadMutexExceptionTests
 public sealed class PthreadMutexSemanticsTests
 {
     [Fact]
+    public void TimedMutex_UncontendedZeroTimeoutAcquiresAndSelfWaitTimesOut()
+    {
+        const ulong address = 0x7_0000_0100;
+        var memory = new AllocatingCpuMemory(0x7_0000_0000, 0x4000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = address;
+        context[CpuRegister.Rsi] = 0;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexTimedlock(context));
+        try
+        {
+            context[CpuRegister.Rsi] = 10_000;
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT,
+                KernelPthreadCompatExports.PthreadMutexTimedlock(context));
+            Assert.True(elapsed.Elapsed >= TimeSpan.FromMilliseconds(10));
+        }
+        finally
+        {
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+        }
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexTrylock(context));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(context));
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexDestroy(context));
+    }
+
+    [Fact]
+    public void TimedMutex_AcquiresAfterAnotherOwnerReleases()
+    {
+        const ulong address = 0x7_0001_0100;
+        var memory = new AllocatingCpuMemory(0x7_0001_0000, 0x4000);
+        var owner = new CpuContext(memory, Generation.Gen5);
+        owner[CpuRegister.Rdi] = address;
+        Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexLock(owner));
+        using var started = new ManualResetEventSlim();
+        var result = -1;
+        Exception? failure = null;
+        var worker = new Thread(() =>
+        {
+            try
+            {
+                var waiter = new CpuContext(memory, Generation.Gen5);
+                waiter[CpuRegister.Rdi] = address;
+                waiter[CpuRegister.Rsi] = 5_000_000;
+                started.Set();
+                result = KernelPthreadCompatExports.PthreadMutexTimedlock(waiter);
+                if (result == 0)
+                    Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(waiter));
+            }
+            catch (Exception error) { failure = error; }
+        }) { IsBackground = true };
+        worker.Start();
+        try
+        {
+            Assert.True(started.Wait(TimeSpan.FromSeconds(5)));
+            Assert.False(worker.Join(TimeSpan.FromMilliseconds(20)), "The waiter acquired a held mutex.");
+        }
+        finally
+        {
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexUnlock(owner));
+            Assert.True(worker.Join(TimeSpan.FromSeconds(10)));
+            Assert.Equal(0, KernelPthreadCompatExports.PthreadMutexDestroy(owner));
+        }
+        Assert.Null(failure);
+        Assert.Equal(0, result);
+    }
+
+    [Fact]
     public void AdaptiveMutex_SelfLockIsIdempotent()
     {
         const ulong memoryBase = 0x1_0000_0000;

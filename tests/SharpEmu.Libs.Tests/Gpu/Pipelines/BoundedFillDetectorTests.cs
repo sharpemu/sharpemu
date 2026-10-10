@@ -170,6 +170,58 @@ public sealed class BoundedFillDetectorTests
     }
 
     [Fact]
+    public void APatternWithUnverifiedArithmeticIsRejected()
+    {
+        var program = Decode(PatternFromUserData);
+        program = program with
+        {
+            Instructions = program.Instructions.Select(instruction => instruction.Opcode == "VRcpIflagF32"
+                ? instruction with { Sources = [instruction.Sources[0] with { Kind = Gen5OperandKind.EncodedConstant, Value = 128 }] }
+                : instruction).ToArray(),
+        };
+        Assert.Null(BoundedFillDetector.Detect(program));
+    }
+
+    [Theory]
+    [InlineData(0)] // reciprocal scale
+    [InlineData(1)] // overwrite the output index
+    [InlineData(2)] // restore another EXEC mask
+    [InlineData(3)] // float negation
+    public void APatternWithChangedDataFlowIsRejected(int mutation)
+    {
+        var program = Decode(PatternFromUserData);
+        var instructions = program.Instructions.ToArray();
+        var at = Array.FindIndex(instructions, instruction => instruction.Opcode ==
+            (mutation == 0 ? "VMulF32" : mutation == 1 ? "VSubI32" : mutation == 2 ? "SMovB64" : "VLshlAddU32"));
+        var original = instructions[at];
+        instructions[at] = mutation switch
+        {
+            0 => original with { Sources = [original.Sources[0] with { Value = 0x3F800000 }, original.Sources[1]] },
+            1 => original with { Destinations = [Gen5Operand.Vector(2)] },
+            2 => original with { Sources = [Gen5Operand.Scalar(8)] },
+            _ => original with { Control = ((Gen5Vop3Control)original.Control!) with { NegateMask = 1 } },
+        };
+        Assert.Null(BoundedFillDetector.Detect(program with { Instructions = instructions }));
+    }
+
+    [Fact]
+    public void ThePatternIsRecognizedAfterVectorRegisterAllocationChanges()
+    {
+        var program = Decode(PatternFromUserData);
+        // Preserve the architectural input v0 and move only the global index v2.
+        Gen5Operand Rename(Gen5Operand operand) => operand.Kind == Gen5OperandKind.VectorRegister && operand.Value == 2
+            ? operand with { Value = 17 } : operand;
+        var renamed = program.Instructions.Select(instruction => instruction with
+        {
+            Sources = instruction.Sources.Select(Rename).ToArray(),
+            Destinations = instruction.Destinations.Select(Rename).ToArray(),
+            Control = instruction.Control is Gen5BufferMemoryControl control
+                ? control with { VectorAddress = 17 } : instruction.Control,
+        }).ToArray();
+        Assert.NotNull(BoundedFillDetector.Detect(program with { Instructions = renamed }));
+    }
+
+    [Fact]
     public void APatternFillWithAnotherBranchTargetIsRejected()
     {
         var words = PatternFromUserData.ToArray();

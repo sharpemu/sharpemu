@@ -8,7 +8,7 @@ namespace SharpEmu.Libs.Gpu.Images;
 
 public sealed partial class GuestImageCache
 {
-    private const int LookupSlots = 256;
+    private const int LookupSlots = 4096;
 
     private static readonly bool LookupMemoEnabled = Environment.GetEnvironmentVariable("SHARPEMU_IMAGE_LOOKUP_MEMO") != "0";
 

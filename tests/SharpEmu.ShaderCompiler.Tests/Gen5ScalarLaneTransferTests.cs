@@ -4,6 +4,7 @@
 using SharpEmu.HLE;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
+using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Tests.Resources;
 using System.Buffers.Binary;
@@ -13,6 +14,45 @@ namespace SharpEmu.ShaderCompiler.Tests;
 
 public sealed class Gen5ScalarLaneTransferTests
 {
+    [Fact]
+    public void FlbitOpcodeDecodesAndCompilesWithRdnaSemantics()
+    {
+        const ulong shaderAddress = 0x1000;
+        var memory = new TestCpuMemory(shaderAddress, 0x20);
+        Span<byte> words = stackalloc byte[8];
+        BinaryPrimitives.WriteUInt32LittleEndian(words, 0xBEEA156A); // s_flbit_i32_b32 s106, s106
+        BinaryPrimitives.WriteUInt32LittleEndian(words[4..], 0xBF810000); // s_endpgm
+        Assert.True(memory.TryWrite(shaderAddress, words));
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(
+            new CpuContext(memory, Generation.Gen5), shaderAddress,
+            out var program, out var decodeError), decodeError);
+        Assert.Equal("SFlbitI32B32", program.Instructions[0].Opcode);
+        var request = ResourceTestProgram.Request(program);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var compileError), compileError);
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
+    }
+
+    [Theory]
+    [InlineData(0u, 0xFFFFFFFFu)]
+    [InlineData(0x0000CCCCu, 16u)]
+    [InlineData(0xFFFF3333u, 0u)]
+    [InlineData(0x7FFFFFFFu, 1u)]
+    [InlineData(0x80000000u, 0u)]
+    [InlineData(0xFFFFFFFFu, 0u)]
+    public void FlbitCountsZerosFromTheMostSignificantBit(uint input, uint expected)
+    {
+        var program = ResourceTestProgram.Program(
+            ResourceTestProgram.MoveScalar(0, 106, input),
+            ResourceTestProgram.Sop1(4, "SFlbitI32B32", 107, Gen5Operand.Scalar(106)),
+            ResourceTestProgram.MoveScalar(8, 108, 0),
+            ResourceTestProgram.ScalarLoad(12, 107, 109),
+            ResourceTestProgram.EndProgram(20));
+        var plan = ResourceTestProgram.Extract(program, userDataCount: 0);
+        var evaluator = new RuntimeValueEvaluator(plan, ResourceTestProgram.Inputs([]));
+        Assert.True(evaluator.Evaluate(plan.Accesses[0]!.Handle!.Operands[0], out var actual));
+        Assert.Equal(expected, actual);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -320,6 +360,56 @@ public sealed class Gen5ScalarLaneTransferTests
         var text = System.Text.Encoding.ASCII.GetString(compiled.Spirv);
         Assert.Equal(expectSlot, text.Contains("v86_lane2", StringComparison.Ordinal));
         Assert.Equal(expectSlot, text.Contains("v86_lane3", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void EmulatedWave64KeepsPureScalarSpillsWithoutAnExchange(bool vectorWrite, bool expectSlot)
+    {
+        // Wave64 on a 32-lane host reads another lane through LDS and a workgroup barrier. A VGPR
+        // that only V_WRITELANE writes holds wave-uniform spilled scalars, so its constant-lane
+        // reads need no exchange; once an ordinary instruction writes it, the exchange returns.
+        const ulong shaderAddress = 0x1000;
+        var memory = new TestCpuMemory(shaderAddress, 0x100);
+        var words = new List<uint>
+        {
+            0xD7610056, 0x0001047E, // v_writelane_b32 v86, s126, 2
+            0xD7610056, 0x0001067F, // v_writelane_b32 v86, s127, 3
+        };
+        if (vectorWrite)
+        {
+            words.Add(0x7EAC0280); // v_mov_b32 v86, 0
+        }
+
+        words.AddRange(
+        [
+            0xD7600000, 0x00010556, // v_readlane_b32 s0, v86, 2
+            0xD7600001, 0x00010756, // v_readlane_b32 s1, v86, 3
+            0xBF810000,             // s_endpgm
+        ]);
+        var shader = new byte[words.Count * sizeof(uint)];
+        for (var index = 0; index < words.Count; index++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(shader.AsSpan(index * sizeof(uint)), words[index]);
+        }
+
+        Assert.True(memory.TryWrite(shaderAddress, shader));
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(ctx, shaderAddress, out var program, out var decodeError), decodeError);
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = 64,
+            ThreadCountX = 64,
+            WaveSize = 64,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var compiled, out var compileError), compileError);
+
+        var text = System.Text.Encoding.ASCII.GetString(compiled.Spirv);
+        Assert.Equal(expectSlot, text.Contains("v86_lane2", StringComparison.Ordinal));
+        Assert.Equal(expectSlot, text.Contains("v86_lane3", StringComparison.Ordinal));
+        Assert.Equal(!expectSlot, ReadSpirvOpcodes(compiled.Spirv).Contains((ushort)SpirvOp.ControlBarrier));
     }
 
     private static Gen5ShaderInstruction ScalarInstruction(

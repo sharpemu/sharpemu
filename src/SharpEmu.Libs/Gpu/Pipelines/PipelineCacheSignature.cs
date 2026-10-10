@@ -40,7 +40,10 @@ public static class PipelineCacheSignature
     }
 
     // The payload when the signature and the hash match; false for any other file.
-    public static bool TryUnwrap(string signature, ReadOnlySpan<byte> file, out byte[] payload)
+    public static bool TryUnwrap(string signature, ReadOnlySpan<byte> file, out byte[] payload) =>
+        TryUnwrap(signature, file, out payload, checkHash: true);
+
+    private static bool TryUnwrap(string signature, ReadOnlySpan<byte> file, out byte[] payload, bool checkHash)
     {
         payload = [];
         if (file.Length > int.MaxValue)
@@ -81,12 +84,74 @@ public static class PipelineCacheSignature
 
         var expectedHash = BinaryPrimitives.ReadUInt64LittleEndian(file[hashOffset..]);
         var data = file[(hashOffset + sizeof(ulong))..];
-        if (XxHash3.HashToUInt64(data) != expectedHash)
+        if (checkHash && XxHash3.HashToUInt64(data) != expectedHash)
         {
             return false;
         }
 
         payload = data.ToArray();
+        return true;
+    }
+
+    // Driver caches of large titles pass 2 GiB, beyond a .NET array, so these stream
+    // the same file format from and to native memory in chunks.
+    private const int StreamChunk = 64 << 20;
+
+    // Writes the signature line, the payload hash and the payload.
+    public static unsafe void WriteTo(Stream stream, string signature, byte* payload, ulong length)
+    {
+        stream.Write(Encoding.ASCII.GetBytes(signature));
+        var hash = new XxHash3();
+        for (ulong offset = 0; offset < length; offset += StreamChunk)
+            hash.Append(new ReadOnlySpan<byte>(payload + offset, (int)Math.Min(StreamChunk, length - offset)));
+        Span<byte> hashBytes = stackalloc byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64LittleEndian(hashBytes, hash.GetCurrentHashAsUInt64());
+        stream.Write(hashBytes);
+        for (ulong offset = 0; offset < length; offset += StreamChunk)
+            stream.Write(new ReadOnlySpan<byte>(payload + offset, (int)Math.Min(StreamChunk, length - offset)));
+    }
+
+    // Reads the payload into native memory (free it with NativeMemory.Free) when the
+    // signature (as TryUnwrap accepts it) and the hash match.
+    public static unsafe bool TryReadFrom(Stream stream, string signature, out byte* payload, out ulong length)
+    {
+        payload = null;
+        length = 0;
+        var line = new List<byte>(256);
+        int value;
+        while ((value = stream.ReadByte()) >= 0)
+        {
+            line.Add((byte)value);
+            if (value == '\n' || line.Count > 4096) break;
+        }
+
+        if (line.Count == 0 || line[^1] != (byte)'\n' ||
+            !TryUnwrap(signature, [.. line, .. new byte[sizeof(ulong)]], out _, checkHash: false))
+        {
+            return false;
+        }
+
+        Span<byte> hashBytes = stackalloc byte[sizeof(ulong)];
+        stream.ReadExactly(hashBytes);
+        var expectedHash = BinaryPrimitives.ReadUInt64LittleEndian(hashBytes);
+        var remaining = (ulong)(stream.Length - stream.Position);
+        var data = (byte*)System.Runtime.InteropServices.NativeMemory.Alloc((nuint)Math.Max(remaining, 1));
+        var hash = new XxHash3();
+        for (ulong offset = 0; offset < remaining; offset += StreamChunk)
+        {
+            var chunk = new Span<byte>(data + offset, (int)Math.Min(StreamChunk, remaining - offset));
+            stream.ReadExactly(chunk);
+            hash.Append(chunk);
+        }
+
+        if (hash.GetCurrentHashAsUInt64() != expectedHash)
+        {
+            System.Runtime.InteropServices.NativeMemory.Free(data);
+            return false;
+        }
+
+        payload = data;
+        length = remaining;
         return true;
     }
 }

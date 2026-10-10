@@ -99,13 +99,57 @@ public static class NpTrophy2Exports
     public static int NpTrophy2GetTrophyInfo(CpuContext ctx) =>
         SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
 
+    private const int TrophyDataSize = 0x20;
+
+    /// <summary>
+    /// Gen5 ABI: context, handle, first trophy id, count, SceNpTrophy2Details
+    /// array, SceNpTrophy2Data array, then the returned-count pointer on the stack.
+    /// </summary>
+    /// <remarks>
+    /// The emulated user has unlocked nothing, so every requested trophy is reported
+    /// locked: a data entry holds the trophy id at +0 and the unlocked flag at +4.
+    /// Details carry names and grades whose layout is not confirmed here, so a
+    /// request for them keeps the NOT_FOUND outcome.
+    /// </remarks>
     [SysAbiExport(
         Nid = "y3zHpdZO6ME",
         ExportName = "sceNpTrophy2GetTrophyInfoArray",
         Target = Generation.Gen5,
         LibraryName = "libSceNpTrophy2")]
-    public static int NpTrophy2GetTrophyInfoArray(CpuContext ctx) =>
-        SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+    public static int NpTrophy2GetTrophyInfoArray(CpuContext ctx)
+    {
+        var firstTrophyId = unchecked((int)ctx[CpuRegister.Rdx]);
+        var count = unchecked((int)ctx[CpuRegister.Rcx]);
+        var detailsAddress = ctx[CpuRegister.R8];
+        var dataAddress = ctx[CpuRegister.R9];
+        if (detailsAddress != 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+        }
+
+        if (dataAddress == 0 || count < 0 || firstTrophyId < 0 ||
+            !ctx.TryGetImportStackArgument(0, out var countAddress) || countAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        Span<byte> entry = stackalloc byte[TrophyDataSize];
+        for (var index = 0; index < count; index++)
+        {
+            entry.Clear();
+            BinaryPrimitives.WriteInt32LittleEndian(entry, firstTrophyId + index);
+            if (!ctx.Memory.TryWrite(dataAddress + (ulong)(index * TrophyDataSize), entry))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        Span<byte> countBytes = stackalloc byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32LittleEndian(countBytes, count);
+        return ctx.Memory.TryWrite(countAddress, countBytes)
+            ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK)
+            : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
 
 
     private static int WriteIdAndReturn(CpuContext ctx, ulong outAddress, ref int nextId)

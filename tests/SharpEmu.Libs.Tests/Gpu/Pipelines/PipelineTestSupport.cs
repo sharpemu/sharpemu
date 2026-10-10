@@ -45,6 +45,12 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     public bool GraphicsSubgroupOperationsEnabled => true;
 
     public bool SharedInt64AtomicsEnabled => false;
+    public bool PostDepthCoverageSupported { get; set; }
+
+    public bool ExactFloat16ConversionsEnabled { get; set; }
+    public bool NonUniformImageIndexingEnabled { get; set; }
+    public bool RuntimeBufferStridesEnabled { get; set; }
+    public bool UsesBindlessImages { get; set; }
 
     public ShaderPrewarmList? ShaderPrewarm { get; set; }
 

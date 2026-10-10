@@ -39,13 +39,6 @@ public sealed unsafe class DescriptorHeap : IDisposable
     public const uint SetsPerPool = 1024;
     public const uint SetBatch = 32;
 
-    private static readonly DescriptorPoolSize[] PoolSizes =
-    [
-        new(DescriptorType.StorageBuffer, 8192),
-        new(DescriptorType.SampledImage, 8192),
-        new(DescriptorType.StorageImage, 1024),
-        new(DescriptorType.Sampler, 1024),
-    ];
 
     private sealed class SetBatchState
     {
@@ -56,11 +49,15 @@ public sealed unsafe class DescriptorHeap : IDisposable
 
     private readonly GpuDeviceInfo _device;
     private readonly SubmissionScheduler _scheduler;
-    private static readonly DescriptorSetDemand PoolCapacity = new(8192, 8192, 1024, 1024);
+    // An ordinary pool. A set larger than this gets a pool sized for a few of its kind, so the
+    // common case does not pay for the largest shader's descriptors.
+    public static readonly DescriptorSetDemand PoolCapacity = new(8192, 8192, 1024, 1024);
+    private const uint LargeSetsPerPool = 4;
 
-    private readonly Queue<(DescriptorPool Pool, ulong Tick)> _pendingPools = new();
+    private readonly Queue<(DescriptorPool Pool, DescriptorSetDemand Capacity, ulong Tick)> _pendingPools = new();
     private readonly Dictionary<ulong, SetBatchState> _sets = new();
     private DescriptorPool _currentPool;
+    private DescriptorSetDemand _currentCapacity = PoolCapacity;
     private DescriptorSetDemand _remaining = PoolCapacity;
     private uint _remainingSets = SetsPerPool;
 
@@ -68,12 +65,30 @@ public sealed unsafe class DescriptorHeap : IDisposable
     {
         _device = device;
         _scheduler = scheduler;
-        _currentPool = CreatePool();
+        _currentPool = CreatePool(PoolCapacity);
     }
 
     public int PendingPoolCount => _pendingPools.Count;
 
     public DescriptorPool CurrentPool => _currentPool;
+
+    public DescriptorSetDemand CurrentCapacity => _currentCapacity;
+
+    // The capacity of a pool that holds at least one set of the demand.
+    public static DescriptorSetDemand CapacityFor(in DescriptorSetDemand demand)
+    {
+        if (demand.Fits(PoolCapacity))
+        {
+            return PoolCapacity;
+        }
+
+        var large = demand.Scale(LargeSetsPerPool);
+        return new DescriptorSetDemand(
+            Math.Max(PoolCapacity.StorageBuffers, large.StorageBuffers),
+            Math.Max(PoolCapacity.SampledImages, large.SampledImages),
+            Math.Max(PoolCapacity.StorageImages, large.StorageImages),
+            Math.Max(PoolCapacity.Samplers, large.Samplers));
+    }
 
     public DescriptorSet Commit(DescriptorSetLayout layout, in DescriptorSetDemand demand)
     {
@@ -98,10 +113,11 @@ public sealed unsafe class DescriptorHeap : IDisposable
             return batch.Sets[--batch.Size];
         }
 
-        _pendingPools.Enqueue((_currentPool, _scheduler.CurrentTick));
-        var (oldest, tick) = _pendingPools.Peek();
+        _pendingPools.Enqueue((_currentPool, _currentCapacity, _scheduler.CurrentTick));
+        var (oldest, oldestCapacity, tick) = _pendingPools.Peek();
+        var needed = CapacityFor(demand);
         _scheduler.Timeline.RefreshCompletedTick();
-        if (_scheduler.Timeline.IsTickComplete(tick))
+        if (_scheduler.Timeline.IsTickComplete(tick) && needed.Fits(oldestCapacity))
         {
             _pendingPools.Dequeue();
             _currentPool = oldest;
@@ -111,12 +127,13 @@ public sealed unsafe class DescriptorHeap : IDisposable
                 throw SubmissionScheduler.Fatal($"vkResetDescriptorPool failed: result={reset}.");
             }
 
-            _remaining = PoolCapacity;
+            _currentCapacity = oldestCapacity;
+            _remaining = oldestCapacity;
             _remainingSets = SetsPerPool;
         }
         else
         {
-            _currentPool = CreatePool();
+            _currentPool = CreatePool(needed);
         }
 
         _sets.Clear();
@@ -188,15 +205,22 @@ public sealed unsafe class DescriptorHeap : IDisposable
         }
     }
 
-    private DescriptorPool CreatePool()
+    private DescriptorPool CreatePool(in DescriptorSetDemand capacity)
     {
-        fixed (DescriptorPoolSize* poolSizes = PoolSizes)
+        DescriptorPoolSize[] sizes =
+        [
+            new(DescriptorType.StorageBuffer, capacity.StorageBuffers),
+            new(DescriptorType.SampledImage, capacity.SampledImages),
+            new(DescriptorType.StorageImage, capacity.StorageImages),
+            new(DescriptorType.Sampler, capacity.Samplers),
+        ];
+        fixed (DescriptorPoolSize* poolSizes = sizes)
         {
             var create = new DescriptorPoolCreateInfo
             {
                 SType = StructureType.DescriptorPoolCreateInfo,
                 MaxSets = SetsPerPool,
-                PoolSizeCount = (uint)PoolSizes.Length,
+                PoolSizeCount = (uint)sizes.Length,
                 PPoolSizes = poolSizes,
             };
             var result = _device.Vk.CreateDescriptorPool(_device.Device, &create, null, out var pool);
@@ -205,7 +229,8 @@ public sealed unsafe class DescriptorHeap : IDisposable
                 throw SubmissionScheduler.Fatal($"vkCreateDescriptorPool failed: result={result}.");
             }
 
-            _remaining = PoolCapacity;
+            _currentCapacity = capacity;
+            _remaining = capacity;
             _remainingSets = SetsPerPool;
             return pool;
         }
@@ -216,7 +241,7 @@ public sealed unsafe class DescriptorHeap : IDisposable
         _device.Vk.DestroyDescriptorPool(_device.Device, _currentPool, null);
         while (_pendingPools.Count != 0)
         {
-            var (pool, tick) = _pendingPools.Dequeue();
+            var (pool, _, tick) = _pendingPools.Dequeue();
             _scheduler.Timeline.Wait(tick);
             _device.Vk.DestroyDescriptorPool(_device.Device, pool, null);
         }

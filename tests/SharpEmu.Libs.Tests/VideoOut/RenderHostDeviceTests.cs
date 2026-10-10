@@ -395,10 +395,15 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     }
 
     [Theory]
-    [InlineData(true, true)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    public void PrepareBindings_InvalidatesImagesOnlyForFormattedWrites(bool formatted, bool writable)
+    [InlineData(true, true, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, false, false)]
+    [InlineData(true, true, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, true)]
+    [InlineData(false, false, true)]
+    public void PrepareBindings_InvalidatesImagesAccordingToWriteTypeAndOwnership(bool formatted, bool writable, bool gpuOwned)
     {
         if (!Ready()) return;
         using var presenter = new PresenterUnderTest(_vulkan!);
@@ -412,11 +417,13 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         var snapshot = new ResourceSnapshot { Buffers = [[(uint)address, (uint)(address >> 32), 0x10000, 0]] };
         presenter.Run(() =>
         {
+            if (gpuOwned) image.MarkGpuModified();
             Assert.False(image.IsBufferModified);
             using var preparation = presenter.RenderHost.BeginPreparation();
             var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot));
             presenter.RenderHost.BindResources(prepared);
-            Assert.Equal(formatted && writable, image.IsBufferModified);
+            Assert.Equal(writable && (formatted || !gpuOwned), image.IsBufferModified);
+            Assert.Equal(gpuOwned && !(formatted && writable), image.IsGpuModified);
         });
         harness.Finish();
         harness.Shutdown();
@@ -588,6 +595,54 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         {
             GuestGpuMemoryHook.Attach(null);
         }
+        harness.Shutdown();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PrepareBindings_PreservesPartialGpuImagesBeforeAnyStageCapturesBufferHandles(bool separateStages)
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        using var fatal = new FatalScope();
+        presenter.SetField("_minStorageBufferOffsetAlignment", 256UL);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var image = Color32(address, 8192);
+        var imageId = harness.Acquire(ref image);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, 0x8000, 0x11223344)));
+        Assert.True(harness.Image(imageId).IsGpuModified);
+        var read = new BufferResource { Read = true, MaxByteExtent = 4 };
+        var write = new BufferResource { Written = true, Formatted = true, MaxByteExtent = 4 };
+        var readAddress = address + 0x100;
+        var writeAddress = address + 0x4000;
+        uint[] Descriptor(ulong at) => [(uint)at, (uint)(at >> 32), 4, 0];
+
+        presenter.Run(() =>
+        {
+            using var preparation = presenter.RenderHost.BeginPreparation();
+            var firstProgram = FixedProgramProvider.EmptyProgram(ShaderStageKind.Compute, 3,
+                new ShaderResourceInfo { Buffers = separateStages ? [read] : [read, write] });
+            var first = presenter.RenderHost.PrepareBindings(new ShaderStageResources(firstProgram,
+                new ResourceSnapshot { Buffers = separateStages ? [Descriptor(readAddress)] : [Descriptor(readAddress), Descriptor(writeAddress)] }));
+            IPreparedBindings? second = null;
+            if (separateStages)
+            {
+                var secondProgram = FixedProgramProvider.EmptyProgram(ShaderStageKind.Compute, 4,
+                    new ShaderResourceInfo { Buffers = [write] });
+                second = presenter.RenderHost.PrepareBindings(new ShaderStageResources(secondProgram,
+                    new ResourceSnapshot { Buffers = [Descriptor(writeAddress)] }));
+            }
+
+            var readOwner = harness.Cache.GetBuffer(harness.Cache.FindBuffer(readAddress, 4));
+            var writeOwner = harness.Cache.GetBuffer(harness.Cache.FindBuffer(writeAddress, 4));
+            presenter.RenderHost.BindResources(first);
+            if (second is not null) presenter.RenderHost.BindResources(second);
+            Assert.Same(readOwner, harness.Cache.GetBuffer(harness.Cache.FindBuffer(readAddress, 4)));
+            Assert.Same(writeOwner, harness.Cache.GetBuffer(harness.Cache.FindBuffer(writeAddress, 4)));
+        });
         harness.Shutdown();
     }
 
@@ -966,6 +1021,8 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
                 : host.TryReadGuestWord(unmappedAddress, out word);
             Assert.False(success);
             Assert.Equal(0u, word);
+            Span<byte> arguments = stackalloc byte[3 * sizeof(uint)];
+            Assert.False(presenter.RenderHost.TryReadCleanGuestBytes(unmappedAddress, arguments));
         });
     }
 
@@ -984,6 +1041,7 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         var address = harness.MapBacked(0x10000, ReadWrite);
         harness.Write(address, BitConverter.GetBytes(0xCAFEF00Du));
         var host = (IShaderPipelineHost)presenter.Instance;
+        var renderHost = presenter.RenderHost;
         GuestGpuMemoryHook.Attach(harness.Gpu);
         try
         {
@@ -993,13 +1051,93 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
                 Assert.Equal(0xCAFEF00Du, word);
                 Assert.True(host.TryReadCleanGuestWord(address, out word));
                 Assert.Equal(0xCAFEF00Du, word);
+                Span<byte> arguments = stackalloc byte[3 * sizeof(uint)];
+                Assert.True(renderHost.TryReadCleanGuestBytes(address, arguments));
+                Assert.Equal(0xCAFEF00Du, BitConverter.ToUInt32(arguments));
 
+                // CPU-owned bytes on a page that also holds GPU-owned bytes are read through the
+                // backing alias, without bringing the neighbouring GPU bytes back.
+                _ = harness.Cache.ObtainBuffer(address, 0x1000, isWritten: false);
+                _ = harness.Cache.ObtainBuffer(address + 0x800, 4, isWritten: true);
+                Assert.True(harness.Cache.HasGpuDirtyPages(address, 4));
+                Assert.False(harness.Cache.HasGpuDirtyBytes(address, 4));
+                Span<byte> resident = stackalloc byte[4];
+                Assert.True(host.TryReadResidentGuestBytes(address, resident, clean: true));
+                Assert.Equal(0xCAFEF00Du, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(resident));
+                Assert.True(harness.Cache.HasGpuDirtyBytes(address + 0x800, 4));
+
+                // A clean word read brings GPU-owned bytes back first; byte reads still refuse them.
                 _ = harness.Cache.ObtainBuffer(address, 0x1000, isWritten: true);
-                Assert.False(host.TryReadCleanGuestWord(address, out _));
-                Assert.False(host.TryReadCleanGuestWord(address + 0x800, out _));
+                Assert.False(renderHost.TryReadCleanGuestBytes(address, arguments));
+                Assert.True(host.TryReadCleanGuestWord(address, out word));
+                Assert.Equal(0xCAFEF00Du, word);
                 Assert.True(host.TryReadCleanGuestWord(address + 0x2000, out _));
                 Assert.True(host.TryReadGuestWord(address, out word));
                 Assert.Equal(0xCAFEF00Du, word);
+            });
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+        }
+
+        harness.Finish();
+        harness.Shutdown();
+    }
+
+    // Resource reads check a page's GPU ownership once and trust it until a buffer or an image
+    // is written by the GPU; an image written afterwards makes clean reads refuse the page.
+    [Fact]
+    public void CleanResidentReads_VerifyAPageOnceUntilAnImageIsGpuWritten()
+    {
+        if (!Ready())
+        {
+            return;
+        }
+
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, BitConverter.GetBytes(0xCAFEF00Du));
+        var renderHost = presenter.RenderHost;
+        var verifications = presenter.Instance.GetType().GetProperty("CleanReadVerifications",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        long Verifications() => (long)verifications.GetValue(presenter.Instance)!;
+        var request = SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport.LinearRequest(address, 0x1000, Format.R8G8B8A8Unorm,
+            GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new Extent3D(32, 32, 1), 1, 4, 1);
+        GuestGpuMemoryHook.Attach(harness.Gpu);
+        try
+        {
+            presenter.Run(() =>
+            {
+                Span<byte> bytes = stackalloc byte[sizeof(uint)];
+                Assert.True(renderHost.TryReadCleanGuestBytes(address, bytes));
+                var first = Verifications();
+                for (var index = 0; index < 16; index++)
+                {
+                    Assert.True(renderHost.TryReadCleanGuestBytes(address + (ulong)index * 4, bytes));
+                }
+
+                var host = (IShaderPipelineHost)presenter.Instance;
+                for (var index = 0; index < 16; index++)
+                {
+                    Assert.True(host.TryReadCleanGuestWord(address + (ulong)index * 4, out var word));
+                    if (index == 0) Assert.Equal(0xCAFEF00Du, word);
+                }
+
+                Assert.Equal(first, Verifications());
+                Assert.True(renderHost.TryReadCleanGuestBytes(address, bytes));
+                Assert.Equal(0xCAFEF00Du, BitConverter.ToUInt32(bytes));
+            });
+            var image = harness.Acquire(ref request);
+            presenter.Run(() =>
+            {
+                harness.Image(image).MarkGpuModified();
+                var before = Verifications();
+                Span<byte> bytes = stackalloc byte[sizeof(uint)];
+                Assert.False(renderHost.TryReadCleanGuestBytes(address, bytes));
+                Assert.True(Verifications() > before);
             });
         }
         finally

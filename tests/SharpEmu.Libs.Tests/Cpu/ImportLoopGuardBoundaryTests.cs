@@ -13,6 +13,28 @@ namespace SharpEmu.Libs.Tests.Cpu;
 
 public sealed class ImportLoopGuardBoundaryTests
 {
+    [Fact]
+    public void UnresolvedWarningsSampleEachNidIndependentlyAcrossConcurrentCalls()
+    {
+        var backend = (DirectExecutionBackend)RuntimeHelpers.GetUninitializedObject(typeof(DirectExecutionBackend));
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        typeof(DirectExecutionBackend).GetField("_importResultLogSampleGate", flags)!.SetValue(backend, new object());
+        typeof(DirectExecutionBackend).GetField("_unresolvedImportLogSamples", flags)!.SetValue(
+            backend, new Dictionary<string, long>(StringComparer.Ordinal));
+        var method = typeof(DirectExecutionBackend).GetMethod("ShouldLogUnresolvedImport", flags)!;
+        var emitted = new System.Collections.Concurrent.ConcurrentBag<long>();
+        Parallel.For(0, 20001, _ =>
+        {
+            object?[] arguments = ["missing-export", 0L];
+            if (Assert.IsType<bool>(method.Invoke(backend, arguments)))
+                emitted.Add(Assert.IsType<long>(arguments[1]));
+        });
+        Assert.Equal(new long[] { 1, 2, 3, 4, 5, 6, 7, 8, 10000, 20000 }, emitted.Order());
+        object?[] otherArguments = ["another-export", 0L];
+        Assert.True(Assert.IsType<bool>(method.Invoke(backend, otherArguments)));
+        Assert.Equal(1L, Assert.IsType<long>(otherArguments[1]));
+    }
+
     [Theory]
     [InlineData(typeof(KernelRuntimeCompatExports), "gettimeofday", "n88vx3C5nW8")]
     [InlineData(typeof(KernelMemoryCompatExports), "clock_gettime", "lLMT9vJAck0")]

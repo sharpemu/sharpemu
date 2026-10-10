@@ -206,6 +206,21 @@ public sealed class RenderExecutorStateTests : IDisposable
     }
 
     [Fact]
+    public void ScaledScissorRoundsOutwardAndStaysInsideTheAttachment()
+    {
+        // A guest rectangle keeps its host coverage: the edges round outward, so no guest
+        // pixel the game asked for is clipped away by the mapping itself.
+        Assert.Equal(new ScissorRectangle(5, 2, 51, 29), RenderExecutor.ScaleScissor(new ScissorRectangle(11, 5, 101, 57), 0.5f, 64, 36));
+        Assert.Equal(new ScissorRectangle(22, 10, 202, 114), RenderExecutor.ScaleScissor(new ScissorRectangle(11, 5, 101, 57), 2f, 256, 144));
+
+        // Rounding outward must not push the rectangle past the attachment.
+        Assert.Equal(new ScissorRectangle(0, 0, 32, 18), RenderExecutor.ScaleScissor(new ScissorRectangle(0, 0, 65, 37), 0.5f, 32, 18));
+
+        // An empty scissor stays empty rather than growing a row.
+        Assert.Equal(new ScissorRectangle(5, 5, 5, 5), RenderExecutor.ScaleScissor(new ScissorRectangle(10, 10, 10, 10), 0.5f, 64, 36));
+    }
+
+    [Fact]
     public void Scissor_ClipRectangleRulesIntersectTheSelectedRectangles()
     {
         var viewport = new ScreenViewportRegisters { ScreenScissorRight = 100, ScreenScissorBottom = 100 };
@@ -323,6 +338,25 @@ public sealed class RenderExecutorStateTests : IDisposable
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Attachments_DisabledColorBufferIgnoresStaleTargetsAndPreservesDepthEffects(bool exportsDepth)
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.ColorControl = ColorControlRegisters.Decode(0);
+        banks.Context.ColorTargets[0] = RegisterWords.Color(ColorBase, 32, 32);
+        banks.Context.ShaderInterface.DepthShaderControl = new DepthShaderControlRegisters { DepthExportEnable = exportsDepth };
+
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal((0u, 64u, 64u), (rendering.ColorAttachmentCount, rendering.Width, rendering.Height));
+        Assert.Equal(Format.D32Sfloat, rendering.DepthFormat);
+        Assert.Equal(exportsDepth, Assert.Single(_pipelines.PipelineRequests).PixelActive);
+        Assert.True(Assert.Single(_host.DynamicStates).DepthWriteEnabled);
+    }
+
+    [Theory]
     [InlineData(0x0u, 0u, 64u)]
     [InlineData(0xFu, 1u, 32u)]
     public void Attachments_AColorTargetThePixelProgramNeverExportsDoesNotBoundTheDepthPass(uint exportMasks, uint expectedColors, uint expectedExtent)
@@ -383,6 +417,29 @@ public sealed class RenderExecutorStateTests : IDisposable
         Assert.Contains("imageSamples=2 targetSamples=1", fatal.Message);
     }
 
+    [Theory]
+    [InlineData(false, 1, false)]
+    [InlineData(true, 1, true)]
+    [InlineData(true, 2, false)]
+    public void Attachments_TwoSampleDepthWithSingleSampleColorRequiresExactHostSupport(bool supported, byte rasterLog2, bool accepted)
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.DepthTarget = RegisterWords.Depth(DepthBase, 64, 64, samplesLog2: 1);
+        banks.Context.AntialiasingConfig.SampleCountLog2 = rasterLog2;
+        _host.NativeTwoSampleMixedSupported = supported;
+        if (!accepted)
+        {
+            var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, banks, Indexed(3)));
+            Assert.Contains("color=1 depth=2", fatal.Message);
+            Assert.Empty(_host.BegunRenderings);
+            return;
+        }
+        _executor.DrawIndexed(1, banks, Indexed(3));
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal(2u, rendering.Samples);
+        Assert.Equal(1u, rendering.ColorAttachmentCount);
+        Assert.True(rendering.DepthStencilAttachment.HasDepth);
+    }
     [Fact]
     public void Attachments_SingleSampleColorWithMultisampledDepthIsFatal()
     {
@@ -588,10 +645,10 @@ public sealed class RenderExecutorStateTests : IDisposable
         AssertOrder(
             "preparation_begin",
             "prepare_bindings Vertex",
-            "bind_resources 2",
-            "upload_transient 6 align=16",
             "wrap_refused acquire_color",
             "acquire_color 0",
+            "bind_resources 2",
+            "upload_transient 6 align=16",
             "commit Graphics",
             "draw_indexed 3 1 0 0 0",
             "preparation_end",

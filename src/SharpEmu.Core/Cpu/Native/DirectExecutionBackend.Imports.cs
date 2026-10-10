@@ -36,6 +36,7 @@ public sealed partial class DirectExecutionBackend
 
 	private readonly object _importResultLogSampleGate = new();
 	private readonly Dictionary<string, int> _importResultLogSamples = new(StringComparer.Ordinal);
+	private readonly Dictionary<string, long> _unresolvedImportLogSamples = new(StringComparer.Ordinal);
 	private int _il2CppExceptionDiagnosticCount;
 
 	private static ulong ImportDispatchGatewayManaged(nint backendHandle, int importIndex, nint argPackPtr)
@@ -162,6 +163,14 @@ public sealed partial class DirectExecutionBackend
 		{
 			LastError = $"Import dispatch index out of range: {importIndex}";
 			return 18446744071562199042uL;
+		}
+		// Stop before the leaf fast paths too: services may already be tearing down.
+		// ActiveForcedGuestExit includes the global request on this backend, so testing
+		// its negation here would prevent every shutdown redirect.
+		if (_forcedGuestExit && TryEndGuestSliceForShutdown(argPackPtr))
+		{
+			cpuContext[CpuRegister.Rax] = 1uL;
+			return 1uL;
 		}
 		ImportStubEntry importStubEntry = _importEntries[importIndex];
 		using var registerPacketImport = SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.MeasureImport(importStubEntry.Nid);
@@ -344,14 +353,6 @@ public sealed partial class DirectExecutionBackend
 			}
 			Console.Error.WriteLine(
 				$"[LOADER][TRACE] bootstrap_call#{num}: op=0x{value:X16} sym_ptr=0x{value2:X16} sym='{symbolText}' out_ptr=0x{num3:X16} ret=0x{num7:X16}");
-		}
-		// Once the host is shutting down, a guest thread still running reaches no more HLE: the
-		// services behind the imports are being torn down, and a title that sees them fail (a null
-		// command buffer from the GPU library, say) crashes the process on its way out.
-		if (_forcedGuestExit && !ActiveForcedGuestExit && TryEndGuestSliceForShutdown(argPackPtr))
-		{
-			cpuContext[CpuRegister.Rax] = 1uL;
-			return 1uL;
 		}
 		if (!isGuestWorker &&
 			!ActiveForcedGuestExit &&
@@ -594,9 +595,12 @@ public sealed partial class DirectExecutionBackend
 				{
 					DumpIl2CppExceptionDiagnostic(cpuContext, value, num7);
 				}
-				Console.Error.WriteLine(
-					$"[LOADER][WARN] Import#{num} unresolved: nid={importStubEntry.Nid} ret=0x{num7:X16} " +
-					$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
+				if (ShouldLogUnresolvedImport(importStubEntry.Nid, out var unresolvedCount))
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][WARN] Import#{num} unresolved occurrence={unresolvedCount}: nid={importStubEntry.Nid} ret=0x{num7:X16} " +
+						$"rdi=0x{value:X16} rsi=0x{value2:X16} rdx=0x{num3:X16} rcx=0x{num4:X16} r8=0x{num5:X16} r9=0x{num6:X16}");
+				}
 				if (importStubEntry.Nid == "L-Q3LEjIbgA")
 				{
 					string value18 = string.Join(" ", importStubEntry.Nid.Select(delegate (char c)
@@ -1665,12 +1669,19 @@ public sealed partial class DirectExecutionBackend
 		var expectedUserServiceNoEvent =
 			string.Equals(nid, "yH17Q6NWtVg", StringComparison.Ordinal) &&
 			resultValue == unchecked((int)0x80960007);
+		var expectedSystemServiceNoEvent =
+			string.Equals(nid, "656LMQSrg6U", StringComparison.Ordinal) &&
+			resultValue == unchecked((int)0x80A10004);
 		var expectedPrivacyInvalidParameter =
 			string.Equals(nid, "D-CzAxQL0XI", StringComparison.Ordinal) &&
 			resultValue == unchecked((int)0x80960009);
 		var expectedPlayGoChunkEnumerationEnd =
 			string.Equals(nid, "uWIYLFkkwqk", StringComparison.Ordinal) &&
 			resultValue == unchecked((int)0x80B2000C);
+		// NO_ENTITLEMENT: the title asks about add-on content the user does not own.
+		var expectedAddcontNotOwned =
+			string.Equals(nid, "xddD23+8TfQ", StringComparison.Ordinal) &&
+			resultValue == unchecked((int)0x817D0007);
 		if (!expectedFileProbeMiss &&
 			!expectedTimedWaitTimeout &&
 			!expectedEqueueTimeout &&
@@ -1682,8 +1693,10 @@ public sealed partial class DirectExecutionBackend
 			!expectedPollSemaBusy &&
 			!expectedNetAcceptWouldBlock &&
 			!expectedUserServiceNoEvent &&
+			!expectedSystemServiceNoEvent &&
 			!expectedPrivacyInvalidParameter &&
-			!expectedPlayGoChunkEnumerationEnd)
+			!expectedPlayGoChunkEnumerationEnd &&
+			!expectedAddcontNotOwned)
 		{
 			return true;
 		}
@@ -1702,6 +1715,19 @@ public sealed partial class DirectExecutionBackend
 			_importResultLogSamples[key] = count;
 		}
 
+		return count <= 8 || count % 10000 == 0;
+	}
+
+	private bool ShouldLogUnresolvedImport(string nid, out long count)
+	{
+		// Keep the first call sites and periodic totals without formatting a warning
+		// on every invocation of an unsupported export. Dispatch still returns its error.
+		lock (_importResultLogSampleGate)
+		{
+			_unresolvedImportLogSamples.TryGetValue(nid, out count);
+			count++;
+			_unresolvedImportLogSamples[nid] = count;
+		}
 		return count <= 8 || count % 10000 == 0;
 	}
 
@@ -1869,7 +1895,7 @@ public sealed partial class DirectExecutionBackend
 		}
 	}
 
-	// Returns the import straight to the host entry stub, which ends this guest slice.
+	// Return directly to the host entry stub instead of executing another HLE call.
 	private unsafe bool TryEndGuestSliceForShutdown(nint argPackPtr)
 	{
 		ulong sentinel = ActiveEntryReturnSentinelRip;

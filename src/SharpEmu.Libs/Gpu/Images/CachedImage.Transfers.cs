@@ -14,6 +14,14 @@ public sealed unsafe partial class CachedImage
 {
     private const AccessFlags WriteAccess = AccessFlags.TransferWriteBit | AccessFlags.ShaderWriteBit | AccessFlags.MemoryWriteBit;
     private const AccessFlags TransferAccess = AccessFlags.TransferReadBit | AccessFlags.TransferWriteBit;
+    private const AccessFlags AnyWriteAccess = WriteAccess | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit;
+
+    // Reads after reads in one layout need no barrier: the state keeps every reader, so the next
+    // writer still waits for all of them. (A sampled depth attachment followed by a draw that only
+    // tests depth would otherwise end the rendering scope.)
+    private static bool IsReadAfterRead(ImageAccessState state, ImageLayout layout, AccessFlags access) =>
+        state.Layout == layout && state.Layout != ImageLayout.Undefined && access != 0 && state.Access != 0 &&
+        (state.Access & AnyWriteAccess) == 0 && (access & AnyWriteAccess) == 0;
     private const AccessFlags MemoryAccess = AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit;
     private const ImageLayout ReadyLayout = ImageLayout.General;
     private const AccessFlags ReadyAccess = AccessFlags.ShaderReadBit | AccessFlags.TransferReadBit;
@@ -32,9 +40,12 @@ public sealed unsafe partial class CachedImage
     };
 
     // Barriers for the requested state; a repeated write always gets a barrier.
+    private static readonly List<ImageMemoryBarrier2> NoBarriers = new(0);
+
     public (List<ImageMemoryBarrier2> Barriers, PipelineStageFlags SourceStages) GetBarriers(ImageLayout layout, AccessFlags access, PipelineStageFlags stage, SubresourceRange? range)
     {
-        var barriers = new List<ImageMemoryBarrier2>();
+        // Most requests need no barrier; the list exists only once one does. Callers never add to it.
+        List<ImageMemoryBarrier2>? barriers = null;
         PipelineStageFlags sourceStages = 0;
         if ((access & (WriteAccess | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit)) != 0)
         {
@@ -81,9 +92,13 @@ public sealed unsafe partial class CachedImage
 
                     var state = states[index];
                     var repeatedWrite = (state.Access & WriteAccess) != 0;
-                    if (state.Layout != layout || state.Access != access || repeatedWrite)
+                    if (IsReadAfterRead(state, layout, access))
                     {
-                        barriers.Add(MakeBarrier(state, layout, access, level, 1, layer, 1));
+                        states[index] = new ImageAccessState(state.Stage | stage, state.Access | access, layout);
+                    }
+                    else if (state.Layout != layout || state.Access != access || repeatedWrite)
+                    {
+                        (barriers ??= new List<ImageMemoryBarrier2>(1)).Add(MakeBarrier(state, layout, access, level, 1, layer, 1));
                         sourceStages |= state.Stage;
                         states[index] = new ImageAccessState(stage, access, layout);
                     }
@@ -101,15 +116,54 @@ public sealed unsafe partial class CachedImage
             var repeatedWrite = (state.Access & WriteAccess) != 0;
             if (state.Layout == layout && state.Access == access && !repeatedWrite)
             {
-                return (barriers, sourceStages);
+                return (barriers ?? NoBarriers, sourceStages);
             }
 
-            barriers.Add(MakeBarrier(state, layout, access, 0, Vk.RemainingMipLevels, 0, Vk.RemainingArrayLayers));
+            if (IsReadAfterRead(state, layout, access))
+            {
+                Backing.State = new ImageAccessState(state.Stage | stage, state.Access | access, layout);
+                return (barriers ?? NoBarriers, sourceStages);
+            }
+
+            (barriers ??= new List<ImageMemoryBarrier2>(1)).Add(MakeBarrier(state, layout, access, 0, Vk.RemainingMipLevels, 0, Vk.RemainingArrayLayers));
             sourceStages |= state.Stage;
         }
 
         Backing.State = new ImageAccessState(stage, access, layout);
-        return (barriers, sourceStages);
+        return (barriers ?? NoBarriers, sourceStages);
+    }
+
+    // The layout every subresource in the range is in, or null when they differ.
+    public ImageLayout? UniformLayout(SubresourceRange range)
+    {
+        var states = Backing.SubresourceStates;
+        if (states == null)
+        {
+            return Backing.State.Layout;
+        }
+
+        var layers = Description.Resources.Layers;
+        if (Description.IsVolume)
+        {
+            range = range with { BaseLayer = 0, LayerCount = 1 };
+        }
+
+        ImageLayout? layout = null;
+        for (var level = range.BaseLevel; level < range.BaseLevel + range.LevelCount; level++)
+        {
+            for (var layer = range.BaseLayer; layer < range.BaseLayer + range.LayerCount; layer++)
+            {
+                var index = (int)(level * layers + layer);
+                if (index >= states.Count || (layout is { } known && known != states[index].Layout))
+                {
+                    return null;
+                }
+
+                layout = states[index].Layout;
+            }
+        }
+
+        return layout;
     }
 
     public void Transition(ImageLayout layout, AccessFlags access, SubresourceRange? range, CommandBuffer command)
@@ -134,7 +188,7 @@ public sealed unsafe partial class CachedImage
         // Attachment accesses inside one rendering scope are already ordered by rasterization
         // order, so a barrier that only repeats an attachment write in the same layout matters
         // only to what runs after the scope; it waits for the scope to end instead of ending it.
-        if (OnlyRepeatsAttachmentAccess(barriers) &&
+        if (Backing.SampleLocations is null && OnlyRepeatsAttachmentAccess(barriers) &&
             _scheduler.TryDeferUntilRenderingEnds(sourceStages == 0 ? PipelineStageFlags.TopOfPipeBit : sourceStages, stage, barriers))
         {
             return;
@@ -166,9 +220,24 @@ public sealed unsafe partial class CachedImage
 
     private void RecordBarriers(CommandBuffer command, PipelineStageFlags sourceStages, PipelineStageFlags destinationStages, BufferMemoryBarrier2* bufferBarrier, List<ImageMemoryBarrier2> imageBarriers)
     {
-        var images = imageBarriers.ToArray();
+        // Sample locations chain a stack structure into each barrier, so those barriers are a
+        // copy; the caller's list never keeps that pointer.
+        Span<ImageMemoryBarrier2> images = Backing.SampleLocations is null
+            ? System.Runtime.InteropServices.CollectionsMarshal.AsSpan(imageBarriers)
+            : imageBarriers.ToArray();
+        fixed (SampleLocationEXT* locations = Backing.SampleLocations)
         fixed (ImageMemoryBarrier2* imagePointer = images)
         {
+            var locationInfo = new SampleLocationsInfoEXT
+            {
+                SType = StructureType.SampleLocationsInfoExt,
+                SampleLocationsPerPixel = SampleCountFlags.Count2Bit,
+                SampleLocationGridSize = new Extent2D(2, 2),
+                SampleLocationsCount = 8,
+                PSampleLocations = locations,
+            };
+            if (locations != null)
+                for (var index = 0; index < images.Length; index++) imagePointer[index].PNext = &locationInfo;
             VulkanSynchronization.PipelineBarrier(_device.Vk,
                 command, sourceStages == 0 ? PipelineStageFlags.TopOfPipeBit : sourceStages, destinationStages, DependencyFlags.ByRegionBit,
                 0, null, bufferBarrier == null ? 0u : 1u, bufferBarrier, (uint)images.Length, imagePointer);
@@ -242,6 +311,16 @@ public sealed unsafe partial class CachedImage
 
     public void UploadFromBuffer(ReadOnlySpan<BufferImageCopy> copies, VkBuffer buffer, ulong offset, ulong size)
     {
+        // Guest bytes describe guest geometry, so a scaled image receives them through its
+        // guest-resolution twin and takes the result as a blit.
+        if (IsScaled)
+        {
+            var twin = GuestSizedTwin();
+            twin.UploadFromBuffer(copies, buffer, offset, size);
+            BlitFrom(twin);
+            return;
+        }
+
         var command = BeginTransfer(copies, buffer, size);
         var sanitized = SanitizeUploadCopies(copies);
         var uploadCopies = sanitized is null ? copies : sanitized.AsSpan();
@@ -260,6 +339,12 @@ public sealed unsafe partial class CachedImage
 
     public void DownloadToBuffer(ReadOnlySpan<BufferImageCopy> copies, VkBuffer buffer, ulong offset, ulong size)
     {
+        if (IsScaled)
+        {
+            AtGuestResolution().DownloadToBuffer(copies, buffer, offset, size);
+            return;
+        }
+
         var command = BeginTransfer(copies, buffer, size);
         var bufferBarrier = BufferBarrier(buffer, offset, size, MemoryAccess, AccessFlags.TransferWriteBit);
         var (imageBarriers, sourceStages) = GetBarriers(ImageLayout.TransferSrcOptimal, AccessFlags.TransferReadBit, PipelineStageFlags.TransferBit, null);
@@ -298,6 +383,11 @@ public sealed unsafe partial class CachedImage
     // Copies every shared mip level of the source; stencil is never copied here.
     public void CopyFrom(CachedImage source)
     {
+        if (TryCopyAcrossScales(source, static (destination, origin) => destination.CopyFrom(origin)))
+        {
+            return;
+        }
+
         if (source.Backing.Samples != Backing.Samples)
         {
             throw SubmissionScheduler.Fatal($"An image copy needs equal sample counts: source={source.Backing.Samples} destination={Backing.Samples}.");
@@ -367,6 +457,13 @@ public sealed unsafe partial class CachedImage
     // Resolves or copies one mip of the source into one mip of this single-sample image.
     public void ResolveFrom(CachedImage source, in SubresourceRange sourceRange, in SubresourceRange destinationRange)
     {
+        var fromRange = sourceRange;
+        var toRange = destinationRange;
+        if (TryCopyAcrossScales(source, (destination, origin) => destination.ResolveFrom(origin, fromRange, toRange)))
+        {
+            return;
+        }
+
         if (Backing.Samples != 1 || source.Backing.ImageType != ImageType.Type2D || Backing.ImageType != ImageType.Type2D ||
             sourceRange.LevelCount != 1 || destinationRange.LevelCount != 1 ||
             sourceRange.BaseLevel >= source.Backing.MipLevels || destinationRange.BaseLevel >= Backing.MipLevels ||
@@ -383,16 +480,18 @@ public sealed unsafe partial class CachedImage
         var destinationHeight = Math.Max(Backing.Extent.Height >> (int)destinationRange.BaseLevel, 1);
         var copy = source.Backing.Samples == 1;
         var formatsAgree = copy ? ViewFormatRules.AreCompatible(source.Backing.Format, Backing.Format) : source.Backing.Format == Backing.Format;
-        if (layers == 0 || Description.Extent.Width > sourceWidth || Description.Extent.Height > sourceHeight ||
-            Description.Extent.Width > destinationWidth || Description.Extent.Height > destinationHeight || !formatsAgree)
+        // The resolve moves host texels, so the guest extent crosses into this image's resolution.
+        var resolveExtent = RenderScalePolicy.ScaleExtent(Description.Extent, RenderScale);
+        if (layers == 0 || resolveExtent.Width > sourceWidth || resolveExtent.Height > sourceHeight ||
+            resolveExtent.Width > destinationWidth || resolveExtent.Height > destinationHeight || !formatsAgree)
         {
             throw SubmissionScheduler.Fatal(
-                $"The resolve extent or formats do not agree: extent={Description.Extent.Width}x{Description.Extent.Height} source={sourceWidth}x{sourceHeight} destination={destinationWidth}x{destinationHeight} layers={layers} sourceFormat={(int)source.Backing.Format} destinationFormat={(int)Backing.Format}.");
+                $"The resolve extent or formats do not agree: extent={resolveExtent.Width}x{resolveExtent.Height} source={sourceWidth}x{sourceHeight} destination={destinationWidth}x{destinationHeight} layers={layers} sourceFormat={(int)source.Backing.Format} destinationFormat={(int)Backing.Format}.");
         }
 
         var resolvedSource = sourceRange with { LayerCount = layers };
         var resolvedDestination = destinationRange with { LayerCount = layers };
-        var extent = new Extent3D(Description.Extent.Width, Description.Extent.Height, 1);
+        var extent = new Extent3D(resolveExtent.Width, resolveExtent.Height, 1);
         _scheduler.EndRendering();
         var command = new CommandBuffer(_scheduler.Current.Handle);
         source.Transition(ImageLayout.TransferSrcOptimal, AccessFlags.TransferReadBit, resolvedSource, command);
@@ -413,6 +512,13 @@ public sealed unsafe partial class CachedImage
 
     public void CopyDepthStencilFrom(CachedImage source, in SubresourceRange range, in Extent3D extent, ImageAspectFlags aspects)
     {
+        var copyRange = range;
+        var copyExtent = extent;
+        if (TryCopyAcrossScales(source, (destination, origin) => destination.CopyDepthStencilFrom(origin, copyRange, copyExtent, aspects)))
+        {
+            return;
+        }
+
         var requested = aspects & (ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit);
         var available = ViewFormatRules.FullAspects(Backing.Format);
         if (requested == 0 || (requested & ~available) != 0 || source.Backing.Format != Backing.Format ||
@@ -468,22 +574,27 @@ public sealed unsafe partial class CachedImage
     }
 
     // A storage image holds the stencil bytes while the shader runs; the attachment stays the owner.
-    public CachedImage CreateStencilStorageImage()
+    // `width` x `height` is the storage view the shader binds, which can cover only the top-left
+    // part of the attachment (a dynamic-resolution pass): the shader then sees that size.
+    public CachedImage CreateStencilStorageImage(uint width, uint height)
     {
         if ((ViewFormatRules.FullAspects(Backing.Format) & ImageAspectFlags.StencilBit) == 0 ||
-            Backing.ImageType != ImageType.Type2D || Backing.Samples != 1 || Backing.MipLevels != 1)
+            Backing.ImageType != ImageType.Type2D || Backing.Samples != 1 || Backing.MipLevels != 1 ||
+            width == 0 || height == 0 || width > Backing.Extent.Width || height > Backing.Extent.Height)
         {
-            throw SubmissionScheduler.Fatal("Stencil storage needs a single-sample, single-level 2D stencil image.");
+            throw SubmissionScheduler.Fatal(
+                $"Stencil storage needs a single-sample, single-level 2D stencil image covering the view: " +
+                $"view={width}x{height} attachment={Backing.Extent.Width}x{Backing.Extent.Height} mips={Backing.MipLevels} samples={Backing.Samples}.");
         }
 
         var description = ImageDescription.Create();
         description.PixelFormat = Format.R8Uint;
         description.GuestFormat = GuestPixelFormat.Bits8UInt;
-        description.Extent = Backing.Extent;
+        description.Extent = new Extent3D(width, height, 1);
         description.Resources = new SubresourceCount(1, Backing.Layers);
-        description.Pitch = Backing.Extent.Width;
+        description.Pitch = width;
         description.BytesPerBlock = 1;
-        return new CachedImage(_device, _scheduler, _guestBacking, description);
+        return new CachedImage(_device, _scheduler, _guestBacking, description, memoryPool: _memoryPool);
     }
 
     public void CopyStencilStorage(CachedImage storage, GpuBuffer buffer, bool writeBack)
@@ -492,11 +603,12 @@ public sealed unsafe partial class CachedImage
             Backing.ImageType != ImageType.Type2D || Backing.Samples != 1 || Backing.MipLevels != 1 ||
             storage.Backing.Format != Format.R8Uint || storage.Backing.ImageType != ImageType.Type2D ||
             storage.Backing.Samples != 1 || storage.Backing.MipLevels != 1 || storage.Backing.Layers != Backing.Layers ||
-            storage.Backing.Extent.Width != Backing.Extent.Width || storage.Backing.Extent.Height != Backing.Extent.Height)
+            storage.Backing.Extent.Width > Backing.Extent.Width || storage.Backing.Extent.Height > Backing.Extent.Height)
         {
             throw SubmissionScheduler.Fatal("The stencil storage image does not match its attachment.");
         }
 
+        // Only the storage's region moves: the rest of the plane keeps its stencil values.
         if (writeBack)
             CopyThroughBuffer(storage, buffer, ImageAspectFlags.ColorBit, ImageAspectFlags.StencilBit);
         else
@@ -510,6 +622,11 @@ public sealed unsafe partial class CachedImage
 
     private void CopyThroughBuffer(CachedImage source, GpuBuffer buffer, ImageAspectFlags sourceAspect, ImageAspectFlags destinationAspect)
     {
+        if (TryCopyAcrossScales(source, (destination, origin) => destination.CopyThroughBuffer(origin, buffer, sourceAspect, destinationAspect)))
+        {
+            return;
+        }
+
         if (buffer.Handle.Handle == 0 || source.Backing.Samples != 1 || Backing.Samples != 1)
         {
             throw SubmissionScheduler.Fatal($"A copy through a buffer needs single-sample images and a buffer: sourceSamples={source.Backing.Samples} destinationSamples={Backing.Samples}.");
@@ -531,10 +648,11 @@ public sealed unsafe partial class CachedImage
         var command = new CommandBuffer(_scheduler.Current.Handle);
         source.Transition(ImageLayout.TransferSrcOptimal, AccessFlags.TransferReadBit, null, command);
         Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+        // The copy covers the region both images have, from their top-left corner.
         for (uint level = 0; level < levels; level++)
         {
-            var width = Math.Max(source.Backing.Extent.Width >> (int)level, 1);
-            var height = Math.Max(source.Backing.Extent.Height >> (int)level, 1);
+            var width = Math.Max(Math.Min(source.Backing.Extent.Width, Backing.Extent.Width) >> (int)level, 1);
+            var height = Math.Max(Math.Min(source.Backing.Extent.Height, Backing.Extent.Height) >> (int)level, 1);
             var sourceDepth = source.Backing.ImageType == ImageType.Type3D ? Math.Max(source.Backing.Extent.Depth >> (int)level, 1) : source.Backing.Layers;
             var destinationDepth = Backing.ImageType == ImageType.Type3D ? Math.Max(Backing.Extent.Depth >> (int)level, 1) : Backing.Layers;
             var slices = Math.Min(sourceDepth, destinationDepth);
@@ -579,6 +697,11 @@ public sealed unsafe partial class CachedImage
     // Copies a whole standalone image into one mip and layer of this image.
     public void CopyMipFrom(CachedImage source, uint mip, uint layer)
     {
+        if (TryCopyAcrossScales(source, (destination, origin) => destination.CopyMipFrom(origin, mip, layer)))
+        {
+            return;
+        }
+
         if (source.Backing.Samples != Backing.Samples || mip >= Backing.MipLevels || layer >= Backing.Layers)
         {
             throw SubmissionScheduler.Fatal($"The mip copy target is invalid: mip={mip} layer={layer} levels={Backing.MipLevels} layers={Backing.Layers} sourceSamples={source.Backing.Samples} destinationSamples={Backing.Samples}.");
@@ -627,6 +750,11 @@ public sealed unsafe partial class CachedImage
     // Copies a rectangle of the source's first mip into one mip of this image, at its origin.
     public void CopyRegionFrom(CachedImage source, uint sourceX, uint sourceY, uint mip, uint width, uint height)
     {
+        if (TryCopyAcrossScales(source, (destination, origin) => destination.CopyRegionFrom(origin, sourceX, sourceY, mip, width, height)))
+        {
+            return;
+        }
+
         if (mip >= Backing.MipLevels || sourceX + width > source.Backing.Extent.Width || sourceY + height > source.Backing.Extent.Height)
         {
             throw SubmissionScheduler.Fatal(

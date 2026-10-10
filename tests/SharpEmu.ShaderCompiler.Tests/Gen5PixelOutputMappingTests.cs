@@ -52,6 +52,26 @@ public sealed class Gen5PixelOutputMappingTests
             instruction => instruction.Opcode == SpirvOp.VectorShuffle);
     }
 
+    [Theory]
+    [InlineData(Gen5PixelExportFormat.Unorm16, "/ 65535.0f")]
+    [InlineData(Gen5PixelExportFormat.Snorm16, "/ 32767.0f")]
+    [InlineData(Gen5PixelExportFormat.Uint16, "& 0xffffu")]
+    [InlineData(Gen5PixelExportFormat.Sint16, "as_type<short>")]
+    public void MetalCompressedExportUsesTheDeclaredRepresentation(Gen5PixelExportFormat format, string expected)
+    {
+        var program = ResourceTestProgram.Program(new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Exp,
+            "Exp", [], [Gen5Operand.Vector(0), Gen5Operand.Vector(1), Gen5Operand.Vector(0), Gen5Operand.Vector(0)],
+            [], new Gen5ExportControl(0, 15, true, true, true)), ResourceTestProgram.EndProgram(8));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelOutputs = [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float) { ExportFormat = format }],
+        };
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.Contains(expected, shader.Source);
+        Assert.DoesNotContain("as_type<half2>", shader.Source);
+    }
+
     [Fact]
     public void BgraOutputShufflesGuestComponentsToPhysicalOrder()
     {

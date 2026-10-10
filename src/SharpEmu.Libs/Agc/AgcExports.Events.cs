@@ -64,19 +64,29 @@ public static partial class AgcExports
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var eventType = (uint)(ctx[CpuRegister.Rsi] & 0xFF);
         var eventAddress = ctx[CpuRegister.Rdx];
-        if (commandBufferAddress == 0 || eventType > 0x3F || eventAddress != 0)
+        if (commandBufferAddress == 0 || eventType > 0x3F || (eventAddress != 0 && (eventType & ~1u) != 0x38))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(2, ItEventWrite, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, eventType))
+        // Counter selection and counter dumps carry a payload in the address fields.
+        var hasAddress = (eventType & ~1u) == 0x38;
+        var packetDwords = hasAddress ? 4u : 2u;
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItEventWrite, 0)) ||
+            !TryWriteUInt32(ctx, commandAddress + 4, hasAddress ? eventType | 0x100u : eventType))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        TraceAgc($"agc.dcb_event_write buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} type={eventType}");
+        if (hasAddress &&
+            (!TryWriteUInt32(ctx, commandAddress + 8, (uint)eventAddress & ~7u) ||
+             !TryWriteUInt32(ctx, commandAddress + 12, (uint)(eventAddress >> 32))))
+        {
+            return ReturnPointer(ctx, 0);
+        }
+
+        TraceAgc($"agc.dcb_event_write buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} type={eventType} address=0x{eventAddress:X16}");
         return ReturnPointer(ctx, commandAddress);
     }
 

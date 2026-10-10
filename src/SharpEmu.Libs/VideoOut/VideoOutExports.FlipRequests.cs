@@ -37,6 +37,8 @@ public static partial class VideoOutExports
         public int FlipMode;
         public long FlipArg;
         public bool GpuQueued;
+        // In command-stream order: a GPU flip from its packet, a CPU flip once its preparation runs on the graphics queue.
+        public bool Ordered;
         public long? ReadyTimestamp;
         public ulong EventHint;
         public FlipEventRegistration[]? FlipEvents;
@@ -128,6 +130,7 @@ public static partial class VideoOutExports
                 FlipMode = flipMode,
                 FlipArg = flipArg,
                 GpuQueued = gpuQueued,
+                Ordered = gpuQueued,
                 EventHint = SceVideoOutInternalEventFlip |
                     ((unchecked((ulong)flipArg) & 0x0000_FFFF_FFFF_FFFFUL) << 16),
                 FlipEventCount = port.FlipEvents.Count,
@@ -296,14 +299,30 @@ public static partial class VideoOutExports
         }
     }
 
+    // The graphics queue reached the preparation of a CPU flip, so later waits on its buffer are ordered after it.
+    internal static void MarkFlipOrdered(ulong requestId)
+    {
+        lock (_stateGate)
+        {
+            if (_flipRequests.TryGetValue(requestId, out var request))
+            {
+                request.Ordered = true;
+            }
+        }
+    }
+
     // True when no flip still waits for the presenter on the buffer; a discarded or cancelled flip no longer does.
+    // A CPU flip counts only once the graphics queue has reached it: sceVideoOutSubmitFlip reserves the request
+    // (and may sleep for pacing) before queueing its preparation, so a command buffer submitted earlier must not
+    // wait for it; the preparation sits behind that command buffer and the wait would never end.
     internal static bool IsFlipDone(int handle, int bufferIndex)
     {
         lock (_stateGate)
         {
             foreach (var request in _flipRequests.Values)
             {
-                if (request.Handle == handle && request.BufferIndex == bufferIndex && request.Outcome == FlipOutcome.Pending)
+                if (request.Handle == handle && request.BufferIndex == bufferIndex && request.Ordered &&
+                    request.Outcome == FlipOutcome.Pending)
                 {
                     return false;
                 }

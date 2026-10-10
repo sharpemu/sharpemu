@@ -113,6 +113,7 @@ public static class AudioOut2Exports
     private sealed class ContextState
     {
         private readonly object _paceGate = new();
+        private IHostAudioStream? _backend;
         private long _nextAdvanceTimestamp;
 
         public ContextState(ulong handle, uint frequency, uint grainSamples, uint queueDepth, IHostAudioStream? backend)
@@ -121,14 +122,56 @@ public static class AudioOut2Exports
             Frequency = frequency == 0 ? 48000 : frequency;
             GrainSamples = grainSamples == 0 ? 256 : grainSamples;
             QueueDepth = queueDepth == 0 ? 4 : queueDepth;
-            Backend = backend;
+            _backend = backend;
         }
 
         public ulong Handle { get; }
         public uint Frequency { get; }
         public uint GrainSamples { get; }
         public uint QueueDepth { get; }
-        public IHostAudioStream? Backend { get; }
+        public IHostAudioStream? Backend => Volatile.Read(ref _backend);
+
+        public void AttachBackend(IHostAudioStream? backend) => Volatile.Write(ref _backend, backend);
+
+        public uint QueuedGrains
+        {
+            get
+            {
+                if (Backend is { } backend)
+                {
+                    var queuedMilliseconds = backend.QueuedMilliseconds;
+                    if (queuedMilliseconds >= 0)
+                    {
+                        var grainMilliseconds = (double)GrainSamples * 1000.0 / Frequency;
+                        return Math.Min(
+                            QueueDepth,
+                            checked((uint)Math.Ceiling(queuedMilliseconds / grainMilliseconds)));
+                    }
+                }
+
+                // A context can be intentionally backend-less (headless runs,
+                // unavailable host audio, or before lazy backend binding). In
+                // that case PaceAdvance is the queue: report the portion of
+                // its software clock that has not elapsed yet instead of
+                // claiming that every grain is free.
+                lock (_paceGate)
+                {
+                    var remaining = _nextAdvanceTimestamp - Stopwatch.GetTimestamp();
+                    if (remaining <= 0)
+                    {
+                        return 0;
+                    }
+
+                    var grainTicks = checked(
+                        (long)Math.Ceiling(Stopwatch.Frequency * (double)GrainSamples / Frequency));
+                    return Math.Min(
+                        QueueDepth,
+                        checked((uint)Math.Ceiling((double)remaining / grainTicks)));
+                }
+            }
+        }
+
+        public uint FreeGrains => QueueDepth - Math.Min(QueueDepth, QueuedGrains);
 
         public long GrainTicks => (long)Math.Ceiling(Stopwatch.Frequency * (double)GrainSamples / Frequency);
 
@@ -512,9 +555,14 @@ public static class AudioOut2Exports
         }
         else
         {
-            // Push is the blocking point of a grain: it waits for the grain an Advance claimed, or
-            // claims one itself when the title does not advance separately.
-            ContextState.SleepUntil(context.QueueSlotFree(advancedGrain != 0 ? advancedGrain : context.ReserveGrain()));
+            // Push queues the grain an Advance claimed, or claims one itself when the title does not
+            // advance separately. A blocking push waits for its slot; a nonblocking one returns at
+            // once, as on the hardware, and the grain still counts in the queue level.
+            var grain = advancedGrain != 0 ? advancedGrain : context.ReserveGrain();
+            if (blocking != 0)
+            {
+                ContextState.SleepUntil(context.QueueSlotFree(grain));
+            }
         }
 
         return SetReturn(ctx, 0);
@@ -833,6 +881,10 @@ public static class AudioOut2Exports
         return SetReturn(ctx, 0);
     }
 
+    // Fixed-size connected state. Do not trust r8/r9 for byte counts.
+    // Both Demon's Souls and Yotei derive their speaker layout from numChannels
+    // at +2. Yotei's startup poll waits for that count to become nonzero; it is
+    // not an independent active flag. +3 is padding, as in the struct above.
     [SysAbiExport(
         Nid = "gatEUKG+Ea4",
         ExportName = "sceAudioOut2PortGetState",
@@ -860,6 +912,10 @@ public static class AudioOut2Exports
 
         Span<byte> state = stackalloc byte[PortStateSize];
         state.Clear();
+        //   +0x00 u16 output   = CONNECTED_PRIMARY (1)
+        //   +0x02 u8  channels = from port format when known, else 2
+        //   +0x03 u8  padding  = 0
+        //   +0x04 s16 volume   = 127 (full volume)
         byte channels = 2;
         if (Ports.TryGetValue(portHandle, out var port) &&
             TryDecodeDataFormat(port.DataFormat, out var decodedChannels, out _, out _))
@@ -1238,6 +1294,7 @@ public static class AudioOut2Exports
                 }
 
                 backendName = PrimaryBackendName;
+                context.AttachBackend(PrimaryBackend);
                 return PrimaryBackend;
             }
 
@@ -1269,6 +1326,7 @@ public static class AudioOut2Exports
             }
 
             backendName = SecondaryBackendName;
+            context.AttachBackend(SecondaryBackend);
             return SecondaryBackend;
         }
     }

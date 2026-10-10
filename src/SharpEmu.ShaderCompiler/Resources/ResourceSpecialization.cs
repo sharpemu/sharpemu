@@ -6,7 +6,16 @@ using System.Linq;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
-public readonly record struct BufferSpecialization(uint PackedStride, uint DescriptorFormat, uint DescriptorSwizzle);
+public readonly record struct BufferSpecialization(uint PackedStride, uint DescriptorFormat, uint DescriptorSwizzle)
+{
+    public const uint SwizzleEnabledBit = 1u << 14;
+    public const uint StrideMask = 0x3FFF;
+
+    // With runtime strides only a swizzled buffer keeps its stride compiled in: swizzled
+    // addressing derives its element layout from it. The flag bits always stay.
+    public BufferSpecialization WithoutRuntimeStride() =>
+        (PackedStride & SwizzleEnabledBit) != 0 ? this : this with { PackedStride = PackedStride & ~StrideMask };
+}
 
 // The module-affecting layout of one bounded runtime V# table. Candidate descriptors
 // themselves are appended to Buffers; this names their contiguous run and the flattened

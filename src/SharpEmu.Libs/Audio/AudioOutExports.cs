@@ -51,7 +51,8 @@ public static class AudioOutExports
             int bytesPerSample,
             bool isFloat,
             bool preservesGuestFormat,
-            IHostAudioStream? backend)
+            IHostAudioStream? backend,
+            string backendName)
         {
             UserId = userId;
             Type = type;
@@ -63,6 +64,7 @@ public static class AudioOutExports
             IsFloat = isFloat;
             PreservesGuestFormat = preservesGuestFormat;
             Backend = backend;
+            BackendName = backendName;
         }
 
         public int UserId { get; }
@@ -75,6 +77,7 @@ public static class AudioOutExports
         public bool IsFloat { get; }
         public bool PreservesGuestFormat { get; }
         public IHostAudioStream? Backend { get; }
+        public string BackendName { get; }
         public object SubmissionGate { get; } = new();
         public volatile float Volume = 1.0f;
         public int BufferByteLength =>
@@ -195,7 +198,8 @@ public static class AudioOutExports
             bytesPerSample,
             isFloat,
             preservesGuestFormat,
-            backend);
+            backend,
+            backendName);
         Console.Error.WriteLine(
             $"[LOADER][INFO] AudioOut port {handle}: {frequency} Hz, " +
             $"{channels} ch, {(isFloat ? "float32" : "s16")}, " +
@@ -598,7 +602,7 @@ public static class AudioOutExports
         {
             var peak = PeakAmplitude(source, port.IsFloat, port.BytesPerSample);
             Console.Error.WriteLine(
-                $"[LOADER][TRACE] audioout.output#{n} handle={handle} bytes={source.Length} ch={port.Channels} float={port.IsFloat} vol={port.Volume:F2} peak={peak:F4} backend={(port.Backend is null ? "none" : "coreaudio")}");
+                $"[LOADER][TRACE] audioout.output#{n} handle={handle} bytes={source.Length} ch={port.Channels} float={port.IsFloat} vol={port.Volume:F2} peak={peak:F4} backend={(port.Backend is null ? "none" : port.BackendName)}");
         }
     }
 

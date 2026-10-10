@@ -11,6 +11,7 @@ namespace SharpEmu.Libs.Gpu.Pipelines;
 // Everything a host pipeline creation reads for one graphics pipeline.
 public sealed class GraphicsPipelineDescription
 {
+    public TessellationPipelineStages? Tessellation { get; init; }
     public required PipelineRenderingState Rendering { get; init; }
     public required PipelineVertexInputState VertexInput { get; init; }
     public required VertexInputInfo VertexInfo { get; init; }
@@ -21,6 +22,8 @@ public sealed class GraphicsPipelineDescription
     public ShaderProgramInfo? PixelStage { get; init; }
     public required PipelineStaticParameters StaticParameters { get; init; }
 }
+
+public sealed record TessellationPipelineStages(ShaderProgram Control, ShaderProgram Evaluation, uint InputControlPoints);
 
 public sealed class ComputePipelineDescription
 {
@@ -41,11 +44,32 @@ internal interface IShaderPipelineHost
     // The device supports shaderSharedInt64Atomics, so LDS 64-bit atomics can be
     // emitted as real 64-bit atomics instead of a non-atomic 32-bit pair.
     bool SharedInt64AtomicsEnabled { get; }
+
+    // The device converts f16<->f32 natively with the hardware's rounding and denormals
+    // (see VulkanFloat16Support).
+    bool ExactFloat16ConversionsEnabled => false;
+
+    bool NonUniformImageIndexingEnabled => false;
+
+    // The host writes buffer strides into shader data (BindingLayout.UsesRuntimeBufferStrides),
+    // so the stride leaves the permutation key.
+    bool RuntimeBufferStridesEnabled => false;
+    bool UsesBindlessImages => false;
     bool ShaderSignedZeroInfNanPreserveFloat32Supported => false;
     bool ExecGuardElisionEnabled => true;
     ShaderPrewarmList? ShaderPrewarm => null;
     bool PerVertexPixelInputsSupported => true;
     bool ClipDistanceEnabled => false;
+    bool PostDepthCoverageSupported => false;
+    bool NativeTwoSampleMixedSupported => false;
+
+    // True when this device's GLSL UnpackHalf2x16 / PackHalf2x16 were measured bit-exact
+    // against the translator's own f16 conversion. False for every host that did not measure it.
+    bool NativeHalfConversionExact => false;
+
+    // True only when the host measured that a storage-buffer read past its descriptor range
+    // returns zero on this device; the translator then stops bounds-checking every guest word.
+    bool ZeroOutOfBoundsBufferReads => false;
 
     RenderHostLimits Limits { get; }
 
@@ -59,6 +83,16 @@ internal interface IShaderPipelineHost
 
     // Reads one guest dword only when no GPU work may still own the range.
     bool TryReadCleanGuestWord(ulong address, out uint word);
+
+    // The device can blend with a second fragment output (dualSrcBlend).
+    bool SupportsDualSourceBlend => false;
+
+    bool TryReadCleanGuestWords(ulong address, Span<uint> words)
+    {
+        using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CleanGuestRead);
+        return BitConverter.IsLittleEndian && TryReadResidentGuestBytes(address,
+            System.Runtime.InteropServices.MemoryMarshal.AsBytes(words), clean: true);
+    }
 
     // Copies guest bytes the CPU already holds, without synchronizing. False when the GPU
     // may own the range (or, for a clean read, when a clean word read would be refused);

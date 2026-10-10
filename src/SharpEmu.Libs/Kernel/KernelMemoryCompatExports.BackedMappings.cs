@@ -408,9 +408,22 @@ public static partial class KernelMemoryCompatExports
             {
                 _insideMappingTransaction = false;
             }
-        });
+        }, () => onlyAddsOutsideGpuMemory?.Invoke() != true);
         return result;
     }
+
+    // Whether a map request may replace memory the GPU can be using. Without MAP_FIXED the address
+    // is chosen among free or reserved ranges; with it, only a live (non-reserved) mapping in the
+    // range can be in use. An unreadable request pointer keeps the safe answer.
+    private static Func<bool> MapNeedsGpuDrain(CpuContext ctx, ulong addressPointer, ulong length, ulong flags) => () =>
+    {
+        if ((flags & OrbisKernelMapFixed) == 0)
+            return false;
+        if (!ctx.TryReadUInt64(addressPointer, out var requested) || length == 0 || requested > ulong.MaxValue - length)
+            return true;
+        lock (_memoryGate)
+            return GetMappingSlices(requested, length).Any(region => !region.IsReserved);
+    };
 
     private static int ReserveBackingRangeCore(CpuContext ctx, ulong pointer, ulong length, ulong flags, ulong alignment)
     {

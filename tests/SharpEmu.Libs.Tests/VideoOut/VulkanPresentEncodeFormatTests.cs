@@ -9,6 +9,18 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 
 public sealed class VulkanPresentEncodeFormatTests
 {
+    // Ghost of Yotei binds an 11_11_10 target with the UNORM number type; the format holds
+    // unsigned floats whatever the number type, as the image path already maps it.
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(7u)]
+    public void Packed11_11_10Target_UsesTheUnsignedFloatFormat(uint numberType)
+    {
+        Assert.True(VulkanVideoPresenter.TryDecodeRenderTargetFormat(6, numberType, 0, out var decoded));
+        Assert.Equal(Format.B10G11R11UfloatPack32, decoded.Format);
+        Assert.Equal(SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float, decoded.OutputKind);
+    }
+
     [Fact]
     public void UnsignedByteTargetUsesUnsignedPixelOutput()
     {
@@ -158,6 +170,20 @@ public sealed class VulkanPresentEncodeFormatTests
 
         Assert.Equal(expectedFormat, decoded.Format);
         Assert.Equal(expectedMapping, decoded.ExportMapping.Packed);
+    }
+
+    [Theory]
+    [InlineData(1u, 6u, Format.R8Srgb)]
+    [InlineData(1u, 9u, Format.R8Srgb)]
+    [InlineData(3u, 6u, Format.R8G8Srgb)]
+    [InlineData(3u, 9u, Format.R8G8Srgb)]
+    public void TryDecodeRenderTargetFormat_DecodesNarrowSrgbOutputs(uint layout, uint numberType, Format expected)
+    {
+        Assert.True(VulkanVideoPresenter.TryDecodeRenderTargetFormat(layout, numberType, 0, out var decoded));
+        Assert.Equal(expected, decoded.Format);
+        Assert.Equal(SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float, decoded.OutputKind);
+        Assert.True(decoded.ExportMapping.IsIdentity);
+        Assert.False(VulkanVideoPresenter.TryDecodeRenderTargetFormat(layout, numberType, 4, out _));
     }
 
     [Theory]

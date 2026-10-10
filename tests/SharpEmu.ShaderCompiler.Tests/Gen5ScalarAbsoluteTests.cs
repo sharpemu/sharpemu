@@ -25,12 +25,15 @@ public sealed class Gen5ScalarAbsoluteTests
             Decode(0xBEEA2D6A) with { Pc = 4 },
             Decode(0x8F38806Au | (shift << 8)) with { Pc = 8 },
             Decode(0x880B380B) with { Pc = 12 }, sample, EndProgram(28));
+        var plan = Extract(program, userDataCount: 16);
         if (!accepted)
         {
-            Assert.Throws<ResourcePlanException>(() => Extract(program, userDataCount: 16));
+            // Lane bits outside the reserved field are part of the sampler: it is read at run time.
+            Assert.True(plan.Info.UsesRuntimeDescriptors);
+            Assert.Empty(plan.Info.Samplers);
             return;
         }
-        var plan = Extract(program, userDataCount: 16);
+
         var registers = new uint[16];
         registers[8] = 6; // Border clamp keeps the actual border fields live.
         registers[11] = 0xC0000123;
@@ -55,11 +58,60 @@ public sealed class Gen5ScalarAbsoluteTests
             Branch(44, "SCbranchScc1", -7), EndProgram(48));
 
         var plan = Extract(program, userDataCount: 16);
+        Assert.Empty(plan.Info.NullDescriptorFallbacks);
+        if (changesMask)
+        {
+            // A loop-carried sampler has no plan-time source: it is read at run time.
+            Assert.True(plan.Info.UsesRuntimeDescriptors);
+            return;
+        }
+
         var registers = new uint[16];
         registers[8] = 6;
         registers[15] = 0xC0000123;
         Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(plan, plan.Info.Samplers[0].Source, Inputs(registers), out var result));
-        Assert.Equal(changesMask ? 0u : registers[15], result.Dwords[3]);
+        Assert.Equal(registers[15], result.Dwords[3]);
+    }
+
+    // A plain sampled float access whose sampler is loop-carried reads its descriptors at run
+    // time, as the hardware does, instead of reading the null descriptor.
+    [Fact]
+    public void LoopCarriedSamplerOfAPlainSampleIsReadAtRuntime()
+    {
+        var sample = Image(28, "ImageSample", 0, 8);
+        var program = Program(
+            Decode(0x7D840A81), Decode(0xBEEA2D6A) with { Pc = 4 },
+            Decode(0x8F388C6A) with { Pc = 8 }, MoveScalar(12, 24, 0),
+            Decode(0xBE8B030F) with { Pc = 20 }, Decode(0x880B380B) with { Pc = 24 }, sample,
+            Sop2(36, "SAddI32", 56, Gen5Operand.Scalar(56), Operand(1)), Sopc(40, "SCmpLgU32", Gen5Operand.Scalar(24), Operand(4)),
+            Branch(44, "SCbranchScc1", -7), EndProgram(48));
+
+        var plan = Extract(program, userDataCount: 16);
+
+        Assert.Empty(plan.Info.NullDescriptorFallbacks);
+        Assert.True(plan.Info.UsesRuntimeDescriptors);
+        Assert.Contains(plan.Memory.Entries, entry => entry.RuntimeDescriptor);
+    }
+
+    // Like the sampler case above, an image descriptor carried around the loop has no
+    // plan-time source. ImageLoad must use the runtime descriptor table rather than make
+    // the old null-descriptor fallback (which reads zero texels).
+    [Fact]
+    public void LoopCarriedImageLoadIsReadAtRuntime()
+    {
+        var load = Image(28, "ImageLoad", 8, vectorAddress: 0, dmask: 1);
+        var program = Program(
+            Decode(0x7D840A81), Decode(0xBEEA2D6A) with { Pc = 4 },
+            Decode(0x8F388C6A) with { Pc = 8 }, MoveScalar(12, 24, 0),
+            Decode(0xBE8B030F) with { Pc = 20 }, Decode(0x880B380B) with { Pc = 24 }, load,
+            Sop2(36, "SAddI32", 56, Gen5Operand.Scalar(56), Operand(1)), Sopc(40, "SCmpLgU32", Gen5Operand.Scalar(24), Operand(4)),
+            Branch(44, "SCbranchScc1", -7), EndProgram(48));
+
+        var plan = Extract(program, userDataCount: 16);
+
+        Assert.Empty(plan.Info.NullDescriptorFallbacks);
+        Assert.True(plan.Info.UsesRuntimeDescriptors);
+        Assert.Contains(plan.Memory.Entries, entry => entry.Pc == 28 && entry.RuntimeDescriptor);
     }
 
     public static TheoryData<uint, uint, uint> QuadmaskValues => new()

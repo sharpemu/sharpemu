@@ -19,6 +19,11 @@ public static partial class Gen5MslTranslator
     public static bool TryCompileProgram(ShaderCompileRequest request, out Gen5MslShader shader, out string error)
     {
         shader = default!;
+        if (request.Stage == ShaderStage.TessellationEvaluation || request.CooperativeWave64Workgroup)
+        {
+            error = "The Metal backend does not yet support native tessellation evaluation or cooperative wave64 workgroups.";
+            return false;
+        }
         try
         {
             BindingLayoutValidator.Validate(

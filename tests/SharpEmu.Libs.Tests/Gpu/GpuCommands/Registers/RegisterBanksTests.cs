@@ -10,6 +10,17 @@ namespace SharpEmu.Libs.Tests.Gpu.GpuCommands.Registers;
 // The context lifecycle over the typed banks: push copies, pop restores, clear returns to the defaults.
 public sealed class RegisterBanksTests
 {
+    [Theory]
+    [InlineData(0x00000110u, false)]
+    [InlineData(0x00001110u, true)]
+    public void DepthBeforeShaderIsIndependentOfEarlyThenLateOrderAndMaskExport(uint raw, bool forcedEarly)
+    {
+        var control = DepthShaderControlRegisters.Decode(raw);
+        Assert.Equal((byte)1, control.DepthExportOrder);
+        Assert.True(control.MaskExportEnable);
+        Assert.Equal(forcedEarly, control.DepthBeforeShader);
+        Assert.Equal(0u, control.RemainingBits);
+    }
     private static RegisterBanks NewBanks() => new(static message => new InvalidOperationException(message));
 
     [Fact]

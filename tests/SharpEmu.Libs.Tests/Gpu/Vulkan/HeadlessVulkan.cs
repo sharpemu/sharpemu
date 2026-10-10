@@ -91,6 +91,13 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
 
     public bool ShaderInt64 { get; }
 
+    // The runtime-descriptor GPU tests need an unbounded, dynamically indexed sampled-image
+    // array. Keep it opt-in: hosts without the descriptor-indexing feature simply skip them.
+    public bool SupportsRuntimeDescriptorArrays { get; private init; }
+
+    // Created with shaderFloat16 and f16 float controls (VulkanFloat16Support).
+    public bool ExactFloat16Conversions { get; private init; }
+
     public bool ValidationEnabled => _debugUtils is not null;
 
     // The validation messages collected since the last call; empty when the layer is off.
@@ -128,8 +135,9 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         {
             return Create();
         }
-        catch (Exception)
+        catch (Exception exception)
         {
+            Console.Error.WriteLine($"[TEST][VULKAN] Device setup failed: {exception}");
             return null;
         }
     }
@@ -161,6 +169,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     public void Dispose()
     {
         Vk.DeviceWaitIdle(Device);
+        _deviceInfo?.Slabs.Destroy();
         Vk.DestroyDevice(Device, null);
         if (_debugUtils is { } debugUtils)
         {
@@ -168,6 +177,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         }
 
         Vk.DestroyInstance(Instance, null);
+        AssertNoValidationMessages();
     }
 
     private static uint DebugCallback(DebugUtilsMessageSeverityFlagsEXT severity, DebugUtilsMessageTypeFlagsEXT type, DebugUtilsMessengerCallbackDataEXT* data, void* userData)
@@ -215,22 +225,33 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         var appInfo = new ApplicationInfo { SType = StructureType.ApplicationInfo, ApiVersion = apiVersion };
         var validation = Environment.GetEnvironmentVariable(ValidationVariable) == "1";
         var layers = validation ? SilkMarshal.StringArrayToPtr(new[] { "VK_LAYER_KHRONOS_validation" }) : 0;
-        var extensions = validation ? SilkMarshal.StringArrayToPtr(new[] { ExtDebugUtils.ExtensionName }) : 0;
+        uint instanceExtensionCount = 0;
+        vk.EnumerateInstanceExtensionProperties((byte*)null, &instanceExtensionCount, null);
+        var instanceExtensions = new ExtensionProperties[instanceExtensionCount];
+        fixed (ExtensionProperties* pointer = instanceExtensions)
+            vk.EnumerateInstanceExtensionProperties((byte*)null, &instanceExtensionCount, pointer);
+        var portable = instanceExtensions.Any(extension =>
+            SilkMarshal.PtrToString((nint)extension.ExtensionName) == "VK_KHR_portability_enumeration");
+        var instanceNames = new List<string>();
+        if (validation) instanceNames.Add(ExtDebugUtils.ExtensionName);
+        if (portable) instanceNames.Add("VK_KHR_portability_enumeration");
+        var extensions = instanceNames.Count != 0 ? SilkMarshal.StringArrayToPtr(instanceNames.ToArray()) : 0;
         var instanceInfo = new InstanceCreateInfo
         {
             SType = StructureType.InstanceCreateInfo,
+            Flags = portable ? InstanceCreateFlags.EnumeratePortabilityBitKhr : 0,
             PApplicationInfo = &appInfo,
             EnabledLayerCount = validation ? 1u : 0u,
             PpEnabledLayerNames = (byte**)layers,
-            EnabledExtensionCount = validation ? 1u : 0u,
+            EnabledExtensionCount = (uint)instanceNames.Count,
             PpEnabledExtensionNames = (byte**)extensions,
         };
         var created = vk.CreateInstance(&instanceInfo, null, out var instance);
         if (validation)
         {
             SilkMarshal.Free(layers);
-            SilkMarshal.Free(extensions);
         }
+        if (extensions != 0) SilkMarshal.Free(extensions);
 
         if (created != Result.Success)
         {
@@ -318,10 +339,21 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             SType = StructureType.PhysicalDeviceTimelineSemaphoreFeatures,
             PNext = &addressFeatures,
         };
-        var features = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &timelineFeatures };
+        var descriptorIndexingFeatures = new PhysicalDeviceDescriptorIndexingFeatures
+        {
+            SType = StructureType.PhysicalDeviceDescriptorIndexingFeatures,
+            PNext = &timelineFeatures,
+        };
+        var features = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &descriptorIndexingFeatures };
         vk.GetPhysicalDeviceFeatures2(physical, &features);
         var dynamicRendering = vulkan13Features.DynamicRendering && vulkan13Features.Synchronization2 &&
             HasDeviceExtensions(vk, physical, RenderingExtensionNames);
+        var runtimeDescriptorArrays = descriptorIndexingFeatures.ShaderSampledImageArrayNonUniformIndexing &&
+            descriptorIndexingFeatures.RuntimeDescriptorArray &&
+            descriptorIndexingFeatures.DescriptorBindingPartiallyBound &&
+            descriptorIndexingFeatures.DescriptorBindingSampledImageUpdateAfterBind &&
+            descriptorIndexingFeatures.DescriptorBindingUpdateUnusedWhilePending &&
+            descriptorIndexingFeatures.DescriptorBindingVariableDescriptorCount;
         if (family == uint.MaxValue || !timelineFeatures.TimelineSemaphore || !addressFeatures.BufferDeviceAddress ||
             !vulkan13Features.Synchronization2)
         {
@@ -332,6 +364,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         vk.GetPhysicalDeviceFeatures(physical, out var baseFeatures);
         var enabledFeatures = new PhysicalDeviceFeatures
         {
+            TessellationShader = baseFeatures.TessellationShader,
             SampleRateShading = baseFeatures.SampleRateShading,
             SamplerAnisotropy = baseFeatures.SamplerAnisotropy,
             ShaderStorageImageExtendedFormats = baseFeatures.ShaderStorageImageExtendedFormats,
@@ -362,12 +395,36 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             PNext = &vulkan13Features,
         };
         timelineFeatures.PNext = &addressFeatures;
+        descriptorIndexingFeatures = new PhysicalDeviceDescriptorIndexingFeatures
+        {
+            SType = StructureType.PhysicalDeviceDescriptorIndexingFeatures,
+            ShaderSampledImageArrayNonUniformIndexing = runtimeDescriptorArrays,
+            RuntimeDescriptorArray = runtimeDescriptorArrays,
+            DescriptorBindingPartiallyBound = runtimeDescriptorArrays,
+            DescriptorBindingSampledImageUpdateAfterBind = runtimeDescriptorArrays,
+            DescriptorBindingUpdateUnusedWhilePending = runtimeDescriptorArrays,
+            DescriptorBindingVariableDescriptorCount = runtimeDescriptorArrays,
+            PNext = &timelineFeatures,
+        };
         if (barycentric)
         {
             barycentricFeatures.PNext = vulkan13Features.PNext;
             vulkan13Features.PNext = &barycentricFeatures;
         }
+
+        var exactFloat16 = SharpEmu.Libs.VideoOut.VulkanFloat16Support.SupportsExactConversions(vk, physical);
+        var float16Features = new PhysicalDeviceShaderFloat16Int8Features
+        {
+            SType = StructureType.PhysicalDeviceShaderFloat16Int8Features,
+            ShaderFloat16 = true,
+        };
+        if (exactFloat16)
+        {
+            float16Features.PNext = vulkan13Features.PNext;
+            vulkan13Features.PNext = &float16Features;
+        }
         var extensionNames = new List<string>();
+        if (HasDeviceExtensions(vk, physical, ["VK_KHR_portability_subset"])) extensionNames.Add("VK_KHR_portability_subset");
         if (dynamicRendering) extensionNames.AddRange(RenderingExtensionNames);
         if (barycentric) extensionNames.Add(barycentricExtension);
         const string fillRectangleExtension = "VK_NV_fill_rectangle";
@@ -377,7 +434,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         var deviceInfo = new DeviceCreateInfo
         {
             SType = StructureType.DeviceCreateInfo,
-            PNext = &timelineFeatures,
+            PNext = &descriptorIndexingFeatures,
             QueueCreateInfoCount = 1,
             PQueueCreateInfos = &queueInfo,
             PEnabledFeatures = &enabledFeatures,
@@ -401,6 +458,8 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         {
             SupportsFragmentShaderBarycentric = barycentric,
             SupportsFillRectangle = fillRectangle,
+            ExactFloat16Conversions = exactFloat16,
+            SupportsRuntimeDescriptorArrays = runtimeDescriptorArrays,
         };
         if (validation)
         {

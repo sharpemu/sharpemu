@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Reflection;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Audio;
 using Xunit;
@@ -28,6 +29,8 @@ public sealed class AjmExportsTests : IDisposable
     private const ulong BatchInfoAddress = MemoryBase + 0x300;
     private const ulong StatisticsAddress = MemoryBase + 0x400;
     private const ulong BatchBufferAddress = MemoryBase + 0x500;
+    private const ulong ConfigAddress = MemoryBase + 0xB00;
+    private const ulong ConfigInfoAddress = MemoryBase + 0xB10;
 
     private readonly FakeCpuMemory _memory = new(MemoryBase, 0x1000);
     private readonly CpuContext _ctx;
@@ -196,6 +199,105 @@ public sealed class AjmExportsTests : IDisposable
 
         Assert.Equal(0, CreateInstance(contextId, 1, flags, InstanceAddress));
         Assert.Equal(0x4001u, ReadUInt32(InstanceAddress));
+    }
+
+    [Fact]
+    public void ParseConfigData_LayoutSevenIsReportedAsStereo()
+    {
+        WriteBytes(ConfigAddress, [0xFE, 0x4E, 0x00, 0x40]);
+
+        _ctx[CpuRegister.Rdi] = ConfigAddress;
+        _ctx[CpuRegister.Rsi] = ConfigInfoAddress;
+        Assert.Equal(0, AjmExports.AjmDecAt9ParseConfigData(_ctx));
+
+        Assert.Equal(3u, ReadUInt32(ConfigInfoAddress));
+        Assert.Equal(1u, ReadUInt32(ConfigInfoAddress + 4));
+        Assert.Equal(2u, ReadUInt32(ConfigInfoAddress + 8));
+        Assert.Equal(128u, ReadUInt32(ConfigInfoAddress + 12));
+        Assert.Equal(3u, ReadUInt32(ConfigInfoAddress + 16));
+    }
+
+    [Fact]
+    public void ParseConfigData_Ps5MultichannelLayoutReportsFixedSuperframe()
+    {
+        WriteBytes(ConfigAddress, [0x30, 0x62, 0xC0, 0x40]);
+
+        _ctx[CpuRegister.Rdi] = ConfigAddress;
+        _ctx[CpuRegister.Rsi] = ConfigInfoAddress;
+        Assert.Equal(0, AjmExports.AjmDecAt9ParseConfigData(_ctx));
+
+        Assert.Equal(204u, ReadUInt32(ConfigInfoAddress));
+        Assert.Equal(1u, ReadUInt32(ConfigInfoAddress + 4));
+        Assert.Equal(12u, ReadUInt32(ConfigInfoAddress + 8));
+        Assert.Equal(256u, ReadUInt32(ConfigInfoAddress + 12));
+        Assert.Equal(17u, ReadUInt32(ConfigInfoAddress + 16));
+    }
+
+    [Fact]
+    public void ParseConfigData_UsesSuperframeIndexInMonoDecoderConfig()
+    {
+        var decoder = new Atrac9DecodeState();
+        Assert.True(decoder.TryInitialize([0x30, 0x62, 0xC0, 0x42]));
+
+        var configField = typeof(Atrac9DecodeState).GetField(
+            "_extendedDecoderConfig",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        var monoConfig = Assert.IsType<byte[]>(configField?.GetValue(decoder));
+
+        // frameBytes=17 and sfIndex=2: the low config field is 16 << 5 | 2 << 3.
+        Assert.Equal(new byte[] { 0xFE, 0x60, 0x02, 0x10 }, monoConfig);
+    }
+
+    [Fact]
+    public void ExtendedBlocks_AdvanceByConsumedBytesAndSkipPadding()
+    {
+        // Two channels, two frames: the consumed block lengths differ and the
+        // second frame has low-bit padding before its second channel block.
+        ReadOnlySpan<byte> compressed =
+        [
+            0x80, 0x01,       // frame 0, channel 0: used = 2
+            0x80, 0x82,       // frame 0, channel 1: used = 2
+            0x80,             // frame 1, channel 0: used = 1
+            0x03, 0x04, 0x80, // padding before channel 1
+            0x80, 0x05,       // frame 1, channel 1: used = 2
+        ];
+        var usedBytes = new[] { 2, 2, 1, 2 };
+        var position = 0;
+        var usedIndex = 0;
+
+        for (var frame = 0; frame < 2; frame++)
+        {
+            for (var channel = 0; channel < 2; channel++)
+            {
+                Assert.True(Atrac9DecodeState.TryBeginExtendedBlock(compressed, frame, ref position));
+                position += usedBytes[usedIndex++];
+            }
+        }
+
+        Assert.Equal(9, position);
+    }
+
+    [Fact]
+    public void UnsupportedStandardLayoutProducesSilentSuperframeWithoutError()
+    {
+        // Layout 6 is outside LibAtrac9's standard channel table. It must not
+        // be handed to the decoder, but the header still describes a complete
+        // stereo-duration superframe so the caller can keep its timeline.
+        var decoder = new Atrac9DecodeState();
+        Assert.True(decoder.TryInitialize([0xFE, 0x4C, 0x00, 0x40]));
+
+        var output = new byte[128 * 2 * sizeof(short)];
+        var result = decoder.Decode(
+            [0x00, 0x00, 0x00],
+            output,
+            Atrac9PcmEncoding.Signed16,
+            requestedChannels: 2,
+            multipleFrames: false);
+
+        Assert.Equal(0, result.Status);
+        Assert.Equal(output.Length, result.OutputWritten);
+        Assert.Equal(128u, result.TotalDecodedSamples);
+        Assert.All(output, value => Assert.Equal(0, value));
     }
 
     /// <summary>
@@ -429,6 +531,88 @@ public sealed class AjmExportsTests : IDisposable
         return AjmExports.AjmModuleRegister(_ctx);
     }
 
+    [Fact]
+    public void BatchJobDecodeSplit_InvalidInstanceWritesResultThroughSeventhArgument()
+    {
+        const ulong resultAddress = MemoryBase + 0xB00;
+        const ulong outputAddress = MemoryBase + 0xC00;
+        InitializeBatch(BatchBufferAddress, 0x100, BatchInfoAddress);
+        WriteUInt64(outputAddress, 0x1122334455667788);
+        WriteUInt64(resultAddress + 32, 0x8877665544332211);
+        WriteStackArgs(resultAddress, 0, 0);
+        _ctx[CpuRegister.Rdi] = BatchInfoAddress;
+        _ctx[CpuRegister.Rsi] = uint.MaxValue;
+        _ctx[CpuRegister.Rdx] = MemoryBase + 0xD00;
+        _ctx[CpuRegister.Rcx] = 1;
+        _ctx[CpuRegister.R8] = outputAddress;
+        _ctx[CpuRegister.R9] = 1;
+
+        Assert.Equal(0, AjmExports.AjmBatchJobDecodeSplit(_ctx));
+        Assert.NotEqual(0u, ReadUInt32(resultAddress));
+        Assert.Equal(0u, ReadUInt32(resultAddress + 8));
+        Assert.Equal(0u, ReadUInt32(resultAddress + 12));
+        Assert.Equal(0UL, ReadUInt64(resultAddress + 16));
+        Assert.Equal(0u, ReadUInt32(resultAddress + 24));
+        Assert.Equal(0x1122334455667788UL, ReadUInt64(outputAddress));
+        Assert.Equal(0x8877665544332211UL, ReadUInt64(resultAddress + 32));
+    }
+
+    [Fact]
+    public void BatchJobDecodeSplit_GathersAFrameAndScattersPcmWithoutOverwritingBoundaries()
+    {
+        const ulong configAddress = MemoryBase + 0x600;
+        const ulong inputDescriptors = MemoryBase + 0x620;
+        const ulong outputDescriptors = MemoryBase + 0x660;
+        const ulong inputData = MemoryBase + 0x700;
+        const ulong outputData = MemoryBase + 0x800;
+        const ulong resultAddress = MemoryBase + 0xB00;
+        var contextId = Initialize();
+        Assert.Equal(0, RegisterCodec(contextId, 1));
+        Assert.Equal(0, CreateInstance(contextId, 1, 0x401, InstanceAddress));
+        var instanceId = ReadUInt32(InstanceAddress);
+        InitializeBatch(BatchBufferAddress, 0x100, BatchInfoAddress);
+        Assert.True(_memory.TryWrite(configAddress, new byte[] { 0xFE, 0x70, 0x17, 0xE0 }));
+        _ctx[CpuRegister.Rdi] = BatchInfoAddress;
+        _ctx[CpuRegister.Rsi] = instanceId;
+        _ctx[CpuRegister.Rdx] = configAddress;
+        _ctx[CpuRegister.Rcx] = 4;
+        _ctx[CpuRegister.R8] = resultAddress;
+        Assert.Equal(0, AjmExports.AjmBatchJobInitialize(_ctx));
+        Assert.Equal(0u, ReadUInt32(resultAddress));
+
+        var input = new byte[192];
+        new byte[] { 0x00, 0x84, 0x00, 0x40 }.CopyTo(input, 0);
+        Assert.True(_memory.TryWrite(inputData, input));
+        WriteUInt64(inputDescriptors, inputData);
+        WriteUInt64(inputDescriptors + 8, 2);
+        WriteUInt64(inputDescriptors + 16, inputData + 2);
+        WriteUInt64(inputDescriptors + 24, 190);
+        WriteUInt64(outputDescriptors, outputData);
+        WriteUInt64(outputDescriptors + 8, 128);
+        WriteUInt64(outputDescriptors + 16, outputData + 144);
+        WriteUInt64(outputDescriptors + 24, 384);
+        var sentinel = new byte[544];
+        Array.Fill(sentinel, (byte)0xCC);
+        Assert.True(_memory.TryWrite(outputData, sentinel));
+        _ctx[CpuRegister.Rsp] = MemoryBase + 0xF00;
+        WriteUInt64(MemoryBase + 0xF08, resultAddress);
+        _ctx[CpuRegister.Rdi] = BatchInfoAddress;
+        _ctx[CpuRegister.Rsi] = instanceId;
+        _ctx[CpuRegister.Rdx] = inputDescriptors;
+        _ctx[CpuRegister.Rcx] = 2;
+        _ctx[CpuRegister.R8] = outputDescriptors;
+        _ctx[CpuRegister.R9] = 2;
+        Assert.Equal(0, AjmExports.AjmBatchJobDecodeSplit(_ctx));
+        Assert.Equal(0u, ReadUInt32(resultAddress));
+        Assert.Equal(192u, ReadUInt32(resultAddress + 8));
+        Assert.Equal(512u, ReadUInt32(resultAddress + 12));
+        Assert.Equal(256UL, ReadUInt64(resultAddress + 16));
+        Assert.All(ReadBytes(outputData, 128), value => Assert.Equal(0, value));
+        Assert.All(ReadBytes(outputData + 128, 16), value => Assert.Equal(0xCC, value));
+        Assert.All(ReadBytes(outputData + 144, 384), value => Assert.Equal(0, value));
+        Assert.All(ReadBytes(outputData + 528, 16), value => Assert.Equal(0xCC, value));
+    }
+
     private int UnregisterCodec(uint contextId, uint codecType)
     {
         _ctx[CpuRegister.Rdi] = contextId;
@@ -515,6 +699,8 @@ public sealed class AjmExportsTests : IDisposable
         Assert.True(_memory.TryRead(address, value));
         return value;
     }
+
+    private void WriteBytes(ulong address, ReadOnlySpan<byte> value) => Assert.True(_memory.TryWrite(address, value));
 
     private void WriteUInt32(ulong address, uint value)
     {

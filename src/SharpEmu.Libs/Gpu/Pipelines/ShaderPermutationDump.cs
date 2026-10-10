@@ -67,6 +67,8 @@ internal static class ShaderPermutationDump
                 request.Bindings.PushDataStartDword,
                 request.Bindings.ShaderDataDwordCount,
                 request.Bindings.UsesDispatchThreadLimits,
+                request.Bindings.UsesBindlessImages,
+                request.Bindings.UsesRuntimeBufferStrides,
                 request.Bindings.DispatchThreadLimitsDword,
                 request.LocalSizeX,
                 request.LocalSizeY,
@@ -76,6 +78,12 @@ internal static class ShaderPermutationDump
                 request.ThreadCountZ,
                 request.WaveSize,
                 request.ScratchDwords,
+                request.UserDataBase,
+                request.EnableExecGuardElision,
+                request.SupportsSharedInt64Atomics,
+                request.SupportsExactFloat16Conversions,
+                request.SupportsNonUniformImageIndexing,
+                request.ComputeSystemRegisters,
                 InstructionCount = request.Program.Instructions.Count,
             };
             File.WriteAllText($"{basePath}.json", JsonSerializer.Serialize(evidence, JsonOptions));

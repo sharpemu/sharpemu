@@ -122,11 +122,39 @@ public sealed class GuestPageTracker
         return count;
     }
 
-    public void MarkCpuDirtyPages(ulong vaddr, ulong size) => Mark(vaddr, size, WriteOrigin.Cpu, enable: true, create: true);
+    // Reports whether at least one page transitioned from clean to CPU-dirty.
+    public bool MarkCpuDirtyPages(ulong vaddr, ulong size) => Mark(vaddr, size, WriteOrigin.Cpu, enable: true, create: true);
 
     public void MarkGpuDirtyPages(ulong vaddr, ulong size) => Mark(vaddr, size, WriteOrigin.Gpu, enable: true, create: true);
 
     public void ClearGpuDirtyPages(ulong vaddr, ulong size) => Mark(vaddr, size, WriteOrigin.Gpu, enable: false, create: false);
+
+    // Marks the tracked pages of a range GPU-dirty after the fact, page by page under the region
+    // lock. A page the CPU dirtied meanwhile is left CPU-owned and counted as a conflict, since the
+    // two cannot both own it. Returns the number of such conflicting pages.
+    public int MarkGpuWrittenPages(ulong vaddr, ulong size)
+    {
+        RejectUploadCallbackReentry();
+        var conflicts = 0;
+        VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
+        {
+            using var _ = region.Lock.Hold();
+            for (var page = offset; page < offset + bytes; page += PageBytes)
+            {
+                var pageBytes = Math.Min(PageBytes, offset + bytes - page);
+                if (region.IsModified(WriteOrigin.Cpu, page, pageBytes))
+                {
+                    conflicts++;
+                    continue;
+                }
+
+                region.ChangeState(WriteOrigin.Gpu, enable: true, region.BaseAddress + page, pageBytes);
+            }
+
+            return false;
+        });
+        return conflicts;
+    }
 
     // True when every page of the range has a region, so the range is under tracking.
     public bool HasRegion(ulong vaddr, ulong size)
@@ -141,6 +169,32 @@ public sealed class GuestPageTracker
         }
 
         return true;
+    }
+
+    // Hot pages stay writable and are copied whole at every sync, so a ring the CPU fills a
+    // little at a time would end up copied in full forever. Once a frame they lose their heat:
+    // the next sync copies them once more and protects them again, and only pages the CPU
+    // keeps rewriting within a frame turn hot again.
+    public void DecayCpuWriteHeat()
+    {
+        RejectUploadCallbackReentry();
+        for (var index = 0; index < _regions.Length; index++)
+        {
+            if (Volatile.Read(ref _regions[index]) is not { HasCpuWriteHeat: true } region)
+            {
+                continue;
+            }
+
+            region.Lock.Enter();
+            try
+            {
+                region.ResetCpuWriteHeat(region.BaseAddress, TrackerLayout.BlockBytes);
+            }
+            finally
+            {
+                region.Lock.Exit();
+            }
+        }
     }
 
     public void UntrackMemory(ulong vaddr, ulong size)
@@ -242,50 +296,110 @@ public sealed class GuestPageTracker
         }
     }
 
-    // Region locks stay held across uploadFunc only for a written range, which turns GPU-dirty.
+    // Receives the CPU-dirty runs an upload copies, then performs the upload while the regions are held.
+    public interface IUploadRangeSink
+    {
+        void Range(ulong address, ulong size);
+
+        void Upload();
+    }
+
+    private struct DelegateUploadSink(Action<ulong, ulong> rangeFunc, Action uploadFunc) : IUploadRangeSink
+    {
+        public readonly void Range(ulong address, ulong size) => rangeFunc(address, size);
+
+        public readonly void Upload() => uploadFunc();
+    }
+
+    // Forwards a region's upload runs to the sink and remembers the runs it cleared, for rollback.
+    private struct RegionUploadVisitor<TSink>(TSink sink, List<(TrackedRegion Region, ulong Address, ulong Size)> cleared)
+        : TrackedRegion.ICpuUploadVisitor
+        where TSink : struct, IUploadRangeSink
+    {
+        public TSink Sink = sink;
+
+        public readonly void Cleared(TrackedRegion region, ulong address, ulong size) => cleared.Add((region, address, size));
+
+        public void Upload(ulong address, ulong size) => Sink.Range(address, size);
+    }
+
+    // Uploads run on every bound buffer of every draw, so the bookkeeping lists are reused per thread.
+    [ThreadStatic]
+    private static List<TrackedRegion>? _scratchHeld;
+
+    [ThreadStatic]
+    private static List<(TrackedRegion Region, ulong Address, ulong Size)>? _scratchCleared;
+
     public void ForEachUploadRange(ulong vaddr, ulong size, bool isWritten, Action<ulong, ulong> rangeFunc, Action uploadFunc,
         bool preserveCpuWriteHotPages = true)
+    {
+        var sink = new DelegateUploadSink(rangeFunc, uploadFunc);
+        ForEachUploadRange(vaddr, size, isWritten, ref sink, preserveCpuWriteHotPages);
+    }
+
+    // Region locks stay held across the upload only for a written range, which turns GPU-dirty.
+    public void ForEachUploadRange<TSink>(ulong vaddr, ulong size, bool isWritten, ref TSink sink, bool preserveCpuWriteHotPages = true,
+        bool skipCpuWriteHotPages = false)
+        where TSink : struct, IUploadRangeSink
     {
         RejectUploadCallbackReentry();
         VisitRegions(vaddr, size, create: true, static (_, _, _) => false);
         var previousOwner = _uploadOwner;
         _uploadOwner = this;
-        var held = new List<TrackedRegion>();
-        var cleared = new List<(TrackedRegion Region, ulong Address, ulong Size)>();
+        // Another tracker may upload from this callback. It needs its own rollback
+        // state; the reentry guard only rejects reentry into this tracker.
+        var held = previousOwner is null
+            ? _scratchHeld ??= new List<TrackedRegion>()
+            : new List<TrackedRegion>();
+        var cleared = previousOwner is null
+            ? _scratchCleared ??= new List<(TrackedRegion Region, ulong Address, ulong Size)>()
+            : new List<(TrackedRegion Region, ulong Address, ulong Size)>();
+        held.Clear();
+        cleared.Clear();
         try
         {
             using (GpuMemoryAccessProfile.Measure(GpuMemoryAccessProfile.Operation.UploadTracking, size))
             {
-                VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
+                var visitor = new RegionUploadVisitor<TSink>(sink, cleared);
+                var preserveHotPages = !isWritten && preserveCpuWriteHotPages;
+                for (var (index, offset, remaining) = (vaddr / BlockBytes, vaddr % BlockBytes, size); remaining != 0; index++, offset = 0)
                 {
+                    var bytes = Math.Min(BlockBytes - offset, remaining);
+                    remaining -= bytes;
+                    if (Volatile.Read(ref _regions[index]) is not { } region)
+                    {
+                        continue;
+                    }
+
                     region.Lock.Enter();
                     held.Add(region);
-                    var address = region.BaseAddress + offset;
-                    region.ForEachCpuUploadRange(
-                        preserveHotPages: !isWritten && preserveCpuWriteHotPages,
-                        address,
-                        bytes,
-                        (runAddress, runSize) => cleared.Add((region, runAddress, runSize)),
-                        rangeFunc);
+                    region.ForEachCpuUploadRange(preserveHotPages, region.BaseAddress + offset, bytes, ref visitor,
+                        skipHotPages: !isWritten && skipCpuWriteHotPages);
                     if (!isWritten)
                     {
                         region.Lock.Exit();
-                        held.Remove(region);
+                        held.RemoveAt(held.Count - 1);
                     }
+                }
 
-                    return false;
-                });
+                sink = visitor.Sink;
             }
-            uploadFunc();
+            sink.Upload();
             if (isWritten)
             {
-                VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
+                for (var (index, offset, remaining) = (vaddr / BlockBytes, vaddr % BlockBytes, size); remaining != 0; index++, offset = 0)
                 {
+                    var bytes = Math.Min(BlockBytes - offset, remaining);
+                    remaining -= bytes;
+                    if (Volatile.Read(ref _regions[index]) is not { } region)
+                    {
+                        continue;
+                    }
+
                     region.ChangeState(WriteOrigin.Gpu, enable: true, region.BaseAddress + offset, bytes);
                     region.Lock.Exit();
                     held.Remove(region);
-                    return false;
-                });
+                }
             }
         }
         catch
@@ -333,6 +447,8 @@ public sealed class GuestPageTracker
                 region.Lock.Exit();
             }
 
+            held.Clear();
+            cleared.Clear();
             _uploadOwner = previousOwner;
         }
     }
@@ -368,22 +484,25 @@ public sealed class GuestPageTracker
         }
     }
 
-    private void Mark(ulong vaddr, ulong size, WriteOrigin side, bool enable, bool create)
+    private bool Mark(ulong vaddr, ulong size, WriteOrigin side, bool enable, bool create)
     {
         RejectUploadCallbackReentry();
+        var changed = false;
         VisitRegions(vaddr, size, create, (region, offset, bytes) =>
         {
             using var _ = region.Lock.Hold();
             if (side == WriteOrigin.Cpu && enable)
             {
-                region.MarkCpuWrite(region.BaseAddress + offset, bytes);
+                changed |= region.MarkCpuWrite(region.BaseAddress + offset, bytes);
             }
             else
             {
                 region.ChangeState(side, enable, region.BaseAddress + offset, bytes);
+                changed = true;
             }
             return false;
         });
+        return changed;
     }
 
     private void VisitDirtyRanges(ulong vaddr, ulong size, WriteOrigin side, bool clear, Action<ulong, ulong> visit) =>

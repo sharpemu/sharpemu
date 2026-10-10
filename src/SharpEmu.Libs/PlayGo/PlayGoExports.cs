@@ -19,6 +19,7 @@ public static class PlayGoExports
     private const int OrbisPlayGoErrorBadChunkId = unchecked((int)0x80B2000C);
     private const int OrbisPlayGoErrorNotSupportPlayGo = unchecked((int)0x80B2000E);
     private const int OrbisPlayGoErrorBadLocus = unchecked((int)0x80B20010);
+    private const int OrbisKernelErrorNoEntry = unchecked((int)0x80020002);
     private const int OrbisPlayGoErrorBadOptionalType = unchecked((int)0x80B20024);
     private const ulong PlayGoInitBufAddrOffset = 0;
     private const ulong PlayGoInitBufSizeOffset = 8;
@@ -254,8 +255,7 @@ public static class PlayGoExports
 
         for (uint i = 0; i < entriesToWrite; i++)
         {
-            var chunkId = chunkIds[i];
-            if (!ctx.TryWriteUInt16(outChunkIdList + (i * sizeof(ushort)), chunkId))
+            if (!ctx.TryWriteUInt16(outChunkIdList + (i * sizeof(ushort)), chunkIds[i]))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
@@ -566,8 +566,8 @@ public static class PlayGoExports
 
         TracePlayGo($"get_progress entries={numberOfEntries}");
         Span<byte> progress = stackalloc byte[sizeof(ulong) * 2];
-        BinaryPrimitives.WriteUInt64LittleEndian(progress, 0);
-        BinaryPrimitives.WriteUInt64LittleEndian(progress[sizeof(ulong)..], 0);
+        BinaryPrimitives.WriteUInt64LittleEndian(progress, 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(progress[sizeof(ulong)..], 1);
         return ctx.Memory.TryWrite(outProgress, progress)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -644,6 +644,32 @@ public static class PlayGoExports
         return ValidateChunkIds(ctx, chunkIds, numberOfEntries) is { } chunkError && chunkError != 0
             ? chunkError
             : (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "RHXYK0iDICM",
+        ExportName = "scePlayGoRequestNextChunk",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePlayGo")]
+    public static int PlayGoRequestNextChunk(CpuContext ctx)
+    {
+        var handle = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var outChunkId = ctx[CpuRegister.Rsi];
+
+        var validation = ValidateHandle(handle);
+        if (validation != 0)
+        {
+            return validation;
+        }
+
+        if (outChunkId == 0)
+        {
+            return OrbisPlayGoErrorBadPointer;
+        }
+
+        return ctx.TryWriteUInt16(outChunkId, 0)
+            ? OrbisKernelErrorNoEntry
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
     }
 
     [SysAbiExport(
@@ -763,7 +789,7 @@ public static class PlayGoExports
     {
         lock (_stateGate)
         {
-            return _metadata.ChunkIdKnowledge == PlayGoChunkIdKnowledge.Unknown ||
+            return _metadata.ChunkIdKnowledge != PlayGoChunkIdKnowledge.Authoritative ||
                 Array.BinarySearch(_metadata.ChunkIds, chunkId) >= 0;
         }
     }
@@ -778,46 +804,98 @@ public static class PlayGoExports
             return CreateBaseChunkMetadata(PlayGoChunkIdKnowledge.Authoritative);
         }
 
+        var playGoPgm = Path.Combine(app0Root, "cache_ps5", "playgo.pgm");
         var playGoDat = Path.Combine(app0Root, "sce_sys", "playgo-chunk.dat");
         var scenarioJson = Path.Combine(app0Root, "sce_sys", "playgo-scenario.json");
         var chunkDefsXml = Path.Combine(app0Root, "playgo-chunkdefs.xml");
 
-        var hasMetadata = File.Exists(playGoDat) || File.Exists(scenarioJson) || File.Exists(chunkDefsXml);
-        if (!hasMetadata)
+        var pgmChunkIds = LoadPlayGoPgmChunkIds(playGoPgm);
+        if (pgmChunkIds.Length > 0)
         {
-            // No PlayGo sidecar: derive the installed chunk set from the pak files
-            // actually present on disk. A locally dumped title has all of its data
-            // installed, and a package that splits content across chunks names them
-            // pakchunk<N>-<platform>.pak, so those N are exactly the chunks that
-            // exist. Reporting only chunk 0 told such a title its remaining content
-            // was missing: The Invincible (PPSA06426) ships pakchunk0..8 and spun
-            // forever re-querying scePlayGoGetLocus for a chunk that never became
-            // available. Available must stay true or scePlayGoOpen fails with
-            // NotSupportPlayGo (fatal PS5-component init failure for UE titles).
-            // Ids outside the discovered set still return BAD_CHUNK_ID, so
-            // title-side chunk enumeration still terminates.
-            var installedChunkIds = DiscoverInstalledChunkIds(app0Root);
-            TracePlayGo($"metadata_missing; fully-installed chunks=[{string.Join(',', installedChunkIds)}]");
-            return new PlayGoMetadata(
-                true,
-                installedChunkIds,
-                PlayGoChunkIdKnowledge.Authoritative);
+            TracePlayGo($"metadata_pgm chunks={pgmChunkIds.Length}");
+            return new PlayGoMetadata(true, pgmChunkIds, PlayGoChunkIdKnowledge.Assumed);
         }
 
         var chunkIds = LoadChunkIds(chunkDefsXml);
-        if (chunkIds.Length == 0)
+        if (chunkIds.Length > 0)
         {
-            TracePlayGo("metadata_has_no_chunk_definitions; installed chunk ids unknown");
+            TracePlayGo($"metadata_chunkdefs chunks=[{string.Join(',', chunkIds)}]");
+            return new PlayGoMetadata(true, chunkIds, PlayGoChunkIdKnowledge.Authoritative);
+        }
+
+        if (File.Exists(playGoDat) || File.Exists(scenarioJson) || File.Exists(chunkDefsXml))
+        {
+            // These sidecars are used by PS4 and by scenarios whose chunk map
+            // is not understood here. Their presence proves PlayGo is in use,
+            // but does not prove that the derived chunk list is complete. Keep
+            // the pre-pgm permissive behaviour so titles such as The Invincible
+            // do not receive BAD_CHUNK_ID for content they own.
+            TracePlayGo("metadata_present_but_unparsed; chunk_ids_unknown");
             return new PlayGoMetadata(
                 true,
                 Array.Empty<ushort>(),
                 PlayGoChunkIdKnowledge.Unknown);
         }
 
+        // Derive the installed chunk set from pak files when no usable chunk map
+        // was available. A locally dumped title has all of its data installed, and
+        // chunk 0 is always retained as the final single-chunk fallback.
+        var installedChunkIds = DiscoverInstalledChunkIds(app0Root);
+        TracePlayGo($"metadata_fallback; fully-installed chunks=[{string.Join(',', installedChunkIds)}]");
         return new PlayGoMetadata(
             true,
-            chunkIds,
+            installedChunkIds,
             PlayGoChunkIdKnowledge.Authoritative);
+    }
+
+    private static ushort[] LoadPlayGoPgmChunkIds(string playGoPgm)
+    {
+        Span<byte> header = stackalloc byte[0x14];
+        try
+        {
+            using var stream = File.OpenRead(playGoPgm);
+            if (stream.Length < header.Length)
+            {
+                return Array.Empty<ushort>();
+            }
+
+            stream.ReadExactly(header);
+        }
+        catch (FileNotFoundException)
+        {
+            return Array.Empty<ushort>();
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return Array.Empty<ushort>();
+        }
+        catch (IOException)
+        {
+            return Array.Empty<ushort>();
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Array.Empty<ushort>();
+        }
+
+        if (!header[..4].SequenceEqual("DMGP"u8))
+        {
+            return Array.Empty<ushort>();
+        }
+
+        var count = BinaryPrimitives.ReadUInt32LittleEndian(header[0x10..]);
+        if (count == 0 || count > (uint)ushort.MaxValue + 1u)
+        {
+            return Array.Empty<ushort>();
+        }
+
+        var chunkIds = new ushort[checked((int)count)];
+        for (var index = 0; index < chunkIds.Length; index++)
+        {
+            chunkIds[index] = (ushort)index;
+        }
+
+        return chunkIds;
     }
 
     private static PlayGoMetadata CreateBaseChunkMetadata(PlayGoChunkIdKnowledge knowledge) =>
@@ -952,6 +1030,9 @@ public static class PlayGoExports
     {
         Unknown,
         Authoritative,
+        // The list is derived rather than read (playgo.pgm gives only a count), so it is
+        // reported but an ID outside it is not rejected.
+        Assumed,
     }
 
     private sealed record PlayGoMetadata(

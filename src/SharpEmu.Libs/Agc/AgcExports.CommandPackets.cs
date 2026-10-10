@@ -841,7 +841,10 @@ public static partial class AgcExports
 
         var payloadDwords = Math.Max(((uint)marker.Length + 4) / 4, 1);
         var packetDwords = payloadDwords + 1;
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
+        // The returned pointer must name reserved packet storage. Returning an unreserved
+        // cursor aliases the next packet and also bypasses the buffer-full callback.
+        // Only a marker from a foreign DCB writer is skipped, with a null packet pointer.
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress, isMarker: true) ||
             !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItNop, RPushMarker)))
         {
             return ReturnPointer(ctx, 0);
@@ -884,7 +887,7 @@ public static partial class AgcExports
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         if (commandBufferAddress == 0 ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress) ||
+            !TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress, isMarker: true) ||
             !TryWriteUInt32(ctx, commandAddress, Pm4(2, ItNop, RPopMarker)) ||
             !TryWriteUInt32(ctx, commandAddress + 4, 0))
         {

@@ -28,6 +28,9 @@ internal interface IGuestGpuBackend
 
     // Compiles one permutation of a program over its resource plan and binding layout.
     bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error);
+    (IGuestCompiledShader Vertex, IGuestCompiledShader Control) CompileTessellationBridge(
+        SharpEmu.ShaderCompiler.Resources.BindingLayout layout, Gen5TessellationDomain domain) =>
+        throw new NotSupportedException($"The {BackendName} backend does not support merged tessellation.");
 
     /// <summary>Returns the backend's no-color-output fragment shader.</summary>
     IGuestCompiledShader GetDepthOnlyFragmentShader();

@@ -81,6 +81,9 @@ public sealed class ComputeRejectionPolicyTests
         var failure = Assert.Throws<SchedulerFatalException>(() => guest.Programs.TryGetProgram(
             source, PipelineTestGuest.ComputeOptions(1), false, ref cursor, out _, out _, out _));
         Assert.Contains("could not be materialized", failure.Message);
+        // The unreadable pointer is user data [0, 2], i.e. guest address 0x200000000.
+        Assert.Contains("detail=", failure.Message);
+        Assert.Contains("0x0000000200000000", failure.Message);
         Assert.Empty(guest.Compiler.Requests);
     }
 

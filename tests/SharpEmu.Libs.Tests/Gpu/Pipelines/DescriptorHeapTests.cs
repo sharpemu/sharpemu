@@ -88,6 +88,55 @@ public sealed unsafe class DescriptorHeapTests(HeadlessVulkanFixture fixture) : 
         vulkan.AssertNoValidationMessages();
     }
 
+    // Ordinary pools stay small; a set too large for one gets a pool sized for a few of its kind.
+    [Fact]
+    public void PoolCapacity_GrowsOnlyForSetsThatDoNotFit()
+    {
+        Assert.Equal(DescriptorHeap.PoolCapacity, DescriptorHeap.CapacityFor(new DescriptorSetDemand(SampledImages: 64)));
+        var large = DescriptorHeap.CapacityFor(new DescriptorSetDemand(SampledImages: 65536, Samplers: 2));
+        Assert.Equal(4u * 65536, large.SampledImages);
+        Assert.Equal(DescriptorHeap.PoolCapacity.StorageBuffers, large.StorageBuffers);
+        Assert.Equal(DescriptorHeap.PoolCapacity.Samplers, large.Samplers);
+    }
+
+    [Fact]
+    public void SetLargerThanAnOrdinaryPool_GetsALargerPool()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan))
+        {
+            return;
+        }
+
+        const uint samplers = 2000;
+        Assert.True(samplers > DescriptorHeap.PoolCapacity.Samplers);
+        using var fatal = new FatalScope();
+        using var harness = new ImageTestHarness(vulkan);
+        var layout = CreateSamplerLayout(harness, samplers);
+        DescriptorHeap? heap = null;
+        try
+        {
+            harness.Run(() =>
+            {
+                heap = new DescriptorHeap(harness.Device, harness.Scheduler);
+                Assert.Equal(DescriptorHeap.PoolCapacity, heap.CurrentCapacity);
+                Assert.Equal(3, Commit(heap, layout, 3, samplers).Count);
+                Assert.True(heap.CurrentCapacity.Samplers >= samplers);
+            });
+        }
+        finally
+        {
+            harness.Finish();
+            harness.Run(() =>
+            {
+                heap?.Dispose();
+                harness.Vk.DestroyDescriptorSetLayout(harness.Device.Device, layout, null);
+            });
+        }
+
+        vulkan.AssertNoValidationMessages();
+    }
+
     [Fact]
     public void RetiredPool_IsResetOnlyAfterItsTickCompletes()
     {

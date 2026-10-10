@@ -119,6 +119,16 @@ public readonly record struct Gen5ColorComponentMapping
     }
 }
 
+// SPI_SHADER_COL_FORMAT selects the representation carried by a compressed EXP.
+public enum Gen5PixelExportFormat : byte
+{
+    Float16 = 4,
+    Unorm16 = 5,
+    Snorm16 = 6,
+    Uint16 = 7,
+    Sint16 = 8,
+}
+
 public readonly record struct Gen5PixelOutputBinding(
     uint GuestSlot,
     uint HostLocation,
@@ -143,6 +153,12 @@ public readonly record struct Gen5PixelOutputBinding(
         get => _exportTarget ?? GuestSlot;
         init => _exportTarget = value;
     }
+
+    // The fragment output index: 1 is the second source of dual-source blending, which
+    // shares its location with the first and is not a render target.
+    public uint Index { get; init; }
+
+    public Gen5PixelExportFormat ExportFormat { get; init; } = Gen5PixelExportFormat.Float16;
 }
 
 public readonly record struct Gen5ComputeSystemRegisters(
@@ -255,7 +271,12 @@ public sealed record Gen5BufferMemoryControl(
     bool Glc,
     bool Slc,
     bool Typed = false,
-    uint TypedFormat = 0) : Gen5InstructionControl;
+    uint TypedFormat = 0,
+    bool PackedD16 = false,
+    uint FormatComponentCount = 0) : Gen5InstructionControl
+{
+    public uint ComponentCount => FormatComponentCount == 0 ? DwordCount : FormatComponentCount;
+}
 
 public sealed record Gen5ExportControl(
     uint Target,
@@ -355,6 +376,14 @@ public sealed record Gen5ShaderProgram(
     public uint PixelColorExportMasks => _pixelColorExportMasks;
 
     public uint ParameterExportMask => _parameterExportMask;
+
+    // Fused objects can put their continuation before the entry in guest memory.
+    // Control-flow PCs remain increasing; S_GETPC still uses the original guest PC.
+    public IReadOnlyDictionary<uint, ulong>? InstructionAddressOffsets { get; init; }
+    public uint? FusedContinuationPc { get; init; }
+
+    public ulong InstructionAddressOffset(uint pc) =>
+        InstructionAddressOffsets is { } offsets && offsets.TryGetValue(pc, out var offset) ? offset : Instructions.FirstOrDefault(instruction => instruction.Pc == pc)?.ProgramOffset ?? pc;
 
     private static uint ComputePixelColorExportMasks(
         IReadOnlyList<Gen5ShaderInstruction> instructions)

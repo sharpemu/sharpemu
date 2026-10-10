@@ -18,6 +18,31 @@ public sealed class GuestBufferRegistryTests
     }
 
     [Fact]
+    public void ResidentBytes_IncludeRetiredAndReplacementUntilEachCompletion()
+    {
+        using var registry = new GuestBufferRegistry<TestBuffer>(16, 4096);
+        var first = registry.AllocateBuffer(new TestBuffer(), 32, 32);
+        registry.RegisterBuffer(first, 0);
+        registry.BeginRetirement(first);
+        Assert.Equal(0UL, registry.RegisteredBytes);
+        Assert.Equal(32UL, registry.RetiredBytes);
+        Assert.Equal(32UL, registry.ResidentBytes);
+        var second = registry.AllocateBuffer(new TestBuffer(), 32, 64);
+        registry.RegisterBuffer(second, 1);
+        Assert.Equal(96UL, registry.ResidentBytes);
+        Assert.True(registry.CompleteRetirement(first));
+        Assert.Equal(64UL, registry.ResidentBytes);
+        Assert.Equal(0UL, registry.RetiredBytes);
+        Assert.False(registry.CompleteRetirement(first));
+        Assert.Equal(64UL, registry.ResidentBytes);
+        registry.BeginRetirement(second);
+        Assert.Equal(64UL, registry.RetiredBytes);
+        registry.Dispose();
+        Assert.Equal(0UL, registry.ResidentBytes);
+        Assert.Equal(0UL, registry.RetiredBytes);
+    }
+
+    [Fact]
     public void LifetimeSeparatesLookupRemovalFromResourceRelease()
     {
         using var registry = new GuestBufferRegistry<TestBuffer>(16, 4096);

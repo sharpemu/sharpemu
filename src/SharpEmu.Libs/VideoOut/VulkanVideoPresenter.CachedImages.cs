@@ -115,6 +115,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public Sampler Sampler;
         public GuestSampler SamplerState;
         public bool IsStorage;
+        public bool IsResident;
         public bool IsHostMovie;
         public int HostMoviePlane = -1;
         public long HostMovieFrameSerial;
@@ -185,6 +186,10 @@ internal static unsafe partial class VulkanVideoPresenter
             _imageCache.GetImage(imageIdentifier).Binding.IsTarget = true;
             TrackImageBinding(imageIdentifier);
         }
+
+        public void DemoteRenderScale(ResourceSlotIdentifier imageIdentifier) => _imageCache.DemoteRenderScale(imageIdentifier);
+
+        public float GetRenderScale(ResourceSlotIdentifier imageIdentifier) => _imageCache.GetImage(imageIdentifier).RenderScale;
 
         private void ResetImageBindings()
         {
@@ -380,34 +385,18 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        // The color a DCC clear code decompresses to: the register clear (0x20) needs the
+        // target's clear words, the fixed codes need a format that encodes them.
         private static bool TryDecodeDccClear(byte code, bool registerClearSupported, bool fixedClearSupported, ClearColorValue registerClear,
             out ClearColorValue clearValue)
         {
-            clearValue = default;
-            switch (code)
+            if (code == 0x20)
             {
-                case 0x00:
-                    return true;
-                case 0x20:
-                    clearValue = registerClear;
-                    return registerClearSupported;
-                case 0x40:
-                    clearValue.Float32_3 = 1f;
-                    return fixedClearSupported;
-                case 0x80:
-                    clearValue.Float32_0 = 1f;
-                    clearValue.Float32_1 = 1f;
-                    clearValue.Float32_2 = 1f;
-                    return fixedClearSupported;
-                case 0xc0:
-                    clearValue.Float32_0 = 1f;
-                    clearValue.Float32_1 = 1f;
-                    clearValue.Float32_2 = 1f;
-                    clearValue.Float32_3 = 1f;
-                    return fixedClearSupported;
-                default:
-                    return false;
+                clearValue = registerClear;
+                return registerClearSupported;
             }
+
+            return ImageRequestBuilders.TryFixedDccClearValue(code, out clearValue) && (code == 0x00 || fixedClearSupported);
         }
 
         private DepthAttachment? DiscoverDepthTarget(GuestDepthTarget target)
@@ -579,6 +568,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Request = request,
                 MipLevel = texture.MipLevel,
                 IsStorage = texture.IsStorage,
+                IsResident = true,
                 SamplerState = texture.Sampler,
                 DestinationSelect = texture.DstSelect,
                 Width = texture.Width,
@@ -650,12 +640,19 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private CachedImage AcquireStencilStorage(TextureResource binding, CachedImage attachment, bool writeBack = true)
         {
+            // The view can be smaller than the attachment (a dynamic-resolution pass writes only
+            // the region it renders); the storage image then has the view's size.
             var description = binding.Request.Description;
             if (description.Data.Address != attachment.Description.Stencil.Address || description.Data.Size > attachment.Description.Stencil.Size ||
-                description.Extent.Width != attachment.Backing.Extent.Width || description.Extent.Height != attachment.Backing.Extent.Height ||
+                description.Extent.Width > attachment.Backing.Extent.Width || description.Extent.Height > attachment.Backing.Extent.Height ||
                 description.Resources.Levels != 1 || description.Resources.Layers != attachment.Backing.Layers)
             {
-                throw SubmissionScheduler.Fatal("The stencil storage request does not cover its attachment's stencil layout.");
+                throw SubmissionScheduler.Fatal(
+                    $"The stencil storage request does not fit its attachment's stencil layout: " +
+                    $"request=0x{description.Data.Address:X}+0x{description.Data.Size:X} {description.Extent.Width}x{description.Extent.Height} " +
+                    $"levels={description.Resources.Levels} layers={description.Resources.Layers} " +
+                    $"stencil=0x{attachment.Description.Stencil.Address:X}+0x{attachment.Description.Stencil.Size:X} " +
+                    $"attachment={attachment.Backing.Extent.Width}x{attachment.Backing.Extent.Height} layers={attachment.Backing.Layers}.");
             }
 
             if (writeBack && _hasBoundDepth && _boundDepth.Image == binding.ImageIdentifier &&
@@ -668,6 +665,13 @@ internal static unsafe partial class VulkanVideoPresenter
             var stencilImages = preparation.StencilStorageImages ??= new();
             if (stencilImages.TryGetValue(attachment, out var storage))
             {
+                if (storage.Backing.Extent.Width != description.Extent.Width || storage.Backing.Extent.Height != description.Extent.Height)
+                {
+                    throw SubmissionScheduler.Fatal(
+                        $"Two stencil storage views of one attachment in a draw differ in size: " +
+                        $"{storage.Backing.Extent.Width}x{storage.Backing.Extent.Height} and {description.Extent.Width}x{description.Extent.Height}.");
+                }
+
                 if (writeBack)
                 {
                     preparation.StencilStorageWriteBackImages ??= new();
@@ -689,7 +693,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _imageCache.MarkGpuWritten(binding.ImageIdentifier);
             }
 
-            storage = attachment.CreateStencilStorageImage();
+            storage = _imageCache.AcquireStencilStorageImage(binding.ImageIdentifier, description.Extent.Width, description.Extent.Height);
             stencilImages.Add(attachment, storage);
             storage.Binding.ShaderWrite = writeBack;
             if (writeBack)
@@ -1161,6 +1165,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 ResetImageBindings();
             }
         }
+
+        // Retired flip snapshots kept for the next flips. Every flip copies the display surface
+        // into a snapshot of the same size and format; creating and freeing a 4K image per flip
+        // was hundreds of megabytes of driver allocations a second.
+        private const int MaxRecycledFlipSnapshots = 4;
+        private readonly List<GuestImageResource> _recycledFlipSnapshots = [];
 
         private void DestroyGuestImage(GuestImageResource resource)
         {

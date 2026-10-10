@@ -157,4 +157,22 @@ public sealed class TextureTransferLayoutTests
         Assert.Throws<SchedulerFatalException>(() => TextureTransferLayout.SurfaceFormat(GuestPixelFormat.Invalid));
         Assert.Contains(fatal.Messages, message => message.Contains("has no host format"));
     }
+
+    [Fact]
+    public void CopyFootprint_EndsAtTheLastTexelOfThePaddedRows()
+    {
+        var region = new BufferImageCopy
+        {
+            BufferOffset = 16,
+            BufferRowLength = 8,
+            ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+            ImageExtent = new Extent3D(3, 2, 1),
+        };
+        // Row 0 starts at 16, row 1 at 16 + 8 * 4; its third texel ends at 16 + 44.
+        Assert.Equal(60UL, TextureTransferLayout.CopyFootprint([region], new TileElementLayout(4, 1, 1)));
+
+        var compressed = region with { BufferOffset = 0, BufferRowLength = 0, ImageExtent = new Extent3D(8, 8, 1) };
+        // An 8x8 BC block image is two block rows of two 8-byte blocks.
+        Assert.Equal(32UL, TextureTransferLayout.CopyFootprint([compressed], new TileElementLayout(8, 4, 4)));
+    }
 }

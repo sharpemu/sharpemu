@@ -333,6 +333,22 @@ public sealed class CommandStreamQueueTests
     }
 
     [Fact]
+    public void DrainForShutdown_DropsPendingWorkOnceTheGuestMemoryIsGone()
+    {
+        var (host, queue) = NewQueue();
+        Enqueue(host, queue, Graphics, 1, CreateInstanceCountPacket(9));
+        EnqueueCompute(host, queue, 0x20, Compute, 2, CreateInstanceCountPacket(5));
+        queue.StopAccepting();
+
+        var outcome = queue.DrainForShutdown(cancelBlockedOnNoProgress: true, abandon: () => true);
+
+        Assert.Equal(IdleOutcome.Cancelled, outcome);
+        Assert.NotEqual(9u, queue.GetInterpreter(0).InstanceCount);
+        Assert.False(queue.HasPending);
+        Assert.Equal(IdleOutcome.Cancelled, queue.WaitForIdle());
+    }
+
+    [Fact]
     public void DrainForShutdown_CancelsOnlyHeadsThatMakeNoProgressAndTheOutcomeSticks()
     {
         var (host, queue) = NewQueue();

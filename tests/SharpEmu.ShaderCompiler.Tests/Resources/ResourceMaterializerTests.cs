@@ -63,7 +63,8 @@ public sealed class ResourceMaterializerTests
         var memory = ResourceTrackerTests.LinearMemory();
         var first = ResourceTrackerTests.ImageDescriptor();
         var second = first.ToArray();
-        second[3] = (second[3] & 0x0FFFFFFF) | (10u << 28);
+        // A converted format cannot share a case with a directly sampled one.
+        second[1] = (second[1] & ~(0x1FFu << 20)) | (GuestImageFormat.Format11x2x10Uint << 20);
         ResourceTrackerTests.WriteImage(memory, 0x2000, first);
         ResourceTrackerTests.WriteImage(memory, 0x2020, second);
         memory.At(0x1000 + 36) = 1;
@@ -93,7 +94,7 @@ public sealed class ResourceMaterializerTests
             Assert.Equal(first, failure.TableDescriptors[0]);
             Assert.Equal(second, failure.TableDescriptors[1]);
             Assert.Equal(second, failure.ImageDescriptors[1]);
-            Assert.NotEqual(failure.ImageSpecializations[0].Dimension, failure.ImageSpecializations[1].Dimension);
+            Assert.NotEqual(failure.ImageSpecializations[0].ConversionFormat, failure.ImageSpecializations[1].ConversionFormat);
             Assert.Equal(userData, failure.UserData);
             var diagnostic = Assert.IsType<IndirectSelectorDiagnostic>(failure.SelectorDiagnostic);
             Assert.Equal("full_domain_no_proof", diagnostic.SelectionMode);
@@ -125,7 +126,8 @@ public sealed class ResourceMaterializerTests
         memory.At(0x1000 + 36) = 1;
         var first = ResourceTrackerTests.ImageDescriptor();
         var second = first.ToArray();
-        second[3] = (second[3] & 0x0FFFFFFF) | (10u << 28);
+        // A converted format cannot share a case with a directly sampled one.
+        second[1] = (second[1] & ~(0x1FFu << 20)) | (GuestImageFormat.Format11x2x10Uint << 20);
         ResourceTrackerTests.WriteImage(memory, 0x2000, first);
         ResourceTrackerTests.WriteImage(memory, 0x2020, second);
         var addresses = new List<ulong>();
@@ -147,6 +149,109 @@ public sealed class ResourceMaterializerTests
         Assert.Equal(2, reads.Length);
         Assert.Equal(0u, Assert.Single(reads, read => read.ComponentIndex == 0).Value);
         Assert.Equal(1u, Assert.Single(reads, read => read.ComponentIndex == 1).Value);
+    }
+
+    // A 116-byte-stride material table with a selector offset of 4: the exhaustive probe step is
+    // 4 bytes, so a table of 2260+ records exceeds the probe cap. Keys 1 and 2 sit at record
+    // aligned offsets (4 + 116 * 3 and 4 + 116 * 2000); key 3 is a poison value at a misaligned
+    // offset (4 + 116 * 10 + 8) that only the exhaustive enumeration can reach.
+    private const uint AlignedStride = 116;
+    private const uint AlignedKeyOneOffset = 4 + AlignedStride * 3;
+    private const uint AlignedKeyTwoOffset = 4 + AlignedStride * 2000;
+    private const uint MisalignedKeyThreeOffset = 4 + AlignedStride * 10 + 8;
+
+    private static (ShaderResourcePlan Plan, ResourceRuntimeInputs Inputs, uint[][] Heap) RecordAlignedTable(uint records, bool incompatibleKeyTwo = false)
+    {
+        var plan = Extract(ResourceTrackerTests.IndirectImageProgram(false, selectorStride: AlignedStride));
+        var selector = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!;
+        Assert.Equal(AlignedStride, selector.SelectorStride);
+        Assert.Equal(4u, selector.SelectorOffset);
+
+        const ulong heapBase = 0x60000;
+        uint[] userData = [0x1000, AlignedStride << 16, records, 0, (uint)heapBase, 16 << 16, 16, 0, 7];
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[0x60000 / 4], RequireAlignment = true };
+        var heap = new uint[4][];
+        for (var key = 0; key < heap.Length; key++)
+        {
+            heap[key] = ResourceTrackerTests.ImageDescriptor();
+            heap[key][0] += (uint)key;
+        }
+
+        if (incompatibleKeyTwo)
+        {
+            // A converted format cannot share a case with a directly sampled one.
+            heap[2][1] = (heap[2][1] & ~(0x1FFu << 20)) | (GuestImageFormat.Format11x2x10Uint << 20);
+        }
+
+        for (var key = 0; key < heap.Length; key++)
+        {
+            ResourceTrackerTests.WriteImage(memory, heapBase + (ulong)key * 32, heap[key]);
+        }
+
+        memory.At(0x1000 + AlignedKeyOneOffset) = 1;
+        memory.At(0x1000 + AlignedKeyTwoOffset) = 2;
+        memory.At(0x1000 + MisalignedKeyThreeOffset) = 3;
+        return (plan, Inputs(userData, readCleanMemory: memory.Read), heap);
+    }
+
+    // 2259 records keep the exhaustive probe count under the cap (65512 offsets, step 4): the
+    // misaligned key is found as before. 2260 records exceed it (65541) and probe only the
+    // record-aligned offsets instead of failing.
+    [Theory]
+    [InlineData(2259u, true)]
+    [InlineData(2260u, false)]
+    public void UnboundedSelectorProbesFallBackToRecordAlignedOffsetsOnlyPastTheCap(uint records, bool exhaustive)
+    {
+        var (plan, inputs, heap) = RecordAlignedTable(records);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.Equal(exhaustive ? 4 : 3, snapshot.Images.Length);
+        for (var key = 0; key < 3; key++)
+        {
+            Assert.Contains(snapshot.Images, image => image.SequenceEqual(heap[key]));
+        }
+
+        Assert.Equal(exhaustive, snapshot.Images.Any(image => image.SequenceEqual(heap[3])));
+    }
+
+    [Theory]
+    [InlineData(2259u, false)]
+    [InlineData(2260u, true)]
+    public void RecordAlignedFallbackReportsTheProbedOffsets(uint records, bool fallback)
+    {
+        var (plan, inputs, _) = RecordAlignedTable(records, incompatibleKeyTwo: true);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var captures = new List<IndirectImageFailure>();
+
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization,
+            out var failureKind, captures.Add));
+        Assert.Equal(ResourceMaterializationFailure.IncompatibleImageCandidates, failureKind);
+        var diagnostic = Assert.IsType<IndirectSelectorDiagnostic>(Assert.Single(captures).SelectorDiagnostic);
+        Assert.Equal(fallback ? "record_aligned_fallback" : "full_domain_no_proof", diagnostic.SelectionMode);
+        SelectorKeyProbe[] expected = fallback ?
+            [new(AlignedKeyOneOffset, 1), new(AlignedKeyTwoOffset, 2)] :
+            [new(AlignedKeyOneOffset, 1), new(MisalignedKeyThreeOffset, 3), new(AlignedKeyTwoOffset, 2)];
+        Assert.Equal(expected, diagnostic.KeyProbes);
+    }
+
+    // 70000 records leave more than the cap even among the record-aligned offsets.
+    [Fact]
+    public void UnboundedSelectorProbesStillFailWhenTheAlignedOffsetsExceedTheCap()
+    {
+        var (plan, inputs, _) = RecordAlignedTable(70000);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var previousSnapshot = snapshot;
+        var previousSpecialization = specialization;
+
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out var failureKind));
+        Assert.Equal(ResourceMaterializationFailure.Other, failureKind);
+        Assert.Contains("unbounded selector probes exceed 65536", ResourceMaterializer.LastFailureDetail);
+        Assert.Same(previousSnapshot, snapshot);
+        Assert.Same(previousSpecialization, specialization);
     }
 
     private static IEnumerable<Gen5ShaderInstruction> ImageWords(ref uint pc, uint register, uint address, uint format)

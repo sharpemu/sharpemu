@@ -14,6 +14,12 @@ public static class ResourceMaterializer
     private const ulong AddressMask = 0x0000_FFFF_FFFF_FFFFul;
     private const ulong MaxIndirectImageProbes = 65536;
 
+    // Why the last Materialize call on this thread returned false, for the host's fatal.
+    [ThreadStatic]
+    private static string? _lastFailureDetail;
+
+    public static string? LastFailureDetail => _lastFailureDetail;
+
     // Written to standard error like every specialization refusal; the host turns it
     // into its fatal.
     public static Action<string> SpecializationFailed { get; set; } = message => Console.Error.WriteLine($"shader resource specialization failed: {message}");
@@ -69,6 +75,7 @@ public static class ResourceMaterializer
         Action<IndirectImageFailure>? captureIndirectImageFailure = null)
     {
         using var totalProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Total);
+        _lastFailureDetail = null;
         if (!MaterializeSnapshot(plan, inputs, captureIndirectImageFailure is not null, out var materialized, out failure))
         {
             return false;
@@ -127,15 +134,29 @@ public static class ResourceMaterializer
         snapshot = new MaterializedSnapshot();
         if (plan.RequiresSpecializationMemory && inputs.ReadCleanMemory is null)
         {
-            return false;
+            return Detail("the plan reads guest memory for specialization but no clean-memory reader is available");
         }
 
         if (!RuntimeValueEvaluator.EvaluateSources(plan, plan.MaterializationSources, inputs, plan.CleanFlatSlots,
             evaluateTable: true, out var values, out var table, out var activeSources,
             additionalTableWords: checked(plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount)))
         {
-            SpecializationFailed(DiagnoseSnapshotEvaluationFailure(plan, inputs, activeSources));
+            var diagnosis = DiagnoseSnapshotEvaluationFailure(plan, inputs, activeSources);
+            _lastFailureDetail = diagnosis;
+            SpecializationFailed(diagnosis);
             return false;
+        }
+
+        foreach (var source in plan.DescriptorSources)
+        {
+            if (source.ZeroExtentBufferSource is not { } bufferSource) continue;
+            if (!RuntimeValueEvaluator.EvaluateSources(plan, [bufferSource], inputs.WithReader(inputs.ReadCleanMemory), [],
+                    evaluateTable: false, out var descriptors, out _) ||
+                descriptors.Count != 1 || descriptors[0].DwordCount != 4 || ScalarBufferSize(descriptors[0].Dwords) != 0)
+            {
+                SpecializationFailed("a dynamically loaded descriptor requires an empty source buffer");
+                return false;
+            }
         }
 
         var cursor = 0;
@@ -158,10 +179,11 @@ public static class ResourceMaterializer
                 var cleanInputs = inputs.WithReader(inputs.ReadCleanMemory);
                 if (indirect.DirectCandidates is { } directCandidates)
                 {
-                    if (!RuntimeValueEvaluator.EvaluateSources(plan, directCandidates.Select(candidate => candidate.Source).ToArray(),
+                    var candidateSources = directCandidates.Select(candidate => candidate.Source).ToArray();
+                    if (!RuntimeValueEvaluator.EvaluateSources(plan, candidateSources,
                         cleanInputs, [], evaluateTable: false, out var descriptors, out _))
                     {
-                        return false;
+                        return Detail($"image {imageIndex} direct candidates: " + DiagnoseSources(plan, cleanInputs, candidateSources));
                     }
                     var directTable = new IndirectImageTable { Resource = (uint)imageIndex };
                     for (var candidateIndex = 0; candidateIndex < descriptors.Count; candidateIndex++)
@@ -186,7 +208,7 @@ public static class ResourceMaterializer
                 {
                     if (!RuntimeValueEvaluator.EvaluateSources(plan, [indirect.HeapSource], cleanInputs, [], evaluateTable: false,
                         out var waveSources, out _))
-                        return false;
+                        return Detail($"image {imageIndex} wave-indexed heap source: " + DiagnoseSources(plan, cleanInputs, [indirect.HeapSource]));
                     if (!MaterializeWaveIndexedImage(indirect, waveIndexed, waveSources[0], image, image.R128, inputs, out var waveTable, out failure))
                         return false;
                     snapshot.Images[imageIndex] = waveTable.Descriptors[(int)waveTable.Candidates[0]].Dwords;
@@ -201,7 +223,7 @@ public static class ResourceMaterializer
                 {
                     if (!RuntimeValueEvaluator.EvaluateSources(plan, [indirect.HeapSource], cleanInputs, [], evaluateTable: false,
                         out var denseSources, out _))
-                        return false;
+                        return Detail($"image {imageIndex} dense heap source: " + DiagnoseSources(plan, cleanInputs, [indirect.HeapSource]));
                     if (!MaterializeDenseIndirectImage(indirect, denseSources[0], image, image.R128, inputs, out var denseTable, out failure))
                         return false;
                     snapshot.Images[imageIndex] = denseTable.Descriptors[(int)denseTable.Candidates[0]].Dwords;
@@ -214,7 +236,8 @@ public static class ResourceMaterializer
                 }
                 if (!RuntimeValueEvaluator.EvaluateSources(plan, [indirect.MaterialSource, indirect.HeapSource], cleanInputs, [], evaluateTable: false, out var tables, out _))
                 {
-                    return false;
+                    return Detail($"image {imageIndex} material/heap sources: " +
+                        DiagnoseSources(plan, cleanInputs, [indirect.MaterialSource, indirect.HeapSource]));
                 }
 
                 if (!MaterializeIndirectImage(plan, indirect, tables[0], tables[1], image, inputs,
@@ -244,22 +267,38 @@ public static class ResourceMaterializer
 
         snapshot.Samplers = new uint[plan.Info.Samplers.Count][];
         for (var index = 0; index < snapshot.Samplers.Length; index++)
-            snapshot.Samplers[index] = values[cursor++].Dwords;
+        {
+            var samplerSource = plan.DescriptorSources[(int)plan.Info.Samplers[index].Source];
+            var samplerWords = values[cursor++];
+            if (samplerSource.PointerTable is { } pointerTable)
+            {
+                if (!MaterializePointerTableSampler(pointerTable, samplerWords, inputs, out var sampler))
+                    return _lastFailureDetail is not null ? false : Detail($"sampler {index} pointer table failed");
+                snapshot.Samplers[index] = sampler;
+                continue;
+            }
+
+            snapshot.Samplers[index] = samplerWords.Dwords;
+        }
 
         // Bounded runtime V# tables: the whole table is read and validated before it is
         // published, so a single unreadable candidate leaves the previous snapshot intact.
         foreach (var candidatePlan in plan.BufferCandidateTables)
         {
-            if (candidatePlan.SourceSrtResource == DescriptorConstants.NoIndex ||
-                !RuntimeValueEvaluator.EvaluateSources(plan, [candidatePlan.SourceSrtResource], inputs, [], evaluateTable: false,
+            if (candidatePlan.SourceSrtResource == DescriptorConstants.NoIndex)
+            {
+                return Detail("buffer candidate table has no SRT source resource");
+            }
+
+            if (!RuntimeValueEvaluator.EvaluateSources(plan, [candidatePlan.SourceSrtResource], inputs, [], evaluateTable: false,
                     out var srtSources, out _) || srtSources.Count == 0)
             {
-                return false;
+                return Detail("buffer candidate table SRT source: " + DiagnoseSources(plan, inputs, [candidatePlan.SourceSrtResource]));
             }
 
             if (!MaterializeBufferCandidateTable(plan, candidatePlan, srtSources[0], inputs, out var candidateTable))
             {
-                return false;
+                return _lastFailureDetail is not null ? false : Detail("buffer candidate table could not be materialized");
             }
 
             snapshot.BufferCandidateTables.Add(candidateTable);
@@ -283,7 +322,7 @@ public static class ResourceMaterializer
         result = new BufferCandidateTable { MemoryIndex = table.MemoryIndices.Count != 0 ? table.MemoryIndices[0] : -1 };
         if (srt.DwordCount != 4)
         {
-            return false;
+            return Detail($"buffer candidate table SRT has {srt.DwordCount} dwords, expected 4: {Words(srt.Dwords)}");
         }
 
         int count;
@@ -295,20 +334,25 @@ public static class ResourceMaterializer
         {
             if (table.Limit is null)
             {
-                return false;
+                return Detail("buffer candidate table is not statically bounded and has no limit expression");
             }
 
             using var scratch = RuntimeEvaluationScratch.Rent();
             var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs);
-            if (!evaluator.Evaluate(table.Limit, out var limit) || !table.TryResolveCount(limit, out count))
+            if (!evaluator.Evaluate(table.Limit, out var limit))
             {
-                return false;
+                return Detail($"buffer candidate table limit cannot be evaluated: {DescribeEvaluationValue(plan, inputs, evaluator, table.Limit)}");
+            }
+
+            if (!table.TryResolveCount(limit, out count))
+            {
+                return Detail($"buffer candidate table limit {limit} does not resolve to a count (cap={table.Cap})");
             }
         }
 
         if (count <= 0 || count > table.Cap)
         {
-            return false;
+            return Detail($"buffer candidate table count {count} is outside 1..{table.Cap}");
         }
 
         var keyToCandidate = new Dictionary<uint, uint>();
@@ -320,7 +364,7 @@ public static class ResourceMaterializer
             {
                 if (!ReadScalarBufferWord(srt.Dwords, offset, dword * sizeof(uint), inputs, out words[dword]))
                 {
-                    return false;
+                    return Detail($"buffer candidate {index} dword {dword} (offset {Hex(offset)}): " + DescribeScalarBufferRead(srt.Dwords, offset, dword * sizeof(uint), inputs));
                 }
             }
 
@@ -337,7 +381,8 @@ public static class ResourceMaterializer
                 // run time; reject precisely instead of guessing.
                 if (!result.Descriptors[(int)existing].SameAs(descriptor))
                 {
-                    return false;
+                    return Detail($"buffer candidates {existing} and {index} share probe key 0x{words[0]:X8} but differ: " +
+                        $"{Words(result.Descriptors[(int)existing].Dwords)} vs {Words(words)}");
                 }
 
                 continue;
@@ -486,6 +531,21 @@ public static class ResourceMaterializer
         }
     }
 
+    private static readonly HashSet<(uint Pc, uint Stride)> ReportedRecordAlignedFallbacks = new();
+
+    // Once per image and material stride, so a table probed every draw does not flood the log.
+    private static void ReportRecordAlignedFallback(uint pc, uint stride, ulong exhaustiveCount, ulong alignedCount)
+    {
+        lock (ReportedRecordAlignedFallbacks)
+        {
+            if (ReportedRecordAlignedFallbacks.Add((pc, stride)))
+            {
+                Console.Error.WriteLine($"[GPU][WARN] indirect image {Hex(pc)}: {exhaustiveCount} unbounded selector probes exceed {MaxIndirectImageProbes}; " +
+                    $"probing the {alignedCount} record-aligned offsets (selectors assumed below 2^32/stride)");
+            }
+        }
+    }
+
     private static bool NullImageDescriptor(ReadOnlySpan<uint> descriptor) =>
         descriptor[0] == 0 && (descriptor[1] & 0xFF) == 0;
 
@@ -493,7 +553,8 @@ public static class ResourceMaterializer
     {
         ReadOnlySpan<uint> reserved =
         [
-            0x00000000u, 0x20000000u, 0xf0003000u, 0x00000000u,
+            // GFX10/10.3 word 2 bit 31 is RESOURCE_LEVEL, not reserved.
+            0x00000000u, 0x20000000u, 0x70003000u, 0x00000000u,
             0xe000e000u, 0xf9000000u, 0x00007b00u, 0x00000000u,
         ];
         for (var dword = 0; dword < reserved.Length; dword++)
@@ -532,6 +593,11 @@ public static class ResourceMaterializer
 
         }
 
+        if (!BaseAlignedToSwizzleBlock(descriptor))
+        {
+            return false;
+        }
+
         if (type is GuestImageFormat.ImageType2DMsaa or GuestImageFormat.ImageType2DMsaaArray)
         {
             var baseLevel = (descriptor[3] >> 12) & 0xF;
@@ -541,6 +607,22 @@ public static class ResourceMaterializer
         }
 
         return true;
+    }
+
+    // A standard (non-XOR) swizzled surface starts on its swizzle block, so a base inside a
+    // block cannot describe a real surface. XOR modes fold the pipe/bank XOR into the low
+    // base bits and are not checked.
+    private static bool BaseAlignedToSwizzleBlock(ReadOnlySpan<uint> descriptor)
+    {
+        var swizzleMode = (descriptor[3] >> 20) & 0x1F;
+        var blockBytes = swizzleMode switch
+        {
+            >= 4 and <= 7 => 4UL * 1024,
+            >= 8 and <= 15 => 64UL * 1024,
+            _ => 0UL,
+        };
+        var baseAddress = ((ulong)descriptor[0] | ((ulong)(descriptor[1] & 0xFF) << 32)) << 8;
+        return blockBytes == 0 || (baseAddress & (blockBytes - 1)) == 0;
     }
 
     private static bool UsableImageCandidate(ReadOnlySpan<uint> candidate, bool r128) =>
@@ -573,6 +655,16 @@ public static class ResourceMaterializer
         return inputs.ReadCleanMemory is not null && inputs.ReadCleanMemory(baseAddress + aligned, out word);
     }
 
+    // Describes a failed ReadScalarBufferWord: the V# words and the address it resolved to.
+    private static string DescribeScalarBufferRead(ReadOnlySpan<uint> descriptor, uint dynamicOffset, uint immediateOffset, ResourceRuntimeInputs inputs)
+    {
+        var aligned = ((ulong)dynamicOffset + immediateOffset) & ~3ul;
+        var baseAddress = ((descriptor[0] | ((ulong)descriptor[1] << 32)) & AddressMask) & ~3ul;
+        return $"cannot read {sizeof(uint)} bytes at guest address {Hex(baseAddress + aligned)} " +
+            $"(V# words {Words(descriptor)} base={Hex(baseAddress)} offset={Hex(aligned)} size={Hex(ScalarBufferSize(descriptor))}" +
+            $"{(inputs.ReadCleanMemory is null ? " no clean reader" : string.Empty)})";
+    }
+
     // Enumerates every material key that can pass the table's bounds and reads the
     // heap descriptor each selects; stale or invalid descriptors become null.
     private static bool MaterializeIndirectImage(
@@ -590,13 +682,13 @@ public static class ResourceMaterializer
         result = new IndirectImageTable();
         if (material.DwordCount != 4 || heap.DwordCount != 4)
         {
-            return false;
+            return Detail($"indirect image {Hex(image.FirstUsePc)}: material/heap descriptors have {material.DwordCount}/{heap.DwordCount} dwords, expected 4/4");
         }
 
         var materialStride = (material.Dwords[1] >> 16) & 0x3FFF;
         if (materialStride != indirect.SelectorStride)
         {
-            return false;
+            return Detail($"indirect image {Hex(image.FirstUsePc)}: material V# stride {materialStride} differs from selector stride {indirect.SelectorStride}: {Words(material.Dwords)}");
         }
 
         var period = 1ul << 32;
@@ -619,20 +711,45 @@ public static class ResourceMaterializer
                 diagnostic.ProvenOffsets = provenOffsets ?? [];
             }
         }
+        // Without a proven selector set every offset residue + k * step is reachable, because
+        // selector * stride + offset wraps modulo 2^32 for an unbounded 32-bit selector. A
+        // table whose exhaustive probe count fits the cap keeps that enumeration unchanged.
+        // Past the cap, a non-multiple of the stride needs a selector >= 2^32 / stride, which
+        // no real table index reaches (the hardware reads selector * stride + offset), so the
+        // probe falls back to the record-aligned offsets offset + k * stride inside the table.
+        var probeStart = residue;
+        var probeStep = step;
+        var probeTotal = probeCount;
         if (provenOffsets is null && probeCount > MaxIndirectImageProbes)
         {
-            return false;
+            var alignedCount = indirect.SelectorStride != 0 && indirect.SelectorOffset <= limit ?
+                (limit - indirect.SelectorOffset) / indirect.SelectorStride + 1 : 0;
+            if (indirect.SelectorStride == 0 || alignedCount > MaxIndirectImageProbes)
+            {
+                return Detail($"indirect image {Hex(image.FirstUsePc)}: {probeCount} unbounded selector probes exceed {MaxIndirectImageProbes} (material V# {Words(material.Dwords)} stride={indirect.SelectorStride} offset={indirect.SelectorOffset})");
+            }
+
+            ReportRecordAlignedFallback(image.FirstUsePc, indirect.SelectorStride, probeCount, alignedCount);
+            if (diagnostic is not null)
+            {
+                diagnostic.SelectionMode = "record_aligned_fallback";
+            }
+
+            probeStart = indirect.SelectorOffset;
+            probeStep = indirect.SelectorStride;
+            probeTotal = alignedCount;
         }
 
         var keys = new List<uint> { 0 };
         var seen = new HashSet<uint> { 0 };
         var offsets = provenOffsets is not null ? provenOffsets.Select(offset => (ulong)offset) :
-            Enumerable.Range(0, (int)probeCount).Select(index => residue + (ulong)index * step);
+            Enumerable.Range(0, (int)probeTotal).Select(index => probeStart + (ulong)index * probeStep);
         foreach (var offset in offsets)
         {
             if (!ReadScalarBufferWord(material.Dwords, (uint)offset, indirect.MaterialImmediate, inputs, out var key))
             {
-                return false;
+                return Detail($"indirect image {Hex(image.FirstUsePc)} material key at offset {Hex(offset)}: " +
+                    DescribeScalarBufferRead(material.Dwords, (uint)offset, indirect.MaterialImmediate, inputs));
             }
 
             if (seen.Add(key))
@@ -648,11 +765,13 @@ public static class ResourceMaterializer
         {
             var candidate = new uint[8];
             var heapOffset = key << 5;
-            for (uint dword = 0; dword < 8; dword++)
+            if (!ScalarBufferRangeRead.TryRead(heap.Dwords, heapOffset, 0, inputs, candidate))
             {
-                if (!ReadScalarBufferWord(heap.Dwords, heapOffset, dword * sizeof(uint), inputs, out candidate[dword]))
+                for (uint dword = 0; dword < 8; dword++)
                 {
-                    return false;
+                    if (!ReadScalarBufferWord(heap.Dwords, heapOffset, dword * sizeof(uint), inputs, out candidate[dword]))
+                        return Detail($"indirect image {Hex(image.FirstUsePc)} heap descriptor for key 0x{key:X8} dword {dword}: " +
+                            DescribeScalarBufferRead(heap.Dwords, heapOffset, dword * sizeof(uint), inputs));
                 }
             }
 
@@ -692,8 +811,12 @@ public static class ResourceMaterializer
     {
         failure = ResourceMaterializationFailure.Other;
         result = new IndirectImageTable();
+        if (indirect.BufferTableStride != 0)
+            return MaterializeBufferTableImage(indirect, heap, r128, inputs, out result, out failure);
+
         if (heap.DwordCount != 2 || indirect.KeyBound == 0 || indirect.KeyBound > MaxIndirectImageProbes || inputs.ReadCleanMemory is null)
-            return false;
+            return Detail($"dense indirect image {Hex(image.FirstUsePc)}: heap dwords={heap.DwordCount} (expected 2) keyBound={indirect.KeyBound} " +
+                $"(1..{MaxIndirectImageProbes}) cleanReader={inputs.ReadCleanMemory is not null}");
 
         var baseAddress = (((ulong)heap.Dwords[1] << 32) | heap.Dwords[0]) & AddressMask;
         var probed = new List<uint[]>((int)indirect.KeyBound);
@@ -706,7 +829,8 @@ public static class ResourceMaterializer
                 var relative = entry + dword * sizeof(uint);
                 if (relative > AddressMask || baseAddress > AddressMask - relative ||
                     !inputs.ReadCleanMemory(baseAddress + relative, out candidate[dword]))
-                    return false;
+                    return Detail($"dense indirect image {Hex(image.FirstUsePc)} key {key} dword {dword}: cannot read {sizeof(uint)} bytes at guest address " +
+                        $"{Hex(baseAddress + relative)} (heap base={Hex(baseAddress)} offset={Hex(relative)})");
             }
 
             if (!UsableImageCandidate(candidate, r128))
@@ -722,6 +846,129 @@ public static class ResourceMaterializer
             out failure);
     }
 
+    // Every record of a V# table: the key is the record's byte offset, which the shader
+    // passes as its scalar buffer offset. The V# range bounds the records; a record whose
+    // bytes cannot be read ends the table as the hardware would read out of range.
+    private static bool MaterializeBufferTableImage(
+        IndirectImageSelector indirect,
+        DescriptorWords table,
+        bool r128,
+        ResourceRuntimeInputs inputs,
+        out IndirectImageTable result,
+        out ResourceMaterializationFailure failure)
+    {
+        failure = ResourceMaterializationFailure.Other;
+        result = new IndirectImageTable();
+        if (table.DwordCount != 4 || inputs.ReadCleanMemory is null)
+            return Detail($"buffer-table image: table has {table.DwordCount} dwords (expected 4), cleanReader={inputs.ReadCleanMemory is not null}");
+
+        var baseAddress = (table.Dwords[0] | ((ulong)(table.Dwords[1] & 0xFFFF) << 32)) & AddressMask;
+        var recordStride = (table.Dwords[1] >> 16) & 0x3FFF;
+        var rangeBytes = recordStride == 0 ? (ulong)table.Dwords[2] : (ulong)table.Dwords[2] * recordStride;
+        // A pointer record holds a 64-bit address; a direct record holds the descriptor.
+        var pointerTable = indirect.PointerTargetOffset is not null;
+        var entryBytes = pointerTable ? (ulong)sizeof(ulong) : 8 * sizeof(uint);
+        // Out-of-range buffer reads return zero on hardware: an empty table selects null.
+        var count = rangeBytes < indirect.TableOffset + entryBytes ? 0 : Math.Min((rangeBytes - indirect.TableOffset - entryBytes) / indirect.BufferTableStride + 1, MaxIndirectImageProbes);
+        var probed = new List<uint[]>();
+        var keys = new List<uint>();
+        for (ulong record = 0; record < count; record++)
+        {
+            var candidate = new uint[8];
+            var entry = indirect.TableOffset + record * indirect.BufferTableStride;
+            var readable = true;
+            var dwords = r128 ? 4u : 8u;
+            if (pointerTable)
+            {
+                if (!TryReadCleanWord(baseAddress, entry, inputs, out var low) ||
+                    !TryReadCleanWord(baseAddress, entry + sizeof(uint), inputs, out var high))
+                    break;
+
+                // A null or unmapped pointer cannot be followed; that record selects null.
+                var target = (((ulong)high << 32) | low) & AddressMask;
+                for (uint dword = 0; dword < dwords && readable && target != 0; dword++)
+                    readable = TryReadCleanWord(target, indirect.PointerTargetOffset!.Value + dword * sizeof(uint), inputs, out candidate[dword]);
+                if (target == 0 || !readable)
+                    Array.Clear(candidate);
+            }
+            else
+            {
+                for (uint dword = 0; dword < dwords && readable; dword++)
+                    readable = TryReadCleanWord(baseAddress, entry + dword * sizeof(uint), inputs, out candidate[dword]);
+                if (!readable)
+                    break;
+            }
+
+            if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128) || !ReservedImageBitsClear(candidate) ||
+                !ImageBaseMapped(candidate, inputs))
+                Array.Clear(candidate);
+            probed.Add(candidate);
+            keys.Add(checked((uint)(record * indirect.BufferTableStride)));
+        }
+
+        if (probed.Count == 0)
+        {
+            probed.Add(new uint[8]);
+            keys.Add(0);
+        }
+
+        return FinishIndirectImage(probed, keys, out result, out failure);
+    }
+
+    // One sampler for a pointer table: every record whose pointer can be followed must hold
+    // the same four dwords, or no single host sampler represents what the shader selects.
+    private static bool MaterializePointerTableSampler(
+        PointerTableSelector selector,
+        DescriptorWords table,
+        ResourceRuntimeInputs inputs,
+        out uint[] sampler)
+    {
+        sampler = new uint[4];
+        if (table.DwordCount != 4 || inputs.ReadCleanMemory is null || selector.Stride == 0)
+            return Detail($"pointer-table sampler: table has {table.DwordCount} dwords (expected 4), cleanReader={inputs.ReadCleanMemory is not null}, stride={selector.Stride}");
+
+        var baseAddress = (table.Dwords[0] | ((ulong)(table.Dwords[1] & 0xFFFF) << 32)) & AddressMask;
+        var recordStride = (table.Dwords[1] >> 16) & 0x3FFF;
+        var rangeBytes = recordStride == 0 ? (ulong)table.Dwords[2] : (ulong)table.Dwords[2] * recordStride;
+        if (rangeBytes < selector.TableOffset + sizeof(ulong))
+            return true;
+
+        var count = Math.Min((rangeBytes - selector.TableOffset - sizeof(ulong)) / selector.Stride + 1, MaxIndirectImageProbes);
+        uint[]? common = null;
+        var candidate = new uint[4];
+        for (ulong record = 0; record < count; record++)
+        {
+            var entry = selector.TableOffset + record * selector.Stride;
+            if (!TryReadCleanWord(baseAddress, entry, inputs, out var low) ||
+                !TryReadCleanWord(baseAddress, entry + sizeof(uint), inputs, out var high))
+                break;
+
+            var target = (((ulong)high << 32) | low) & AddressMask;
+            var readable = target != 0;
+            for (uint dword = 0; dword < 4 && readable; dword++)
+                readable = TryReadCleanWord(target, selector.TargetOffset + dword * sizeof(uint), inputs, out candidate[dword]);
+            if (!readable)
+                continue;
+
+            if (common is null)
+                common = (uint[])candidate.Clone();
+            else if (!common.AsSpan().SequenceEqual(candidate))
+                return Fail($"pointer-table sampler differs between records: record={record} stride={selector.Stride} offset={selector.TargetOffset}");
+        }
+
+        if (common is not null)
+            sampler = common;
+        return true;
+    }
+
+    // A bindless table names every texture the game knows; one whose memory is not mapped is
+    // not resident, and sampling it cannot be valid, so it binds as null.
+    private static bool ImageBaseMapped(ReadOnlySpan<uint> descriptor, ResourceRuntimeInputs inputs)
+    {
+        var baseAddress = (((ulong)descriptor[0] | ((ulong)(descriptor[1] & 0xFF) << 32)) << 8) & AddressMask;
+        return baseAddress == 0 || inputs.ReadMemory is null || inputs.ReadMemory(baseAddress, out _);
+    }
+
     private static bool MaterializeWaveIndexedImage(
         IndirectImageSelector indirect,
         WaveIndexedImageSelector wave,
@@ -735,11 +982,12 @@ public static class ResourceMaterializer
         failure = ResourceMaterializationFailure.Other;
         result = new IndirectImageTable();
         if (heap.DwordCount != 2 || inputs.ReadCleanMemory is null || wave.IndexStride == 0)
-            return false;
+            return Detail($"wave-indexed image {Hex(image.FirstUsePc)}: heap dwords={heap.DwordCount} (expected 2) " +
+                $"cleanReader={inputs.ReadCleanMemory is not null} indexStride={wave.IndexStride}");
 
         var baseAddress = (((ulong)heap.Dwords[1] << 32) | heap.Dwords[0]) & AddressMask;
         if (!TryReadCleanWord(baseAddress, wave.MaskOffset, inputs, out var activeMask))
-            return false;
+            return ReadFailed($"wave-indexed image {Hex(image.FirstUsePc)} active mask", baseAddress, wave.MaskOffset, inputs);
 
         var keys = new SortedSet<uint>();
         for (uint bit = 0; bit < 32; bit++)
@@ -748,7 +996,7 @@ public static class ResourceMaterializer
                 continue;
             var indexOffset = (ulong)wave.IndexTableOffset + (ulong)bit * wave.IndexStride;
             if (!TryReadCleanWord(baseAddress, indexOffset, inputs, out var key))
-                return false;
+                return ReadFailed($"wave-indexed image {Hex(image.FirstUsePc)} lane {bit} index", baseAddress, indexOffset, inputs);
             // VCmpxLeI32 0, key suppresses signed-negative indices before ReadFirstLane.
             if ((key & 0x8000_0000u) == 0)
                 keys.Add(key);
@@ -760,10 +1008,14 @@ public static class ResourceMaterializer
         {
             var candidate = new uint[8];
             var descriptorOffset = (ulong)indirect.TableOffset + ((ulong)key << 5);
-            for (uint dword = 0; dword < candidate.Length; dword++)
+            if (!ScalarBufferRangeRead.TryReadAddress(baseAddress, descriptorOffset, inputs, candidate))
             {
-                if (!TryReadCleanWord(baseAddress, descriptorOffset + dword * sizeof(uint), inputs, out candidate[dword]))
-                    return false;
+                for (uint dword = 0; dword < candidate.Length; dword++)
+                {
+                    if (!TryReadCleanWord(baseAddress, descriptorOffset + dword * sizeof(uint), inputs, out candidate[dword]))
+                        return ReadFailed($"wave-indexed image {Hex(image.FirstUsePc)} key {key} descriptor dword {dword}",
+                            baseAddress, descriptorOffset + dword * sizeof(uint), inputs);
+                }
             }
 
             if (!UsableImageCandidate(candidate, r128))
@@ -797,19 +1049,21 @@ public static class ResourceMaterializer
         failure = ResourceMaterializationFailure.Other;
         result = new IndirectImageTable();
         result.Keys.AddRange(keys);
+        // A bindless table holds tens of thousands of candidates; index them by content.
+        var indices = new Dictionary<uint[], int>(DescriptorContentComparer.Instance);
         foreach (var candidate in probed)
         {
             var words = new DescriptorWords(candidate);
-            var found = result.Descriptors.FindIndex(existing => existing.SameAs(words));
-            if (found < 0)
+            if (!indices.TryGetValue(candidate, out var found))
             {
                 if (result.Descriptors.Count >= ShaderResourceInfo.MaxImages)
                 {
                     failure = ResourceMaterializationFailure.ImageCapacityExceeded;
-                    return false;
+                    return Fail($"indirect image table has more than {ShaderResourceInfo.MaxImages} distinct descriptors among {probed.Count} candidates");
                 }
                 found = result.Descriptors.Count;
                 result.Descriptors.Add(words);
+                indices.Add(candidate, found);
             }
             result.Candidates.Add((uint)found);
         }
@@ -868,11 +1122,64 @@ public static class ResourceMaterializer
         return baseLevel <= last ? last - baseLevel + 1 : 0;
     }
 
+    // Whether an instruction declaring one dimension addresses a descriptor of another:
+    // arrayness can differ, the spatial dimensionality and sample layout cannot.
+    private static bool DimensionAddressable(ImageDimension descriptor, ImageDimension declared) =>
+        descriptor == declared || (Family(descriptor) != 0 && Family(descriptor) == Family(declared));
+
+    private static int Family(ImageDimension dimension) => dimension switch
+    {
+        ImageDimension.Dim1D or ImageDimension.Dim1DArray => 1,
+        ImageDimension.Dim2D or ImageDimension.Dim2DArray => 2,
+        ImageDimension.Dim3D => 3,
+        ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray => 4,
+        _ => 0,
+    };
+
     private static bool Fail(string message)
     {
+        _lastFailureDetail = message;
         SpecializationFailed(message);
         return false;
     }
+
+    // Records why the current Materialize call failed and returns false. Callers build the
+    // text only on their failure path.
+    private static bool Detail(string message)
+    {
+        _lastFailureDetail = message;
+        return false;
+    }
+
+    private static string Hex(ulong value) => $"0x{value:X}";
+
+    private static string Words(ReadOnlySpan<uint> words) => string.Join(",", words.ToArray().Select(word => $"{word:x8}"));
+
+    // The first dword of the given sources that cannot be evaluated, with the values behind it.
+    private static string DiagnoseSources(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, IReadOnlyList<uint> sources)
+    {
+        var evaluator = new RuntimeValueEvaluator(plan, inputs);
+        foreach (var sourceIndex in sources)
+        {
+            if (sourceIndex >= plan.DescriptorSources.Count)
+                return $"descriptor source {sourceIndex} is outside the source table";
+            var source = plan.DescriptorSources[(int)sourceIndex];
+            for (var dword = 0; dword < source.Dwords.Length; dword++)
+            {
+                if (!evaluator.Evaluate(source.Dwords[dword], out _))
+                    return $"descriptor source {sourceIndex} dword {dword} cannot be evaluated: " +
+                        DescribeEvaluationValue(plan, inputs, evaluator, source.Dwords[dword]);
+            }
+        }
+
+        return $"descriptor sources [{string.Join(",", sources)}] failed without an isolated dword";
+    }
+
+    // Reports a guest word that could not be read: the address and size, split into the
+    // base and offset the caller used.
+    private static bool ReadFailed(string step, ulong baseAddress, ulong offset, ResourceRuntimeInputs inputs) =>
+        Detail($"{step}: cannot read {sizeof(uint)} bytes at guest address {Hex(baseAddress + offset)} " +
+            $"(base={Hex(baseAddress)} offset={Hex(offset)}{(inputs.ReadCleanMemory is null ? " no clean reader" : string.Empty)})");
 
     private static bool BuildSpecialization(
         ShaderResourcePlan plan,
@@ -899,7 +1206,7 @@ public static class ResourceMaterializer
             if (imageCount + table.Descriptors.Count - 1 > ShaderResourceInfo.MaxImages)
             {
                 failure = ResourceMaterializationFailure.ImageCapacityExceeded;
-                return Fail("indirect image candidates exceed the dense image resource limit");
+                return Fail($"indirect image candidates exceed the dense image resource limit: images={imageCount} candidates={table.Descriptors.Count} keys={table.Keys.Count} limit={ShaderResourceInfo.MaxImages}");
             }
 
             imageCount += table.Descriptors.Count - 1;
@@ -1056,7 +1363,7 @@ public static class ResourceMaterializer
             var numericClass = GuestImageFormat.SampledNumericClass(format);
             if (storage)
             {
-                if ((!rawSintStorage && numericClass == ImageNumericClass.Sint) || numericClass == ImageNumericClass.Unsupported)
+                if (numericClass == ImageNumericClass.Unsupported)
                 {
                     return Fail($"storage image descriptor {index} uses unsupported format {format}");
                 }
@@ -1112,6 +1419,10 @@ public static class ResourceMaterializer
                 return Fail("indirect image specialization has an invalid key mapping");
             }
 
+            // The instruction's MIMG dimension bounds what a candidate can be: a descriptor of
+            // another dimension is never a valid selection for it, so it binds as null.
+            var declaredDimension = info.Images[rootIndex].Dimension;
+            var declaredCube = info.Images[rootIndex].Cube;
             var exemplar = DescriptorConstants.NoIndex;
             var resourceCount = 0;
             for (var resource = 0; resource < images.Count; resource++)
@@ -1122,18 +1433,35 @@ public static class ResourceMaterializer
                 }
 
                 resourceCount++;
-                if (exemplar == DescriptorConstants.NoIndex && !NullImageDescriptor(snapshot.Images[resource]))
+                if (exemplar == DescriptorConstants.NoIndex && !NullImageDescriptor(snapshot.Images[resource]) &&
+                    DimensionAddressable(images[resource].Dimension, declaredDimension) && images[resource].Cube == declaredCube)
                 {
                     exemplar = (uint)resource;
                 }
             }
 
-            if (resourceCount < 2 || exemplar == DescriptorConstants.NoIndex)
+            if (resourceCount < 2)
             {
-                return Fail("indirect image specialization has no typed candidate");
+                return Fail("indirect image specialization has fewer than two candidates");
             }
 
-            var imageClass = images[(int)exemplar];
+            var declaredImage = info.Images[rootIndex];
+            // A bounded table can contain only descriptors from another image family. Keep
+            // the instruction's declared type and bind every candidate as a typed null.
+            var imageClass = exemplar == DescriptorConstants.NoIndex
+                ? images[rootIndex] with
+                {
+                    NumericClass = declaredImage.NumericClass == ImageNumericClass.Unsupported
+                        ? declaredImage.Atomic ? ImageNumericClass.Uint : ImageNumericClass.Float
+                        : declaredImage.NumericClass,
+                    Dimension = declaredDimension,
+                    MipCount = declaredImage.MipCount,
+                    ConversionFormat = declaredImage.ConversionFormat,
+                    ShaderSwizzle = declaredImage.ShaderSwizzle,
+                    Cube = declaredCube,
+                    EmulatedCompareFunction = declaredImage.EmulatedCompareFunction,
+                }
+                : images[(int)exemplar];
             var separateSampledDimensions = info.Images[rootIndex].ResourceClass == ImageResourceClass.Sampled;
             for (var candidate = 0; candidate < images.Count; candidate++)
             {
@@ -1162,7 +1490,24 @@ public static class ResourceMaterializer
                     separateSampledDimensions && !image.Cube && !imageClass.Cube &&
                     image.Dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray &&
                     imageClass.Dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray;
-                if (image.NumericClass != imageClass.NumericClass || !compatibleDimensions ||
+                if (!DimensionAddressable(image.Dimension, declaredDimension) || image.Cube != declaredCube)
+                {
+                    snapshot.Images[candidate] = new uint[snapshot.Images[candidate].Length];
+                    images[candidate] = image with
+                    {
+                        NumericClass = imageClass.NumericClass,
+                        Dimension = imageClass.Dimension,
+                        MipCount = imageClass.MipCount,
+                        ConversionFormat = imageClass.ConversionFormat,
+                        ShaderSwizzle = imageClass.ShaderSwizzle,
+                        Cube = imageClass.Cube,
+                    };
+                    continue;
+                }
+
+                // Each candidate is emitted as its own case with its own typed binding, so the
+                // numeric class may differ between candidates, as the hardware allows.
+                if (!compatibleDimensions ||
                     image.MipCount != imageClass.MipCount || image.ConversionFormat != imageClass.ConversionFormat ||
                     image.ShaderSwizzle != imageClass.ShaderSwizzle || image.Cube != imageClass.Cube)
                 {
@@ -1562,5 +1907,45 @@ public static class ResourceMaterializer
         }
 
         return new SpecializedResourceInfo { Info = info, SamplerByMemoryIndex = samplerByMemory };
+    }
+}
+
+internal static class ScalarBufferRangeRead
+{
+    internal static bool TryReadAddress(ulong baseAddress, ulong offset,
+        ResourceRuntimeInputs inputs, Span<uint> words)
+    {
+        const ulong addressMask = 0x0000_FFFF_FFFF_FFFFul;
+        var length = (ulong)words.Length * sizeof(uint);
+        return inputs.ReadCleanWords is not null && length != 0 && baseAddress <= addressMask &&
+            offset <= addressMask - baseAddress && length - 1 <= addressMask - baseAddress - offset &&
+            inputs.ReadCleanWords(baseAddress + offset, words);
+    }
+
+    // Use one clean read only when every scalar load is in bounds and contiguous.
+    // A refusal leaves the caller's original word reads and OOB handling intact.
+    internal static bool TryRead(ReadOnlySpan<uint> descriptor, uint dynamicOffset,
+        uint immediateOffset, ResourceRuntimeInputs inputs, Span<uint> words)
+    {
+        if (inputs.ReadCleanWords is null || descriptor.Length != 4 || words.IsEmpty)
+            return false;
+
+        var lastImmediate = (ulong)immediateOffset + (ulong)(words.Length - 1) * sizeof(uint);
+        if (lastImmediate > uint.MaxValue)
+            return false;
+
+        const ulong addressMask = 0x0000_FFFF_FFFF_FFFFul;
+        var stride = (descriptor[1] >> 16) & 0x3FFF;
+        var size = stride == 0 ? descriptor[2] : (ulong)stride * descriptor[2];
+        var offset = ((ulong)dynamicOffset + immediateOffset) & ~3ul;
+        var length = (ulong)words.Length * sizeof(uint);
+        if (offset > size || length > size - offset)
+            return false;
+
+        var baseAddress = ((descriptor[0] | ((ulong)descriptor[1] << 32)) & addressMask) & ~3ul;
+        if (offset > addressMask - baseAddress || length - 1 > addressMask - baseAddress - offset)
+            return false;
+
+        return inputs.ReadCleanWords(baseAddress + offset, words);
     }
 }

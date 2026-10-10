@@ -264,6 +264,31 @@ public sealed class GpuTilerTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void ScratchPressure_TrimsOnlyCompletedBuffers()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var baseline = harness.Device.LiveAllocations;
+        harness.Run(() =>
+        {
+            _ = harness.Tiler.GetScratchBuffer(64);
+            Assert.Equal(baseline + 1, harness.Device.LiveAllocations);
+            harness.Tiler.ReleaseUnusedScratch();
+            Assert.Equal(baseline + 1, harness.Device.LiveAllocations);
+            Assert.True(harness.Tiler.OutstandingScratchBytes > 0);
+            harness.Scheduler.Finish();
+            Assert.Equal(0UL, harness.Tiler.OutstandingScratchBytes);
+            Assert.True(harness.Tiler.PooledScratchBytes > 0);
+            harness.Tiler.ReleaseUnusedScratch();
+            Assert.Equal(baseline, harness.Device.LiveAllocations);
+            Assert.Equal(0UL, harness.Tiler.PooledScratchBytes);
+            _ = harness.Tiler.GetScratchBuffer(64);
+            harness.Scheduler.Finish();
+        });
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
     // Scratches go back to a pool when their tick completes instead of being freed, so
     // the next tick's scratches of the same sizes reuse them without new allocations.
     public void Detile_ReusesTheScratchAfterTheTick()

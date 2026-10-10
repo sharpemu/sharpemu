@@ -22,7 +22,9 @@ public sealed class BufferCandidateTablePlannerTests
         string guard = "SCmpLtU32",
         uint guardRegister = 10,
         uint limit = 4,
-        bool runtimeLimit = false)
+        bool runtimeLimit = false,
+        uint descriptorOffset = 0,
+        bool secondField = false)
     {
         var instructions = new List<Gen5ShaderInstruction>();
         uint pc = 0;
@@ -41,8 +43,10 @@ public sealed class BufferCandidateTablePlannerTests
         var headerPc = pc;
 
         Add(Sop2(pc, "SMulI32", 12, Gen5Operand.Scalar(10), Operand(stride)));
-        Add(ScalarBufferLoad(pc, 0, destination: 16, count: 4, dynamicOffsetRegister: 12));
+        Add(ScalarBufferLoad(pc, 0, destination: 16, count: secondField ? 8u : 4u, immediateOffset: (int)descriptorOffset, dynamicOffsetRegister: 12));
         Add(BufferLoad(pc, 16, formatted: true));
+        if (secondField)
+            Add(BufferLoad(pc, 20, formatted: true));
         Add(Sop2(pc, "SAddU32", 10, Gen5Operand.Scalar(10), Operand(1)));
         var bound = runtimeLimit ? Gen5Operand.Scalar(7) : Operand(limit);
         Add(Sopc(pc, guard, Gen5Operand.Scalar(guardRegister), bound));
@@ -64,6 +68,55 @@ public sealed class BufferCandidateTablePlannerTests
         }
 
         throw new Xunit.Sdk.XunitException("the program has no formatted buffer load");
+    }
+
+    [Fact]
+    public void TwoDescriptorFields_DoNotShareACandidateTable()
+    {
+        var plan = Extract(CandidateProgram(stride: 192, records: 4, descriptorOffset: 160, secondField: true));
+        Assert.Equal(2, plan.BufferCandidateTables.Count);
+        Assert.Equal(new uint[] { 160, 176 }, plan.BufferCandidateTables.Select(table => table.BaseOffset));
+        Assert.All(plan.BufferCandidateTables, table => Assert.Single(table.MemoryIndices));
+        var memory = new TestWordMemory { Base = 0x3000, Words = new uint[0x1000 / 4], RequireAlignment = true };
+        for (var record = 0; record < 4; record++)
+        for (var field = 0; field < 2; field++)
+        {
+            var address = 0x3000ul + (ulong)record * 192 + 160 + (ulong)field * 16;
+            memory.At(address) = 0x4000u + (uint)(record * 2 + field) * 0x100;
+            memory.At(address + 4) = 16u << 16;
+            memory.At(address + 8) = 4;
+            memory.At(address + 12) = 0;
+        }
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([], readCleanMemory: memory.Read), ref snapshot, ref specialization));
+        Assert.Equal(2, specialization.BufferCandidateTables.Count);
+        for (var field = 0; field < 2; field++)
+        {
+            var table = specialization.BufferCandidateTables[field];
+            Assert.Equal(4u, table.CandidateCount);
+            for (var record = 0; record < 4; record++)
+                Assert.Equal(0x4000u + (uint)(record * 2 + field) * 0x100,
+                    snapshot.Buffers[(int)table.FirstCandidate + record][0]);
+        }
+    }
+
+    [Fact]
+    public void DescriptorOffsetBeyondTheAddressSpace_IsRejected()
+    {
+        var plan = Extract(CandidateProgram(stride: 192, records: 4, descriptorOffset: uint.MaxValue - 15));
+        Assert.Empty(plan.BufferCandidateTables);
+    }
+
+    [Fact]
+    public void DescriptorInsideAStridedRecord_KeepsItsFieldOffset()
+    {
+        var plan = Extract(CandidateProgram(stride: 192, records: 4, descriptorOffset: 160));
+        var table = Assert.Single(plan.BufferCandidateTables);
+        Assert.Equal(160u, table.BaseOffset);
+        Assert.Equal(160u, table.MinOffset);
+        Assert.Equal(752u, table.MaxOffset);
+        Assert.Equal(352u, table.StaticCandidateOffset(1));
     }
 
     [Fact]

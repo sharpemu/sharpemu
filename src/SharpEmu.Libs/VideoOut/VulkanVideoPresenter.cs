@@ -82,6 +82,18 @@ internal static unsafe partial class VulkanVideoPresenter
     private static int _nativeSubgroupSize;
     private static int _nativeSubgroupShaderStages;
     private static int _sharedInt64AtomicsSupported;
+    private static int _nonUniformImageIndexingSupported;
+    private static int _bindlessImageHeapSupported;
+
+    internal static bool NonUniformImageIndexingEnabled => Volatile.Read(ref _nonUniformImageIndexingSupported) != 0;
+
+    internal static bool BindlessImageHeapEnabled => Volatile.Read(ref _bindlessImageHeapSupported) != 0;
+
+    private static void SetNonUniformImageIndexingCapability(bool supported) =>
+        Volatile.Write(ref _nonUniformImageIndexingSupported, supported ? 1 : 0);
+
+    private static void SetBindlessImageHeapCapability(bool supported) =>
+        Volatile.Write(ref _bindlessImageHeapSupported, supported ? 1 : 0);
 
     // True when the device supports shaderSharedInt64Atomics, so LDS 64-bit
     // atomics can be emitted as real 64-bit atomics.
@@ -91,11 +103,36 @@ internal static unsafe partial class VulkanVideoPresenter
     private static void SetSharedInt64AtomicsCapability(bool supported) =>
         Volatile.Write(ref _sharedInt64AtomicsSupported, supported ? 1 : 0);
 
+    private static int _exactFloat16ConversionsSupported;
+
+    // True when the device was created with shaderFloat16 and f16 float controls.
+    internal static bool ExactFloat16ConversionsEnabled =>
+        Volatile.Read(ref _exactFloat16ConversionsSupported) != 0;
+
+    private static void SetExactFloat16ConversionsCapability(bool supported) =>
+        Volatile.Write(ref _exactFloat16ConversionsSupported, supported ? 1 : 0);
+
     internal static bool GraphicsSubgroupOperationsEnabled =>
         VulkanGraphicsSubgroupPolicy.ShouldUseNativeGraphicsSubgroups(
             unchecked((uint)Volatile.Read(ref _nativeSubgroupSize)),
             (ShaderStageFlags)Volatile.Read(ref _nativeSubgroupShaderStages),
             Environment.GetEnvironmentVariable("SHARPEMU_GRAPHICS_SUBGROUPS"));
+
+    private static int _nativeHalfConversionExact;
+    private static int _nativeHalfConversionProbed;
+    private static int _zeroOutOfBoundsReads;
+    private static int _zeroOutOfBoundsReadsProbed;
+    private static bool _robustBufferAccess2Enabled;
+
+    // Set once per process by the device-setup probe: GLSL UnpackHalf2x16 / PackHalf2x16 produced
+    // exactly what the translator's integer f16 conversion produces, for every test vector. False
+    // until then, so a device that is never probed keeps the exact emulation.
+    internal static bool NativeHalfConversionExact => Volatile.Read(ref _nativeHalfConversionExact) != 0;
+
+    // Set once per process by the device-setup probe: a storage-buffer read past the end of its
+    // descriptor range returned zero on this device, so the translator's own range test, address
+    // clamp and zero select on every guest buffer word are redundant. False until then.
+    internal static bool ZeroOutOfBoundsBufferReads => Volatile.Read(ref _zeroOutOfBoundsReads) != 0;
 
     private static void SetNativeSubgroupCapabilities(uint subgroupSize, ShaderStageFlags supportedStages)
     {

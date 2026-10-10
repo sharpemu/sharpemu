@@ -98,7 +98,7 @@ public static partial class KernelMemoryCompatExports
 
     private static readonly object _fdGate = new();
     private static readonly Dictionary<int, FileStream> _openFiles = new();
-    private static readonly HashSet<int> _randomDeviceDescriptors = new();
+    private static readonly HashSet<int> _entropyDevices = new();
     private static readonly Dictionary<int, HostMovieBridge.BinkGuestCompletionShim>
         _binkGuestCompletionShims = new();
     private static readonly Dictionary<int, string> _observedBinkGuestFiles = new();
@@ -1455,16 +1455,19 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        if (IsRandomDevicePath(guestPath) && (flags & O_DIRECTORY) == 0)
+        if (guestPath is "/dev/urandom" or "/dev/random")
         {
-            var randomFd = (int)Interlocked.Increment(ref _nextFileDescriptor);
+            // These character devices provide entropy, not mounted host files.
+            // Only read-only opens are currently supported.
+            if (ResolveOpenAccess(flags) != FileAccess.Read ||
+                (flags & (O_CREAT | O_TRUNC | O_APPEND | O_DIRECTORY)) != 0)
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
             lock (_fdGate)
             {
-                _randomDeviceDescriptors.Add(randomFd);
+                var entropyFd = (int)Interlocked.Increment(ref _nextFileDescriptor);
+                _entropyDevices.Add(entropyFd);
+                ctx[CpuRegister.Rax] = unchecked((ulong)entropyFd);
             }
-
-            LogOpenTrace($"_open random-device path='{guestPath}' flags=0x{flags:X8} fd={randomFd}");
-            ctx[CpuRegister.Rax] = unchecked((ulong)randomFd);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
@@ -2273,12 +2276,12 @@ public static partial class KernelMemoryCompatExports
         string? observedBinkPath = null;
         lock (_fdGate)
         {
-            if (_randomDeviceDescriptors.Remove(fd))
+            if (_entropyDevices.Remove(fd))
             {
                 ctx[CpuRegister.Rax] = 0;
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
-            else if (_openFiles.Remove(fd, out stream))
+            if (_openFiles.Remove(fd, out stream))
             {
                 _binkGuestCompletionShims.Remove(fd);
                 if (_observedBinkGuestFiles.Remove(fd, out observedBinkPath))
@@ -2331,23 +2334,17 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        bool isRandomDevice;
         lock (_fdGate)
         {
-            isRandomDevice = _randomDeviceDescriptors.Contains(fd);
-        }
-
-        if (isRandomDevice)
-        {
-            var randomBytes = GC.AllocateUninitializedArray<byte>(requested);
-            RandomNumberGenerator.Fill(randomBytes);
-            if (!ctx.Memory.TryWrite(bufferAddress, randomBytes))
+            if (_entropyDevices.Contains(fd))
             {
-                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                var bytes = GC.AllocateUninitializedArray<byte>(requested);
+                System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
+                if (!TryWriteCompat(ctx, bufferAddress, bytes))
+                    return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+                ctx[CpuRegister.Rax] = unchecked((ulong)requested);
+                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
-
-            ctx[CpuRegister.Rax] = unchecked((ulong)requested);
-            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
         if (KernelSocketCompatExports.TryReadSocketFd(
@@ -2401,41 +2398,53 @@ public static partial class KernelMemoryCompatExports
             positionBefore = -1;
         }
 
-        var buffer = GC.AllocateUninitializedArray<byte>(requested);
-        var read = stream.Read(buffer, 0, requested);
-        if (read > 0 && useBinkCompletionShim)
-        {
-            // The patched NumFrames field is what tells the guest "this
-            // movie is fully consumed" - hold that specific read until the
-            // host has actually finished showing it, so guest-side game
-            // logic can't race ahead of what's still on screen.
-            if (completionShim.Patch(positionBefore, buffer.AsSpan(0, read)))
-            {
-                HostMovieBridge.WaitForHostPlaybackToFinish(stream.Name);
-            }
-        }
-        if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
-        long positionAfter;
+        // Guest reads are frequent and mostly small: a pooled buffer spares each one an allocation.
+        var pooled = requested <= MaxPooledReadBytes;
+        var buffer = pooled ? ArrayPool<byte>.Shared.Rent(requested) : GC.AllocateUninitializedArray<byte>(requested);
         try
         {
-            positionAfter = stream.Position;
+            var read = stream.Read(buffer, 0, requested);
+            if (read > 0 && useBinkCompletionShim)
+            {
+                // The patched NumFrames field is what tells the guest "this
+                // movie is fully consumed" - hold that specific read until the
+                // host has actually finished showing it, so guest-side game
+                // logic can't race ahead of what's still on screen.
+                if (completionShim.Patch(positionBefore, buffer.AsSpan(0, read)))
+                {
+                    HostMovieBridge.WaitForHostPlaybackToFinish(stream.Name);
+                }
+            }
+            if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            long positionAfter;
+            try
+            {
+                positionAfter = stream.Position;
+            }
+            catch (IOException)
+            {
+                positionAfter = -1;
+            }
+
+            LogIoTrace(
+                "read",
+                stream.Name,
+                $"fd={fd} req={requested} read={read} pos={positionBefore}->{positionAfter} preview='{PreviewIoBytes(buffer, read, 64)}' hex={PreviewIoHex(buffer, read, 32)} guest_tail={PreviewGuestHex(ctx, bufferAddress + (ulong)Math.Max(read, 0), 32)}");
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)read);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
-        catch (IOException)
+        finally
         {
-            positionAfter = -1;
+            if (pooled)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
-
-        LogIoTrace(
-            "read",
-            stream.Name,
-            $"fd={fd} req={requested} read={read} pos={positionBefore}->{positionAfter} preview='{PreviewIoBytes(buffer, read, 64)}' hex={PreviewIoHex(buffer, read, 32)} guest_tail={PreviewGuestHex(ctx, bufferAddress + (ulong)Math.Max(read, 0), 32)}");
-
-        ctx[CpuRegister.Rax] = unchecked((ulong)read);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     [SysAbiExport(
@@ -3329,7 +3338,8 @@ public static partial class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int KernelMapNamedFlexibleMemory(CpuContext ctx)
-        => RunMappingTransaction(() => MapFlexibleMemoryCore(ctx));
+        => RunMappingTransaction(() => MapFlexibleMemoryCore(ctx),
+            () => IsNewMappingOutsideGpuMemory(ctx, ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi], ctx[CpuRegister.Rcx]));
 
     private static int MapFlexibleMemoryCore(CpuContext ctx)
     {
@@ -6368,6 +6378,25 @@ public static partial class KernelMemoryCompatExports
                 : HostPageNoAccess;
     }
 
+    // The guest mapping containing the address, for the GPU caches: a device-address fault
+    // inside it registers part of that mapping rather than a single page.
+    internal static bool TryGetMappedRange(ulong address, out ulong start, out ulong length)
+    {
+        lock (_memoryGate)
+        {
+            if (TryFindVirtualQueryRegionLocked(address, findNext: false, out var region) && !region.IsReserved)
+            {
+                start = region.Address;
+                length = region.Length;
+                return true;
+            }
+        }
+
+        start = 0;
+        length = 0;
+        return false;
+    }
+
     private static bool TryFindVirtualQueryRegionLocked(ulong queryAddress, bool findNext, out MappedRegion region)
     {
         region = default;
@@ -6952,14 +6981,15 @@ public static partial class KernelMemoryCompatExports
 
         string? hostPath = null;
         bool isDirectory = false;
-        bool isRandomDevice = false;
         lock (_fdGate)
         {
-            if (_randomDeviceDescriptors.Contains(fd))
+            if (_entropyDevices.Contains(fd))
             {
-                isRandomDevice = true;
+                return TryWriteKernelStat(ctx, statAddress, isDirectory: false, size: 0,
+                    DateTime.UnixEpoch, DateTime.UnixEpoch, DateTime.UnixEpoch,
+                    "entropy-device", modeOverride: 0x2124);
             }
-            else if (_openDirectories.TryGetValue(fd, out var directory))
+            if (_openDirectories.TryGetValue(fd, out var directory))
             {
                 hostPath = directory.Path;
                 isDirectory = true;
@@ -6968,14 +6998,6 @@ public static partial class KernelMemoryCompatExports
             {
                 hostPath = stream.Name;
             }
-        }
-
-        if (isRandomDevice)
-        {
-            var now = DateTime.UtcNow;
-            LogIoTrace("fstat", "/dev/urandom", $"fd={fd} size=0 device=random");
-            return TryWriteKernelStat(ctx, statAddress, isDirectory: false, size: 0,
-                now, now, now, "/dev/urandom");
         }
 
         if (!string.IsNullOrWhiteSpace(hostPath))
@@ -6998,10 +7020,6 @@ public static partial class KernelMemoryCompatExports
 
         return !string.IsNullOrWhiteSpace(hostPath) && TryWriteHostPathStat(ctx, statAddress, hostPath!, isDirectory);
     }
-
-    private static bool IsRandomDevicePath(string path) =>
-        string.Equals(path, "/dev/random", StringComparison.Ordinal) ||
-        string.Equals(path, "/dev/urandom", StringComparison.Ordinal);
 
     private static bool TryWriteHostPathStat(CpuContext ctx, ulong statAddress, string hostPath)
     {
@@ -7118,7 +7136,8 @@ public static partial class KernelMemoryCompatExports
         DateTime lastAccessUtc,
         DateTime lastWriteUtc,
         DateTime creationUtc,
-        string inodeSeed)
+        string inodeSeed,
+        ushort? modeOverride = null)
     {
         Span<byte> payload = stackalloc byte[KernelStatSize];
         payload.Clear();
@@ -7126,7 +7145,7 @@ public static partial class KernelMemoryCompatExports
         var seedBytes = Encoding.UTF8.GetBytes(inodeSeed);
         BinaryPrimitives.WriteUInt32LittleEndian(payload[KernelStatStDevOffset..], 0);
         BinaryPrimitives.WriteUInt32LittleEndian(payload[KernelStatStInoOffset..], ComputeDirectoryEntryHash(seedBytes));
-        BinaryPrimitives.WriteUInt16LittleEndian(payload[KernelStatStModeOffset..], isDirectory ? KernelStatModeDirectory : KernelStatModeRegular);
+        BinaryPrimitives.WriteUInt16LittleEndian(payload[KernelStatStModeOffset..], modeOverride ?? (isDirectory ? KernelStatModeDirectory : KernelStatModeRegular));
         BinaryPrimitives.WriteUInt16LittleEndian(payload[KernelStatStNlinkOffset..], 1);
         BinaryPrimitives.WriteUInt32LittleEndian(payload[KernelStatStUidOffset..], 0);
         BinaryPrimitives.WriteUInt32LittleEndian(payload[KernelStatStGidOffset..], 0);
@@ -7274,8 +7293,40 @@ public static partial class KernelMemoryCompatExports
     }
 
     // Read once: file-heavy titles call LogIoTrace for every resolved path.
+    private const int MaxPooledReadBytes = 1 << 20;
+
     private static readonly bool _logIo =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO"), "1", StringComparison.Ordinal);
+
+    // Builds an I/O trace detail only while SHARPEMU_LOG_IO is on: its holes (byte previews of
+    // every read) are otherwise never evaluated.
+    [System.Runtime.CompilerServices.InterpolatedStringHandler]
+    private ref struct IoTraceDetail
+    {
+        private System.Runtime.CompilerServices.DefaultInterpolatedStringHandler _inner;
+
+        public IoTraceDetail(int literalLength, int formattedCount, out bool enabled)
+        {
+            enabled = _logIo;
+            _inner = enabled ? new System.Runtime.CompilerServices.DefaultInterpolatedStringHandler(literalLength, formattedCount) : default;
+        }
+
+        public void AppendLiteral(string value) => _inner.AppendLiteral(value);
+
+        public void AppendFormatted<T>(T value) => _inner.AppendFormatted(value);
+
+        public void AppendFormatted<T>(T value, string? format) => _inner.AppendFormatted(value, format);
+
+        public string ToStringAndClear() => _inner.ToStringAndClear();
+    }
+
+    private static void LogIoTrace(string operation, string path, IoTraceDetail detail)
+    {
+        if (_logIo)
+        {
+            LogIoTrace(operation, path, detail.ToStringAndClear());
+        }
+    }
 
     private static void LogIoTrace(string operation, string path, string detail)
     {

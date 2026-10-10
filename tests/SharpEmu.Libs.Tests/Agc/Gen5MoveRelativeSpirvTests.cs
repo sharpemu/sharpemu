@@ -10,8 +10,8 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
-// Checks that relative register accesses resolve without a dynamically indexed register
-// file, and rejects invalid relative sources.
+// Checks that unknown relative indices preserve the full register bank,
+// and rejects invalid relative sources.
 public sealed class Gen5MoveRelativeSpirvTests
 {
     private const ulong ShaderAddress = 0x1_0000_0000;
@@ -33,7 +33,7 @@ public sealed class Gen5MoveRelativeSpirvTests
         // s_mov_b32 m0, s3 ; v_movrels_b32 v5, v3   ->   v5 = vgpr[3 + m0]
         var spirv = Compile([SMovM0FromUserData, Vop1 | (5u << 17) | (0x43u << 9) | (256u + 3u)]);
 
-        AssertResolvesRelativeRegistersWithSelects(spirv, "V_MOVRELS_B32");
+        AssertResolvesUnknownRelativeRegisters(spirv, "V_MOVRELS_B32");
     }
 
     [Fact]
@@ -42,7 +42,7 @@ public sealed class Gen5MoveRelativeSpirvTests
         // s_mov_b32 m0, s3 ; v_movreld_b32 v5, v3   ->   vgpr[5 + m0] = v3
         var spirv = Compile([SMovM0FromUserData, Vop1 | (5u << 17) | (0x42u << 9) | (256u + 3u)]);
 
-        AssertResolvesRelativeRegistersWithSelects(spirv, "V_MOVRELD_B32");
+        AssertResolvesUnknownRelativeRegisters(spirv, "V_MOVRELD_B32");
     }
 
     [Fact]
@@ -51,7 +51,7 @@ public sealed class Gen5MoveRelativeSpirvTests
         // s_mov_b32 m0, s3 ; v_movrelsd_b32 v5, v3  ->  vgpr[5 + m0] = vgpr[3 + m0]
         var spirv = Compile([SMovM0FromUserData, Vop1 | (5u << 17) | (0x44u << 9) | (256u + 3u)]);
 
-        AssertResolvesRelativeRegistersWithSelects(spirv, "V_MOVRELSD_B32");
+        AssertResolvesUnknownRelativeRegisters(spirv, "V_MOVRELSD_B32");
     }
 
     [Fact]
@@ -61,7 +61,7 @@ public sealed class Gen5MoveRelativeSpirvTests
         // 10-bit halves (source index in [9:0], destination index in [25:16]).
         var spirv = Compile([SMovM0, Vop1 | (5u << 17) | (0x48u << 9) | (256u + 3u)]);
 
-        AssertResolvesRelativeRegistersWithSelects(spirv, "V_MOVRELSD_2_B32");
+        AssertResolvesUnknownRelativeRegisters(spirv, "V_MOVRELSD_2_B32");
     }
 
     [Theory]
@@ -93,44 +93,11 @@ public sealed class Gen5MoveRelativeSpirvTests
         Assert.Contains("vector register", error, StringComparison.Ordinal);
     }
 
-    // A dynamically indexed private register array is lowered to thread memory on Metal, so no
-    // access chain may take a computed index; the relative access compares the computed register
-    // number with each candidate register (OpIEqual) and selects its value (OpSelect).
-    private static void AssertResolvesRelativeRegistersWithSelects(byte[] spirv, string opcode)
+    // Unknown indices require the full bank; bounded indices are tested separately.
+    private static void AssertResolvesUnknownRelativeRegisters(byte[] spirv, string opcode)
     {
-        var constants = new HashSet<uint>();
-        var equalities = 0;
-        var selects = 0;
-        foreach (var (op, wordCount, offset) in EnumerateInstructions(spirv))
-        {
-            // OpConstant = 43, OpConstantNull = 46: (opcode, resultType, resultId, ...).
-            if (op is 43 or 46 && wordCount >= 3)
-            {
-                constants.Add(ReadWord(spirv, offset + 8));
-            }
-
-            // OpIEqual = 170, OpSelect = 169.
-            equalities += op == 170 ? 1 : 0;
-            selects += op == 169 ? 1 : 0;
-        }
-
-        foreach (var (op, wordCount, offset) in EnumerateInstructions(spirv))
-        {
-            // OpAccessChain = 65: (opcode, resultType, resultId, base, index...).
-            if (op != 65)
-            {
-                continue;
-            }
-
-            for (var index = 4; index < wordCount; index++)
-            {
-                Assert.True(
-                    constants.Contains(ReadWord(spirv, offset + index * sizeof(uint))),
-                    $"{opcode} must not index a register array with a computed index");
-            }
-        }
-
-        Assert.True(equalities > 1 && selects > 1, $"{opcode} must select the register its computed index names");
+        Assert.True(HasDynamicVectorRegisterAccess(spirv), $"{opcode} must preserve every register its runtime index can name");
+        SharpEmu.ShaderCompiler.Tests.Gen5LargeDispatcherValidationTests.ValidateWithSpirvToolsWhenAvailable(spirv);
     }
 
     // True when some access chain takes a computed index, i.e. registers are indexed at run time.

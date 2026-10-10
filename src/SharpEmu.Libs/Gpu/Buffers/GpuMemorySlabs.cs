@@ -21,7 +21,7 @@ internal sealed unsafe class GpuMemorySlabs
     private readonly GpuDeviceInfo _device;
     private readonly object _gate = new();
     private readonly Dictionary<(uint MemoryType, bool DeviceAddress), Pool> _pools = [];
-    private readonly List<DeviceMemory> _chunks = [];
+    private readonly Dictionary<DeviceMemory, Chunk> _chunks = [];
     private readonly List<Block> _quarantine = [];
     private int _foreignReaders;
 
@@ -37,6 +37,50 @@ internal sealed unsafe class GpuMemorySlabs
     {
         public readonly Stack<(DeviceMemory Memory, ulong Offset, nint Mapped, bool Recycled)>[] Free =
             Enumerable.Range(0, ClassCount).Select(_ => new Stack<(DeviceMemory, ulong, nint, bool)>()).ToArray();
+    }
+
+    private sealed class Chunk(uint memoryType, bool deviceAddress, int sizeClass)
+    {
+        public readonly uint MemoryType = memoryType;
+        public readonly bool DeviceAddress = deviceAddress;
+        public readonly int SizeClass = sizeClass;
+        // Quarantined blocks remain in use until foreign readers have finished.
+        public int InUse;
+    }
+
+    internal ulong AllocatedBytes { get { lock (_gate) return (ulong)_chunks.Count * ChunkSize; } }
+
+    private void DrainQuarantine()
+    {
+        if (Volatile.Read(ref _foreignReaders) != 0) return;
+        foreach (var released in _quarantine)
+        {
+            var chunk = _chunks[released.Memory];
+            chunk.InUse--;
+            _pools[(released.MemoryType, released.DeviceAddress)].Free[chunk.SizeClass]
+                .Push((released.Memory, released.Offset, released.MappedAddress, true));
+        }
+        _quarantine.Clear();
+    }
+
+    // Only blocks already retired after GPU completion may enter quarantine.
+    // Under pressure return completely idle chunks, retaining live neighbours.
+    public void ReleaseUnused()
+    {
+        lock (_gate)
+        {
+            DrainQuarantine();
+            foreach (var memory in _chunks.Where(pair => pair.Value.InUse == 0).Select(pair => pair.Key).ToArray())
+            {
+                var chunk = _chunks[memory];
+                var free = _pools[(chunk.MemoryType, chunk.DeviceAddress)].Free[chunk.SizeClass];
+                var kept = free.Where(block => block.Memory.Handle != memory.Handle).ToArray();
+                free.Clear();
+                for (var index = kept.Length - 1; index >= 0; index--) free.Push(kept[index]);
+                _chunks.Remove(memory);
+                _device.FreeMemory(memory);
+            }
+        }
     }
 
     // A readback on the second queue copies from buffers the render thread may retire (and
@@ -69,17 +113,7 @@ internal sealed unsafe class GpuMemorySlabs
         var sizeClass = BitOperations.Log2(blockSize) - BitOperations.Log2(MinBlockSize);
         lock (_gate)
         {
-            if (_quarantine.Count != 0 && Volatile.Read(ref _foreignReaders) == 0)
-            {
-                foreach (var released in _quarantine)
-                {
-                    var releasedClass = BitOperations.Log2(released.Size) - BitOperations.Log2(MinBlockSize);
-                    _pools[(released.MemoryType, released.DeviceAddress)].Free[releasedClass]
-                        .Push((released.Memory, released.Offset, released.MappedAddress, true));
-                }
-
-                _quarantine.Clear();
-            }
+            DrainQuarantine();
 
             if (!_pools.TryGetValue((memoryType, deviceAddress), out var pool))
             {
@@ -94,6 +128,7 @@ internal sealed unsafe class GpuMemorySlabs
             }
 
             var (memory, offset, mapped, recycled) = free.Pop();
+            _chunks[memory].InUse++;
             block = new Block(memory, offset, blockSize, mapped, memoryType, deviceAddress, recycled);
             return true;
         }
@@ -112,7 +147,7 @@ internal sealed unsafe class GpuMemorySlabs
     {
         lock (_gate)
         {
-            foreach (var chunk in _chunks)
+            foreach (var chunk in _chunks.Keys)
             {
                 _device.FreeMemory(chunk);
             }
@@ -155,7 +190,8 @@ internal sealed unsafe class GpuMemorySlabs
             mapped = (byte*)pointer;
         }
 
-        _chunks.Add(memory);
+        _chunks.Add(memory, new Chunk(memoryType, deviceAddress,
+            BitOperations.Log2(blockSize) - BitOperations.Log2(MinBlockSize)));
         // Push in reverse so blocks come out in address order.
         for (var offset = ChunkSize - blockSize; ; offset -= blockSize)
         {

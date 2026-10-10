@@ -17,11 +17,34 @@ namespace SharpEmu.Libs.Gpu.Pipelines;
 // clear; the metadata is not emulated and the stores alone would leave the image stale.
 public sealed record ConstantFill(uint GroupScalarRegister, uint DestinationScalarResource, uint SourceScalarResource);
 
+public sealed record ImmediateConstantFill(uint GroupScalarRegister, uint DestinationScalarResource);
+
 public static class ConstantFillDetector
 {
     private const uint Shift64 = 134; // inline constant 6
     private const uint ZeroConstant = 128;
     private const uint NullScalar = 125;
+
+    public static ImmediateConstantFill? DetectImmediate(Gen5ShaderProgram program)
+    {
+        var instructions = program.Instructions.Where(instruction => instruction.Opcode != "SWaitcnt").ToArray();
+        if (instructions.Length != 4 || instructions[0].Opcode != "VLshlAddU32" ||
+            instructions[0].Destinations is not [{ Kind: Gen5OperandKind.VectorRegister } index] ||
+            instructions[0].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } group,
+                { Kind: Gen5OperandKind.EncodedConstant, Value: Shift64 }, { Kind: Gen5OperandKind.VectorRegister, Value: 0 }] ||
+            instructions[1].Opcode != "VMovB32" ||
+            instructions[1].Destinations is not [{ Kind: Gen5OperandKind.VectorRegister } data] ||
+            data.Value == index.Value ||
+            instructions[1].Sources is not [{ Kind: Gen5OperandKind.LiteralConstant or Gen5OperandKind.EncodedConstant }] ||
+            instructions[2].Opcode != "BufferStoreFormatX" ||
+            instructions[2].Control is not Gen5BufferMemoryControl
+                { DwordCount: 1, OffsetBytes: 0, IndexEnabled: true, OffsetEnabled: false, Typed: false } control ||
+            control.VectorAddress != index.Value || control.VectorData != data.Value ||
+            instructions[2].Sources is not [_, _, { Kind: Gen5OperandKind.EncodedConstant, Value: ZeroConstant }] ||
+            instructions[3].Opcode != "SEndpgm")
+            return null;
+        return new ImmediateConstantFill(group.Value, control.ScalarResource);
+    }
 
     public static ConstantFill? Detect(Gen5ShaderProgram program)
     {
@@ -34,7 +57,7 @@ public static class ConstantFillDetector
         var index = instructions[0];
         if (index.Opcode != "VLshlAddU32" || index.Destinations is not [{ Kind: Gen5OperandKind.VectorRegister } indexRegister] ||
             index.Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } group, { Kind: Gen5OperandKind.EncodedConstant, Value: Shift64 },
-                { Kind: Gen5OperandKind.VectorRegister } thread] || thread.Value != indexRegister.Value)
+                { Kind: Gen5OperandKind.VectorRegister } thread] || thread.Value != 0 || thread.Value != indexRegister.Value)
         {
             return null;
         }

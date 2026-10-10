@@ -531,6 +531,47 @@ public static class TilerShaders
         return shaderModule.Finish(main, 64, 1);
     }
 
+    // Packs encoded R/RG bytes into RGBA or extracts them again. No gamma conversion:
+    // the sRGB image format performs conversion during sampling and attachment writes.
+    public static byte[] CreateNarrowColorConversion(uint channels, bool widen)
+    {
+        if (channels is not (1 or 2))
+            throw new ArgumentOutOfRangeException(nameof(channels));
+
+        var (shaderModule, main, x, y) = BeginConversion();
+        var builder = shaderModule.Builder;
+        ReturnOutsideRectangle(shaderModule, x, y);
+        var source = shaderModule.Add(shaderModule.LoadArgument(0),
+            shaderModule.Add(shaderModule.Multiply(y, shaderModule.LoadArgument(6)),
+                shaderModule.Multiply(x, shaderModule.GetUnsignedConstant(widen ? channels : 4))));
+        var destination = shaderModule.Add(shaderModule.LoadArgument(1),
+            shaderModule.Add(shaderModule.Multiply(y, shaderModule.LoadArgument(7)),
+                shaderModule.Multiply(x, shaderModule.GetUnsignedConstant(widen ? 4 : channels))));
+        if (widen)
+        {
+            var value = shaderModule.GetUnsignedConstant(0xff000000);
+            for (uint channel = 0; channel < channels; channel++)
+            {
+                var address = shaderModule.Add(source, shaderModule.GetUnsignedConstant(channel));
+                var word = shaderModule.LoadWord(shaderModule.InputBufferVariable, shaderModule.ShiftRight(address, 2));
+                var shift = shaderModule.Multiply(shaderModule.And(address, shaderModule.GetUnsignedConstant(3)), shaderModule.GetUnsignedConstant(8));
+                var octet = shaderModule.And(builder.AddInstruction(SpirvOp.ShiftRightLogical, shaderModule.UintType, word, shift), shaderModule.GetUnsignedConstant(255));
+                value = shaderModule.Or(value, builder.AddInstruction(SpirvOp.ShiftLeftLogical, shaderModule.UintType, octet, shaderModule.GetUnsignedConstant(channel * 8)));
+            }
+            builder.AddStatement(SpirvOp.Store, shaderModule.GetWordPointer(shaderModule.OutputBufferVariable, shaderModule.ShiftRight(destination, 2)), value);
+        }
+        else
+        {
+            // Byte atomics preserve padding and the neighboring packed texels.
+            for (uint channel = 0; channel < channels; channel++)
+                CopyElement(shaderModule, shaderModule.Add(source, shaderModule.GetUnsignedConstant(channel)),
+                    shaderModule.Add(destination, shaderModule.GetUnsignedConstant(channel)), 1);
+        }
+        builder.AddStatement(SpirvOp.Return);
+        builder.EndFunction();
+        return shaderModule.Finish(main, 64, 1);
+    }
+
     // Swaps the 16-bit blue and red channels of BGRA16 pixels; the width argument counts pixels.
     public static byte[] CreateBgra16Swap()
     {

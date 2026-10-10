@@ -72,15 +72,16 @@ public sealed partial class GuestImageCache
     }
 
     // Removes the image and its stencil associations; the slot is freed after the current tick.
-    private void DeleteImage(ResourceSlotIdentifier imageIdentifier)
+    private int DeleteImage(ResourceSlotIdentifier imageIdentifier)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageDelete);
         var image = _slots.TryGet(imageIdentifier);
         if (image == null || !image.Registered)
         {
-            return;
+            return 0;
         }
 
+        var retiredImages = 1;
         if (!image.DepthOwner.IsValid)
         {
             var associations = new List<ResourceSlotIdentifier>();
@@ -99,7 +100,7 @@ public sealed partial class GuestImageCache
                     associated.ClearGpuModified();
                 }
 
-                DeleteImage(association);
+                retiredImages += DeleteImage(association);
             }
         }
 
@@ -108,29 +109,44 @@ public sealed partial class GuestImageCache
             throw SubmissionScheduler.Fatal($"A GPU-modified image cannot be deleted before its contents are resolved: address=0x{image.Description.Data.Address:X16} size=0x{image.Description.Data.Size:X}.");
         }
 
+        if (BindlessImageInvalidator is { } invalidate)
+        {
+            var views = image.GetOwnedViews().ToArray();
+            if (views.Length != 0) invalidate(views);
+        }
+
         _scheduledReadbacks.Remove(imageIdentifier);
         if (image.Description.HasMetadata)
         {
             _surfaceMetadata.Remove(image.Description.Metadata.Range.Address);
         }
 
+        var retiredBytes = checked((long)image.AccountedSize);
         RemoveFromIndex(imageIdentifier);
         if (_scheduler.Active)
         {
-            _scheduler.QueueCompletionAction(() => _slots.Erase(imageIdentifier));
+            Interlocked.Add(ref _retiredImageMemoryBytes, retiredBytes);
+            _scheduler.QueueCompletionAction(() =>
+            {
+                _slots.Erase(imageIdentifier);
+                Interlocked.Add(ref _retiredImageMemoryBytes, -retiredBytes);
+            });
         }
         else
         {
             _slots.Erase(imageIdentifier);
         }
+        return retiredImages;
     }
 
-    private void ReleaseImage(ResourceSlotIdentifier imageIdentifier)
+    private void ReleaseImage(ResourceSlotIdentifier imageIdentifier,
+        [System.Runtime.CompilerServices.CallerFilePath] string file = "",
+        [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
     {
         var image = _slots[imageIdentifier];
         if (image.IsGpuModified)
         {
-            image.ClearGpuModified();
+            image.ClearGpuModified(file, line);
         }
 
         DeleteImage(imageIdentifier);
@@ -466,17 +482,53 @@ public sealed partial class GuestImageCache
         }
 
         using var held = _lock.Hold();
+        ImageDropTrace.CauseAddress = address;
+        ImageDropTrace.CauseSize = size;
+        try
+        {
+            foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
+            {
+                var image = _slots[imageIdentifier];
+                if (!image.Overlaps(address, size))
+                {
+                    continue;
+                }
+
+                if (image.IsGpuModified)
+                {
+                    // A partial write leaves the rest of the image's bytes in memory.
+                    var range = image.Description.Data;
+                    var fullyCovered = address <= range.Address && address + size >= range.Address + range.Size;
+                    if (fullyCovered || !PublishBeforeDrop(imageIdentifier))
+                    {
+                        image.ClearGpuModified();
+                    }
+                }
+
+                image.MarkBufferModified();
+            }
+        }
+        finally
+        {
+            ImageDropTrace.CauseSize = 0;
+        }
+    }
+
+    // A GPU-modified image owns its bytes; a raw binding can overlap it without writing there.
+    public void InvalidateMemoryCopiesFromGpu(ulong address, ulong size)
+    {
+        if (!IsValidRange(address, size))
+        {
+            return;
+        }
+
+        using var held = _lock.Hold();
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
         {
             var image = _slots[imageIdentifier];
-            if (!image.Overlaps(address, size))
+            if (image.DepthOwner.IsValid || image.IsGpuModified || !image.Overlaps(address, size))
             {
                 continue;
-            }
-
-            if (image.IsGpuModified)
-            {
-                image.ClearGpuModified();
             }
 
             image.MarkBufferModified();
@@ -504,6 +556,54 @@ public sealed partial class GuestImageCache
         }
 
         return new ImageRegionInfo(imagePages, imageBytes, gpuImageBytes);
+    }
+
+    // The GPU-modified images whose contents are not yet in a buffer and that overlap the range.
+    // An image the CPU or a buffer wrote over since holds superseded contents; memory is newer.
+    // The ranges' test without building them: resource reads ask it for every guest word
+    // and almost never meet such an image.
+    public bool HasUnsynchronizedGpuImage(ulong address, ulong size)
+    {
+        if (!IsValidRange(address, size)) return false;
+        using var held = _lock.Hold();
+        if (!ImagePageOwnerTable.TryGetPageRange(address, size, out var first, out var lastExclusive)) return false;
+        for (var page = first; page < lastExclusive; page++)
+        {
+            var owners = _pageOwners.Find(page);
+            if (owners is null) continue;
+            for (var ownerIndex = 0; ownerIndex < owners.Count; ownerIndex++)
+            {
+                if (IsUnsynchronizedGpuImage(_slots.TryGet(owners[ownerIndex]), address, size)) return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsUnsynchronizedGpuImage(CachedImage? image, ulong address, ulong size) =>
+        image is not null && !image.DepthOwner.IsValid && image.GpuOverlaps(address, size) && !image.BufferHoldsGpuContents &&
+        !image.IsCpuDirty && !image.IsBufferModified;
+
+    public List<(ulong Address, ulong Size)> UnsynchronizedGpuImageRanges(ulong address, ulong size)
+    {
+        var ranges = new List<(ulong Address, ulong Size)>();
+        if (!IsValidRange(address, size)) return ranges;
+        using var held = _lock.Hold();
+        if (!ImagePageOwnerTable.TryGetPageRange(address, size, out var first, out var lastExclusive)) return ranges;
+        for (var page = first; page < lastExclusive; page++)
+        {
+            var owners = _pageOwners.Find(page);
+            if (owners is null) continue;
+            for (var ownerIndex = 0; ownerIndex < owners.Count; ownerIndex++)
+            {
+                var image = _slots.TryGet(owners[ownerIndex]);
+                if (IsUnsynchronizedGpuImage(image, address, size) &&
+                    !ranges.Contains((image!.Description.Data.Address, image.Description.Data.Size)))
+                    ranges.Add((image.Description.Data.Address, image.Description.Data.Size));
+            }
+        }
+
+        return ranges;
     }
 
     // Only byte overlap with a GPU-owned image can make a clean backing read unsafe.

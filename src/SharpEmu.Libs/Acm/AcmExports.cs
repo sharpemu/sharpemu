@@ -170,8 +170,51 @@ public static class AcmExports
         ExportName = "sceAcm_ConvReverb_SharedInput",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceAcm")]
-    public static int AcmConvReverbSharedInput(CpuContext ctx) =>
-        AdvanceBatchInfo(ctx, 1024);
+    public static int AcmConvReverbSharedInput(CpuContext ctx)
+    {
+        var outputCount = unchecked((uint)ctx[CpuRegister.Rcx]);
+        var outputDescriptors = ReadStackArg64(ctx, 0);
+        if (outputDescriptors != 0)
+        {
+            Span<byte> descriptor = stackalloc byte[24];
+            for (uint index = 0; index < Math.Min(outputCount, 64u); index++)
+            {
+                if (!ctx.TryReadUInt64(outputDescriptors + (index * sizeof(ulong)), out var descriptorAddress) ||
+                    descriptorAddress == 0)
+                {
+                    continue;
+                }
+
+                if (!ctx.Memory.TryRead(descriptorAddress, descriptor))
+                {
+                    continue;
+                }
+
+                var samples = BinaryPrimitives.ReadUInt32LittleEndian(descriptor);
+                var channels = BinaryPrimitives.ReadUInt32LittleEndian(descriptor[4..]);
+                var buffersAddress = BinaryPrimitives.ReadUInt64LittleEndian(descriptor[16..]);
+                if (samples == 0 || channels == 0 || channels > 64 || buffersAddress == 0 || samples > 65536)
+                {
+                    continue;
+                }
+
+                for (uint channel = 0; channel < channels; channel++)
+                {
+                    if (!ctx.TryReadUInt64(buffersAddress + (channel * sizeof(ulong)), out var bufferAddress) ||
+                        bufferAddress == 0)
+                    {
+                        continue;
+                    }
+
+                    ClearGuestMemory(ctx, bufferAddress, (ulong)samples * sizeof(float));
+                }
+            }
+        }
+
+        // The batch record still advances when the job is recorded. The actual
+        // convolution remains unimplemented, but stale output must not be played.
+        return AdvanceBatchInfo(ctx, 1024);
+    }
 
     [SysAbiExport(
         Nid = "9nLbWmRDpa8",
@@ -271,6 +314,29 @@ public static class AcmExports
         }
 
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    private static ulong ReadStackArg64(CpuContext ctx, int index)
+    {
+        var address = ctx[CpuRegister.Rsp] + sizeof(ulong) + ((ulong)index * sizeof(ulong));
+        return ctx.TryReadUInt64(address, out var value) ? value : 0;
+    }
+
+    private static void ClearGuestMemory(CpuContext ctx, ulong address, ulong byteCount)
+    {
+        Span<byte> zeros = stackalloc byte[256];
+        var remaining = byteCount;
+        while (remaining != 0)
+        {
+            var chunk = (int)Math.Min(remaining, (ulong)zeros.Length);
+            if (!ctx.Memory.TryWrite(address, zeros[..chunk]))
+            {
+                return;
+            }
+
+            address += (ulong)chunk;
+            remaining -= (ulong)chunk;
+        }
     }
 
     private static void Trace(string message)

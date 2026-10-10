@@ -582,10 +582,17 @@ public sealed class CommandStreamQueue
     }
 
     // Processes to empty; with the flag, heads still blocked after a full retry cycle are cancelled.
-    public IdleOutcome DrainForShutdown(bool cancelBlockedOnNoProgress)
+    // Once abandon reports true (the guest memory is gone), the remaining work is dropped unexecuted.
+    public IdleOutcome DrainForShutdown(bool cancelBlockedOnNoProgress, Func<bool>? abandon = null)
     {
         for (;;)
         {
+            if (abandon?.Invoke() == true)
+            {
+                DiscardPending();
+                return Outcome;
+            }
+
             var result = ProcessOne();
             switch (result)
             {
@@ -633,6 +640,34 @@ public sealed class CommandStreamQueue
         }
 
         return progressed;
+    }
+
+    private void DiscardPending()
+    {
+        lock (_gate)
+        {
+            foreach (var queue in _queues)
+            {
+                if (queue.Count == 0)
+                {
+                    continue;
+                }
+
+                _submissionCount -= queue.Count;
+                foreach (var dropped in queue)
+                {
+                    if (dropped.Kind == CommandSubmissionKind.FrameBoundary)
+                    {
+                        _pendingBoundaries--;
+                    }
+                }
+
+                queue.Clear();
+                _outcome = IdleOutcome.Cancelled;
+            }
+
+            Monitor.PulseAll(_gate);
+        }
     }
 
     private void CancelBlocked()

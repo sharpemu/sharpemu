@@ -7,6 +7,7 @@ using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
@@ -93,6 +94,7 @@ internal sealed class RecordingRenderHost : IRenderHost
     public IImageFormatSupport FormatSupport { get; } = new AcceptingFormatSupport();
 
     public bool IsRecording => Recording;
+    public bool NativeTwoSampleMixedSupported { get; set; }
 
     public ImageLayout ColorLayout { get; set; } = ImageLayout.ColorAttachmentOptimal;
 
@@ -158,6 +160,11 @@ internal sealed class RecordingRenderHost : IRenderHost
         return GuestMemory.TryRead(address, destination);
     }
 
+    public bool CleanGuestMemoryAvailable { get; set; } = true;
+
+    public bool TryReadCleanGuestBytes(ulong address, Span<byte> destination) =>
+        CleanGuestMemoryAvailable && GuestMemory.TryRead(address, destination);
+
     public ulong ClampMappedSize(ulong address, ulong size) => ClampOverride?.Invoke(address, size) ?? size;
 
     public ResourceSlotIdentifier FindImage(ref ImageRequest request, bool exactFormat)
@@ -176,6 +183,10 @@ internal sealed class RecordingRenderHost : IRenderHost
     public ResourceSlotIdentifier ImageOf(ulong address) => _images[address];
 
     public void BindRenderTarget(ResourceSlotIdentifier image) => Calls.Add($"bind_target {image.Index}");
+
+    public void DemoteRenderScale(ResourceSlotIdentifier image) => Calls.Add($"demote_scale {image.Index}");
+
+    public float GetRenderScale(ResourceSlotIdentifier image) => 1f;
 
     public void ResetBindings() => Calls.Add("reset_bindings");
 
@@ -222,6 +233,35 @@ internal sealed class RecordingRenderHost : IRenderHost
     public BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten)
     {
         TryWrapRing("obtain");
+        var owner = ResolveAllocation(address, size);
+        var end = address + size;
+        for (var page = address & ~(PageSize - 1); page < end; page += PageSize)
+        {
+            if (_dirtyPages.Remove(page))
+            {
+                Calls.Add($"upload {owner.Handle:X} {page:X}");
+            }
+        }
+
+        Calls.Add($"obtain {address:X} {size:X} written={isWritten} -> {owner.Handle:X}:{address - owner.Start:X}");
+        return new BufferBinding(owner.Handle, address - owner.Start);
+    }
+
+    public void PrepareBufferAllocations(ReadOnlySpan<GuestSpan> ranges)
+    {
+        for (var index = 0; index < ranges.Length; index++)
+        {
+            var range = ranges[index];
+            var overlaps = _allocations.Any(allocation => !allocation.Deleted &&
+                allocation.Start < range.End && range.Address < allocation.End);
+            for (var other = 0; !overlaps && other < ranges.Length; other++)
+                overlaps = other != index && ranges[other].Address < range.End && range.Address < ranges[other].End;
+            if (overlaps) _ = ResolveAllocation(range.Address, range.Size);
+        }
+    }
+
+    private Allocation ResolveAllocation(ulong address, ulong size)
+    {
         var end = address + size;
         var owner = _allocations.Find(a => !a.Deleted && a.Start <= address && end <= a.End);
         if (owner is null)
@@ -244,16 +284,7 @@ internal sealed class RecordingRenderHost : IRenderHost
             _allocations.Add(owner);
         }
 
-        for (var page = address & ~(PageSize - 1); page < end; page += PageSize)
-        {
-            if (_dirtyPages.Remove(page))
-            {
-                Calls.Add($"upload {owner.Handle:X} {page:X}");
-            }
-        }
-
-        Calls.Add($"obtain {address:X} {size:X} written={isWritten} -> {owner.Handle:X}:{address - owner.Start:X}");
-        return new BufferBinding(owner.Handle, address - owner.Start);
+        return owner;
     }
 
     public BufferBinding UploadTransient(ReadOnlySpan<byte> data, uint alignment)
@@ -267,8 +298,15 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public byte[]? LastTransient { get; private set; }
 
-    public void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input) =>
+    public BufferBinding[] LastVertexBindings { get; private set; } = [];
+
+    public bool IsBufferLive(ulong handle) => _allocations.Any(allocation => allocation.Handle == handle && !allocation.Deleted);
+
+    public void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input)
+    {
+        LastVertexBindings = bindings.ToArray();
         Calls.Add($"bind_vertex {string.Join(",", bindings.ToArray().Select(b => $"{b.Handle:X}:{b.Offset:X}"))}");
+    }
 
     public void BindIndexBuffer(BufferBinding binding, IndexType type) => Calls.Add($"bind_index {binding.Handle:X}:{binding.Offset:X} {type}");
 
@@ -324,6 +362,9 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void DrawIndexedIndirect(BufferBinding arguments) =>
         Calls.Add($"draw_indexed_indirect {arguments.Handle:X}:{arguments.Offset:X}");
+
+    public void DrawIndirect(BufferBinding arguments) =>
+        Calls.Add($"draw_indirect {arguments.Handle:X}:{arguments.Offset:X}");
 
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ) => Calls.Add($"dispatch {groupsX} {groupsY} {groupsZ}");
 
@@ -497,6 +538,7 @@ internal static class RenderExecutorFixtures
     public const ulong ComputeShader = 0x2_0002_0000;
     public const uint PrimitiveTriangleList = 4;
     public const uint PrimitiveTriangleStrip = 6;
+    public const uint PrimitiveTriangleFan = 5;
 
     private static Exception Fatal(string message) => new RenderExecutorFatalException(message);
 

@@ -23,7 +23,6 @@ internal static partial class RegisterWriters
     [
         SpiShaderPaceIdPs, SpiGraphicsShaderControlPs, SpiShaderPaceIdGs, SpiShaderPgmRsrc4Gs, SpiGraphicsShaderControlGs,
         SpiShaderUserDataAddrLoGs, SpiShaderUserDataAddrHiGs, SpiShaderPgmChksumHs, SpiShaderPgmRsrc4Hs, SpiGraphicsShaderControlHs,
-        SpiShaderUserDataAddrLoHs, SpiShaderUserDataAddrHiHs,
     ];
 
     public static void FillShader(RegisterPacketWriter?[] direct, RegisterWriter?[] indirect)
@@ -67,6 +66,8 @@ internal static partial class RegisterWriters
             indirect[offset] = IgnoreEntry;
         }
 
+        indirect[SpiShaderUndocumented192] = UndocumentedShaderEntry;
+
         direct[SpiGraphicsShaderControlPs] = ForwardShaderPacket;
         direct[SpiGraphicsShaderControlGs] = ForwardShaderPacket;
         direct[SpiShaderUserDataAddrLoGs] = ForwardShaderPacket;
@@ -74,6 +75,13 @@ internal static partial class RegisterWriters
         direct[SpiGraphicsShaderControlHs] = ForwardShaderPacket;
         direct[SpiShaderUserDataAddrLoHs] = ForwardShaderPacket;
         direct[SpiShaderUserDataAddrHiHs] = ForwardShaderPacket;
+
+        // Unlike program addresses, these registers contain byte-address
+        // bits 0..31 and 32..47, consumed directly by merged LS/HS s0:s1.
+        indirect[SpiShaderUserDataAddrLoHs] = static (banks, _, value) =>
+            banks.Shader.Vertex.HullUserDataAddress = (banks.Shader.Vertex.HullUserDataAddress & 0xFFFF_0000_0000ul) | value;
+        indirect[SpiShaderUserDataAddrHiHs] = static (banks, _, value) =>
+            banks.Shader.Vertex.HullUserDataAddress = (banks.Shader.Vertex.HullUserDataAddress & uint.MaxValue) | ((ulong)(value & 0xFFFFu) << 32);
 
         indirect[SpiShaderPgmLoHs] = static (banks, _, value) => banks.Shader.Vertex.HullAddress = RegisterField.WithLowAddress(banks.Shader.Vertex.HullAddress, value);
         indirect[SpiShaderPgmHiHs] = static (banks, _, value) => banks.Shader.Vertex.HullAddress = RegisterField.WithHighAddress(banks.Shader.Vertex.HullAddress, value);
@@ -97,6 +105,17 @@ internal static partial class RegisterWriters
         indirect[SpiShaderPgmHiVs] = static (banks, _, value) => banks.Shader.Vertex.LegacyVertexAddress = RegisterField.WithHighAddress(banks.Shader.Vertex.LegacyVertexAddress, value);
         indirect[SpiShaderPgmRsrc1Vs] = static (banks, _, value) => banks.Shader.Vertex.LegacyVertexResource1 = value;
         indirect[SpiShaderPgmRsrc2Vs] = static (banks, _, value) => banks.Shader.Vertex.LegacyVertexResource2 = value;
+    }
+
+    // The value is not applied, but each new one is logged so a rendering difference can be traced to it.
+    private static long _lastUndocumentedShaderValue = -1;
+
+    private static void UndocumentedShaderEntry(RegisterBanks banks, uint offset, uint value)
+    {
+        if (Interlocked.Exchange(ref _lastUndocumentedShaderValue, value) != value)
+        {
+            Console.Error.WriteLine($"[GPU][WARN] Undocumented shader register written: offset=0x{offset:X4} value=0x{value:X8}; it is not applied.");
+        }
     }
 
     private static uint PixelUserScalarsPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>

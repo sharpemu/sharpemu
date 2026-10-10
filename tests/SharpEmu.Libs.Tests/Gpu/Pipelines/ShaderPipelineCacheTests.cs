@@ -19,6 +19,24 @@ public sealed class ShaderPipelineCacheTests : IDisposable
 {
     private const uint Format32x4Float = 77;
 
+    [Theory]
+    [InlineData(6u)]
+    [InlineData(32u)]
+    public void MergedHullUserData_CarriesTheBackAddressBesideTheDeclaredFrontBank(uint count)
+    {
+        var registers = new UserScalarRegisters();
+        for (uint index = 0; index < count; index++) registers.Set(index, 100 + index, UserScalarKind.Unknown);
+        var data = ShaderPipelineCache.MergedHullUserData(registers, count, 0x20_ABCDEFBC);
+        Assert.Equal((int)count + 2, data.Length);
+        Assert.Equal(registers.Values.AsSpan(0, (int)count).ToArray(), data.AsSpan(0, (int)count).ToArray());
+        Assert.Equal(0xABCDEFBCu, data[count]);
+        Assert.Equal(0x20u, data[count + 1]);
+        var changed = ShaderPipelineCache.MergedHullUserData(registers, count, 0x21_98765404);
+        Assert.Equal(0x98765404u, changed[count]);
+        Assert.Equal(0x21u, changed[count + 1]);
+        Assert.Equal(0xABCDEFBCu, data[count]);
+    }
+
     private readonly FatalScope _fatal = new();
 
     public void Dispose() => _fatal.Dispose();
@@ -132,6 +150,47 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.False(description.StaticParameters.CullBack);
     }
 
+    [Theory]
+    [InlineData(true, 15, 0, 1, 0, true)]
+    [InlineData(true, 1, 16, 1, 0, true)]
+    [InlineData(true, 1, 0, 17, 0, true)]
+    [InlineData(true, 1, 0, 1, 18, true)]
+    [InlineData(true, 4, 5, 1, 0, false)]
+    [InlineData(false, 15, 16, 17, 18, false)]
+    public void SecondBlendSource_IsUsedOnlyByEnabledSrc1Factors(bool enable, byte colorSource, byte colorDestination,
+        byte alphaSource, byte alphaDestination, bool expected)
+    {
+        var blend = new BlendRegisters
+        {
+            Enable = enable, ColorSourceFactor = colorSource, ColorDestinationFactor = colorDestination,
+            AlphaSourceFactor = alphaSource, AlphaDestinationFactor = alphaDestination,
+        };
+
+        Assert.Equal(expected, ShaderPipelineCache.UsesSecondBlendSource(blend));
+    }
+
+    [Fact]
+    public void TessellatedPatches_KeepTheGuestCulling()
+    {
+        var banks = Banks();
+        banks.Context.RasterMode.CullBack = true;
+        var programs = Programs();
+        var tessellated = new VertexInputInfo
+        {
+            PositionExportControl = programs.VertexInput.PositionExportControl,
+            Stage = programs.VertexInput.Stage,
+            Tessellation = new(new(10), new(20), 4),
+        };
+        var rendering = new RenderingState { Samples = 1 };
+
+        var description = ShaderPipelineCache.BuildGraphicsDescription(
+            [], default, tessellated, programs.PixelInput, banks.Context, in rendering, PrimitiveTopology.PatchList, false, false,
+            programs.Vertex, programs.Pixel, SampleCountFlags.Count1Bit);
+
+        Assert.Equal(PrimitiveTopology.PatchList, description.StaticParameters.Topology);
+        Assert.True(description.StaticParameters.CullBack);
+    }
+
     [Fact]
     public void DepthTarget_FoldsTheDepthAndStencilState()
     {
@@ -167,6 +226,17 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.Equal(new PipelineVertexBinding(16, true), state.Bindings[1]);
         Assert.Equal(new PipelineVertexAttribute(16, 0), state.Attributes[1]);
         Assert.Equal(new PipelineVertexAttribute(0, 1), state.Attributes[2]);
+    }
+
+    // Depth bounds are dynamic state: a game that moves them per draw (light volumes) must not
+    // create a pipeline for every value.
+    [Fact]
+    public void DepthBounds_DoNotSplitTheGraphicsPipeline()
+    {
+        var near = Describe(banks => { banks.Context.DepthBoundsMin = 0.1f; banks.Context.DepthBoundsMax = 0.4f; }, withDepth: true);
+        var far = Describe(banks => { banks.Context.DepthBoundsMin = 0.6f; banks.Context.DepthBoundsMax = 0.9f; }, withDepth: true);
+
+        Assert.Equal(ShaderPipelineCache.KeyOf(near), ShaderPipelineCache.KeyOf(far));
     }
 
     [Fact]
@@ -213,6 +283,25 @@ public sealed class ShaderPipelineCacheTests : IDisposable
     }
 
     [Fact]
+    public void GraphicsPipelineKey_DistinguishesTessellationStagesAndPatchSizes()
+    {
+        var basic = Describe();
+        GraphicsPipelineKey Key(ulong control, ulong evaluation, uint points) => ShaderPipelineCache.KeyOf(new()
+        {
+            Rendering = basic.Rendering, VertexInput = basic.VertexInput, VertexInfo = basic.VertexInfo,
+            VertexProgram = basic.VertexProgram, VertexStage = basic.VertexStage, PixelInfo = basic.PixelInfo,
+            PixelProgram = basic.PixelProgram, PixelStage = basic.PixelStage, StaticParameters = basic.StaticParameters,
+            Tessellation = new(new(control), new(evaluation), points),
+        });
+        var key = Key(10, 20, 4);
+        Assert.Equal(key, Key(10, 20, 4));
+        Assert.NotEqual(key, ShaderPipelineCache.KeyOf(basic));
+        Assert.NotEqual(key, Key(11, 20, 4));
+        Assert.NotEqual(key, Key(10, 21, 4));
+        Assert.NotEqual(key, Key(10, 20, 3));
+    }
+
+    [Fact]
     public void ComputePipelineKey_IsTheProgramId()
     {
         Assert.Equal(new ComputePipelineKey(5), new ComputePipelineKey(5));
@@ -229,6 +318,28 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.NotEqual(first, other);
         Assert.Equal(2, guest.Host.ComputePipelines.Count);
         Assert.Equal(2, cache.ComputePipelineCount);
+    }
+
+    [Fact]
+    public void RenderingKeysDistinguishColorAndDepthSampleCounts()
+    {
+        PipelineRenderingState State(uint color, uint depth)
+        {
+            var state = new PipelineRenderingState { ColorCount = 1, DepthFormat = Format.D32Sfloat, DepthSamples = depth };
+            state.ColorFormats[0] = Format.R8G8B8A8Unorm;
+            state.ColorSamples[0] = color;
+            return state;
+        }
+        var entries = new Dictionary<PipelineRenderingState, int>
+        {
+            [State(1, 1)] = 1,
+            [State(1, 2)] = 2,
+            [State(2, 2)] = 3,
+        };
+        Assert.Equal(3, entries.Count);
+        Assert.Equal(1, entries[State(1, 1)]);
+        Assert.Equal(2, entries[State(1, 2)]);
+        Assert.Equal(3, entries[State(2, 2)]);
     }
 
     [Fact]
@@ -315,7 +426,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         var programs = Programs(pixelStage: Stage(new ShaderProgramInfo { Stage = ShaderStageKind.Pixel, PixelColorExportMasks = exportMasks }));
         var resolution = new ColorTargetResolution(
             default, 0x1000, 0x10000, new Extent2D(64, 64), 0, 0, 1, ColorComponentMap.Identity, false, false, default);
-        ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1))];
+        ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1), 1f)];
         var rendering = new RenderingState { Samples = 1, ColorAttachmentCount = 1 };
         rendering.ColorAttachments[0] = new RenderingAttachment(
             default, ImageLayout.ColorAttachmentOptimal, Format.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
@@ -335,7 +446,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         var programs = Programs();
         var resolution = new ColorTargetResolution(
             default, 0x1000, 0x10000, new Extent2D(64, 64), 0, 0, 1, ColorComponentMap.Identity, false, false, default);
-        ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1))];
+        ColorTargetState[] colors = [new(in resolution, 0, new SharpEmu.Libs.Gpu.Buffers.ResourceSlotIdentifier(1, 1), 1f)];
         var rendering = new RenderingState { Samples = 1, ColorAttachmentCount = 1 };
         rendering.ColorAttachments[0] = new RenderingAttachment(
             default, ImageLayout.ColorAttachmentOptimal, Format.R8G8B8A8Unorm, 0, 0, 0, 0, false, false, false, false, false);
@@ -379,6 +490,30 @@ public sealed class ShaderPipelineCacheTests : IDisposable
             programs.Vertex, programs.Pixel, SampleCountFlags.Count1Bit | SampleCountFlags.Count4Bit);
 
         Assert.Equal(expected, description.StaticParameters.SampleShadingEnable);
+    }
+
+    [Theory]
+    [InlineData(0xFFFFFFFFu, 0xFFFFFFFFu, true)]
+    [InlineData(0x00030003u, 0x00030003u, true)]
+    [InlineData(0xFFFFFFFEu, 0xFFFFFFFFu, false)]
+    [InlineData(0xFFFEFFFFu, 0xFFFFFFFFu, false)]
+    [InlineData(0xFFFFFFFFu, 0xFFFFFFFEu, false)]
+    [InlineData(0xFFFFFFFFu, 0xFFFEFFFFu, false)]
+    public void NativeTwoSampleRenderingRejectsRestrictedCoverage(uint firstRow, uint secondRow, bool supported)
+    {
+        using var fatalScope = new FatalScope();
+        var banks = Banks();
+        banks.Context.AntialiasingConfig.SampleCountLog2 = 1;
+        banks.Context.SampleCoverageMaskX0Y0X1Y0 = firstRow;
+        banks.Context.SampleCoverageMaskX0Y1X1Y1 = secondRow;
+        var programs = Programs();
+        var rendering = new RenderingState { Samples = 2 };
+        GraphicsPipelineDescription Describe() => ShaderPipelineCache.BuildGraphicsDescription(
+            [], default, programs.VertexInput, programs.PixelInput, banks.Context, in rendering,
+            PrimitiveTopology.TriangleList, false, false, programs.Vertex, programs.Pixel,
+            SampleCountFlags.Count2Bit, nativeTwoSampleMixedSupported: true);
+        if (supported) Assert.Equal(2u, Describe().StaticParameters.Samples);
+        else Assert.Contains("restricted per-pixel coverage", Assert.Throws<SchedulerFatalException>(() => Describe()).Message);
     }
 
     [Fact]

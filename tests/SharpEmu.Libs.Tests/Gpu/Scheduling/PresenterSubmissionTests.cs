@@ -457,6 +457,8 @@ public sealed class PresenterSubmissionTests
             PresenterType.GetMethod("PrepareGuestSubmission", InstanceMembers)!.CreateDelegate<Action<SubmitBundle>>(presenter),
             PresenterType.GetMethod("CompleteGuestSubmission", InstanceMembers)!.CreateDelegate<Action<ulong>>(presenter));
         Set(presenter, "_scheduler", scheduler);
+        // Each collection below must observe the device state it follows, not a polled value.
+        scheduler.TimelinePollInterval = 0;
         scheduler.Begin(new SubmissionContext { QueueName = "test.queue", SubmissionId = 7 });
 
         switch (route)

@@ -4,6 +4,7 @@
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.HLE.GpuMemory;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -63,7 +64,9 @@ public readonly record struct DynamicDrawState(
     StencilMasks FrontStencil,
     StencilMasks BackStencil,
     uint ColorWriteCount,
-    byte ColorWriteEnableMask);
+    byte ColorWriteEnableMask,
+    float DepthMinBounds = 0f,
+    float DepthMaxBounds = 1f);
 
 // The host-side descriptors of one shader stage, prepared before the draw or dispatch records.
 public interface IPreparedBindings
@@ -92,12 +95,22 @@ public interface IRenderHost
 
     bool TryReadGuest(ulong address, Span<byte> destination);
 
+    // Reads guest bytes only when no pending GPU buffer or image write owns them.
+    bool TryReadCleanGuestBytes(ulong address, Span<byte> destination);
+
     // The part of the range that is mapped from its start; zero when the start is unmapped.
     ulong ClampMappedSize(ulong address, ulong size);
 
     ResourceSlotIdentifier FindImage(ref ImageRequest request, bool exactFormat);
 
     void BindRenderTarget(ResourceSlotIdentifier image);
+
+    // The attachments of one pass must share a host resolution; a disagreement drops the
+    // scaled image back to guest resolution for good and the draw resolves its targets again.
+    void DemoteRenderScale(ResourceSlotIdentifier image);
+
+    // The host resolution multiplier of one cached image; one when it is at guest resolution.
+    float GetRenderScale(ResourceSlotIdentifier image);
 
     void ResetBindings();
 
@@ -108,10 +121,18 @@ public interface IRenderHost
     DepthAttachmentAcquisition AcquireDepthAttachment(in DepthAttachmentState depth);
 
     void TransitionDepthAttachment(in DepthAttachmentState depth, ImageLayout layout, ImageAspectFlags writeAspects);
+    bool NativeTwoSampleMixedSupported => false;
+    void ConfigureDepthSampleLocations(in DepthAttachmentState depth, ReadOnlySpan<uint> words, ImageLayout layout, ImageAspectFlags writeAspects)
+        => TransitionDepthAttachment(in depth, layout, writeAspects);
 
     BufferBinding NullBuffer { get; }
 
     BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten);
+    ulong ObtainBufferDeviceAddress(ulong address, ulong size, bool isWritten) =>
+        throw new NotSupportedException("The render host does not expose buffer addresses for tessellation.");
+
+    // Resolve allocations that can overlap before descriptors or geometry capture their handles.
+    void PrepareBufferAllocations(ReadOnlySpan<GuestSpan> ranges);
 
     // Copies host bytes into the stream ring for the current recording.
     BufferBinding UploadTransient(ReadOnlySpan<byte> data, uint alignment);
@@ -124,6 +145,8 @@ public interface IRenderHost
     IResourcePreparation BeginPreparation();
 
     IPreparedBindings PrepareBindings(ShaderStageResources stage);
+    void UpdateTessellationData(IPreparedBindings prepared, uint[] data) =>
+        throw new NotSupportedException("The render host does not support tessellation runtime data.");
 
     void PrepareDeviceAddresses();
 
@@ -140,9 +163,13 @@ public interface IRenderHost
     // Whether a texture bound for the draw being prepared reads the depth attachment's subresources.
     bool SamplesDepthAttachment(in DepthAttachmentState depth) => true;
 
+    // The layout the depth attachment's subresources are in now, or null when unknown or mixed.
+    ImageLayout? DepthAttachmentLayout(in DepthAttachmentState depth) => null;
+
     // The next draw stores to buffers or storage images; called before its BeginRendering.
     void PrepareMemoryWritingDraw() { }
 
+    void PrepareGraphicsPipeline(in PipelineHandle pipeline) { }
     void BindPipeline(PipelineBindPoint bindPoint, in PipelineHandle pipeline);
 
     void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance);
@@ -151,6 +178,10 @@ public interface IRenderHost
 
     // One indexed draw whose counts the GPU reads from the buffer (VkDrawIndexedIndirectCommand layout).
     void DrawIndexedIndirect(BufferBinding arguments) =>
+        throw new NotSupportedException("The render host does not draw from indirect arguments.");
+
+    // One draw whose counts the GPU reads from the buffer (VkDrawIndirectCommand layout).
+    void DrawIndirect(BufferBinding arguments) =>
         throw new NotSupportedException("The render host does not draw from indirect arguments.");
 
     void Dispatch(uint groupsX, uint groupsY, uint groupsZ);

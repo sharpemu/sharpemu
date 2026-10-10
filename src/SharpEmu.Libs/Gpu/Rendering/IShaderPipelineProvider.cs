@@ -23,6 +23,7 @@ public readonly record struct VertexPositionStream(ulong Address, uint Stride, u
 
 public sealed class GraphicsPrograms
 {
+    public TessellationDrawPrograms? Tessellation { get; init; }
     public ShaderProgram Vertex { get; init; }
     public ShaderProgram Pixel { get; init; }
     public VertexInputInfo VertexInput { get; init; } = new();
@@ -38,6 +39,9 @@ public sealed class GraphicsPrograms
     // Blending is off for a fill the provider recognised as an overwrite.
     public bool DisableBlending { get; init; }
 }
+
+public sealed record TessellationDrawPrograms(SharpEmu.ShaderCompiler.Gen5TessellationInfo Configuration,
+    SharpEmu.ShaderCompiler.Gen5TessellationHullInfo HullConfiguration, ComputeProgram Hull);
 
 public sealed class ComputeProgram
 {

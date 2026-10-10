@@ -7,6 +7,7 @@ using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.ShaderCompiler;
 using Silk.NET.Vulkan;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
@@ -49,6 +50,7 @@ public sealed partial class RenderExecutor
         (stages & ~VgtShaderStagesWaveSizeBits) is 0x02002000 or 0x00002000 or 0x00002030;
     private const uint MaxOutputPerSubgroupLimit = 0x40;
     private static int _geometryWarningShown;
+    private static int _tessellationWarningShown;
 
     private readonly IRenderHost _host;
     private readonly IShaderPipelineProvider _pipelines;
@@ -208,6 +210,15 @@ public sealed partial class RenderExecutor
             return;
         }
 
+        if (Pipelines.ShaderPipelineCache.IsMergedTessellationMask(banks.Context.ShaderStages))
+        {
+            if (IsSupportedTessellation(banks))
+            {
+                DrawTessellationIndexed(submitId, banks, arguments);
+            }
+
+            return;
+        }
         if (!HasValidVertexShader(shader) || IsUnsupportedGeometryStage(banks))
         {
             return;
@@ -310,6 +321,50 @@ public sealed partial class RenderExecutor
 
     public void DrawAuto(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
     {
+        if (arguments.IndirectArgumentsAddress != 0 && !CanDrawAutoIndirectOnGpu(banks))
+        {
+            DrawAutoWithCpuArguments(submitId, banks, in arguments);
+            return;
+        }
+
+        DrawAutoCore(submitId, banks, in arguments);
+    }
+
+    // Fans, polygons and legacy rectangle/quad lists are drawn from their vertex counts, so
+    // those read the indirect arguments on the CPU, as merged tessellation does: it counts its
+    // patches from the vertex count. Rectangle lists draw through the host's general
+    // rectangle-list variant, as indexed indirect draws do.
+    private static bool CanDrawAutoIndirectOnGpu(RegisterBanks banks) =>
+        !Pipelines.ShaderPipelineCache.IsMergedTessellationMask(banks.Context.ShaderStages) &&
+        (GuestPrimitiveType)banks.UserConfig.PrimitiveType is
+            GuestPrimitiveType.PointList or GuestPrimitiveType.LineList or GuestPrimitiveType.LineStrip or
+            GuestPrimitiveType.TriangleList or GuestPrimitiveType.TriangleStrip or GuestPrimitiveType.RectangleList;
+
+    private void DrawAutoWithCpuArguments(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
+    {
+
+        Span<byte> bytes = stackalloc byte[(int)AutoIndirectArgumentsSize];
+        if (!_host.TryReadGuest(arguments.IndirectArgumentsAddress, bytes))
+        {
+            throw _host.Fatal($"The indirect draw arguments are unreadable: address=0x{arguments.IndirectArgumentsAddress:X16}.");
+        }
+
+        var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes);
+        var resolved = arguments with
+        {
+            VertexCount = words[0],
+            InstanceCount = words[1],
+            FirstVertex = words[2],
+            FirstInstance = words[3],
+            IndirectArgumentsAddress = 0,
+        };
+        DrawAutoCore(submitId, banks, in resolved);
+    }
+
+    private const ulong AutoIndirectArgumentsSize = 16;
+
+    private void DrawAutoCore(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
+    {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawExecutor);
         if (!_host.IsRecording)
         {
@@ -336,6 +391,17 @@ public sealed partial class RenderExecutor
             return;
         }
 
+        if (Pipelines.ShaderPipelineCache.IsMergedTessellationMask(banks.Context.ShaderStages))
+        {
+            var tessellationVertexOffset = unchecked((int)arguments.FirstVertex +
+                (arguments.OffsetSource == DrawOffsetSource.IndirectArguments ? 0 : (int)banks.UserConfig.IndexOffset));
+            if (IsSupportedTessellation(banks))
+            {
+                DrawTessellation(submitId, banks, arguments.VertexCount, arguments.InstanceCount, 0, 0, tessellationVertexOffset, arguments.FirstInstance);
+            }
+
+            return;
+        }
         if (!HasValidVertexShader(shader) || IsUnsupportedGeometryStage(banks))
         {
             return;
@@ -357,10 +423,17 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        if (!ResolveTopology(userConfig, autoDraw: true, out var topology))
+        if (!ResolveTopology(userConfig, autoDraw: true, out var topology, arguments.VertexCount))
         {
             TraceDrawDisposition(banks, in draw, "no-primitive-topology");
             _host.ResetBindings();
+            return;
+        }
+
+        if (arguments.IndirectArgumentsAddress != 0 && state.ColorCount == 0 && !state.Depth.HasTarget)
+        {
+            // A targetless draw may be retained and replayed later; it needs its counts.
+            DrawAutoWithCpuArguments(submitId, banks, in arguments);
             return;
         }
 
@@ -396,7 +469,8 @@ public sealed partial class RenderExecutor
             false,
             0,
             (uint)vertexOffset,
-            indirect ? arguments.FirstInstance : ResolveInstanceOffset(vertexInput));
+            indirect ? arguments.FirstInstance : ResolveInstanceOffset(vertexInput),
+            arguments.IndirectArgumentsAddress);
         RecordDraw(submitId, banks, in draw, ref state, topology, in emission, default, primitiveRestart: false, setBindDebug: false, setAutoDebug: true);
         _host.ResetBindings();
     }
@@ -496,7 +570,32 @@ public sealed partial class RenderExecutor
     private static bool IsKnownGeometryOutputPrimitiveType(uint value) => value <= 4;
 
     // Only the plain vertex path and the primitive-shader vertex path with default geometry state run.
-    private static bool IsUnsupportedGeometryStage(RegisterBanks banks)
+    // A tessellation configuration the bridge cannot express skips the draw, as an
+    // unsupported geometry stage does, instead of stopping the emulator.
+    private static bool IsSupportedTessellation(RegisterBanks banks)
+    {
+        var shaderInterface = banks.Context.ShaderInterface;
+        string? error = null;
+        if (!Gen5TessellationInfo.TryDecode(shaderInterface.TessellationFactorParameter, out var tessellation, out var factorError))
+            error = factorError;
+        else if (tessellation.Spacing == Gen5TessellationSpacing.PowerOfTwo)
+            error = "power-of-two partitioning needs factor conversion";
+        else if (!Gen5TessellationHullInfo.TryDecode(shaderInterface.LocalHullConfiguration, 0, out _, out var hullError))
+            error = hullError;
+        if (error is null)
+            return true;
+
+        if (Interlocked.Exchange(ref _tessellationWarningShown, 1) == 0)
+        {
+            Console.Error.WriteLine(
+                $"Warning: the title uses an unsupported tessellation configuration; those draw calls are skipped. {error} " +
+                $"tf_param=0x{shaderInterface.TessellationFactorParameter:X8} ls_hs_config=0x{shaderInterface.LocalHullConfiguration:X8}");
+        }
+
+        return false;
+    }
+
+    private bool IsUnsupportedGeometryStage(RegisterBanks banks)
     {
         var context = banks.Context;
         var shaderInterface = context.ShaderInterface;
@@ -556,7 +655,8 @@ public sealed partial class RenderExecutor
     {
         var context = banks.Context;
         var shaderInterface = context.ShaderInterface;
-        var hasColorOutput = (context.RenderTargetMask & shaderInterface.ColorShaderMask) != 0;
+        var hasColorOutput = context.ColorControl.Mode != 0 &&
+                             (context.RenderTargetMask & shaderInterface.ColorShaderMask) != 0;
         return banks.Shader.Pixel.Address != 0 && (hasColorOutput || PixelShaderHasDepthOrCoverageSideEffects(shaderInterface));
     }
 
@@ -572,7 +672,9 @@ public sealed partial class RenderExecutor
         return mode is ColorModeEliminateFastClear or ColorModeFmaskDecompress or ColorModeDccDecompress;
     }
 
-    public bool ResolveTopology(UserConfigRegisters userConfig, bool autoDraw, out PrimitiveTopology topology)
+    private static bool IsLegacyRectangleBatch(uint vertexCount) => vertexCount > 3 && vertexCount % 3 == 0;
+
+    public bool ResolveTopology(UserConfigRegisters userConfig, bool autoDraw, out PrimitiveTopology topology, uint vertexCount = 3)
     {
         topology = PrimitiveTopology.PointList;
         switch ((GuestPrimitiveType)userConfig.PrimitiveType)
@@ -607,7 +709,9 @@ public sealed partial class RenderExecutor
                     throw _host.Fatal($"The primitive type is unknown for an indexed draw: primitiveType={userConfig.PrimitiveType}.");
                 }
 
-                topology = PrimitiveTopology.TriangleStrip;
+                // Several rectangles take the rectangle-list path, which derives each
+                // fourth corner from three vertices like the hardware.
+                topology = IsLegacyRectangleBatch(vertexCount) ? PrimitiveTopology.PatchList : PrimitiveTopology.TriangleStrip;
                 break;
             case GuestPrimitiveType.QuadListLegacy:
                 topology = PrimitiveTopology.TriangleFan;

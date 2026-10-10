@@ -37,6 +37,7 @@ public sealed class ResourceMaterializationCache
     private static long _totalStale;
     private static long _totalStaleUnreadable;
     private static long _totalRefreshes;
+    private static long _totalBypassed;
 
     [ThreadStatic]
     private static bool _readingTable;
@@ -47,6 +48,11 @@ public sealed class ResourceMaterializationCache
         private set => _readingTable = value;
     }
 
+    private const int ProbationLookups = 64;
+    // A plan keeps using the cache while at least one lookup in this many hits.
+    private const int MinimumHitShare = 8;
+
+    public long Bypassed { get; private set; }
     public long Hits { get; private set; }
     public long Misses { get; private set; }
     public long Uncacheable { get; private set; }
@@ -61,9 +67,10 @@ public sealed class ResourceMaterializationCache
         var stale = Interlocked.Exchange(ref _totalStale, 0);
         var staleUnreadable = Interlocked.Exchange(ref _totalStaleUnreadable, 0);
         var refreshes = Interlocked.Exchange(ref _totalRefreshes, 0);
+        var bypassed = Interlocked.Exchange(ref _totalBypassed, 0);
         var total = hits + misses;
         return FormattableString.Invariant(
-            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% {RawReadPrefetch.TakeReport()}");
+            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} stale={stale} stale_unreadable={staleUnreadable} refreshes={refreshes} bypassed={bypassed} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}% {RawReadPrefetch.TakeReport()}");
     }
 
     public bool Materialize(
@@ -74,6 +81,17 @@ public sealed class ResourceMaterializationCache
         ref ResourceSpecialization specialization,
         out ResourceMaterializationFailure failure)
     {
+        // Most draws of a plan whose user data points at per-draw constants never repeat their
+        // inputs; recording their reads and storing entries then costs more than a plain walk.
+        // Such a plan materializes directly and probes the cache again on every 64th draw.
+        var lookups = ++plan.CacheLookups;
+        if (lookups > ProbationLookups && plan.CacheHits * MinimumHitShare < lookups && (lookups & 63) != 0)
+        {
+            Bypassed++;
+            Interlocked.Increment(ref _totalBypassed);
+            return ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out failure);
+        }
+
         var key = KeyOf(plan, inputs);
         var found = TryFind(key, plan, inputs, out var cached);
         if (found)
@@ -94,6 +112,7 @@ public sealed class ResourceMaterializationCache
                     }
 
                     Hits++;
+                    plan.CacheHits++;
                     Interlocked.Increment(ref _totalHits);
                     snapshot = variant.Snapshot;
                     specialization = variant.Specialization;
@@ -107,6 +126,7 @@ public sealed class ResourceMaterializationCache
             if (TryRefreshTable(key, cached, plan, inputs, residentReader, out var refreshed))
             {
                 TableRefreshes++;
+                plan.CacheHits++;
                 Interlocked.Increment(ref _totalRefreshes);
                 snapshot = refreshed.Snapshot;
                 specialization = refreshed.Specialization;
@@ -130,6 +150,7 @@ public sealed class ResourceMaterializationCache
                 ShaderBase = inputs.ShaderBase,
                 ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
                 ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
+                ReadCleanWords = recorder.Wrap(inputs.ReadCleanWords),
                 ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
@@ -211,6 +232,7 @@ public sealed class ResourceMaterializationCache
                 ShaderBase = inputs.ShaderBase,
                 ReadMemory = recorder.Wrap(inputs.ReadMemory, clean: false),
                 ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
+                ReadCleanWords = recorder.Wrap(inputs.ReadCleanWords),
                 ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
@@ -415,6 +437,7 @@ public sealed class ResourceMaterializationCache
     private sealed class ReadRecorder
     {
         private readonly List<(ulong Address, uint Word, bool Clean, bool Table)> _reads = new();
+        private readonly Dictionary<ulong, int> _readIndex = new();
         private bool _inTable;
         private GuestWordReader? _reader;
         private GuestWordReader? _cleanReader;
@@ -438,6 +461,7 @@ public sealed class ResourceMaterializationCache
         public void Reset()
         {
             _reads.Clear();
+            _readIndex.Clear();
             // Retain ordinary descriptor walks without keeping unusually large
             // tables alive for the lifetime of the renderer.
             if (_reads.Capacity > 16384)
@@ -475,7 +499,7 @@ public sealed class ResourceMaterializationCache
                 Failed = true;
                 return false;
             }
-            _reads.Add((address, word, clean, _inTable));
+            Record(address, word, clean);
             return true;
         }
 
@@ -493,9 +517,38 @@ public sealed class ResourceMaterializationCache
                 return false;
 
             for (var offset = 0; offset + sizeof(uint) <= destination.Length; offset += sizeof(uint))
-                _reads.Add((address + (ulong)offset,
-                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(destination[offset..]), clean, _inTable));
+                Record(address + (ulong)offset,
+                    System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(destination[offset..]), clean);
             return true;
+        }
+
+        public GuestWordsReader? Wrap(GuestWordsReader? inner)
+        {
+            if (inner is null) return null;
+            return (ulong address, Span<uint> words) =>
+            {
+                // A refused range falls back to individual reads; only those
+                // determine whether the materialization is uncacheable.
+                if (!inner(address, words)) return false;
+                for (var index = 0; index < words.Length; index++)
+                    Record(address + (ulong)index * sizeof(uint), words[index], true);
+                return true;
+            };
+        }
+
+        private void Record(ulong address, uint word, bool clean)
+        {
+            if (_readIndex.TryGetValue(address, out var index))
+            {
+                var previous = _reads[index];
+                // A changing input during one materialization cannot be represented
+                // by a cache entry that validates only one value for this address.
+                if (previous.Word != word) Failed = true;
+                _reads[index] = (address, previous.Word, previous.Clean || clean, previous.Table && _inTable);
+                return;
+            }
+            _readIndex.Add(address, _reads.Count);
+            _reads.Add((address, word, clean, _inTable));
         }
 
         public Entry Build(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ResourceSnapshot snapshot,

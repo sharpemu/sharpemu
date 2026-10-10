@@ -272,6 +272,21 @@ public static class ViewFormatRules
         _ => Format.Undefined,
     };
 
+    // The same-size UINT view of a SINT format; integer stores write identical bits through it.
+    public static Format UintStorageFormat(Format imageFormat) => imageFormat switch
+    {
+        Format.R8Sint => Format.R8Uint,
+        Format.R8G8Sint => Format.R8G8Uint,
+        Format.R8G8B8A8Sint => Format.R8G8B8A8Uint,
+        Format.R16Sint => Format.R16Uint,
+        Format.R16G16Sint => Format.R16G16Uint,
+        Format.R16G16B16A16Sint => Format.R16G16B16A16Uint,
+        Format.R32Sint => Format.R32Uint,
+        Format.R32G32Sint => Format.R32G32Uint,
+        Format.R32G32B32A32Sint => Format.R32G32B32A32Uint,
+        _ => Format.Undefined,
+    };
+
     public static bool IsSupportedSampledColorView(Format imageFormat, Format viewFormat, uint swizzle) =>
         IsValidSwizzle(swizzle) && AreCompatible(imageFormat, viewFormat);
 

@@ -7,6 +7,7 @@ using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
+using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
@@ -57,8 +58,87 @@ public sealed partial class GuestImageCacheTests
         Assert.True(harness.Images.Contains(exactId));
         Assert.True(harness.Image(exactId).IsGpuModified);
         Assert.False(harness.Image(exactFloatId).IsBufferModified);
-        Assert.False(harness.Image(exactFloatId).IsGpuModified);
+        // The float alias copies the GPU-owned contents of the same-layout integer image.
+        Assert.True(harness.Image(exactFloatId).IsGpuModified);
         Assert.Equal(Bytes(0x3f234567u), harness.ReadImageBytes(harness.Image(exactFloatId)));
+        harness.Shutdown();
+    }
+
+    // One surface read through two formats of the same layout is two cache images. The one
+    // used next copies the newer GPU contents of the other, which guest memory does not hold.
+    [Fact]
+    public void SameLayoutAlias_ReadsTheNewerGpuContentsOfTheOtherFormat()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address + 0x4000, Bytes(0x11111111u));
+        var integer = Color32(address + 0x4000);
+        var integerId = harness.Acquire(ref integer, exactFormat: true);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address + 0x4000, 4, 0xaabbccddu)));
+
+        var floating = LinearRequest(address + 0x4000, 4, Format.R32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var floatingId = harness.Acquire(ref floating, exactFormat: true);
+
+        Assert.NotEqual(integerId, floatingId);
+        Assert.Equal(Bytes(0xaabbccddu), harness.ReadImageBytes(harness.Image(floatingId)));
+        Assert.Equal(Bytes(0x11111111u), harness.Read(address + 0x4000, 4));
+        harness.Shutdown();
+    }
+
+    // An alias already holding the newest contents is not copied again.
+    [Fact]
+    public void SameLayoutAlias_DoesNotCopyContentsItAlreadyHolds()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address + 0x4000, Bytes(0x11111111u));
+        var integer = Color32(address + 0x4000);
+        var integerId = harness.Acquire(ref integer, exactFormat: true);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address + 0x4000, 4, 0xaabbccddu)));
+        var floating = LinearRequest(address + 0x4000, 4, Format.R32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var floatingId = harness.Acquire(ref floating, exactFormat: true);
+        var floatingContents = harness.Image(floatingId).ContentSequence;
+        var integerContents = harness.Image(integerId).ContentSequence;
+
+        var again = integer;
+        Assert.Equal(integerId, harness.Acquire(ref again, exactFormat: true));
+        var floatingAgain = floating;
+        Assert.Equal(floatingId, harness.Acquire(ref floatingAgain, exactFormat: true));
+
+        Assert.Equal(integerContents, harness.Image(integerId).ContentSequence);
+        Assert.Equal(floatingContents, harness.Image(floatingId).ContentSequence);
+        Assert.Equal(integerContents, floatingContents);
+        harness.Shutdown();
+    }
+
+    // A formatted shader binding can cover only one cache page of a larger GPU image.
+    // Publishing the untouched image bytes must keep writes through that binding visible.
+    [Fact]
+    public void PartialFormattedWriteToGpuImage_ReachesTheCurrentBufferOwner()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        using var fatal = new FatalScope();
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var request = Color32(address, 8192);
+        var imageId = harness.Acquire(ref request);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, 0x8000, 0x11223344)));
+        Assert.True(harness.Image(imageId).IsGpuModified);
+
+        var writeAddress = address + 0x4000;
+        harness.Worker.Run(() =>
+        {
+            var (bound, offset) = harness.Cache.ObtainBuffer(writeAddress, 4, isWritten: true, isTexelBuffer: true);
+            harness.Images.InvalidateMemoryFromGpu(writeAddress, 4);
+            bound.Fill(offset, 4, 0x55667788);
+        });
+
+        Assert.True(harness.Cache.DownloadToCpu(writeAddress, 4));
+        Assert.Equal(0x55667788u, harness.ReadUInt32(writeAddress));
+        Assert.True(harness.Cache.DownloadToCpu(address, 4));
+        Assert.Equal(0x11223344u, harness.ReadUInt32(address));
         harness.Shutdown();
     }
 
@@ -86,6 +166,30 @@ public sealed partial class GuestImageCacheTests
         var reread = clear;
         Assert.Equal(clearId, harness.Find(ref reread));
         Assert.Equal(new byte[] { 0xdd, 0xcc, 0xbb, 0xaa }, harness.ReadImageBytes(harness.Image(clearId)));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void RawBufferWrite_InvalidatesMemoryCopiesAndKeepsGpuOwnedImages()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Bytes(0x01010101u));
+        harness.Write(address + 0x6000, Bytes(0x02020202u));
+        var copy = LinearRequest(address, 4, Format.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var copyId = harness.Find(ref copy);
+        var owned = LinearRequest(address + 0x6000, 4, Format.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var ownedId = harness.Find(ref owned);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address + 0x6000, 4, 0xaabbccddu)));
+        Assert.True(harness.Image(ownedId).IsGpuModified);
+
+        harness.Worker.Run(() => harness.Images.InvalidateMemoryCopiesFromGpu(address, 0x10000));
+
+        Assert.True(harness.Image(copyId).IsBufferModified);
+        Assert.False(harness.Image(ownedId).IsBufferModified);
+        Assert.True(harness.Image(ownedId).IsGpuModified);
+        Assert.Equal(new byte[] { 0xdd, 0xcc, 0xbb, 0xaa }, harness.ReadImageBytes(harness.Image(ownedId)));
         harness.Shutdown();
     }
 

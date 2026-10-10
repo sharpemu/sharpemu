@@ -488,10 +488,94 @@ public static partial class AgcExports
         return fingerprint;
     }
 
-    private static bool TryAllocateCommandDwords(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress)
-        => TryPrepareCommandDwords(ctx, commandBufferAddress, sizeDwords, true, out commandAddress);
+    private static bool TryAllocateCommandDwords(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, out ulong commandAddress,
+        bool isMarker = false)
+        => TryPrepareCommandDwords(ctx, commandBufferAddress, sizeDwords, true, out commandAddress, isMarker);
 
-    private static bool TryPrepareCommandDwords(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, bool advanceCursor, out ulong commandAddress)
+    // Inline guest stores do not take the allocation lock. Remember the last ordinary
+    // packet writer so a diagnostic marker from another guest thread cannot reserve or
+    // overwrite that writer's unpublished inline packet (Yotei 1.512). Ordinary exports
+    // can transfer a buffer to a new writer. Scope identities to memory, not guest addresses
+    // reused by another game; guest handles survive migration between host threads.
+    private static readonly ConditionalWeakTable<object, ConcurrentDictionary<ulong, CommandBufferWriter>> _commandBufferWriters = new();
+
+    private readonly record struct CommandBufferWriter(ulong ThreadHandle, CpuContext Context)
+    {
+        public bool Matches(CpuContext ctx) => ThreadHandle != 0 && GuestThreadExecution.CurrentGuestThreadHandle != 0
+            ? ThreadHandle == GuestThreadExecution.CurrentGuestThreadHandle
+            : ReferenceEquals(Context, ctx);
+    }
+
+    // Guest threads run HLE exports concurrently. Two exports appending to one command buffer
+    // both read its cursor before either stores it back, and the second packet overwrites the
+    // first (a Yōtei DCB lost the header of a SET_SH_REG to a concurrent PopMarker). The
+    // cursor update is made atomic per buffer; the lock is not held across the guest's
+    // buffer-full callback.
+    private static readonly object[] _commandBufferLocks = CreateCommandBufferLocks();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte> _reportedConcurrentCommandBuffers = new();
+
+    private static object[] CreateCommandBufferLocks()
+    {
+        var locks = new object[64];
+        for (var index = 0; index < locks.Length; index++)
+        {
+            locks[index] = new object();
+        }
+
+        return locks;
+    }
+
+    // The buffer each stripe's holder is appending to, so contention between two buffers that
+    // share a stripe is not reported as a race on one buffer.
+    private static readonly ulong[] _commandBufferLockOwners = new ulong[64];
+
+    private static bool TryPrepareCommandDwords(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, bool advanceCursor,
+        out ulong commandAddress, bool isMarker = false)
+    {
+        // Worker threads keep their command buffer objects at the same offset of stacks 16 MiB
+        // apart; a multiplicative hash keeps them on different stripes.
+        var stripe = (int)((commandBufferAddress * 0x9E3779B97F4A7C15UL) >> 58);
+        var gate = _commandBufferLocks[stripe];
+        if (!Monitor.TryEnter(gate))
+        {
+            if (Volatile.Read(ref _commandBufferLockOwners[stripe]) == commandBufferAddress &&
+                _reportedConcurrentCommandBuffers.TryAdd(commandBufferAddress, 0))
+            {
+                Console.Error.WriteLine(
+                    $"[AGC][WARN] Two threads append to one command buffer: buf=0x{commandBufferAddress:X16} thread={Environment.CurrentManagedThreadId}.");
+            }
+
+            Monitor.Enter(gate);
+        }
+
+        try
+        {
+            Volatile.Write(ref _commandBufferLockOwners[stripe], commandBufferAddress);
+            var writers = _commandBufferWriters.GetValue(CanonicalMemory(ctx.Memory), static _ => new());
+            if (isMarker && writers.TryGetValue(commandBufferAddress, out var writer) && !writer.Matches(ctx))
+            {
+                commandAddress = 0;
+                return false;
+            }
+
+            // A first marker establishes a writer too; an ordinary export explicitly
+            // takes ownership, including a legitimate handoff between guest threads.
+            if (!writers.TryGetValue(commandBufferAddress, out writer) || !writer.Matches(ctx) ||
+                writer.ThreadHandle != GuestThreadExecution.CurrentGuestThreadHandle)
+                writers[commandBufferAddress] = new(GuestThreadExecution.CurrentGuestThreadHandle, ctx);
+
+            return TryPrepareCommandDwordsLocked(ctx, commandBufferAddress, sizeDwords, advanceCursor, gate,
+                writers, isMarker, out commandAddress);
+        }
+        finally
+        {
+            Volatile.Write(ref _commandBufferLockOwners[stripe], 0);
+            Monitor.Exit(gate);
+        }
+    }
+
+    private static bool TryPrepareCommandDwordsLocked(CpuContext ctx, ulong commandBufferAddress, uint sizeDwords, bool advanceCursor, object gate,
+        ConcurrentDictionary<ulong, CommandBufferWriter> writers, bool isMarker, out ulong commandAddress)
     {
         commandAddress = 0;
         if (sizeDwords == 0 ||
@@ -511,19 +595,31 @@ public static partial class AgcExports
             var scheduler = GuestThreadExecution.Scheduler;
             ulong callbackResult = 0;
             string? callbackError = null;
-            if (callback == 0 ||
-                scheduler is null ||
-                !scheduler.TryCallGuestFunction(
-                    ctx,
-                    callback,
-                    commandBufferAddress,
-                    (ulong)sizeDwords + reservedDwords,
-                    userData,
-                    0,
-                    0,
-                    "agc_command_buffer_full",
-                    out callbackResult,
-                    out callbackError))
+            bool called;
+            // The callback is guest code; it may block or append to this buffer itself.
+            Monitor.Exit(gate);
+            try
+            {
+                called = callback != 0 &&
+                    scheduler is not null &&
+                    scheduler.TryCallGuestFunction(
+                        ctx,
+                        callback,
+                        commandBufferAddress,
+                        (ulong)sizeDwords + reservedDwords,
+                        userData,
+                        0,
+                        0,
+                        "agc_command_buffer_full",
+                        out callbackResult,
+                        out callbackError);
+            }
+            finally
+            {
+                Monitor.Enter(gate);
+            }
+
+            if (!called)
             {
                 TraceAgc(
                     $"agc.cmd_alloc_callback_failed buf=0x{commandBufferAddress:X16} " +
@@ -531,6 +627,11 @@ public static partial class AgcExports
                     $"error={callbackError ?? "none"}");
                 return false;
             }
+
+            // The callback ran with the gate released. An ordinary export may have
+            // handed the DCB to another writer while this marker was waiting for space.
+            if (isMarker && !writers[commandBufferAddress].Matches(ctx))
+                return false;
 
             TraceAgc(
                 $"agc.cmd_alloc_callback_complete buf=0x{commandBufferAddress:X16} " +

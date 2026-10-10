@@ -102,6 +102,34 @@ public sealed class AcmExportsTests : IDisposable
         }
     }
 
+    [Fact]
+    public void ConvReverbSharedInput_ClearsOutputBuffers()
+    {
+        const ulong stackAddress = MemoryBase + 0x600;
+        const ulong descriptorListAddress = MemoryBase + 0x680;
+        const ulong descriptorAddress = MemoryBase + 0x700;
+        const ulong bufferListAddress = MemoryBase + 0x740;
+        const ulong outputAddress = MemoryBase + 0x780;
+
+        Span<byte> output = stackalloc byte[16];
+        output.Fill(0x7F);
+        Assert.True(_memory.TryWrite(outputAddress, output));
+        WriteUInt64(bufferListAddress, outputAddress);
+        WriteUInt64(descriptorListAddress, descriptorAddress);
+
+        Span<byte> descriptor = stackalloc byte[24];
+        BinaryPrimitives.WriteUInt32LittleEndian(descriptor, 4);
+        BinaryPrimitives.WriteUInt32LittleEndian(descriptor[4..], 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(descriptor[16..], bufferListAddress);
+        Assert.True(_memory.TryWrite(descriptorAddress, descriptor));
+
+        _ctx[CpuRegister.Rsp] = stackAddress;
+        WriteUInt64(stackAddress + 8, descriptorListAddress);
+        _ctx[CpuRegister.Rcx] = 1;
+        Assert.Equal(0, AcmExports.AcmConvReverbSharedInput(_ctx));
+        Assert.All(ReadBytes(outputAddress, 16), value => Assert.Equal(0, value));
+    }
+
     public void Dispose()
     {
         AcmExports.ResetForTests();

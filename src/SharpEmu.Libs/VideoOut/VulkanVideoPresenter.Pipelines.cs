@@ -44,6 +44,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public DescriptorSetLayout SetLayout;
             public DescriptorSetDemand Demand;
             public bool UsesPushDescriptors;
+            public bool UsesBindlessImages;
             public GraphicsPipelineDescription? Description;
             public Pipeline StripVariant;
             public Pipeline ListVariant;
@@ -52,7 +53,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public ulong ProfilePixelHash;
             public ulong ProfileComputeHash;
 
-            public bool RectangleList => Description is { StaticParameters.Topology: PrimitiveTopology.PatchList };
+            public bool RectangleList => Description is { Tessellation: null, StaticParameters.Topology: PrimitiveTopology.PatchList };
         }
 
         private readonly Dictionary<ulong, ShaderModule> _shaderModules = new();
@@ -61,8 +62,20 @@ internal static unsafe partial class VulkanVideoPresenter
         private long _pipelineCreationMilliseconds;
         private KhrPushDescriptor _pushDescriptorApi = null!;
         private uint _maxPushDescriptors;
+        private uint _maxPerStageSampledImages = uint.MaxValue;
+        private uint _maxPerStageStorageImages = uint.MaxValue;
+        private uint _maxPerStageStorageBuffers = uint.MaxValue;
+        private uint _maxPerStageUpdateAfterBindSampledImages = uint.MaxValue;
+        private uint _maxPerStageUpdateAfterBindStorageImages = uint.MaxValue;
+        private uint _maxUpdateAfterBindSampledImages = uint.MaxValue;
+        private uint _maxUpdateAfterBindStorageImages = uint.MaxValue;
+        private uint _maxUpdateAfterBindDescriptors = uint.MaxValue;
+        private uint _maxPerStageSamplers = uint.MaxValue;
+        private uint _maxPerStageUpdateAfterBindSamplers = uint.MaxValue;
+        private uint _maxUpdateAfterBindSamplers = uint.MaxValue;
         private SampleCountFlags _noAttachmentSampleCounts;
         private DescriptorHeap _descriptorHeap = null!;
+        private BindlessImageHeap? _bindlessImageHeap;
 
         uint IShaderPipelineHost.MaxPushDescriptors => _maxPushDescriptors;
 
@@ -73,6 +86,8 @@ internal static unsafe partial class VulkanVideoPresenter
         // other compute translation maps a guest wave to 32-lane host subgroups, and a 64-lane host
         // subgroup (AMD's default) left lanes 32..63 inactive: a wave64 8x8x8 group lost rows 4..7.
         private const uint RdnaSubgroupSize = 32;
+
+        // Pipeline creations at least this slow are logged; cached ones take well under 1 ms.
         private bool _canRequireComputeSubgroup32;
         private uint _maxComputeWorkgroupSubgroups;
 
@@ -87,12 +102,26 @@ internal static unsafe partial class VulkanVideoPresenter
         bool IShaderPipelineHost.GraphicsSubgroupOperationsEnabled => GraphicsSubgroupOperationsEnabled;
 
         bool IShaderPipelineHost.SharedInt64AtomicsEnabled => SharedInt64AtomicsEnabled;
+        bool IShaderPipelineHost.ExactFloat16ConversionsEnabled => ExactFloat16ConversionsEnabled;
+
+        bool IShaderPipelineHost.NonUniformImageIndexingEnabled => NonUniformImageIndexingEnabled;
+        bool IShaderPipelineHost.RuntimeBufferStridesEnabled => true;
+        bool IShaderPipelineHost.UsesBindlessImages => BindlessImageHeapEnabled;
         bool IShaderPipelineHost.ShaderSignedZeroInfNanPreserveFloat32Supported =>
             _supportsShaderSignedZeroInfNanPreserveFloat32;
         // NVIDIA's compiler rejects the elided-EXEC wave64 compute module with NVVM error 3.
         bool IShaderPipelineHost.ExecGuardElisionEnabled => _physicalDeviceVendorId != NvidiaVendorId;
+
+        bool IShaderPipelineHost.SupportsDualSourceBlend => _supportsDualSourceBlend;
         bool IShaderPipelineHost.PerVertexPixelInputsSupported => _supportsPerVertexPixelInputs;
         bool IShaderPipelineHost.ClipDistanceEnabled => _supportsShaderClipDistance;
+        private bool _postDepthCoverageEnabled;
+        bool IShaderPipelineHost.PostDepthCoverageSupported => _postDepthCoverageEnabled;
+        public bool NativeTwoSampleMixedSupported => _supportsNativeTwoSampleMixed;
+
+        bool IShaderPipelineHost.NativeHalfConversionExact => NativeHalfConversionExact;
+
+        bool IShaderPipelineHost.ZeroOutOfBoundsBufferReads => ZeroOutOfBoundsBufferReads;
 
         RenderHostLimits IShaderPipelineHost.Limits => _renderHostLimits;
 
@@ -104,7 +133,7 @@ internal static unsafe partial class VulkanVideoPresenter
             using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.GuestRead);
             word = 0;
             var synchronized = false;
-            if (IsCleanReadPage(address, sizeof(uint)))
+            if (IsCleanReadPage(address, sizeof(uint), clean: false))
             {
                 if (TryGetAliasPointer(address, sizeof(uint), out var alias))
                 {
@@ -141,7 +170,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
                 else
                 {
-                    NoteCleanReadPage(address, sizeof(uint));
+                    NoteCleanReadPage(address, sizeof(uint), clean: false);
                 }
             }
 
@@ -165,14 +194,47 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CleanGuestRead);
             word = 0;
+            if (!_bufferCache.HasGpuDirtyPages(address, sizeof(uint)) && IsCleanReadPage(address, sizeof(uint), clean: true))
+            {
+                if (TryGetAliasPointer(address, sizeof(uint), out var alias))
+                {
+                    word = System.Runtime.CompilerServices.Unsafe.ReadUnaligned<uint>(alias);
+                    return true;
+                }
+
+                Span<byte> resident = stackalloc byte[sizeof(uint)];
+                if (_guestMemory.TryRead(address, resident))
+                {
+                    word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(resident);
+                    return true;
+                }
+            }
+
+            CleanReadVerifications++;
             if (!_guestMemory.CanRead(address, sizeof(uint)))
             {
                 return false;
             }
 
+            // A word a previous GPU pass wrote is read once that pass's bytes are back in guest
+            // memory, as the command processor would see them: an image's contents go through
+            // its buffer view first, then the buffer comes back to guest memory.
+            if (_imageCache.HasUnsynchronizedGpuImage(address, sizeof(uint)))
+            {
+                foreach (var (imageAddress, imageSize) in _imageCache.UnsynchronizedGpuImageRanges(address, sizeof(uint)))
+                {
+                    _ = _bufferCache.ObtainBuffer(imageAddress, imageSize, isWritten: false, isTexelBuffer: true);
+                }
+            }
+
+            if (_bufferCache.HasGpuDirtyPages(address, sizeof(uint)) || _bufferCache.HasGpuDirtyBytes(address, sizeof(uint)))
+            {
+                _ = _bufferCache.TrySynchronizeCpuRead(address, sizeof(uint));
+            }
+
             if ((_bufferCache.MayHaveGpuDirtyPages(address, sizeof(uint)) && _bufferCache.HasGpuDirtyPages(address, sizeof(uint))) ||
                 _bufferCache.HasGpuDirtyBytes(address, sizeof(uint)) ||
-                _imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)))
+                _imageCache.HasUnsynchronizedGpuImage(address, sizeof(uint)))
             {
                 return false;
             }
@@ -183,6 +245,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return false;
             }
 
+            NoteCleanReadPage(address, sizeof(uint), clean: true);
             word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
             return true;
         }
@@ -191,16 +254,28 @@ internal static unsafe partial class VulkanVideoPresenter
         public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean)
         {
             var size = (ulong)destination.Length;
-            if (clean || !IsCleanReadPage(address, size))
+            if (!_guestMemory.CanRead(address, size))
             {
+                return false;
+            }
+
+            if (_bufferCache.HasGpuDirtyPages(address, size) || !IsCleanReadPage(address, size, clean))
+            {
+                CleanReadVerifications++;
                 if (!_guestMemory.CanRead(address, size) ||
                     _bufferCache.HasGpuDirtyBytes(address, size) ||
-                    (clean && (_bufferCache.HasGpuDirtyPages(address, size) || _imageCache.HasGpuModifiedImageBytes(address, size))))
+                    (clean && _imageCache.HasGpuModifiedImageBytes(address, size)))
                 {
                     return false;
                 }
 
-                NoteCleanReadPage(address, size);
+                // GPU ownership is tracked in bytes, but protection covers whole pages.
+                // Read disjoint CPU-owned bytes through the backing alias so a protected
+                // guest view cannot trigger a download of neighboring GPU-owned bytes.
+                if (clean && _bufferCache.HasGpuDirtyPages(address, size))
+                    return _guestBacking.TryReadBacking(address, destination);
+
+                NoteCleanReadPage(address, size, clean);
             }
 
             if (TryGetAliasPointer(address, size, out var alias))
@@ -211,6 +286,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
             return _guestMemory.TryRead(address, destination);
         }
+
+        bool IRenderHost.TryReadCleanGuestBytes(ulong address, Span<byte> destination) =>
+            TryReadResidentGuestBytes(address, destination, clean: true);
 
         private const ulong CleanReadPageBytes = 0x1000;
         private const int CleanReadPageSlots = 64;
@@ -223,7 +301,13 @@ internal static unsafe partial class VulkanVideoPresenter
             public readonly long[] Versions = new long[CleanReadPageSlots];
             public readonly ulong[] Aliases = new ulong[CleanReadPageSlots];
             public readonly object?[] Snapshots = new object?[CleanReadPageSlots];
+            // A clean read also needs no GPU-dirty page and no GPU-modified image over the page.
+            public readonly bool[] CleanVerified = new bool[CleanReadPageSlots];
+            public readonly long[] ImageVersions = new long[CleanReadPageSlots];
         }
+
+        // Resident reads that had to check GPU ownership instead of trusting a verified page.
+        internal long CleanReadVerifications { get; private set; }
 
         private bool TryGetAliasPointer(ulong address, ulong size, out byte* pointer)
         {
@@ -257,24 +341,30 @@ internal static unsafe partial class VulkanVideoPresenter
             return size != 0 && address + size > address && ((address + size - 1) & ~(CleanReadPageBytes - 1)) == page;
         }
 
-        private bool IsCleanReadPage(ulong address, ulong size) =>
+        private bool IsCleanReadPage(ulong address, ulong size, bool clean) =>
             _cleanReadPages is { } pages &&
             TryGetCleanReadPage(address, size, out var page, out var slot) &&
             pages.Tags[slot] == page + 1 &&
-            pages.Versions[slot] == _bufferCache.GpuModifiedVersion;
+            pages.Versions[slot] == _bufferCache.GpuModifiedVersion &&
+            (!clean || (pages.CleanVerified[slot] && pages.ImageVersions[slot] == CachedImage.GpuWriteVersion));
 
-        private void NoteCleanReadPage(ulong address, ulong size)
+        private void NoteCleanReadPage(ulong address, ulong size, bool clean)
         {
             if (!TryGetCleanReadPage(address, size, out var page, out var slot))
             {
                 return;
             }
 
+            // Read the versions first: a change during the checks then invalidates the entry.
             var version = _bufferCache.GpuModifiedVersion;
+            var imageVersion = CachedImage.GpuWriteVersion;
             if (!_guestMemory.CanRead(page, CleanReadPageBytes) || _bufferCache.HasGpuDirtyBytes(page, CleanReadPageBytes))
             {
                 return;
             }
+
+            var cleanVerified = clean && !_bufferCache.HasGpuDirtyPages(page, CleanReadPageBytes) &&
+                !_imageCache.HasGpuModifiedImageBytes(page, CleanReadPageBytes);
 
             var pages = _cleanReadPages ??= new CleanReadPages();
             if (pages.Tags[slot] != page + 1)
@@ -282,9 +372,20 @@ internal static unsafe partial class VulkanVideoPresenter
                 pages.Tags[slot] = page + 1;
                 pages.Aliases[slot] = 0;
                 pages.Snapshots[slot] = null;
+                pages.CleanVerified[slot] = false;
+            }
+
+            if (pages.Versions[slot] != version)
+            {
+                pages.CleanVerified[slot] = false;
             }
 
             pages.Versions[slot] = version;
+            if (cleanVerified)
+            {
+                pages.CleanVerified[slot] = true;
+                pages.ImageVersions[slot] = imageVersion;
+            }
         }
 
         public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
@@ -307,7 +408,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // The Metal shader compiler can spend seconds on one translated program and the
         // command stream cannot advance while it does, so a slow creation is reported with
         // the SPIR-V size that produced it.
-        private const long SlowPipelineCreationMilliseconds = 250;
+        private const long SlowPipelineCreationMilliseconds = 500;
 
         private int SpirvBytesOf(ulong moduleHandle) =>
             _shaderModuleSpirvBytes.TryGetValue(moduleHandle, out var bytes) ? bytes : -1;
@@ -506,6 +607,11 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             foreach (var binding in layout.Descriptors)
             {
+                if (layout.UsesBindlessImages && ImageDescriptorBinding.ResourceClass(binding.Kind) != ShaderCompiler.Resources.ImageResourceClass.None)
+                {
+                    continue;
+                }
+
                 bindings.Add(new DescriptorSetLayoutBinding
                 {
                     Binding = BindingLayout.NativeBindingIndex(stage, binding.Kind),
@@ -514,6 +620,36 @@ internal static unsafe partial class VulkanVideoPresenter
                     StageFlags = DescriptorWriter.ShaderStageFlag(stage),
                 });
             }
+        }
+
+        private void EnsureBindlessImageHeap(params ShaderProgramInfo?[] programs)
+            => EnsureBindlessImageHeapForMode(programs.Any(program => program?.Bindings?.UsesBindlessImages == true));
+
+        private void EnsureBindlessImageHeapForMode(bool usesBindlessImages)
+        {
+            if (_bindlessImageHeap is not null)
+            {
+                return;
+            }
+
+            if (!usesBindlessImages)
+            {
+                return;
+            }
+
+            _bindlessImageHeap = new BindlessImageHeap(_deviceInfo, _scheduler, new BindlessImageHeap.Limits(
+                _maxPerStageSampledImages,
+                _maxPerStageStorageImages,
+                _maxPerStageSamplers,
+                _maxPerStageUpdateAfterBindSampledImages,
+                _maxPerStageUpdateAfterBindStorageImages,
+                _maxPerStageUpdateAfterBindSamplers,
+                _maxUpdateAfterBindSampledImages,
+                _maxUpdateAfterBindStorageImages,
+                _maxUpdateAfterBindSamplers,
+                _maxUpdateAfterBindDescriptors));
+            _imageCache.BindlessImageInvalidator = _bindlessImageHeap.InvalidateViews;
+            _bindlessImageHeap.SetDefaultSampler(_samplerStore.GetSampler(new SamplerDescriptorWords(stackalloc uint[4]), integerView: false));
         }
 
         // The set is pushed when its descriptors fit the device limit, else it comes from the heap.
@@ -525,6 +661,21 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 descriptorCount += binding.DescriptorCount;
                 demand = demand.Add(DescriptorSetDemand.Of(binding.DescriptorType, binding.DescriptorCount));
+            }
+
+            // A zero limit is an unreported one.
+            if (_maxPerStageStorageBuffers != 0 && demand.StorageBuffers > _maxPerStageStorageBuffers)
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"The shader stage binds more buffers than the device allows: storage={demand.StorageBuffers}/{_maxPerStageStorageBuffers}.");
+            }
+
+            if ((_maxPerStageSampledImages != 0 && demand.SampledImages > _maxPerStageSampledImages) ||
+                (_maxPerStageStorageImages != 0 && demand.StorageImages > _maxPerStageStorageImages))
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"The shader stage binds more images than the device allows: sampled={demand.SampledImages}/{_maxPerStageSampledImages} " +
+                    $"storage={demand.StorageImages}/{_maxPerStageStorageImages}.");
             }
 
             usesPushDescriptors = descriptorCount <= _maxPushDescriptors;
@@ -543,19 +694,23 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private PipelineLayout CreatePipelineLayout(DescriptorSetLayout setLayout, ShaderStageFlags pushStages)
+        private PipelineLayout CreatePipelineLayout(DescriptorSetLayout setLayout, ShaderStageFlags pushStages, bool usesBindlessImages)
         {
             var pushConstants = new PushConstantRange { StageFlags = pushStages, Offset = 0, Size = PushConstantBytes };
+            var setLayouts = usesBindlessImages ? new[] { _bindlessImageHeap!.Layout, setLayout } : new[] { setLayout };
             var create = new PipelineLayoutCreateInfo
             {
                 SType = StructureType.PipelineLayoutCreateInfo,
-                SetLayoutCount = 1,
-                PSetLayouts = &setLayout,
+                SetLayoutCount = (uint)setLayouts.Length,
                 PushConstantRangeCount = 1,
                 PPushConstantRanges = &pushConstants,
             };
-            Check(_vk.CreatePipelineLayout(_device, &create, null, out var layout), "vkCreatePipelineLayout");
-            return layout;
+            fixed (DescriptorSetLayout* setLayoutPointer = setLayouts)
+            {
+                create.PSetLayouts = setLayoutPointer;
+                Check(_vk.CreatePipelineLayout(_device, &create, null, out var layout), "vkCreatePipelineLayout");
+                return layout;
+            }
         }
 
         private PipelineHandle RegisterPipeline(RenderPipelineEntry entry)
@@ -575,8 +730,22 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"The draw binds more color attachments than the device supports: count={description.Rendering.ColorCount} max={_maxColorAttachments}.");
             }
 
+            EnsureBindlessImageHeap(description.VertexStage, description.PixelStage);
+            var usesBindlessImages = description.VertexStage.Bindings!.UsesBindlessImages ||
+                description.PixelStage?.Bindings?.UsesBindlessImages == true;
+
             var bindings = new List<DescriptorSetLayoutBinding>();
-            CollectLayoutBindings(bindings, description.VertexStage, ShaderStage.Vertex);
+            CollectLayoutBindings(bindings, description.VertexStage,
+                description.Tessellation is null ? ShaderStage.Vertex : ShaderStage.TessellationEvaluation);
+            if (description.Tessellation is not null)
+            {
+                var dataBinding = BindingLayout.NativeBindingIndex(ShaderStage.TessellationEvaluation, DescriptorBindingKind.ShaderData);
+                var index = bindings.FindIndex(binding => binding.Binding == dataBinding);
+                if (index < 0) throw SubmissionScheduler.Fatal("The tessellation pipeline has no runtime data binding.");
+                var binding = bindings[index];
+                binding.StageFlags |= ShaderStageFlags.TessellationControlBit;
+                bindings[index] = binding;
+            }
             if (description.PixelStage is { } pixelStage)
             {
                 CollectLayoutBindings(bindings, pixelStage, ShaderStage.Pixel);
@@ -587,8 +756,10 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 SetLayout = setLayout,
                 Demand = demand,
-                Layout = CreatePipelineLayout(setLayout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit),
+                Layout = CreatePipelineLayout(setLayout, ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit |
+                    (description.Tessellation is null ? 0 : ShaderStageFlags.TessellationControlBit | ShaderStageFlags.TessellationEvaluationBit), usesBindlessImages),
                 UsesPushDescriptors = usesPushDescriptors,
+                UsesBindlessImages = usesBindlessImages,
                 Description = description,
                 ProfileVertexHash = description.VertexStage.Hash,
                 ProfilePixelHash = description.PixelStage?.Hash ?? 0,
@@ -742,7 +913,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
             try
             {
-                var shaderStages = stackalloc PipelineShaderStageCreateInfo[2];
+                var shaderStages = stackalloc PipelineShaderStageCreateInfo[4];
                 var stageCount = 1u;
                 shaderStages[0] = new PipelineShaderStageCreateInfo
                 {
@@ -751,6 +922,29 @@ internal static unsafe partial class VulkanVideoPresenter
                     Module = vertexModule,
                     PName = entryPoint,
                 };
+                var tessellationState = new PipelineTessellationStateCreateInfo
+                {
+                    SType = StructureType.PipelineTessellationStateCreateInfo,
+                    PatchControlPoints = description.Tessellation?.InputControlPoints ?? 0,
+                };
+                if (description.Tessellation is { } tessellation)
+                {
+                    if (topology != PrimitiveTopology.PatchList || tessellation.InputControlPoints is 0 or > 32 ||
+                        tessellation.Control.Module == 0 || tessellation.Evaluation.Module == 0)
+                        throw SubmissionScheduler.Fatal("Invalid native tessellation pipeline stages or patch size.");
+                    shaderStages[stageCount++] = new PipelineShaderStageCreateInfo
+                    {
+                        SType = StructureType.PipelineShaderStageCreateInfo,
+                        Stage = ShaderStageFlags.TessellationControlBit,
+                        Module = new ShaderModule(tessellation.Control.Module), PName = entryPoint,
+                    };
+                    shaderStages[stageCount++] = new PipelineShaderStageCreateInfo
+                    {
+                        SType = StructureType.PipelineShaderStageCreateInfo,
+                        Stage = ShaderStageFlags.TessellationEvaluationBit,
+                        Module = new ShaderModule(tessellation.Evaluation.Module), PName = entryPoint,
+                    };
+                }
                 if (pixelModule.Handle != 0)
                 {
                     shaderStages[stageCount++] = new PipelineShaderStageCreateInfo
@@ -847,9 +1041,42 @@ internal static unsafe partial class VulkanVideoPresenter
                         FrontFace = parameters.FrontFaceClockwise ? FrontFace.Clockwise : FrontFace.CounterClockwise,
                         LineWidth = 1,
                     };
+                    var nativeMixed = _supportsNativeTwoSampleMixed &&
+                        parameters.Samples == 2 && rendering.DepthSamples == 2 && colorCount > 0 &&
+                        rendering.ColorSamples.Take(colorCount).All(count => count == 1);
+                    var coverageReduction = new PipelineCoverageReductionStateCreateInfoNV
+                    {
+                        SType = StructureType.PipelineCoverageReductionStateCreateInfoNV,
+                        CoverageReductionMode = CoverageReductionModeNV.TruncateNV,
+                    };
+                    var sampleLocationsEnabled = _supportsNativeTwoSampleMixed && parameters.Samples == 2;
+                    var sampleLocations = stackalloc SampleLocationEXT[8];
+                    for (var pixel = 0; pixel < 4; pixel++)
+                        for (var sample = 0; sample < 2; sample++)
+                        {
+                            var word = rendering.SampleLocationWords[pixel * 4] >> (sample * 8);
+                            var x = (int)(word << 28) >> 28;
+                            var y = (int)(word << 24) >> 28;
+                            sampleLocations[pixel * 2 + sample] = new SampleLocationEXT((x + 8) / 16f, (y + 8) / 16f);
+                        }
+                    var sampleLocationState = new PipelineSampleLocationsStateCreateInfoEXT
+                    {
+                        SType = StructureType.PipelineSampleLocationsStateCreateInfoExt,
+                        PNext = nativeMixed ? &coverageReduction : null,
+                        SampleLocationsEnable = true,
+                        SampleLocationsInfo = new SampleLocationsInfoEXT
+                        {
+                            SType = StructureType.SampleLocationsInfoExt,
+                            SampleLocationsPerPixel = SampleCountFlags.Count2Bit,
+                            SampleLocationGridSize = new Extent2D(2, 2),
+                            SampleLocationsCount = 8,
+                            PSampleLocations = sampleLocations,
+                        },
+                    };
                     var multisample = new PipelineMultisampleStateCreateInfo
                     {
                         SType = StructureType.PipelineMultisampleStateCreateInfo,
+                        PNext = sampleLocationsEnabled ? &sampleLocationState : (nativeMixed ? &coverageReduction : null),
                         SampleShadingEnable = parameters.SampleShadingEnable,
                         RasterizationSamples = ImageDescription.VulkanSampleCount(parameters.Samples),
                         MinSampleShading = 1f,
@@ -868,10 +1095,10 @@ internal static unsafe partial class VulkanVideoPresenter
                         StencilTestEnable = parameters.StencilTestEnable,
                         Front = ToVkStencilOpState(parameters.StencilFront),
                         Back = ToVkStencilOpState(parameters.StencilBack),
-                        MinDepthBounds = parameters.DepthMinBounds,
-                        MaxDepthBounds = parameters.DepthMaxBounds,
+                        MinDepthBounds = 0f,
+                        MaxDepthBounds = 1f,
                     };
-                    var dynamicStates = stackalloc DynamicState[13];
+                    var dynamicStates = stackalloc DynamicState[14];
                     dynamicStates[0] = DynamicState.Viewport;
                     dynamicStates[1] = DynamicState.Scissor;
                     dynamicStates[2] = DynamicState.LineWidth;
@@ -885,6 +1112,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     dynamicStates[10] = DynamicState.StencilWriteMask;
                     dynamicStates[11] = DynamicState.BlendConstants;
                     var dynamicStateCount = 12u;
+                    if (_supportsDepthBounds)
+                    {
+                        dynamicStates[dynamicStateCount++] = DynamicState.DepthBounds;
+                    }
+
                     // Last so a pipeline without color attachments can leave it out.
                     if (_colorWriteEnableApi is not null && colorCount != 0)
                     {
@@ -905,14 +1137,26 @@ internal static unsafe partial class VulkanVideoPresenter
                         DepthAttachmentFormat = rendering.DepthFormat,
                         StencilAttachmentFormat = rendering.StencilFormat,
                     };
+                    var colorSampleCounts = stackalloc SampleCountFlags[8];
+                    for (var index = 0; index < colorCount; index++)
+                        colorSampleCounts[index] = ImageDescription.VulkanSampleCount(rendering.ColorSamples[index]);
+                    var attachmentSampleCounts = new AttachmentSampleCountInfoNV
+                    {
+                        SType = StructureType.AttachmentSampleCountInfoNV,
+                        PNext = &renderingInfo,
+                        ColorAttachmentCount = (uint)colorCount,
+                        PColorAttachmentSamples = colorSampleCounts,
+                        DepthStencilAttachmentSamples = ImageDescription.VulkanSampleCount(rendering.DepthSamples == 0 ? 1 : rendering.DepthSamples),
+                    };
                     var pipelineInfo = new GraphicsPipelineCreateInfo
                     {
                         SType = StructureType.GraphicsPipelineCreateInfo,
-                        PNext = &renderingInfo,
+                        PNext = nativeMixed ? &attachmentSampleCounts : &renderingInfo,
                         StageCount = stageCount,
                         PStages = shaderStages,
                         PVertexInputState = &vertexInput,
                         PInputAssemblyState = &inputAssembly,
+                        PTessellationState = description.Tessellation is null ? null : &tessellationState,
                         PViewportState = &viewportState,
                         PRasterizationState = &rasterization,
                         PMultisampleState = &multisample,
@@ -953,10 +1197,11 @@ internal static unsafe partial class VulkanVideoPresenter
         public PipelineHandle CreateComputePipeline(ComputePipelineDescription description)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineSetup);
+            EnsureBindlessImageHeap(description.Stage);
             var bindings = new List<DescriptorSetLayoutBinding>();
             CollectLayoutBindings(bindings, description.Stage, ShaderStage.Compute);
             var setLayout = CreateDescriptorSetLayout(bindings, out var usesPushDescriptors, out var demand);
-            var layout = CreatePipelineLayout(setLayout, ShaderStageFlags.ComputeBit);
+            var layout = CreatePipelineLayout(setLayout, ShaderStageFlags.ComputeBit, description.Stage.Bindings!.UsesBindlessImages);
             var computeModule = new ShaderModule(description.Program.Module);
             if (computeModule.Handle == 0)
             {
@@ -1010,6 +1255,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SetLayout = setLayout,
                 Demand = demand,
                 UsesPushDescriptors = usesPushDescriptors,
+                UsesBindlessImages = description.Stage.Bindings!.UsesBindlessImages,
                 ProfileComputeHash = description.Stage.Hash,
             };
             return RegisterPipeline(entry);
@@ -1080,6 +1326,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     SetLayout = pending.SetLayout,
                     Demand = pending.Demand,
                     UsesPushDescriptors = pending.UsesPushDescriptors,
+                    UsesBindlessImages = description.Stage.Bindings!.UsesBindlessImages,
                     ProfileComputeHash = pending.Hash,
                 });
                 return true;
@@ -1089,7 +1336,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var bindings = new List<DescriptorSetLayoutBinding>();
             CollectLayoutBindings(bindings, description.Stage, ShaderStage.Compute);
             var setLayout = CreateDescriptorSetLayout(bindings, out var usesPushDescriptors, out var demand);
-            var layout = CreatePipelineLayout(setLayout, ShaderStageFlags.ComputeBit);
+            EnsureBindlessImageHeap(description.Stage);
+            var layout = CreatePipelineLayout(setLayout, ShaderStageFlags.ComputeBit, description.Stage.Bindings!.UsesBindlessImages);
             var computeModule = new ShaderModule(description.Program.Module);
             if (computeModule.Handle == 0)
             {

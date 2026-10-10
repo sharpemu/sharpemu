@@ -38,6 +38,63 @@ public sealed class TilerParityTests : IClassFixture<HeadlessVulkanFixture>
         return bytes;
     }
 
+    [Theory]
+    [InlineData(1u, 1u)]
+    [InlineData(2u, 1u)]
+    [InlineData(1u, 3u)]
+    [InlineData(2u, 3u)]
+    public void NarrowColorPacking_PreservesEncodedBytesAndPadding(uint channels, uint layers)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        const uint width = 257, height = 3, sourceBase = 3, wideBase = 4, narrowBase = 1;
+        var narrowStride = width * channels + 5;
+        const uint wideStride = width * 4 + 12;
+        var narrowSlice = height * narrowStride + 7;
+        const uint wideSlice = height * wideStride + 16;
+        var input = new byte[sourceBase + layers * narrowSlice + 4];
+        var expectedWide = Enumerable.Repeat((byte)0x5a, (int)(wideBase + layers * wideSlice + 4)).ToArray();
+        var expectedNarrow = Enumerable.Repeat((byte)0x5a, (int)((narrowBase + layers * narrowSlice + 7) & ~3u)).ToArray();
+        for (uint layer = 0; layer < layers; layer++)
+        for (uint row = 0; row < height; row++)
+        for (uint x = 0; x < width; x++)
+        {
+            var wide = wideBase + layer * wideSlice + row * wideStride + x * 4;
+            expectedWide[wide] = expectedWide[wide + 1] = expectedWide[wide + 2] = 0;
+            expectedWide[wide + 3] = 255;
+            for (uint channel = 0; channel < channels; channel++)
+            {
+                var value = (byte)(x + layer * 53 + row * 37 + channel * 91);
+                input[sourceBase + layer * narrowSlice + row * narrowStride + x * channels + channel] = value;
+                expectedWide[wide + channel] = value;
+                expectedNarrow[narrowBase + layer * narrowSlice + row * narrowStride + x * channels + channel] = value;
+            }
+        }
+        var source = harness.Upload(input);
+        var wideOutput = harness.CreateDeviceLocalBuffer((ulong)expectedWide.Length);
+        var layout = new DepthConversionLayout { Width = width, Height = height, Layers = layers, SourceRowStride = narrowStride, TargetRowStride = wideStride,
+            SourceSliceStride = narrowSlice, TargetSliceStride = wideSlice };
+        harness.Run(() =>
+        {
+            wideOutput.Fill(0, wideOutput.Size, 0x5a5a5a5a);
+            harness.Tiler.ConvertNarrowColor(new TilerBufferSpan(source.Handle, sourceBase, source.Size - sourceBase),
+                new TilerBufferSpan(wideOutput.Handle, wideBase, wideOutput.Size - wideBase), channels, true, layout);
+        });
+        Assert.Equal(expectedWide, harness.ReadBack(wideOutput.Handle, 0, wideOutput.Size));
+        var wideSource = harness.Upload(expectedWide);
+        var narrowOutput = harness.CreateDeviceLocalBuffer((ulong)expectedNarrow.Length);
+        layout = new DepthConversionLayout { Width = width, Height = height, Layers = layers, SourceRowStride = wideStride, TargetRowStride = narrowStride,
+            SourceSliceStride = wideSlice, TargetSliceStride = narrowSlice };
+        harness.Run(() =>
+        {
+            narrowOutput.Fill(0, narrowOutput.Size, 0x5a5a5a5a);
+            harness.Tiler.ConvertNarrowColor(new TilerBufferSpan(wideSource.Handle, wideBase, wideSource.Size - wideBase),
+                new TilerBufferSpan(narrowOutput.Handle, narrowBase, narrowOutput.Size - narrowBase), channels, false, layout);
+        });
+        Assert.Equal(expectedNarrow, harness.ReadBack(narrowOutput.Handle, 0, narrowOutput.Size));
+        harness.AssertNoValidationMessages();
+    }
+
     [Fact]
     public void BlockCopies_ProduceTheSameBytesAsTheReferenceModules()
     {

@@ -205,6 +205,9 @@ public static class ShaderRegisterOffset
     public const uint SpiShaderUserAccumLsHs0 = 0x132;
     public const uint SpiShaderPgmLoLs = 0x148;
     public const uint SpiShaderPgmHiLs = 0x149;
+    // Past the LS block, where gfx10 documents no register. Ghost of Yotei 2.002 writes 1 here
+    // from a shader register table at startup; no shader state depends on it.
+    public const uint SpiShaderUndocumented192 = 0x192;
     public const uint ComputeStartX = 0x204;
     public const uint ComputeStartY = 0x205;
     public const uint ComputeStartZ = 0x206;

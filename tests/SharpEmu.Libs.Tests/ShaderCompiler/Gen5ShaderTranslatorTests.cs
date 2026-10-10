@@ -235,15 +235,17 @@ public sealed class Gen5ShaderTranslatorTests
         Assert.Equal(0x1234u, instruction.Sources[1].Value);
     }
 
-    [Fact]
-    public void FusedProgramContinuesAfterSetProgramCounter()
+    [Theory]
+    [InlineData(0xBE802000u)]
+    [InlineData(0xBEFD2106u)]
+    public void FusedProgramContinuesAfterSetProgramCounter(uint tailJump)
     {
         const ulong continuationAddress = ProgramAddress + 0x100;
         const ulong entryHeaderAddress = ProgramAddress + 0x400;
         const ulong continuationHeaderAddress = ProgramAddress + 0x500;
         var memory = new FakeCpuMemory(ProgramAddress, 0x1000);
 
-        WriteWords(memory, ProgramAddress, 0xBF800000u, 0xBE802000u);
+        WriteWords(memory, ProgramAddress, 0xBF800000u, tailJump);
         WriteWords(memory, continuationAddress, 0xBF800000u, 0xBF810000u);
         WriteUInt32(memory, entryHeaderAddress + 0x44, 2 * sizeof(uint));
         WriteUInt32(memory, continuationHeaderAddress + 0x44, 2 * sizeof(uint));
@@ -306,6 +308,27 @@ public sealed class Gen5ShaderTranslatorTests
         Assert.Equal((ulong)distance, program.Instructions[2].ProgramOffset);
         Assert.Equal(unchecked((ulong)distance + 4), program.Instructions[3].ProgramOffset);
         Assert.Equal(continuationAddress, unchecked(program.Address + program.Instructions[2].ProgramOffset));
+    }
+
+    [Fact]
+    public void EarlierFusedContinuation_PreservesTheGuestProgramCounter()
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x2000);
+        var entryAddress = ProgramAddress + 0x1000;
+        var continuationAddress = ProgramAddress + 0x100;
+        var entryHeader = ProgramAddress + 0x400;
+        var continuationHeader = ProgramAddress + 0x500;
+        WriteWords(memory, entryAddress, 0xBF800000u, 0xBEFD2106u);
+        WriteWords(memory, continuationAddress, 0xBE801F00u, 0xBF810000u);
+        WriteUInt32(memory, entryHeader + 0x44, 8);
+        WriteUInt32(memory, continuationHeader + 0x44, 8);
+        var context = new CpuContext(memory, Generation.Gen5);
+        Gen5ShaderTranslator.RegisterFusedProgram(context, entryAddress, entryHeader, continuationAddress, continuationHeader);
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, entryAddress, out var program, out var error), error);
+        var getPc = Assert.Single(program.Instructions, instruction => instruction.Opcode == "SGetpcB64");
+        Assert.Equal(0x100u, getPc.Pc);
+        Assert.Equal(continuationAddress + 4,
+            unchecked(program.Address + program.InstructionAddressOffset(getPc.Pc) + 4));
     }
 
     private static void WriteWords(FakeCpuMemory memory, ulong address, params uint[] words)

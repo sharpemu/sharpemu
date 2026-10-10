@@ -10,11 +10,27 @@ namespace SharpEmu.Libs.Gpu.Vulkan;
 
 public readonly record struct ReadbackPiece(GpuBuffer Source, ulong SourceOffset, ulong Size);
 
+// A readback that waits only for the main-queue tick that last wrote its sources.
+internal interface IBufferReadback : IDisposable
+{
+    void Read(ReadOnlySpan<ReadbackPiece> pieces, ulong waitTick, VulkanAsyncReadback.ReadbackConsumer consume);
+
+    bool TryBegin(ReadOnlySpan<ReadbackPiece> pieces, ulong waitTick, out VulkanAsyncReadback.Ticket? ticket)
+    {
+        ticket = null;
+        return false;
+    }
+
+    void Wait(VulkanAsyncReadback.Ticket ticket) => throw new NotSupportedException("This readback backend does not support asynchronous tickets.");
+    bool IsComplete(VulkanAsyncReadback.Ticket ticket) => throw new NotSupportedException("This readback backend does not support asynchronous tickets.");
+    void Complete(VulkanAsyncReadback.Ticket ticket, VulkanAsyncReadback.ReadbackConsumer? consume) => throw new NotSupportedException("This readback backend does not support asynchronous tickets.");
+}
+
 // Copies GPU-written buffer ranges back to the host on a second queue. The copy waits
 // on the main queue's timeline for the tick that last wrote the sources only, so a
 // guest read of one GPU-produced value no longer waits behind every later draw that
 // is still queued on the main queue (a readback there has to go to the queue's tail).
-internal sealed unsafe class VulkanAsyncReadback : IDisposable
+internal sealed unsafe class VulkanAsyncReadback : IBufferReadback
 {
     private const ulong Alignment = 16;
     private const int SlotCount = 8;

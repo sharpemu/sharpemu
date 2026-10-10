@@ -4,6 +4,7 @@
 namespace SharpEmu.Libs.VideoOut;
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Agc;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.Libs.Gpu;
@@ -86,7 +87,7 @@ internal static unsafe partial class VulkanVideoPresenter
                             }
                             finally
                             {
-                                owner._scheduler.QueueCompletionAction(storage.Dispose);
+                                // Storage belongs to its cached attachment and is reused across draws.
                             }
                         }
                     }
@@ -198,6 +199,20 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public void RunPendingOperations()
         {
+            // Start of a draw or dispatch: nothing is bound yet, so the tick can end here.
+            if (_imageCache.MemoryUnderPressure && !_scheduler.InsideTickCallback)
+            {
+                // A slow frame can materialize many draws' textures before the next flip.
+                // Advance collection here, while no new draw bindings can be invalidated.
+                _imageCache.RunGarbageCollector(endsFrame: false);
+            }
+            if ((_imageCache.ScratchOverBudget || _imageCache.RetirementOverBudget || _bufferCache.RetirementOverBudget) && !_scheduler.InsideTickCallback)
+            {
+                _scheduler.Finish();
+                if (_imageCache.MemoryUnderPressure)
+                    _imageCache.ReleaseUnusedMemory();
+            }
+
             RunPendingCommands();
             if (_batchOpen && _preparation is null && _bufferCache?.HotWritePending == true)
             {
@@ -338,6 +353,38 @@ internal static unsafe partial class VulkanVideoPresenter
             _boundDepthLoadState = depth.LoadState;
         }
 
+        public void ConfigureDepthSampleLocations(in DepthAttachmentState depth, ReadOnlySpan<uint> words, ImageLayout layout, ImageAspectFlags writeAspects)
+        {
+            var image = _imageCache.GetImage(depth.Image);
+            if ((image.Backing.Flags & ImageCreateFlags.CreateSampleLocationsCompatibleDepthBitExt) == 0)
+                throw SubmissionScheduler.Fatal("Custom sample positions require a compatible depth image.");
+            var locations = new SampleLocationEXT[8];
+            for (var pixel = 0; pixel < 4; pixel++)
+                for (var sample = 0; sample < 2; sample++)
+                {
+                    var word = words[pixel * 4] >> (sample * 8);
+                    var x = (int)(word << 28) >> 28;
+                    var y = (int)(word << 24) >> 28;
+                    locations[pixel * 2 + sample] = new SampleLocationEXT((x + 8) / 16f, (y + 8) / 16f);
+                }
+            if (image.Backing.SampleLocations is null || !locations.AsSpan().SequenceEqual(image.Backing.SampleLocations))
+            {
+                if (!depth.LoadClear && (image.Backing.SampleLocations is not null ||
+                    image.Backing.State.Layout != ImageLayout.Undefined || image.Backing.SubresourceStates is not null))
+                    throw SubmissionScheduler.Fatal("Changing depth sample positions requires a guest depth clear.");
+                var view = depth.Target.Target.Request.View;
+                if (view.BaseLevel != 0 || view.LevelCount != image.Backing.MipLevels ||
+                    view.BaseLayer != 0 || view.LayerCount != image.Backing.Layers)
+                    throw SubmissionScheduler.Fatal("Changing depth sample positions requires a complete image view.");
+                EndRendering();
+                // The transition describes the positions of the previous depth writes.
+                TransitionDepthAttachment(in depth, layout, writeAspects);
+                image.Backing.SampleLocations = locations;
+                return;
+            }
+            TransitionDepthAttachment(in depth, layout, writeAspects);
+        }
+
         public BufferBinding NullBuffer => new(_bufferCache.GetBuffer(GuestBufferCache.NullBufferId).Handle.Handle, 0);
 
         public BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten)
@@ -345,6 +392,9 @@ internal static unsafe partial class VulkanVideoPresenter
             var (buffer, offset) = _bufferCache.ObtainBuffer(address, size, isWritten);
             return new BufferBinding(buffer.Handle.Handle, offset);
         }
+
+        public void PrepareBufferAllocations(ReadOnlySpan<GuestSpan> ranges) =>
+            _bufferCache.PrepareBufferAllocations(ranges);
 
         // The ring takes the bytes unless it would wrap over a prepared binding; then a host buffer of the draw takes them.
         public BufferBinding UploadTransient(ReadOnlySpan<byte> data, uint alignment)
@@ -367,6 +417,14 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             return new BufferBinding(buffer.Handle, 0);
+        }
+
+        public ulong ObtainBufferDeviceAddress(ulong address, ulong size, bool isWritten)
+        {
+            // Read-only indices normally use the transient stream fast path.
+            // Physical pointers require a cache allocation created with BDA usage.
+            var (buffer, offset) = _bufferCache.ObtainBuffer(address, size, isWritten, requiresDeviceAddress: true);
+            return checked(buffer.DeviceAddress + offset);
         }
 
         public void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input)
@@ -586,8 +644,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 var view = binding.Request.View;
                 for (var layer = view.BaseLayer; layer < view.BaseLayer + view.LayerCount; layer++)
                 {
-                    var tracked = _imageCache.IsMetadataCleared(metadataAddress, layer, out var metadataValue) && (byte)metadataValue == DccClearToZero;
+                    // Every fixed clear code carries its own colour; only the register code (0x20) needs
+                    // the CB clear word, which is known when the surface binds as a target. Silent Hill
+                    // fast-clears UE's separate-translucency target to (0,0,0,1) and only samples it:
+                    // skipping that clear left stale zeros that blacked out the whole title-menu scene.
                     var clearValue = default(ClearColorValue);
+                    var tracked = _imageCache.IsMetadataCleared(metadataAddress, layer, out var metadataValue) &&
+                        TryDecodeDccClear((byte)metadataValue, false, (byte)metadataValue == DccClearToZero || fixedClearSupported, default, out clearValue);
                     ulong guestSlice = 0;
                     if (!tracked &&
                         (sliceSize == 0 || !_imageCache.TryReadGuestDccClear(metadataAddress, sliceSize, layer, out guestSlice, out var code) ||
@@ -661,6 +724,11 @@ internal static unsafe partial class VulkanVideoPresenter
             _vk.CmdSetDepthWriteEnable(command, state.DepthWriteEnabled);
             _vk.CmdSetDepthCompareOp(command, state.DepthCompare);
             _vk.CmdSetDepthBiasEnable(command, state.DepthBiasEnabled);
+            if (_supportsDepthBounds)
+            {
+                _vk.CmdSetDepthBounds(command, state.DepthMinBounds, state.DepthMaxBounds);
+            }
+
             if (state.DepthBiasEnabled)
             {
                 _vk.CmdSetDepthBias(command, state.DepthBiasConstantFactor, _supportsDepthBiasClamp ? state.DepthBiasClamp : 0f, state.DepthBiasSlopeFactor);
@@ -909,6 +977,17 @@ internal static unsafe partial class VulkanVideoPresenter
             _nextDrawWritesMemory = true;
         }
 
+        public void PrepareGraphicsPipeline(in PipelineHandle pipeline)
+        {
+            if (!_supportsNativeTwoSampleMixed || _supportsVariableSampleLocations || !_renderingActive)
+                return;
+            var next = RequirePipelineEntry(in pipeline).Description;
+            var previous = _boundGraphicsPipeline?.Description;
+            if (next is not null && previous is not null && next.StaticParameters.Samples == 2 &&
+                previous.StaticParameters.Samples == 2 &&
+                !next.Rendering.SampleLocationWords.AsSpan().SequenceEqual(previous.Rendering.SampleLocationWords))
+                EndRendering();
+        }
         public void BindPipeline(PipelineBindPoint bindPoint, in PipelineHandle pipeline)
         {
             var entry = RequirePipelineEntry(in pipeline);
@@ -1042,6 +1121,31 @@ internal static unsafe partial class VulkanVideoPresenter
             CountDraw();
         }
 
+        void IRenderHost.DrawIndirect(BufferBinding arguments)
+        {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
+            var command = BeginBatchedGuestCommands();
+            if (_boundGraphicsPipeline is { RectangleList: true } entry)
+            {
+                // The count is unknown here, so neither the single-rectangle strip nor a
+                // count check for native rectangles applies.
+                if (_supportsFillRectangle)
+                {
+                    BindNativeRectangleList(entry, command);
+                }
+                else
+                {
+                    BindRectangleListVariant(entry, strip: false, command);
+                }
+            }
+
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
+            _vk.CmdDrawIndirect(command, new VkBuffer(arguments.Handle), arguments.Offset, 1, 16);
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Draw,
+                _boundGraphicsPipeline?.Id ?? 0, 0, 0);
+            CountDraw();
+        }
+
         public void Dispatch(uint groupsX, uint groupsY, uint groupsZ)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
@@ -1091,8 +1195,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public void ShaderWriteBarrier(PipelineStageFlags sourceStages) =>
             RecordMemoryBarrier(
                 sourceStages,
-                PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.VertexInputBit | PipelineStageFlags.VertexShaderBit |
-                PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit | PipelineStageFlags.ColorAttachmentOutputBit,
+                PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.AllGraphicsBit | PipelineStageFlags.TransferBit,
                 AccessFlags.ShaderWriteBit,
                 AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit | AccessFlags.VertexAttributeReadBit | AccessFlags.IndexReadBit |
                 AccessFlags.UniformReadBit | AccessFlags.TransferReadBit | AccessFlags.TransferWriteBit |

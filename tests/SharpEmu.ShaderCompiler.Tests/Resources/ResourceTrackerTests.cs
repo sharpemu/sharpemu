@@ -11,6 +11,42 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class ResourceTrackerTests
 {
+    [Theory]
+    [InlineData("SCmpkGeU32", 0xFFFF, ScalarOperation.UGreaterThanEqual32, 0xFFFFu)]
+    [InlineData("SCmpkGeI32", 0xFFFF, ScalarOperation.SGreaterThanEqual32, 0xFFFF_FFFFu)]
+    public void ScalarCompareKUsesItsEncodedSourceAndImmediate(
+        string opcode,
+        ushort immediate,
+        ScalarOperation expectedComparison,
+        uint expectedImmediate)
+    {
+        var program = Program(
+            ScalarCompareK(0, opcode, source: 10, immediate),
+            Sop2(4, "SMulI32", 12, Gen5Operand.Scalar(10), Operand(384)),
+            EndProgram(8));
+        var graph = ScalarValueGraph.Build(program, userDataBase: 10, userDataCount: 1);
+
+        var source = Assert.Single(graph.Values, value =>
+            value.Kind == ScalarValueKind.UserData && value.UserDataRegister == 10);
+        var comparison = Assert.Single(graph.Values, value =>
+            value.Kind == ScalarValueKind.Operation && value.Operation == expectedComparison);
+        var product = Assert.Single(graph.Values, value =>
+            value.Kind == ScalarValueKind.Operation && value.Operation == ScalarOperation.IMul32);
+
+        Assert.Same(source, comparison.Operands[0]);
+        Assert.Equal(expectedImmediate, comparison.Operands[1].ConstantU32);
+        Assert.Same(source, product.Operands[0]);
+        Assert.Equal(384u, product.Operands[1].ConstantU32);
+    }
+
+    private static Gen5ShaderInstruction ScalarCompareK(uint pc, string opcode, uint source, ushort immediate)
+    {
+        var word = ((source & 0x7Fu) << 16) | immediate;
+        return new Gen5ShaderInstruction(pc, Gen5ShaderEncoding.Sopk, opcode, [word],
+            [new Gen5Operand(Gen5OperandKind.EncodedConstant, immediate)],
+            [Gen5Operand.Scalar(source)], null);
+    }
+
     private const uint Format32x4Float = 77;
     private const uint Format32x2Float = 64;
     private const uint ImageType2D = 9;
@@ -129,7 +165,7 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
-    public void SamplerWithDivergentBits_IsRejected()
+    public void SamplerWithDivergentBits_IsReadAtRuntime()
     {
         var program = Program(
             MoveScalarRegister(0, 16, 0),
@@ -141,9 +177,14 @@ public sealed class ResourceTrackerTests
             Image(0x200, "ImageSample", 8, 16),
             EndProgram(0x208));
 
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(program));
-        Assert.Contains("not a valid runtime value", error.Message);
-        Assert.Contains("pc=0x00000200", error.Message);
+        // The sampler has no plan-time source: the sample reads both descriptors from its
+        // registers through the runtime descriptor table instead of being planned.
+        var plan = Extract(program);
+        Assert.True(plan.Info.UsesRuntimeDescriptors);
+        var access = Assert.Single(plan.Memory.Entries, entry => entry.Pc == 0x200);
+        Assert.True(access.RuntimeDescriptor);
+        Assert.Empty(plan.Info.Images);
+        Assert.Empty(plan.Info.Samplers);
     }
 
     private static uint[] StorageDescriptorUserData(uint mipBase, uint mipLast) =>
@@ -215,7 +256,7 @@ public sealed class ResourceTrackerTests
 
     // The material table s[0:3], the heap s[4:7], the key selector in s8; the image words
     // come from the heap record the key selects.
-    internal static Gen5ShaderProgram IndirectImageProgram(bool malformed, int materialImmediate = 0, bool memoryBackedMaterial = false)
+    internal static Gen5ShaderProgram IndirectImageProgram(bool malformed, int materialImmediate = 0, bool memoryBackedMaterial = false, uint selectorStride = 224)
     {
         var instructions = new List<Gen5ShaderInstruction>();
         uint pc = 0x1000;
@@ -231,7 +272,7 @@ public sealed class ResourceTrackerTests
 
         Add(At(current => Vop1(current, "VMovB32", 1, Gen5Operand.Scalar(8))));
         Add(At(current => ReadFirstLane(current, 9, 1)));
-        Add(At(current => Sop2(current, "SMulI32", 10, Gen5Operand.Scalar(9), Operand(224))));
+        Add(At(current => Sop2(current, "SMulI32", 10, Gen5Operand.Scalar(9), Operand(selectorStride))));
         Add(At(current => Sop2(current, "SAddU32", 11, Gen5Operand.Scalar(10), Operand(4))));
         Add(At(current => ScalarBufferLoad(current, 0, destination: 12, immediateOffset: materialImmediate, dynamicOffsetRegister: 11)));
         Add(At(current => Sop2(current, "SLshlB32", 13, Gen5Operand.Scalar(12), Operand(5))));
@@ -401,10 +442,105 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
-    public void MalformedIndirectImage_IsRejected()
+    public void MalformedIndirectImage_IsReadAtRuntime()
     {
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(IndirectImageProgram(true)));
+        var plan = Extract(IndirectImageProgram(true));
+        Assert.True(plan.Info.UsesRuntimeDescriptors);
+        Assert.Contains(plan.Memory.Entries, entry => entry.RuntimeDescriptor);
+    }
+
+    // A storage access has no runtime view: an unresolvable descriptor still rejects the plan.
+    [Fact]
+    public void UnresolvableStorageImage_IsStillRejected()
+    {
+        var program = Program(
+            Vop2(0, "VLshlrevB32", 1, Operand(12), Gen5Operand.Vector(0)),
+            ReadFirstLane(4, 20, 1),
+            Sop2(8, "SOrB32", 3, Gen5Operand.Scalar(3), Gen5Operand.Scalar(20)),
+            Image(0x200, "ImageStore", 0),
+            EndProgram(0x208));
+
+        var error = Assert.Throws<ResourcePlanException>(() => Extract(program));
         Assert.Contains("not a valid runtime value", error.Message);
+    }
+
+    // A depth-compare sample has no runtime view: descriptors read from an empty scalar buffer
+    // are the null descriptor, and materialization rechecks that the buffer is still empty.
+    [Fact]
+    public void DynamicDescriptorsFromZeroExtentBufferAreNullOnlyWhileTheBufferIsEmpty()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, destination: 28, count: 4),
+            ReadFirstLane(8, 10, 0),
+            ScalarBufferLoad(12, 28, destination: 16, count: 8, dynamicOffsetRegister: 10),
+            ScalarBufferLoad(20, 28, destination: 24, count: 4, dynamicOffsetRegister: 10),
+            Image(28, "ImageSampleC", 16, 24),
+            EndProgram(36));
+        var plan = Extract(program, userDataCount: 2);
+        Assert.False(plan.Info.UsesRuntimeDescriptors);
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Images[0].Source].ZeroExtentBufferSource);
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Samplers[0].Source].ZeroExtentBufferSource);
+
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[8], RequireAlignment = true };
+        memory.At(0x1000) = 0x2000;
+        memory.At(0x1004) = 8u << 16;
+        var inputs = Inputs([0x1000, 0], memory.Read, memory.Read);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.All(snapshot.Images[0], word => Assert.Equal(0u, word));
+        Assert.All(snapshot.Samplers[0], word => Assert.Equal(0u, word));
+
+        var priorSnapshot = snapshot;
+        memory.At(0x1008) = 1;
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.Same(priorSnapshot, snapshot);
+    }
+
+    // The runtime table reads whatever the buffer holds, so an access it can serve keeps that
+    // path rather than a null descriptor that a non-empty buffer would later invalidate.
+    [Fact]
+    public void RuntimeReadableDescriptorsFromZeroExtentBufferAreReadAtRuntime()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, destination: 28, count: 4),
+            ReadFirstLane(8, 10, 0),
+            ScalarBufferLoad(12, 28, destination: 16, count: 8, dynamicOffsetRegister: 10),
+            ScalarBufferLoad(20, 28, destination: 24, count: 4, dynamicOffsetRegister: 10),
+            Image(28, "ImageSample", 16, 24),
+            EndProgram(36));
+        var plan = Extract(program, userDataCount: 2);
+
+        Assert.True(plan.Info.UsesRuntimeDescriptors);
+        Assert.DoesNotContain(plan.DescriptorSources, source => source.ZeroExtentBufferSource is not null);
+    }
+
+    [Fact]
+    public void ZeroExtentDescriptorLoadsRemainNullAcrossInvariantLoopPhis()
+    {
+        var program = Program(
+            ScalarLoad(0, 0, destination: 28, count: 4),
+            ReadFirstLane(8, 10, 0),
+            ScalarBufferLoad(12, 28, destination: 16, count: 8, dynamicOffsetRegister: 10),
+            ScalarBufferLoad(20, 28, destination: 24, count: 4, dynamicOffsetRegister: 10),
+            Nop(28),
+            Branch(32, "SCbranchScc1", -2),
+            Image(36, "ImageSampleC", 16, 24),
+            EndProgram(44));
+        var plan = Extract(program, userDataCount: 2);
+        Assert.False(plan.Info.UsesRuntimeDescriptors);
+        Assert.True(plan.Memory.TryGetIndex(36, 0, out var imageMemoryIndex));
+        Assert.Equal(ScalarValueKind.Phi, plan.Accesses[imageMemoryIndex]!.Handle!.Operands[0].Kind);
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Images[0].Source].ZeroExtentBufferSource);
+        Assert.NotNull(plan.DescriptorSources[(int)plan.Info.Samplers[0].Source].ZeroExtentBufferSource);
+
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[8], RequireAlignment = true };
+        memory.At(0x1000) = 0x2000;
+        memory.At(0x1004) = 8u << 16;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], memory.Read, memory.Read),
+            ref snapshot, ref specialization));
     }
 
     [Fact]
@@ -553,8 +689,10 @@ public sealed class ResourceTrackerTests
             BufferLoad(32, 8),
             EndProgram(36));
 
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(program));
-        Assert.Contains("not a valid runtime value", error.Message);
+        // The control-dependent V# is read from its SGPRs when the access runs.
+        var plan = Extract(program);
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Info.UsesDeviceAddresses);
     }
 
     [Fact]

@@ -25,7 +25,9 @@ public sealed partial class ResourceTracker
 
         for (var dword = 0; dword < 8; dword++)
         {
-            var read = handle.Operands[dword];
+            // A descriptor kept in its registers across a loop reaches the handle through
+            // phis that only carry the loaded value.
+            var read = _graph.ResolveInvariantPhi(handle.Operands[dword]) ?? handle.Operands[dword];
             if (read.Kind != ScalarValueKind.ScalarAddressWord || read.MemoryIndex < 0 ||
                 read.MemoryIndex >= _plan.Memory.Count || !MemoryIndexBelongsTo(read.MemoryIndex, read))
                 return false;
@@ -34,7 +36,7 @@ public sealed partial class ResourceTracker
             if (memory.Kind != MemoryResourceKind.ScalarAddress || memory.DataBits != 32 || memory.DataDwords != 1)
                 return false;
 
-            var offset = read.Operands[1];
+            var offset = _graph.ResolveInvariantPhi(read.Operands[1]) ?? read.Operands[1];
             uint extra = 0;
             if (based is null)
             {
@@ -113,7 +115,8 @@ public sealed partial class ResourceTracker
             scaled.Operands[1].ConstantU32 != DenseIndirectImageShift)
             return false;
 
-        var key = scaled.Operands[0];
+        // A key carried unchanged around a loop is bounded by the value it carries.
+        var key = _graph.ResolveInvariantPhi(scaled.Operands[0]) ?? scaled.Operands[0];
         var bound = BoundBySamplerLoads(DenseKeyBound(key), heapHandle, tableOffset);
         var waveIndexed = TryCreateWaveIndexedImageSelector(key, reads);
         if (bound == 0 && waveIndexed is null)
@@ -121,8 +124,10 @@ public sealed partial class ResourceTracker
             return false;
         }
 
+        // Several image instructions may sample the same loaded descriptor; each builds its
+        // own handle over these reads and gets the same plan.
         foreach (var read in reads)
-            if (!UsesOnly(read, [handle]))
+            if (!UsedOnlyByImageHandlesOver(read, reads))
                 return false;
 
         if (!MakeRuntimeAddressSource(heapHandle, pc, out var heapSourceIndex, out var heapSource))
@@ -158,6 +163,39 @@ public sealed partial class ResourceTracker
         return true;
     }
 
+    private bool UsedOnlyByImageHandlesOver(ScalarValue read, IReadOnlyList<ScalarValue> reads)
+    {
+        var pending = new Stack<ScalarValue>();
+        var visited = new HashSet<ScalarValue>();
+        pending.Push(read);
+        while (pending.TryPop(out var value))
+        {
+            if (!visited.Add(value) || !_uses.TryGetValue(value, out var uses) || uses.Count == 0)
+                continue;
+
+            foreach (var user in uses)
+            {
+                if (user.Kind == ScalarValueKind.Phi && ReferenceEquals(_graph.ResolveInvariantPhi(user), read))
+                {
+                    pending.Push(user);
+                    continue;
+                }
+
+                if (user.Kind != ScalarValueKind.ImageHandle || user.Operands.Length != reads.Count)
+                    return false;
+
+                for (var index = 0; index < reads.Count; index++)
+                {
+                    var operand = _graph.ResolveInvariantPhi(user.Operands[index]) ?? user.Operands[index];
+                    if (!ReferenceEquals(operand, reads[index]))
+                        return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
     private uint BoundBySamplerLoads(uint bound, ScalarValue heapHandle, uint tableOffset)
     {
         foreach (var access in _plan.Accesses)
@@ -188,6 +226,18 @@ public sealed partial class ResourceTracker
         if (key.Kind == ScalarValueKind.Operation && key.Operation == ScalarOperation.FindLowestBit32 &&
             _graph.HasNonZeroBitScanInput(key))
             return 32;
+
+        // A constant-width bitfield, or a value masked to its low bits, has 2^width values.
+        if (key.Kind == ScalarValueKind.Operation && key.Operation == ScalarOperation.BitFieldUExtract &&
+            key.Operands.Length == 3 && key.Operands[2].IsConstant && key.Operands[2].ConstantU32 is > 0 and <= 12)
+            return 1u << (int)key.Operands[2].ConstantU32;
+
+        if (key.Kind == ScalarValueKind.Operation && key.Operation == ScalarOperation.And32 && key.Operands.Length == 2)
+        {
+            var mask = key.Operands[1].IsConstant ? key.Operands[1] : key.Operands[0].IsConstant ? key.Operands[0] : null;
+            if (mask is not null && mask.ConstantU32 < MaxDenseIndirectImageEntries && (mask.ConstantU32 & (mask.ConstantU32 + 1)) == 0)
+                return mask.ConstantU32 + 1;
+        }
 
         if (!_uses.TryGetValue(key, out var uses))
             return 0;
@@ -572,5 +622,229 @@ public sealed partial class ResourceTracker
 
         constant = 0;
         return false;
+    }
+
+    // A descriptor loaded with s_buffer_load from a table of fixed-size records, at a
+    // record offset the shader computes at run time (key * stride). The hardware reads
+    // whichever record the offset names; the host binds every image the table holds and
+    // the shader selects one by the same offset.
+    private bool TryMakeBufferTableImage(ScalarValue handle, uint pc, bool r128, out IndirectImagePlan plan)
+    {
+        plan = null!;
+        if (handle.Kind != ScalarValueKind.ImageHandle || handle.Operands.Length != 8)
+            return false;
+
+        // A 128-bit resource reads only the first four dwords of the handle.
+        var dwords = r128 ? 4 : 8;
+        var reads = new ScalarValue[dwords];
+        var memoryIndices = new int[dwords];
+        ScalarValue? tableHandle = null;
+        ScalarValue? offset = null;
+        uint tableImmediate = 0;
+        for (var dword = 0; dword < dwords; dword++)
+        {
+            var read = handle.Operands[dword];
+            var memory = ScalarReadMemory(read, out var memoryIndex);
+            if (memory is null || memory.Kind != MemoryResourceKind.ScalarBuffer || !MemoryIndexBelongsTo(memoryIndex, read))
+                return false;
+
+            var componentOffset = (uint)dword * sizeof(uint);
+            if (memory.Offset < componentOffset)
+                return false;
+            if (dword == 0)
+                tableImmediate = memory.Offset;
+            else if (memory.Offset - componentOffset != tableImmediate)
+                return false;
+
+            if (tableHandle is null)
+            {
+                tableHandle = read.Operands[0];
+                offset = read.Operands[1];
+            }
+            else if (!ReferenceEquals(read.Operands[0], tableHandle) || !_graph.Equivalent(read.Operands[1], offset!))
+            {
+                return false;
+            }
+
+            reads[dword] = read;
+            memoryIndices[dword] = memoryIndex;
+        }
+
+        if (tableHandle is null || offset is null || !TryGetRecordStride(offset, out var stride))
+            return false;
+
+        // Other consumers of the same words (a sampler or another image in the record) keep
+        // the loads; they are ordinary buffer reads at the offset the shader computes.
+        var suppressReads = reads.All(read => UsesOnly(read, [handle]));
+        if (!MakeRuntimeBufferSource(tableHandle, pc, out var tableSourceIndex, out var tableSource))
+            return false;
+
+        var imageSource = new DescriptorSource
+        {
+            Dwords = [.. tableSource.Dwords, .. tableSource.Dwords],
+            IndirectImage = new IndirectImageSelector(0, tableSourceIndex, 0, 0, 0)
+            {
+                Dense = true,
+                TableOffset = tableImmediate,
+                BufferTableStride = stride,
+            },
+        };
+
+        plan = new IndirectImagePlan
+        {
+            Handle = handle,
+            Source = InternSource(imageSource),
+            Key = reads[0],
+            KeyIsAddressOffset = true,
+            HeapSource = tableSourceIndex,
+            SuppressMemoryReads = suppressReads,
+            Memory = memoryIndices,
+            Reads = reads,
+        };
+        return true;
+    }
+
+    // A descriptor loaded through a pointer that a V# table record holds: the shader reads
+    // the record's 64-bit pointer with S_BUFFER_LOAD at key * stride, then the descriptor
+    // with S_LOAD at a constant offset from that pointer. The key is the record offset.
+    private sealed record PointerTableMatch(
+        ScalarValue TableHandle,
+        ScalarValue KeyRead,
+        uint TableOffset,
+        uint Stride,
+        uint TargetOffset,
+        ScalarValue[] Reads,
+        int[] MemoryIndices);
+
+    private bool TryMatchPointerTable(ScalarValue handle, int dwords, out PointerTableMatch match)
+    {
+        match = null!;
+        if (handle.Operands.Length < dwords)
+            return false;
+
+        var reads = new ScalarValue[dwords];
+        var memoryIndices = new int[dwords];
+        ScalarValue? address = null;
+        uint targetOffset = 0;
+        for (var dword = 0; dword < dwords; dword++)
+        {
+            var read = handle.Operands[dword];
+            if (read.Kind != ScalarValueKind.ScalarAddressWord || read.Operands.Length != 2 ||
+                read.MemoryIndex >= _plan.Memory.Count || !read.Operands[1].IsConstant || read.Operands[1].ConstantU32 != 0)
+                return false;
+
+            var memory = _plan.Memory[read.MemoryIndex];
+            if (memory.Kind != MemoryResourceKind.ScalarAddress || memory.DataBits != 32 || memory.DataDwords != 1 ||
+                !MemoryIndexBelongsTo(read.MemoryIndex, read))
+                return false;
+
+            var componentOffset = (uint)dword * sizeof(uint);
+            if (memory.Offset < componentOffset)
+                return false;
+            if (dword == 0)
+            {
+                targetOffset = memory.Offset;
+                address = read.Operands[0];
+            }
+            else if (memory.Offset - componentOffset != targetOffset || !ReferenceEquals(read.Operands[0], address))
+            {
+                return false;
+            }
+
+            reads[dword] = read;
+            memoryIndices[dword] = read.MemoryIndex;
+        }
+
+        if (address is not { Kind: ScalarValueKind.AddressHandle, Operands.Length: 2 })
+            return false;
+
+        var low = _graph.ResolveInvariantPhi(address.Operands[0]);
+        var high = _graph.ResolveInvariantPhi(address.Operands[1]);
+        if (low is null || high is null)
+            return false;
+
+        var lowMemory = ScalarReadMemory(low, out _);
+        var highMemory = ScalarReadMemory(high, out _);
+        if (lowMemory is null || highMemory is null || lowMemory.Kind != MemoryResourceKind.ScalarBuffer ||
+            highMemory.Kind != MemoryResourceKind.ScalarBuffer || highMemory.Offset != lowMemory.Offset + sizeof(uint) ||
+            !ReferenceEquals(low.Operands[0], high.Operands[0]) || !_graph.Equivalent(low.Operands[1], high.Operands[1]) ||
+            !TryGetRecordStride(low.Operands[1], out var stride))
+            return false;
+
+        match = new PointerTableMatch(low.Operands[0], low, lowMemory.Offset, stride, targetOffset, reads, memoryIndices);
+        return true;
+    }
+
+    private bool TryMakePointerTableImage(ScalarValue handle, uint pc, bool r128, out IndirectImagePlan plan)
+    {
+        plan = null!;
+        if (handle.Kind != ScalarValueKind.ImageHandle || handle.Operands.Length != 8 ||
+            !TryMatchPointerTable(handle, r128 ? 4 : 8, out var match) ||
+            !MakeRuntimeBufferSource(match.TableHandle, pc, out var tableSourceIndex, out var tableSource))
+            return false;
+
+        var imageSource = new DescriptorSource
+        {
+            Dwords = [.. tableSource.Dwords, .. tableSource.Dwords],
+            IndirectImage = new IndirectImageSelector(0, tableSourceIndex, 0, 0, 0)
+            {
+                Dense = true,
+                TableOffset = match.TableOffset,
+                BufferTableStride = match.Stride,
+                PointerTargetOffset = match.TargetOffset,
+            },
+        };
+
+        plan = new IndirectImagePlan
+        {
+            Handle = handle,
+            Source = InternSource(imageSource),
+            Key = match.KeyRead,
+            KeyIsAddressOffset = true,
+            HeapSource = tableSourceIndex,
+            SuppressMemoryReads = match.Reads.All(read => UsesOnly(read, [handle])),
+            Memory = match.MemoryIndices,
+            Reads = match.Reads,
+        };
+        return true;
+    }
+
+    // A sampler reached the same way. The host binds one sampler, so the table's records
+    // must all hold the same one; the materializer checks that on every snapshot.
+    private bool TryMakePointerTableSampler(ScalarValue? handle, uint pc, out uint sourceIndex)
+    {
+        sourceIndex = DescriptorConstants.NoIndex;
+        if (handle is not { Kind: ScalarValueKind.SamplerHandle } || !TryMatchPointerTable(handle, 4, out var match) ||
+            !MakeRuntimeBufferSource(match.TableHandle, pc, out _, out var tableSource))
+            return false;
+
+        sourceIndex = InternSource(new DescriptorSource
+        {
+            Dwords = tableSource.Dwords,
+            PointerTable = new PointerTableSelector(match.TableOffset, match.Stride, match.TargetOffset),
+        });
+        return true;
+    }
+
+    // The record offset is key * stride, as a multiply or a shift by a constant.
+    private static bool TryGetRecordStride(ScalarValue offset, out uint stride)
+    {
+        stride = 0;
+        if (offset.Kind != ScalarValueKind.Operation || offset.Operands.Length != 2)
+            return false;
+
+        if (offset.Operation == ScalarOperation.IMul32)
+        {
+            if (offset.Operands[1].IsConstant)
+                stride = offset.Operands[1].ConstantU32;
+            else if (offset.Operands[0].IsConstant)
+                stride = offset.Operands[0].ConstantU32;
+        }
+        else if (offset.Operation == ScalarOperation.ShiftLeft32 && offset.Operands[1].IsConstant && offset.Operands[1].ConstantU32 < 32)
+        {
+            stride = 1u << (int)offset.Operands[1].ConstantU32;
+        }
+
+        return stride >= 8 * sizeof(uint) && stride % sizeof(uint) == 0;
     }
 }

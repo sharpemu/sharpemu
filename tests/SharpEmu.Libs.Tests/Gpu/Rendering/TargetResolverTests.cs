@@ -87,6 +87,13 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Equal(state.FrontOperations, state.BackOperations);
         Assert.Equal(state.FrontMasks, state.BackMasks);
 
+        // An ALWAYS test ignores the reference, so it carries the replacement value.
+        context.StencilMask.OperationValue = 0x20;
+        Assert.Equal(new StencilMasks(0xFF, 0xFF, 0x20), DepthTargetResolver.ResolveState(context, true, Fatal).FrontMasks);
+
+        // A test that reads the reference cannot also carry a different replacement value.
+        var tested = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x20, DepthControl(CompareOp.Less, CompareOp.Equal));
+        Assert.Contains("replacement", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(tested, true, Fatal)).Message);
         context.StencilMask.OperationValue = 0x20;
         state = DepthTargetResolver.ResolveState(context, true, Fatal);
         Assert.Equal(0x20u, state.FrontMasks.Reference); // Always does not consume the comparison reference.
@@ -101,29 +108,19 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
-    public void DepthState_PlayroomReplacementClearsOnlyTheWrittenBit()
+    public void DepthState_ReplacementWithZeroWrittenBitsUsesZeroOperation()
     {
-        var context = StencilContext(pass: 3, writeMask: 0x80, operationValue: 1, depthControl: 0x007007B1);
-        context.StencilControl = new StencilControlRegisters
-        {
-            Fail = 3, Pass = 3, DepthFail = 3,
-            FailBack = 4, PassBack = 4, DepthFailBack = 4,
-        };
+        var context = StencilContext(pass: 4, writeMask: 0x80, operationValue: 1,
+            DepthControl(CompareOp.Less, CompareOp.Always));
         context.StencilMask.TestValue = 0x80;
-        context.StencilMask.TestValueBack = 0x80;
-        context.StencilMask.MaskBack = 0xFF;
-        context.StencilMask.WriteMaskBack = 0x80;
-        context.StencilMask.OperationValueBack = 1;
 
         var state = DepthTargetResolver.ResolveState(context, true, Fatal);
 
-        Assert.Equal(new StencilOperations(StencilOp.Replace, StencilOp.Replace, StencilOp.Replace, CompareOp.Always), state.FrontOperations);
-        Assert.Equal(new StencilOperations(StencilOp.Zero, StencilOp.Zero, StencilOp.Zero, CompareOp.Always), state.BackOperations);
-        Assert.Equal(new StencilMasks(0xFF, 0x80, 0x80), state.FrontMasks);
-        Assert.Equal(state.FrontMasks, state.BackMasks);
+        Assert.Equal(StencilOp.Zero, state.FrontOperations.PassOperation);
+        Assert.Equal(0x80u, state.FrontMasks.WriteMask);
         for (uint oldValue = 0; oldValue <= 0xFF; oldValue++)
         {
-            Assert.Equal((oldValue & ~0x80u) | (1u & 0x80u), oldValue & ~state.BackMasks.WriteMask);
+            Assert.Equal((oldValue & ~0x80u) | (1u & 0x80u), oldValue & ~state.FrontMasks.WriteMask);
         }
     }
 
@@ -131,6 +128,23 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
     [InlineData(0x0F, 0xF0, 0x20, 0x20)]
     [InlineData(0xFF, 0xF0, 0x11, 0x10)]
     public void DepthState_ReplacementMergesOnlyBitsUnusedByComparison(byte compareMask, byte writeMask, byte operationValue, uint reference)
+    {
+        var context = StencilContext(pass: 4, writeMask, operationValue,
+            DepthControl(CompareOp.Less, CompareOp.Equal));
+        context.StencilMask.Mask = compareMask;
+
+        var state = DepthTargetResolver.ResolveState(context, true, Fatal);
+
+        Assert.Equal(StencilOp.Replace, state.FrontOperations.PassOperation);
+        Assert.Equal(reference, state.FrontMasks.Reference);
+        Assert.Equal((uint)(context.StencilMask.TestValue & compareMask), state.FrontMasks.Reference & compareMask);
+        Assert.Equal((uint)(operationValue & writeMask), state.FrontMasks.Reference & writeMask);
+    }
+
+    [Theory]
+    [InlineData(0x0F, 0xF0, 0x20, 0x20)]
+    [InlineData(0xFF, 0xF0, 0x11, 0x10)]
+    public void DepthState_ReplacementMergesOnlyBitsUnusedByComparison_Upstream(byte compareMask, byte writeMask, byte operationValue, uint reference)
     {
         var context = StencilContext(pass: 4, writeMask, operationValue, DepthControl(CompareOp.Less, CompareOp.Equal));
         context.StencilMask.Mask = compareMask;
@@ -141,6 +155,62 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Equal(reference, state.FrontMasks.Reference);
         Assert.Equal((uint)(context.StencilMask.TestValue & compareMask), state.FrontMasks.Reference & compareMask);
         Assert.Equal((uint)(operationValue & writeMask), state.FrontMasks.Reference & writeMask);
+    }
+
+    [Fact]
+    public void DepthState_EqualTestCanTranslateOperationValueReplacementToMaskedInvert()
+    {
+        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x40, DepthControl(CompareOp.Less, CompareOp.Equal));
+        context.StencilControl.DepthFail = 0;
+        context.StencilMask.TestValue = 0xFF;
+
+        var state = DepthTargetResolver.ResolveState(context, hasStencil: true, Fatal);
+
+        Assert.Equal(new StencilOperations(StencilOp.Keep, StencilOp.Invert, StencilOp.Keep, CompareOp.Equal), state.FrontOperations);
+        Assert.Equal(new StencilMasks(0xFF, 0xBF, 0xFF), state.FrontMasks);
+
+        // The Equal test only passes for 0xFF. Invert toggles the differing bits and
+        // leaves the shared bit intact, exactly matching the guest replacement.
+        for (var stencil = 0; stencil <= byte.MaxValue; stencil++)
+        {
+            var before = (byte)stencil;
+            var guestAfter = before == 0xFF ? (byte)0x40 : before;
+            var vulkanAfter = before == state.FrontMasks.Reference
+                ? (byte)((before & ~(byte)state.FrontMasks.WriteMask) | ((byte)~before & (byte)state.FrontMasks.WriteMask))
+                : before;
+            Assert.Equal(guestAfter, vulkanAfter);
+        }
+
+        // A replacement in the stencil-fail path has no known input value, and an
+        // incomplete compare mask does not establish all written bits.
+        context.StencilControl.Fail = 4;
+        Assert.Contains("replacement", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(context, true, Fatal)).Message);
+        context.StencilControl.Fail = 0;
+        context.StencilMask.Mask = 0x7F;
+        Assert.Contains("replacement", Assert.Throws<InvalidOperationException>(() => DepthTargetResolver.ResolveState(context, true, Fatal)).Message);
+    }
+
+    [Theory]
+    [InlineData(0xA5, 0x5A, 0x0F, 0x0F)]
+    [InlineData(0x00, 0x80, 0xF0, 0x80)]
+    [InlineData(0xFF, 0xF0, 0x0F, 0x0F)]
+    [InlineData(0x55, 0xAA, 0xFF, 0x33)]
+    public void DepthState_EqualReplacementPreservesEveryStencilValue(int test, int replacement, int compareMask, int writeMask)
+    {
+        var context = StencilContext(4, (byte)writeMask, (byte)replacement, DepthControl(CompareOp.Less, CompareOp.Equal));
+        context.StencilControl.DepthFail = 0;
+        context.StencilMask.TestValue = (byte)test;
+        context.StencilMask.Mask = (byte)compareMask;
+        var state = DepthTargetResolver.ResolveState(context, true, Fatal);
+        Assert.Equal(StencilOp.Invert, state.FrontOperations.PassOperation);
+        for (var before = 0; before <= byte.MaxValue; before++)
+        {
+            var passes = (before & compareMask) == (test & compareMask);
+            var expected = passes ? (before & ~writeMask) | (replacement & writeMask) : before;
+            var hostMask = (byte)state.FrontMasks.WriteMask;
+            var actual = passes ? (before & ~hostMask) | (~before & hostMask) : before;
+            Assert.Equal(expected, actual);
+        }
     }
 
     [Fact]
@@ -235,6 +305,25 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void AttachmentLayoutFor_KeepsTheReadOnlyLayoutForDrawsThatOnlyTest()
+    {
+        var context = StencilContext(pass: 4, writeMask: 0xFF, operationValue: 0x10, DepthControl(CompareOp.Less, CompareOp.Always));
+        var writer = DepthTargetResolver.ResolveState(context, true, Fatal) with { StencilTestEnabled = false };
+        var tester = writer with { DepthWriteEnabled = false };
+        const Format format = Format.D32SfloatS8Uint;
+        var readOnly = ImageLayout.DepthStencilReadOnlyOptimal;
+
+        // A sampled attachment is read-only whatever it was in before.
+        Assert.Equal(readOnly, DepthStencilState.AttachmentLayoutFor(tester, format, sampled: true, ImageLayout.DepthStencilAttachmentOptimal));
+        // A test-only draw after a sampling draw stays read-only, so the scope continues.
+        Assert.Equal(readOnly, DepthStencilState.AttachmentLayoutFor(tester, format, sampled: false, readOnly));
+        // Otherwise the writable layout keeps toggling depth writes inside one scope.
+        Assert.Equal(ImageLayout.DepthStencilAttachmentOptimal, DepthStencilState.AttachmentLayoutFor(tester, format, sampled: false, ImageLayout.DepthStencilAttachmentOptimal));
+        Assert.Equal(ImageLayout.DepthStencilAttachmentOptimal, DepthStencilState.AttachmentLayoutFor(tester, format, sampled: false, null));
+        Assert.Equal(ImageLayout.DepthStencilAttachmentOptimal, DepthStencilState.AttachmentLayoutFor(writer, format, sampled: false, readOnly));
+    }
+
+    [Fact]
     public void DepthResolve_UsesTheBuilderThenAddsTheState()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
@@ -251,5 +340,32 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
 
         context.DepthTarget = RegisterWords.Depth(Base, 64, 64, depthTest: false, depthWrite: false);
         Assert.Null(DepthTargetResolver.Resolve(context, _vulkan.DeviceInfo, Fatal));
+    }
+
+    [Fact]
+    public void DepthState_PlayroomReplacementClearsOnlyTheWrittenBit()
+    {
+        var context = StencilContext(pass: 3, writeMask: 0x80, operationValue: 1, depthControl: 0x007007B1);
+        context.StencilControl = new StencilControlRegisters
+        {
+            Fail = 3, Pass = 3, DepthFail = 3,
+            FailBack = 4, PassBack = 4, DepthFailBack = 4,
+        };
+        context.StencilMask.TestValue = 0x80;
+        context.StencilMask.TestValueBack = 0x80;
+        context.StencilMask.MaskBack = 0xFF;
+        context.StencilMask.WriteMaskBack = 0x80;
+        context.StencilMask.OperationValueBack = 1;
+
+        var state = DepthTargetResolver.ResolveState(context, true, Fatal);
+
+        Assert.Equal(new StencilOperations(StencilOp.Replace, StencilOp.Replace, StencilOp.Replace, CompareOp.Always), state.FrontOperations);
+        Assert.Equal(new StencilOperations(StencilOp.Zero, StencilOp.Zero, StencilOp.Zero, CompareOp.Always), state.BackOperations);
+        Assert.Equal(new StencilMasks(0xFF, 0x80, 0x80), state.FrontMasks);
+        Assert.Equal(state.FrontMasks, state.BackMasks);
+        for (uint oldValue = 0; oldValue <= 0xFF; oldValue++)
+        {
+            Assert.Equal((oldValue & ~0x80u) | (1u & 0x80u), oldValue & ~state.BackMasks.WriteMask);
+        }
     }
 }

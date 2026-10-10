@@ -165,6 +165,8 @@ public static class KernelPthreadCompatExports
         public LinkedListNode<PthreadCondWaiter>? Node { get; set; }
         public PthreadMutexWaiter? MutexWaiter { get; set; }
         public Timer? TimeoutTimer { get; set; }
+        // Recursion depth of the mutex before the wait released it; restored on wakeup.
+        public int SavedRecursion { get; init; } = 1;
         // 0 = waiting, 1 = signaled, 2 = timed out.
         public int CompletionState { get; set; }
     }
@@ -375,6 +377,33 @@ public static class KernelPthreadCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int PthreadMutexTrylock(CpuContext ctx) => PthreadMutexLockCore(ctx, ctx[CpuRegister.Rdi], tryOnly: true);
+
+    [SysAbiExport(
+        Nid = "IafI2PxcPnQ",
+        ExportName = "scePthreadMutexTimedlock",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PthreadMutexTimedlock(CpuContext ctx)
+    {
+        // Unlike POSIX pthread_mutex_timedlock's absolute timespec, this export
+        // receives a 32-bit relative microsecond interval in the second argument.
+        var mutexAddress = ctx[CpuRegister.Rdi];
+        var timeoutUsec = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var deadline = GuestThreadExecution.ComputeDeadlineTimestamp(TimeSpan.FromTicks((long)timeoutUsec * 10));
+        while (true)
+        {
+            var result = PthreadMutexLockCore(ctx, mutexAddress, tryOnly: true);
+            if (result != (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY)
+                return result;
+            if (Stopwatch.GetTimestamp() >= deadline)
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
+
+            // Recheck ownership after every wake. A timeout never grants the lock
+            // or leaves a queued waiter behind. Trylock also preserves recursion.
+            Thread.Sleep(1);
+            GuestThreadExecution.Scheduler?.DeliverPendingGuestExceptionIfReady(ctx);
+        }
+    }
 
     [SysAbiExport(
         Nid = "tn3VlD0hG60",
@@ -1054,12 +1083,7 @@ public static class KernelPthreadCompatExports
         }
 
         if (canCooperativelyBlock && waiter is not null &&
-            GuestThreadExecution.RequestCurrentThreadBlock(
-                ctx,
-                "pthread_mutex_lock",
-                waiter.WakeKey,
-                () => CompleteBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter),
-                () => TryGrantBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter)))
+            RequestBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter))
         {
             TracePthreadMutex(ctx, "lock-block", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1069,6 +1093,21 @@ public static class KernelPthreadCompatExports
         TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, hostResult);
         return hostResult;
     }
+
+    // The continuations capture the lock's arguments in a closure; keeping them out of
+    // PthreadMutexLockCore spares every uncontended lock that allocation.
+    private static bool RequestBlockedMutexLock(
+        CpuContext ctx,
+        ulong mutexAddress,
+        ulong resolvedAddress,
+        PthreadMutexState state,
+        PthreadMutexWaiter waiter) =>
+        GuestThreadExecution.RequestCurrentThreadBlock(
+            ctx,
+            "pthread_mutex_lock",
+            waiter.WakeKey,
+            () => CompleteBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter),
+            () => TryGrantBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter));
 
     private static int PthreadMutexUnlockCore(CpuContext ctx, ulong mutexAddress, bool requireOwner)
     {
@@ -1895,6 +1934,7 @@ public static class KernelPthreadCompatExports
         }
 
         var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
+        var savedRecursion = 1;
         lock (mutexState.SyncRoot)
         {
             if (mutexState.OwnerThreadId == 0 && mutexState.RecursionCount == 0)
@@ -1909,6 +1949,15 @@ public static class KernelPthreadCompatExports
                 // that later blocks on pthread_mutex_lock. Adopt ownership so the
                 // unlock/wait/re-lock cycle is balanced and releases the mutex.
                 _ = mutexState.TryAcquireOwner(currentThreadId);
+            }
+
+            // libthr's mutex_cv_unlock releases a recursive mutex completely and
+            // mutex_cv_lock restores its depth, so a nested lock may wait.
+            if (mutexState.OwnerThreadId == currentThreadId && mutexState.RecursionCount > 1 &&
+                mutexState.Type == MutexTypeRecursive)
+            {
+                savedRecursion = mutexState.RecursionCount;
+                mutexState.RecursionCount = 1;
             }
 
             if (mutexState.OwnerThreadId != currentThreadId || mutexState.RecursionCount != 1)
@@ -1927,6 +1976,7 @@ public static class KernelPthreadCompatExports
             MutexState = mutexState,
             Cooperative = cooperative,
             PosixErrors = posixErrors,
+            SavedRecursion = savedRecursion,
             WakeKey = cooperative
                 ? $"pthread_cond_waiter:{Interlocked.Increment(ref _nextSynchronizationWaiterId)}"
                 : string.Empty,
@@ -1942,6 +1992,7 @@ public static class KernelPthreadCompatExports
             if (unlockResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
             {
                 RemoveCondWaiterLocked(state, waiter);
+                RestoreCondWaiterRecursion(waiter);
                 TracePthreadCond("wait-unlock-fail", condAddress, mutexAddress, state, timed, unlockResult);
                 return unlockResult;
             }
@@ -1988,7 +2039,7 @@ public static class KernelPthreadCompatExports
                     break;
                 }
 
-                var waitDuration = TimeSpan.FromMilliseconds(10);
+                var waitMilliseconds = 10;
                 if (timed)
                 {
                     var remaining = GetRemainingTimeout(deadline);
@@ -1998,13 +2049,14 @@ public static class KernelPthreadCompatExports
                         break;
                     }
 
-                    if (remaining < waitDuration)
-                    {
-                        waitDuration = remaining;
-                    }
+                    // Monitor.Wait truncates to whole milliseconds, so a sub-millisecond remainder
+                    // became a zero timeout and the wait spun until the deadline. UE's game thread
+                    // waits for the render fence in 1 ms slices, which kept a core busy. A timed wait
+                    // may wake late, so round up instead.
+                    waitMilliseconds = (int)Math.Min(waitMilliseconds, Math.Ceiling(remaining.TotalMilliseconds));
                 }
 
-                _ = Monitor.Wait(state.SyncRoot, waitDuration);
+                _ = Monitor.Wait(state.SyncRoot, waitMilliseconds);
                 if (waiter.CompletionState == 0 &&
                     timed &&
                     GetRemainingTimeout(deadline) <= TimeSpan.Zero)
@@ -2035,6 +2087,7 @@ public static class KernelPthreadCompatExports
         }
 
         _ = WaitForHostMutexLock(ctx, mutexState, waiter.MutexWaiter);
+        RestoreCondWaiterRecursion(waiter);
         var waitResult = waiter.CompletionState == 2
             ? CondTimedOutResult(waiter)
             : (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -2454,6 +2507,11 @@ public static class KernelPthreadCompatExports
                     ? CondTimedOutResult(waiter)
                     : (int)OrbisGen2Result.ORBIS_GEN2_OK)
                 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+        if (result != (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY)
+        {
+            RestoreCondWaiterRecursion(waiter);
+        }
+
         TracePthreadCond(
             waiter.CompletionState == 2 ? "wait-resume-timeout" : "wait-resume",
             condAddress,
@@ -2463,6 +2521,14 @@ public static class KernelPthreadCompatExports
             result);
         _ = ctx;
         return result;
+    }
+
+    private static void RestoreCondWaiterRecursion(PthreadCondWaiter waiter)
+    {
+        if (waiter.SavedRecursion > 1 && waiter.MutexState.OwnerThreadId == waiter.ThreadId)
+        {
+            waiter.MutexState.RecursionCount = waiter.SavedRecursion;
+        }
     }
 
     private static int CondTimedOutResult(PthreadCondWaiter waiter) =>

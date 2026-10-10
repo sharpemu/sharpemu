@@ -1401,6 +1401,15 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             {
                 Console.Error.WriteLine("[LOADER][INFO] " + gpuSummary);
             }
+            // The presenter shuts down on its own thread; its caches still hold page watches
+            // and may still run queued GPU work until it detaches its stores.
+            if (!_gpuMemory.WaitForStoresDetached(TimeSpan.FromSeconds(15)))
+            {
+                Console.Error.WriteLine(
+                    "[RUNTIME] The GPU caches did not release guest memory in time; keeping it mapped.");
+                return;
+            }
+
             GuestGpuMemoryHook.Attach(null);
             _gpuMemory.Dispose();
         }

@@ -19,6 +19,78 @@ public sealed class AudioOut2PortGetStateExportsTests
         return new CpuContext(memory, Generation.Gen5);
     }
 
+    [Theory]
+    [InlineData(0x100u, 1)]
+    [InlineData(0x201u, 2)]
+    [InlineData(0x880u, 8)]
+    public void PortGetState_ExposesChannelCountInTheGuestSdkField(uint format, byte channels)
+    {
+        var ctx = CreateContext(out var memory);
+        Span<byte> parameters = stackalloc byte[0x40];
+        parameters.Clear();
+        BinaryPrimitives.WriteUInt32LittleEndian(parameters[4..], format);
+        BinaryPrimitives.WriteUInt32LittleEndian(parameters[8..], 48000);
+        Assert.True(memory.TryWrite(MemoryBase, parameters));
+        ctx[CpuRegister.Rdi] = 0;
+        ctx[CpuRegister.Rsi] = MemoryBase;
+        ctx[CpuRegister.Rdx] = MemoryBase + 0x80;
+        Assert.Equal(0, AudioOut2Exports.AudioOut2PortCreate(ctx));
+        Span<byte> handleBytes = stackalloc byte[8];
+        Assert.True(memory.TryRead(MemoryBase + 0x80, handleBytes));
+        var handle = BinaryPrimitives.ReadUInt64LittleEndian(handleBytes);
+        try
+        {
+            ctx[CpuRegister.Rdi] = handle;
+            ctx[CpuRegister.Rsi] = StateAddress;
+            Assert.Equal(0, AudioOut2Exports.AudioOut2PortGetState(ctx));
+            Span<byte> state = stackalloc byte[0x40];
+            Assert.True(memory.TryRead(StateAddress, state));
+            // Demon's Souls selects its speaker layout from +2. Yotei also reads
+            // +2 and waits until it is nonzero, which the channel count satisfies.
+            Assert.Equal(channels, state[2]);
+            Assert.NotEqual(0, state[2]);
+            Assert.Equal(0, state[3]);
+        }
+        finally
+        {
+            ctx[CpuRegister.Rdi] = handle;
+            Assert.Equal(0, AudioOut2Exports.AudioOut2PortDestroy(ctx));
+        }
+    }
+
+    [Fact]
+    public void ContextPush_NonblockingWithoutPcmDoesNotPaceSilentGrains()
+    {
+        var ctx = CreateContext(out var memory);
+        Span<byte> parameters = stackalloc byte[0x40];
+        parameters.Clear();
+        BinaryPrimitives.WriteUInt32LittleEndian(parameters[0x0C..], 4);
+        BinaryPrimitives.WriteUInt32LittleEndian(parameters[0x10..], 0x4000);
+        Assert.True(memory.TryWrite(MemoryBase, parameters));
+        ctx[CpuRegister.Rdi] = MemoryBase;
+        ctx[CpuRegister.Rsi] = MemoryBase + 0x400;
+        ctx[CpuRegister.Rdx] = 0x100;
+        ctx[CpuRegister.Rcx] = StateAddress;
+        Assert.Equal(0, AudioOut2Exports.AudioOut2ContextCreate(ctx));
+        Span<byte> handleBytes = stackalloc byte[8];
+        Assert.True(memory.TryRead(StateAddress, handleBytes));
+        var handle = BinaryPrimitives.ReadUInt64LittleEndian(handleBytes);
+        try
+        {
+            ctx[CpuRegister.Rdi] = handle;
+            ctx[CpuRegister.Rsi] = 0;
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            for (var i = 0; i < 4; i++)
+                Assert.Equal(0, AudioOut2Exports.AudioOut2ContextPush(ctx));
+            // Incorrectly pacing these grains adds over a second of sleep.
+            Assert.True(elapsed.Elapsed < TimeSpan.FromMilliseconds(500));
+        }
+        finally
+        {
+            ctx[CpuRegister.Rdi] = handle;
+            Assert.Equal(0, AudioOut2Exports.AudioOut2ContextDestroy(ctx));
+        }
+    }
     [Fact]
     public void PortGetState_WritesExactlySizeofPortStateIgnoringPollutedR9()
     {
@@ -39,7 +111,7 @@ public sealed class AudioOut2PortGetStateExportsTests
         Assert.Equal(0, result);
         Span<byte> state = stackalloc byte[0x100];
         Assert.True(memory.TryRead(StateAddress, state));
-        // SceAudioOut2PortState: output@0, numChannels@2, volume@4.
+        // SceAudioOut2PortState: output@0, numChannels@2, padding@3, volume@4.
         Assert.Equal(1, BinaryPrimitives.ReadUInt16LittleEndian(state));
         Assert.Equal(2, state[2]);
         Assert.Equal(0, state[3]);
@@ -48,6 +120,7 @@ public sealed class AudioOut2PortGetStateExportsTests
         Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(state[8..]));
         Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(state[0x0C..]));
         Assert.All(state[0x10..0x40].ToArray(), value => Assert.Equal(0, value));
+        // Bytes past sizeof(SceAudioOut2PortState), 0x40, must remain untouched.
         Assert.Equal(0xAB, state[0x40]);
         Assert.Equal(0xAB, state[0x7F]);
     }

@@ -160,6 +160,11 @@ public static class BoundedFillDetector
             return null;
         }
 
+        if (!HasPatternDataFlow(instructions))
+        {
+            return null;
+        }
+
         if (instructions[0].Destinations is not [{ Kind: Gen5OperandKind.VectorRegister } index] ||
             instructions[0].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } group, { Kind: Gen5OperandKind.EncodedConstant, Value: Shift64 },
                 { Kind: Gen5OperandKind.VectorRegister, Value: ThreadIndexRegister }] ||
@@ -237,6 +242,144 @@ public static class BoundedFillDetector
 
     private static readonly (int Branch, int Target)[] PatternFillBranches =
         [(2, 53), (30, 49), (33, 44), (36, 39), (40, 43), (45, 48), (50, 53)];
+
+    // The integer remainder idiom and its four mutually exclusive stores must
+    // agree on every operand, not just the opcodes. Names describe register
+    // roles and bind to the actual registers, so register allocation may vary.
+    // The empty side of a row denotes no explicit destination/source in the IR.
+    private static readonly (string Destinations, string Sources)[] PatternDataFlow =
+    [
+        ("v:index", "s:group c:134 v:thread"),
+        ("", "s:count v:index"),
+        ("", ""),
+        ("v:quotient", "s:length"),
+        ("", "c:128 s:length"),
+        ("s:lengthMask", "exec c:128"),
+        ("v:quotient", "v:quotient"),
+        ("v:quotient", "l:4F800000 v:quotient"),
+        ("v:reciprocal", "v:quotient"),
+        ("v:quotient", "s:length v:reciprocal c:128"),
+        ("", "c:128 v:temporary"),
+        ("v:temporary", "c:128 v:quotient"),
+        ("v:quotient", "v:temporary v:quotient"),
+        ("v:temporary", "v:quotient v:reciprocal s:resource"),
+        ("v:quotient", "v:reciprocal v:temporary"),
+        ("v:temporary", "v:reciprocal v:temporary"),
+        ("v:quotient", "v:temporary v:quotient"),
+        ("v:quotient", "v:quotient v:index s:resource"),
+        ("v:temporary", "s:length v:quotient s:resource"),
+        ("v:reciprocal", "v:index v:temporary"),
+        ("", "s:length v:reciprocal"),
+        ("s:predicate", "v:index v:temporary"),
+        ("vcc", "s:predicate vcc"),
+        ("v:quotient", "c:128 v:quotient"),
+        ("v:quotient", "c:193 v:quotient s:predicate"),
+        ("v:quotient", "c:193 v:quotient s:lengthMask"),
+        ("v:quotient", "s:length v:quotient s:resource"),
+        ("v:quotient", "v:index v:quotient"),
+        ("", "c:128 v:quotient"),
+        ("s:outerMask", "vcc"),
+        ("", ""),
+        ("", "c:129 v:quotient"),
+        ("s:innerMask", "vcc"),
+        ("", ""),
+        ("", "c:130 v:quotient"),
+        ("vcc", "vcc"),
+        ("", ""),
+        ("v:data", "s:pattern3"),
+        ("v:data", "v:index s:resource c:128"),
+        ("exec", "vcc exec"),
+        ("", ""),
+        ("v:data", "s:pattern2"),
+        ("v:data", "v:index s:resource c:128"),
+        ("exec", "vcc"),
+        ("exec", "s:innerMask exec"),
+        ("", ""),
+        ("v:data", "s:pattern1"),
+        ("v:data", "v:index s:resource c:128"),
+        ("exec", "s:innerMask"),
+        ("exec", "s:outerMask exec"),
+        ("", ""),
+        ("v:data", "s:pattern0"),
+        ("v:data", "v:index s:resource c:128"),
+        ("", ""),
+    ];
+
+    private static bool HasPatternDataFlow(Gen5ShaderInstruction[] instructions)
+    {
+        var roles = new Dictionary<string, Gen5Operand>
+        {
+            ["vcc"] = Gen5Operand.Scalar(106),
+            ["exec"] = Gen5Operand.Scalar(126),
+            ["v:thread"] = Gen5Operand.Vector(ThreadIndexRegister),
+        };
+        bool Matches(IReadOnlyList<Gen5Operand> operands, string pattern)
+        {
+            var names = pattern.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (operands.Count != names.Length) return false;
+            for (var index = 0; index < names.Length; index++)
+            {
+                var name = names[index];
+                var operand = operands[index];
+                if (roles.TryGetValue(name, out var bound))
+                {
+                    if (operand != bound) return false;
+                }
+                else if (name.StartsWith("c:", StringComparison.Ordinal))
+                {
+                    if (operand.Kind != Gen5OperandKind.EncodedConstant || operand.Value != uint.Parse(name.AsSpan(2))) return false;
+                }
+                else if (name.StartsWith("l:", StringComparison.Ordinal))
+                {
+                    if (operand.Kind != Gen5OperandKind.LiteralConstant ||
+                        operand.Value != uint.Parse(name.AsSpan(2), System.Globalization.NumberStyles.HexNumber)) return false;
+                }
+                else
+                {
+                    var kind = name[0] == 's' ? Gen5OperandKind.ScalarRegister : Gen5OperandKind.VectorRegister;
+                    if (operand.Kind != kind) return false;
+                    roles.Add(name, operand);
+                }
+            }
+            return true;
+        }
+
+        for (var at = 0; at < instructions.Length; at++)
+        {
+            var instruction = instructions[at];
+            if (!Matches(instruction.Destinations, PatternDataFlow[at].Destinations) ||
+                !Matches(instruction.Sources, PatternDataFlow[at].Sources)) return false;
+            switch (instruction.Control)
+            {
+                case null:
+                    break;
+                case Gen5Vop3Control control when control.AbsoluteMask == 0 && control.NegateMask == 0 &&
+                    control.OutputModifier == 0 && !control.Clamp && control.OperandSelect == 0 &&
+                    control.ScalarDestination == (at is 9 or 24 ? 106u : (uint?)null):
+                    break;
+                case Gen5SdwaControl control when at == 21 && control.DestinationSelect == 6 && control.DestinationUnused == 0 &&
+                    control.Source0Select == 6 && control.Source1Select == 6 && !control.Source0SignExtend && !control.Source1SignExtend &&
+                    control.AbsoluteMask == 0 && control.NegateMask == 0 && control.OutputModifier == 0 && !control.Clamp &&
+                    control.ScalarDestination == roles["s:predicate"].Value:
+                    break;
+                case Gen5BufferMemoryControl control when at is 38 or 42 or 47 or 52 && !control.PackedD16 && control.ComponentCount == 1:
+                    break; // The descriptor and address controls are checked by DetectPattern.
+                default:
+                    return false;
+            }
+        }
+
+        // MAD_U64 writes a consecutive pair; none of the remainder temporaries
+        // may overwrite the global index used by every store.
+        var quotient = roles["v:quotient"].Value;
+        var temporary = roles["v:temporary"].Value;
+        var indexRegister = roles["v:index"].Value;
+        var reciprocal = roles["v:reciprocal"].Value;
+        return temporary == quotient + 1 && new[] { quotient, temporary, indexRegister, reciprocal }.Distinct().Count() == 4 &&
+            roles["v:data"].Value != indexRegister &&
+            roles["s:predicate"].Value < 104 && roles["s:outerMask"].Value < 104 && roles["s:innerMask"].Value < 104 &&
+            Math.Abs((long)roles["s:outerMask"].Value - roles["s:innerMask"].Value) >= 2;
+    }
 
     private static HashSet<uint> WrittenScalars(Gen5ShaderInstruction[] instructions, int count)
     {

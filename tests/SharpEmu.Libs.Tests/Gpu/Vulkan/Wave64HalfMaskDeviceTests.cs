@@ -206,6 +206,35 @@ public sealed class Wave64HalfMaskDeviceTests(HeadlessVulkanFixture fixture) : I
         }
     }
 
+    // A march loop shaped like Ghost of Yotei's lighting pass: a scalar step counter compared
+    // into EXEC, lanes leaving through VCC as well, and the back edge taken while EXEC is not
+    // empty. Each lane must stop on its own, in both halves of the wave.
+    [Fact]
+    public void AMarchLoop_EndsEveryLaneByItsCounterOrItsCompare()
+    {
+        if (!Ready()) return;
+        Lane();
+        Add(Vop2(0, "VAndB32", 3, Operand(15), Gen5Operand.Vector(2)));
+        Add(MoveVector(0, 4, 0));
+        Add(Sop1(0, "SMovB32", 2, Operand(0)));
+        var header = Add(Vopc(0, "VCmpxLtI32", Gen5Operand.Scalar(2), 3));
+        var exit = Add(Branch(0, "SCbranchExecz", 0));
+        Add(Vop2(0, "VAddU32", 4, Operand(1), Gen5Operand.Vector(4)));
+        Add(Sop2(0, "SAddI32", 2, Gen5Operand.Scalar(2), Operand(1)));
+        Add(Vopc(0, "VCmpLeU32", Operand(5), 4));
+        Add(Sop2(0, "SAndn2B64", Exec, Gen5Operand.Scalar(Exec), Gen5Operand.Scalar(Vcc)));
+        var back = Add(Branch(0, "SCbranchExecnz", 0));
+        var done = Add(Sop1(0, "SMovB64", Exec, AllLanes));
+        Point(exit, done);
+        Point(back, header);
+
+        var lanes = Run();
+        for (uint lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(Math.Min(lane & 15, 5u), lanes[lane]);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -279,6 +308,38 @@ public sealed class Wave64HalfMaskDeviceTests(HeadlessVulkanFixture fixture) : I
         using var harness = new ImageTestHarness(fixture.Vulkan);
         using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
         harness.AssertNoValidationMessages();
+    }
+
+    // Ghost of Yotei's non-uniform texture loop: READFIRSTLANE into VCC_LO, an SDWA compare
+    // that writes its lane mask to an SGPR pair, AND_SAVEEXEC, then EXEC = saved & ~mask until
+    // EXEC is empty. Every lane must be visited exactly once.
+    [Fact]
+    public void AWaterfallLoop_WithAnSdwaCompareToAnSgprPair_VisitsEachLaneOnce()
+    {
+        if (!Ready()) return;
+        // v_cmp_eq_u32_sdwa s[98:99], s106, v3 (from the game's code, with v3 for v162).
+        uint[] words = [0x7D8406F9u, 0x0686E26Au, 0xBF810000u];
+        var bytes = new byte[words.Length * sizeof(uint)];
+        for (var index = 0; index < words.Length; index++)
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)), words[index]);
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(new SharpEmu.HLE.CpuContext(new WordMemory(bytes), SharpEmu.HLE.Generation.Gen5),
+            0x1000, out var decoded, out var decodeError), decodeError);
+        var compare = decoded.Instructions[0];
+        Assert.Equal("VCmpEqU32", compare.Opcode);
+
+        Lane();
+        Add(Vop2(0, "VAndB32", 3, Operand(3), Gen5Operand.Vector(2)));
+        Add(MoveVector(0, 4, 0));
+        var header = Add(ReadFirstLane(0, Vcc, 3));
+        Add(compare);
+        Add(Sop1(0, "SAndSaveexecB64", 100, Gen5Operand.Scalar(98)));
+        Add(Vop2(0, "VAddU32", 4, Operand(1), Gen5Operand.Vector(4)));
+        Add(Sop2(0, "SAndn2B64", Exec, Gen5Operand.Scalar(100), Gen5Operand.Scalar(98)));
+        var back = Add(Branch(0, "SCbranchExecnz", 0));
+        Add(Sop1(0, "SMovB64", Exec, AllLanes));
+        Point(back, header);
+
+        Assert.All(Run(), count => Assert.Equal(1u, count));
     }
 
     private sealed class WordMemory(byte[] bytes) : SharpEmu.HLE.ICpuMemory

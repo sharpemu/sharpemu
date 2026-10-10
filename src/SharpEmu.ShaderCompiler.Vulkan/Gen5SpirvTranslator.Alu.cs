@@ -1689,10 +1689,17 @@ public static partial class Gen5SpirvTranslator
         }
 
         // Packed f16 (VOP3P) arithmetic. Each source register holds two f16 values,
-        // one per result lane. Every f16<->f32 conversion is done with the explicit
-        // integer sequences below (EmitHalfToFloat / EmitFloatToHalf) instead of
-        // GLSL UnpackHalf2x16 / PackHalf2x16, whose subnormal and rounding behaviour
-        // is implementation-defined without float-controls execution modes. The two
+        // one per result lane. Every f16<->f32 conversion goes through
+        // EmitHalfToFloat / EmitFloatToHalf, which default to the explicit integer
+        // sequences below rather than GLSL UnpackHalf2x16 / PackHalf2x16, whose
+        // subnormal and rounding behaviour is implementation-defined without
+        // float-controls execution modes. The host switches those two helpers to the
+        // native ext instructions (ShaderCompileRequest.NativeHalfConversionExact) only
+        // after measuring them bit-exact against these sequences on the running device,
+        // because a device capability bit does not promise that: MoltenVK on Apple
+        // silicon reports shaderRoundingModeRTEFloat16 and
+        // shaderSignedZeroInfNanPreserveFloat16 yet not shaderDenormPreserveFloat16.
+        // The two
         // lanes are computed independently: each operand half is widened exactly to
         // f32, op_sel/op_sel_hi pick the source half and neg_lo/neg_hi negate it, the
         // op runs in f32, and the result is rounded back to f16 with round-to-nearest-
@@ -1807,8 +1814,11 @@ public static partial class Gen5SpirvTranslator
         }
 
         // Reads one V_FMA_MIX source as an f32. op_sel_hi selects whether a
-        // register operand is taken as an f16 (the half picked by op_sel, widened
-        // exactly to f32) or as a full f32; inline constants are always f32. The
+        // register or literal operand is taken as an f16 (the half picked by op_sel,
+        // widened exactly to f32) or as a full f32; inline constants keep their value
+        // either way. A literal is an f16 bit pattern then: reading 0x34CD as an f32
+        // made Silent Hill's luminance weights denormal zeros, and the lighting that
+        // divides by that luminance came out thousands of times too bright. The
         // per-operand neg_hi bit takes the absolute value and neg negates, in that
         // order (abs-then-neg), reusing the VOP3P modifier fields the way the mix
         // ops define them rather than the packed low/high-lane meaning.
@@ -1820,7 +1830,7 @@ public static partial class Gen5SpirvTranslator
             var source = instruction.Sources[index];
             var readAsHalf =
                 ((control.OpSelHiMask >> index) & 1) != 0 &&
-                source.Kind is Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister;
+                source.Kind is Gen5OperandKind.VectorRegister or Gen5OperandKind.ScalarRegister or Gen5OperandKind.LiteralConstant;
 
             uint value;
             if (readAsHalf)
@@ -1863,6 +1873,16 @@ public static partial class Gen5SpirvTranslator
             Gen5Vop3pControl control,
             bool highLane)
         {
+            if (instruction.Opcode == "VPkFmaF16" && _request.SupportsExactFloat16Conversions &&
+                instruction.Sources.All(source => source.Kind != Gen5OperandKind.EncodedConstant))
+            {
+                var select = highLane ? control.OpSelHiMask : control.OpSelMask;
+                var negate = highLane ? control.NegHiMask : control.NegLoMask;
+                uint Operand(int index) => ReadNativePackedHalf(GetRawSource(instruction, index),
+                    ((select >> index) & 1) != 0, ((negate >> index) & 1) != 0);
+                return EmitNativePackedHalfFma(Operand(0), Operand(1), Operand(2), control.Clamp);
+            }
+
             var left = EmitPackedF16Operand(instruction, control, 0, highLane);
             var right = EmitPackedF16Operand(instruction, control, 1, highLane);
             uint value;
@@ -1909,6 +1929,12 @@ public static partial class Gen5SpirvTranslator
             uint accumulator,
             bool highLane)
         {
+            if (_request.SupportsExactFloat16Conversions)
+                return EmitNativePackedHalfFma(
+                    ReadNativePackedHalf(GetRawSource(instruction, 0), highLane),
+                    ReadNativePackedHalf(GetRawSource(instruction, 1), highLane),
+                    ReadNativePackedHalf(accumulator, highLane), clamp: false);
+
             var left = EmitPackedF16Half(GetRawSource(instruction, 0), highLane);
             var right = EmitPackedF16Half(GetRawSource(instruction, 1), highLane);
             var addend = EmitPackedF16Half(accumulator, highLane);
@@ -1934,6 +1960,26 @@ public static partial class Gen5SpirvTranslator
             var belowOne = _module.AddInstruction(SpirvOp.FOrdLessThan, _boolType, lowerBounded, Float(1));
             var clamped = _module.AddInstruction(SpirvOp.Select, _floatType, belowOne, lowerBounded, Float(1));
             return Bitcast(_uintType, clamped);
+        }
+
+        // Keep packed operands in half until the fused operation, avoiding widening,
+        // software NaN reconstruction and narrowing at every input. Inline f32 constants
+        // use the original path because they need not be exactly representable in half.
+        private uint ReadNativePackedHalf(uint raw, bool highLane, bool negate = false)
+        {
+            var bits = highLane ? ShiftRightLogical(raw, UInt(16)) : raw;
+            if (negate) bits = BitwiseXor(bits, UInt(0x8000));
+            return _module.AddInstruction(SpirvOp.CompositeExtract, _halfType, Bitcast(_half2Type, bits), 0);
+        }
+
+        private uint EmitNativePackedHalfFma(uint left, uint right, uint addend, bool clamp)
+        {
+            var fused = Ext(50, _halfType, left, right, addend);
+            _module.AddDecoration(fused, SpirvDecoration.NoContraction);
+            var bits = Bitcast(_uintType, _module.AddInstruction(SpirvOp.FConvert, _floatType, fused));
+            if (clamp) bits = EmitClampToUnitInterval(bits);
+            // Preserve the common output NaN canonicalization and packing rules.
+            return EmitFloatToHalf(bits);
         }
 
         // Fused f16 multiply-add with a single rounding, emulated in f32 without the
@@ -2014,11 +2060,12 @@ public static partial class Gen5SpirvTranslator
             bool highLane)
         {
             var operand = instruction.Sources[index];
-            if (operand.Kind is Gen5OperandKind.EncodedConstant or Gen5OperandKind.LiteralConstant)
+            if (operand.Kind is Gen5OperandKind.EncodedConstant)
             {
-                // An inline constant or literal is a single f32 value, not a
-                // packed register: both lanes take the exactly-converted f16 of
-                // the same constant, so there is no half to select.
+                // An inline constant is replicated into both halves: both lanes take
+                // the exactly-converted f16 of the same constant, whatever op_sel says.
+                // A 32-bit literal is not: it holds two f16 halves that op_sel /
+                // op_sel_hi select like a register's, so it takes the path below.
                 var constant = GetFloatSource(instruction, index);
                 var constantNegate = highLane ? control.NegHiMask : control.NegLoMask;
                 if (((constantNegate >> index) & 1) != 0)
@@ -2067,8 +2114,23 @@ public static partial class Gen5SpirvTranslator
         // Widens an f16 value held in the low 16 bits of `halfBits` to an f32 bit
         // pattern, exactly (subnormals normalised, Inf/NaN and signed zero preserved).
         // Mirrors the branchless HalfToFloat reference validated against System.Half.
+        // With NativeHalfConversionExact the same value comes from GLSL UnpackHalf2x16,
+        // which the driver lowers to one hardware convert instead of ~20 integer ops.
         private uint EmitHalfToFloat(uint halfBits)
         {
+            if (_request.SupportsExactFloat16Conversions)
+            {
+                return EmitNativeHalfToFloat(halfBits);
+            }
+
+            if (_nativeHalfConversionExact)
+            {
+                var unpacked = Ext(62, _vec2Type, BitwiseAnd(halfBits, UInt(0xFFFF)));
+                return Bitcast(
+                    _uintType,
+                    _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, unpacked, 0));
+            }
+
             var sign = ShiftLeftLogical(BitwiseAnd(halfBits, UInt(0x8000)), UInt(16));
             var exponent = BitwiseAnd(ShiftRightLogical(halfBits, UInt(10)), UInt(0x1F));
             var mantissa = BitwiseAnd(halfBits, UInt(0x3FF));
@@ -2098,8 +2160,24 @@ public static partial class Gen5SpirvTranslator
         // Narrows an f32 bit pattern to an f16 value in the low 16 bits, rounding to
         // nearest even (subnormals, overflow-to-Inf and NaN/Inf handled). Mirrors the
         // branchless FloatToHalf reference validated exhaustively against System.Half.
+        // With NativeHalfConversionExact the same value comes from GLSL PackHalf2x16.
         private uint EmitFloatToHalf(uint bits)
         {
+            if (_request.SupportsExactFloat16Conversions)
+            {
+                return EmitNativeFloatToHalf(bits);
+            }
+
+            if (_nativeHalfConversionExact)
+            {
+                var pair = _module.AddInstruction(
+                    SpirvOp.CompositeConstruct,
+                    _vec2Type,
+                    Bitcast(_floatType, bits),
+                    Float(0));
+                return BitwiseAnd(Ext(58, _uintType, pair), UInt(0xFFFF));
+            }
+
             var sign = BitwiseAnd(ShiftRightLogical(bits, UInt(16)), UInt(0x8000));
             var absolute = BitwiseAnd(bits, UInt(0x7FFF_FFFF));
 
@@ -2146,6 +2224,34 @@ public static partial class Gen5SpirvTranslator
             var isSubnormal = UCmp(SpirvOp.ULessThanEqual, exponent, UInt(112));
             var finite = SelectU(isSubnormal, subnormal, normal);
             return SelectU(isInfinityNan, infinityNan, BitwiseOr(sign, finite));
+        }
+
+        // EmitHalfToFloat with a native conversion. Widening is exact; only NaNs are
+        // rebuilt, since drivers may quiet a signalling NaN where the sequence above keeps
+        // its payload bits as they are.
+        private uint EmitNativeHalfToFloat(uint halfBits)
+        {
+            var half = _module.AddInstruction(
+                SpirvOp.CompositeExtract, _halfType, Bitcast(_half2Type, halfBits), 0);
+            var widened = Bitcast(_uintType, _module.AddInstruction(SpirvOp.FConvert, _floatType, half));
+            var magnitude = BitwiseAnd(halfBits, UInt(0x7FFF));
+            var nan = BitwiseOr(
+                ShiftLeftLogical(BitwiseAnd(halfBits, UInt(0x8000)), UInt(16)),
+                BitwiseOr(UInt(0x7F80_0000), ShiftLeftLogical(BitwiseAnd(halfBits, UInt(0x3FF)), UInt(13))));
+            return SelectU(UCmp(SpirvOp.UGreaterThan, magnitude, UInt(0x7C00)), nan, widened);
+        }
+
+        // EmitFloatToHalf with a native conversion, rounded to nearest even by the
+        // module's RoundingModeRTE. A NaN becomes the same quiet NaN as above (sign kept,
+        // payload dropped) rather than the driver's canonical NaN.
+        private uint EmitNativeFloatToHalf(uint bits)
+        {
+            var half = _module.AddInstruction(SpirvOp.FConvert, _halfType, Bitcast(_floatType, bits));
+            var pair = _module.AddInstruction(SpirvOp.CompositeConstruct, _half2Type, half, half);
+            var narrowed = BitwiseAnd(Bitcast(_uintType, pair), UInt(0xFFFF));
+            var nan = BitwiseOr(BitwiseAnd(ShiftRightLogical(bits, UInt(16)), UInt(0x8000)), UInt(0x7E00));
+            var isNan = UCmp(SpirvOp.UGreaterThan, BitwiseAnd(bits, UInt(0x7FFF_FFFF)), UInt(0x7F80_0000));
+            return SelectU(isNan, nan, narrowed);
         }
 
         private uint SelectU(uint condition, uint whenTrue, uint whenFalse) =>
@@ -2717,40 +2823,19 @@ public static partial class Gen5SpirvTranslator
 
             if (instruction.Opcode == "SFlbitI32B64")
             {
-                var wide = GetRawSource64(instruction, 0);
-                var low = _module.AddInstruction(
-                    SpirvOp.UConvert,
-                    _uintType,
-                    wide);
-                var high = _module.AddInstruction(
-                    SpirvOp.UConvert,
-                    _uintType,
-                    ShiftRightLogical64(
-                        wide,
-                        _module.Constant64(_ulongType, 32)));
-                var highClz = _module.AddInstruction(
-                    SpirvOp.ISub,
-                    _uintType,
-                    UInt(31),
-                    Ext(74, _uintType, high));
-                var lowClz = _module.AddInstruction(
-                    SpirvOp.ISub,
-                    _uintType,
-                    UInt(31),
-                    Ext(74, _uintType, low));
-                var lowResult = IAdd(lowClz, UInt(32));
-                var leadingZeroResult = _module.AddInstruction(
-                    SpirvOp.Select,
-                    _uintType,
-                    IsNotZero(high),
-                    highClz,
-                    _module.AddInstruction(
-                        SpirvOp.Select,
-                        _uintType,
-                        IsNotZero(low),
-                        lowResult,
-                        UInt(uint.MaxValue)));
-                StoreS(destination, leadingZeroResult);
+                var source = GetRawSource64(instruction, 0);
+                var low = _module.AddInstruction(SpirvOp.UConvert, _uintType, source);
+                var high = _module.AddInstruction(SpirvOp.UConvert, _uintType,
+                    ShiftRightLogical64(source, ULong(32)));
+                var highIndex = _module.AddInstruction(SpirvOp.ISub, _uintType,
+                    UInt(31), Ext(75, _uintType, high));
+                var lowIndex = _module.AddInstruction(SpirvOp.ISub, _uintType,
+                    UInt(63), Ext(75, _uintType, low));
+                var bitIndex = _module.AddInstruction(SpirvOp.Select, _uintType,
+                    IsNotZero(high), highIndex,
+                    _module.AddInstruction(SpirvOp.Select, _uintType,
+                        IsNotZero(low), lowIndex, UInt(uint.MaxValue)));
+                StoreS(destination, bitIndex);
                 return true;
             }
 
@@ -2764,11 +2849,23 @@ public static partial class Gen5SpirvTranslator
             var left = GetRawSource(instruction, 0);
             if (instruction.Opcode == "SBitreplicateB64B32")
             {
-                // S_BITREPLICATE_B64_B32 broadcasts the source dword into both
-                // halves of its 64-bit SGPR destination and does not update SCC.
-                StoreS(destination, left);
-                StoreS(destination + 1, left);
+                // S_BITREPLICATE_B64_B32 doubles every source bit: bit i lands in bits
+                // 2i and 2i+1 of the 64-bit destination, so the low dword comes from
+                // source bits 0-15 and the high dword from bits 16-31. SCC is unchanged.
+                StoreS(destination, ReplicateBits(BitwiseAnd(left, UInt(0xFFFF))));
+                StoreS(destination + 1, ReplicateBits(ShiftRightLogical(left, UInt(16))));
                 return true;
+            }
+
+            // Spreads the low 16 bits of `value` to the even bit positions and copies each
+            // into the odd position above it: abcd -> aabbccdd.
+            uint ReplicateBits(uint value)
+            {
+                value = BitwiseAnd(BitwiseOr(value, ShiftLeftLogical(value, UInt(8))), UInt(0x00FF_00FF));
+                value = BitwiseAnd(BitwiseOr(value, ShiftLeftLogical(value, UInt(4))), UInt(0x0F0F_0F0F));
+                value = BitwiseAnd(BitwiseOr(value, ShiftLeftLogical(value, UInt(2))), UInt(0x3333_3333));
+                value = BitwiseAnd(BitwiseOr(value, ShiftLeftLogical(value, UInt(1))), UInt(0x5555_5555));
+                return BitwiseOr(value, ShiftLeftLogical(value, UInt(1)));
             }
 
             if (instruction.Opcode.EndsWith("SaveexecB32", StringComparison.Ordinal))
@@ -2878,7 +2975,7 @@ public static partial class Gen5SpirvTranslator
                 case "SFlbitI32B32":
                 {
                     // Count leading zero bits, 0xFFFFFFFF when the source is zero.
-                    var msb = Ext(74, _uintType, left);
+                    var msb = Ext(75, _uintType, left);
                     var clz = _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(31), msb);
                     result = _module.AddInstruction(
                         SpirvOp.Select, _uintType, IsNotZero(left), clz, UInt(0xFFFFFFFFu));
@@ -3953,7 +4050,7 @@ public static partial class Gen5SpirvTranslator
             {
                 targetLane = BitwiseAnd(targetLane, UInt(31));
             }
-            var shuffled = ShuffleLane(value, targetLane);
+            var shuffled = ShuffleGuestLaneOrSelf(value, targetLane, out var sourcePresent);
             if (control.FetchInactive)
             {
                 return shuffled;
@@ -3966,11 +4063,15 @@ public static partial class Gen5SpirvTranslator
                 UInt(1),
                 UInt(0));
             var sourceActive = IsNotZero(
-                ShuffleLane(activeWord, targetLane));
+                ShuffleGuestLaneOrSelf(activeWord, targetLane, out _));
             return _module.AddInstruction(
                 SpirvOp.Select,
                 _uintType,
-                sourceActive,
+                _module.AddInstruction(
+                    SpirvOp.LogicalOr,
+                    _boolType,
+                    LogicalNot(sourcePresent),
+                    sourceActive),
                 shuffled,
                 UInt(0));
         }
@@ -3989,7 +4090,7 @@ public static partial class Gen5SpirvTranslator
             // operations are limited to a single half-wave for some encodings, so we 
             // must not clamp wave64 lanes to 31; use the full lane mask instead.
             safeTarget = BitwiseAnd(safeTarget, UInt(_waveLaneCount == 64 ? 63u : 31u));
-            var shuffled = ShuffleLane(value, safeTarget);
+            var shuffled = ShuffleGuestLaneOrSelf(value, safeTarget, out var sourcePresent);
 
             var sourceAvailable = inRange;
             if (!control.FetchInactive)
@@ -4000,12 +4101,16 @@ public static partial class Gen5SpirvTranslator
                     Load(_boolType, _exec),
                     UInt(1),
                     UInt(0));
-                var shuffledActive = ShuffleLane(activeWord, safeTarget);
+                var shuffledActive = ShuffleGuestLaneOrSelf(activeWord, safeTarget, out _);
                 sourceAvailable = _module.AddInstruction(
                     SpirvOp.LogicalAnd,
                     _boolType,
                     sourceAvailable,
-                    IsNotZero(shuffledActive));
+                    _module.AddInstruction(
+                        SpirvOp.LogicalOr,
+                        _boolType,
+                        LogicalNot(sourcePresent),
+                        IsNotZero(shuffledActive)));
             }
 
             return _module.AddInstruction(
@@ -5038,7 +5143,14 @@ public static partial class Gen5SpirvTranslator
             var sourceValue = GetRawSource(instruction, 0);
             var selectedLane = BitwiseAnd(GetRawSource(instruction, 1), UInt(LaneSelectMask));
 
-            if (_emulateWave64)
+            if (_emulateWave64 && instruction.Sources[0].Kind == Gen5OperandKind.VectorRegister &&
+                TryGetConstantLane(instruction, out var spillLane) &&
+                _laneSpillSlots.TryGetValue((instruction.Sources[0].Value, spillLane), out var spillSlot))
+            {
+                // A pure scalar spill slot: every invocation already holds the wave-uniform value.
+                StoreS(destination, Load(_uintType, spillSlot));
+            }
+            else if (_emulateWave64)
             {
                 // The selected guest lane can belong to another host subgroup.
                 // Read it even when the guest execution mask disables that lane.
@@ -5053,6 +5165,13 @@ public static partial class Gen5SpirvTranslator
                     sourceValue,
                     selectedLane);
                 StoreS(destination, ReadLaneSpillSlot(instruction, selectedLane, broadcast));
+            }
+            else if (_subgroupInvocationIdInput != 0)
+            {
+                // A graphics wave is a group of up to 32 host lanes (GuestWaveLane). Read the
+                // selected lane of the invocation's own group, whatever its EXEC state.
+                var read = ShuffleGuestLaneOrSelf(sourceValue, selectedLane, out _);
+                StoreS(destination, ReadLaneSpillSlot(instruction, selectedLane, read));
             }
             else
             {
@@ -5115,11 +5234,9 @@ public static partial class Gen5SpirvTranslator
             }
 
             var targetLane = IAdd(rowBase, selector);
-            // Mask to guest wave size — on Radeon hardware DPP is limited to a 
-            // single half-wave for some encodings, but we must not clamp wave64 
-            // lanes to 31; use the full lane mask instead.
+            // Select a guest lane first; ShuffleGuestLaneOrSelf maps it to the host subgroup.
             targetLane = BitwiseAnd(targetLane, UInt(_waveLaneCount == 64 ? 63u : 31u));
-            var shuffled = ShuffleLane(value, targetLane);
+            var shuffled = ShuffleGuestLaneOrSelf(value, targetLane, out var sourcePresent);
             var fetchInactive = (control.OperandSelect & 1) != 0;
             if (fetchInactive)
             {
@@ -5133,11 +5250,15 @@ public static partial class Gen5SpirvTranslator
                 UInt(1),
                 UInt(0));
             var sourceActive = IsNotZero(
-                ShuffleLane(activeWord, targetLane));
+                ShuffleGuestLaneOrSelf(activeWord, targetLane, out _));
             return _module.AddInstruction(
                 SpirvOp.Select,
                 _uintType,
-                sourceActive,
+                _module.AddInstruction(
+                    SpirvOp.LogicalOr,
+                    _boolType,
+                    LogicalNot(sourcePresent),
+                    sourceActive),
                 shuffled,
                 UInt(0));
         }
@@ -5228,12 +5349,33 @@ public static partial class Gen5SpirvTranslator
             return Bitcast(_uintType, value);
         }
 
+        // Rounds an f32 toward zero onto an f16 value, so packHalf2x16 then encodes it exactly
+        // (V_CVT_PKRTZ_F16_F32). Toward zero, a finite value beyond the f16 range becomes
+        // +-65504, never infinity: Silent Hill's deferred lighting packs values past 65504 and
+        // its fog pass then scales them down, while an infinity stays infinite, turns into NaN
+        // and blacks out the whole title-menu scene. Subnormal results keep whole 2^-24 steps.
         private uint TruncateFloat32ForPack(uint value)
         {
-            var raw = BitwiseAnd(
-                Bitcast(_uintType, value),
-                UInt(0xFFFF_E000));
-            return Bitcast(_floatType, raw);
+            var normal = Bitcast(
+                _floatType,
+                BitwiseAnd(Bitcast(_uintType, Ext(43, _floatType, value, Float(-65504f), Float(65504f))), UInt(0xFFFF_E000)));
+            var subnormal = _module.AddInstruction(
+                SpirvOp.FMul,
+                _floatType,
+                Ext(3, _floatType, _module.AddInstruction(SpirvOp.FMul, _floatType, value, Float(16777216f))),
+                Float(1f / 16777216f));
+            var isSubnormal = _module.AddInstruction(
+                SpirvOp.FOrdLessThan,
+                _boolType,
+                Ext(4, _floatType, value),
+                Float(6.10351562e-05f));
+            var finite = _module.AddInstruction(SpirvOp.Select, _floatType, isSubnormal, subnormal, normal);
+            var special = _module.AddInstruction(
+                SpirvOp.LogicalOr,
+                _boolType,
+                _module.AddInstruction(SpirvOp.IsNan, _boolType, value),
+                _module.AddInstruction(SpirvOp.IsInf, _boolType, value));
+            return _module.AddInstruction(SpirvOp.Select, _floatType, special, value, finite);
         }
 
         private uint Ext(uint operation, uint resultType, params uint[] operands)

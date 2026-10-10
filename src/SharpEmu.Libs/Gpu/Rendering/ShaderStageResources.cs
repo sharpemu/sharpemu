@@ -4,6 +4,7 @@
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
@@ -14,6 +15,7 @@ public enum ShaderStageKind
     Vertex,
     Pixel,
     Compute,
+    TessellationEvaluation,
 }
 
 public enum ImageResourceClass : byte
@@ -42,6 +44,7 @@ public class ShaderProgramInfo
     public const int NoScalarRegister = -1;
 
     public ShaderStageKind Stage { get; init; }
+    public int TessellationFactorBuffer { get; init; } = -1;
     public ulong Hash { get; init; }
     public uint UserDataBase { get; init; }
     public uint UserDataCount { get; init; }
@@ -55,6 +58,7 @@ public class ShaderProgramInfo
     // The dword every invocation stores when the whole program is 'index, v_mov constant, one
     // buffer store, end' (AGC's constant fill kernels); null for any other program.
     public uint? ConstantStoreValue { get; init; }
+    public Pipelines.ImmediateConstantFill? ImmediateConstantFill { get; init; }
     public bool HasBitwiseExclusiveOr { get; init; }
     public Pipelines.ConstantFill? ConstantFill { get; init; }
     public Pipelines.BoundedFill? BoundedFill { get; init; }
@@ -79,6 +83,19 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
     public bool IsValid => Program is not null;
 
     public DispatchThreadLimits? ThreadLimits { get; init; }
+    public uint[]? TessellationData { get; init; }
+
+    public void WriteTessellationData(Span<uint> shaderData)
+    {
+        if (Program?.Bindings is not { UsesTessellationData: true } layout) return;
+        if (TessellationData is not { Length: (int)Gen5TessellationData.DwordCount } data ||
+            shaderData.Length != layout.ShaderDataDwordCount)
+            throw SubmissionScheduler.Fatal("The tessellation stage has missing runtime data or invalid shader data.");
+        data.CopyTo(shaderData[(int)layout.TessellationDataDword..]);
+    }
+
+    // The host resolution of the attachments this draw writes; null outside a draw.
+    public float? AttachmentRenderScale { get; init; }
 
     public void WriteDispatchThreadLimits(Span<uint> shaderData)
     {
@@ -93,6 +110,25 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
         shaderData[offset + 1] = limits.Y;
         shaderData[offset + 2] = limits.Z;
     }
+
+    // The internal-resolution dwords: the factor that maps one guest pixel onto host texels,
+    // its reciprocal, which image resources the host holds at that factor, and the factor the
+    // pixel position is divided by so the program keeps reading guest pixels.
+    public void WriteRenderScale(Span<uint> shaderData, ulong scaledImages, float imageScale)
+    {
+        if (Program?.Bindings is not { UsesRenderScale: true } layout) return;
+        if (shaderData.Length != layout.ShaderDataDwordCount || !float.IsFinite(imageScale) || imageScale <= 0)
+        {
+            throw SubmissionScheduler.Fatal("The draw has invalid shader data or an invalid scale for its render scale dwords.");
+        }
+
+        var offset = (int)layout.RenderScaleDword;
+        shaderData[offset] = BitConverter.SingleToUInt32Bits(imageScale);
+        shaderData[offset + 1] = BitConverter.SingleToUInt32Bits(1.0f / imageScale);
+        shaderData[offset + 2] = (uint)scaledImages;
+        shaderData[offset + 3] = (uint)(scaledImages >> 32);
+        shaderData[offset + 4] = BitConverter.SingleToUInt32Bits(1.0f / (AttachmentRenderScale ?? 1.0f));
+    }
 }
 
 public readonly record struct DispatchThreadLimits(uint X, uint Y, uint Z);
@@ -100,7 +136,9 @@ public readonly record struct DispatchThreadLimits(uint X, uint Y, uint Z);
 // The vertex buffer words of one fetch slot as the vertex program declares them.
 public readonly record struct VertexInputBuffer(ulong Address, uint Stride, uint RecordCount, bool PerInstance = false)
 {
-    public ulong Size => Stride != 0 ? (ulong)Stride * RecordCount : RecordCount;
+    public uint MinimumFetchBytes { get; init; }
+
+    public ulong Size => Math.Max(Stride != 0 ? (ulong)Stride * RecordCount : RecordCount, MinimumFetchBytes);
 }
 
 // One attribute of the vertex tables: its buffer words, the registers it fills and its buffer slot.
@@ -125,6 +163,7 @@ public readonly record struct ClipSpaceTransform(
 
 public sealed class VertexInputInfo
 {
+    public Pipelines.TessellationPipelineStages? Tessellation { get; init; }
     public const int MaxBuffers = 32;
 
     public VertexInputBuffer[] Buffers { get; init; } = [];
@@ -150,6 +189,7 @@ public sealed class PixelInputInfo
     public uint PerspectiveCenterRegister { get; init; } = NoPerspectiveCenterRegister;
     public uint[] InterpolatorSettings { get; init; } = new uint[InterpolatorCount];
     public byte[] TargetOutputModes { get; init; } = new byte[TargetCount];
+    public byte[] TargetExportFormats { get; init; } = new byte[TargetCount];
     public ColorComponentMap[] TargetExportMappings { get; init; } = new ColorComponentMap[TargetCount];
     public uint ScratchDwords { get; init; }
     public bool PositionX { get; init; }
@@ -161,8 +201,13 @@ public sealed class PixelInputInfo
     public bool KillEnable { get; init; }
     public bool DepthExportEnable { get; init; }
     public bool SampleMaskExportEnable { get; init; }
+    public uint MaskExportSamples { get; init; } = 1;
+    public uint RasterizationSamples { get; init; } = 1;
+    public uint? InterpolationSample { get; init; }
+    public IReadOnlyList<(float X, float Y)> CustomSampleOffsets { get; init; } = [];
     public bool SampleShading { get; init; }
     public bool EarlyDepth { get; init; }
+    public uint ShaderSampleExclusionMask { get; init; }
     public bool ExecuteOnNoop { get; init; }
     public ShaderStageResources Stage { get; set; }
 

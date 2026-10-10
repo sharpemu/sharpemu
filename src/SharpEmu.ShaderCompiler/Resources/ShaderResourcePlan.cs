@@ -27,6 +27,10 @@ public sealed class ShaderResourcePlan
     public ScalarValueGraph Graph { get; }
     public ShaderStage Stage { get; }
     public ulong Hash { get; }
+
+    // How often ResourceMaterializationCache looked this plan up and found a reusable entry.
+    internal int CacheLookups;
+    internal int CacheHits;
     public uint UserDataBase => Graph.UserDataBase;
     public uint UserDataCount => Graph.UserDataCount;
     public MemoryAccessTable Memory => Graph.Memory;
@@ -148,6 +152,10 @@ public sealed class ShaderResourcePlan
         foreach (var sampler in plan.Info.Samplers)
         {
             materialization.Add(sampler.Source);
+            if (plan.DescriptorSources[(int)sampler.Source].PointerTable is not null)
+            {
+                plan.RequiresSpecializationMemory = true;
+            }
         }
 
         plan.MaterializationSources = materialization;

@@ -72,10 +72,20 @@ public static class StageStaticKey
         key.Add(Bit(info.KillEnable));
         key.Add(Bit(info.DepthExportEnable));
         key.Add(Bit(info.SampleMaskExportEnable));
-        key.Add(Bit(info.EarlyDepth));
-        foreach (var mode in info.TargetOutputModes)
+        key.Add(info.SampleMaskExportEnable ? info.MaskExportSamples : 0u);
+        key.Add(info.SampleMaskExportEnable ? info.RasterizationSamples : 0u);
+        key.Add(info.InterpolationSample ?? uint.MaxValue);
+        key.Add((uint)info.CustomSampleOffsets.Count);
+        foreach (var offset in info.CustomSampleOffsets)
         {
-            key.Add(mode);
+            key.Add(BitConverter.SingleToUInt32Bits(offset.X));
+            key.Add(BitConverter.SingleToUInt32Bits(offset.Y));
+        }
+        key.Add(Bit(info.EarlyDepth));
+        key.Add(info.EarlyDepth ? info.ShaderSampleExclusionMask : 0u);
+        for (var index = 0; index < info.TargetOutputModes.Length; index++)
+        {
+            key.Add(info.TargetOutputModes[index] | (uint)info.TargetExportFormats[index] << 8);
         }
 
         for (var first = 0; first < PixelInputInfo.TargetCount; first += 4)
