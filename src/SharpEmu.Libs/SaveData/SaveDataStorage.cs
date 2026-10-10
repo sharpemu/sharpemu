@@ -21,12 +21,14 @@ public static class SaveDataStorage
     public static string Root(string? overrideDir = null)
     {
         var configured = overrideDir ?? Environment.GetEnvironmentVariable("SHARPEMU_SAVEDATA_DIR");
-        var root = string.IsNullOrWhiteSpace(configured)
-            ? Path.Combine(AppContext.BaseDirectory, "user", "savedata")
-            : configured;
+        var root = !string.IsNullOrWhiteSpace(configured)
+            ? configured
+            : OperatingSystem.IsLinux()
+                ? Path.Combine(XdgPaths.DataHome, "sharpemu", "savedata")
+                : Path.Combine(AppContext.BaseDirectory, "user", "savedata");
         return Path.GetFullPath(root);
     }
-
+    
     /// <summary>
     /// Imports saves written by the short-lived profile layout and by the old
     /// numeric-user layout. Newer destination files are never overwritten.
