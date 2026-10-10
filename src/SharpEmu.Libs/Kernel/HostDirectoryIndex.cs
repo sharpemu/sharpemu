@@ -176,12 +176,116 @@ internal static partial class HostDirectoryIndex
         }
     }
 
+    private static int _warmStarted;
+
+    /// <summary>
+    /// Lists every directory under <paramref name="hostRoot"/> on a background
+    /// thread so the guest's first resolve into each one is a dictionary probe.
+    /// </summary>
+    /// <remarks>
+    /// Building a listing on demand moves the cold directory-metadata read onto
+    /// whichever guest thread resolves the first path in that directory, which
+    /// put ~4 s of external-volume latency on the engine's initialization phase.
+    /// The work is the same either way (and strictly less than the per-file
+    /// stats it replaces), so it runs here, overlapped with module load, rather
+    /// than in front of the guest.
+    /// </remarks>
+    internal static void BeginWarm(string? hostRoot)
+    {
+        if (!Enabled || string.IsNullOrWhiteSpace(hostRoot) || !Directory.Exists(hostRoot))
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _warmStarted, 1) != 0)
+        {
+            return;
+        }
+
+        // A dedicated thread, not the pool: the walk blocks on device latency for
+        // seconds, and a pool worker parked that long makes the pool inject
+        // threads for everything else queued behind it.
+        var warmer = new Thread(static root => Warm((string)root!))
+        {
+            IsBackground = true,
+            Name = "dir-index-warm",
+            Priority = ThreadPriority.BelowNormal,
+        };
+        warmer.Start(hostRoot);
+    }
+
+    // setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, IOPOL_THROTTLE): the
+    // kernel defers this thread's disk requests behind foreground ones.
+    private const int IopolTypeDisk = 0;
+    private const int IopolScopeThread = 1;
+    private const int IopolThrottle = 1;
+
+    [LibraryImport("libc", EntryPoint = "setiopolicy_np")]
+    private static partial int SetIoPolicy(int iotype, int scope, int policy);
+
+    private static void ThrottleThreadIo()
+    {
+        // Only macOS exposes a per-thread disk policy through libc; elsewhere
+        // the walk relies on its below-normal thread priority.
+        if (!OperatingSystem.IsMacOS())
+        {
+            return;
+        }
+
+        try
+        {
+            // The game image is on a slow external volume, and the warm walk
+            // reads metadata the guest has not asked for yet. Letting it queue
+            // ahead of the asset reads the guest is blocked on trades startup
+            // latency for index coverage nobody needed yet.
+            _ = SetIoPolicy(IopolTypeDisk, IopolScopeThread, IopolThrottle);
+        }
+        catch (Exception exception) when (
+            exception is DllNotFoundException or EntryPointNotFoundException)
+        {
+            // Without the policy the walk simply competes normally.
+        }
+    }
+
+    private static void Warm(string root)
+    {
+        ThrottleThreadIo();
+        // Breadth-first so the shallow directories a title opens first are ready
+        // before the deep asset trees it streams later.
+        var pending = new Queue<string>();
+        pending.Enqueue(root);
+        try
+        {
+            while (pending.Count > 0 &&
+                   Volatile.Read(ref _indexedEntries) < MaxIndexedEntries)
+            {
+                var directory = pending.Dequeue();
+                var listing = GetListing(directory);
+                foreach (var (name, entry) in listing.Ordinal)
+                {
+                    if (entry.Verdict == Verdict.Directory)
+                    {
+                        pending.Enqueue(Path.Combine(directory, name));
+                    }
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            // Warming is opportunistic: a dump that moves or a mount that
+            // hiccups must leave resolution working, just without the index.
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] dir_index.warm_failed root={root}: {exception.Message}");
+        }
+    }
+
     /// <summary>Test hook: forget every listing and case-folding probe.</summary>
     internal static void ClearForTests()
     {
         _directories.Clear();
         _caseFolding.Clear();
         Volatile.Write(ref _indexedEntries, 0);
+        Volatile.Write(ref _warmStarted, 0);
     }
 
     private static DirectoryListing GetListing(string directory)

@@ -500,6 +500,10 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         // Overlap the cooked-id APR walk with module load so the first ReadFile
         // miss mid-boot does not stall on a cold USB index.
         SharpEmu.Libs.Ampr.AmprFileRegistry.BeginApp0IndexPreload(app0Root);
+        // Same reason, for the directory listings the path resolver reads its
+        // existence/symlink/size answers out of: pay the cold metadata walk
+        // here rather than on the guest thread that resolves first.
+        SharpEmu.Libs.Kernel.HostDirectoryIndex.BeginWarm(app0Root);
         return new App0BindingScope(app0VariableName);
     }
 

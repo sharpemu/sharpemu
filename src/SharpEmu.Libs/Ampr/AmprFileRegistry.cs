@@ -108,7 +108,11 @@ internal static class AmprFileRegistry
         return handle;
     }
 
+    // Both sides normally come straight out of ResolveGuestPath, which already
+    // returns Path.GetFullPath output, so the equal case needs no normalization
+    // at all - and it runs under _resolvedFileGate once per resolved asset.
     private static bool IsSameHostFile(string left, string right) =>
+        HostFsPath.Comparer.Equals(left, right) ||
         HostFsPath.Comparer.Equals(Path.GetFullPath(left), Path.GetFullPath(right));
 
     public static bool TryGetHostPath(uint id, out string hostPath)
