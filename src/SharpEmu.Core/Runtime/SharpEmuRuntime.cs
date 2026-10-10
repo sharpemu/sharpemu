@@ -161,6 +161,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         NpAuthExports.ResetRuntimeState();
         NpUniversalDataSystemExports.ResetRuntimeState();
         KernelModuleRegistry.Reset();
+        KernelExports.ResetProcessArguments();
         var image = LoadImage(normalizedEbootPath);
         VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version);
         KernelMemoryCompatExports.ConfigureApplicationInfo(image.TitleId);
