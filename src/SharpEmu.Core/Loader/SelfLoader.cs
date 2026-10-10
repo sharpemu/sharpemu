@@ -232,16 +232,31 @@ public sealed class SelfLoader : ISelfLoader
 
                 imageBase = allocatedBase;
             }
-            else if (!TryAllocateAdditionalImageAtExact(physicalVm, imageBase, totalImageSize, isNextGen, out imageBase))
+            else
             {
-                var allocatedBase = physicalVm.AllocateAt(imageBase, totalImageSize, executable: true);
-                if (allocatedBase != imageBase)
+                // TryAllocateAdditionalImageAtExact writes its out-param only on
+                // success (allocatedBase = 0 on the failure path), so passing
+                // imageBase as `out` would clobber the preferred base to 0 here.
+                // Preserve it: the fallback must still try the preferred base
+                // (AllocateAt skips its fixed-address attempt for address 0),
+                // and the diagnostic below should report the base that was
+                // actually requested, not 0.
+                var preferredImageBase = imageBase;
+                if (!TryAllocateAdditionalImageAtExact(physicalVm, preferredImageBase, totalImageSize, isNextGen, out var exactImageBase))
                 {
-                    Console.WriteLine($"[LOADER] Could not allocate module at preferred base 0x{imageBase:X16}");
-                    Console.WriteLine($"[LOADER] Allocated module at 0x{allocatedBase:X16} instead.");
-                }
+                    var allocatedBase = physicalVm.AllocateAt(preferredImageBase, totalImageSize, executable: true);
+                    if (allocatedBase != preferredImageBase)
+                    {
+                        Console.WriteLine($"[LOADER] Could not allocate module at preferred base 0x{preferredImageBase:X16}");
+                        Console.WriteLine($"[LOADER] Allocated module at 0x{allocatedBase:X16} instead.");
+                    }
 
-                imageBase = allocatedBase;
+                    imageBase = allocatedBase;
+                }
+                else
+                {
+                    imageBase = exactImageBase;
+                }
             }
         }
 
