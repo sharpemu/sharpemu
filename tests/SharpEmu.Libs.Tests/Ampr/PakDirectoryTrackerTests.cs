@@ -5,6 +5,7 @@ using System.Buffers.Binary;
 using System.Text;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Ampr;
+using SharpEmu.Libs.Tests.Kernel;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Ampr;
@@ -14,6 +15,11 @@ namespace SharpEmu.Libs.Tests.Ampr;
 // picking by directory order alone mis-resolves out-of-order reads: Quake requested progs/h_ogre.mdl
 // (0x3A34 bytes) but the tracker returned bots/navigation/death32c.nav, which shares the size and
 // sits earlier in the directory, so the guest parsed NAV2 data as a brush model and aborted.
+// Shares the kernel path state an AMPR command buffer reads through
+// (TryPreindexApp0 -> ResolveGuestPath consults the global app0 root and mount
+// table) with the kernel tests that rewrite it, so both run in one collection
+// instead of racing in parallel.
+[Collection(KernelMemoryCompatStateCollection.Name)]
 public sealed class PakDirectoryTrackerTests
 {
     private const int EntrySize = 64;

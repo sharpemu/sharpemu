@@ -5,11 +5,16 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Ampr;
 using SharpEmu.Libs.Kernel;
 using System.Buffers.Binary;
+using SharpEmu.Libs.Tests.Kernel;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Ampr;
 
-[Collection("AmprFileRegistry")]
+// Shares the kernel path state an AMPR command buffer reads through
+// (TryPreindexApp0 -> ResolveGuestPath consults the global app0 root and mount
+// table) with the kernel tests that rewrite it, so both run in one collection
+// instead of racing in parallel.
+[Collection(KernelMemoryCompatStateCollection.Name)]
 public sealed class AprStreamingContractTests
 {
     public AprStreamingContractTests() => AmprFileRegistry.ClearForTests();

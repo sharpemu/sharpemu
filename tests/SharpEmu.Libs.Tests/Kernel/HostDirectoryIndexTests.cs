@@ -13,6 +13,10 @@ namespace SharpEmu.Libs.Tests.Kernel;
 // a symlink (the escape the resolver denies), a name the listing has never
 // seen is "unknown" rather than "absent", and a listing that a write made
 // stale is dropped.
+// Shares the kernel path-resolution statics (the listing cache the resolver
+// reads) with the other Kernel/AMPR state tests, so it runs in their collection
+// rather than in parallel with them.
+[Collection(KernelMemoryCompatStateCollection.Name)]
 public sealed class HostDirectoryIndexTests : IDisposable
 {
     private readonly string _root;

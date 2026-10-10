@@ -106,6 +106,7 @@ public static class AmprExports
     {
         private readonly SafeFileHandle? _handle;
         private readonly ZArchiveFileStream? _archived;
+        private long _nextSequentialOffset = -1;
 
         public CachedHostFile(string path)
         {
@@ -134,6 +135,45 @@ public static class AmprExports
         {
             _handle?.Dispose();
             _archived?.Dispose();
+        }
+
+        /// <summary>
+        /// Asks the kernel to start pulling in the bytes after a read that
+        /// continues where the previous one stopped.
+        /// </summary>
+        /// <remarks>
+        /// Unreal titles drain a .pak in 64 KiB positional reads - Octopath
+        /// Traveler II issues 12,236 of them for 784 MiB - and each one is a
+        /// separate syscall that waits for the device. That reaches ~21 MB/s on
+        /// the external game volume against ~41 MB/s of raw sequential
+        /// throughput, because nothing tells the kernel the next 64 KiB is
+        /// wanted until the guest asks for it. The hint (F_RDADVISE on macOS,
+        /// POSIX_FADV_WILLNEED on Linux) queues that read asynchronously, so
+        /// the following call can be served from the buffer cache.
+        ///
+        /// Only a continuing offset is advised: hinting ahead of a genuinely
+        /// random read would evict pages a different stream still wants, and
+        /// the handle cache is shared by all of a title's AMPR reads.
+        /// </remarks>
+        public void AdviseSequentialReadAhead(long offset, int length)
+        {
+            // An archived file is served from the archive's own stream; only a
+            // host handle has a kernel read-ahead to inform.
+            if (!HostReadAhead.Enabled || length <= 0 || _handle is null)
+            {
+                return;
+            }
+
+            var completed = offset + length;
+            var continuesPreviousRead = offset == Volatile.Read(ref _nextSequentialOffset);
+            Volatile.Write(ref _nextSequentialOffset, completed);
+            if (!continuesPreviousRead || completed >= Length)
+            {
+                return;
+            }
+
+            var window = (int)Math.Min(HostReadAhead.WindowBytes, Length - completed);
+            HostReadAhead.Advise(_handle, completed, window);
         }
     }
 
@@ -1288,6 +1328,7 @@ public static class AmprExports
                         break;
                     }
 
+                    cachedFile.AdviseSequentialReadAhead(unchecked((long)absoluteOffset), filled);
                     bytesRead += (ulong)filled;
                     continue;
                 }
@@ -1301,6 +1342,8 @@ public static class AmprExports
                 {
                     break;
                 }
+
+                cachedFile.AdviseSequentialReadAhead(unchecked((long)absoluteOffset), read);
 
                 if (!ctx.Memory.TryWrite(chunkDestination, buffer.AsSpan(0, read)))
                 {

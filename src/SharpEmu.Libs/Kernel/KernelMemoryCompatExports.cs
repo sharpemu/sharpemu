@@ -2401,6 +2401,10 @@ public static partial class KernelMemoryCompatExports
         {
             HostMovieBridge.NotifyGuestMovieClosed(observedBinkPath!);
         }
+
+        // The read-ahead tracker is keyed by guest fd, which is handed out
+        // again after a close; a stale entry would hint on an unrelated file.
+        ForgetPreadStream(fd);
         stream.Dispose();
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;

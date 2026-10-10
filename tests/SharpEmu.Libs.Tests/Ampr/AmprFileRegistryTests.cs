@@ -2,13 +2,18 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Ampr;
+using SharpEmu.Libs.Tests.Kernel;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Ampr;
 
 // AmprFileRegistry is process-global static state, so the classes that index
 // or clear it must not run concurrently with each other.
-[Collection("AmprFileRegistry")]
+// Shares the kernel path state an AMPR command buffer reads through
+// (TryPreindexApp0 -> ResolveGuestPath consults the global app0 root and mount
+// table) with the kernel tests that rewrite it, so both run in one collection
+// instead of racing in parallel.
+[Collection(KernelMemoryCompatStateCollection.Name)]
 public class AmprFileRegistryTests
 {
     [Theory]
