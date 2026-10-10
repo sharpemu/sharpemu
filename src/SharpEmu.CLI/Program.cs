@@ -50,6 +50,23 @@ internal static partial class Program
         if (args.Length > 0 && args[0] == SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument)
             return SharpEmu.Core.Diagnostics.WindowsCrashCapture.RunHelper(args);
 
+        if (args.Length > 0 && args[0] == ShaderPrecompiler.WorkerFlag)
+        {
+            int workerExitCode;
+            try
+            {
+                workerExitCode = ShaderPrecompiler.RunWorker(args[1..]);
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine($"[SHADER CACHE][ERROR] The precompile worker failed: {exception.Message}");
+                workerExitCode = 1;
+            }
+
+            Console.Out.Flush();
+            Environment.Exit(workerExitCode);
+        }
+
         RenderDocCapture.ApplyVulkanLoaderEnvironment();
         SharpEmu.Libs.VideoOut.RenderDocCapture.Initialize();
 
@@ -243,6 +260,8 @@ internal static partial class Program
             return childExitCode;
         }
 
+        var precompileOnly = args.Any(static argument => string.Equals(argument, "--precompile-only", StringComparison.OrdinalIgnoreCase));
+        args = args.Where(static argument => !string.Equals(argument, "--precompile-only", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (!TryParseArguments(
                 args,
                 out var ebootPath,
@@ -267,6 +286,8 @@ internal static partial class Program
             return 3;
         }
 
+        GuiLauncher.ConfigureSplashFont();
+
         Log.Info(BuildInfo.Banner);
         Log.Info(HostSystemInfo.Summary);
 
@@ -277,6 +298,11 @@ internal static partial class Program
         {
             Log.Error($"EBOOT file was not found: {ebootPath}");
             return 2;
+        }
+
+        if (precompileOnly)
+        {
+            return RunShaderPrecompileOnly(ebootPath);
         }
 
         if (!TryGetDebugServerOptions(args, out var debugServerEnabled, out var debugServerOptions, out var debugServerError))
@@ -1008,9 +1034,36 @@ internal static partial class Program
         return builder.ToString();
     }
 
+    private static int RunShaderPrecompileOnly(string ebootPath)
+    {
+        var app0Root = Path.GetDirectoryName(ebootPath)!;
+        var parent = Path.GetDirectoryName(app0Root);
+        if (string.Equals(Path.GetFileName(app0Root), "decrypted", StringComparison.OrdinalIgnoreCase) &&
+            !string.IsNullOrWhiteSpace(parent) && Directory.Exists(Path.Combine(parent, "sce_sys")))
+        {
+            app0Root = parent;
+        }
+
+        var paramPath = Path.Combine(app0Root, "sce_sys", "param.json");
+        var (title, titleId, version) = File.Exists(paramPath)
+            ? SharpEmu.Core.Loader.Ps5ParamJsonReader.TryReadPs5Param(File.ReadAllBytes(paramPath))
+            : (null, null, null);
+        if (string.IsNullOrWhiteSpace(titleId))
+        {
+            Log.Error($"The game title id could not be read from {paramPath}.");
+            return 2;
+        }
+
+        VideoOutExports.ConfigureApplicationInfo(title, titleId, version);
+        Environment.SetEnvironmentVariable(
+            SharpEmu.Libs.Gpu.ShaderCache.ShaderCacheSettings.EnvironmentVariable,
+            SharpEmu.Libs.Gpu.ShaderCache.ShaderCacheSettings.Format(true));
+        return ShaderPrecompiler.Run(app0Root, full: true);
+    }
+
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--shader-cache=<on|off>] [--shader-learn=<on|off>] [--precompile-only] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1222,6 +1275,32 @@ internal static partial class Program
                     return false;
                 }
                 hdrModeOverride = hdrMode;
+                continue;
+            }
+            if (TrySplitOption(argument, "--shader-learn", out var shaderLearnText))
+            {
+                if (!SharpEmu.Libs.Gpu.ShaderCache.ShaderCacheSettings.TryParse(shaderLearnText, out var shaderLearnEnabled))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                Environment.SetEnvironmentVariable(
+                    SharpEmu.Libs.Gpu.ShaderCache.ShaderCacheSettings.LearnEnvironmentVariable,
+                    SharpEmu.Libs.Gpu.ShaderCache.ShaderCacheSettings.Format(shaderLearnEnabled));
+                continue;
+            }
+            if (TrySplitOption(argument, "--shader-cache", out var shaderCacheText))
+            {
+                if (!SharpEmu.Libs.Gpu.ShaderCache.ShaderCacheSettings.TryParse(shaderCacheText, out var shaderCacheEnabled))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                Environment.SetEnvironmentVariable(
+                    SharpEmu.Libs.Gpu.ShaderCache.ShaderCacheSettings.EnvironmentVariable,
+                    SharpEmu.Libs.Gpu.ShaderCache.ShaderCacheSettings.Format(shaderCacheEnabled));
                 continue;
             }
             if (string.Equals(argument, "--strict", StringComparison.OrdinalIgnoreCase))

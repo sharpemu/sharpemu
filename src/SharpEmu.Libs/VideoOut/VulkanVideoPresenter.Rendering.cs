@@ -918,13 +918,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 _boundGraphicsPipeline = entry;
                 if (!entry.RectangleList)
                 {
-                    _vk.CmdBindPipeline(command, bindPoint, entry.Pipeline);
+                    _vk.CmdBindPipeline(command, bindPoint, ResolveOptimizedPipeline(entry.Pipeline));
                 }
 
                 return;
             }
 
-            _vk.CmdBindPipeline(command, bindPoint, entry.Pipeline);
+            _vk.CmdBindPipeline(command, bindPoint, ResolveOptimizedPipeline(entry.Pipeline));
             _profileComputePipeline = entry.Id;
         }
 
@@ -945,10 +945,11 @@ internal static unsafe partial class VulkanVideoPresenter
             ref var variant = ref strip ? ref entry.StripVariant : ref entry.ListVariant;
             if (variant.Handle == 0)
             {
-                variant = CreateRenderPipeline(entry.Description!, strip ? PrimitiveTopology.TriangleStrip : PrimitiveTopology.TriangleList, entry.Layout);
+                variant = CreateRenderPipeline(entry.Description!, strip ? PrimitiveTopology.TriangleStrip : PrimitiveTopology.TriangleList,
+                    entry.Layout);
             }
 
-            _vk.CmdBindPipeline(command, PipelineBindPoint.Graphics, variant);
+            _vk.CmdBindPipeline(command, PipelineBindPoint.Graphics, ResolveOptimizedPipeline(variant));
         }
 
         private void BindNativeRectangleList(RenderPipelineEntry entry, CommandBuffer command)
@@ -959,7 +960,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     entry.Layout, PolygonMode.FillRectangleNV);
             }
 
-            _vk.CmdBindPipeline(command, PipelineBindPoint.Graphics, entry.RectangleVariant);
+            _vk.CmdBindPipeline(command, PipelineBindPoint.Graphics, ResolveOptimizedPipeline(entry.RectangleVariant));
         }
 
         // Rectangle2D consumes three vertices and fills their projected bounding box.

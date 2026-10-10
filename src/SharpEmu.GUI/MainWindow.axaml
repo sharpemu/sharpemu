@@ -755,6 +755,30 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                      VerticalAlignment="Center" />
                         </StackPanel>
                       </Button>
+                      <Button x:Name="GameOptionsPrecompileShadersButton"
+                              Classes="gameAction"
+                              Margin="0,0,10,10">
+                        <StackPanel Orientation="Horizontal"
+                                    Spacing="11">
+                          <TextBlock Classes="materialSymbol"
+                                     Text="bolt" />
+                          <TextBlock Text="{Binding [Library.Context.PrecompileShaders],
+                                                    Source={x:Static local:Localization.Instance},
+                                                    x:CompileBindings=False}"
+                                     VerticalAlignment="Center" />
+                        </StackPanel>
+                      </Button>
+                      <Button x:Name="GameOptionsClearShaderCacheButton"
+                              Classes="gameAction"
+                              Margin="0,0,10,10">
+                        <StackPanel Orientation="Horizontal"
+                                    Spacing="11">
+                          <TextBlock Classes="materialSymbol"
+                                     Text="cleaning_services" />
+                          <TextBlock x:Name="GameOptionsClearShaderCacheText"
+                                     VerticalAlignment="Center" />
+                        </StackPanel>
+                      </Button>
                       <Button x:Name="GameOptionsRemoveButton"
                               Classes="gameAction dangerAction"
                               Margin="0,0,10,10">
@@ -922,6 +946,30 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                                                 Source={x:Static local:Localization.Instance},
                                                                 x:CompileBindings=False}">
                           <ToggleSwitch x:Name="GameVSyncToggle"
+                                        Classes="optionToggle" />
+                        </local:SettingRow>
+
+                        <local:SettingRow x:Name="GameShaderCacheRow"
+                                          Classes="optionRow"
+                                          Label="{Binding [Options.ShaderCache.Label],
+                                                          Source={x:Static local:Localization.Instance},
+                                                          x:CompileBindings=False}"
+                                          Description="{Binding [Options.ShaderCache.Desc],
+                                                                Source={x:Static local:Localization.Instance},
+                                                                x:CompileBindings=False}">
+                          <ToggleSwitch x:Name="GameShaderCacheToggle"
+                                        Classes="optionToggle" />
+                        </local:SettingRow>
+
+                        <local:SettingRow x:Name="GameShaderLearnRow"
+                                          Classes="optionRow"
+                                          Label="{Binding [Options.ShaderLearn.Label],
+                                                          Source={x:Static local:Localization.Instance},
+                                                          x:CompileBindings=False}"
+                                          Description="{Binding [Options.ShaderLearn.Desc],
+                                                                Source={x:Static local:Localization.Instance},
+                                                                x:CompileBindings=False}">
+                          <ToggleSwitch x:Name="GameShaderLearnToggle"
                                         Classes="optionToggle" />
                         </local:SettingRow>
 
@@ -1539,6 +1587,21 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         <ToggleSwitch x:Name="VSyncToggle"
                                       Classes="optionToggle"
                                       IsChecked="True" />
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="ShaderCacheRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.ShaderCache.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.ShaderCache.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ToggleSwitch x:Name="ShaderCacheToggle"
+                                      Classes="optionToggle"
+                                      IsChecked="True" />
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="ShaderLearnRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.ShaderLearn.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.ShaderLearn.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ToggleSwitch x:Name="ShaderLearnToggle"
+                                      Classes="optionToggle" />
                       </local:SettingRow>
                       <local:SettingRow x:Name="HdrRow"
                                         Classes="optionRow"

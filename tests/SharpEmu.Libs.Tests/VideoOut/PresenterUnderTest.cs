@@ -10,6 +10,7 @@ using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.ShaderCache;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
 using SharpEmu.Libs.VideoOut;
@@ -79,6 +80,8 @@ internal sealed class PresenterUnderTest : IDisposable
             "_deferredGuestImageVersionDestroys",
             "_pipelineEntries", "_shaderModules", "_shaderModuleSpirvBytes",
             "_preparedTextures", "_barriersAfterRendering", "_feedbackSnapshotPool",
+            "_warmStages", "_shaderCacheWorkers",
+            "_pipelineOptimizationGate", "_pipelineOptimizationQueue", "_pipelineOptimizations",
         })
         {
             var field = PresenterType.GetField(name, InstanceMembers)!;
@@ -86,6 +89,8 @@ internal sealed class PresenterUnderTest : IDisposable
         }
 
         SetField("_shaderModuleCacheIdentities", new Dictionary<ulong, string>());
+        SetField("_shaderCacheCancel", new CancellationTokenSource());
+        SetField("_pipelineStoreSources", Array.Empty<ShaderCacheFile>());
         var cacheShards = PresenterType.GetField("_pipelineCacheShards", InstanceMembers)!;
         cacheShards.SetValue(Instance, Activator.CreateInstance(cacheShards.FieldType, nonPublic: true));
         forwarder.Target = this;
@@ -156,6 +161,7 @@ internal sealed class PresenterUnderTest : IDisposable
 
     private void DestroyPipelineResources()
     {
+        InvokeMethod("StopPipelineOptimization");
         InvokeMethod("DestroyRenderPipelines");
         GetField<DescriptorHeap>("_descriptorHeap").Dispose();
     }

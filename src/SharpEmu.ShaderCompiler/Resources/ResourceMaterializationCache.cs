@@ -134,6 +134,7 @@ public sealed class ResourceMaterializationCache
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
                 TablePhase = recorder.TablePhase,
+                PortableBuffers = inputs.PortableBuffers,
             };
             if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
                 return false;
@@ -214,6 +215,7 @@ public sealed class ResourceMaterializationCache
                 ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
+                PortableBuffers = inputs.PortableBuffers,
             };
             var cachedTable = cached.Snapshot.FlattenedResourceTable;
             ReadingTable = true;
@@ -249,6 +251,7 @@ public sealed class ResourceMaterializationCache
                 UserData = cached.UserData,
                 ShaderBase = cached.ShaderBase,
                 ComputeState = cached.ComputeState,
+                PortableBuffers = cached.PortableBuffers,
                 RangeAddresses = cached.RangeAddresses,
                 RangeOffsets = cached.RangeOffsets,
                 RangeLengths = cached.RangeLengths,
@@ -325,6 +328,7 @@ public sealed class ResourceMaterializationCache
         hash.Add(RuntimeHelpers.GetHashCode(plan));
         hash.Add(inputs.ShaderBase);
         hash.Add(inputs.ComputeState);
+        hash.Add(inputs.PortableBuffers);
         var userData = inputs.UserData;
         hash.Add(userData.Count);
         for (var index = 0; index < userData.Count; index++)
@@ -387,6 +391,7 @@ public sealed class ResourceMaterializationCache
         public required uint[] UserData { get; init; }
         public required ulong ShaderBase { get; init; }
         public required ComputeSelectorState? ComputeState { get; init; }
+        public required bool PortableBuffers { get; init; }
         public required ulong[] RangeAddresses { get; init; }
         public required int[] RangeOffsets { get; init; }
         public required int[] RangeLengths { get; init; }
@@ -403,7 +408,8 @@ public sealed class ResourceMaterializationCache
         public bool Matches(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
         {
             if (!ReferenceEquals(Plan, plan) || ShaderBase != inputs.ShaderBase ||
-                !Nullable.Equals(ComputeState, inputs.ComputeState) || UserData.Length != inputs.UserData.Count)
+                !Nullable.Equals(ComputeState, inputs.ComputeState) || PortableBuffers != inputs.PortableBuffers ||
+                UserData.Length != inputs.UserData.Count)
                 return false;
             for (var index = 0; index < UserData.Length; index++)
                 if (UserData[index] != inputs.UserData[index])
@@ -562,6 +568,7 @@ public sealed class ResourceMaterializationCache
                 UserData = userData,
                 ShaderBase = inputs.ShaderBase,
                 ComputeState = inputs.ComputeState,
+                PortableBuffers = inputs.PortableBuffers,
                 RangeAddresses = addresses,
                 RangeOffsets = offsets,
                 RangeLengths = lengths,

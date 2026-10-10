@@ -40,7 +40,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         EnsureStarted(1280, 720);
-        WaitForShaderPrewarm("first GPU submission");
+        WaitForShaderCache("first GPU submission");
         // Queue publication precedes device initialization; only the render thread consumes it.
         lock (_gate)
         {
@@ -138,7 +138,7 @@ internal static unsafe partial class VulkanVideoPresenter
         _ = width;
         _ = height;
         _ = pitchInPixel;
-        WaitForShaderPrewarm("first flip");
+        WaitForShaderCache("first flip");
         if (!IsKnownDisplayBuffer(address) || !TryGetActivePresenter(out var presenter))
         {
             return false;
@@ -780,7 +780,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 if (_latestPresentation is not { } latest ||
-                    latest.Sequence == _presentedSequence ||
+                    latest.Sequence == _presentedSequence && !(latest.IsSplash && ShaderCacheSplashNeedsRefresh) ||
                     !IsPresentationReadyLocked(in latest))
                 {
                     if (_latestPresentation is { } rejected &&
@@ -816,7 +816,9 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             return _pendingVideoPresentations.Count > 0 ||
-                (_latestPresentation is { } latest && latest.Sequence != _presentedSequence && IsPresentationReadyLocked(in latest));
+                (_latestPresentation is { } latest &&
+                 (latest.Sequence != _presentedSequence || latest.IsSplash && ShaderCacheSplashNeedsRefresh) &&
+                 IsPresentationReadyLocked(in latest));
         }
     }
 }

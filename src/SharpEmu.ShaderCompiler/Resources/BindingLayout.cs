@@ -336,11 +336,14 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public uint ShaderBaseDword { get; init; } = NoShaderBase;
     public uint MemoryOffsetDword { get; init; }
     public uint MemoryOffsetCount { get; init; }
+    public uint BufferWordCount { get; init; }
     public bool UsesDispatchThreadLimits { get; init; }
     public IReadOnlyList<uint> UserDataRegisters { get; init; } = [];
     public IReadOnlyList<DescriptorBinding> Descriptors { get; init; } = [];
 
-    public uint DispatchThreadLimitsDword => MemoryOffsetDword + (MemoryOffsetCount + 3) / 4;
+    public uint BufferWordDword => MemoryOffsetDword + (MemoryOffsetCount + 3) / 4;
+
+    public uint DispatchThreadLimitsDword => BufferWordDword + BufferWordCount;
 
     public uint ShaderDataDwordCount => DispatchThreadLimitsDword + (UsesDispatchThreadLimits ? 3u : 0u);
 
@@ -561,12 +564,14 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         bool usesFlattenedTable,
         bool usesShaderBase,
         uint pushDataStartDword = 0,
-        bool usesDispatchThreadLimits = false)
+        bool usesDispatchThreadLimits = false,
+        bool portableBuffers = false)
     {
         var shaderBaseDword = usesShaderBase ? (uint)userDataRegisters.Count : NoShaderBase;
         var memoryOffsetDword = (uint)userDataRegisters.Count + (usesShaderBase ? ShaderBaseDwordCount : 0);
         var memoryOffsetCount = (uint)info.Buffers.Count;
-        var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 + (usesDispatchThreadLimits ? 3u : 0u);
+        var bufferWordCount = portableBuffers ? memoryOffsetCount * PortableBufferWord.DwordCount : 0;
+        var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 + bufferWordCount + (usesDispatchThreadLimits ? 3u : 0u);
         var pushStart = PushData.StartFor(pushDataStartDword, shaderDataDwords);
         var descriptors = new List<DescriptorBinding>();
         if (info.Buffers.Count != 0)
@@ -643,6 +648,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             ShaderBaseDword = shaderBaseDword,
             MemoryOffsetDword = memoryOffsetDword,
             MemoryOffsetCount = memoryOffsetCount,
+            BufferWordCount = bufferWordCount,
             UsesDispatchThreadLimits = usesDispatchThreadLimits,
             UserDataRegisters = userDataRegisters,
             Descriptors = descriptors,
@@ -656,6 +662,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         ShaderBaseDword == other.ShaderBaseDword &&
         MemoryOffsetDword == other.MemoryOffsetDword &&
         MemoryOffsetCount == other.MemoryOffsetCount &&
+        BufferWordCount == other.BufferWordCount &&
         UsesDispatchThreadLimits == other.UsesDispatchThreadLimits &&
         UserDataRegisters.SequenceEqual(other.UserDataRegisters) &&
         Descriptors.Count == other.Descriptors.Count &&
@@ -663,7 +670,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public override bool Equals(object? obj) => Equals(obj as BindingLayout);
 
-    public override int GetHashCode() => HashCode.Combine(PushDataStartDword, MemoryOffsetDword, MemoryOffsetCount, Descriptors.Count, UsesDispatchThreadLimits);
+    public override int GetHashCode() => HashCode.Combine(PushDataStartDword, MemoryOffsetDword, MemoryOffsetCount, BufferWordCount, Descriptors.Count, UsesDispatchThreadLimits);
 }
 
 // Recomputes the layout an emitter was given from the same inputs and the same push
@@ -685,7 +692,8 @@ public static class BindingLayoutValidator
             throw new ResourcePlanException("Only a compute shader can use dispatch thread limits.");
         }
 
-        var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare, usesFlattenedTable, usesShaderBase, layout.AllocationCursor, layout.UsesDispatchThreadLimits);
+        var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare, usesFlattenedTable, usesShaderBase,
+            layout.AllocationCursor, layout.UsesDispatchThreadLimits, portableBuffers: layout.BufferWordCount != 0);
         if (!expected.Equals(layout))
         {
             throw new ResourcePlanException(
@@ -696,6 +704,7 @@ public static class BindingLayoutValidator
 
     private static string Describe(BindingLayout layout) =>
         $"push={layout.PushDataStartDword} base={layout.ShaderBaseDword} offsets={layout.MemoryOffsetDword}+{layout.MemoryOffsetCount} " +
+        $"words={layout.BufferWordCount} " +
         $"user=[{string.Join(",", layout.UserDataRegisters)}] " +
         string.Join(" ", layout.Descriptors.Select(binding => $"{binding.Kind}:{string.Join(",", binding.Resources)}"));
 }

@@ -6,6 +6,7 @@ using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.ShaderCache;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
@@ -210,7 +211,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     }
 
     // One past the highest parameter location the pixel program reads, resolved as its translator does.
-    private static uint ReadVertexOutputCount(Gen5ShaderProgram pixelProgram, PixelInputInfo info)
+    internal static uint ReadVertexOutputCount(Gen5ShaderProgram pixelProgram, PixelInputInfo info)
     {
         var attributes = pixelProgram.Instructions
             .Select(static instruction => instruction.Control)
@@ -235,7 +236,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return Gen5PixelInputMapping.ResolveLocations(controls, attributes).Max() + 1;
     }
 
-    private static uint InterpolatedAttributeCount(Gen5ShaderProgram program)
+    internal static uint InterpolatedAttributeCount(Gen5ShaderProgram program)
     {
         var maxAttribute = -1;
         foreach (var instruction in program.Instructions)
@@ -439,8 +440,46 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             var created = _host.CreateGraphicsPipeline(description);
             _graphicsPipelines.Add(key, created);
             ShaderCacheCounters.CountGraphicsPipeline();
+            RecordGraphicsPipeline(description);
             return created;
         }
+    }
+
+    private void RecordGraphicsPipeline(GraphicsPipelineDescription description)
+    {
+        if (_host.ShaderCache is not { } cache ||
+            !_programs.TryGetStageRecord(description.VertexProgram.Id, out var vertex, out var vertexCode))
+        {
+            return;
+        }
+
+        StageRecord? pixel = null;
+        ShaderCodeCapture? pixelCode = null;
+        if (description.PixelStage is not null &&
+            !_programs.TryGetStageRecord(description.PixelProgram.Id, out pixel, out pixelCode))
+        {
+            return;
+        }
+
+        var attributes = new VertexAttributeFormat[description.VertexInput.AttributeCount];
+        for (var index = 0; index < attributes.Length; index++)
+        {
+            var attribute = description.VertexInfo.Attributes[index];
+            attributes[index] = new VertexAttributeFormat(attribute.Descriptor, attribute.RegisterCount);
+        }
+
+        cache.RecordGraphics(
+            new GraphicsPipelineRecord
+            {
+                Vertex = vertex,
+                Pixel = pixel,
+                Rendering = description.Rendering,
+                VertexInput = description.VertexInput,
+                StaticParameters = description.StaticParameters,
+                Attributes = attributes,
+            },
+            vertexCode,
+            pixelCode);
     }
 
     // The full static state of one graphics pipeline from the draw's targets, registers and programs.

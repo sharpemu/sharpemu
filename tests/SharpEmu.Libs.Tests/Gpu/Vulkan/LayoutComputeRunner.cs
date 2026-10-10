@@ -181,7 +181,8 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         uint[]? flattenedTable = null,
         IReadOnlyDictionary<DescriptorBindingKind, DescriptorImageInfo[]>? boundImages = null,
         ulong shaderBase = 0,
-        uint[]? dispatchThreadLimits = null)
+        uint[]? dispatchThreadLimits = null,
+        uint[]? bufferWords = null)
     {
         var vk = _harness.Vk;
         var device = _harness.Device.Device;
@@ -197,6 +198,12 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         {
             shaderData[layout.ShaderBaseDword] = (uint)shaderBase;
             shaderData[layout.ShaderBaseDword + 1] = (uint)(shaderBase >> 32);
+        }
+
+        if (bufferWords is not null)
+        {
+            if (bufferWords.Length != layout.BufferWordCount) throw new InvalidOperationException($"The dispatch requires {layout.BufferWordCount} buffer words.");
+            bufferWords.CopyTo(shaderData, (int)layout.BufferWordDword);
         }
 
         if (layout.UsesDispatchThreadLimits)

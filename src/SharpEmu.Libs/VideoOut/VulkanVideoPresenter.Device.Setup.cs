@@ -93,7 +93,7 @@ internal static unsafe partial class VulkanVideoPresenter
             AttachGuestGpuMemory();
             Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan VideoOut ready: {_extent.Width}x{_extent.Height}, format={_swapchainFormat}");
-            StartShaderPrewarm();
+            StartShaderCache();
         }
 
         private static void WaitForRenderDocAttachIfRequested()
@@ -867,6 +867,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 supportsMaintenance5 = maintenance5Features.Maintenance5;
             }
 
+            _supportsPipelineBinaries = QueryPipelineBinarySupport(supportsMaintenance5);
+
             var imageViewMinLodFeatures = new PhysicalDeviceImageViewMinLodFeaturesEXT
             {
                 SType = StructureType.PhysicalDeviceImageViewMinLodFeaturesExt,
@@ -992,9 +994,10 @@ internal static unsafe partial class VulkanVideoPresenter
             var maintenance5Extension = (byte*)SilkMarshal.StringToPtr(Maintenance5ExtensionName);
             var imageViewMinLodExtension = (byte*)SilkMarshal.StringToPtr(ImageViewMinLodExtensionName);
             var fillRectangleExtension = (byte*)SilkMarshal.StringToPtr(FillRectangleExtensionName);
+            var pipelineBinaryExtension = (byte*)SilkMarshal.StringToPtr(PipelineBinaryExtensionName);
             try
             {
-                var extensions = stackalloc byte*[15];
+                var extensions = stackalloc byte*[16];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
@@ -1029,6 +1032,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (supportsMaintenance5)
                 {
                     extensions[extensionCount++] = maintenance5Extension;
+                }
+
+                if (_supportsPipelineBinaries)
+                {
+                    extensions[extensionCount++] = pipelineBinaryExtension;
                 }
 
                 if (_supportsImageViewMinLod)
@@ -1109,6 +1117,17 @@ internal static unsafe partial class VulkanVideoPresenter
                     };
                     renderingChain = &maintenance5Features;
                 }
+
+                var pipelineBinaryFeatures = new PhysicalDevicePipelineBinaryFeaturesKHR
+                {
+                    SType = StructureType.PhysicalDevicePipelineBinaryFeaturesKhr,
+                    PipelineBinaries = true,
+                    PNext = renderingChain,
+                };
+                if (_supportsPipelineBinaries)
+                {
+                    renderingChain = &pipelineBinaryFeatures;
+                }
                 if (_supportsImageViewMinLod)
                 {
                     imageViewMinLodFeatures = new PhysicalDeviceImageViewMinLodFeaturesEXT
@@ -1185,6 +1204,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)maintenance5Extension);
                 SilkMarshal.Free((nint)imageViewMinLodExtension);
                 SilkMarshal.Free((nint)fillRectangleExtension);
+                SilkMarshal.Free((nint)pipelineBinaryExtension);
                 SilkMarshal.Free((nint)robustness2Extension);
                 SilkMarshal.Free((nint)portabilitySubsetExtension);
                 SilkMarshal.Free((nint)colorWriteEnableExtension);
@@ -1196,7 +1216,14 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
+            InitializePipelineBinaries();
             _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device) { ImageViewMinLodSupported = _supportsImageViewMinLod };
+            if (_shaderCompileOnly)
+            {
+                LoadRenderingCommands(supportsColorWriteEnable, deviceName);
+                return;
+            }
+
             if (_readbackQueueFamilyIndex is { } readbackQueueFamily)
             {
                 _vk.GetDeviceQueue(_device, readbackQueueFamily, 0, out _readbackQueue);

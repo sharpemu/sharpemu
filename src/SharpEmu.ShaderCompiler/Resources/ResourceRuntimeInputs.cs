@@ -26,6 +26,8 @@ public sealed class ResourceRuntimeInputs
 
     public bool ReadsClean { get; init; }
 
+    public bool PortableBuffers { get; init; }
+
     public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => new()
     {
         UserData = UserData,
@@ -36,6 +38,7 @@ public sealed class ResourceRuntimeInputs
         TablePhase = TablePhase,
         ReadResidentMemory = ReadResidentMemory,
         ReadsClean = ReadsClean || ReferenceEquals(reader, ReadCleanMemory),
+        PortableBuffers = PortableBuffers,
     };
 }
 

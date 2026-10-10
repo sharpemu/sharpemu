@@ -215,7 +215,8 @@ public partial class MainWindow : Window
         string ConsoleType,
         string ConsoleLanguage,
         EffectiveLaunchSettings Settings,
-        SharpEmuRuntimeOptions RuntimeOptions);
+        SharpEmuRuntimeOptions RuntimeOptions,
+        bool PrecompileOnly = false);
 
     public MainWindow()
     {
@@ -359,6 +360,8 @@ public partial class MainWindow : Window
         RefreshRateBox.SelectionChanged += (_, _) => OnHostRefreshRateChanged();
         ScalingModeBox.SelectionChanged += (_, _) => _settings.ScalingMode = SelectedComboText(ScalingModeBox, "Fit");
         VSyncToggle.IsCheckedChanged += (_, _) => _settings.VSync = VSyncToggle.IsChecked == true;
+        ShaderCacheToggle.IsCheckedChanged += (_, _) => _settings.ShaderCache = ShaderCacheToggle.IsChecked == true;
+        ShaderLearnToggle.IsCheckedChanged += (_, _) => _settings.ShaderLearn = ShaderLearnToggle.IsChecked == true;
         HdrModeBox.SelectionChanged += (_, _) => _settings.HdrMode = SelectedComboText(HdrModeBox, "Auto");
         OverlayEnabledToggle.IsCheckedChanged += (_, _) => _settings.OverlayEnabled = OverlayEnabledToggle.IsChecked == true;
         OverlayModeBox.SelectionChanged += (_, _) => _settings.OverlayMode = SelectedComboText(OverlayModeBox, "TitleBar");
@@ -1448,6 +1451,8 @@ public partial class MainWindow : Window
         LoadHostDisplayOptions();
         ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         VSyncToggle.IsChecked = _settings.VSync;
+        ShaderCacheToggle.IsChecked = _settings.ShaderCache;
+        ShaderLearnToggle.IsChecked = _settings.ShaderLearn;
         HdrModeBox.SelectedIndex = ChoiceIndex(_settings.HdrMode, "Auto", "On", "Off");
         OverlayEnabledToggle.IsChecked = _settings.OverlayEnabled;
         OverlayModeBox.SelectedIndex = ChoiceIndex(_settings.OverlayMode, "Full", "Minimal", "TitleBar");
@@ -2803,7 +2808,8 @@ public partial class MainWindow : Window
         string ebootPath,
         string displayName,
         string? titleId = null,
-        IReadOnlyList<string>? oneShotCustomEnvironment = null)
+        IReadOnlyList<string>? oneShotCustomEnvironment = null,
+        bool precompileOnly = false)
     {
         if (_isRunning)
         {
@@ -2936,7 +2942,8 @@ public partial class MainWindow : Window
             _settings.ConsoleType,
             _settings.ConsoleLanguage,
             effective,
-            runtimeOptions);
+            runtimeOptions,
+            precompileOnly);
 
         StartPendingSession();
     }
@@ -3119,10 +3126,16 @@ public partial class MainWindow : Window
         arguments.Add($"--refresh-rate={launch.Settings.RefreshRate}");
         arguments.Add($"--scaling={launch.Settings.ScalingMode.ToLowerInvariant()}");
         arguments.Add($"--vsync={(launch.Settings.VSync ? "on" : "off")}");
+        arguments.Add($"--shader-cache={(launch.Settings.ShaderCache ? "on" : "off")}");
+        arguments.Add($"--shader-learn={(launch.Settings.ShaderLearn ? "on" : "off")}");
         arguments.Add($"--hdr={launch.Settings.HdrMode.ToLowerInvariant()}");
         arguments.Add($"--overlay={(launch.Settings.OverlayEnabled ? "on" : "off")}");
         arguments.Add($"--overlay-mode={launch.Settings.OverlayMode.ToLowerInvariant()}");
         arguments.Add($"--overlay-corner={launch.Settings.OverlayCorner.ToLowerInvariant()}");
+        if (launch.PrecompileOnly)
+        {
+            arguments.Add("--precompile-only");
+        }
 
         arguments.Add(launch.EbootPath);
         return arguments;

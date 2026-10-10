@@ -33,6 +33,10 @@
   "Library.Context.CopyPath": "Yolu kopyala",
   "Library.Context.CopyTitleId": "Title ID'yi kopyala",
   "Library.Context.Remove": "Kütüphaneden kaldır",
+  "Library.Context.ClearShaderCache": "Shader önbelleğini temizle",
+  "Library.Context.PrecompileShaders": "Shader'ları ön derle",
+  "Library.Context.ShaderCacheCleared": "Shader önbelleği temizlendi",
+  "Library.Context.ShaderCacheBusy": "Önce oyunu kapatın",
 
   "Library.Empty.Title": "Kütüphaneniz boş",
   "Library.Empty.Hint": "Başlamak için oyunlarınızı içeren bir klasör ekleyin.",
@@ -72,6 +76,10 @@
   "Options.Scaling.Desc": "Dahili çözünürlüğü değiştirmeden oyun görüntüsünü ölçekle.",
   "Options.VSync.Label": "VSync",
   "Options.VSync.Desc": "Yırtılmasız görüntü için FIFO sunumunu kullan.",
+  "Options.ShaderCache.Label": "Shader önbelleği",
+  "Options.ShaderCache.Desc": "Oyunun oluşturduğu pipeline'ları kaydeder ve oyun başlamadan önce hazırlar; sonraki oturumlarda takılma olmaz.",
+  "Options.ShaderLearn.Label": "Öğren ve derle",
+  "Options.ShaderLearn.Desc": "Oynarken oyunun render durumlarını bir shader seed dosyasına (user/shader_seeds) öğrenir; sonraki açılışta grafik pipeline'ları da önceden derlenir. Oraya konan bir seed dosyası bu kapalıyken de kullanılır.",
   "Options.Hdr.Label": "HDR çıkışı",
   "Options.Hdr.Desc": "Seçili ekran ve grafik backend'i destekliyorsa HDR kullan. Otomatik mod SDR'ye geri döner.",
 

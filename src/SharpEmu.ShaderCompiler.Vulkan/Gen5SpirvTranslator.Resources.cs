@@ -203,6 +203,15 @@ public static partial class Gen5SpirvTranslator
                 _interfaces.Add(_runtimeBufferBiases);
             }
 
+            if (_request.Bindings.BufferWordCount != 0)
+            {
+                var wordArrayType = _module.TypeArray(_uintType, _request.Bindings.BufferWordCount);
+                _portableBufferWords = _module.AddGlobalVariable(
+                    _module.TypePointer(SpirvStorageClass.Private, wordArrayType), SpirvStorageClass.Private, _module.ConstantNull(wordArrayType));
+                _module.AddName(_portableBufferWords, "guestBufferWords");
+                _interfaces.Add(_portableBufferWords);
+            }
+
             if (info.UsesDeviceAddresses)
             {
                 _module.AddCapability(SpirvCapability.PhysicalStorageBufferAddresses);
@@ -394,7 +403,17 @@ public static partial class Gen5SpirvTranslator
                 var bias = BitwiseAnd(ShiftRightLogical(packed, UInt((buffer % 4) * 8)), UInt(0xFF));
                 Store(RuntimeBufferBiasPointer((int)buffer), bias);
             }
+
+            for (uint dword = 0; dword < layout.BufferWordCount; dword++)
+            {
+                Store(PortableBufferWordPointer((int)dword), LoadShaderDataDword(UInt(layout.BufferWordDword + dword)));
+            }
         }
+
+        private uint _portableBufferWords;
+
+        private uint PortableBufferWordPointer(int dword) =>
+            _module.AddInstruction(SpirvOp.AccessChain, _privateUintPointer, _portableBufferWords, UInt(checked((uint)dword)));
 
         private uint LoadShaderDataDword(uint dwordIndex)
         {

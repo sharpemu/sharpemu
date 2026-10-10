@@ -97,6 +97,7 @@ public static partial class VideoOutExports
     private static string _applicationWindowTitle = "VideoOut";
     private static string _selectedGpuName = string.Empty;
     private static string _applicationTitleId = "UNKNOWN";
+    private static string _applicationVersion = string.Empty;
     private static readonly bool _logFrameRate =
         string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_LOG_VIDEOOUT_FPS"),
@@ -144,6 +145,7 @@ public static partial class VideoOutExports
             _applicationTitleId = string.IsNullOrWhiteSpace(titleId)
                 ? "UNKNOWN"
                 : titleId.Trim();
+            _applicationVersion = version?.Trim() ?? string.Empty;
             _applicationWindowTitle = $"{application}{versionSuffix}";
         }
 
@@ -155,6 +157,22 @@ public static partial class VideoOutExports
         lock (_stateGate)
         {
             return _applicationTitleId;
+        }
+    }
+
+    internal static string GetApplicationVersion()
+    {
+        lock (_stateGate)
+        {
+            return _applicationVersion;
+        }
+    }
+
+    internal static string GetApplicationDisplayName()
+    {
+        lock (_stateGate)
+        {
+            return _applicationWindowTitle;
         }
     }
 

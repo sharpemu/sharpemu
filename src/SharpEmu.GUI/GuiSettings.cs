@@ -78,6 +78,10 @@ public sealed class GuiSettings
 
     public bool VSync { get; set; } = true;
 
+    public bool ShaderCache { get; set; } = true;
+
+    public bool ShaderLearn { get; set; }
+
     public string HdrMode { get; set; } = "Auto";
 
     public bool OverlayEnabled { get; set; } = true;

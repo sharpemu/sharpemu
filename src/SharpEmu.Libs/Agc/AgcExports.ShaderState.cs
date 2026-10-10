@@ -92,6 +92,8 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
+        Gpu.ShaderCache.ShaderInventory.Capture(ctx, headerAddress, codeAddress);
+
         if (!RelocatePointerField(ctx, headerAddress + ShaderCxRegistersOffset) ||
             !RelocatePointerField(ctx, headerAddress + ShaderShRegistersOffset) ||
             !RelocatePointerField(ctx, headerAddress + ShaderUserDataOffset) ||
@@ -658,47 +660,7 @@ public static partial class AgcExports
             {
                 var source = BinaryPrimitives.ReadUInt32LittleEndian(inputWords[(inputIndex * sizeof(uint))..]);
                 var hasMask = TryFindOutputSemantic(outputWords, source, out var mask);
-
-                var mode = (source >> 20) & 0x3u;
-                uint flags;
-                if (mode == 0)
-                {
-                    flags = (((source >> 24) & 0x1u) | (hasMask ? 0u : 1u)) << 5;
-                    flags = ApplyInterpolantTwoBitField(flags, source >> 28, 8);
-                }
-                else
-                {
-                    flags = ((source << 4) & 0x0300_0000u) + 0x0008_0000u;
-                    if (mode == 2)
-                    {
-                        flags &= 0xFFEF_FFDFu;
-                        flags |= hasMask ? ((~(mask & source) >> 16) & 0x20u) : 0x20u;
-                        flags = ApplyInterpolantTwoBitField(flags, source >> 30, 8);
-                        flags = ApplyInterpolantTwoBitField(flags, source >> 30, 21);
-                    }
-                    else
-                    {
-                        if (hasMask)
-                        {
-                            var masked = mask & source;
-                            flags = (flags & 0xFFFF_FFDFu) | ((masked >> 15) & 0x20u);
-                            flags ^= 0x20u;
-                            flags = (flags & 0xFFEF_FFFFu) | ((~masked >> 1) & 0x0010_0000u);
-                        }
-                        else
-                        {
-                            flags |= 0x0010_0020u;
-                        }
-
-                        flags = ApplyInterpolantTwoBitField(flags, source >> 28, 8);
-                        flags = ApplyInterpolantTwoBitField(flags, source >> 30, 21);
-                    }
-                }
-
-                flags = hasMask
-                    ? ApplyInterpolantFinalMask(flags, source, mask)
-                    : flags & 0xFFFF_FBE0u;
-                SetInterpolantRegister(registers, inputIndex, flags);
+                SetInterpolantRegister(registers, inputIndex, InterpolantMapping2Value(source, hasMask, mask));
             }
         }
         finally
@@ -778,6 +740,81 @@ public static partial class AgcExports
                TryWriteUInt32(ctx, destinationAddress + 8, outputPrimitiveOffset) &&
                TryWriteUInt32(ctx, destinationAddress + 12, outputPrimitiveValue);
     }
+    private static uint InterpolantMapping2Value(uint source, bool hasMask, uint mask)
+    {
+        var mode = (source >> 20) & 0x3u;
+        uint flags;
+        if (mode == 0)
+        {
+            flags = (((source >> 24) & 0x1u) | (hasMask ? 0u : 1u)) << 5;
+            flags = ApplyInterpolantTwoBitField(flags, source >> 28, 8);
+        }
+        else
+        {
+            flags = ((source << 4) & 0x0300_0000u) + 0x0008_0000u;
+            if (mode == 2)
+            {
+                flags &= 0xFFEF_FFDFu;
+                flags |= hasMask ? ((~(mask & source) >> 16) & 0x20u) : 0x20u;
+                flags = ApplyInterpolantTwoBitField(flags, source >> 30, 8);
+                flags = ApplyInterpolantTwoBitField(flags, source >> 30, 21);
+            }
+            else
+            {
+                if (hasMask)
+                {
+                    var masked = mask & source;
+                    flags = (flags & 0xFFFF_FFDFu) | ((masked >> 15) & 0x20u);
+                    flags ^= 0x20u;
+                    flags = (flags & 0xFFEF_FFFFu) | ((~masked >> 1) & 0x0010_0000u);
+                }
+                else
+                {
+                    flags |= 0x0010_0020u;
+                }
+
+                flags = ApplyInterpolantTwoBitField(flags, source >> 28, 8);
+                flags = ApplyInterpolantTwoBitField(flags, source >> 30, 21);
+            }
+        }
+
+        return hasMask
+            ? ApplyInterpolantFinalMask(flags, source, mask)
+            : flags & 0xFFFF_FBE0u;
+    }
+
+    private static uint InterpolantMappingValue(uint psWord, uint? gsWord)
+    {
+        var value = (psWord & 0x0030_0000u) != 0
+            ? CreateInterpolantF16Value(psWord, gsWord)
+            : CreateInterpolantNonF16Value(psWord, gsWord.HasValue);
+        return gsWord is { } matched
+            ? CreateInterpolantMappingValue(value, psWord, matched)
+            : CreateInterpolantDefaultParamValue(value, psWord);
+    }
+
+    internal static uint[] ComputeInterpolantMapping(ReadOnlySpan<uint> pixelInputs, ReadOnlySpan<uint> vertexOutputs, bool secondVariant)
+    {
+        var registers = new uint[InterpolantRegisterCount];
+        for (var index = 0; index < registers.Length; index++)
+        {
+            registers[index] = (uint)index;
+        }
+
+        var outputBytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(vertexOutputs);
+        var count = Math.Min(pixelInputs.Length, InterpolantRegisterCount);
+        for (var index = 0; index < count; index++)
+        {
+            var input = pixelInputs[index];
+            var matched = TryFindOutputSemantic(outputBytes, input, out var output);
+            registers[index] = secondVariant
+                ? InterpolantMapping2Value(input, matched, output)
+                : InterpolantMappingValue(input, matched ? output : null);
+        }
+
+        return registers;
+    }
+
     private static uint ApplyInterpolantTwoBitField(uint value, uint field, int shift)
     {
         var mask = 0x3u << shift;
@@ -880,16 +917,7 @@ public static partial class AgcExports
             {
                 var psWord = BinaryPrimitives.ReadUInt32LittleEndian(psWords[(psIndex * sizeof(uint))..]);
                 uint? gsWord = TryFindOutputSemantic(gsWords, psWord, out var candidate) ? candidate : null;
-
-                var value = (psWord & 0x0030_0000u) != 0
-                    ? CreateInterpolantF16Value(psWord, gsWord)
-                    : CreateInterpolantNonF16Value(psWord, gsWord.HasValue);
-                SetInterpolantRegister(
-                    registers,
-                    psIndex,
-                    gsWord is { } matched
-                        ? CreateInterpolantMappingValue(value, psWord, matched)
-                        : CreateInterpolantDefaultParamValue(value, psWord));
+                SetInterpolantRegister(registers, psIndex, InterpolantMappingValue(psWord, gsWord));
             }
         }
         finally

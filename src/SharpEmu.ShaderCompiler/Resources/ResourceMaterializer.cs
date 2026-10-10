@@ -91,7 +91,7 @@ public static class ResourceMaterializer
             materialized.FlattenedTable[offset + 2] = (uint)Math.Min(range.Size, uint.MaxValue);
         }
 
-        if (!BuildSpecialization(plan, materialized, out var nextSnapshot, out var nextSpecialization, out failure, captureIndirectImageFailure))
+        if (!BuildSpecialization(plan, materialized, inputs.PortableBuffers, out var nextSnapshot, out var nextSpecialization, out failure, captureIndirectImageFailure))
         {
             return false;
         }
@@ -877,6 +877,7 @@ public static class ResourceMaterializer
     private static bool BuildSpecialization(
         ShaderResourcePlan plan,
         MaterializedSnapshot snapshot,
+        bool portableBuffers,
         out MaterializedSnapshot specializedSnapshot,
         out ResourceSpecialization specialization,
         out ResourceMaterializationFailure failure,
@@ -985,10 +986,11 @@ public static class ResourceMaterializer
             }
 
             var formatted = info.Buffers[index].Formatted;
+            var runtimeFormat = portableBuffers && PortableBufferWord.ReadsFormatAtRuntime(info.Buffers[index]);
             buffers.Add(new BufferSpecialization(
-                packedStride,
-                formatted ? (words[3] >> 12) & 0x7F : DescriptorConstants.InvalidFormat,
-                formatted ? words[3] & 0xFFF : DescriptorConstants.IdentityDestinationSelect));
+                portableBuffers ? 0 : packedStride,
+                formatted && !runtimeFormat ? (words[3] >> 12) & 0x7F : DescriptorConstants.InvalidFormat,
+                formatted && !runtimeFormat ? words[3] & 0xFFF : DescriptorConstants.IdentityDestinationSelect));
         }
 
         for (var index = 0; index < images.Count; index++)
@@ -1274,7 +1276,7 @@ public static class ResourceMaterializer
                     packedStride &= ~(3u << 16);
                 }
 
-                buffers.Add(new BufferSpecialization(packedStride, (words[3] >> 12) & 0x7F, words[3] & 0xFFF));
+                buffers.Add(new BufferSpecialization(portableBuffers ? 0 : packedStride, (words[3] >> 12) & 0x7F, words[3] & 0xFFF));
             }
 
             var mappingOffset = (uint)mappingCursor;

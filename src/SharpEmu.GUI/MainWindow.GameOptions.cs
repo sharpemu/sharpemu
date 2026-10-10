@@ -4,6 +4,7 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.VisualTree;
+using SharpEmu.Libs.Gpu.ShaderCache;
 using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.GUI;
@@ -99,6 +100,8 @@ public partial class MainWindow
             await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.Path);
         GameOptionsCopyTitleIdButton.Click += async (_, _) =>
             await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.TitleId);
+        GameOptionsClearShaderCacheButton.Click += (_, _) => ClearOpenGameShaderCache();
+        GameOptionsPrecompileShadersButton.Click += (_, _) => PrecompileOpenGameShaders();
         GameOptionsRemoveButton.Click += (_, _) =>
         {
             CloseGameSettings();
@@ -115,6 +118,8 @@ public partial class MainWindow
         GameRefreshRateBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameScalingModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameVSyncToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
+        GameShaderCacheToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
+        GameShaderLearnToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
         GameHdrModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameOverlayEnabledToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
         GameOverlayModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
@@ -125,6 +130,30 @@ public partial class MainWindow
         }
 
         SetGameOptionsSection(0, animateIndicator: false);
+    }
+
+    private void PrecompileOpenGameShaders()
+    {
+        if (GameList.SelectedItem is not GameEntry game || _isRunning)
+        {
+            return;
+        }
+
+        CloseGameSettings();
+        Launch(game.Path, game.Name, game.TitleId, precompileOnly: true);
+    }
+
+    private void ClearOpenGameShaderCache()
+    {
+        if (string.IsNullOrWhiteSpace(_gameSettingsTitleId))
+        {
+            return;
+        }
+
+        GameOptionsClearShaderCacheText.Text = Localization.Instance[
+            ShaderCacheSettings.TryClear(_gameSettingsTitleId)
+                ? "Library.Context.ShaderCacheCleared"
+                : "Library.Context.ShaderCacheBusy"];
     }
 
     private void OpenSelectedGameSettings()
@@ -144,9 +173,11 @@ public partial class MainWindow
 
         _gameSettingsTitleId = game.TitleId;
         GameOptionsOverlay.DataContext = game;
+        GameOptionsClearShaderCacheText.Text = Localization.Instance["Library.Context.ClearShaderCache"];
         LoadGameSettings(game.TitleId);
         SetGameOptionsSection(0, animateIndicator: false);
         GameOptionsLaunchButton.IsEnabled = !_isRunning;
+        GameOptionsPrecompileShadersButton.IsEnabled = !_isRunning;
         GameOptionsCopyTitleIdButton.IsEnabled =
             !string.IsNullOrWhiteSpace(game.TitleId);
 
@@ -217,6 +248,8 @@ public partial class MainWindow
                 effective.ScalingMode,
                 "Fit");
             GameVSyncToggle.IsChecked = effective.VSync;
+            GameShaderCacheToggle.IsChecked = effective.ShaderCache;
+            GameShaderLearnToggle.IsChecked = effective.ShaderLearn;
             GameOverlayEnabledToggle.IsChecked = effective.OverlayEnabled;
             GameOverlayModeBox.SelectedItem = FindChoice(_overlayModeChoices, effective.OverlayMode, "TitleBar");
             GameOverlayCornerBox.SelectedItem = FindChoice(_overlayCornerChoices, effective.OverlayCorner, "TopRight");
@@ -283,6 +316,8 @@ public partial class MainWindow
             RefreshRate = SelectedGameRefreshRate(),
             ScalingMode = SelectedComboText(GameScalingModeBox, "Fit"),
             VSync = GameVSyncToggle.IsChecked == true,
+            ShaderCache = GameShaderCacheToggle.IsChecked == true,
+            ShaderLearn = GameShaderLearnToggle.IsChecked == true,
             HdrMode = SelectedComboText(GameHdrModeBox, "Auto"),
             OverlayEnabled = GameOverlayEnabledToggle.IsChecked == true,
             OverlayMode = SelectedComboText(GameOverlayModeBox, "TitleBar"),

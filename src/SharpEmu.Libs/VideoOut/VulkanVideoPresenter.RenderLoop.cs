@@ -248,9 +248,12 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             byte[]? pixels = null;
+            var shaderCacheProgress = presentation.IsSplash ? Volatile.Read(ref _shaderCacheProgress) : null;
             if (presentation.Pixels is { } sourcePixels)
             {
-                pixels = presentation.Width == _extent.Width && presentation.Height == _extent.Height
+                pixels = shaderCacheProgress is not null
+                    ? DrawShaderCacheSplash(in presentation, shaderCacheProgress)
+                    : presentation.Width == _extent.Width && presentation.Height == _extent.Height
                     ? sourcePixels
                     : ScaleBgra(
                         sourcePixels,
@@ -466,6 +469,15 @@ internal static unsafe partial class VulkanVideoPresenter
             CollectCompletedGuestSubmissions(waitForOldest: false);
             _imageInitialized[imageIndex] = true;
             _currentFrameSlot = (frameSlot + 1) % MaxFramesInFlight;
+            if (shaderCacheProgress is not null)
+            {
+                _shaderCacheSplashLastDraw = System.Diagnostics.Stopwatch.GetTimestamp();
+                _shaderCacheSplashVisible = true;
+            }
+            else if (_shaderCacheSplashVisible)
+            {
+                ClearShaderCacheSplash();
+            }
             CompletePresentation(in presentation, presented: true);
             if (presentation.IsSplash && !_splashPresented)
             {

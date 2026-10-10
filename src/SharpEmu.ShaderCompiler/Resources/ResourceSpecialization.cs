@@ -86,6 +86,23 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
             image.MipCount, image.ConversionFormat, image.ShaderSwizzle,
             image.IndirectRoot, image.IndirectMappingOffset, image.IndirectSearchIterations, image.Cube)).ToList(),
     };
+
+    public static ResourceSpecialization Predicted(ShaderResourceInfo info)
+    {
+        var specialization = Default(info);
+        for (var index = 0; index < info.Buffers.Count; index++)
+        {
+            if (info.Buffers[index].Formatted && info.Buffers[index].Written)
+            {
+                specialization.Buffers[index] = new BufferSpecialization(0, PredictedWrittenFormat, PredictedWrittenSwizzle);
+            }
+        }
+
+        return specialization;
+    }
+
+    private const uint PredictedWrittenFormat = 20;
+    private const uint PredictedWrittenSwizzle = 4;
 }
 
 // A plan's resource tables with one draw's specialization applied, which the emitter

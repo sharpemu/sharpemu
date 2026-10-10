@@ -636,47 +636,36 @@ public sealed partial class ResourceTracker
         }
     }
 
-    private static bool HasRuntimeRead(ScalarValue value) => HasRuntimeRead(value, []);
+    private static bool HasRuntimeRead(ScalarValue value) => HasRuntimeRead(value, null);
 
-    private static bool HasRuntimeReadKind(ScalarValue value, ScalarValueKind kind) => HasRuntimeReadKind(value, kind, []);
+    private static bool HasRuntimeReadKind(ScalarValue value, ScalarValueKind kind) => HasRuntimeRead(value, kind);
 
-    private static bool HasRuntimeReadKind(ScalarValue value, ScalarValueKind kind, HashSet<ScalarValue> visiting)
+    private static bool HasRuntimeRead(ScalarValue value, ScalarValueKind? kind)
     {
-        if (!visiting.Add(value))
+        var visited = new HashSet<ScalarValue>();
+        var pending = new Stack<ScalarValue>();
+        pending.Push(value);
+        while (pending.TryPop(out var current))
         {
-            return false;
-        }
+            if (!visited.Add(current))
+            {
+                continue;
+            }
 
-        try
-        {
-            return value.Kind == kind || value.Operands.Any(operand => HasRuntimeReadKind(operand, kind, visiting));
-        }
-        finally
-        {
-            visiting.Remove(value);
-        }
-    }
-
-    private static bool HasRuntimeRead(ScalarValue value, HashSet<ScalarValue> visiting)
-    {
-        if (!visiting.Add(value))
-        {
-            return false;
-        }
-
-        try
-        {
-            if (value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord)
+            if (kind is { } expected
+                    ? current.Kind == expected
+                    : current.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord)
             {
                 return true;
             }
 
-            return value.Operands.Any(operand => HasRuntimeRead(operand, visiting));
+            foreach (var operand in current.Operands)
+            {
+                pending.Push(operand);
+            }
         }
-        finally
-        {
-            visiting.Remove(value);
-        }
+
+        return false;
     }
 
     // ---- dense tables ----

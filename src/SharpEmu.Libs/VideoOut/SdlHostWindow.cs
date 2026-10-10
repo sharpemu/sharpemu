@@ -54,7 +54,8 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         string title,
         HostVideoOptions options,
         SdlGraphicsApi graphicsApi,
-        Action? toggleBackendHud = null)
+        Action? toggleBackendHud = null,
+        bool hidden = false)
     {
         _options = options.Normalize();
         _graphicsApi = graphicsApi;
@@ -81,6 +82,11 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         }
 
         _baseTitle = title;
+        if (hidden)
+        {
+            return;
+        }
+
         PerfOverlay.Configure(_options);
         MoveToConfiguredDisplay();
         ApplyConfiguredMode(_options.WindowMode);

@@ -34,6 +34,10 @@ public sealed class PerGameSettings
 
     public bool? VSync { get; set; }
 
+    public bool? ShaderCache { get; set; }
+
+    public bool? ShaderLearn { get; set; }
+
     public string? HdrMode { get; set; }
 
     public bool? OverlayEnabled { get; set; }
@@ -56,6 +60,8 @@ public sealed class PerGameSettings
         RefreshRate is null &&
         ScalingMode is null &&
         VSync is null &&
+        ShaderCache is null &&
+        ShaderLearn is null &&
         HdrMode is null &&
         OverlayEnabled is null &&
         OverlayCorner is null &&
@@ -163,6 +169,16 @@ public sealed class PerGameSettings
         if (VSync == global.VSync)
         {
             VSync = null;
+        }
+
+        if (ShaderCache == global.ShaderCache)
+        {
+            ShaderCache = null;
+        }
+
+        if (ShaderLearn == global.ShaderLearn)
+        {
+            ShaderLearn = null;
         }
 
         if (string.Equals(HdrMode, global.HdrMode, StringComparison.OrdinalIgnoreCase))
@@ -280,7 +296,9 @@ public sealed record EffectiveLaunchSettings(
     bool OverlayEnabled,
     string OverlayCorner,
     string OverlayMode,
-    IReadOnlyList<string> EnvironmentToggles)
+    IReadOnlyList<string> EnvironmentToggles,
+    bool ShaderCache = true,
+    bool ShaderLearn = false)
 {
     public static EffectiveLaunchSettings Resolve(GuiSettings global, PerGameSettings? perGame) => new(
         perGame?.LogLevel ?? global.LogLevel,
@@ -297,5 +315,7 @@ public sealed record EffectiveLaunchSettings(
         perGame?.OverlayEnabled ?? global.OverlayEnabled,
         perGame?.OverlayCorner ?? global.OverlayCorner,
         perGame?.OverlayMode ?? global.OverlayMode,
-        perGame?.EnvironmentToggles ?? global.EnvironmentToggles);
+        perGame?.EnvironmentToggles ?? global.EnvironmentToggles,
+        perGame?.ShaderCache ?? global.ShaderCache,
+        perGame?.ShaderLearn ?? global.ShaderLearn);
 }
