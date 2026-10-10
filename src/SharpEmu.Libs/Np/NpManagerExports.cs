@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 
 namespace SharpEmu.Libs.Np;
 
@@ -11,7 +12,9 @@ public static class NpManagerExports
     private const int NpTitleIdSize = 16;
     private const int NpTitleSecretSize = 128;
     private const int NpErrorInvalidArgument = unchecked((int)0x80550003);
+    private const int NpErrorSignedOut = unchecked((int)0x80550006);
     private static int _nextNpRequestId;
+    private static readonly ConcurrentDictionary<int, int> _requestResults = new();
 
     [SysAbiExport(
         Nid = "3Zl8BePTh9Y",
@@ -28,8 +31,17 @@ public static class NpManagerExports
     public static int NpCreateAsyncRequest(CpuContext ctx) => SetReturn(ctx, NextRequestId());
 
     [SysAbiExport(Nid = "KfGZg2y73oM", ExportName = "sceNpCheckNpReachability", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
-    public static int NpCheckNpReachability(CpuContext ctx) =>
-        SetReturn(ctx, unchecked((int)ctx[CpuRegister.Rdi]) > 0 ? (int)OrbisGen2Result.ORBIS_GEN2_OK : NpErrorInvalidArgument);
+    public static int NpCheckNpReachability(CpuContext ctx)
+    {
+        var requestId = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (requestId <= 0)
+        {
+            return SetReturn(ctx, NpErrorInvalidArgument);
+        }
+
+        _requestResults[requestId] = NpErrorSignedOut;
+        return SetReturn(ctx, NpErrorSignedOut);
+    }
 
     [SysAbiExport(Nid = "GpLQDNKICac", ExportName = "sceNpCreateRequest", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpManager")]
     public static int NpCreateRequest(CpuContext ctx) => SetReturn(ctx, NextRequestId());
@@ -50,7 +62,7 @@ public static class NpManagerExports
         if (resultAddress != 0)
         {
             Span<byte> result = stackalloc byte[sizeof(int)];
-            BinaryPrimitives.WriteInt32LittleEndian(result, 0);
+            BinaryPrimitives.WriteInt32LittleEndian(result, _requestResults.GetValueOrDefault(requestId));
             if (!ctx.Memory.TryWrite(resultAddress, result))
             {
                 return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -73,6 +85,7 @@ public static class NpManagerExports
         LibraryName = "libSceNpManager")]
     public static int NpDeleteRequest(CpuContext ctx)
     {
+        _requestResults.TryRemove(unchecked((int)ctx[CpuRegister.Rdi]), out _);
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
