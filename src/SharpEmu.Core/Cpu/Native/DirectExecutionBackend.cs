@@ -1,4 +1,4 @@
-// Copyright (C) 2026 SharpEmu Emulator Project
+﻿// Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System;
@@ -949,6 +949,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	}
 
 	private bool HasActiveExecutionThread => ReferenceEquals(_activeExecutionBackend, this);
+
+	/// <summary>
+	/// Host thread id currently inside a guest execution call, 0 when none is. Read by the stall
+	/// watchdog from its own thread, which is why this is an ordinary field rather than one of the
+	/// [ThreadStatic] execution-state slots above.
+	/// </summary>
+	private int _executingHostThreadId;
 
 	/// <summary>
 	/// Binds the debug frame view the dispatcher created for the frame about to
@@ -6177,6 +6184,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var previousYieldRequested = _activeGuestThreadYieldRequested;
 		var previousYieldReason = _activeGuestThreadYieldReason;
 		nint previousHostRspSlotValue = TlsGetValue(_hostRspSlotTlsIndex);
+		// Guest code runs natively on this thread; the managed CpuContext keeps whatever it was
+		// entered with. The stall watchdog runs elsewhere, so record the host thread id here or it
+		// has no way to reach the live registers.
+		var previousExecutingHostThreadId = Interlocked.Exchange(
+			ref _executingHostThreadId, unchecked((int)GetCurrentThreadId()));
 		try
 		{
 			_activeExecutionBackend = this;
@@ -6356,6 +6368,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		finally
 		{
 			TlsSetValue(_hostRspSlotTlsIndex, previousHostRspSlotValue);
+			Volatile.Write(ref _executingHostThreadId, previousExecutingHostThreadId);
 			RestoreActiveExecutionThread(
 				previousActiveBackend,
 				previousActiveContext,
@@ -6404,6 +6417,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var previousYieldRequested = _activeGuestThreadYieldRequested;
 		var previousYieldReason = _activeGuestThreadYieldReason;
 		nint previousHostRspSlotValue = TlsGetValue(_hostRspSlotTlsIndex);
+		// Guest code runs natively on this thread; the managed CpuContext keeps whatever it was
+		// entered with. The stall watchdog runs elsewhere, so record the host thread id here or it
+		// has no way to reach the live registers.
+		var previousExecutingHostThreadId = Interlocked.Exchange(
+			ref _executingHostThreadId, unchecked((int)GetCurrentThreadId()));
 		try
 		{
 			_activeExecutionBackend = this;
@@ -6522,6 +6540,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		finally
 		{
 			TlsSetValue(_hostRspSlotTlsIndex, previousHostRspSlotValue);
+			Volatile.Write(ref _executingHostThreadId, previousExecutingHostThreadId);
 			RestoreActiveExecutionThread(
 				previousActiveBackend,
 				previousActiveContext,
@@ -6678,6 +6697,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var previousYieldRequested = _activeGuestThreadYieldRequested;
 		var previousYieldReason = _activeGuestThreadYieldReason;
 		nint previousHostRspSlotValue = TlsGetValue(_hostRspSlotTlsIndex);
+		// Guest code runs natively on this thread; the managed CpuContext keeps whatever it was
+		// entered with. The stall watchdog runs elsewhere, so record the host thread id here or it
+		// has no way to reach the live registers.
+		var previousExecutingHostThreadId = Interlocked.Exchange(
+			ref _executingHostThreadId, unchecked((int)GetCurrentThreadId()));
 		try
 		{
 			_activeExecutionBackend = this;
@@ -6886,6 +6910,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			StopStallWatchdog();
 			ActiveEntryReturnSentinelRip = 0uL;
 			TlsSetValue(_hostRspSlotTlsIndex, previousHostRspSlotValue);
+			Volatile.Write(ref _executingHostThreadId, previousExecutingHostThreadId);
 			if (_hostRspSlotStorage != 0)
 			{
 				*(long*)_hostRspSlotStorage = 0L;
@@ -7316,9 +7341,35 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			{
 				return;
 			}
-			ulong rsp = cpuContext[CpuRegister.Rsp];
-			Console.Error.WriteLine($"[LOADER][ERROR] Stall snapshot: rip=0x{cpuContext.Rip:X16} rsp=0x{rsp:X16} rbp=0x{cpuContext[CpuRegister.Rbp]:X16} rax=0x{cpuContext[CpuRegister.Rax]:X16} rbx=0x{cpuContext[CpuRegister.Rbx]:X16} rcx=0x{cpuContext[CpuRegister.Rcx]:X16} rdx=0x{cpuContext[CpuRegister.Rdx]:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} rdi=0x{cpuContext[CpuRegister.Rdi]:X16}");
-			ulong num = cpuContext.Rip & 0xFFFFFFFFFFFFFFF0uL;
+			// Guest code executes natively, so the managed context still holds the values execution
+			// was entered with - reporting its RIP names the entry point, not where the guest is
+			// stuck. Suspend the executing host thread and read the live registers instead; fall
+			// back to the managed context only when that thread cannot be reached.
+			ulong rip;
+			ulong rsp;
+			var executingHostThreadId = Volatile.Read(ref _executingHostThreadId);
+			if (TryCaptureHostThreadContext(executingHostThreadId, out var live))
+			{
+				rip = live.Rip;
+				rsp = live.Rsp;
+				Console.Error.WriteLine(
+					$"[LOADER][ERROR] Stall snapshot: rip=0x{rip:X16} rsp=0x{rsp:X16} rbp=0x{live.Rbp:X16} " +
+					$"rax=0x{live.Rax:X16} rbx=0x{live.Rbx:X16} rcx=0x{live.Rcx:X16} rdx=0x{live.Rdx:X16} " +
+					$"source=live host_tid={executingHostThreadId} entry_rip=0x{cpuContext.Rip:X16}");
+			}
+			else
+			{
+				rip = cpuContext.Rip;
+				rsp = cpuContext[CpuRegister.Rsp];
+				Console.Error.WriteLine(
+					$"[LOADER][ERROR] Stall snapshot: rip=0x{rip:X16} rsp=0x{rsp:X16} rbp=0x{cpuContext[CpuRegister.Rbp]:X16} " +
+					$"rax=0x{cpuContext[CpuRegister.Rax]:X16} rbx=0x{cpuContext[CpuRegister.Rbx]:X16} " +
+					$"rcx=0x{cpuContext[CpuRegister.Rcx]:X16} rdx=0x{cpuContext[CpuRegister.Rdx]:X16} " +
+					$"rsi=0x{cpuContext[CpuRegister.Rsi]:X16} rdi=0x{cpuContext[CpuRegister.Rdi]:X16} " +
+					$"source=entry-context host_tid={executingHostThreadId} " +
+					"(registers are as execution was entered, not where it is stopped)");
+			}
+			ulong num = rip & 0xFFFFFFFFFFFFFFF0uL;
 			for (int i = 0; i < _importEntries.Length; i++)
 			{
 				if (_importEntries[i].Address != num)
@@ -7337,7 +7388,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				break;
 			}
 			Span<byte> destination = stackalloc byte[16];
-			if (cpuContext.Memory.TryRead(cpuContext.Rip, destination))
+			if (cpuContext.Memory.TryRead(rip, destination))
 			{
 				Console.Error.WriteLine($"[LOADER][ERROR] Stall bytes @rip: {BitConverter.ToString(destination.ToArray()).Replace("-", " ")}");
 			}
