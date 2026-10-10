@@ -333,6 +333,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             throw SubmissionScheduler.Fatal("The host DMA write range is invalid.");
         }
 
+        GpuWritebackEpoch.Advance();
         if (!_backing.TryWriteBacking(guestAddress, data))
         {
             throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{guestAddress:X16} size=0x{data.Length:X16}");
@@ -413,24 +414,69 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         if (images.OverlapsDccMetadata(guestAddress, size) && TryWriteFillToBacking(guestAddress, size, value))
         {
             _gpuModifiedRanges.Remove(guestAddress, size);
-            var firstPage = guestAddress & ~(TrackerLayout.PageBytes - 1);
-            for (var page = firstPage; page < guestAddress + size; page += TrackerLayout.PageBytes)
-            {
-                if (!_gpuModifiedRanges.Overlaps(page, TrackerLayout.PageBytes))
-                {
-                    _tracker.ClearGpuDirtyPages(page, TrackerLayout.PageBytes);
-                }
-            }
+            Interlocked.Increment(ref _gpuModifiedVersion);
+            ClearGpuDirtyPagesOfRemovedRange(guestAddress, size);
+        }
+    }
+
+    // After a range left the GPU-modified set: the pages inside it are clean in one tracker walk,
+    // and only a page the range shares at either end can still hold another GPU-modified range.
+    private void ClearGpuDirtyPagesOfRemovedRange(ulong guestAddress, ulong size)
+    {
+        const ulong pageBytes = TrackerLayout.PageBytes;
+        var end = guestAddress + size;
+        var firstPage = guestAddress & ~(pageBytes - 1);
+        var lastPage = (end - 1) & ~(pageBytes - 1);
+        var startPartial = guestAddress != firstPage;
+        var endPartial = end != lastPage + pageBytes;
+        var innerBegin = startPartial ? firstPage + pageBytes : firstPage;
+        var innerEnd = endPartial ? lastPage : end;
+        if (innerBegin < innerEnd)
+        {
+            _tracker.ClearGpuDirtyPages(innerBegin, innerEnd - innerBegin);
+        }
+
+        if (startPartial)
+        {
+            ClearGpuDirtyPageIfUnmodified(firstPage);
+        }
+
+        if (endPartial && (lastPage != firstPage || !startPartial))
+        {
+            ClearGpuDirtyPageIfUnmodified(lastPage);
+        }
+    }
+
+    private void ClearGpuDirtyPageIfUnmodified(ulong page)
+    {
+        if (!_gpuModifiedRanges.Overlaps(page, TrackerLayout.PageBytes))
+        {
+            _tracker.ClearGpuDirtyPages(page, TrackerLayout.PageBytes);
         }
     }
 
     public void FillDccMetadata(ulong guestAddress, ulong size, uint value)
     {
         if (guestAddress == 0 || (guestAddress & 3) != 0 || size == 0 || (size & 3) != 0 || size > ulong.MaxValue - guestAddress ||
-            HasGpuDirtyBytes(guestAddress, size) || RequireImageCache().QueryRegion(guestAddress, size).ImageBytes)
+            HasGpuDirtyBytes(guestAddress, size))
         {
             FillBuffer(guestAddress, size, value, false);
             return;
+        }
+
+        // Images over the range read it again; only GPU-owned image bytes need the general fill.
+        // The buffer copy is filled on the GPU rather than uploaded from the written bytes.
+        var images = RequireImageCache();
+        var region = images.QueryRegion(guestAddress, size);
+        if (region.GpuImageBytes)
+        {
+            FillBuffer(guestAddress, size, value, false);
+            return;
+        }
+
+        if (region.ImageBytes)
+        {
+            images.InvalidateMemory(guestAddress, size);
         }
 
         var (destination, destinationOffset) = ObtainBuffer(guestAddress, size, false, false, FindBuffer(guestAddress, size));
@@ -443,21 +489,31 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     private bool TryWriteFillToBacking(ulong guestAddress, ulong size, uint value)
     {
-        var values = new uint[(int)Math.Min(size / sizeof(uint), 4096)];
-        Array.Fill(values, value);
-        var bytes = MemoryMarshal.AsBytes<uint>(values);
-        for (ulong offset = 0; offset < size;)
+        // Metadata fills repeat every frame: the pattern buffer is pooled.
+        var count = (int)Math.Min(size / sizeof(uint), 4096);
+        var values = System.Buffers.ArrayPool<uint>.Shared.Rent(count);
+        try
         {
-            var chunk = (int)Math.Min(size - offset, (ulong)bytes.Length);
-            if (!_backing.TryWriteBacking(guestAddress + offset, bytes[..chunk]))
+            values.AsSpan(0, count).Fill(value);
+            var bytes = MemoryMarshal.AsBytes(values.AsSpan(0, count));
+            for (ulong offset = 0; offset < size;)
             {
-                return false;
+                var chunk = (int)Math.Min(size - offset, (ulong)bytes.Length);
+                GpuWritebackEpoch.Advance();
+                if (!_backing.TryWriteBacking(guestAddress + offset, bytes[..chunk]))
+                {
+                    return false;
+                }
+
+                offset += (ulong)chunk;
             }
 
-            offset += (ulong)chunk;
+            return true;
         }
-
-        return true;
+        finally
+        {
+            System.Buffers.ArrayPool<uint>.Shared.Return(values);
+        }
     }
 
     public const ulong MaxHostCopyWords = 64 * 1024;
@@ -1241,6 +1297,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var copies = pending.Copies;
             readback.Complete(pending.Ticket, (index, bytes) =>
             {
+                GpuWritebackEpoch.Advance();
                 if (!_backing.TryWriteBacking(copies[index].Address, bytes))
                 {
                     throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copies[index].Address:X16} size=0x{(ulong)bytes.Length:X16}");
@@ -1249,6 +1306,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             foreach (var copy in copies)
             {
                 _gpuModifiedRanges.Remove(copy.Address, copy.Size);
+                Interlocked.Increment(ref _gpuModifiedVersion);
             }
 
             _tracker.ClearGpuDirtyPages(pending.WindowBegin, pending.WindowEnd - pending.WindowBegin);
@@ -1456,6 +1514,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             foreach (var copy in copies)
             {
                 _gpuModifiedRanges.Remove(copy.Address, copy.Size);
+                Interlocked.Increment(ref _gpuModifiedVersion);
             }
 
             return;
@@ -1492,6 +1551,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         foreach (var copy in copies)
         {
             _gpuModifiedRanges.Remove(copy.Address, copy.Size);
+            Interlocked.Increment(ref _gpuModifiedVersion);
         }
     }
 
@@ -1590,6 +1650,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
         readback.Read(pieces, waitTick, (index, bytes) =>
         {
+            GpuWritebackEpoch.Advance();
             if (!_backing.TryWriteBacking(copies[index].Address, bytes))
             {
                 throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copies[index].Address:X16} size=0x{(ulong)bytes.Length:X16}");
@@ -1622,6 +1683,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             var placement = copy.Placement;
             var offset = baseOffset + placement.DataOffset;
             _download.Invalidate(offset, placement.DataSize);
+            GpuWritebackEpoch.Advance();
             if (!_backing.TryWriteBacking(copy.Address, _download.Mapped.Slice((int)offset, (int)placement.DataSize)))
             {
                 throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copy.Address:X16} size=0x{placement.DataSize:X16}");
@@ -1713,20 +1775,79 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         profileScope.SwitchPhase(isWritten
             ? RenderPhaseProfile.Phase.BufferDirtySyncWritten
             : isTexelBuffer ? RenderPhaseProfile.Phase.BufferDirtySyncTexel : RenderPhaseProfile.Phase.BufferDirtySyncUpload);
-        var copies = new List<BufferCopy>();
-        var totalSize = 0UL;
-        GpuBuffer? source = null;
-        _tracker.ForEachUploadRange(
-            guestAddress,
-            size,
-            isWritten,
-            (address, bytes) =>
+        var collector = _uploadCollector;
+        if (collector is null || collector.InUse)
+        {
+            // The first call on a thread keeps its collector; a nested one gets its own.
+            collector = new UploadCollector();
+            _uploadCollector ??= collector;
+        }
+
+        collector.Begin(this, buffer, guestAddress, size);
+        try
+        {
+            return SynchronizeBufferCore(collector, buffer, guestAddress, size, isWritten, isTexelBuffer, preserveCpuWriteHotPages, startedAt);
+        }
+        finally
+        {
+            collector.End();
+        }
+    }
+
+    // The ranges of one synchronization. The delegates are bound once, so a call that has dirty
+    // pages to upload allocates no closure and no list.
+    private sealed class UploadCollector
+    {
+        private GuestBufferCache _cache = null!;
+        private GpuBuffer _buffer = null!;
+        private ulong _guestAddress;
+        private ulong _size;
+        public readonly List<BufferCopy> Copies = new();
+        public ulong TotalSize;
+        public GpuBuffer? Source;
+        public bool InUse;
+        public readonly Action<ulong, ulong> Collect;
+        public readonly Action Upload;
+
+        public UploadCollector()
+        {
+            Collect = (address, bytes) =>
             {
-                copies.Add(new BufferCopy(totalSize, buffer.Offset(address), bytes));
-                totalSize += bytes;
-            },
-            () => source = _uploader.PrepareSource(buffer.CpuAddress, CollectionsMarshal.AsSpan(copies), totalSize, guestAddress, size),
-            preserveCpuWriteHotPages);
+                Copies.Add(new BufferCopy(TotalSize, _buffer.Offset(address), bytes));
+                TotalSize += bytes;
+            };
+            Upload = () => Source = _cache._uploader.PrepareSource(_buffer.CpuAddress, CollectionsMarshal.AsSpan(Copies), TotalSize, _guestAddress, _size);
+        }
+
+        public void Begin(GuestBufferCache cache, GpuBuffer buffer, ulong guestAddress, ulong size)
+        {
+            InUse = true;
+            _cache = cache;
+            _buffer = buffer;
+            _guestAddress = guestAddress;
+            _size = size;
+        }
+
+        public void End()
+        {
+            InUse = false;
+            _cache = null!;
+            _buffer = null!;
+            Copies.Clear();
+            TotalSize = 0;
+            Source = null;
+        }
+    }
+
+    [ThreadStatic] private static UploadCollector? _uploadCollector;
+
+    private bool SynchronizeBufferCore(UploadCollector collector, GpuBuffer buffer, ulong guestAddress, ulong size, bool isWritten,
+        bool isTexelBuffer, bool preserveCpuWriteHotPages, long startedAt)
+    {
+        var copies = collector.Copies;
+        _tracker.ForEachUploadRange(guestAddress, size, isWritten, collector.Collect, collector.Upload, preserveCpuWriteHotPages);
+        var source = collector.Source;
+        var totalSize = collector.TotalSize;
         if (source != null)
         {
             buffer.NoteGpuWrite();

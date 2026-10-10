@@ -35,6 +35,25 @@ public sealed partial class GuestImageCache
 
     private void InvalidateLookups() => _lookupGeneration++;
 
+    // Changes whenever an image a lookup could find is created, removed or replaced, so a caller
+    // that remembers a lookup's result can tell when it may have changed.
+    public ulong LookupGeneration => _lookupGeneration;
+
+    // What a remembered lookup still does on reuse: the image counts as used now. False when the
+    // image is gone.
+    public bool TryTouchRemembered(ResourceSlotIdentifier imageIdentifier)
+    {
+        using var held = _lock.Hold();
+        if (_slots.TryGet(imageIdentifier) is not { Registered: true } image)
+        {
+            return false;
+        }
+
+        image.LastAccessTick = _scheduler.CurrentTick;
+        TouchImage(image);
+        return true;
+    }
+
     private static int LookupSlot(in ImageRequest request, bool exactFormat)
     {
         var hash = HashCode.Combine(request.Description.Data.Address, request.Description.Data.Size, request.Description.PixelFormat,

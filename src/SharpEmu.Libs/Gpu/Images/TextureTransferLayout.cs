@@ -233,8 +233,7 @@ public sealed class TextureTransferLayout
         layout.Pitch = TileGeometry.TexturePitch(format, width, tile);
         if (tile == GuestTileMode.Linear)
         {
-            var levelSpans = new TileLevelSpan[TiledSurfaceLayout.MaxLevels];
-            var paddedSizes = new TilePaddedSize[TiledSurfaceLayout.MaxLevels];
+            var (levelSpans, paddedSizes) = MipLayoutScratch.Rent();
             TileGeometry.TryGetTextureSize(format, width, height, levels, tile, out _, levelSpans, paddedSizes);
             for (uint level = 0; level < levels; level++)
             {

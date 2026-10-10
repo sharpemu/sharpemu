@@ -28,6 +28,7 @@ public static class RegisterWriteTable
 
     public static uint WriteContextPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values)
     {
+        banks.PrepareContextWrite();
         var consumed = WritePacket(banks, in packet, offset, values, Context, ContextIndirect, "context", emptyIsHandled: true);
         if (Rendering.RenderTrace.Enabled)
         {
@@ -43,6 +44,7 @@ public static class RegisterWriteTable
     // A shader packet without values has no writer; the other banks accept it.
     public static uint WriteShaderPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values)
     {
+        banks.PrepareShaderWrite(offset, (uint)values.Length);
         var consumed = WritePacket(banks, in packet, offset, values, Shader, ShaderIndirect, "shader", emptyIsHandled: false);
         if (Rendering.RenderTrace.Enabled)
         {
@@ -52,15 +54,19 @@ public static class RegisterWriteTable
         return consumed;
     }
 
-    public static uint WriteUserConfigPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
-        WritePacket(banks, in packet, offset, values, UserConfig, UserConfigIndirect, "user-config", emptyIsHandled: true);
+    public static uint WriteUserConfigPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values)
+    {
+        banks.PrepareUserConfigWrite();
+        return WritePacket(banks, in packet, offset, values, UserConfig, UserConfigIndirect, "user-config", emptyIsHandled: true);
+    }
 
     public static void WriteContextEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress)
     {
+        banks.PrepareContextWrite();
         if (offset < ContextIndirect.Length && ContextIndirect[offset] is null)
         {
             // Keep unknown in-bank table values so a later renderer implementation can decode them.
-            banks.Context.UnmodeledTableRegisters[offset] = value;
+            banks.UnmodeledTableRegistersForWrite[offset] = value;
         }
         else
         {
@@ -88,6 +94,7 @@ public static class RegisterWriteTable
 
     public static void WriteShaderEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress)
     {
+        banks.PrepareShaderWrite(offset, 1);
         WriteEntry(banks, offset, value, ShaderIndirect, "shader", tableAddress);
         if (Rendering.RenderTrace.Enabled)
             TracePixelRegisterWrite(banks, offset, value, tableAddress, "table");
@@ -104,8 +111,11 @@ public static class RegisterWriteTable
             $"value=0x{value:X8} shader=0x{banks.Shader.Pixel.Address:X16}");
     }
 
-    public static void WriteUserConfigEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress) =>
+    public static void WriteUserConfigEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress)
+    {
+        banks.PrepareUserConfigWrite();
         WriteEntry(banks, offset, value, UserConfigIndirect, "user-config", tableAddress);
+    }
 
     private static uint WritePacket(
         RegisterBanks banks,

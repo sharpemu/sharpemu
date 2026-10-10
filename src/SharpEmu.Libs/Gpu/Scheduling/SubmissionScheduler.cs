@@ -88,9 +88,21 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 
     internal bool PriorityWorkerAlive => _priorityThread.IsAlive;
 
+    // Set on a thread that does work ahead of the render thread: there a fatal condition only
+    // abandons that work, which the render thread then does itself and fails on if it is real.
+    [ThreadStatic]
+    internal static bool ThrowOnFatal;
+
+    public sealed class AbandonedWorkException(string message) : Exception(message);
+
     // Report the fatal error, then return an exception to stop the caller.
     internal static Exception Fatal(string message)
     {
+        if (ThrowOnFatal)
+        {
+            throw new AbandonedWorkException(message);
+        }
+
         Console.Error.WriteLine($"[GPU][FATAL] {message}");
         OnFatal(message);
         return new InvalidOperationException(message);

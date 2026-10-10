@@ -67,22 +67,42 @@ internal static unsafe partial class VulkanVideoPresenter
         uint IShaderPipelineHost.MaxPushDescriptors => _maxPushDescriptors;
 
         // Wave64 compute runs natively when the device's subgroup is that wide; smaller devices emulate it.
+        bool IShaderPipelineHost.ComputeWave64SubgroupNative =>
+            Volatile.Read(ref _nativeSubgroupSize) >= 64 && (_canRequireComputeSubgroup64 || Volatile.Read(ref _nativeSubgroupSize) == 64);
+
         bool IShaderPipelineHost.ComputeWave64Supported => Volatile.Read(ref _nativeSubgroupSize) >= 64;
 
-        // Only a 64-invocation wave64 workgroup is translated for either host subgroup width. Every
-        // other compute translation maps a guest wave to 32-lane host subgroups, and a 64-lane host
-        // subgroup (AMD's default) left lanes 32..63 inactive: a wave64 8x8x8 group lost rows 4..7.
+        // Wave32 compute maps a guest wave to 32-lane host subgroups, and a 64-lane host subgroup
+        // (AMD's default) left lanes 32..63 inactive, so those pipelines are pinned to 32. Wave64
+        // compute is pinned to 64 instead when the host runs it natively.
         private const uint RdnaSubgroupSize = 32;
         private bool _canRequireComputeSubgroup32;
         private uint _maxComputeWorkgroupSubgroups;
+
+        private const uint Wave64SubgroupSize = 64;
+        private bool _canRequireComputeSubgroup64;
+
+        // A native wave64 translation reads one guest wave as one host subgroup, so the driver must
+        // not pick 32-lane subgroups for it (RDNA drivers may do so for compute).
+        private bool RequiresComputeSubgroup64(ComputeInputInfo input)
+        {
+            return _canRequireComputeSubgroup64 && input.WaveSize == 64 &&
+                   ((IShaderPipelineHost)this).ComputeWave64SubgroupNative;
+        }
 
         private bool RequiresComputeSubgroup32(ComputeInputInfo input)
         {
             var invocations = (ulong)Math.Max(input.ThreadsX, 1) * Math.Max(input.ThreadsY, 1) * Math.Max(input.ThreadsZ, 1);
             return _canRequireComputeSubgroup32 &&
-                   !(input.WaveSize == 64 && invocations == 64) &&
+                   !(input.WaveSize == 64 && ((IShaderPipelineHost)this).ComputeWave64SubgroupNative) &&
                    invocations <= (ulong)_maxComputeWorkgroupSubgroups * RdnaSubgroupSize;
         }
+
+        // The subgroup width a compute pipeline must be pinned to, or 0 to leave it to the driver.
+        private uint ComputeRequiredSubgroupSize(ComputeInputInfo input) =>
+            RequiresComputeSubgroup64(input) ? Wave64SubgroupSize
+            : RequiresComputeSubgroup32(input) ? RdnaSubgroupSize
+            : 0u;
 
         bool IShaderPipelineHost.GraphicsSubgroupOperationsEnabled => GraphicsSubgroupOperationsEnabled;
 
@@ -101,6 +121,11 @@ internal static unsafe partial class VulkanVideoPresenter
         // A range the GPU wrote is downloaded first, so the word is what the guest CPU would read.
         public bool TryReadGuestWord(ulong address, out uint word)
         {
+            if (_concurrentAssumptions is { } assumptions)
+            {
+                return TryReadGuestWordConcurrent(address, out word, assumptions);
+            }
+
             using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.GuestRead);
             word = 0;
             var synchronized = false;
@@ -170,9 +195,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 return false;
             }
 
-            if ((_bufferCache.MayHaveGpuDirtyPages(address, sizeof(uint)) && _bufferCache.HasGpuDirtyPages(address, sizeof(uint))) ||
-                _bufferCache.HasGpuDirtyBytes(address, sizeof(uint)) ||
-                _imageCache.HasGpuModifiedImageBytes(address, sizeof(uint)))
+            var owned = IsGpuOwnedForCleanRead(address, sizeof(uint));
+            _concurrentAssumptions?.Record(ConcurrentQuery.CleanWord, address, sizeof(uint), owned);
+            if (owned)
             {
                 return false;
             }
@@ -190,6 +215,11 @@ internal static unsafe partial class VulkanVideoPresenter
         // The same ownership rules as the two word readers, checked once for a whole range.
         public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean)
         {
+            if (_concurrentAssumptions is { } assumptions)
+            {
+                return TryReadResidentGuestBytesConcurrent(address, destination, clean, assumptions);
+            }
+
             var size = (ulong)destination.Length;
             if (clean || !IsCleanReadPage(address, size))
             {
@@ -967,15 +997,16 @@ internal static unsafe partial class VulkanVideoPresenter
             Pipeline pipeline;
             try
             {
+                var pin = ComputeRequiredSubgroupSize(description.Input);
                 var requiredSubgroupSize = new PipelineShaderStageRequiredSubgroupSizeCreateInfo
                 {
                     SType = StructureType.PipelineShaderStageRequiredSubgroupSizeCreateInfo,
-                    RequiredSubgroupSize = RdnaSubgroupSize,
+                    RequiredSubgroupSize = pin,
                 };
                 var stageInfo = new PipelineShaderStageCreateInfo
                 {
                     SType = StructureType.PipelineShaderStageCreateInfo,
-                    PNext = RequiresComputeSubgroup32(description.Input) ? &requiredSubgroupSize : null,
+                    PNext = pin != 0 ? &requiredSubgroupSize : null,
                     Stage = ShaderStageFlags.ComputeBit,
                     Module = computeModule,
                     PName = entryPoint,
@@ -1099,6 +1130,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var device = _device;
             var cacheSource = GetGuestPipelineCacheSource(ComputeCacheKey(description.Stage.Hash, computeModule.Handle));
             var vk = _vk;
+            var requiredSubgroupSize = ComputeRequiredSubgroupSize(description.Input);
             var started = new PendingComputePipeline
             {
                 SetLayout = setLayout,
@@ -1122,7 +1154,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         // Importing a MoltenVK cache compiles its MSL libraries.
                         // Keep that work inside the same bounded compiler slot.
                         var cache = ResolveGuestPipelineCache(cacheSource);
-                        return CompileComputePipeline(vk, device, cache, computeModule, layout);
+                        return CompileComputePipeline(vk, device, cache, computeModule, layout, requiredSubgroupSize);
                     }
                     finally
                     {
@@ -1146,14 +1178,21 @@ internal static unsafe partial class VulkanVideoPresenter
             Device device,
             PipelineCache cache,
             ShaderModule module,
-            PipelineLayout layout)
+            PipelineLayout layout,
+            uint requiredSubgroupSize)
         {
             var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
             try
             {
+                var subgroupInfo = new PipelineShaderStageRequiredSubgroupSizeCreateInfo
+                {
+                    SType = StructureType.PipelineShaderStageRequiredSubgroupSizeCreateInfo,
+                    RequiredSubgroupSize = requiredSubgroupSize,
+                };
                 var stageInfo = new PipelineShaderStageCreateInfo
                 {
                     SType = StructureType.PipelineShaderStageCreateInfo,
+                    PNext = requiredSubgroupSize != 0 ? &subgroupInfo : null,
                     Stage = ShaderStageFlags.ComputeBit,
                     Module = module,
                     PName = entryPoint,

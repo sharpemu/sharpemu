@@ -31,10 +31,13 @@ public sealed unsafe partial class CachedImage
         SubresourceRange = new ImageSubresourceRange(ViewFormatRules.FullAspects(Backing.Format), baseLevel, levelCount, baseLayer, layerCount),
     };
 
+    // What a state that needs no barrier returns, so the common case allocates nothing. Callers only read it.
+    private static readonly List<ImageMemoryBarrier2> NoBarriers = [];
+
     // Barriers for the requested state; a repeated write always gets a barrier.
     public (List<ImageMemoryBarrier2> Barriers, PipelineStageFlags SourceStages) GetBarriers(ImageLayout layout, AccessFlags access, PipelineStageFlags stage, SubresourceRange? range)
     {
-        var barriers = new List<ImageMemoryBarrier2>();
+        List<ImageMemoryBarrier2>? barriers = null;
         PipelineStageFlags sourceStages = 0;
         if ((access & (WriteAccess | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit)) != 0)
         {
@@ -83,7 +86,7 @@ public sealed unsafe partial class CachedImage
                     var repeatedWrite = (state.Access & WriteAccess) != 0;
                     if (state.Layout != layout || state.Access != access || repeatedWrite)
                     {
-                        barriers.Add(MakeBarrier(state, layout, access, level, 1, layer, 1));
+                        (barriers ??= []).Add(MakeBarrier(state, layout, access, level, 1, layer, 1));
                         sourceStages |= state.Stage;
                         states[index] = new ImageAccessState(stage, access, layout);
                     }
@@ -101,15 +104,15 @@ public sealed unsafe partial class CachedImage
             var repeatedWrite = (state.Access & WriteAccess) != 0;
             if (state.Layout == layout && state.Access == access && !repeatedWrite)
             {
-                return (barriers, sourceStages);
+                return (NoBarriers, sourceStages);
             }
 
-            barriers.Add(MakeBarrier(state, layout, access, 0, Vk.RemainingMipLevels, 0, Vk.RemainingArrayLayers));
+            (barriers ??= []).Add(MakeBarrier(state, layout, access, 0, Vk.RemainingMipLevels, 0, Vk.RemainingArrayLayers));
             sourceStages |= state.Stage;
         }
 
         Backing.State = new ImageAccessState(stage, access, layout);
-        return (barriers, sourceStages);
+        return (barriers ?? NoBarriers, sourceStages);
     }
 
     public void Transition(ImageLayout layout, AccessFlags access, SubresourceRange? range, CommandBuffer command)

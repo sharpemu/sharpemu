@@ -5604,7 +5604,26 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return false;
 	}
 
+	// Map does not reject a range that is already mapped: it reuses and zero-fills it. Two threads
+	// creating guest threads at once could both find the same slot free and share one stack, so
+	// choosing and mapping a slot happen under one lock.
+	private static readonly object GuestThreadRegionGate = new();
+
 	private static bool TryMapGuestThreadRegion(
+		IVirtualMemory virtualMemory,
+		ulong baseAddress,
+		ulong size,
+		ProgramHeaderFlags protection,
+		out ulong mappedBase,
+		out string? error)
+	{
+		lock (GuestThreadRegionGate)
+		{
+			return TryMapGuestThreadRegionLocked(virtualMemory, baseAddress, size, protection, out mappedBase, out error);
+		}
+	}
+
+	private static bool TryMapGuestThreadRegionLocked(
 		IVirtualMemory virtualMemory,
 		ulong baseAddress,
 		ulong size,
@@ -5642,6 +5661,17 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	}
 
 	private static bool TryMapGuestThreadTlsRegion(
+		IVirtualMemory virtualMemory,
+		out ulong tlsBase,
+		out string? error)
+	{
+		lock (GuestThreadRegionGate)
+		{
+			return TryMapGuestThreadTlsRegionLocked(virtualMemory, out tlsBase, out error);
+		}
+	}
+
+	private static bool TryMapGuestThreadTlsRegionLocked(
 		IVirtualMemory virtualMemory,
 		out ulong tlsBase,
 		out string? error)

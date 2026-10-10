@@ -59,8 +59,28 @@ public static partial class ImageRequestBuilders
     }
 
     // Builds the request for the bound depth target. Null when no depth or stencil state is active.
-    public static DepthTargetResolution? DepthTarget(in DepthTargetWords depthWords, IImageFormatSupport device) =>
-        DepthTargetCore(in depthWords, device, copyMode: false, writeBuffer: false);
+    // Reused while the words and the device are the same, as ColorTarget's requests are.
+    public static DepthTargetResolution? DepthTarget(in DepthTargetWords depthWords, IImageFormatSupport device)
+    {
+        if (Rendering.RenderTrace.Enabled)
+        {
+            return DepthTargetCore(in depthWords, device, copyMode: false, writeBuffer: false);
+        }
+
+        if (_depthTargetMemo is { } memo && ReferenceEquals(memo.Device, device) && memo.Words.Equals(depthWords))
+        {
+            return memo.Result;
+        }
+
+        var result = DepthTargetCore(in depthWords, device, copyMode: false, writeBuffer: false);
+        _depthTargetMemo = new DepthTargetMemo(depthWords, device, result);
+        return result;
+    }
+
+    private sealed record DepthTargetMemo(DepthTargetWords Words, IImageFormatSupport Device, DepthTargetResolution? Result);
+
+    [ThreadStatic]
+    private static DepthTargetMemo? _depthTargetMemo;
 
     // Builds the source or destination image used by DB_RENDER_OVERRIDE depth/stencil copies.
     public static DepthTargetResolution? DepthTargetCopy(in DepthTargetWords depthWords, IImageFormatSupport device, bool writeBuffer) =>

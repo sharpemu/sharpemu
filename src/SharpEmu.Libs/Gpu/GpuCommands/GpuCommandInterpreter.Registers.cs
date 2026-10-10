@@ -82,8 +82,8 @@ public sealed partial class GpuCommandInterpreter
         var next = packet.PacketAddress + (ulong)packet.Length * sizeof(uint);
         var expectedHeader = PacketHeader.Make(centroidPacketDwords, PacketOpcode.SetContextRegister);
         if (packet.Remaining < packet.Length + centroidPacketDwords ||
-            ReadDword(next) != expectedHeader ||
-            RegisterBankLayout.Normalize(ReadDword(next + sizeof(uint))) != ContextRegisterOffset.PaScCentroidPriority0)
+            ReadDword(next, RenderPhaseProfile.CommandReadKind.Payload) != expectedHeader ||
+            RegisterBankLayout.Normalize(ReadDword(next + sizeof(uint), RenderPhaseProfile.CommandReadKind.Payload)) != ContextRegisterOffset.PaScCentroidPriority0)
         {
             throw _host.Fatal($"The sample location packet is not followed by the centroid priority packet: header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16} next=0x{next:X16}.");
         }
@@ -102,16 +102,16 @@ public sealed partial class GpuCommandInterpreter
 
         var address = packet.PacketAddress;
         var registerHeader = PacketHeader.Make(3, PacketOpcode.SetContextRegister);
-        if (ReadDword(address + 40) != registerHeader || ReadDword(address + 44) != RegisterBankLayout.DepthInfo ||
-            ReadDword(address + 52) != registerHeader || ReadDword(address + 56) != RegisterBankLayout.DepthView ||
-            ReadDword(address + 64) != registerHeader || ReadDword(address + 68) != RegisterBankLayout.HtileDataBase ||
-            ReadDword(address + 76) != registerHeader || ReadDword(address + 80) != RegisterBankLayout.HtileSurface ||
-            ReadDword(address + 88) != PacketHeader.Make(2, PacketOpcode.Nop))
+        if (ReadDword(address + 40, RenderPhaseProfile.CommandReadKind.Payload) != registerHeader || ReadDword(address + 44, RenderPhaseProfile.CommandReadKind.Payload) != RegisterBankLayout.DepthInfo ||
+            ReadDword(address + 52, RenderPhaseProfile.CommandReadKind.Payload) != registerHeader || ReadDword(address + 56, RenderPhaseProfile.CommandReadKind.Payload) != RegisterBankLayout.DepthView ||
+            ReadDword(address + 64, RenderPhaseProfile.CommandReadKind.Payload) != registerHeader || ReadDword(address + 68, RenderPhaseProfile.CommandReadKind.Payload) != RegisterBankLayout.HtileDataBase ||
+            ReadDword(address + 76, RenderPhaseProfile.CommandReadKind.Payload) != registerHeader || ReadDword(address + 80, RenderPhaseProfile.CommandReadKind.Payload) != RegisterBankLayout.HtileSurface ||
+            ReadDword(address + 88, RenderPhaseProfile.CommandReadKind.Payload) != PacketHeader.Make(2, PacketOpcode.Nop))
         {
             return;
         }
 
-        var sizeXy = ReadDword(address + 92);
+        var sizeXy = ReadDword(address + 92, RenderPhaseProfile.CommandReadKind.Payload);
         if (sizeXy != 0)
         {
             TypedRegisters.CompositeDepthSizeXy = sizeXy;

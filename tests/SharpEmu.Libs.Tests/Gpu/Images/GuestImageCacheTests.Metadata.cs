@@ -99,6 +99,24 @@ public sealed partial class GuestImageCacheTests
         harness.Shutdown();
     }
 
+    // A fill seen before its target leaves its range known as DCC metadata, so the next fill of it
+    // runs on the host and the range stays CPU-readable.
+    [Fact]
+    public void APendingDccFill_MarksItsRangeAsDccMetadata()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var fatal = new FatalScope();
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var metadata = address + 0x10000;
+        Assert.False(harness.Images.OverlapsDccMetadata(metadata, 0x100));
+
+        Assert.False(harness.Images.TryAbsorbDccFill(metadata, 0x100, 0x00000000u));
+
+        Assert.True(harness.Images.OverlapsDccMetadata(metadata + 0x80, 0x10));
+        Assert.False(harness.Images.OverlapsDccMetadata(metadata + 0x100, 0x10));
+    }
+
     [Fact]
     public void DccFills_RemainGuestProducersUntilDescriptorDiscovery()
     {
@@ -448,6 +466,35 @@ public sealed partial class GuestImageCacheTests
         Assert.True(harness.Images.TryReadGuestDccClear(metadata, SliceSize, 0, out _, out var code));
         Assert.Equal(0x00, code);
         Assert.True(harness.Cache.HasGpuDirtyBytes(plain, SliceSize));
+        harness.Shutdown();
+    }
+
+    // The pages inside a filled range are clean after it; a page it shares with another GPU-written
+    // range keeps that range's state.
+    [Fact]
+    public void DirtyDccFill_KeepsASharedBoundaryPageDirty()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const ulong Page = SharpEmu.HLE.GpuMemory.TrackerLayout.PageBytes;
+        var memory = harness.MapBacked(8 * Page, ReadWrite);
+        var metadata = memory + Page + Page / 2;
+        var size = 3 * Page;
+        var neighbour = metadata - 0x100;
+        harness.Images.RegisterDccMetadataForTest(metadata, size);
+        harness.Worker.Run(() =>
+        {
+            _ = harness.Cache.ObtainBuffer(neighbour, 0x100, isWritten: true);
+            _ = harness.Cache.ObtainBuffer(metadata, size, isWritten: true);
+        });
+
+        harness.Worker.Run(() => harness.Cache.FillBuffer(metadata, size, 0x00000000, isGds: false));
+
+        Assert.False(harness.Cache.HasGpuDirtyBytes(metadata, size));
+        Assert.False(harness.Cache.HasGpuDirtyPages(memory + 2 * Page, 2 * Page));
+        Assert.False(harness.Cache.HasGpuDirtyPages(memory + 4 * Page, Page));
+        Assert.True(harness.Cache.HasGpuDirtyPages(memory + Page, Page));
+        Assert.True(harness.Cache.HasGpuDirtyBytes(neighbour, 0x100));
         harness.Shutdown();
     }
 

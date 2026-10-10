@@ -45,6 +45,13 @@ public sealed class PipelineStaticParameters : IEquatable<PipelineStaticParamete
 
     public PipelineStaticParameters()
     {
+        Reset();
+    }
+
+    // The state of a new instance, for a lookup object reused across draws.
+    public void Reset()
+    {
+        Array.Clear(_bytes);
         DepthClipEnable = true;
         Samples = 1;
         ColorCount = 1;
@@ -146,6 +153,15 @@ public sealed class PipelineRenderingState : IEquatable<PipelineRenderingState>
     public Format StencilFormat { get; set; } = Format.Undefined;
     public uint ColorCount { get; set; }
 
+    // The state of a new instance, for a lookup object reused across draws.
+    public void Reset()
+    {
+        Array.Clear(ColorFormats);
+        DepthFormat = Format.Undefined;
+        StencilFormat = Format.Undefined;
+        ColorCount = 0;
+    }
+
     public bool Equals(PipelineRenderingState? other) =>
         other is not null && ColorCount == other.ColorCount && DepthFormat == other.DepthFormat && StencilFormat == other.StencilFormat &&
         ColorFormats.AsSpan().SequenceEqual(other.ColorFormats);
@@ -179,6 +195,15 @@ public sealed class PipelineVertexInputState : IEquatable<PipelineVertexInputSta
     public byte BindingCount { get; set; }
     public byte AttributeCount { get; set; }
 
+    // The state of a new instance, for a lookup object reused across draws.
+    public void Reset()
+    {
+        Array.Clear(Bindings);
+        Array.Clear(Attributes);
+        BindingCount = 0;
+        AttributeCount = 0;
+    }
+
     public bool Equals(PipelineVertexInputState? other) =>
         other is not null && BindingCount == other.BindingCount && AttributeCount == other.AttributeCount &&
         Bindings.AsSpan().SequenceEqual(other.Bindings) && Attributes.AsSpan().SequenceEqual(other.Attributes);
@@ -207,8 +232,9 @@ public sealed class PipelineVertexInputState : IEquatable<PipelineVertexInputSta
 public sealed class GraphicsPipelineKey : IEquatable<GraphicsPipelineKey>
 {
     public required PipelineRenderingState Rendering { get; init; }
-    public ulong VertexProgramId { get; init; }
-    public ulong PixelProgramId { get; init; }
+    // Settable for the lookup key reused across draws; a key in the cache is never changed.
+    public ulong VertexProgramId { get; set; }
+    public ulong PixelProgramId { get; set; }
     public required PipelineVertexInputState VertexInput { get; init; }
     public required PipelineStaticParameters StaticParameters { get; init; }
 

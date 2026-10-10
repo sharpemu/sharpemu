@@ -89,8 +89,7 @@ public static partial class ImageRequestBuilders
             return;
         }
 
-        var spans = new TileLevelSpan[TiledSurfaceLayout.MaxLevels];
-        var padded = new TilePaddedSize[TiledSurfaceLayout.MaxLevels];
+        var (spans, padded) = MipLayoutScratch.Rent();
         TileGeometry.TryGetTextureSize(
             description.GuestFormat, description.Extent.Width, description.Extent.Height, description.Resources.Levels, description.TileMode,
             out _, spans, padded);

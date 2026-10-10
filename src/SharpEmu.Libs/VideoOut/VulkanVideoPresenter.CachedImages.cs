@@ -130,6 +130,37 @@ internal static unsafe partial class VulkanVideoPresenter
         // A draw-local copy used when the guest samples a depth aspect while the
         // same image is attached for writes. It retires with the submission.
         public bool IsFeedbackSnapshot;
+        // Taken from the presenter's pool; goes back to it when its submission retires.
+        public bool Pooled;
+        public bool InPool;
+
+        // Back to the state of a new object, so a reused one never carries a previous binding.
+        public void Reset()
+        {
+            Address = 0;
+            ImageIdentifier = default;
+            Request = default;
+            CachedImage = null;
+            MipLevel = 0;
+            Image = default;
+            View = default;
+            Layout = ImageLayout.ShaderReadOnlyOptimal;
+            Sampler = default;
+            SamplerState = default;
+            IsStorage = false;
+            IsHostMovie = false;
+            HostMoviePlane = -1;
+            HostMovieFrameSerial = 0;
+            NeedsUpload = false;
+            StagingBuffer = default;
+            StagingMemory = default;
+            Width = 0;
+            Height = 0;
+            RowLength = 0;
+            DestinationSelect = 0;
+            MipViews = [];
+            IsFeedbackSnapshot = false;
+        }
     }
 
     private sealed partial class Presenter

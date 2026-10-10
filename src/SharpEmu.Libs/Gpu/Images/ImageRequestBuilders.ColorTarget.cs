@@ -76,8 +76,56 @@ public static partial class ImageRequestBuilders
 
     public static bool SupportsDccFixedClear(Format format) => PackedClearValue.SupportsDccFixedColor(format);
 
+    // Every draw rebuilds its targets' requests (a whole mip layout) from the same register words,
+    // twice: once for the attachments and once for the pixel outputs. The build reads nothing but
+    // its arguments, so a result is reused while they are equal.
+    private struct ColorTargetMemo
+    {
+        public bool Valid;
+        public ColorTargetWords Words;
+        public uint TargetMask;
+        public uint DrawLayerOffset;
+        public bool IgnoreTargetMask;
+        public ColorTargetResolution? Result;
+    }
+
+    private const int TargetMemoCount = 8;
+
+    [ThreadStatic]
+    private static ColorTargetMemo[]? _colorTargetMemos;
+
+    private static int TargetMemoSlot(ulong address) => (int)((address >> 12) ^ (address >> 20)) & (TargetMemoCount - 1);
+
     // Builds the request for a bound color target. Null when the slot carries no target.
     public static ColorTargetResolution? ColorTarget(in ColorTargetWords words, uint targetMask, uint drawLayerOffset, bool ignoreTargetMask)
+    {
+        if (Rendering.RenderTrace.Enabled)
+        {
+            return ColorTargetCore(in words, targetMask, drawLayerOffset, ignoreTargetMask);
+        }
+
+        var memos = _colorTargetMemos ??= new ColorTargetMemo[TargetMemoCount];
+        ref var memo = ref memos[TargetMemoSlot(words.BaseAddress)];
+        if (memo.Valid && memo.TargetMask == targetMask && memo.DrawLayerOffset == drawLayerOffset &&
+            memo.IgnoreTargetMask == ignoreTargetMask && memo.Words.Equals(words))
+        {
+            return memo.Result;
+        }
+
+        var result = ColorTargetCore(in words, targetMask, drawLayerOffset, ignoreTargetMask);
+        memo = new ColorTargetMemo
+        {
+            Valid = true,
+            Words = words,
+            TargetMask = targetMask,
+            DrawLayerOffset = drawLayerOffset,
+            IgnoreTargetMask = ignoreTargetMask,
+            Result = result,
+        };
+        return result;
+    }
+
+    private static ColorTargetResolution? ColorTargetCore(in ColorTargetWords words, uint targetMask, uint drawLayerOffset, bool ignoreTargetMask)
     {
         var mask = targetMask & 0xF;
         if (ignoreTargetMask && words.BaseAddress != 0 && mask == 0)
@@ -235,8 +283,7 @@ public static partial class ImageRequestBuilders
             pitch = TileGeometry.TexturePitch(transferFormat, width, GuestTileMode.Linear);
         }
 
-        var mipSpans = new TileLevelSpan[TiledSurfaceLayout.MaxLevels];
-        var mipPadded = new TilePaddedSize[TiledSurfaceLayout.MaxLevels];
+        var (mipSpans, mipPadded) = MipLayoutScratch.Rent();
         TiledSurfaceLayout? volumeLayout = null;
         ulong size;
         ulong backingSize = 0;

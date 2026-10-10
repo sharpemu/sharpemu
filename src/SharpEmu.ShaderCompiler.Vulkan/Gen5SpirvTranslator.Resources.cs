@@ -116,7 +116,23 @@ public static partial class Gen5SpirvTranslator
             _localSizeY = Math.Max(request.LocalSizeY, 1);
             _localSizeZ = Math.Max(request.LocalSizeZ, 1);
             _physicalAxisOfLogical = ComputeWorkgroupAxisOrder(_localSizeX, _localSizeY, _localSizeZ);
-            _emulateWave64 = _stage == Gen5SpirvStage.Compute && _waveLaneCount == 64 && (ulong)_localSizeX * _localSizeY * _localSizeZ == 64;
+            // A wave64 runs as one 64-lane host subgroup when the host pins it to one
+            // (HostWave64Supported). Hosts without 64-lane subgroups bridge the two 32-lane
+            // halves through workgroup memory.
+            if (_waveLaneCount == 32)
+            {
+                _waveLowering = new NativeWave32Lowering(this);
+            }
+            else if (request.HostWave64Supported)
+            {
+                _waveLowering = new NativeWave64Lowering(this);
+                _guestLaneFromSubgroup = true;
+            }
+            else
+            {
+                _waveLowering = new EmulatedWave64Lowering(this);
+            }
+
             _requiredVertexOutputCount = request.RequiredVertexOutputCount;
             _pixelInputEnable = request.PixelInputEnable;
             _pixelInputAddress = request.PixelInputAddress;
@@ -1909,21 +1925,7 @@ public static partial class Gen5SpirvTranslator
             });
 
             var firstValue = LoadV(destination);
-            uint broadcast;
-            if (_emulateWave64)
-            {
-                broadcast = ExchangeWave64Value(isFirstActive, firstValue);
-            }
-            else if (_stage == Gen5SpirvStage.Compute || _enableGraphicsSubgroupOperations)
-            {
-                // Every active lane receives the first lane's old counter, in graphics stages too.
-                broadcast = _module.AddInstruction(SpirvOp.GroupNonUniformShuffle, _uintType, UInt(3), firstValue, firstLane);
-            }
-            else
-            {
-                // Without subgroup operations a graphics invocation is its own wave of one lane.
-                broadcast = firstValue;
-            }
+            var broadcast = BroadcastWaveValue(isFirstActive, firstValue, firstLane);
 
             var validResult = LogicalAnd(inBounds, IsNotZero64(activeMask));
             StoreV(destination, _module.AddInstruction(SpirvOp.Select, _uintType, validResult, broadcast, UInt(0)));
