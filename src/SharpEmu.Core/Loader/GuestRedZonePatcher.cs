@@ -520,7 +520,8 @@ internal static class GuestRedZonePatcher
                 break;
             }
 
-            if (candidate.Mnemonic != Mnemonic.Lea)
+            // A compiler may spill arguments to the stack between the bounds check and the table load; a store writes no register.
+            if (candidate.Mnemonic != Mnemonic.Lea && !IsStoreToMemory(candidate))
             {
                 return false;
             }
@@ -559,6 +560,11 @@ internal static class GuestRedZonePatcher
         for (var index = branchIndex + 1; index <= jumpIndex - 3; index++)
         {
             var candidate = decoded[index].Instruction;
+            if (IsStoreToMemory(candidate))
+            {
+                continue;
+            }
+
             if (candidate.OpCount < 1 || candidate.GetOpKind(0) != OpKind.Register)
             {
                 return false;
@@ -620,6 +626,9 @@ internal static class GuestRedZonePatcher
 
         return true;
     }
+
+    private static bool IsStoreToMemory(in Instruction instruction) =>
+        instruction.Mnemonic == Mnemonic.Mov && instruction.OpCount == 2 && instruction.GetOpKind(0) == OpKind.Memory;
 
     private static bool IsRangeInReadableLoad(
         IReadOnlyList<ProgramHeader> programHeaders,

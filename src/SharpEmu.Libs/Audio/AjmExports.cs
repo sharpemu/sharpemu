@@ -70,6 +70,9 @@ public static class AjmExports
 
         public AjmMp3Decoder? Mp3 { get; init; }
 
+        /// <summary>The ratio the title last set with sceAjmBatchJobSetResampleParametersEx.</summary>
+        public float ResampleRatio { get; set; } = 1f;
+
         public bool PreferPcm16
         {
             get
@@ -568,6 +571,115 @@ public static class AjmExports
     public static int AjmBatchJobRunSplitBufferRa(CpuContext ctx) => AjmBatchJobRunCore(ctx, split: true);
 
     /// <summary>
+    /// The split-buffer form of <see cref="AjmBatchJobDecode"/>: arrays of input and output AjmBuffer
+    /// descriptors, decoding as many frames as fit, with the SceAjmDecodeResult at the seventh argument.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "SJ3i0DXP8vg",
+        ExportName = "sceAjmBatchJobDecodeSplit",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobDecodeSplit(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var inputAddress = ctx[CpuRegister.Rdx];
+        var inputCount = ctx[CpuRegister.Rcx];
+        var outputAddress = ctx[CpuRegister.R8];
+        var outputCount = ctx[CpuRegister.R9];
+        var resultAddress = ReadStackArg64(ctx, 0);
+
+        if (!TryAppendBatchJob(ctx, infoAddress, SplitJobSize(inputCount, outputCount)))
+        {
+            return ctx.SetReturn(OrbisAjmErrorJobCreation);
+        }
+
+        var result = DecodeJob(
+            ctx, instanceId, split: true, inputAddress, inputCount, outputAddress, outputCount, multipleFrames: true,
+            out _, out _);
+        WriteDecodeStreamResult(ctx, resultAddress, result, multipleFrames: true);
+        Trace(
+            $"batch_job_decode_split instance=0x{instanceId:X8} in=0x{inputAddress:X16}#{inputCount} " +
+            $"out=0x{outputAddress:X16}#{outputCount} consumed={result.InputConsumed} " +
+            $"produced={result.OutputWritten} frames={result.Frames} status=0x{result.Status:X8}");
+        return ctx.SetReturn(0);
+    }
+
+    /// <summary>
+    /// Records the resampling ratio a voice asked for. SharpEmu's decoders do not resample, so the job only
+    /// keeps the ratio for <see cref="AjmBatchJobGetResampleInfo"/> and acknowledges the request instead of
+    /// leaving the title with a failed or missing job.
+    /// </summary>
+    [SysAbiExport(
+        Nid = "5ldnD16rYZw",
+        ExportName = "sceAjmBatchJobSetResampleParametersEx",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobSetResampleParametersEx(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var flags = unchecked((uint)ctx[CpuRegister.Rdx]);
+        var resultAddress = ctx[CpuRegister.Rcx];
+        ctx.GetXmmRegister(0, out var ratioBits, out _);
+        var ratioStart = BitConverter.Int32BitsToSingle(unchecked((int)(uint)ratioBits));
+
+        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobSetResampleParametersSize))
+        {
+            return ctx.SetReturn(OrbisAjmErrorJobCreation);
+        }
+
+        var status = Atrac9DecodeState.ResultInvalidParameter;
+        if (TryGetInstance(instanceId, out var instance))
+        {
+            if ((flags & AjmResampleFlagIgnoreRatio) == 0)
+            {
+                instance.ResampleRatio = ratioStart;
+            }
+
+            status = 0;
+        }
+
+        WriteBasicResult(ctx, resultAddress, status);
+        Trace(
+            $"batch_job_set_resample_parameters_ex instance=0x{instanceId:X8} ratio={ratioStart:R} " +
+            $"flags=0x{flags:X} status=0x{status:X8}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "JkdNCocpu1M",
+        ExportName = "sceAjmBatchJobGetResampleInfo",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAjm")]
+    public static int AjmBatchJobGetResampleInfo(CpuContext ctx)
+    {
+        var infoAddress = ctx[CpuRegister.Rdi];
+        var instanceId = unchecked((uint)ctx[CpuRegister.Rsi]);
+        var resultAddress = ctx[CpuRegister.Rdx];
+
+        if (!TryAppendBatchJob(ctx, infoAddress, AjmJobRunSize))
+        {
+            return ctx.SetReturn(OrbisAjmErrorJobCreation);
+        }
+
+        var found = TryGetInstance(instanceId, out var instance);
+        if (resultAddress != 0)
+        {
+            // SceAjmSidebandResampleResult: the result, then the ratio, the samples still held back by the
+            // resampler (none: nothing is resampled here) and eight reserved words.
+            Span<byte> result = stackalloc byte[AjmSidebandResultBytes + AjmSidebandResampleInfoBytes];
+            result.Clear();
+            BinaryPrimitives.WriteInt32LittleEndian(result, found ? 0 : Atrac9DecodeState.ResultInvalidParameter);
+            BinaryPrimitives.WriteSingleLittleEndian(result[AjmSidebandResultBytes..], found ? instance.ResampleRatio : 1f);
+            _ = ctx.Memory.TryWrite(resultAddress, result);
+        }
+
+        Trace($"batch_job_get_resample_info instance=0x{instanceId:X8} found={found}");
+        return ctx.SetReturn(0);
+    }
+
+    /// <summary>
     /// Records the gapless-decode window for a looping voice. SharpEmu decodes
     /// whole superframes and does not trim lead-in/lead-out samples yet, so this
     /// only has to acknowledge the job instead of failing the batch.
@@ -907,50 +1019,16 @@ public static class AjmExports
         var sidebandAddress = ReadStackArg64(ctx, 1);
         var sidebandSize = ReadStackArg64(ctx, 2);
 
-        var descriptors = split
-            ? Math.Min(inputCountOrSize, MaxBufferDescriptors) + Math.Min(outputCountOrSize, MaxBufferDescriptors)
-            : 0;
-        var jobSize = split
-            ? AjmJobRunSplitBaseSize + (descriptors * AjmBufferDescriptorBytes)
-            : AjmJobRunSize;
+        var jobSize = split ? SplitJobSize(inputCountOrSize, outputCountOrSize) : AjmJobRunSize;
         if (!TryAppendBatchJob(ctx, infoAddress, jobSize))
         {
             return ctx.SetReturn(OrbisAjmErrorJobCreation);
         }
 
         var multipleFrames = (flags & AjmJobRunFlagMultipleFrames) != 0;
-        Atrac9Config? config = null;
-        Atrac9DecodeResult result;
-
-        if (!TryGetInstance(instanceId, out var instance))
-        {
-            result = new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
-        }
-        else if (!TryCollectBuffers(ctx, split, inputAddress, inputCountOrSize, out var inputs, out var inputLength) ||
-                 !TryCollectBuffers(ctx, split, outputAddress, outputCountOrSize, out var outputs, out var outputLength))
-        {
-            result = new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
-        }
-        else if (instance.Codec != Atrac9CodecType || instance.Atrac9 is null)
-        {
-            foreach (var buffer in outputs)
-            {
-                ClearGuestMemory(ctx, buffer.Address, (ulong)buffer.Length);
-            }
-
-            result = new Atrac9DecodeResult(
-                0,
-                inputLength,
-                0,
-                0,
-                inputLength != 0 || outputLength != 0 ? 1u : 0u);
-        }
-        else
-        {
-            config = instance.Atrac9.Config;
-            result = DecodeAtrac9Scattered(ctx, instance, inputs, inputLength, outputs, outputLength, multipleFrames);
-            config ??= instance.Atrac9.Config;
-        }
+        var result = DecodeJob(
+            ctx, instanceId, split, inputAddress, inputCountOrSize, outputAddress, outputCountOrSize, multipleFrames,
+            out var instance, out var config);
 
         WriteRunSideband(ctx, sidebandAddress, sidebandSize, flags, result, instance, config);
         Trace(
@@ -961,6 +1039,62 @@ public static class AjmExports
         TraceBufferDescriptors(ctx, split, "in", inputAddress, inputCountOrSize);
         TraceBufferDescriptors(ctx, split, "out", outputAddress, outputCountOrSize);
         return ctx.SetReturn(0);
+    }
+
+    // SCE_AJM_JOB_RUN_SPLIT_SIZE(N) for the descriptors of one job.
+    private static ulong SplitJobSize(ulong inputCount, ulong outputCount) =>
+        AjmJobRunSplitBaseSize +
+        ((Math.Min(inputCount, MaxBufferDescriptors) + Math.Min(outputCount, MaxBufferDescriptors)) * AjmBufferDescriptorBytes);
+
+    /// <summary>
+    /// The decode body of the flag-driven jobs and of sceAjmBatchJobDecodeSplit: ATRAC9 instances decode, any
+    /// other codec stays a silence stub that reports the input consumed.
+    /// </summary>
+    private static Atrac9DecodeResult DecodeJob(
+        CpuContext ctx,
+        uint instanceId,
+        bool split,
+        ulong inputAddress,
+        ulong inputCountOrSize,
+        ulong outputAddress,
+        ulong outputCountOrSize,
+        bool multipleFrames,
+        out AjmInstanceState? instance,
+        out Atrac9Config? config)
+    {
+        config = null;
+        if (!TryGetInstance(instanceId, out var found))
+        {
+            instance = null;
+            return new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
+        }
+
+        instance = found;
+        if (!TryCollectBuffers(ctx, split, inputAddress, inputCountOrSize, out var inputs, out var inputLength) ||
+            !TryCollectBuffers(ctx, split, outputAddress, outputCountOrSize, out var outputs, out var outputLength))
+        {
+            return new Atrac9DecodeResult(Atrac9DecodeState.ResultInvalidParameter, 0, 0, 0, 0);
+        }
+
+        if (found.Codec != Atrac9CodecType || found.Atrac9 is null)
+        {
+            foreach (var buffer in outputs)
+            {
+                ClearGuestMemory(ctx, buffer.Address, (ulong)buffer.Length);
+            }
+
+            return new Atrac9DecodeResult(
+                0,
+                inputLength,
+                0,
+                0,
+                inputLength != 0 || outputLength != 0 ? 1u : 0u);
+        }
+
+        config = found.Atrac9.Config;
+        var result = DecodeAtrac9Scattered(ctx, found, inputs, inputLength, outputs, outputLength, multipleFrames);
+        config ??= found.Atrac9.Config;
+        return result;
     }
 
     private static void TraceBufferDescriptors(
@@ -1299,6 +1433,11 @@ public static class AjmExports
     // SCE_AJM_JOB_RUN_SPLIT_SIZE(N) is 32 + 16 bytes per descriptor.
     private const ulong AjmJobRunSplitBaseSize = 32;
     private const ulong AjmJobGetStatisticsSize = 88;
+    // SCE_AJM_JOB_SET_RESAMPLE_PARAMETERS_SIZE: the 12 byte parameters, 12 more, and a control job.
+    private const ulong AjmJobSetResampleParametersSize = 72;
+    private const uint AjmResampleFlagIgnoreRatio = 1u << 3;
+    // SceAjmSidebandResampleInfo: float ratio, int num_samples, u32 reserved[8].
+    private const int AjmSidebandResampleInfoBytes = 40;
     private const int AjmStatisticsResultBytes = 48;
     private const int AjmSidebandResultBytes = 8;
     private const int AjmSidebandStreamBytes = 16;

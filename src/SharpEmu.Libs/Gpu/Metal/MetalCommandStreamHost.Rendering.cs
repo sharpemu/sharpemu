@@ -167,6 +167,8 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
     // Metal has no 64-bit workgroup atomics here; keep the non-atomic 32-bit pair.
     bool IShaderPipelineHost.SharedInt64AtomicsEnabled => false;
 
+    bool IShaderPipelineHost.ImageInt64AtomicsEnabled => false;
+
     RenderHostLimits IShaderPipelineHost.Limits => new(MaxDimension, MaxDimension, MaxDimension, MaxDimension);
 
     SampleCountFlags IShaderPipelineHost.NoAttachmentSampleCounts =>

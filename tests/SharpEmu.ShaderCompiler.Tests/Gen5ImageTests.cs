@@ -145,6 +145,17 @@ public sealed class Gen5ImageTests
     }
 
     [Fact]
+    public void ImageGatherWithALevelOfDetailGathersTheBaseLevel()
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation("ImageGather4L", dimension: 1, unifiedFormat: 22u));
+
+        var gather = Assert.Single(instructions, item => item.Opcode == SpirvOp.ImageGather);
+        // Result type, result id, sampled image, coordinates and component: no image operands.
+        Assert.Equal(5, gather.Operands.Length);
+    }
+
+    [Fact]
     public void ImageGatherCompareLzUsesNativeDepthGather()
     {
         var instructions = ReadSpirvInstructions(

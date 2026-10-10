@@ -54,6 +54,52 @@ public sealed class ResourceMaterializerTests
     }
 
     [Theory]
+    [InlineData(20u, 1u, true)]
+    [InlineData(62u, 3u, true)]
+    [InlineData(62u, 1u, false)]
+    [InlineData(20u, 3u, false)]
+    public void AtomicImageOfAnUnsupportedFormatIsRejected(uint format, uint dmask, bool supported)
+    {
+        // One data dword is an atomic on a 32 bit texel (format 20, R32_UINT); two are an atomic on a 64 bit texel
+        // (format 62, 32_32_UINT). A width and a format that do not match have no lowering.
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        uint[] words = [0x1000, format << 20, 3 | (3 << 14), 0xFAC | (1u << 16) | (ImageType2D << 28), 0, 0, 0, 0];
+        for (uint dword = 0; dword < 8; dword++)
+        {
+            instructions.Add(MoveScalar(pc, 16 + dword, words[dword]));
+            pc += 8;
+        }
+
+        for (uint register = 1; register <= 3; register++)
+        {
+            instructions.Add(MoveVector(pc, register, 0));
+            pc += 8;
+        }
+
+        instructions.Add(Image(pc, "ImageAtomicUmax", 16, vectorAddress: 1, dmask: dmask));
+        pc += 8;
+        instructions.Add(EndProgram(pc));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        var success = ResourceMaterializer.Materialize(
+            plan, Inputs([]), ref snapshot, ref specialization, out var failure);
+
+        Assert.Equal(supported, success);
+        Assert.Equal(
+            supported ? ResourceMaterializationFailure.None : ResourceMaterializationFailure.Other,
+            failure);
+        if (supported)
+        {
+            Assert.Equal(
+                dmask == 3 ? ImageNumericClass.Uint64 : ImageNumericClass.Uint,
+                Assert.Single(specialization.Images).NumericClass);
+        }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void IncompatibleImageCapturePreservesFailureAndPublishedState(bool captureEnabled)
@@ -193,6 +239,39 @@ public sealed class ResourceMaterializerTests
         Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
         Assert.Equal(0, cleanReads);
         Assert.Equal([0x12345678u], snapshot.FlattenedResourceTable);
+    }
+
+    // A shader that loads through an absolute address it carries itself reads a table of the system that no guest mapping
+    // backs (not data of the title): those words read as zero instead of failing the dispatch.
+    [Fact]
+    public void ScalarLoadAtAnUnmappedAbsoluteAddress_ReadsZero()
+    {
+        var plan = Extract(Program(
+            MoveScalar(0, 4, 0xE0040000),
+            MoveScalar(8, 5, 0xF),
+            ScalarLoad(16, 4, destination: 6),
+            EndProgram(24)));
+        var reads = 0;
+        var inputs = Inputs([], readMemory: (ulong address, out uint word) => { reads++; word = 0xDEADBEEF; return false; });
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.True(reads > 0);
+        Assert.Equal([0u], snapshot.FlattenedResourceTable);
+    }
+
+    // Only an address the shader carries is a platform table: a pointer the title passes in user data that nothing maps
+    // is still a failure.
+    [Fact]
+    public void ScalarLoadThroughAnUnmappedUserDataPointer_StillFails()
+    {
+        var plan = Extract(Program(ScalarLoad(0, 4, destination: 6), EndProgram(8)));
+        var inputs = Inputs([0, 0, 0, 0, 0xE0040000, 0xF], readMemory: (ulong address, out uint word) => { word = 0xDEADBEEF; return false; });
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
     }
 
     [Fact]

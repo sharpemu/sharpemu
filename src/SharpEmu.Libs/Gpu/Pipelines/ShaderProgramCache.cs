@@ -593,6 +593,7 @@ internal sealed class ShaderProgramCache
     {
         var enableGraphicsSubgroups = _host.GraphicsSubgroupOperationsEnabled;
         var sharedInt64Atomics = _host.SharedInt64AtomicsEnabled;
+        var imageInt64Atomics = _host.ImageInt64AtomicsEnabled;
         var signedZeroInfNanPreserve = _host.ShaderSignedZeroInfNanPreserveFloat32Supported;
         switch (source.Stage)
         {
@@ -606,6 +607,7 @@ internal sealed class ShaderProgramCache
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
+                    SupportsImageInt64Atomics = imageInt64Atomics,
                     ShaderSignedZeroInfNanPreserveFloat32Supported = signedZeroInfNanPreserve,
                     RequiredVertexOutputCount = options.RequiredVertexOutputCount,
                     VertexInputs = entry.VertexInputs,
@@ -634,6 +636,7 @@ internal sealed class ShaderProgramCache
                     ScratchDwords = info.ScratchDwords,
                     EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
                     SupportsSharedInt64Atomics = sharedInt64Atomics,
+                    SupportsImageInt64Atomics = imageInt64Atomics,
                     ShaderSignedZeroInfNanPreserveFloat32Supported = signedZeroInfNanPreserve,
                     PixelOutputs = options.PixelOutputs,
                     PixelInputEnable = options.PixelInputEnable,
@@ -646,7 +649,7 @@ internal sealed class ShaderProgramCache
 
             default:
                 return BuildComputeRequest(entry.Plan, resources, layout, options.ComputeInfo!, options.ComputeSystemRegisters,
-                    sharedInt64Atomics, _host.ExecGuardElisionEnabled, signedZeroInfNanPreserve);
+                    sharedInt64Atomics, _host.ExecGuardElisionEnabled, signedZeroInfNanPreserve, imageInt64Atomics);
         }
     }
 
@@ -663,7 +666,7 @@ internal sealed class ShaderProgramCache
 
     private static ShaderCompileRequest BuildComputeRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout layout,
         ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision,
-        bool signedZeroInfNanPreserve) =>
+        bool signedZeroInfNanPreserve, bool imageInt64Atomics = false) =>
         new(plan, resources, layout)
         {
             WaveSize = info.WaveSize,
@@ -671,6 +674,7 @@ internal sealed class ShaderProgramCache
             TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
             ScratchDwords = info.ScratchDwords,
             SupportsSharedInt64Atomics = sharedInt64Atomics,
+            SupportsImageInt64Atomics = imageInt64Atomics,
             ShaderSignedZeroInfNanPreserveFloat32Supported = signedZeroInfNanPreserve,
             ComputeSystemRegisters = systemRegisters,
             LocalDataShareDwords = info.LocalDataShareDwords,

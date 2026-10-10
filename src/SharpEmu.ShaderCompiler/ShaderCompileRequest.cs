@@ -171,6 +171,10 @@ public sealed class ShaderCompileRequest
     // 64-bit atomics are emitted as real 64-bit atomics instead of a pair of
     // 32-bit ones, which is not atomic as a pair.
     public bool SupportsSharedInt64Atomics { get; init; }
+
+    // The device supports 64-bit integer atomics on images (shaderImageInt64Atomics). Without
+    // it a program that uses an atomic on a 64-bit texel is rejected at compile time.
+    public bool SupportsImageInt64Atomics { get; init; }
     public bool ShaderSignedZeroInfNanPreserveFloat32Supported { get; init; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
 

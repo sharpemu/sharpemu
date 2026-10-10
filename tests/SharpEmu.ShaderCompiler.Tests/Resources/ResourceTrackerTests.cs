@@ -16,6 +16,21 @@ public sealed class ResourceTrackerTests
     private const uint ImageType2D = 9;
     private const uint IdentitySwizzle = 0xFAC;
 
+    [Theory]
+    [InlineData("ImageAtomicUmax", 3u, true)]
+    [InlineData("ImageAtomicUmax", 1u, false)]
+    [InlineData("ImageAtomicCmpswap", 0xFu, true)]
+    [InlineData("ImageAtomicCmpswap", 3u, false)]
+    public void ImageAtomicOnTwoDataDwordsIsMarkedWide(string opcode, uint dmask, bool wide)
+    {
+        // An atomic names its texel width by the data dwords: two (compare-swap: four) are a 64-bit texel.
+        var plan = Extract(Program(Image(0, opcode, 0, dmask: dmask), EndProgram(8)));
+
+        var image = Assert.Single(plan.Info.Images);
+        Assert.True(image.Atomic);
+        Assert.Equal(wide, image.Atomic64);
+    }
+
     [Fact]
     public void DenseBufferTracking()
     {
@@ -127,6 +142,110 @@ public sealed class ResourceTrackerTests
         Assert.True(plan.Memory.TryGetIndex(16, 0, out var index));
         Assert.True(plan.Memory[index].DeviceDescriptor);
     }
+
+    // A waterfall loop picks the descriptor per wave: v_readfirstlane reads a per-lane index, S_BUFFER_LOAD fetches the T# from a
+    // table at that offset and the sample uses it. Such a descriptor has no single source, so it reads as a null image like the
+    // control-dependent lookups instead of failing the whole shader.
+    [Fact]
+    public void ImageDescriptorLoadedAtALaneChosenIndex_ReadsAsANullImage()
+    {
+        var program = LaneIndexedImageProgram();
+
+        var plan = Extract(program, stage: ShaderStage.Pixel);
+
+        var image = Assert.Single(plan.DescriptorSources, source => source.DwordCount == 8);
+        Assert.All(image.Dwords, dword => Assert.True(dword.IsConstant && dword.ConstantU32 == 0));
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program, ShaderStage.Pixel), out var shader, out var error), error);
+        Assert.NotEmpty(shader.Spirv);
+    }
+
+    // Compute keeps rejecting an index no bound was proved for (see DirectImageTableTests).
+    [Fact]
+    public void ImageDescriptorLoadedAtALaneChosenIndexInCompute_IsStillRejected()
+    {
+        var program = LaneIndexedImageProgram();
+
+        var error = Assert.Throws<ResourcePlanException>(() => Extract(program, stage: ShaderStage.Compute));
+        Assert.Contains("not a valid runtime value", error.Message);
+    }
+
+    // The fallback is for images only: a sampler is still rejected when a lane chose its bits.
+    [Fact]
+    public void SamplerLoadedAtALaneChosenIndex_IsStillRejected()
+    {
+        var program = Program(
+            MoveScalarRegister(0, 16, 0),
+            MoveScalarRegister(4, 17, 1),
+            MoveScalarRegister(8, 18, 2),
+            MoveScalarRegister(12, 19, 3),
+            Vop2(16, "VLshlrevB32", 1, Operand(12), Gen5Operand.Vector(0)),
+            ReadFirstLane(20, 106, 1),
+            ScalarBufferLoad(24, 16, destination: 24, count: 4, dynamicOffsetRegister: 106),
+            Image(32, "ImageSample", 8, 24),
+            EndProgram(40));
+
+        var error = Assert.Throws<ResourcePlanException>(() => Extract(program, stage: ShaderStage.Pixel));
+        Assert.Contains("not a valid runtime value", error.Message);
+    }
+
+    private static Gen5ShaderProgram LaneIndexedImageProgram() => Program(
+        // The table V# in s16..s19 and the sampler in s24..s27 come from user data.
+        MoveScalarRegister(0, 16, 0),
+        MoveScalarRegister(4, 17, 1),
+        MoveScalarRegister(8, 18, 2),
+        MoveScalarRegister(12, 19, 3),
+        MoveScalarRegister(16, 24, 4),
+        MoveScalarRegister(20, 25, 5),
+        MoveScalarRegister(24, 26, 6),
+        MoveScalarRegister(28, 27, 7),
+        // s106 = readfirstlane(v7) << 5: the byte offset of the T# the first lane asks for.
+        ReadFirstLane(32, 106, 7),
+        Sop2(36, "SLshlB32", 106, Gen5Operand.Scalar(106), Operand(5)),
+        ScalarBufferLoad(40, 16, destination: 0, count: 8, dynamicOffsetRegister: 106),
+        Image(48, "ImageSample", 0, 24),
+        EndProgram(56));
+    // A shader that selects among states with v_cmpx and s_cbranch_execz sets a constant sampler up in the first state's block and samples
+    // with it in a later state's block. The skip edge of the first branch reaches the join with the sampler registers unwritten, so the host
+    // cannot name the sampler; it reads as a null sampler instead of failing the shader.
+    [Fact]
+    public void SamplerBuiltBehindASkippedBlock_ReadsAsANullSampler()
+    {
+        var program = SamplerBehindSkippedBlockProgram(definitionsBeforeTheBranch: false);
+
+        var plan = Extract(program, userDataCount: 8);
+
+        var sampler = Assert.Single(plan.DescriptorSources, source => source.DwordCount == 4);
+        Assert.All(sampler.Dwords, dword => Assert.True(dword.IsConstant && dword.ConstantU32 == 0));
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program, userDataCount: 8), out var shader, out var error), error);
+        Assert.NotEmpty(shader.Spirv);
+    }
+
+    // Only a sampler none of whose words is known reads as null: three words written before the branch make a partly known sampler.
+    [Fact]
+    public void SamplerWithOneWordBehindASkippedBlock_IsStillRejected()
+    {
+        var program = SamplerBehindSkippedBlockProgram(definitionsBeforeTheBranch: true);
+
+        var error = Assert.Throws<ResourcePlanException>(() => Extract(program, userDataCount: 8));
+        Assert.Contains("not a valid runtime value", error.Message);
+    }
+
+    private static Gen5ShaderProgram SamplerBehindSkippedBlockProgram(bool definitionsBeforeTheBranch) => Program(
+        // The sampler is s36..s39: the last three words before the branch when asked for, the first word (or all four) inside the skipped block.
+        definitionsBeforeTheBranch ? MoveScalar(0, 37, 0xFFF000) : Nop(0),
+        definitionsBeforeTheBranch ? MoveScalar(4, 38, 0x0A500000) : Nop(4),
+        definitionsBeforeTheBranch ? MoveScalar(8, 39, 0) : Nop(8),
+        Vopc(12, "VCmpxEqU32", Operand(1), 24),
+        Branch(16, "SCbranchExecz", 4),
+        MoveScalar(20, 36, 0),
+        definitionsBeforeTheBranch ? Nop(24) : MoveScalar(24, 37, 0xFFF000),
+        definitionsBeforeTheBranch ? Nop(28) : MoveScalar(28, 38, 0x0A500000),
+        definitionsBeforeTheBranch ? Nop(32) : MoveScalar(32, 39, 0),
+        // The join, then the second state's block that samples with s36..s39.
+        Vopc(36, "VCmpxEqU32", Operand(3), 24),
+        Branch(40, "SCbranchExecz", 1),
+        Image(44, "ImageSampleLz", 0, 36, dmask: 1, vectorAddress: 22),
+        EndProgram(48));
 
     [Fact]
     public void SamplerWithDivergentBits_IsRejected()

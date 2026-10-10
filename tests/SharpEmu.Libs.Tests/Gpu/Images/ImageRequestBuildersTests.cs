@@ -202,6 +202,61 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Equal(64u, resolution.Value.Request.Description.Extent.Depth);
     }
 
+    private const uint FastClearBit = 1u << 13;
+    private const uint DccEnableBit = 1u << 28;
+    private const ulong Cmask = 0x1_2000_0000;
+
+    private static ColorTargetWords FastClearTarget(uint samplesLog2 = 0, uint fragmentsLog2 = 0)
+    {
+        var words = RegisterWords.Color(Base, 64, 64, GuestTileMode.RenderTarget, samplesLog2: samplesLog2, fragmentsLog2: fragmentsLog2);
+        return words with { Info = words.Info | FastClearBit, CmaskAddress = Cmask, ClearWord0 = 0xFF0000FF };
+    }
+
+    [Fact]
+    public void ColorTarget_FastClearWithACmaskCarriesTheCmaskAndTheClearWord()
+    {
+        var resolution = ImageRequestBuilders.ColorTarget(FastClearTarget(), 0xF, 0, false);
+
+        Assert.NotNull(resolution);
+        var metadata = resolution.Value.Request.Description.Metadata;
+        Assert.Equal(MetadataKind.CMask, metadata.Kind);
+        Assert.Equal(Cmask, metadata.Range.Address);
+        Assert.Equal(0UL, metadata.Range.Size);
+        Assert.True(resolution.Value.MetadataClearSupported);
+        Assert.Equal(1f, resolution.Value.ColorClearValue.Float32_0);
+        Assert.Equal(0f, resolution.Value.ColorClearValue.Float32_1);
+        Assert.Equal(1f, resolution.Value.ColorClearValue.Float32_3);
+    }
+
+    [Fact]
+    public void ColorTarget_WithoutAUsableCmaskCarriesNoMetadata()
+    {
+        var withoutFastClear = FastClearTarget();
+        withoutFastClear = withoutFastClear with { Info = withoutFastClear.Info & ~FastClearBit };
+
+        foreach (var words in new[] { withoutFastClear, FastClearTarget() with { CmaskAddress = 0 }, FastClearTarget(samplesLog2: 1, fragmentsLog2: 1) })
+        {
+            var resolution = ImageRequestBuilders.ColorTarget(words, 0xF, 0, false);
+
+            Assert.NotNull(resolution);
+            Assert.Equal(MetadataKind.None, resolution.Value.Request.Description.Metadata.Kind);
+            Assert.False(resolution.Value.MetadataClearSupported);
+        }
+    }
+
+    [Fact]
+    public void ColorTarget_DccTakesPrecedenceOverACmask()
+    {
+        var words = FastClearTarget();
+        words = words with { Info = words.Info | DccEnableBit, DccAddress = 0x1_3000_0000 };
+
+        var resolution = ImageRequestBuilders.ColorTarget(words, 0xF, 0, false);
+
+        Assert.NotNull(resolution);
+        Assert.Equal(MetadataKind.Dcc, resolution.Value.Request.Description.Metadata.Kind);
+        Assert.Equal(0x1_3000_0000UL, resolution.Value.Request.Description.Metadata.Range.Address);
+    }
+
     [Fact]
     public void ColorTarget_VolumeViewEndingOnePastTheLastSliceIsClamped()
     {
@@ -328,6 +383,35 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
     }
 
     [Fact]
+    public void Texture_AnAtomicOnA64BitTexelViewsTheImageAsR64()
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits32_32UInt, 64, 64);
+        var shape = Sampled2D with { Storage = true, NumericClass = TextureNumericClass.Uint, Atomic = true, Atomic64 = true };
+        var wide = ImageRequestBuilders.Texture(words, shape);
+        var narrow = ImageRequestBuilders.Texture(words, shape with { Atomic64 = false });
+
+        // The image keeps its two-dword texels; the shader sees each as one 64-bit integer.
+        Assert.Equal(ImageRole.StorageImage, wide.Request.Role);
+        Assert.Equal(Format.R32G32Uint, wide.Request.Description.PixelFormat);
+        Assert.Equal(Format.R64Uint, wide.Request.View.Format);
+        Assert.Equal(ImageUsageFlags.StorageBit, wide.Request.View.Usage);
+        Assert.Equal(Format.R32Uint, narrow.Request.View.Format);
+    }
+
+    [Fact]
+    public void Texture_NullDescriptorOfA64BitAtomicBindsAnR64Image()
+    {
+        var storage = ImageRequestBuilders.Texture(
+            new uint[8], Sampled2D with { Storage = true, NumericClass = TextureNumericClass.Uint, Atomic = true, Atomic64 = true });
+
+        Assert.Equal(ImageRole.StorageImage, storage.Request.Role);
+        Assert.Equal(Format.R64Uint, storage.Request.Description.PixelFormat);
+        Assert.Equal(Format.R64Uint, storage.Request.View.Format);
+        Assert.Equal(8u, storage.Request.Description.BytesPerBlock);
+        Assert.Equal(ImageUsageFlags.StorageBit, storage.Request.View.Usage);
+    }
+
+    [Fact]
     public void Texture_StorageViewOfAnSrgbImageUsesTheLinearFormat()
     {
         var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8Srgb, 64, 64);
@@ -425,6 +509,32 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.True(uncompressed.Value.HasStencil);
         Assert.False(uncompressed.Value.HasHtile);
         Assert.False(uncompressed.Value.Request.Description.Metadata.StencilCompressed);
+    }
+
+    [Fact]
+    public void DepthTarget_ExpClearAccelerationLeavesTheAttachmentUnchanged()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var fatal = new FatalScope();
+        var plain = RegisterWords.Depth(Base, 64, 64, stencilBase: Base + 0x80000) with
+        {
+            ZInfo = (uint)GuestDepthFormat.Z32Float | (1u << 29),
+            StencilInfo = 0x00100981,
+            HtileBase = Base + 0x100000,
+        };
+        var expClear = plain with { ZInfo = plain.ZInfo | (1u << 27), StencilInfo = plain.StencilInfo | (1u << 27) };
+
+        var expected = ImageRequestBuilders.DepthTarget(plain, _vulkan.DeviceInfo);
+        var actual = ImageRequestBuilders.DepthTarget(expClear, _vulkan.DeviceInfo);
+
+        Assert.NotNull(expected);
+        Assert.NotNull(actual);
+        Assert.Equal(expected.Value.Format, actual.Value.Format);
+        Assert.Equal(expected.Value.HasHtile, actual.Value.HasHtile);
+        Assert.Equal(expected.Value.DepthSize, actual.Value.DepthSize);
+        Assert.Equal(expected.Value.StencilSize, actual.Value.StencilSize);
+        Assert.Equal(expected.Value.HtileSize, actual.Value.HtileSize);
+        Assert.Empty(fatal.Messages);
     }
 
     [Fact]

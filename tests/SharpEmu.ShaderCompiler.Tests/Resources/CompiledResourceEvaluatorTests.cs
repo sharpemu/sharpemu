@@ -57,6 +57,35 @@ public sealed class CompiledResourceEvaluatorTests
     }
 
     [Fact]
+    public void CompiledAndInterpretedReadsAtAnUnmappedAbsoluteAddressBothReadZero()
+    {
+        var plan = Extract(Program(
+            MoveScalar(0, 4, 0xE0040000),
+            MoveScalar(8, 5, 0xF),
+            ScalarLoad(16, 4, 8, 4),
+            BufferLoad(24, 8),
+            EndProgram(32)));
+        Assert.NotNull(plan.CompileEvaluatorNow());
+        static bool Unmapped(ulong address, out uint word)
+        {
+            word = 0xDEADBEEF;
+            return false;
+        }
+
+        using var compiledScratch = RuntimeEvaluationScratch.Rent();
+        using var interpretedScratch = RuntimeEvaluationScratch.Rent();
+        var compiled = new RuntimeValueEvaluator(compiledScratch, plan, Inputs([], Unmapped));
+        var interpreted = new RuntimeValueEvaluator(interpretedScratch, plan, Inputs([], Unmapped), useCompiled: false);
+        foreach (var value in plan.DescriptorSources[0].Dwords)
+        {
+            Assert.True(interpreted.EvaluateWide(value, out var expected));
+            Assert.True(compiled.EvaluateWide(value, out var actual));
+            Assert.Equal(0ul, expected);
+            Assert.Equal(0ul, actual);
+        }
+    }
+
+    [Fact]
     public void CompiledAndInterpretedTableReadsHaveIdenticalOrderAndFailure()
     {
         var plan = Extract(Program(ScalarLoad(0, 0, 4, 4), BufferLoad(8, 4), EndProgram(16)));

@@ -181,6 +181,37 @@ public sealed partial class ResourceTracker
         return origins.Count == 0 ? string.Empty : $" (undefined from: {string.Join(", ", origins)})";
     }
 
+    // A value one lane picked for the wave (v_readfirstlane of a per-lane register, as a waterfall loop over a bindless
+    // descriptor index does) has no source the host can evaluate. Compute keeps rejecting it: its dense-table support
+    // proves a bound for the index first.
+    private static bool HasLaneChosenValue(ScalarValue value)
+    {
+        var seen = new HashSet<ScalarValue>();
+        var pending = new Stack<ScalarValue>();
+        pending.Push(value);
+        while (pending.Count != 0)
+        {
+            var current = pending.Pop();
+            if (!seen.Add(current))
+            {
+                continue;
+            }
+
+            if (current.Kind == ScalarValueKind.FirstLane && current.Operands.Length == 2 &&
+                current.Operands[0].Kind == ScalarValueKind.Undefined)
+            {
+                return true;
+            }
+
+            foreach (var operand in current.Operands)
+            {
+                pending.Push(operand);
+            }
+        }
+
+        return false;
+    }
+
     private bool HasUndefinedOrigin(ScalarValue value, string opcodePrefix)
     {
         var seen = new HashSet<ScalarValue>();
@@ -455,11 +486,16 @@ public sealed partial class ResourceTracker
             // implement. Rather than fail shader recompilation outright, degrade to a null
             // descriptor for that one access and let it read as a null/black texture,
             // mirroring KytyPS5's fallback for the same case (feat/shader-control-dependent-
-            // descriptor). Buffer/sampler-adjacent handles or any other validation failure
-            // still hard-fail, since those aren't safe to silently zero.
+            // descriptor). A sampler none of whose words is known reads as a null sampler too: a
+            // shader that builds it in SGPRs inside a block an s_cbranch_execz can skip reaches the
+            // join with the registers unwritten on the skip edge. Buffer handles or any other
+            // validation failure still hard-fail, since those aren't safe to silently zero.
             var dynamicImageFallback = expected is (ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle) &&
                 (controlDependent || HasUndefinedOrigin(source.Dwords[badDword], "BufferLoadFormat") ||
-                 (nonContiguousImage && source.Dwords.Any(dword => HasUndefinedOrigin(dword, "SAndB32"))));
+                 (nonContiguousImage && source.Dwords.Any(dword => HasUndefinedOrigin(dword, "SAndB32"))) ||
+                 (expected == ScalarValueKind.ImageHandle && _plan.Stage != ShaderStage.Compute &&
+                  source.Dwords.Any(HasLaneChosenValue)) ||
+                 (expected == ScalarValueKind.SamplerHandle && source.Dwords.All(dword => dword.IsUndefined)));
             if (dynamicImageFallback)
             {
                 source = new DescriptorSource
@@ -768,7 +804,12 @@ public sealed partial class ResourceTracker
         image.Read |= !write || atomic;
         image.Written |= write;
         image.Atomic |= atomic;
+        image.Atomic64 |= atomic && IsWideImageAtomic(memory);
     }
+
+    // IMAGE_ATOMIC_* names a 64-bit texel by two data dwords (compare-swap: the new value and the comparison, four).
+    private static bool IsWideImageAtomic(MemoryAccessInfo memory) =>
+        System.Numerics.BitOperations.PopCount(memory.Dmask) == (memory.Opcode == "ImageAtomicCmpswap" ? 4 : 2);
 
     private uint AddSampler(uint source, uint pc)
     {

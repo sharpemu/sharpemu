@@ -202,12 +202,15 @@ public static partial class Gen5SpirvTranslator
         private Ir.Gen5Wave64HalfMaskPlan? _halfMaskPlan;
         private uint? _emittingPc;
         private uint _glsl;
+        private bool _declaredImageInt64Extension;
 
         private enum ImageComponentKind
         {
             Float,
             Sint,
             Uint,
+            // 64-bit unsigned texels, which only image atomics address.
+            Uint64,
         }
 
         private enum VertexInputComponentKind
@@ -2298,6 +2301,48 @@ public static partial class Gen5SpirvTranslator
                         GetRawSource(instruction, 1));
                     return true;
                 }
+                case "DsWriteB8":
+                case "DsWriteB16":
+                case "DsWriteB8D16Hi":
+                case "DsWriteB16D16Hi":
+                {
+                    if (instruction.Sources.Count < 2)
+                    {
+                        error = "missing LDS sub-dword write source";
+                        return false;
+                    }
+
+                    // The LDS is an array of dwords: replace the byte or half-word the address selects. Lanes of
+                    // a compute workgroup write neighbouring bytes of one dword, so the shared array is updated
+                    // with an AND that clears the field and an OR that sets it (EmitLdsAtomic is a plain
+                    // read-modify-write on the Private array of a graphics stage).
+                    var halfWord = instruction.Opcode is "DsWriteB16" or "DsWriteB16D16Hi";
+                    var writeAddress = GetRawSource(instruction, 0);
+                    var writeByteAddress = control.SingleOffsetBytes == 0
+                        ? writeAddress
+                        : IAdd(writeAddress, UInt(control.SingleOffsetBytes));
+                    var field = halfWord ? 0xFFFFu : 0xFFu;
+                    var writeShift = ShiftLeftLogical(BitwiseAnd(writeByteAddress, UInt(halfWord ? 2u : 3u)), UInt(3));
+                    var clearMask = _module.AddInstruction(
+                        SpirvOp.Not,
+                        _uintType,
+                        ShiftLeftLogical(UInt(field), writeShift));
+                    // The D16_HI forms store the field the data register's upper half holds.
+                    var writeData = GetRawSource(instruction, 1);
+                    if (instruction.Opcode.EndsWith("D16Hi", StringComparison.Ordinal))
+                    {
+                        writeData = ShiftRightLogical(writeData, UInt(16));
+                    }
+
+                    var fieldValue = ShiftLeftLogical(BitwiseAnd(writeData, UInt(field)), writeShift);
+                    var fieldPointer = LdsPointer(writeAddress, control.SingleOffsetBytes);
+                    EmitExecConditional(() =>
+                    {
+                        EmitLdsAtomic(SpirvOp.AtomicAnd, fieldPointer, value: () => clearMask, comparator: () => clearMask);
+                        EmitLdsAtomic(SpirvOp.AtomicOr, fieldPointer, value: () => fieldValue, comparator: () => fieldValue);
+                    });
+                    return true;
+                }
                 case "DsWriteB64":
                 {
                     if (instruction.Sources.Count < 3)
@@ -2343,20 +2388,14 @@ public static partial class Gen5SpirvTranslator
                         {
                             // OR is bitwise-independent: no dword influences the
                             // other, so two 32-bit ORs are the 64-bit OR.
-                            EmitAtomic(
+                            EmitLdsAtomic(
                                 SpirvOp.AtomicOr,
-                                _uintType,
                                 lowPointer,
-                                scope: 2,
-                                semantics: 0x108,
                                 value: () => lowValue,
                                 comparator: () => lowValue);
-                            EmitAtomic(
+                            EmitLdsAtomic(
                                 SpirvOp.AtomicOr,
-                                _uintType,
                                 highPointer,
-                                scope: 2,
-                                semantics: 0x108,
                                 value: () => highValue,
                                 comparator: () => highValue);
                             return;
@@ -2367,12 +2406,9 @@ public static partial class Gen5SpirvTranslator
                         // pre-add value its atomic returned and adds exactly one
                         // carry, so the high dword ends up with the true count of
                         // wraps however the lanes interleave.
-                        var originalLow = EmitAtomic(
+                        var originalLow = EmitLdsAtomic(
                             SpirvOp.AtomicIAdd,
-                            _uintType,
                             lowPointer,
-                            scope: 2,
-                            semantics: 0x108,
                             value: () => lowValue,
                             comparator: () => lowValue);
                         var sumLow = IAdd(originalLow, lowValue);
@@ -2388,12 +2424,9 @@ public static partial class Gen5SpirvTranslator
                             UInt(1),
                             UInt(0));
                         var highWithCarry = IAdd(highValue, carry);
-                        EmitAtomic(
+                        EmitLdsAtomic(
                             SpirvOp.AtomicIAdd,
-                            _uintType,
                             highPointer,
-                            scope: 2,
-                            semantics: 0x108,
                             value: () => highWithCarry,
                             comparator: () => highWithCarry);
                     });
@@ -2492,6 +2525,50 @@ public static partial class Gen5SpirvTranslator
                         UInt(0),
                         UInt(8));
                     StoreV(instruction.Destinations[0].Value, Bitcast(_uintType, signedByte));
+                    return true;
+                }
+                case "DsReadU8":
+                case "DsReadI16":
+                case "DsReadU16":
+                case "DsReadU8D16":
+                case "DsReadU8D16Hi":
+                case "DsReadI8D16":
+                case "DsReadI8D16Hi":
+                case "DsReadU16D16":
+                case "DsReadU16D16Hi":
+                {
+                    if (instruction.Destinations.Count < 1 || instruction.Sources.Count < 1)
+                    {
+                        error = "missing LDS sub-dword read operand";
+                        return false;
+                    }
+
+                    var address = GetRawSource(instruction, 0);
+                    var byteAddress = control.SingleOffsetBytes == 0
+                        ? address
+                        : IAdd(address, UInt(control.SingleOffsetBytes));
+                    var word = Load(_uintType, LdsPointer(address, control.SingleOffsetBytes));
+                    var byteRead = instruction.Opcode.StartsWith("DsReadU8", StringComparison.Ordinal) ||
+                        instruction.Opcode.StartsWith("DsReadI8", StringComparison.Ordinal);
+                    var signedRead = instruction.Opcode.StartsWith("DsReadI", StringComparison.Ordinal);
+                    var shift = ShiftLeftLogical(BitwiseAnd(byteAddress, UInt(byteRead ? 3u : 2u)), UInt(3));
+                    var packed = ShiftRightLogical(word, shift);
+                    var value = signedRead
+                        ? Bitcast(
+                            _uintType,
+                            _module.AddInstruction(SpirvOp.BitFieldSExtract, _intType, Bitcast(_intType, packed), UInt(0), UInt(byteRead ? 8u : 16u)))
+                        : BitwiseAnd(packed, UInt(byteRead ? 0xFFu : 0xFFFFu));
+                    if (instruction.Opcode.Contains("D16", StringComparison.Ordinal))
+                    {
+                        // The D16 forms return a 16-bit value into one half of the destination and keep the other half.
+                        var half = BitwiseAnd(value, UInt(0xFFFF));
+                        var current = LoadV(instruction.Destinations[0].Value);
+                        value = instruction.Opcode.EndsWith("D16Hi", StringComparison.Ordinal)
+                            ? BitwiseOr(BitwiseAnd(current, UInt(0x0000_FFFF)), ShiftLeftLogical(half, UInt(16)))
+                            : BitwiseOr(BitwiseAnd(current, UInt(0xFFFF_0000)), half);
+                    }
+
+                    StoreV(instruction.Destinations[0].Value, value);
                     return true;
                 }
                 case "DsReadB64":
@@ -2737,12 +2814,9 @@ public static partial class Gen5SpirvTranslator
                                 _uintType,
                                 GetRawSource(instruction, 1))),
                         GetRawSource(instruction, 2));
-                    EmitAtomic(
+                    EmitLdsAtomic(
                         SpirvOp.AtomicCompareExchange,
-                        _uintType,
                         maskedPointer,
-                        scope: 2,
-                        semantics: 0x108,
                         value: () => updated,
                         comparator: () => original);
                 });
@@ -2797,12 +2871,9 @@ public static partial class Gen5SpirvTranslator
             var pointer = LdsPointer(address, control.SingleOffsetBytes);
             EmitExecConditional(() =>
             {
-                var original = EmitAtomic(
+                var original = EmitLdsAtomic(
                     atomicOp,
-                    _uintType,
                     pointer,
-                    scope: 2,
-                    semantics: 0x108,
                     // DS_CMPST sources: DATA0 is the comparator, DATA1 the new value.
                     value: () => GetRawSource(
                         instruction,
@@ -2817,6 +2888,17 @@ public static partial class Gen5SpirvTranslator
             return true;
         }
 
+        private uint DataShareFloatReplaces(uint observed, uint compare, bool maxValue)
+        {
+            var observedFloat = Bitcast(_floatType, observed);
+            var compareFloat = Bitcast(_floatType, compare);
+            return _module.AddInstruction(
+                maxValue ? SpirvOp.FOrdGreaterThan : SpirvOp.FOrdLessThan,
+                _boolType,
+                maxValue ? observedFloat : compareFloat,
+                maxValue ? compareFloat : observedFloat);
+        }
+
         private void EmitDataShareFloatAtomic(
             uint pointer,
             uint data,
@@ -2825,6 +2907,20 @@ public static partial class Gen5SpirvTranslator
             uint scope,
             uint semantics)
         {
+            if (_stage != Gen5SpirvStage.Compute)
+            {
+                var current = Load(_uintType, pointer);
+                Store(
+                    pointer,
+                    _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        DataShareFloatReplaces(current, compare, maxValue),
+                        data,
+                        current));
+                return;
+            }
+
             var preheader = _module.AllocateId();
             var header = _module.AllocateId();
             var continueLabel = _module.AllocateId();
@@ -2849,13 +2945,7 @@ public static partial class Gen5SpirvTranslator
                 preheader,
                 exchanged,
                 continueLabel);
-            var observedFloat = Bitcast(_floatType, observed);
-            var compareFloat = Bitcast(_floatType, compare);
-            var replace = _module.AddInstruction(
-                maxValue ? SpirvOp.FOrdGreaterThan : SpirvOp.FOrdLessThan,
-                _boolType,
-                maxValue ? observedFloat : compareFloat,
-                maxValue ? compareFloat : observedFloat);
+            var replace = DataShareFloatReplaces(observed, compare, maxValue);
             var next = _module.AddInstruction(SpirvOp.Select, _uintType, replace, data, observed);
 
             _module.AddStatement(
@@ -3000,6 +3090,120 @@ public static partial class Gen5SpirvTranslator
                 UInt(scope),
                 UInt(semantics),
                 value());
+        }
+
+        // IMAGE_ATOMIC_* on two data dwords (compare-swap: four) is an atomic on a 64-bit texel: the data registers
+        // hold the low and the high dword, the value that comes back with glc likewise.
+        private bool TryEmitWideImageAtomic(
+            Gen5ShaderInstruction instruction,
+            Gen5ImageControl image,
+            SpirvImageResource resource,
+            out string error)
+        {
+            error = string.Empty;
+            if (!_request.SupportsImageInt64Atomics)
+            {
+                error = "64-bit image atomics need the device feature shaderImageInt64Atomics";
+                return false;
+            }
+
+            if (!TryGetAtomicOp(instruction.Opcode["ImageAtomic".Length..], out var atomicOp))
+            {
+                error = $"unsupported storage image opcode {instruction.Opcode}";
+                return false;
+            }
+
+            var coordinates = BuildIntegerCoordinates(image, 0, ImageCoordinateComponentCount(resource));
+            EmitExecConditional(() =>
+            {
+                var pointer = _module.AddInstruction(
+                    SpirvOp.ImageTexelPointer,
+                    _module.TypePointer(SpirvStorageClass.Image, _ulongType),
+                    resource.Variable,
+                    coordinates,
+                    UInt(0));
+                uint LoadWide(uint register) => BitwiseOr64(
+                    Widen(LoadV(register)),
+                    ShiftLeftLogical64(Widen(LoadV(register + 1)), ULong(32)));
+                var original = EmitAtomic(
+                    atomicOp,
+                    _ulongType,
+                    pointer,
+                    scope: 1,
+                    semantics: 0x808,
+                    value: () => LoadWide(image.VectorData),
+                    comparator: () => LoadWide(image.VectorData + 2));
+                if (image.Glc)
+                {
+                    StoreV(image.VectorData, Narrow(original));
+                    StoreV(image.VectorData + 1, Narrow(ShiftRightLogical64(original, ULong(32))));
+                }
+            });
+
+            return true;
+        }
+
+        // The LDS of a graphics stage is a per-invocation Private array (see DeclareLds). SPIR-V atomics are invalid on Private
+        // memory and the driver's pipeline compiler can crash on them. Nothing else can reach that array, so there the operation
+        // is a plain read-modify-write that returns the original value.
+        private uint EmitLdsAtomic(
+            SpirvOp op,
+            uint pointer,
+            Func<uint> value,
+            Func<uint> comparator)
+        {
+            if (_stage == Gen5SpirvStage.Compute)
+            {
+                return EmitAtomic(op, _uintType, pointer, scope: 2, semantics: 0x108, value, comparator);
+            }
+
+            var original = Load(_uintType, pointer);
+            uint Choose(SpirvOp comparison, uint operand) =>
+                _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    _module.AddInstruction(comparison, _boolType, original, operand),
+                    original,
+                    operand);
+
+            uint updated;
+            switch (op)
+            {
+                case SpirvOp.AtomicIIncrement:
+                    updated = IAdd(original, UInt(1));
+                    break;
+                case SpirvOp.AtomicIDecrement:
+                    updated = ISubU(original, UInt(1));
+                    break;
+                case SpirvOp.AtomicCompareExchange:
+                {
+                    var matches = _module.AddInstruction(SpirvOp.IEqual, _boolType, original, comparator());
+                    updated = _module.AddInstruction(SpirvOp.Select, _uintType, matches, value(), original);
+                    break;
+                }
+                default:
+                {
+                    var operand = value();
+                    updated = op switch
+                    {
+                        SpirvOp.AtomicIAdd => IAdd(original, operand),
+                        SpirvOp.AtomicISub => ISubU(original, operand),
+                        SpirvOp.AtomicAnd => BitwiseAnd(original, operand),
+                        SpirvOp.AtomicOr => BitwiseOr(original, operand),
+                        SpirvOp.AtomicXor => BitwiseXor(original, operand),
+                        SpirvOp.AtomicExchange => operand,
+                        SpirvOp.AtomicSMin => Choose(SpirvOp.SLessThan, operand),
+                        SpirvOp.AtomicUMin => Choose(SpirvOp.ULessThan, operand),
+                        SpirvOp.AtomicSMax => Choose(SpirvOp.SGreaterThan, operand),
+                        SpirvOp.AtomicUMax => Choose(SpirvOp.UGreaterThan, operand),
+                        _ => throw new InvalidOperationException($"unsupported LDS atomic {op}"),
+                    };
+                    break;
+                }
+            }
+
+            Store(pointer, updated);
+            return original;
         }
 
         private bool TryEmitInterpolation(
@@ -4968,6 +5172,13 @@ public static partial class Gen5SpirvTranslator
             out string error)
         {
             error = string.Empty;
+            if (resource.ComponentKind == ImageComponentKind.Uint64 &&
+                !instruction.Opcode.StartsWith("ImageAtomic", StringComparison.Ordinal))
+            {
+                error = $"{instruction.Opcode} addresses an image that only 64-bit atomics use";
+                return false;
+            }
+
             if (instruction.Opcode == "ImageGetResinfo")
             {
                 var sizeComponentCount = ImageCoordinateComponentCount(resource);
@@ -5122,6 +5333,11 @@ public static partial class Gen5SpirvTranslator
                 {
                     error = "image atomic is not bound as storage";
                     return false;
+                }
+
+                if (resource.ComponentKind == ImageComponentKind.Uint64)
+                {
+                    return TryEmitWideImageAtomic(instruction, image, resource, out error);
                 }
 
                 // IMAGE_ATOMIC_FMIN/FMAX target float-format storage images and
@@ -8344,7 +8560,7 @@ public static partial class Gen5SpirvTranslator
             _request.Program.Instructions.Any(instruction =>
                 instruction.Control is Gen5DppControl or Gen5Dpp8Control ||
                 instruction.Opcode is "VPermlane16B32" or "VPermlanex16B32" or "VReadlaneB32" or
-                    "DsAppend" or "DsConsume" or "DsSwizzleB32" or "DsBpermuteB32");
+                    "DsAppend" or "DsConsume" or "DsOrderedCount" or "DsSwizzleB32" or "DsBpermuteB32");
 
         private bool UsesSubgroupBroadcast() =>
             _request.Program.Instructions.Any(instruction =>
