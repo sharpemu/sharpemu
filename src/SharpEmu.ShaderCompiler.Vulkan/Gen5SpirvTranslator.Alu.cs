@@ -3170,6 +3170,19 @@ public static partial class Gen5SpirvTranslator
                             Store(_scc, IsNotZero(result));
                             break;
                         }
+                        case "SAbsdiffI32":
+                        {
+                            var diff = _module.AddInstruction(
+                                SpirvOp.ISub,
+                                _intType,
+                                Bitcast(_intType, left),
+                                Bitcast(_intType, right));
+                            // GLSL.std.450 SAbs (5); 4 is FAbs and float-only.
+                            var absDiff = Ext(5, _intType, diff);
+                            result = Bitcast(_uintType, absDiff);
+                            Store(_scc, IsNotZero(result));
+                            break;
+                        }
                         case "SCselectB32":
                             result = _module.AddInstruction(
                                 SpirvOp.Select,
