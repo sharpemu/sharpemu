@@ -243,8 +243,8 @@ public sealed class SaveDataExportsTests : IDisposable
                 Reg(rdi: MountPointStr, rsi: MountInfo)));
         Assert.True(_ctx.TryReadUInt64(MountInfo, out var blocks));
         Assert.True(_ctx.TryReadUInt64(MountInfo + 0x08, out var freeBlocks));
-        Assert.Equal(16384UL, blocks);
-        Assert.Equal(16382UL, freeBlocks);
+        Assert.Equal(48UL, blocks);
+        Assert.Equal(46UL, freeBlocks);
     }
 
     [Fact]
@@ -290,8 +290,8 @@ public sealed class SaveDataExportsTests : IDisposable
                 Reg(rdi: SearchCond, rsi: SearchResult)));
         Assert.True(_ctx.TryReadUInt64(SearchInfos, out var blocks));
         Assert.True(_ctx.TryReadUInt64(SearchInfos + 0x08, out var freeBlocks));
-        Assert.Equal(16384UL, blocks);
-        Assert.Equal(16382UL, freeBlocks);
+        Assert.Equal(48UL, blocks);
+        Assert.Equal(46UL, freeBlocks);
     }
 
     [Fact]

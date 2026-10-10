@@ -174,6 +174,9 @@ public sealed record SaveDataMetadata
     [JsonPropertyName("userParam")]
     public uint UserParam { get; init; }
 
+    [JsonPropertyName("blocks")]
+    public ulong Blocks { get; init; }
+
     public static SaveDataMetadata CreateDefault(string dirName) =>
         new() { Title = string.IsNullOrWhiteSpace(dirName) ? "Saved Data" : dirName };
 }

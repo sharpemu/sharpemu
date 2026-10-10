@@ -81,6 +81,7 @@ public static class SaveDataExports
     private const int MountInfoSize = 0x30;
     private const uint SaveDataBlockSize = 65536;
     private const ulong SaveDataBlocksMax = 16384;
+    private const ulong SaveDataBlocksMin = 48;
 
     private static readonly object _eventGate = new();
     private static readonly Queue<SaveDataEvent> _events = new();
@@ -94,7 +95,7 @@ public static class SaveDataExports
         int UserId,
         string TitleId,
         string DirName);
-    private sealed record MountEntry(string SlotDir, string DirName, int UserId);
+    private sealed record MountEntry(string SlotDir, string DirName, int UserId, ulong Blocks);
 
     private static void EnqueueEvent(
         uint type,
@@ -304,13 +305,13 @@ public static class SaveDataExports
         }
 
         var usedBlocks = GetUsedBlocks(SafeDirectorySize(entry.SlotDir));
-        var freeBlocks = GetFreeBlocks(usedBlocks);
+        var freeBlocks = GetFreeBlocks(entry.Blocks, usedBlocks);
         Span<byte> info = stackalloc byte[MountInfoSize];
         info.Clear();
-        BinaryPrimitives.WriteUInt64LittleEndian(info[0x00..], SaveDataBlocksMax);
+        BinaryPrimitives.WriteUInt64LittleEndian(info[0x00..], entry.Blocks);
         BinaryPrimitives.WriteUInt64LittleEndian(info[0x08..], freeBlocks);
         TraceSaveData(
-            $"get_mount_info mount='{mountPoint}' blocks={SaveDataBlocksMax} " +
+            $"get_mount_info mount='{mountPoint}' blocks={entry.Blocks} " +
             $"used_blocks={usedBlocks} free_blocks={freeBlocks}");
         return ctx.Memory.TryWrite(infoAddress, info)
             ? SetReturn(ctx, 0)
@@ -395,7 +396,7 @@ public static class SaveDataExports
                     return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
 
-                var metadata = new SaveDataMetadata
+                var metadata = SaveDataStorage.ReadMetadata(entry.SlotDir) with
                 {
                     Title = ReadAsciiField(raw.Slice(0x00, 128)),
                     SubTitle = ReadAsciiField(raw.Slice(0x80, 128)),
@@ -864,6 +865,7 @@ public static class SaveDataExports
                 Directory.CreateDirectory(savePath);
             }
 
+            var slotBlocks = ResolveSlotBlocks(savePath, blocks);
             string mountPoint;
             lock (_mountGate)
             {
@@ -882,7 +884,7 @@ public static class SaveDataExports
                 }
 
                 mountPoint = $"/savedata{slot}";
-                _mounts[mountPoint] = new MountEntry(savePath, dirName, userId);
+                _mounts[mountPoint] = new MountEntry(savePath, dirName, userId, slotBlocks);
             }
             KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, savePath);
 
@@ -1147,11 +1149,33 @@ public static class SaveDataExports
     private static bool TryWriteSearchInfo(CpuContext ctx, ulong address, SaveEntry entry)
     {
         var usedBlocks = GetUsedBlocks(GetDirectorySize(entry.Path));
+        var blocks = SlotBlocks(entry.Path, usedBlocks);
         Span<byte> info = stackalloc byte[SaveDataSearchInfoSize];
         info.Clear();
-        BinaryPrimitives.WriteUInt64LittleEndian(info[0x00..], SaveDataBlocksMax);
-        BinaryPrimitives.WriteUInt64LittleEndian(info[0x08..], GetFreeBlocks(usedBlocks));
+        BinaryPrimitives.WriteUInt64LittleEndian(info[0x00..], blocks);
+        BinaryPrimitives.WriteUInt64LittleEndian(info[0x08..], GetFreeBlocks(blocks, usedBlocks));
         return ctx.Memory.TryWrite(address, info);
+    }
+
+    private static ulong ClampBlocks(ulong blocks) => Math.Clamp(blocks, SaveDataBlocksMin, SaveDataBlocksMax);
+
+    private static ulong SlotBlocks(string slotDir, ulong usedBlocks)
+    {
+        var blocks = SaveDataStorage.ReadMetadata(slotDir).Blocks;
+        return blocks != 0 ? blocks : ClampBlocks(usedBlocks);
+    }
+
+    private static ulong ResolveSlotBlocks(string slotDir, ulong requestedBlocks)
+    {
+        var metadata = SaveDataStorage.ReadMetadata(slotDir);
+        if (metadata.Blocks != 0)
+        {
+            return metadata.Blocks;
+        }
+
+        var blocks = ClampBlocks(Math.Max(requestedBlocks, GetUsedBlocks(SafeDirectorySize(slotDir))));
+        SaveDataStorage.WriteMetadata(slotDir, metadata with { Blocks = blocks });
+        return blocks;
     }
 
     private static ulong GetUsedBlocks(long byteCount)
@@ -1164,8 +1188,8 @@ public static class SaveDataExports
         return checked(((ulong)byteCount + SaveDataBlockSize - 1) / SaveDataBlockSize);
     }
 
-    private static ulong GetFreeBlocks(ulong usedBlocks) =>
-        usedBlocks >= SaveDataBlocksMax ? 0 : SaveDataBlocksMax - usedBlocks;
+    private static ulong GetFreeBlocks(ulong blocks, ulong usedBlocks) =>
+        usedBlocks >= blocks ? 0 : blocks - usedBlocks;
 
     private static long GetDirectorySize(string root)
     {
