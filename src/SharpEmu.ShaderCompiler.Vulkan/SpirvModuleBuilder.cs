@@ -32,6 +32,9 @@ public enum SpirvOp : ushort
     TypeFunction = 33,
     ConstantTrue = 41,
     ConstantFalse = 42,
+    SpecConstantTrue = 48,
+    SpecConstantFalse = 49,
+    SpecConstant = 50,
     Constant = 43,
     ConstantComposite = 44,
     ConstantNull = 46,
@@ -248,6 +251,7 @@ public enum SpirvExecutionMode : uint
 
 public enum SpirvDecoration : uint
 {
+    SpecId = 1,
     Block = 2,
     ArrayStride = 6,
     BuiltIn = 11,
@@ -688,6 +692,24 @@ public sealed class SpirvModuleBuilder
             id);
         _constants.Add(key, id);
         _scalarConstantValues[id] = value ? 1u : 0u;
+        return id;
+    }
+
+    // A boolean specialization constant; never folded or deduplicated.
+    public uint SpecConstantBool(bool defaultValue, uint specId)
+    {
+        var id = AllocateId();
+        Emit(_typesConstantsGlobals, defaultValue ? SpirvOp.SpecConstantTrue : SpirvOp.SpecConstantFalse, TypeBool(), id);
+        AddDecoration(id, SpirvDecoration.SpecId, specId);
+        return id;
+    }
+
+    // A 32-bit unsigned specialization constant; never folded or deduplicated.
+    public uint SpecConstantUInt(uint defaultValue, uint specId)
+    {
+        var id = AllocateId();
+        Emit(_typesConstantsGlobals, SpirvOp.SpecConstant, TypeInt(32, false), id, defaultValue);
+        AddDecoration(id, SpirvDecoration.SpecId, specId);
         return id;
     }
 

@@ -287,13 +287,20 @@ public sealed partial class GuestImageCache
 
     public bool IsMetadataCleared(ulong address, uint slice) => IsMetadataCleared(address, slice, out _);
 
+    // DCC metadata of a bound target, or the range of a DCC fill seen before its target: both are
+    // filled on the host, which keeps them CPU-readable instead of GPU-written.
     public bool OverlapsDccMetadata(ulong address, ulong size)
     {
         using var held = _lock.Hold();
         foreach (var (start, metadata) in _surfaceMetadata)
         {
-            if (metadata.Kind == SurfaceMetadataKind.Dcc && metadata.Size != 0 &&
-                address < start + metadata.Size && start < address + size)
+            var extent = metadata.Kind switch
+            {
+                SurfaceMetadataKind.Dcc => metadata.Size,
+                SurfaceMetadataKind.PendingDcc => metadata.FillSize,
+                _ => 0UL,
+            };
+            if (extent != 0 && address < start + extent && start < address + size)
             {
                 return true;
             }

@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 
 namespace SharpEmu.Libs.VideoOut;
 
-internal sealed class WindowsGpuUsage : IDisposable
+internal sealed class WindowsGpuUsage : IGpuUsage
 {
     private const uint FormatDouble = 0x200;
     private const uint MoreData = 0x800007D2;

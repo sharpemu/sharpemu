@@ -8,6 +8,18 @@ namespace SharpEmu.ShaderCompiler.Vulkan;
 
 public static partial class Gen5SpirvTranslator
 {
+    // Specialization constant id set on the rectangle-list strip fallback pipeline. Its value is
+    // 1 + (firstVertex % 4) for the draw, or 0 when corner synthesis is off.
+    public const uint RectangleCornerSpecId = 0x5245;
+
+    // Rectangle corner attributes: vertex shaders with 1..MaxRectangleCornerAttributes attributes
+    // also declare, per attribute location L, three inputs at RectangleCornerLocation(corner, L).
+    // The host aliases them to location L, except on rectangle strips where they read the three
+    // guest corners, so corner synthesis sees each corner's own attribute data.
+    public const int MaxRectangleCornerAttributes = 7;
+
+    public static uint RectangleCornerLocation(uint corner, uint location) => 8 + corner * 7 + location;
+
     private const uint VectorRegisterCount = 512;
     private const uint LdsDwordCount = 8192;
     // Graphics stages model LDS as a per-invocation Private array rather than
@@ -188,6 +200,12 @@ public static partial class Gen5SpirvTranslator
         private uint _invalidPositionClipDistance = uint.MaxValue;
         private uint _cullDistanceCount;
         private uint _vertexIndexInput;
+        // Vertex index the guest program sees; differs from VertexIndex only while a
+        // rectangle-list corner is being synthesized.
+        private uint _guestVertexIndex;
+        // 0 = the invocation's own vertex; 1..3 = guest rectangle corner 0..2.
+        private uint _cornerSlot;
+        private readonly Dictionary<uint, uint[]> _cornerInputs = new();
         private uint _instanceIndexInput;
         private uint _fragCoordInput;
         private uint _localInvocationIdInput;
@@ -299,8 +317,18 @@ public static partial class Gen5SpirvTranslator
 
 
                 var functionType = _module.TypeFunction(_voidType);
+                var synthesizeCorners = _stage == Gen5SpirvStage.Vertex && _vertexIndexInput != 0 && _positionOutput != 0;
+                if (synthesizeCorners)
+                {
+                    _guestVertexIndex = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, _module.Constant(_uintType, 0));
+                    _interfaces.Add(_guestVertexIndex);
+                    _cornerSlot = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, _module.Constant(_uintType, 0));
+                    _interfaces.Add(_cornerSlot);
+                    _module.AddName(_cornerSlot, "rectangleCornerSlot");
+                    _module.AddName(_guestVertexIndex, "guestVertexIndex");
+                }
                 var main = _module.BeginFunction(_voidType, functionType);
-                _module.AddName(main, "main");
+                _module.AddName(main, synthesizeCorners ? "guestMain" : "main");
                 _module.AddLabel();
                 if (_stage == Gen5SpirvStage.Pixel &&
                     Environment.GetEnvironmentVariable(
@@ -510,6 +538,10 @@ public static partial class Gen5SpirvTranslator
 
                 _module.AddStatement(SpirvOp.Return);
                 _module.EndFunction();
+                if (synthesizeCorners)
+                {
+                    main = EmitRectangleCornerEntry(main, functionType);
+                }
 
                 var model = _stage switch
                 {
@@ -1159,6 +1191,21 @@ public static partial class Gen5SpirvTranslator
                     componentKind,
                     input.NumberFormat,
                     input.DestinationSelect);
+                if (_request.VertexInputs.Count is >= 1 and <= MaxRectangleCornerAttributes &&
+                    input.Location < MaxRectangleCornerAttributes && !_cornerInputs.ContainsKey(variable))
+                {
+                    var corners = new uint[3];
+                    for (var corner = 0u; corner < 3; corner++)
+                    {
+                        corners[corner] = _module.AddGlobalVariable(pointer, SpirvStorageClass.Input);
+                        _module.AddName(corners[corner], $"attr{input.Location}_corner{corner}");
+                        _module.AddDecoration(corners[corner], SpirvDecoration.Location, RectangleCornerLocation(corner, input.Location));
+                        _interfaces.Add(corners[corner]);
+                    }
+
+                    _cornerInputs[variable] = corners;
+                }
+
                 _vertexInputsByPc.TryAdd(input.Pc, vertexInput);
                 foreach (var aliasPc in input.AliasPcs ?? [])
                 {
@@ -1230,7 +1277,7 @@ public static partial class Gen5SpirvTranslator
 
             if (_stage == Gen5SpirvStage.Vertex)
             {
-                StoreV(5, Load(_uintType, _vertexIndexInput), guardWithExec: false);
+                StoreV(5, Load(_uintType, _guestVertexIndex != 0 ? _guestVertexIndex : _vertexIndexInput), guardWithExec: false);
                 StoreV(8, Load(_uintType, _instanceIndexInput), guardWithExec: false);
 
                 // Give every declared param output a defined starting value.
@@ -2298,6 +2345,46 @@ public static partial class Gen5SpirvTranslator
                         GetRawSource(instruction, 1));
                     return true;
                 }
+                case "DsWriteB8":
+                case "DsWriteB16":
+                case "DsWriteB8D16Hi":
+                case "DsWriteB16D16Hi":
+                {
+                    if (instruction.Sources.Count < 2)
+                    {
+                        error = "missing LDS sub-dword write source";
+                        return false;
+                    }
+
+                    var isByte = instruction.Opcode.StartsWith("DsWriteB8", StringComparison.Ordinal);
+                    var highHalf = instruction.Opcode.EndsWith("D16Hi", StringComparison.Ordinal);
+                    EmitLdsSubDwordWrite(instruction, control, isByte ? 8u : 16u, highHalf);
+                    return true;
+                }
+                case "DsReadU8":
+                case "DsReadI16":
+                case "DsReadU16":
+                case "DsReadU8D16":
+                case "DsReadU8D16Hi":
+                case "DsReadI8D16":
+                case "DsReadI8D16Hi":
+                case "DsReadU16D16":
+                case "DsReadU16D16Hi":
+                {
+                    if (instruction.Destinations.Count < 1 || instruction.Sources.Count < 1)
+                    {
+                        error = "missing LDS sub-dword read operand";
+                        return false;
+                    }
+
+                    var name = instruction.Opcode;
+                    var bits = name.Contains("8", StringComparison.Ordinal) ? 8u : 16u;
+                    var signed = name.StartsWith("DsReadI", StringComparison.Ordinal);
+                    var half = name.EndsWith("D16Hi", StringComparison.Ordinal) ? 2
+                        : name.EndsWith("D16", StringComparison.Ordinal) ? 1 : 0;
+                    EmitLdsSubDwordRead(instruction, control, bits, signed, half);
+                    return true;
+                }
                 case "DsWriteB64":
                 {
                     if (instruction.Sources.Count < 3)
@@ -2700,6 +2787,70 @@ public static partial class Gen5SpirvTranslator
                 _ldsElementPointer,
                 _lds,
                 index);
+        }
+
+        // LDS is a uint array. Clear the target bits and OR in the new value
+        // atomically so lanes writing neighbouring bytes of one dword cannot
+        // overwrite each other.
+        private void EmitLdsSubDwordWrite(Gen5ShaderInstruction instruction, Gen5DataShareControl control, uint bits, bool highHalf)
+        {
+            var address = GetRawSource(instruction, 0);
+            var byteAddress = control.SingleOffsetBytes == 0
+                ? address
+                : IAdd(address, UInt(control.SingleOffsetBytes));
+            var pointer = LdsPointer(address, control.SingleOffsetBytes);
+            var width = bits == 8 ? 0xFFu : 0xFFFFu;
+            var alignMask = bits == 8 ? 3u : 2u;
+            EmitExecConditional(() =>
+            {
+                var data = GetRawSource(instruction, 1);
+                if (highHalf)
+                {
+                    data = ShiftRightLogical(data, UInt(16));
+                }
+
+                var shift = ShiftLeftLogical(BitwiseAnd(byteAddress, UInt(alignMask)), UInt(3));
+                var keep = _module.AddInstruction(SpirvOp.Not, _uintType, ShiftLeftLogical(UInt(width), shift));
+                var value = ShiftLeftLogical(BitwiseAnd(data, UInt(width)), shift);
+                EmitAtomic(SpirvOp.AtomicAnd, _uintType, pointer, scope: 2, semantics: 0x108,
+                    value: () => keep, comparator: () => keep);
+                EmitAtomic(SpirvOp.AtomicOr, _uintType, pointer, scope: 2, semantics: 0x108,
+                    value: () => value, comparator: () => value);
+            });
+        }
+
+        // half: 0 = whole VGPR, 1 = low 16 bits (high kept), 2 = high 16 bits (low kept).
+        private void EmitLdsSubDwordRead(Gen5ShaderInstruction instruction, Gen5DataShareControl control, uint bits, bool signed, int half)
+        {
+            var address = GetRawSource(instruction, 0);
+            var byteAddress = control.SingleOffsetBytes == 0
+                ? address
+                : IAdd(address, UInt(control.SingleOffsetBytes));
+            var word = Load(_uintType, LdsPointer(address, control.SingleOffsetBytes));
+            var alignMask = bits == 8 ? 3u : 2u;
+            var shift = ShiftLeftLogical(BitwiseAnd(byteAddress, UInt(alignMask)), UInt(3));
+            uint field;
+            if (signed)
+            {
+                var extracted = _module.AddInstruction(SpirvOp.BitFieldSExtract, _intType,
+                    Bitcast(_intType, word), shift, UInt(bits));
+                field = Bitcast(_uintType, extracted);
+            }
+            else
+            {
+                field = _module.AddInstruction(SpirvOp.BitFieldUExtract, _uintType, word, shift, UInt(bits));
+            }
+
+            var destination = instruction.Destinations[0].Value;
+            if (half != 0)
+            {
+                var previous = LoadV(destination);
+                field = half == 1
+                    ? BitwiseOr(BitwiseAnd(previous, UInt(0xFFFF0000)), BitwiseAnd(field, UInt(0xFFFF)))
+                    : BitwiseOr(BitwiseAnd(previous, UInt(0xFFFF)), ShiftLeftLogical(field, UInt(16)));
+            }
+
+            StoreV(destination, field);
         }
 
         private void StoreLds(uint pointer, uint value)
@@ -4850,6 +5001,17 @@ public static partial class Gen5SpirvTranslator
             }
 
             var loaded = Load(input.Type, input.Variable);
+            if (_cornerSlot != 0 && _cornerInputs.TryGetValue(input.Variable, out var cornerVariables))
+            {
+                var slot = Load(_uintType, _cornerSlot);
+                for (var corner = 0u; corner < 3; corner++)
+                {
+                    loaded = _module.AddInstruction(SpirvOp.Select, input.Type,
+                        _module.AddInstruction(SpirvOp.IEqual, _boolType, slot, UInt(corner + 1)),
+                        Load(input.Type, cornerVariables[corner]), loaded);
+                }
+            }
+
             for (uint component = 0; component < control.DwordCount; component++)
             {
                 uint raw;
@@ -7593,6 +7755,132 @@ public static partial class Gen5SpirvTranslator
                 _privateUintPointer,
                 _runtimeBufferBiases,
                 UInt(checked((uint)binding)));
+
+        // Without native rectangle fill a rectangle list is drawn as a 4-vertex strip, but the
+        // guest defines only three corners, in no fixed order. On the strip pipeline the
+        // specialization constant is 1 + (firstVertex % 4); every invocation of the strip then runs
+        // the guest program for all three corners, finds the right-angle corner R from the
+        // positions, and emits R, the two corners adjacent to it (A, B) and finally A + B - R for
+        // the position and every vec4 attribute. The two strip triangles (R, A, B) and (A, B, D)
+        // cover the rectangle whatever order the guest used, as native rectangle fill would.
+        private uint EmitRectangleCornerEntry(uint guestMain, uint functionType)
+        {
+            var phase = _module.SpecConstantUInt(0, RectangleCornerSpecId);
+            var outputs = new List<uint> { _positionOutput };
+            outputs.AddRange(_vertexOutputs.OrderBy(static pair => pair.Key).Select(static pair => pair.Value));
+            var privateVec4Pointer = _module.TypePointer(SpirvStorageClass.Private, _vec4Type);
+            var saved = new uint[3, outputs.Count];
+            for (var corner = 0; corner < 3; corner++)
+            {
+                for (var index = 0; index < outputs.Count; index++)
+                {
+                    saved[corner, index] = _module.AddGlobalVariable(privateVec4Pointer, SpirvStorageClass.Private, _module.ConstantNull(_vec4Type));
+                    _interfaces.Add(saved[corner, index]);
+                }
+            }
+
+            var entry = _module.BeginFunction(_voidType, functionType);
+            _module.AddName(entry, "main");
+            _module.AddLabel();
+            var vertexIndex = Load(_uintType, _vertexIndexInput);
+            var isRectangle = _module.AddInstruction(SpirvOp.INotEqual, _boolType, phase, UInt(0));
+            var rectangleLabel = _module.AllocateId();
+            var normalLabel = _module.AllocateId();
+            var mergeLabel = _module.AllocateId();
+            _module.AddStatement(SpirvOp.SelectionMerge, mergeLabel, 0);
+            _module.AddStatement(SpirvOp.BranchConditional, isRectangle, rectangleLabel, normalLabel);
+
+            _module.AddLabel(normalLabel);
+            Store(_guestVertexIndex, vertexIndex);
+            _module.AddInstruction(SpirvOp.FunctionCall, _voidType, guestMain);
+            _module.AddStatement(SpirvOp.Branch, mergeLabel);
+
+            _module.AddLabel(rectangleLabel);
+            var phaseMinusOne = _module.AddInstruction(SpirvOp.ISub, _uintType, phase, UInt(1));
+            // Position of this invocation inside its four-vertex strip.
+            var local = BitwiseAnd(_module.AddInstruction(SpirvOp.ISub, _uintType, vertexIndex, phaseMinusOne), UInt(3));
+            var first = _module.AddInstruction(SpirvOp.ISub, _uintType, vertexIndex, local);
+            for (var corner = 0u; corner < 3; corner++)
+            {
+                Store(_guestVertexIndex, IAdd(first, UInt(corner)));
+                Store(_cornerSlot, UInt(corner + 1));
+                _module.AddInstruction(SpirvOp.FunctionCall, _voidType, guestMain);
+                for (var index = 0; index < outputs.Count; index++)
+                {
+                    var value = Load(_vec4Type, outputs[index]);
+                    Store(saved[corner, index], value);
+                }
+            }
+
+            // Right-angle corner: the one whose edge vectors to the other two are most orthogonal.
+            // The test uses the clip-space values the guest wrote; the fourth corner is built from the
+            // same homogeneous values, which keeps all four vertices on one plane for
+            // perspective-correct interpolation.
+            var positions = Enumerable.Range(0, 3).Select(corner => Load(_vec4Type, saved[corner, 0])).ToArray();
+            uint Component(uint position, uint component) =>
+                _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, position, component);
+            uint EdgeDot(int at, int left, int right)
+            {
+                var ax = _module.AddInstruction(SpirvOp.FSub, _floatType, Component(positions[left], 0), Component(positions[at], 0));
+                var ay = _module.AddInstruction(SpirvOp.FSub, _floatType, Component(positions[left], 1), Component(positions[at], 1));
+                var bx = _module.AddInstruction(SpirvOp.FSub, _floatType, Component(positions[right], 0), Component(positions[at], 0));
+                var by = _module.AddInstruction(SpirvOp.FSub, _floatType, Component(positions[right], 1), Component(positions[at], 1));
+                var dot = _module.AddInstruction(SpirvOp.FAdd, _floatType,
+                    _module.AddInstruction(SpirvOp.FMul, _floatType, ax, bx),
+                    _module.AddInstruction(SpirvOp.FMul, _floatType, ay, by));
+                return Ext(4, _floatType, dot); // GLSL.std.450 FAbs
+            }
+
+            var dot0 = EdgeDot(0, 1, 2);
+            var dot1 = EdgeDot(1, 0, 2);
+            var dot2 = EdgeDot(2, 0, 1);
+            var rightAngle = _module.AddInstruction(SpirvOp.Select, _uintType,
+                LogicalAnd(_module.AddInstruction(SpirvOp.FOrdLessThanEqual, _boolType, dot0, dot1),
+                    _module.AddInstruction(SpirvOp.FOrdLessThanEqual, _boolType, dot0, dot2)),
+                UInt(0),
+                _module.AddInstruction(SpirvOp.Select, _uintType,
+                    _module.AddInstruction(SpirvOp.FOrdLessThanEqual, _boolType, dot1, dot2), UInt(1), UInt(2)));
+            var adjacentA = _module.AddInstruction(SpirvOp.Select, _uintType,
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, rightAngle, UInt(0)), UInt(1), UInt(0));
+            var adjacentB = _module.AddInstruction(SpirvOp.Select, _uintType,
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, rightAngle, UInt(2)), UInt(1), UInt(2));
+            var source = _module.AddInstruction(SpirvOp.Select, _uintType,
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, local, UInt(0)), rightAngle,
+                _module.AddInstruction(SpirvOp.Select, _uintType,
+                    _module.AddInstruction(SpirvOp.IEqual, _boolType, local, UInt(1)), adjacentA, adjacentB));
+            var isFourth = _module.AddInstruction(SpirvOp.IEqual, _boolType, local, UInt(3));
+            for (var index = 0; index < outputs.Count; index++)
+            {
+                uint Pick(uint corner) => _module.AddInstruction(SpirvOp.Select, _vec4Type,
+                    _module.AddInstruction(SpirvOp.IEqual, _boolType, corner, UInt(0)), Load(_vec4Type, saved[0, index]),
+                    _module.AddInstruction(SpirvOp.Select, _vec4Type,
+                        _module.AddInstruction(SpirvOp.IEqual, _boolType, corner, UInt(1)), Load(_vec4Type, saved[1, index]),
+                        Load(_vec4Type, saved[2, index])));
+                // Each component of an axis-aligned rectangle's attribute matches between R and one
+                // neighbour, so copy the other neighbour's bits exactly. Only when neither matches fall
+                // back to A + B - R: float math would mangle integers the guest packs into outputs.
+                var valueA = Pick(adjacentA);
+                var valueB = Pick(adjacentB);
+                var valueR = Pick(rightAngle);
+                var bitsA = Bitcast(_uvec4Type, valueA);
+                var bitsB = Bitcast(_uvec4Type, valueB);
+                var bitsR = Bitcast(_uvec4Type, valueR);
+                var boolVector = _module.TypeVector(_boolType, 4);
+                var aMatchesR = _module.AddInstruction(SpirvOp.IEqual, boolVector, bitsA, bitsR);
+                var bMatchesR = _module.AddInstruction(SpirvOp.IEqual, boolVector, bitsB, bitsR);
+                var extrapolated = _module.AddInstruction(SpirvOp.FSub, _vec4Type,
+                    _module.AddInstruction(SpirvOp.FAdd, _vec4Type, valueA, valueB), valueR);
+                var fourth = _module.AddInstruction(SpirvOp.Select, _vec4Type, aMatchesR, valueB,
+                    _module.AddInstruction(SpirvOp.Select, _vec4Type, bMatchesR, valueA, extrapolated));
+                Store(outputs[index], _module.AddInstruction(SpirvOp.Select, _vec4Type, isFourth, fourth, Pick(source)));
+            }
+
+            _module.AddStatement(SpirvOp.Branch, mergeLabel);
+            _module.AddLabel(mergeLabel);
+            _module.AddStatement(SpirvOp.Return);
+            _module.EndFunction();
+            return entry;
+        }
 
         private uint VectorPointer(uint register)
         {

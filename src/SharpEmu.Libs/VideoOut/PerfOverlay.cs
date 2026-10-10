@@ -25,7 +25,7 @@ public static class PerfOverlay
     private const int FrameHistorySize = 128;
 
     private static readonly PerformanceOverlayState DisplayState = new();
-    private static WindowsGpuUsage? _gpuUsage;
+    private static IGpuUsage? _gpuUsage;
 
     private static long _lastPresentTimestamp;
     private static long _lastSubmitTimestamp;
@@ -77,7 +77,7 @@ public static class PerfOverlay
     internal static void Configure(HostVideoOptions options)
     {
         _gpuUsage?.Dispose();
-        _gpuUsage = new WindowsGpuUsage();
+        _gpuUsage = OperatingSystem.IsMacOS() ? new MacGpuUsage() : new WindowsGpuUsage();
         DisplayState.Configure(options,
             string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_OVERLAY"), "0", StringComparison.Ordinal));
         _sessionStartTimestamp = Stopwatch.GetTimestamp();

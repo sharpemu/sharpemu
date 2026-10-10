@@ -896,6 +896,7 @@ public static partial class Gen5ShaderTranslator
             0x0D => "VCvtFlrI32F32",
             0x0E => "VCvtOffF32I4",
             0x0F => "VCvtF32F64",
+            0x10 => "VCvtF64F32",
             0x11 => "VCvtF32Ubyte0",
             0x12 => "VCvtF32Ubyte1",
             0x13 => "VCvtF32Ubyte2",
@@ -1284,6 +1285,7 @@ public static partial class Gen5ShaderTranslator
             // conversions and transcendentals.
             0x184 => "VCvtF64I32",
             0x18F => "VCvtF32F64",
+            0x190 => "VCvtF64F32",
             0x196 => "VCvtF64U32",
             0x1AF => "VRcpF64",
             0x1B0 => "VRsqF64",
@@ -1449,6 +1451,8 @@ public static partial class Gen5ShaderTranslator
             0x10 => "DsCmpstB32",
             0x12 => "DsMinF32",
             0x13 => "DsMaxF32",
+            0x1E => "DsWriteB8",
+            0x1F => "DsWriteB16",
             0x20 => "DsAddRtnU32",
             0x21 => "DsSubRtnU32",
             0x23 => "DsIncRtnU32",
@@ -1467,6 +1471,9 @@ public static partial class Gen5ShaderTranslator
             0x37 => "DsRead2B32",
             0x38 => "DsRead2St64B32",
             0x39 => "DsReadI8",
+            0x3A => "DsReadU8",
+            0x3B => "DsReadI16",
+            0x3C => "DsReadU16",
             0x3D => "DsConsume",
             0x3E => "DsAppend",
             // gfx10 groups the 64-bit LDS atomics at 0x40..0x4C, directly ahead
@@ -1477,6 +1484,15 @@ public static partial class Gen5ShaderTranslator
             0x40 => "DsAddU64",
             0x4A => "DsOrB64",
             0x4D => "DsWriteB64",
+            // Sub-dword forms that read or write one 16-bit half of a VGPR.
+            0xA0 => "DsWriteB8D16Hi",
+            0xA1 => "DsWriteB16D16Hi",
+            0xA2 => "DsReadU8D16",
+            0xA3 => "DsReadU8D16Hi",
+            0xA4 => "DsReadI8D16",
+            0xA5 => "DsReadI8D16Hi",
+            0xA6 => "DsReadU16D16",
+            0xA7 => "DsReadU16D16Hi",
             0x4E => "DsWrite2B64",
             0x4F => "DsWrite2St64B64",
             0x76 => "DsReadB64",
@@ -2500,7 +2516,7 @@ public static partial class Gen5ShaderTranslator
                 {
                     "DsAppend" or "DsConsume" or "DsReadAddtidB32" => [Gen5Operand.Scalar(124)],
                     "DsWriteAddtidB32" => [Gen5Operand.Scalar(124), Gen5Operand.Vector(vectorData0)],
-                    "DsWriteB32" => [
+                    "DsWriteB32" or "DsWriteB8" or "DsWriteB16" or "DsWriteB8D16Hi" or "DsWriteB16D16Hi" => [
                         Gen5Operand.Vector(vectorAddress),
                         Gen5Operand.Vector(vectorData0),
                     ],
@@ -2575,7 +2591,9 @@ public static partial class Gen5ShaderTranslator
                     "DsAppend" or "DsConsume" => [
                         Gen5Operand.Vector(vectorDestination),
                     ],
-                    "DsReadB32" or "DsReadI8" or "DsReadAddtidB32" or
+                    "DsReadB32" or "DsReadI8" or "DsReadU8" or "DsReadI16" or "DsReadU16" or
+                    "DsReadU8D16" or "DsReadU8D16Hi" or "DsReadI8D16" or "DsReadI8D16Hi" or
+                    "DsReadU16D16" or "DsReadU16D16Hi" or "DsReadAddtidB32" or
                     "DsSwizzleB32" or "DsBpermuteB32" => [
                         Gen5Operand.Vector(vectorDestination),
                     ],

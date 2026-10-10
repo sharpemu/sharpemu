@@ -53,6 +53,63 @@ public sealed class RosettaVectorStorePatchTests
         Assert.Equal(unchecked(originalInstruction.MemoryDisplacement64 + 16), upperStore.MemoryDisplacement64);
     }
 
+    [Theory]
+    [InlineData(new byte[] { 0xC4, 0xE3, 0x7D, 0x1D, 0x47, 0x20, 0x03 }, true)]  // vcvtps2ph [rdi+20h], ymm0, 3
+    [InlineData(new byte[] { 0xC4, 0xE3, 0x79, 0x1D, 0x07, 0x00 }, true)]        // vcvtps2ph [rdi], xmm0, 0
+    [InlineData(new byte[] { 0xC4, 0xE3, 0x7D, 0x1D, 0xC1, 0x03 }, false)]       // vcvtps2ph xmm1, ymm0, 3
+    public void SelectsOnlyMemoryHalfConvertStores(byte[] instructionBytes, bool requiresStoreSplit)
+    {
+        Assert.Equal(requiresStoreSplit, RosettaVectorStorePatch.RequiresStoreSplit(DecodeInstruction(instructionBytes)));
+    }
+
+    [Theory]
+    [InlineData(new byte[] { 0xC4, 0xE3, 0x7D, 0x1D, 0x47, 0x20, 0x03 }, Register.RDI, 0x20UL, Code.VEX_Vmovdqu_xmmm128_xmm)]
+    [InlineData(new byte[] { 0xC4, 0xE3, 0x79, 0x1D, 0x44, 0x24, 0x08, 0x00 }, Register.RSP, 0x08UL + 0xA0UL, Code.VEX_Vmovq_xmmm64_xmm)]
+    public void HalfConvertStoreUsesScratchRegisterAndPlainStore(byte[] instructionBytes, Register expectedBase, ulong expectedDisplacement, Code expectedStore)
+    {
+        var original = DecodeInstruction(instructionBytes);
+        var rewritten = Encode(RosettaVectorStorePatch.SplitVectorStores([original]));
+
+        Assert.Equal(6, rewritten.Count);
+        Assert.Equal(Code.Lea_r64_m, rewritten[0].Code);
+        Assert.Equal(unchecked((ulong)-0xA0L), rewritten[0].MemoryDisplacement64);
+        Assert.Equal(Code.VEX_Vmovdqu_ymmm256_ymm, rewritten[1].Code);
+        Assert.Equal(Register.YMM15, rewritten[1].Op1Register);
+        Assert.Equal(Register.XMM15, rewritten[2].Op0Register);
+        Assert.Equal(original.Op1Register, rewritten[2].Op1Register);
+        Assert.Equal(original.Immediate8, rewritten[2].Immediate8);
+        Assert.Equal(expectedStore, rewritten[3].Code);
+        Assert.Equal(expectedBase, rewritten[3].MemoryBase);
+        Assert.Equal(expectedDisplacement, rewritten[3].MemoryDisplacement64);
+        Assert.Equal(Register.XMM15, rewritten[3].Op1Register);
+        Assert.Equal(Code.VEX_Vmovdqu_ymm_ymmm256, rewritten[4].Code);
+        Assert.Equal(Code.Lea_r64_m, rewritten[5].Code);
+        Assert.Equal(0xA0UL, rewritten[5].MemoryDisplacement64);
+    }
+
+    [Fact]
+    public void HalfConvertStoreAvoidsScratchingItsSource()
+    {
+        // vcvtps2ph [rdi], ymm15, 0
+        var rewritten = Encode(RosettaVectorStorePatch.SplitVectorStores([DecodeInstruction([0xC4, 0x63, 0x7D, 0x1D, 0x3F, 0x00])]));
+        Assert.Equal(Register.YMM14, rewritten[1].Op1Register);
+        Assert.Equal(Register.YMM15, rewritten[2].Op1Register);
+        Assert.Equal(Register.XMM14, rewritten[3].Op1Register);
+    }
+
+    private static List<Instruction> Encode(IList<Instruction> instructions)
+    {
+        var writer = new InstructionByteWriter();
+        Assert.True(BlockEncoder.TryEncode(64, new InstructionBlock(writer, instructions, 0x200000), out var error, out _), error);
+        var bytes = writer.EncodedBytes.ToArray();
+        var decoder = Decoder.Create(64, new ByteArrayCodeReader(bytes));
+        decoder.IP = 0x200000;
+        var decoded = new List<Instruction>();
+        while (decoder.IP < 0x200000 + (ulong)bytes.Length)
+            decoded.Add(decoder.Decode());
+        return decoded;
+    }
+
     [Fact]
     public unsafe void RosettaSplitsStoresWithoutRedZoneUseAndPreservesAllBytes()
     {
