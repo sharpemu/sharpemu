@@ -369,8 +369,11 @@ internal static unsafe partial class VulkanVideoPresenter
             return new BufferBinding(buffer.Handle, 0);
         }
 
+        private BufferBinding[] _lastVertexBuffers = [];
+
         public void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input)
         {
+            _lastVertexBuffers = bindings.ToArray();
             if (bindings.IsEmpty) return;
             var command = BeginBatchedGuestCommands();
             var buffers = stackalloc VkBuffer[bindings.Length];
@@ -940,15 +943,47 @@ internal static unsafe partial class VulkanVideoPresenter
         // Existing strip compatibility path when native rectangle fill cannot be used.
         private static bool IsSingleRectangle(uint vertexCount) => vertexCount is 1 or 3 or 4;
 
-        private void BindRectangleListVariant(RenderPipelineEntry entry, bool strip, CommandBuffer command)
+        private void BindRectangleListVariant(RenderPipelineEntry entry, bool strip, CommandBuffer command, uint firstVertex = 0)
         {
-            ref var variant = ref strip ? ref entry.StripVariant : ref entry.ListVariant;
+            ref var variant = ref strip ? ref entry.RectangleStripVariants[firstVertex & 3] : ref entry.ListVariant;
             if (variant.Handle == 0)
             {
-                variant = CreateRenderPipeline(entry.Description!, strip ? PrimitiveTopology.TriangleStrip : PrimitiveTopology.TriangleList, entry.Layout);
+                variant = CreateRenderPipeline(entry.Description!, strip ? PrimitiveTopology.TriangleStrip : PrimitiveTopology.TriangleList, entry.Layout,
+                    rectangleCornerPhase: strip ? (firstVertex & 3) + 1 : 0);
             }
 
             _vk.CmdBindPipeline(command, PipelineBindPoint.Graphics, variant);
+            if (strip)
+            {
+                BindRectangleCornerBuffers(entry, command, firstVertex);
+            }
+        }
+
+        // Points the per-instance corner bindings of a rectangle strip at guest vertices
+        // firstVertex + 0, 1 and 2.
+        private void BindRectangleCornerBuffers(RenderPipelineEntry entry, CommandBuffer command, uint firstVertex)
+        {
+            var description = entry.Description!;
+            if (!UsesRectangleCornerBindings(description) || _lastVertexBuffers.Length < description.VertexInput.BindingCount)
+            {
+                return;
+            }
+
+            var bindingCount = (int)description.VertexInput.BindingCount;
+            var buffers = stackalloc VkBuffer[bindingCount * 3];
+            var offsets = stackalloc ulong[bindingCount * 3];
+            for (var corner = 0; corner < 3; corner++)
+            {
+                for (var binding = 0; binding < bindingCount; binding++)
+                {
+                    var source = _lastVertexBuffers[binding];
+                    var stride = description.VertexInput.Bindings[binding].Stride;
+                    buffers[corner * bindingCount + binding] = new VkBuffer(source.Handle);
+                    offsets[corner * bindingCount + binding] = source.Offset + (ulong)(firstVertex + (uint)corner) * stride;
+                }
+            }
+
+            _vk.CmdBindVertexBuffers(command, (uint)bindingCount, (uint)(bindingCount * 3), buffers, offsets);
         }
 
         private void BindNativeRectangleList(RenderPipelineEntry entry, CommandBuffer command)
@@ -981,7 +1016,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 else
                 {
                     var strip = IsSingleRectangle(vertexCount);
-                    BindRectangleListVariant(entry, strip, command);
+                    BindRectangleListVariant(entry, strip, command, firstVertex);
                     if (strip)
                     {
                         count = SingleRectangleVertexCount;
@@ -993,6 +1028,23 @@ internal static unsafe partial class VulkanVideoPresenter
             _vk.CmdDraw(command, count, instanceCount, firstVertex, firstInstance);
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Draw,
                 _boundGraphicsPipeline?.Id ?? 0, count, instanceCount);
+            CountDraw();
+        }
+
+        void IRenderHost.DrawLegacyRectangle(uint instanceCount, uint firstVertex, uint firstInstance)
+        {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
+            var command = BeginBatchedGuestCommands();
+            if (_boundGraphicsPipeline is { } entry && entry.Description is not null)
+            {
+                // The bound pipeline is already a triangle strip; this variant also builds the fourth corner.
+                BindRectangleListVariant(entry, strip: true, command, firstVertex);
+            }
+
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
+            _vk.CmdDraw(command, SingleRectangleVertexCount, instanceCount, firstVertex, firstInstance);
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Draw,
+                _boundGraphicsPipeline?.Id ?? 0, SingleRectangleVertexCount, instanceCount);
             CountDraw();
         }
 

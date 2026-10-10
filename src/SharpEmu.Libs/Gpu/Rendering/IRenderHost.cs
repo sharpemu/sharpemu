@@ -147,6 +147,11 @@ public interface IRenderHost
 
     void Draw(uint vertexCount, uint instanceCount, uint firstVertex, uint firstInstance);
 
+    // A legacy rectangle: three guest vertices drawn as a four-vertex strip. Hosts that can
+    // synthesize the fourth corner override this; the default draws the guest's own vertex 3.
+    void DrawLegacyRectangle(uint instanceCount, uint firstVertex, uint firstInstance) =>
+        Draw(4, instanceCount, firstVertex, firstInstance);
+
     void DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance);
 
     // One indexed draw whose counts the GPU reads from the buffer (VkDrawIndexedIndirectCommand layout).

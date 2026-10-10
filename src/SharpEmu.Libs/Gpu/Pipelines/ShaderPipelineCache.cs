@@ -326,7 +326,21 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var source = PrepareSource(compute.Address, ShaderStage.Compute, "compute", compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, userDataBase: 0);
         var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
         var systemRegisters = DecodeComputeSystemRegisters(compute);
-        var program = _programs.Decode(source);
+        Gen5ShaderProgram program;
+        if (_strictShaders)
+        {
+            program = _programs.Decode(source);
+        }
+        else if (!_programs.TryDecode(source, out program, out var decodeRejection))
+        {
+            if (_reportedShaderSkips.Add((source.Stage, source.Hash, source.CodeSize)))
+            {
+                Console.Error.WriteLine($"[GPU][WARN][COMPUTE_SKIPPED] {decodeRejection} " +
+                    "The operation was not executed. Images and FPS can be incorrect. Set SHARPEMU_STRICT_COMPUTE=1 to stop on this failure.");
+            }
+            return new ComputeProgram { Available = false };
+        }
+
         if (TrySubmitMaskedDwordCopyKernel(program, source, systemRegisters, input, out var description))
         {
             if (RenderTrace.Enabled)
@@ -419,7 +433,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
         var description = BuildGraphicsDescription(
             colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts);
+            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts, _host.DepthBoundsTestSupported);
         var key = KeyOf(description);
         lock (_gate)
         {
@@ -456,7 +470,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool disableBlending,
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram,
-        SampleCountFlags noAttachmentSampleCounts)
+        SampleCountFlags noAttachmentSampleCounts,
+        bool depthBoundsTestSupported = true)
     {
         if (colors.Length > PipelineStaticParameters.ColorAttachmentCount)
         {
@@ -540,9 +555,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         parameters.Samples = samples;
         parameters.SampleShadingEnable = pixelActive && samples > 1 && pixelInput!.SampleShading;
         parameters.WithDepth = withDepth;
+        // Bounds only matter while the test runs. Games such as GTA V change them for nearly every
+        // light volume, so keeping unused bounds in the key created a new pipeline per draw.
+        var depthBoundsActive = depthBoundsTestSupported && depthState.DepthBoundsTestEnabled;
         parameters.DepthBoundsTestEnable = depthState.DepthBoundsTestEnabled;
-        parameters.DepthMinBounds = depthState.DepthMinBounds;
-        parameters.DepthMaxBounds = depthState.DepthMaxBounds;
+        parameters.DepthMinBounds = depthBoundsActive ? depthState.DepthMinBounds : 0f;
+        parameters.DepthMaxBounds = depthBoundsActive ? depthState.DepthMaxBounds : 0f;
         parameters.StencilTestEnable = depthState.StencilTestEnabled;
         parameters.StencilFront = withDepth ? depthState.FrontOperations : StencilOperations.Default;
         parameters.StencilBack = withDepth ? depthState.BackOperations : StencilOperations.Default;

@@ -383,7 +383,7 @@ public sealed partial class RenderExecutor
                     throw _host.Fatal($"A legacy rectangle list needs three vertices and no vertex buffers: count={draw.Count} buffers={vertexInput.Buffers.Length}.");
                 }
 
-                _host.Draw(4, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);
+                _host.DrawLegacyRectangle(draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);
                 break;
             case GuestPrimitiveType.QuadListLegacy:
                 if ((draw.Count & 0x3) != 0)

@@ -310,6 +310,8 @@ public sealed class SelfLoader : ISelfLoader
                 totalImageSize);
         }
 
+        _ = GuestVaHolePatcher.Patch(virtualMemory, programHeaders, imageBase);
+
         Console.WriteLine($"[LOADER] ELF e_entry: 0x{elfHeader.EntryPoint:X16}");
         Console.WriteLine($"[LOADER] Generation: {(isNextGen ? "Gen5 (PS5)" : "Gen4 (PS4)")}");
         Console.WriteLine($"[LOADER] Using image base: 0x{imageBase:X16}");

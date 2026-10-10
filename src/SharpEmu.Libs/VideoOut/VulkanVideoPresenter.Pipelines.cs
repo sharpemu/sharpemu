@@ -45,7 +45,8 @@ internal static unsafe partial class VulkanVideoPresenter
             public DescriptorSetDemand Demand;
             public bool UsesPushDescriptors;
             public GraphicsPipelineDescription? Description;
-            public Pipeline StripVariant;
+            // Rectangle strips specialized by firstVertex % 4 for fourth-corner synthesis.
+            public readonly Pipeline[] RectangleStripVariants = new Pipeline[4];
             public Pipeline ListVariant;
             public Pipeline RectangleVariant;
             public ulong ProfileVertexHash;
@@ -67,6 +68,8 @@ internal static unsafe partial class VulkanVideoPresenter
         uint IShaderPipelineHost.MaxPushDescriptors => _maxPushDescriptors;
 
         // Wave64 compute runs natively when the device's subgroup is that wide; smaller devices emulate it.
+        bool IShaderPipelineHost.DepthBoundsTestSupported => _supportsDepthBounds;
+
         bool IShaderPipelineHost.ComputeWave64Supported => Volatile.Read(ref _nativeSubgroupSize) >= 64;
 
         // Only a 64-invocation wave64 workgroup is translated for either host subgroup width. Every
@@ -661,6 +664,68 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        // The translator declares three corner copies of each attribute (see
+        // Gen5SpirvTranslator.RectangleCornerLocation). Ordinary pipelines alias them to the
+        // attribute itself. Rectangle strips read them through extra per-instance bindings that
+        // BindRectangleCornerBuffers points at guest corners 0, 1 and 2 of the draw.
+        internal static bool UsesRectangleCornerBindings(GraphicsPipelineDescription description) =>
+            description.VertexInput.AttributeCount is >= 1 and <= Gen5SpirvTranslator.MaxRectangleCornerAttributes &&
+            description.VertexInput.BindingCount is >= 1 and <= 4;
+
+        private static void AddRectangleCornerAttributes(
+            GraphicsPipelineDescription description,
+            ref VertexInputAttributeDescription[] attributes,
+            ref VertexInputBindingDescription[] bindings,
+            bool rectangleStrip)
+        {
+            var count = attributes.Length;
+            if (count is < 1 or > Gen5SpirvTranslator.MaxRectangleCornerAttributes)
+            {
+                return;
+            }
+
+            var separate = rectangleStrip && UsesRectangleCornerBindings(description);
+            var bindingCount = bindings.Length;
+            var corners = new VertexInputAttributeDescription[count * 3];
+            for (var corner = 0u; corner < 3; corner++)
+            {
+                for (var index = 0; index < count; index++)
+                {
+                    var attribute = attributes[index];
+                    var binding = attribute.Binding;
+                    if (separate && bindings[binding].InputRate == VertexInputRate.Vertex)
+                    {
+                        binding = (uint)(bindingCount + corner * bindingCount + binding);
+                    }
+
+                    corners[corner * count + index] = attribute with
+                    {
+                        Location = Gen5SpirvTranslator.RectangleCornerLocation(corner, (uint)index),
+                        Binding = binding,
+                    };
+                }
+            }
+
+            attributes = [.. attributes, .. corners];
+            if (separate)
+            {
+                var extra = new VertexInputBindingDescription[bindingCount * 3];
+                for (var corner = 0; corner < 3; corner++)
+                {
+                    for (var binding = 0; binding < bindingCount; binding++)
+                    {
+                        extra[corner * bindingCount + binding] = bindings[binding] with
+                        {
+                            Binding = (uint)(bindingCount + corner * bindingCount + binding),
+                            InputRate = VertexInputRate.Instance,
+                        };
+                    }
+                }
+
+                bindings = [.. bindings, .. extra];
+            }
+        }
+
         private static uint DestinationSelect(uint x, uint y = 0, uint z = 0, uint w = 0) => x | (y << 3) | (z << 6) | (w << 9);
 
         // A destination select the fixed-function fetch cannot apply is logged once and accepted.
@@ -728,7 +793,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // One graphics pipeline for dynamic rendering: the attachment formats travel in the create info.
         private Pipeline CreateRenderPipeline(GraphicsPipelineDescription description, PrimitiveTopology topology, PipelineLayout layout,
-            PolygonMode polygonMode = PolygonMode.Fill)
+            PolygonMode polygonMode = PolygonMode.Fill, uint rectangleCornerPhase = 0)
         {
             var parameters = description.StaticParameters;
             var rendering = description.Rendering;
@@ -744,12 +809,28 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 var shaderStages = stackalloc PipelineShaderStageCreateInfo[2];
                 var stageCount = 1u;
+                // The rectangle-list strip fallback asks the vertex shader to build the fourth corner.
+                var cornerEnabled = rectangleCornerPhase;
+                var cornerEntry = new SpecializationMapEntry
+                {
+                    ConstantID = SharpEmu.ShaderCompiler.Vulkan.Gen5SpirvTranslator.RectangleCornerSpecId,
+                    Offset = 0,
+                    Size = sizeof(uint),
+                };
+                var cornerSpecialization = new SpecializationInfo
+                {
+                    MapEntryCount = 1,
+                    PMapEntries = &cornerEntry,
+                    DataSize = sizeof(uint),
+                    PData = &cornerEnabled,
+                };
                 shaderStages[0] = new PipelineShaderStageCreateInfo
                 {
                     SType = StructureType.PipelineShaderStageCreateInfo,
                     Stage = ShaderStageFlags.VertexBit,
                     Module = vertexModule,
                     PName = entryPoint,
+                    PSpecializationInfo = rectangleCornerPhase != 0 ? &cornerSpecialization : null,
                 };
                 if (pixelModule.Handle != 0)
                 {
@@ -765,6 +846,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var vertexBindings = new VertexInputBindingDescription[description.VertexInput.BindingCount];
                 var vertexAttributes = new VertexInputAttributeDescription[description.VertexInput.AttributeCount];
                 BuildVertexAttributes(description, vertexAttributes, vertexBindings);
+                AddRectangleCornerAttributes(description, ref vertexAttributes, ref vertexBindings, rectangleCornerPhase != 0);
                 var colorCount = (int)parameters.ColorCount;
                 var blends = new PipelineColorBlendAttachmentState[colorCount];
                 for (var index = 0; index < colorCount; index++)
@@ -792,12 +874,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 var colorFormats = new Format[colorCount];
                 Array.Copy(rendering.ColorFormats, colorFormats, colorCount);
                 var cullMode = CullModeFlags.None;
-                if (parameters.CullBack)
+                // Rectangles have no facing on the guest GPU. Drawn as a strip, the two halves
+                // wind in opposite directions, so culling would drop one of them.
+                if (parameters.CullBack && rectangleCornerPhase == 0)
                 {
                     cullMode |= CullModeFlags.BackBit;
                 }
 
-                if (parameters.CullFront)
+                if (parameters.CullFront && rectangleCornerPhase == 0)
                 {
                     cullMode |= CullModeFlags.FrontBit;
                 }
@@ -1201,7 +1285,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             foreach (var entry in _pipelineEntries.Values)
             {
-                foreach (var pipeline in new[] { entry.Pipeline, entry.StripVariant, entry.ListVariant, entry.RectangleVariant })
+                foreach (var pipeline in new[] { entry.Pipeline, entry.ListVariant, entry.RectangleVariant }.Concat(entry.RectangleStripVariants))
                 {
                     if (pipeline.Handle != 0)
                     {

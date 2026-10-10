@@ -703,6 +703,9 @@ public sealed partial class RenderExecutor
         return true;
     }
 
+    // SHARPEMU_HOST_DCC_FILL=0 runs deferred metadata clears as dispatches again.
+    private static readonly bool HostDccFill = Environment.GetEnvironmentVariable("SHARPEMU_HOST_DCC_FILL") != "0";
+
     private bool TryConsumeImageClear(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
     {
         if (TryDecodeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator) is not { } clear)
@@ -714,15 +717,19 @@ public sealed partial class RenderExecutor
         var hash = input.Stage.Program!.Hash;
         if (!_host.TryClearImageFromBuffer(address, clear.Size, clear.PackedClear))
         {
-            // A metadata fill may run before its target is bound; the store keeps it pending and the dispatch runs.
+            // A metadata fill may run before its target is bound; the store keeps it pending. The fill
+            // itself then runs on the host when the range is known DCC metadata: run as a dispatch it
+            // leaves the metadata GPU-written, and every later bind of the surface waits for the GPU to
+            // read it back (GTA V fills hundreds of surfaces this way each second).
             var registered = _host.TryAbsorbDccFill(address, clear.Size, clear.PackedClear);
+            var filledOnHost = !registered && HostDccFill && _host.TryFillDccMetadata(address, clear.Size, clear.PackedClear);
             if (RenderTrace.Enabled && RenderTrace.MetadataClear())
             {
                 RenderTrace.Write(
-                    $"{(registered ? "Tracked" : "Deferred")} a metadata clear: shader=0x{hash:X16} address=0x{address:X16} size=0x{clear.Size:X16} value=0x{clear.PackedClear:X8}");
+                    $"{(registered ? "Tracked" : filledOnHost ? "Filled on the host" : "Deferred")} a metadata clear: shader=0x{hash:X16} address=0x{address:X16} size=0x{clear.Size:X16} value=0x{clear.PackedClear:X8}");
             }
 
-            return registered;
+            return registered || filledOnHost;
         }
 
         if (RenderTrace.Enabled && RenderTrace.ImageClear())

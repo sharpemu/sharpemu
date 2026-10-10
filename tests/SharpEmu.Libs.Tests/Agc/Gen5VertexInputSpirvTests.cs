@@ -103,11 +103,14 @@ public sealed class Gen5VertexInputSpirvTests
             new ShaderVertexInput(0, 0, 4, 0, false, [4u]));
 
         var module = ParseModule(shaderBytes);
+        // Rectangle-strip corner copies of each input sit at RectangleCornerLocation and above;
+        // only the guest's own attribute locations count here.
         var locations = module
             .Where(candidate =>
                 candidate.Opcode == SpirvOp.Decorate &&
                 candidate.Operands.Length >= 3 &&
-                candidate.Operands[1] == (uint)SpirvDecoration.Location)
+                candidate.Operands[1] == (uint)SpirvDecoration.Location &&
+                candidate.Operands[2] < Gen5SpirvTranslator.RectangleCornerLocation(0, 0))
             .ToArray();
         var inputVariable = Assert.Single(locations).Operands[0];
 

@@ -284,6 +284,68 @@ public static partial class Gen5SpirvTranslator
 
                     break;
                 }
+                case "VCvtF64F32":
+                {
+                    // Widen with integer ops so devices without shaderFloat64
+                    // (Metal) can still run it. f32 denormals flush to signed zero.
+                    var bits = GetRawSource(instruction, 0);
+                    switch (instruction.Control)
+                    {
+                        case null:
+                            break;
+                        case Gen5Vop3Control vop3 when vop3.OutputModifier == 0 && !vop3.Clamp:
+                            // Input modifiers act on the f32 sign bit, so apply them before widening.
+                            if ((vop3.AbsoluteMask & 1) != 0)
+                                bits = BitwiseAnd(bits, UInt(0x7FFFFFFF));
+                            if ((vop3.NegateMask & 1) != 0)
+                                bits = _module.AddInstruction(SpirvOp.BitwiseXor, _uintType, bits, UInt(0x80000000));
+                            break;
+                        default:
+                            error = $"{instruction.Opcode} with {instruction.Control.GetType().Name} output control is not implemented";
+                            return false;
+                    }
+
+                    // Exact IEEE widening: normals rebias the exponent, denormals
+                    // renormalise around their highest set bit, and Inf/NaN keep
+                    // their payload. 64-bit integers only, no Float64 capability.
+                    var sign = BitwiseAnd(bits, UInt(0x80000000));
+                    var exponent = BitwiseAnd(ShiftRightLogical(bits, UInt(23)), UInt(0xFF));
+                    var mantissa = BitwiseAnd(bits, UInt(0x7FFFFF));
+                    var isExponentZero = _module.AddInstruction(SpirvOp.IEqual, _boolType, exponent, UInt(0));
+                    var isMantissaZero = _module.AddInstruction(SpirvOp.IEqual, _boolType, mantissa, UInt(0));
+                    var isSpecial = _module.AddInstruction(SpirvOp.IEqual, _boolType, exponent, UInt(0xFF));
+                    var isDenormal = _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, isExponentZero,
+                        _module.AddInstruction(SpirvOp.LogicalNot, _boolType, isMantissaZero));
+                    var isZero = _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, isExponentZero, isMantissaZero);
+
+                    // FindUMsb (GLSL.std.450 75): denormal value = mantissa * 2^-149.
+                    var msb = Bitcast(_uintType, Ext(75, _intType, mantissa));
+                    var denormalFraction = _module.AddInstruction(SpirvOp.BitwiseXor, _uintType, mantissa,
+                        ShiftLeftLogical(UInt(1), msb));
+                    var denormalFraction64 = ShiftLeftLogical64(
+                        _module.AddInstruction(SpirvOp.UConvert, _ulongType, denormalFraction),
+                        _module.AddInstruction(SpirvOp.UConvert, _ulongType, _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(52), msb)));
+                    var normalFraction64 = ShiftLeftLogical64(
+                        _module.AddInstruction(SpirvOp.UConvert, _ulongType, mantissa),
+                        _module.Constant64(_ulongType, 29));
+                    var fraction64 = _module.AddInstruction(SpirvOp.Select, _ulongType, isDenormal,
+                        denormalFraction64, normalFraction64);
+                    fraction64 = _module.AddInstruction(SpirvOp.Select, _ulongType, isZero,
+                        _module.Constant64(_ulongType, 0), fraction64);
+
+                    var wideExponent = _module.AddInstruction(SpirvOp.Select, _uintType, isSpecial,
+                        UInt(0x7FF), IAdd(exponent, UInt(896)));
+                    wideExponent = _module.AddInstruction(SpirvOp.Select, _uintType, isDenormal,
+                        IAdd(msb, UInt(874)), wideExponent);
+                    wideExponent = _module.AddInstruction(SpirvOp.Select, _uintType, isZero,
+                        UInt(0), wideExponent);
+
+                    var fractionHigh = _module.AddInstruction(SpirvOp.UConvert, _uintType,
+                        ShiftRightLogical64(fraction64, _module.Constant64(_ulongType, 32)));
+                    StoreV(destination + 1, BitwiseOr(sign, BitwiseOr(ShiftLeftLogical(wideExponent, UInt(20)), fractionHigh)));
+                    result = _module.AddInstruction(SpirvOp.UConvert, _uintType, fraction64);
+                    break;
+                }
                 case "VCvtF32F64":
                 {
                     if (!TryGetDoubleSource(instruction, 0, out var source, out error))
@@ -1959,8 +2021,20 @@ public static partial class Gen5SpirvTranslator
         // ordered compare below is then false and the IEEE sum passes through
         // unchanged. A residual of zero also covers the exact-sum case, where the
         // parity fix must not fire. Returns the round-to-odd f32 bit pattern.
+        // SHARPEMU_EXACT_F16_FMA=1 keeps the bit-exact round-to-odd emulation below. By default a
+        // native f32 fma is used: inputs are f16 so the product is exact, and the result can only
+        // differ from the guest after the final f16 rounding in rare exact-tie cases, while the
+        // emulated chain costs about ten ALU operations per f16 fma.
+        private static readonly bool ExactF16Fma =
+            Environment.GetEnvironmentVariable("SHARPEMU_EXACT_F16_FMA") == "1";
+
         private uint EmitPackedF16FusedMultiplyAdd(uint left, uint right, uint addend)
         {
+            if (!ExactF16Fma)
+            {
+                return Bitcast(_uintType, Ext(50, _floatType, left, right, addend));
+            }
+
             var product = EmitPreciseFloat(SpirvOp.FMul, left, right);
             var sum = EmitPreciseFloat(SpirvOp.FAdd, product, addend);
 
@@ -2067,8 +2141,20 @@ public static partial class Gen5SpirvTranslator
         // Widens an f16 value held in the low 16 bits of `halfBits` to an f32 bit
         // pattern, exactly (subnormals normalised, Inf/NaN and signed zero preserved).
         // Mirrors the branchless HalfToFloat reference validated against System.Half.
+        // GLSL.std.450 UnpackHalf2x16/PackHalf2x16 convert in hardware (one or two GPU
+        // instructions) instead of the bit-exact integer emulation below, which expands every
+        // f16 operand and result into dozens of operations. SHARPEMU_FAST_F16=0 keeps emulation.
+        private static readonly bool FastHalfConversion =
+            Environment.GetEnvironmentVariable("SHARPEMU_FAST_F16") != "0";
+
         private uint EmitHalfToFloat(uint halfBits)
         {
+            if (FastHalfConversion)
+            {
+                var unpacked = Ext(62, _vec2Type, BitwiseAnd(halfBits, UInt(0xFFFF)));
+                return Bitcast(_uintType, _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, unpacked, 0));
+            }
+
             var sign = ShiftLeftLogical(BitwiseAnd(halfBits, UInt(0x8000)), UInt(16));
             var exponent = BitwiseAnd(ShiftRightLogical(halfBits, UInt(10)), UInt(0x1F));
             var mantissa = BitwiseAnd(halfBits, UInt(0x3FF));
@@ -2100,6 +2186,12 @@ public static partial class Gen5SpirvTranslator
         // branchless FloatToHalf reference validated exhaustively against System.Half.
         private uint EmitFloatToHalf(uint bits)
         {
+            if (FastHalfConversion)
+            {
+                var pair = _module.AddInstruction(SpirvOp.CompositeConstruct, _vec2Type, Bitcast(_floatType, bits), Float(0f));
+                return BitwiseAnd(Ext(58, _uintType, pair), UInt(0xFFFF));
+            }
+
             var sign = BitwiseAnd(ShiftRightLogical(bits, UInt(16)), UInt(0x8000));
             var absolute = BitwiseAnd(bits, UInt(0x7FFF_FFFF));
 
@@ -2852,11 +2944,14 @@ public static partial class Gen5SpirvTranslator
                                     ShiftRightLogical(left, UInt(2)),
                                     ShiftRightLogical(left, UInt(3))))),
                         UInt(0x1111_1111));
-                    result = _module.AddInstruction(
-                        SpirvOp.IMul,
-                        _uintType,
-                        quadAny,
-                        UInt(0xF));
+                    // See SWqmB64: with one logical lane only this lane's bit survives.
+                    result = _subgroupInvocationIdInput == 0
+                        ? BitwiseAnd(quadAny, UInt(1))
+                        : _module.AddInstruction(
+                            SpirvOp.IMul,
+                            _uintType,
+                            quadAny,
+                            UInt(0xF));
                     StoreS(destination, result);
                     Store(_scc, IsNotZero(result));
                     return true;
@@ -3680,11 +3775,17 @@ public static partial class Gen5SpirvTranslator
                     _ulongType,
                     quadAny,
                     _module.Constant64(_ulongType, 0x1111_1111_1111_1111UL));
-                value = _module.AddInstruction(
-                    SpirvOp.IMul,
-                    _ulongType,
-                    quadAny,
-                    _module.Constant64(_ulongType, 0xFUL));
+                value = _subgroupInvocationIdInput == 0
+                    // One logical lane (no graphics subgroups): the host already runs the other
+                    // quad pixels as their own invocations, so whole-quad mode keeps only this
+                    // lane's bit. Expanding to 0xF left phantom lanes 1-3 in masks that nothing
+                    // could clear, and waterfall loops ran until the iteration guard.
+                    ? _module.AddInstruction(SpirvOp.BitwiseAnd, _ulongType, quadAny, _module.Constant64(_ulongType, 1))
+                    : _module.AddInstruction(
+                        SpirvOp.IMul,
+                        _ulongType,
+                        quadAny,
+                        _module.Constant64(_ulongType, 0xFUL));
             }
             else if (instruction.Opcode == "SNotB64")
             {

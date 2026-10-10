@@ -38,6 +38,9 @@ internal interface IShaderPipelineHost
 
     bool GraphicsSubgroupOperationsEnabled { get; }
 
+    // False when the device cannot test depth bounds; pipelines then leave the bounds out of their key.
+    bool DepthBoundsTestSupported => true;
+
     // The device supports shaderSharedInt64Atomics, so LDS 64-bit atomics can be
     // emitted as real 64-bit atomics instead of a non-atomic 32-bit pair.
     bool SharedInt64AtomicsEnabled { get; }
