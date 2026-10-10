@@ -236,7 +236,7 @@
   "Updater.Status.Available": "Yeni yığım mövcuddur: {0}",
   "Updater.Status.Downloading": "Yeniləmə endirilir… {0}%",
   "Updater.Status.Installing": "Yeniləmə quraşdırılır…",
-  "Updater.Status.Timeout": "Yeniləmələrin yoxlanması üçün ayrılmış 10 saniyə bitdi.",
+  "Updater.Status.Timeout": "Yeniləmələrin yoxlanması üçün ayrılmış vaxt bitdi.",
   "Updater.Status.Failed": "Yeniləmələri yoxlamaq mümkün olmadı.",
   "Updater.Status.ChecksumFailed": "Endirilmiş yeniləmə SHA-256 yoxlamasından keçmədi.",
   "Updater.Status.Unsupported": "Avtomatik yeniləmə üçün Windows, Linux və ya macOS x64 yığımı tələb olunur."

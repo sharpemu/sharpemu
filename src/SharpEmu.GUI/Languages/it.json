@@ -205,7 +205,7 @@
   "Updater.Status.Available": "È disponibile un nuovo build: {0}",
   "Updater.Status.Downloading": "Download dell'aggiornamento… {0}%",
   "Updater.Status.Installing": "Installazione dell'aggiornamento…",
-  "Updater.Status.Timeout": "Il controllo degli aggiornamenti è scaduto dopo 10 secondi.",
+  "Updater.Status.Timeout": "Il controllo degli aggiornamenti è scaduto.",
   "Updater.Status.Failed": "Impossibile controllare gli aggiornamenti.",
   "Updater.Status.ChecksumFailed": "L'aggiornamento scaricato non ha superato la verifica SHA-256.",
   "Updater.Status.Unsupported": "L'aggiornamento automatico richiede un build x64 per Windows, Linux o macOS.",

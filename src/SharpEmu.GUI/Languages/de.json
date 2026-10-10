@@ -200,7 +200,7 @@
   "Updater.Status.Available": "Ein neuer Build ist verfügbar: {0}",
   "Updater.Status.Downloading": "Update wird heruntergeladen… {0}%",
   "Updater.Status.Installing": "Update wird installiert…",
-  "Updater.Status.Timeout": "Die Updateprüfung ist nach 10 Sekunden abgelaufen.",
+  "Updater.Status.Timeout": "Die Updateprüfung ist abgelaufen.",
   "Updater.Status.Failed": "Updates konnten nicht geprüft werden.",
   "Updater.Status.ChecksumFailed": "Das heruntergeladene Update hat die SHA-256-Prüfung nicht bestanden.",
   "Updater.Status.Unsupported": "Automatische Updates erfordern einen x64-Build für Windows, Linux oder macOS.",

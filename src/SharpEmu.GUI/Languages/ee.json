@@ -241,7 +241,7 @@
   "Updater.Status.Available": "Uus versioon on saadaval: {0}",
   "Updater.Status.Downloading": "Värskenduse allalaadimine… {0}%",
   "Updater.Status.Installing": "Värskenduse paigaldamine…",
-  "Updater.Status.Timeout": "Värskenduste kontroll aegus 10 sekundi järel.",
+  "Updater.Status.Timeout": "Värskenduste kontroll aegus.",
   "Updater.Status.Failed": "Värskendusi ei saanud kontrollida.",
   "Updater.Status.ChecksumFailed": "Allalaaditud värskendus ei läbinud SHA-256 kontrolli.",
   "Updater.Status.Unsupported": "Automaatne värskendamine nõuab Windowsi, Linuxi või macOS-i x64 versiooni."

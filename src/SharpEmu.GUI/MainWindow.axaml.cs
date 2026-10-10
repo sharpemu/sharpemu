@@ -158,9 +158,7 @@ public partial class MainWindow : Window
     private int _autoScrollTicks;
     private int _activePageIndex;
     private int _optionsSectionIndex;
-    private Updater.UpdateInfo? _availableUpdate;
-    private string _updateStatusKey = "Updater.Status.Ready";
-    private object?[] _updateStatusArgs = [BuildInfo.CommitSha ?? "dev"];
+    private UpdateController? _updateController;
 
     // Discord Rich Presence state.
     private readonly long _launcherStartUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -363,7 +361,6 @@ public partial class MainWindow : Window
         OverlayEnabledToggle.IsCheckedChanged += (_, _) => _settings.OverlayEnabled = OverlayEnabledToggle.IsChecked == true;
         OverlayModeBox.SelectionChanged += (_, _) => _settings.OverlayMode = SelectedComboText(OverlayModeBox, "TitleBar");
         OverlayCornerBox.SelectionChanged += (_, _) => _settings.OverlayCorner = SelectedComboText(OverlayCornerBox, "TopRight");
-        UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
         PerformanceProfileToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_PROFILE_PERFORMANCE", PerformanceProfileToggle.IsChecked == true);
@@ -1025,13 +1022,14 @@ public partial class MainWindow : Window
         PopulateLanguageBox();
         ApplyLocalization();
         ApplySettingsToControls();
+        _updateController = new UpdateController(this, UpdateButton, UpdateStatusText, UpdateReminderToggle, _settings);
         LocateEmulator();
         UpdateDiscordPresence();
         _ = LoadLatestCommitAsync();
 
         if (_settings.CheckForUpdatesOnStartup)
         {
-            _ = CheckForUpdatesAsync();
+            _ = _updateController.CheckForUpdatesAsync();
         }
 
         SeedLibraryFromCache();
@@ -1128,7 +1126,7 @@ public partial class MainWindow : Window
         RefreshLocalizedChoices();
         UpdateLogFilePathText();
         RefreshHostRefreshRates(_settings.RefreshRate);
-        RefreshUpdateText();
+        _updateController?.RefreshText();
         UpdateEmptyStateTexts();
         UpdateLibraryLayoutButton();
         UpdateRunButtons();
@@ -1427,6 +1425,7 @@ public partial class MainWindow : Window
         SetLibraryLayout(string.Equals(_settings.LibraryLayout, "Grid", StringComparison.OrdinalIgnoreCase));
         DiscordToggle.IsChecked = _settings.DiscordRichPresence;
         AutoUpdateToggle.IsChecked = _settings.CheckForUpdatesOnStartup;
+        UpdateReminderToggle.IsChecked = _settings.ShowUpdateNotifications;
         PerformanceProfileToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_PROFILE_PERFORMANCE");
         PerformanceFrameTraceToggle.IsChecked = _settings.EnvironmentToggles.Contains("SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE");
         StrictComputeToggle.IsChecked = StrictComputeSettings.IsEnabled(_settings.EnvironmentToggles);
@@ -1578,80 +1577,6 @@ public partial class MainWindow : Window
     {
         var index = Array.FindIndex(choices, choice => string.Equals(choice, value, StringComparison.OrdinalIgnoreCase));
         return index < 0 ? 0 : index;
-    }
-
-    private async Task OnUpdateButtonAsync()
-    {
-        if (_availableUpdate is null)
-        {
-            await CheckForUpdatesAsync();
-            return;
-        }
-
-        UpdateButton.IsEnabled = false;
-        try
-        {
-            var progress = new Progress<int>(value =>
-                SetUpdateStatus("Updater.Status.Downloading", value));
-            await Updater.DownloadAndRestartAsync(_availableUpdate, progress);
-            SetUpdateStatus("Updater.Status.Installing");
-            Close();
-        }
-        catch (InvalidDataException)
-        {
-            SetUpdateStatus("Updater.Status.ChecksumFailed");
-            UpdateButton.IsEnabled = true;
-        }
-        catch
-        {
-            SetUpdateStatus("Updater.Status.Failed");
-            UpdateButton.IsEnabled = true;
-        }
-    }
-
-    private async Task CheckForUpdatesAsync()
-    {
-        _availableUpdate = null;
-        UpdateButton.IsEnabled = false;
-        SetUpdateStatus("Updater.Status.Checking");
-        try
-        {
-            _availableUpdate = await Updater.CheckAsync(BuildInfo.CommitSha);
-            SetUpdateStatus(
-                _availableUpdate is null ? "Updater.Status.Current" : "Updater.Status.Available",
-                _availableUpdate?.Sha ?? BuildInfo.CommitSha ?? "dev");
-        }
-        catch (OperationCanceledException)
-        {
-            SetUpdateStatus("Updater.Status.Timeout");
-        }
-        catch (PlatformNotSupportedException)
-        {
-            SetUpdateStatus("Updater.Status.Unsupported");
-        }
-        catch
-        {
-            SetUpdateStatus("Updater.Status.Failed");
-        }
-        finally
-        {
-            UpdateButton.IsEnabled = true;
-            RefreshUpdateText();
-        }
-    }
-
-    private void SetUpdateStatus(string key, params object?[] args)
-    {
-        _updateStatusKey = key;
-        _updateStatusArgs = args;
-        RefreshUpdateText();
-    }
-
-    private void RefreshUpdateText()
-    {
-        UpdateStatusText.Text = Localization.Instance.Format(_updateStatusKey, _updateStatusArgs);
-        UpdateButton.Content = Localization.Instance.Get(
-            _availableUpdate is null ? "Updater.Check" : "Updater.DownloadRestart");
     }
 
     // Environment variables set on this process at the previous launch; children

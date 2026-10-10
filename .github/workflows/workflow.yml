@@ -173,7 +173,12 @@ jobs:
       # Also runs on Linux/macOS: the aerolib.bin MSBuild task does platform-sensitive
       # path handling, so a cross-platform generation regression surfaces here.
       - name: Run tests
-        run: dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
+        shell: bash
+        run: |
+          if [ "${{ matrix.rid }}" = "osx-x64" ]; then
+            export SHARPEMU_ALLOW_NON_X64=true
+          fi
+          dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
 
       - name: Build pinned SPIRV-Tools
         if: matrix.rid == 'linux-x64'
@@ -244,6 +249,7 @@ jobs:
       - name: Package release assets
         shell: bash
         env:
+          GITHUB_SHA: ${{ github.sha }}
           SHORT_SHA: ${{ needs.init.outputs.short-sha }}
           VERSION: ${{ needs.init.outputs.version }}
         run: |
@@ -262,6 +268,15 @@ jobs:
           chmod +x "${linux_dir}/SharpEmu" "${macos_dir}/SharpEmu"
           tar -czf "release-assets/sharpemu-${VERSION}-linux-x64.tar.gz" -C "${linux_dir}" .
           tar -czf "release-assets/sharpemu-${VERSION}-osx-x64.tar.gz" -C "${macos_dir}" .
+
+          sha256sum release-assets/* > release-assets/SHA256SUMS
+          jq -n \
+            --arg version "${VERSION}" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --rawfile checksums release-assets/SHA256SUMS \
+            '{schema: 1, version: $version, commit: $commit, created_at: $created_at, sha256sums: $checksums}' \
+            > release-assets/sharpemu-update-manifest.json
 
       - name: Build release notes
         shell: bash
@@ -321,14 +336,15 @@ jobs:
       - name: Create release
         shell: bash
         env:
+          GITHUB_SHA: ${{ github.sha }}
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_NAME: ${{ needs.init.outputs.release-name }}
           RELEASE_TAG: ${{ needs.init.outputs.release-tag }}
         run: |
-          mapfile -t assets < <(find release-assets -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) | sort)
-          if [ "${#assets[@]}" -ne 3 ]; then
-            echo "Expected 3 release assets, found ${#assets[@]}." >&2
+          mapfile -t assets < <(find release-assets -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name 'sharpemu-update-manifest.json' \) | sort)
+          if [ "${#assets[@]}" -ne 4 ]; then
+            echo "Expected 4 release assets, found ${#assets[@]}." >&2
             exit 1
           fi
 
@@ -339,5 +355,6 @@ jobs:
 
           gh release create "${RELEASE_TAG}" "${assets[@]}" \
             --verify-tag \
+            --target "${GITHUB_SHA}" \
             --title "${RELEASE_NAME}" \
             --notes-file release-notes.md

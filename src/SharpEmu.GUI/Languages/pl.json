@@ -241,7 +241,7 @@
   "Updater.Status.Available": "Dostępna nowa wersja: {0}",
   "Updater.Status.Downloading": "Pobieranie aktualizacji… {0}%",
   "Updater.Status.Installing": "Instalowanie aktualizacji…",
-  "Updater.Status.Timeout": "Sprawdzanie aktualizacji przekroczyło limit 10 sekund.",
+  "Updater.Status.Timeout": "Sprawdzanie aktualizacji przekroczyło limit czasu.",
   "Updater.Status.Failed": "Nie udało się sprawdzić aktualizacji.",
   "Updater.Status.ChecksumFailed": "Pobrana aktualizacja nie przeszła weryfikacji SHA-256.",
   "Updater.Status.Unsupported": "Automatyczna aktualizacja wymaga wersji dla Windows, Linux lub macOS x64."

@@ -200,7 +200,7 @@
   "Updater.Status.Available": "يتوفر إصدار جديد: {0}",
   "Updater.Status.Downloading": "جارٍ تنزيل التحديث… {0}%",
   "Updater.Status.Installing": "جارٍ تثبيت التحديث…",
-  "Updater.Status.Timeout": "انتهت مهلة التحقق من التحديثات بعد 10 ثوانٍ.",
+  "Updater.Status.Timeout": "انتهت مهلة التحقق من التحديثات.",
   "Updater.Status.Failed": "تعذر التحقق من التحديثات.",
   "Updater.Status.ChecksumFailed": "فشل التحديث المنزَّل في اجتياز تحقق SHA-256.",
   "Updater.Status.Unsupported": "يتطلب التحديث التلقائي إصدار x64 لنظام Windows أو Linux أو macOS.",

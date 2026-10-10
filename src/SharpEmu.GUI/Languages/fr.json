@@ -201,7 +201,7 @@
   "Updater.Status.Available": "Un nouveau build est disponible : {0}",
   "Updater.Status.Downloading": "Téléchargement de la mise à jour… {0}%",
   "Updater.Status.Installing": "Installation de la mise à jour…",
-  "Updater.Status.Timeout": "La vérification des mises à jour a expiré après 10 secondes.",
+  "Updater.Status.Timeout": "La vérification des mises à jour a expiré.",
   "Updater.Status.Failed": "Impossible de vérifier les mises à jour.",
   "Updater.Status.ChecksumFailed": "La mise à jour téléchargée a échoué à la vérification SHA-256.",
   "Updater.Status.Unsupported": "La mise à jour automatique nécessite un build x64 pour Windows, Linux ou macOS.",

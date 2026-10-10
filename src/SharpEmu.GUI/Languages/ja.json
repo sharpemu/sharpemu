@@ -200,7 +200,7 @@
   "Updater.Status.Available": "新しいビルドがあります: {0}",
   "Updater.Status.Downloading": "アップデートをダウンロード中… {0}%",
   "Updater.Status.Installing": "アップデートをインストール中…",
-  "Updater.Status.Timeout": "アップデートの確認が10秒でタイムアウトしました。",
+  "Updater.Status.Timeout": "アップデートの確認がタイムアウトしました。",
   "Updater.Status.Failed": "アップデートを確認できませんでした。",
   "Updater.Status.ChecksumFailed": "ダウンロードしたアップデートはSHA-256検証に失敗しました。",
   "Updater.Status.Unsupported": "自動アップデートにはWindows、Linux、またはmacOSのx64ビルドが必要です。",

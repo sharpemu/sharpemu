@@ -200,7 +200,7 @@
   "Updater.Status.Available": "Et nyt build er tilgængeligt: {0}",
   "Updater.Status.Downloading": "Downloader opdatering… {0}%",
   "Updater.Status.Installing": "Installerer opdatering…",
-  "Updater.Status.Timeout": "Opdateringstjekket fik timeout efter 10 sekunder.",
+  "Updater.Status.Timeout": "Opdateringstjekket fik timeout.",
   "Updater.Status.Failed": "Kunne ikke søge efter opdateringer.",
   "Updater.Status.ChecksumFailed": "Den downloadede opdatering bestod ikke SHA-256-verifikationen.",
   "Updater.Status.Unsupported": "Automatisk opdatering kræver et x64-build til Windows, Linux eller macOS.",
