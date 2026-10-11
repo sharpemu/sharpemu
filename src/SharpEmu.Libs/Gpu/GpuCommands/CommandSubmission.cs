@@ -137,4 +137,10 @@ public sealed class CommandSubmission
 
     // What the blocked slice is waiting for; the queue wakes it on that alone.
     public CommandWaitCondition Wait { get; internal set; } = CommandWaitCondition.Unknown;
+
+    // Set when the last park was skipped because a wake raced the slice. A wake that
+    // arrives while the slice runs is worth one more run, and without remembering that it
+    // was given, a queue that is told of a completion every millisecond never parks at
+    // all: Poppy Playtime spun forty thousand slices in two seconds and drew nothing.
+    public bool RerunForRacedWake { get; internal set; }
 }
