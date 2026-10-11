@@ -91,11 +91,16 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The semaphore cannot be read: address=0x{semaphore.Address:X16}.");
         }
 
-        GuestMemoryWritten?.Invoke(semaphore.Address, sizeof(ulong));
-
+        // Only a taken token is a write. Reporting the empty poll too woke every other
+        // head waiting on this semaphore, which polled, reported and woke this one back:
+        // two waiters on one semaphore spun against each other until a signal came.
         if (priorValue == 0)
         {
             SuspendOn(CommandWaitCondition.Memory(semaphore.Address, sizeof(ulong)));
+        }
+        else
+        {
+            GuestMemoryWritten?.Invoke(semaphore.Address, sizeof(ulong));
         }
 
         return 3;
