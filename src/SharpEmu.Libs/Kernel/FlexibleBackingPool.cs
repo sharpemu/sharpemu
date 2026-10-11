@@ -11,6 +11,12 @@ internal sealed class FlexibleBackingPool
 
     private readonly SortedList<ulong, ulong> _free = new();
     private readonly List<Block> _blocks = new();
+    // Backing bytes no mapping has been given since the pool was made. A new backing
+    // object reads as zero, so a mapping over them needs no clear; clearing them wrote
+    // every page through the host alias, which committed memory the guest might never
+    // touch and, once the guest view touched it too, counted each page twice in the
+    // process footprint. A reset keeps this: bytes leave it when they are handed out.
+    private readonly SortedList<ulong, ulong> _pristine = new();
     private readonly ulong _offset;
     private readonly ulong _size;
 
@@ -18,6 +24,8 @@ internal sealed class FlexibleBackingPool
     {
         _offset = offset;
         _size = size;
+        if (size != 0)
+            _pristine.Add(offset, size);
         Reset();
     }
 
@@ -81,7 +89,7 @@ internal sealed class FlexibleBackingPool
         for (var index = 0; index < planned.Count; index++)
         {
             var block = planned[index];
-            if (space.TryClearBacking(block.Offset, block.Size) &&
+            if (ClearUsedBacking(space, block.Offset, block.Size) &&
                 space.TryMapBacked(block.Address, block.Size, block.Offset, protection, out _))
                 continue;
 
@@ -98,6 +106,7 @@ internal sealed class FlexibleBackingPool
             if (block.Size < freeSize)
                 _free.Add(block.Offset + block.Size, freeSize - block.Size);
             _blocks.Add(block);
+            RemovePristine(block.Offset, block.Size);
         }
         _blocks.Sort((left, right) => left.Address.CompareTo(right.Address));
         Used += size;
@@ -133,6 +142,43 @@ internal sealed class FlexibleBackingPool
         _blocks.Clear();
         _blocks.AddRange(remaining);
         Used -= removed;
+    }
+
+    // Clears the parts of a backing range that an earlier mapping may have written.
+    private bool ClearUsedBacking(IGuestBackedSpace space, ulong offset, ulong size)
+    {
+        var cursor = offset;
+        var end = offset + size;
+        foreach (var range in _pristine)
+        {
+            var rangeEnd = range.Key + range.Value;
+            if (rangeEnd <= cursor)
+                continue;
+            if (range.Key >= end)
+                break;
+            if (range.Key > cursor && !space.TryClearBacking(cursor, range.Key - cursor))
+                return false;
+            cursor = Math.Max(cursor, Math.Min(rangeEnd, end));
+        }
+
+        return cursor >= end || space.TryClearBacking(cursor, end - cursor);
+    }
+
+    private void RemovePristine(ulong start, ulong size)
+    {
+        var end = start + size;
+        for (var index = _pristine.Count - 1; index >= 0; index--)
+        {
+            var rangeStart = _pristine.Keys[index];
+            var rangeEnd = rangeStart + _pristine.Values[index];
+            if (rangeStart >= end || rangeEnd <= start)
+                continue;
+            _pristine.RemoveAt(index);
+            if (rangeStart < start)
+                _pristine.Add(rangeStart, start - rangeStart);
+            if (end < rangeEnd)
+                _pristine.Add(end, rangeEnd - end);
+        }
     }
 
     private void AddFree(ulong start, ulong size)
