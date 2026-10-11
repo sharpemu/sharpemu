@@ -1709,6 +1709,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 AllocateAt(mapStart, mapSize, isExecutable, allowAlternative: false);
             }
 
+            // Memory AllocateAt just obtained from the host is already zero (it commits
+            // only pages that were free or reserved). Clearing it again touched every page
+            // of each guest thread stack and .bss, committing memory the guest may never use.
+            var alreadyZero = existingRegion == null;
+
             var stageProtection = (protection & ProgramHeaderFlags.Execute) != 0
                 ? ProgramHeaderFlags.Read | ProgramHeaderFlags.Write | ProgramHeaderFlags.Execute
                 : ProgramHeaderFlags.Read | ProgramHeaderFlags.Write;
@@ -1724,7 +1729,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
 
             var zeroFillSize = memorySize - (ulong)fileData.Length;
-            if (zeroFillSize != 0)
+            if (zeroFillSize != 0 && !alreadyZero)
             {
                 NativeMemory.Clear((void*)(virtualAddress + (ulong)fileData.Length), (nuint)zeroFillSize);
             }
