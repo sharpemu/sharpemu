@@ -17,10 +17,14 @@ public static partial class AgcExports
     // This partial preserves submitted guest geometry until translated draws execute.
 
     // Keep submitted geometry stable after the guest reuses its memory.
-    // Set either variable to 0 only for a comparison test.
-    private static readonly bool _retainSubmittedIndexData = !string.Equals(
+    // Set the vertex variable to 0 only for a comparison test.
+    // No draw path reads the retained index bytes: a snapshot is only matched against
+    // the draw, and its Data is never consumed. Copying them anyway cost a managed array
+    // of every indexed draw's indices (up to 64 MiB a submission) for each queued
+    // submission, on every backend. SHARPEMU_RETAIN_SUBMITTED_INDEX_DATA=1 restores it.
+    private static readonly bool _retainSubmittedIndexData = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_RETAIN_SUBMITTED_INDEX_DATA"),
-        "0",
+        "1",
         StringComparison.Ordinal);
     private static readonly bool _retainSubmittedVertexData = !string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_RETAIN_SUBMITTED_VERTEX_DATA"),
