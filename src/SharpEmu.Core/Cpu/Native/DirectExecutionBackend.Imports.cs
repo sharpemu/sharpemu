@@ -1332,9 +1332,20 @@ public sealed partial class DirectExecutionBackend
 		return true;
 	}
 
-	private static ulong ReadImportStackArgument(nint argPackPtr, int index)
+	private unsafe static ulong ReadImportStackArgument(nint argPackPtr, int index)
 	{
 		var address = checked((ulong)argPackPtr + 104UL + (ulong)index * sizeof(ulong));
+		// The guest's call wrote the return slot just below the arguments, so the page
+		// holding it is mapped and readable. An argument on that page needs no host region
+		// query: on a fiber's stack the thread-stack shortcut misses, and the query takes
+		// the host mapping lock that every protection change also holds.
+		var returnSlot = (ulong)argPackPtr + 96UL;
+		const ulong PageMask = ~0xFFFUL;
+		if ((address & PageMask) == (returnSlot & PageMask) && (address & 0xFFFUL) <= 0x1000UL - sizeof(ulong))
+		{
+			return *(ulong*)address;
+		}
+
 		return TryReadImportStackU64(address, out var value) ? value : 0;
 	}
 
