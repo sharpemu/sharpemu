@@ -287,6 +287,45 @@ public sealed class CommandStreamQueueTests
         Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
     }
 
+    /// <summary>
+    /// A wake that arrives while the slice is running reaches a head that has not parked
+    /// yet, so parking it afterwards would sleep until the retry timer. A command
+    /// processor polling a label the GPU is about to write is exactly that race, and the
+    /// timer is a hundred milliseconds against a submission that finishes in one.
+    /// </summary>
+    [Fact]
+    public void AWakeDuringTheSliceLeavesTheHeadRunnable()
+    {
+        var (host, queue) = NewQueue();
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, Graphics, 1, WaitEqual(Label, 1), CreateInstanceCountPacket(9));
+        host.BeforeGuestRead = address =>
+        {
+            if (address != Label)
+            {
+                return;
+            }
+
+            // The submission completes between the poll and the park.
+            host.BeforeGuestRead = null;
+            queue.NotifyCompletedGpuTick(1);
+        };
+
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.Equal(0, queue.BlockedQueueCount);
+        Assert.Equal(1ul, queue.WakesRacedWithSlice);
+
+        // No further event is needed to look again; the value is still wrong, and with
+        // nothing racing this time the head does park.
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.Equal(1, queue.BlockedQueueCount);
+
+        host.WriteDword(Label, 1);
+        queue.NotifyCompletedGpuTick(2);
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
+    }
+
     [Fact]
     public void CompletedGpuTick_RetriesBlockedWaitWithoutTheTimeout()
     {
