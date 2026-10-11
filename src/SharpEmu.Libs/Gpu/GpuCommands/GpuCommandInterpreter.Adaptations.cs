@@ -31,7 +31,12 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The atomic address cannot be accessed: address=0x{atomic.Address:X16} size={atomic.ByteCount}.");
         }
 
-        GuestMemoryWritten?.Invoke(atomic.Address, sizeof(ulong));
+        // A failed try of a compare-swap loop writes nothing; reporting it would wake every
+        // other loop parked on the address, and two such loops would wake each other forever.
+        if (atomic.Command != 1 || comparePassed)
+        {
+            GuestMemoryWritten?.Invoke(atomic.Address, sizeof(ulong));
+        }
 
         if (atomic.ReturnsData)
         {
