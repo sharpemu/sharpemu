@@ -75,6 +75,29 @@ public static class ZArchiveWriter
         }
     }
 
+    // Whether the archive opens and holds every file of the folder at the same size: the check
+    // that must pass before the folder may be deleted.
+    public static bool MatchesFolder(string archivePath, string sourceDirectory)
+    {
+        using var archive = ZArchive.Open(archivePath);
+        if (archive is null)
+        {
+            return false;
+        }
+
+        var source = Path.GetFullPath(sourceDirectory);
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var node = archive.LookUp(Path.GetRelativePath(source, file));
+            if (!archive.IsFile(node) || archive.GetFileSize(node) != (ulong)new FileInfo(file).Length)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static void Write(
         string source,
         List<FileInfo> files,

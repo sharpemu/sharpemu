@@ -2543,7 +2543,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        var dialog = new ZarPackDialog(game.Name, gameFolder, destination);
+        // A running game may hold files in the folder open, so it is never deleted then.
+        var dialog = new ZarPackDialog(game.Name, gameFolder, destination, canDeleteSource: !_isRunning);
         dialog.MuteMusicChanged += SetTitleMusicMuted;
         try
         {

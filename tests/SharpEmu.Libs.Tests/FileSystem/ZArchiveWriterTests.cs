@@ -78,6 +78,24 @@ public sealed class ZArchiveWriterTests : IDisposable
     }
 
     [Fact]
+    public void AnArchiveMatchesItsFolderUntilTheFolderChanges()
+    {
+        var archivePath = Path.Combine(_directory, "game.zar");
+        ZArchiveWriter.Pack(_game, archivePath);
+        Assert.True(ZArchiveWriter.MatchesFolder(archivePath, _game));
+
+        Put("added.bin", Bytes(5, 6));
+        Assert.False(ZArchiveWriter.MatchesFolder(archivePath, _game));
+
+        File.Delete(Path.Combine(_game, "added.bin"));
+        Put("eboot.bin", Bytes(150_001, 1));
+        Assert.False(ZArchiveWriter.MatchesFolder(archivePath, _game));
+
+        File.WriteAllBytes(archivePath, Bytes(4096, 7));
+        Assert.False(ZArchiveWriter.MatchesFolder(archivePath, _game));
+    }
+
+    [Fact]
     public void AnArchiveCannotBeWrittenIntoTheFolderItPacks()
     {
         Assert.Throws<IOException>(() => ZArchiveWriter.Pack(_game, Path.Combine(_game, "game.zar")));

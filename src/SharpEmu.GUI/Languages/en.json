@@ -45,6 +45,13 @@
   "Library.Pack.Failed": "Packing failed: {0}",
   "Library.Pack.Close": "Close",
   "Library.Pack.MuteMusic": "Mute the title music while packing",
+  "Library.Pack.DeleteSource": "Delete the game folder after packing",
+  "Library.Pack.DeleteSourceWarning": "The folder is permanently deleted once the archive is written and checked. Keep a backup until you know the archive works.",
+  "Library.Pack.Verifying": "Checking the archive…",
+  "Library.Pack.Deleting": "Deleting the game folder…",
+  "Library.Pack.DoneDeleted": "Done. The archive is ready and the game folder was deleted.",
+  "Library.Pack.DeleteSkipped": "Done. The game folder was kept because the archive could not be confirmed to hold all of it.",
+  "Library.Pack.DeleteFailed": "The archive is ready, but deleting the game folder failed: {0}",
 
   "Library.Empty.Title": "Your library is empty",
   "Library.Empty.Hint": "Add a folder containing your games to get started.",
