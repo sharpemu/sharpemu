@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Ampr;
 using SharpEmu.Libs.Kernel;
 using Xunit;
 
@@ -334,6 +335,76 @@ public sealed class HostDirectoryIndexTests : IDisposable
         Assert.Equal(
             HostDirectoryIndex.Verdict.Symlink,
             HostDirectoryIndex.Describe(link).Verdict);
+    }
+
+    // The production boot path: BeginWarm finds the snapshot path and the dump
+    // fingerprint itself, and the boot that saved the listings and the boot that
+    // reads them back must land on the very same file.
+    [Fact]
+    public void BeginWarm_RoundTripsTheSnapshotThroughTheCacheDirectory()
+    {
+        var tree = CreateTree();
+        Directory.CreateDirectory(Path.Combine(tree, "sce_sys"));
+        File.WriteAllText(Path.Combine(tree, "sce_sys", "param.json"), "{}");
+        var previousCacheDir = Environment.GetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE");
+        Environment.SetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE", Path.Combine(_root, "cache"));
+        try
+        {
+            var snapshot = AmprFileRegistry.GetDirectoryIndexSnapshotPath(tree);
+            Assert.StartsWith(Path.Combine(_root, "cache"), snapshot, StringComparison.Ordinal);
+
+            HostDirectoryIndex.BeginWarm(tree, persistSnapshot: true);
+            Assert.True(HostDirectoryIndex.WaitForSnapshot(TimeSpan.FromSeconds(10)));
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (!File.Exists(snapshot) && DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(10);
+            }
+
+            Assert.True(File.Exists(snapshot));
+
+            HostDirectoryIndex.ClearForTests();
+            File.Delete(Path.Combine(tree, "maps", "m01.bin"));
+            HostDirectoryIndex.BeginWarm(tree, persistSnapshot: true);
+            Assert.True(HostDirectoryIndex.WaitForSnapshot(TimeSpan.FromSeconds(10)));
+
+            // Only a seeded listing can still describe the deleted file.
+            var entry = HostDirectoryIndex.Describe(Path.Combine(tree, "maps", "m01.bin"));
+            Assert.Equal(HostDirectoryIndex.Verdict.File, entry.Verdict);
+            Assert.Equal(10, entry.Length);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE", previousCacheDir);
+        }
+    }
+
+    // The id cache and the snapshot resolve their directory on two threads at
+    // once during boot; both must settle on the preferred directory rather than
+    // one of them falling back elsewhere.
+    [Fact]
+    public void CacheFilePaths_ResolvedConcurrentlyShareOneDirectory()
+    {
+        var tree = CreateTree();
+        var previousCacheDir = Environment.GetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE");
+        var cacheDir = Path.Combine(_root, "cache-concurrent");
+        Environment.SetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE", cacheDir);
+        try
+        {
+            var directories = new string?[32];
+            Parallel.For(
+                0,
+                directories.Length,
+                new ParallelOptions { MaxDegreeOfParallelism = directories.Length },
+                i => directories[i] = Path.GetDirectoryName(
+                    AmprFileRegistry.GetDirectoryIndexSnapshotPath(tree)));
+
+            Assert.All(directories, directory => Assert.Equal(cacheDir, directory));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE", previousCacheDir);
+        }
     }
 
     private string CreateTree()

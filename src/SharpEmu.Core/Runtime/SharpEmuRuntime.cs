@@ -192,6 +192,15 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             loadedModuleImages,
             activeImportStubs,
             activeRuntimeSymbols));
+        // Guest code starts with the initializers. The persisted app0 listings
+        // load while modules do; make sure they are in place before the guest
+        // resolves its first asset path, without letting a stalled volume hold
+        // boot hostage.
+        if (!SharpEmu.Libs.Kernel.HostDirectoryIndex.WaitForSnapshot(TimeSpan.FromSeconds(10)))
+        {
+            Console.Error.WriteLine("[RUNTIME][WARN] dir_index.snapshot_wait_timed_out");
+        }
+
         var initializerResult = RunAllInitializers(
             image,
             loadedModuleImages,

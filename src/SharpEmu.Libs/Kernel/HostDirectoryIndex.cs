@@ -214,6 +214,11 @@ internal static partial class HostDirectoryIndex
             return;
         }
 
+        if (persistSnapshot)
+        {
+            _snapshotPhase.Reset();
+        }
+
         // A dedicated thread, not the pool: the walk blocks on device latency for
         // seconds, and a pool worker parked that long makes the pool inject
         // threads for everything else queued behind it.
@@ -263,7 +268,29 @@ internal static partial class HostDirectoryIndex
         }
     }
 
+    // Unset from BeginWarm until the snapshot has been seeded or ruled out.
+    private static readonly ManualResetEventSlim _snapshotPhase = new(initialState: true);
+
+    /// <summary>
+    /// Blocks until the persisted app0 listings are seeded (or known to be
+    /// unusable), so the guest's first resolves find them in place.
+    /// </summary>
+    /// <returns>False when <paramref name="timeout"/> expired first.</returns>
+    internal static bool WaitForSnapshot(TimeSpan timeout) => _snapshotPhase.Wait(timeout);
+
     private static void Warm(string root, bool persistSnapshot)
+    {
+        try
+        {
+            WarmWithSnapshot(root, persistSnapshot);
+        }
+        finally
+        {
+            _snapshotPhase.Set();
+        }
+    }
+
+    private static void WarmWithSnapshot(string root, bool persistSnapshot)
     {
         string? snapshotPath = null;
         long fingerprint = 0;
@@ -314,7 +341,9 @@ internal static partial class HostDirectoryIndex
     internal static bool WarmCore(string root, string? snapshotPath, long fingerprint)
     {
         root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
-        if (snapshotPath is not null && TryLoadSnapshot(root, snapshotPath, fingerprint))
+        var seeded = snapshotPath is not null && TryLoadSnapshot(root, snapshotPath, fingerprint);
+        _snapshotPhase.Set();
+        if (seeded)
         {
             return true;
         }
@@ -577,6 +606,7 @@ internal static partial class HostDirectoryIndex
         _caseFolding.Clear();
         Volatile.Write(ref _indexedEntries, 0);
         Volatile.Write(ref _warmStarted, 0);
+        _snapshotPhase.Set();
     }
 
     private static DirectoryListing GetListing(string directory)
