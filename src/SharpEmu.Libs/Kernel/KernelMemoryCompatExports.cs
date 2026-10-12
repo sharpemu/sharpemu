@@ -4580,7 +4580,15 @@ public static partial class KernelMemoryCompatExports
                         else if (spaceForSign && value >= 0)
                             formatted = " " + formatted;
 
-                        sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign));
+                        if (padWithZero && !leftAlign && width > formatted.Length && formatted[0] is '-' or '+' or ' ')
+                        {
+                            // C99: zero padding goes between the sign and the digits.
+                            sb.Append(formatted[0]).Append('0', width - formatted.Length).Append(formatted, 1, formatted.Length - 1);
+                        }
+                        else
+                        {
+                            sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign));
+                        }
                     }
                     break;
 

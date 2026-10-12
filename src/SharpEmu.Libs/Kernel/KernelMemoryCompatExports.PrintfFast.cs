@@ -188,7 +188,7 @@ public static partial class KernelMemoryCompatExports
                         };
 
                         value.TryFormat(output[(length + width)..], out var written, default, CultureInfo.InvariantCulture);
-                        length = PadFormattedNumber(output, length, written, width, leftAlign, zeroPad);
+                        length = PadFormattedNumber(output, length, written, width, leftAlign, zeroPad, signed: true);
                     }
                     break;
 
@@ -307,7 +307,7 @@ public static partial class KernelMemoryCompatExports
     // Numbers are formatted at output[start + width ..]; move them into place and pad.
     // Zero padding goes in front of the whole rendering, sign included, matching the
     // general formatter.
-    private static int PadFormattedNumber(Span<byte> output, int start, int written, int width, bool leftAlign, bool zeroPad)
+    private static int PadFormattedNumber(Span<byte> output, int start, int written, int width, bool leftAlign, bool zeroPad, bool signed = false)
     {
         var padding = Math.Max(0, width - written);
         var number = output.Slice(start + width, written);
@@ -319,7 +319,16 @@ public static partial class KernelMemoryCompatExports
         else
         {
             number.CopyTo(output[(start + padding)..]);
-            output.Slice(start, padding).Fill(zeroPad ? (byte)'0' : (byte)' ');
+            if (zeroPad && signed && padding > 0 && output[start + padding] == (byte)'-')
+            {
+                // C99: zero padding goes between the sign and the digits.
+                output[start] = (byte)'-';
+                output.Slice(start + 1, padding).Fill((byte)'0');
+            }
+            else
+            {
+                output.Slice(start, padding).Fill(zeroPad ? (byte)'0' : (byte)' ');
+            }
         }
 
         return start + written + padding;

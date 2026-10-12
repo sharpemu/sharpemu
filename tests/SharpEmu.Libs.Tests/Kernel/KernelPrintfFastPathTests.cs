@@ -92,6 +92,11 @@ public sealed class KernelPrintfFastPathTests
             ("%05d|", 64, new object?[] { 42UL }),
             ("%05d|", 64, new object?[] { Neg(-42) }),
             ("%-05d|", 64, new object?[] { Neg(-42) }),
+            ("%08ld|", 64, new object?[] { Neg(-42) }),
+            ("%06i|", 64, new object?[] { Neg(-42) }),
+            ("%02d|", 64, new object?[] { Neg(-12345) }),
+            ("%+06d|", 64, new object?[] { 42UL }),
+            ("% 06d|", 64, new object?[] { 42UL }),
             ("%2d|", 64, new object?[] { 12345UL }),
             ("%020lld|", 64, new object?[] { Neg(long.MinValue) }),
             ("%u", 64, new object?[] { 0xFFFFFFFFUL }),
@@ -180,6 +185,24 @@ public sealed class KernelPrintfFastPathTests
         Assert.Equal(0, run.Status);
         Assert.Equal(23UL, run.Rax);
         Assert.Equal("a/bb.ccc 0000BEEF   -12\0", Encoding.ASCII.GetString(run.Buffer, 0, 24));
+    }
+
+    [Theory]
+    [InlineData("%05d|", -42L, "-0042|")]
+    [InlineData("%08ld|", -42L, "-0000042|")]
+    [InlineData("%06i|", -42L, "-00042|")]
+    [InlineData("%02d|", -12345L, "-12345|")]
+    [InlineData("%022lld|", long.MinValue, "-009223372036854775808|")]
+    [InlineData("%-05d|", -42L, "-42  |")]
+    [InlineData("%05d|", 42L, "00042|")]
+    public void ZeroPaddedSignedIntegersPutTheSignBeforeThePadding(string format, long value, string expected)
+    {
+        foreach (var disable in new[] { false, true })
+        {
+            var run = Run(format, 64, new object?[] { Neg(value) }, useVaList: true, disableFastPath: disable);
+            Assert.Equal((ulong)expected.Length, run.Rax);
+            Assert.Equal(expected, Encoding.ASCII.GetString(run.Buffer, 0, expected.Length));
+        }
     }
 
     [Fact]
