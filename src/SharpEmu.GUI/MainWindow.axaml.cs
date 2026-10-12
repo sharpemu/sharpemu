@@ -2526,7 +2526,7 @@ public partial class MainWindow : Window
         var options = new FilePickerSaveOptions
         {
             Title = loc.Get("Dialog.SaveZar"),
-            SuggestedFileName = SuggestedArchiveName(Path.GetFileName(gameFolder), game.Version),
+            SuggestedFileName = SuggestedArchiveName(Path.GetFileName(gameFolder), game.TitleId, game.Version),
             DefaultExtension = "zar",
             FileTypeChoices = [new FilePickerFileType(loc.Get("Dialog.ZarFiles")) { Patterns = ["*.zar"] }],
         };
@@ -2559,21 +2559,42 @@ public partial class MainWindow : Window
         }
     }
 
-    // The game folder's name with the game version, so archives of different versions of a game
-    // get different names (and different cache folders). A name that already carries the version
-    // is left as it is.
-    internal static string SuggestedArchiveName(string folderName, string? version)
+    // TITLEID-version (PPSA01234-1.004): the title id differs between regions of the same game and
+    // the version between updates, so each archive gets its own name and cache folder. Without a
+    // title id the game folder's name stands in.
+    internal static string SuggestedArchiveName(string folderName, string? titleId, string? version)
     {
-        var name = string.IsNullOrWhiteSpace(version) ||
-            folderName.Contains(version, StringComparison.OrdinalIgnoreCase)
-            ? folderName
-            : $"{folderName} v{version.Trim()}";
+        var name = string.IsNullOrWhiteSpace(titleId) ? folderName : titleId.Trim();
+        var shortVersion = ShortVersion(version);
+        if (shortVersion.Length > 0)
+        {
+            name = $"{name}-{shortVersion}";
+        }
+
         foreach (var invalid in Path.GetInvalidFileNameChars())
         {
             name = name.Replace(invalid, '_');
         }
 
         return name;
+    }
+
+    // "01.004.000" reads as "1.004": the leading zeros of the major number go, and the last part
+    // stays only when it is not zero. A version in another form is kept as it is.
+    private static string ShortVersion(string? version)
+    {
+        var text = version?.Trim() ?? string.Empty;
+        var parts = text.Split('.');
+        if (parts.Length < 2 || !parts.All(part => part.Length > 0 && part.All(char.IsAsciiDigit)))
+        {
+            return text;
+        }
+
+        var major = parts[0].TrimStart('0');
+        var shortened = $"{(major.Length == 0 ? "0" : major)}.{parts[1]}";
+        return parts.Length > 2 && parts[2].Any(digit => digit != '0')
+            ? $"{shortened}.{string.Join('.', parts[2..])}"
+            : shortened;
     }
 
     private void SetTitleMusicMuted(bool muted)

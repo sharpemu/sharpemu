@@ -41,14 +41,16 @@ public sealed class LibrarySelectionTests
     }
 
     [Theory]
-    [InlineData("Hades", "01.003.000", "Hades v01.003.000")]
-    [InlineData("Hades", null, "Hades")]
-    [InlineData("Hades", " ", "Hades")]
-    [InlineData("Hades 01.003.000", "01.003.000", "Hades 01.003.000")]
-    [InlineData("Game", "1.0/beta", "Game v1.0_beta")]
-    public void SuggestedArchiveName_AddsTheVersionOnce(string folder, string? version, string expected)
+    [InlineData("Hades", "PPSA03355", "01.003.000", "PPSA03355-1.003")]
+    [InlineData("Hades", "PPSA03355", "01.004.002", "PPSA03355-1.004.002")]
+    [InlineData("Hades", "PPSA03355", "10.000.000", "PPSA03355-10.000")]
+    [InlineData("Hades", "PPSA03355", null, "PPSA03355")]
+    [InlineData("Hades", null, "01.003.000", "Hades-1.003")]
+    [InlineData("Hades", " ", " ", "Hades")]
+    [InlineData("Game", "PPSA00001", "1.0/beta", "PPSA00001-1.0_beta")]
+    public void SuggestedArchiveName_IsTitleIdAndVersion(string folder, string? titleId, string? version, string expected)
     {
-        Assert.Equal(expected, MainWindow.SuggestedArchiveName(folder, version));
+        Assert.Equal(expected, MainWindow.SuggestedArchiveName(folder, titleId, version));
     }
 
     private static GameEntry CreateGame(string name) =>
