@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.FileSystem;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Kernel;
 using System.Buffers;
@@ -100,23 +101,40 @@ public static class AmprExports
         public uint Flush;
     }
 
+    // A host file, or a file of an archive-mounted app0 that is not on disk.
     private sealed class CachedHostFile : IDisposable
     {
+        private readonly SafeFileHandle? _handle;
+        private readonly ZArchiveFileStream? _archived;
+
         public CachedHostFile(string path)
         {
-            Handle = File.OpenHandle(
+            if (!File.Exists(path) && App0Archive.OpenRead(path) is { } archived)
+            {
+                _archived = archived;
+                Length = archived.Length;
+                return;
+            }
+
+            _handle = File.OpenHandle(
                 path,
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete,
                 FileOptions.RandomAccess);
-            Length = RandomAccess.GetLength(Handle);
+            Length = RandomAccess.GetLength(_handle);
         }
 
-        public SafeFileHandle Handle { get; }
         public long Length { get; }
 
-        public void Dispose() => Handle.Dispose();
+        public int Read(Span<byte> buffer, long offset) =>
+            _archived?.ReadAt(buffer, offset) ?? RandomAccess.Read(_handle!, buffer, offset);
+
+        public void Dispose()
+        {
+            _handle?.Dispose();
+            _archived?.Dispose();
+        }
     }
 
     private sealed class CachedHostFileEntry
@@ -1252,8 +1270,7 @@ public static class AmprExports
                 }
 
                 var request = (int)Math.Min((ulong)buffer.Length, size - bytesRead);
-                var read = RandomAccess.Read(
-                    cachedFile.Handle,
+                var read = cachedFile.Read(
                     buffer.AsSpan(0, request),
                     unchecked((long)absoluteOffset));
 

@@ -216,6 +216,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                HorizontalAlignment="Center" VerticalAlignment="Center" />
                   </MenuItem.Icon>
                 </MenuItem>
+                <MenuItem x:Name="CtxPackZar"
+                          Header="{Binding [Library.Context.PackZar], Source={x:Static local:Localization.Instance}}">
+                  <MenuItem.Icon>
+                    <TextBlock Text="▣" FontSize="12" Foreground="{StaticResource MutedBrush}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  </MenuItem.Icon>
+                </MenuItem>
                 <Separator />
                 <MenuItem x:Name="CtxGameSettings"
                           Header="{Binding [Library.Context.GameSettings], Source={x:Static local:Localization.Instance}}">

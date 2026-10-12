@@ -7,6 +7,7 @@ using SharpEmu.Core.Cpu.Disasm;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.HLE.FileSystem;
 using SharpEmu.HLE.Host;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.VideoOut;
@@ -148,6 +149,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
     public OrbisGen2Result Run(string ebootPath)
     {
+        using var archiveMount = MountArchive(ref ebootPath);
         var normalizedEbootPath = Path.GetFullPath(ebootPath);
         using var app0Binding = BindApp0Root(normalizedEbootPath);
         Console.Error.WriteLine($"[RUNTIME] Loading: {ebootPath}");
@@ -398,6 +400,72 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         }
 
         return result;
+    }
+
+    // A .zar holds the whole application folder. Mount it at a cache folder that gets the files host
+    // code reads by path (the executable, its modules and sce_sys); everything else is read from the
+    // archive when the guest asks for it. The path becomes the cached executable.
+    private static ArchiveMountScope? MountArchive(ref string ebootPath)
+    {
+        if (!ZArchive.IsArchivePath(ebootPath))
+        {
+            return null;
+        }
+
+        var archivePath = Path.GetFullPath(ebootPath);
+        var archive = ZArchive.Open(archivePath) ??
+            throw new InvalidDataException($"'{archivePath}' is not a valid .zar archive.");
+        if (!archive.IsFile(archive.LookUp("eboot.bin")))
+        {
+            archive.Dispose();
+            throw new FileNotFoundException("The archive has no eboot.bin at its root.", archivePath);
+        }
+
+        var cacheRoot = ZArchiveCache.Prepare(archivePath);
+        App0Archive.Mount(archive, cacheRoot);
+        try
+        {
+            foreach (var entry in archive.GetEntries(archive.LookUp(string.Empty)))
+            {
+                if (entry.IsDirectory)
+                {
+                    if (entry.Name.Equals("sce_sys", StringComparison.OrdinalIgnoreCase) ||
+                        entry.Name.Equals("sce_module", StringComparison.OrdinalIgnoreCase) ||
+                        entry.Name.Equals("sce_modules", StringComparison.OrdinalIgnoreCase))
+                    {
+                        App0Archive.ExtractDirectory(entry.Name);
+                    }
+                }
+                else if (entry.Name.Equals("eboot.bin", StringComparison.OrdinalIgnoreCase) ||
+                    Path.GetExtension(entry.Name).Equals(".prx", StringComparison.OrdinalIgnoreCase) ||
+                    Path.GetExtension(entry.Name).Equals(".sprx", StringComparison.OrdinalIgnoreCase))
+                {
+                    App0Archive.Extract(Path.Combine(cacheRoot, entry.Name));
+                }
+            }
+
+            foreach (var modules in new[] { Path.Combine("Media", "Modules"), Path.Combine("Media", "Plugins") })
+            {
+                if (App0Archive.IsDirectory(Path.Combine(cacheRoot, modules)))
+                {
+                    App0Archive.ExtractDirectory(modules);
+                }
+            }
+        }
+        catch
+        {
+            App0Archive.Unmount();
+            throw;
+        }
+
+        Console.Error.WriteLine($"[RUNTIME] Mounted archive '{archivePath}' at '{cacheRoot}'");
+        ebootPath = Path.Combine(cacheRoot, "eboot.bin");
+        return new ArchiveMountScope();
+    }
+
+    private sealed class ArchiveMountScope : IDisposable
+    {
+        public void Dispose() => App0Archive.Unmount();
     }
 
     private static App0BindingScope? BindApp0Root(string normalizedEbootPath)
@@ -806,6 +874,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
             try
             {
+                App0Archive.Extract(modulePath);
                 var fileInfo = new FileInfo(modulePath);
                 if (!fileInfo.Exists || fileInfo.Length <= 0 || fileInfo.Length > int.MaxValue)
                 {

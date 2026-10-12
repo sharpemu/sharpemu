@@ -24,7 +24,7 @@ internal static class HostMovieBridge
 
     private static readonly string[] SelfDecodedMovieExtensions = [".bk2"];
 
-    private static bool IsSelfDecodedMovie(string hostPath)
+    internal static bool IsSelfDecodedMovie(string hostPath)
     {
         foreach (var extension in SelfDecodedMovieExtensions)
         {

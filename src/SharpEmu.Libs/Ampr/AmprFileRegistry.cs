@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.FileSystem;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -269,20 +270,29 @@ internal static class AmprFileRegistry
             var relatives = new List<string>(256 * 1024);
             try
             {
-                foreach (var hostPath in Directory.EnumerateFiles(
-                             normalizedRoot,
-                             "*",
-                             SearchOption.AllDirectories))
+                // An app0 mounted from an archive holds only a few files on disk; the archive lists them all.
+                if (App0Archive.Root is { } archiveRoot &&
+                    string.Equals(archiveRoot, Path.TrimEndingDirectorySeparator(normalizedRoot), HostFsPath.Comparison))
                 {
-                    var relative = Path.GetRelativePath(normalizedRoot, hostPath)
-                        .Replace('\\', '/');
-                    if (string.IsNullOrEmpty(relative) ||
-                        relative.StartsWith("..", StringComparison.Ordinal))
+                    relatives.AddRange(App0Archive.ListAllFiles());
+                }
+                else
+                {
+                    foreach (var hostPath in Directory.EnumerateFiles(
+                                 normalizedRoot,
+                                 "*",
+                                 SearchOption.AllDirectories))
                     {
-                        continue;
-                    }
+                        var relative = Path.GetRelativePath(normalizedRoot, hostPath)
+                            .Replace('\\', '/');
+                        if (string.IsNullOrEmpty(relative) ||
+                            relative.StartsWith("..", StringComparison.Ordinal))
+                        {
+                            continue;
+                        }
 
-                    relatives.Add(relative);
+                        relatives.Add(relative);
+                    }
                 }
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)

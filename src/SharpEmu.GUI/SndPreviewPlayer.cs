@@ -26,8 +26,43 @@ internal sealed class SndPreviewPlayer
     private GCHandle _pinnedWav;
     private bool _playing;
     private bool _paused;
+    private bool _muted;
     private string? _cachedPath;
     private byte[]? _cachedWav;
+
+    /// <summary>
+    /// Keeps the music silent while set, even across <see cref="Play"/> and
+    /// <see cref="Resume"/>; the track stays ready so clearing it and
+    /// resuming restarts the music.
+    /// </summary>
+    public bool Muted
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _muted;
+            }
+        }
+        set
+        {
+            if (!OperatingSystem.IsWindows())
+            {
+                return;
+            }
+
+            lock (_sync)
+            {
+                _muted = value;
+                if (value && _playing)
+                {
+                    _ = PlaySound(0, 0, 0);
+                    _playing = false;
+                    _paused = true;
+                }
+            }
+        }
+    }
 
     /// <summary>Starts looping the given snd0.at9 after a short debounce.</summary>
     public void Play(string at9Path)
@@ -87,6 +122,12 @@ internal sealed class SndPreviewPlayer
 
                 // The WAV image must stay pinned while winmm plays from it.
                 _pinnedWav = GCHandle.Alloc(wav, GCHandleType.Pinned);
+                if (_muted)
+                {
+                    _paused = true;
+                    return;
+                }
+
                 _playing = PlaySound(_pinnedWav.AddrOfPinnedObject(), 0, SND_MEMORY | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
                 if (!_playing)
                 {
@@ -144,7 +185,7 @@ internal sealed class SndPreviewPlayer
 
         lock (_sync)
         {
-            if (!_paused || !_pinnedWav.IsAllocated)
+            if (!_paused || _muted || !_pinnedWav.IsAllocated)
             {
                 return;
             }

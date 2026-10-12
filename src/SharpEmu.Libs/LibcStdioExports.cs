@@ -6,6 +6,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
+using SharpEmu.HLE.FileSystem;
 using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.LibcStdio;
@@ -30,10 +31,10 @@ public static class LibcStdioExports
     private const int Einval = 22;
     private const int Erofs = 30;
 
-    private sealed class StdioFile(FileStream stream)
+    private sealed class StdioFile(Stream stream)
     {
         public object Gate { get; } = new();
-        public FileStream Stream { get; set; } = stream;
+        public Stream Stream { get; set; } = stream;
         public bool IsClosed { get; set; }
     }
 
@@ -147,7 +148,7 @@ public static class LibcStdioExports
                 }
             }
 
-            var stream = new FileStream(hostPath, fileMode, fileAccess, KernelMemoryCompatExports.GuestFileShare);
+            var stream = OpenStdioStream(hostPath, fileMode, fileAccess);
             if (mode.StartsWith('a') && fileAccess == FileAccess.ReadWrite)
             {
                 stream.Seek(0, SeekOrigin.End);
@@ -1063,7 +1064,7 @@ public static class LibcStdioExports
                 }
             }
 
-            var replacement = new FileStream(hostPath, fileMode, fileAccess, KernelMemoryCompatExports.GuestFileShare);
+            var replacement = OpenStdioStream(hostPath, fileMode, fileAccess);
             lock (file.Gate)
             {
                 if (file.IsClosed)
@@ -1227,9 +1228,15 @@ public static class LibcStdioExports
         return (int)diagnosticResult;
     }
 
+    // A read-only open of a file that exists only in an archive-mounted app0 reads from the archive.
+    private static Stream OpenStdioStream(string hostPath, FileMode fileMode, FileAccess fileAccess) =>
+        fileAccess == FileAccess.Read && fileMode == FileMode.Open
+            ? App0Archive.OpenReadOrFile(hostPath, KernelMemoryCompatExports.GuestFileShare)
+            : new FileStream(hostPath, fileMode, fileAccess, KernelMemoryCompatExports.GuestFileShare);
+
     private static void FlushForBufferingMode(
         ulong handle,
-        FileStream stream,
+        Stream stream,
         ReadOnlySpan<byte> payload)
     {
         if (!_fileBufferingModes.TryGetValue(handle, out var mode))

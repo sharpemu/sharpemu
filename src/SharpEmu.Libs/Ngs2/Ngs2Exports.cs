@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.FileSystem;
 using SharpEmu.Libs.Kernel;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -979,7 +980,7 @@ public static class Ngs2Exports
         long fileLength;
         try
         {
-            using var stream = File.OpenRead(hostPath);
+            using var stream = App0Archive.OpenReadOrFile(hostPath);
             fileLength = stream.Length;
             if (offset >= (ulong)fileLength)
             {

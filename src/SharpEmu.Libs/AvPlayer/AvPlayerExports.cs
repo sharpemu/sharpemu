@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.FileSystem;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.Media;
 using SharpEmu.Libs.VideoOut;
@@ -2592,6 +2593,8 @@ public static class AvPlayerExports
         out string resolved)
     {
         resolved = string.Empty;
+        // A media file only in an archive-mounted app0 is extracted so the host decoder can open it.
+        App0Archive.Extract(Path.Combine(root, relativePath));
         var current = root;
         var segments = relativePath.Split(
             Path.DirectorySeparatorChar,
