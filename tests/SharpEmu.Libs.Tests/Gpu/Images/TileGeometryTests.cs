@@ -64,9 +64,9 @@ public sealed class TileGeometryTests
     [InlineData(16u, 0u, 4u, 4096u)]
     [InlineData(16u, 4u, 0u, 8192u)]
     [InlineData(16u, 0u, 8u, 16640u)]
-    public void RenderTargetBlockOffsets_MatchTheReferenceSpotValues(uint bytes, uint x, uint y, uint expected)
+    public void Gen5RenderTargetBlockOffsets_MatchTheGuestDetiler(uint bytes, uint x, uint y, uint expected)
     {
-        Assert.True(TileGeometry.TryGetBlockLayout(TileBlockKind.RenderTarget64KB, bytes, out var layout));
+        Assert.True(TileGeometry.TryGetBlockLayout(TileBlockKind.RenderTarget64KBGen5, bytes, out var layout));
         Assert.True(TileGeometry.TryGetBlockOffset(layout, x, y, 0, out var offset));
         Assert.Equal(expected, offset);
 
