@@ -117,6 +117,7 @@ internal static unsafe partial class VulkanVideoPresenter
             (5, 0, _) => Format.R16G16Unorm,
             (7, 0, _) => Format.B10G11R11UfloatPack32,
             (12, 0, _) => Format.R16G16B16A16Unorm,
+            (16, 0, _) => Format.B5G6R5UnormPack16,
             (13, 0, _) or (14, 0, _) => Format.R32G32B32A32Sfloat,
             (22, 0, _) or (71, 0, _) => Format.R16G16B16A16Sfloat,
             (56, 0, _) or (62, 0, _) or (64, 0, _) => Format.R8G8B8A8Unorm,
@@ -167,7 +168,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             1 or 2 or 4 or 20 or 29 or 36 or 49 => 1,
             3 or 5 or 11 or 75 => 2,
-            6 or 7 => 3,
+            6 or 7 or 16 => 3,
             9 or 10 or 12 or 13 or 14 or 22 or 56 or 62 or 64 or 71 => 4,
             _ => 0,
         };

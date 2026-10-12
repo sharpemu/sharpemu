@@ -455,7 +455,7 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     }
 
     [Fact]
-    public void PrepareBindings_InvalidAnisotropyStillFailsWithSourceDiagnostics()
+    public void PrepareBindings_ReservedAnisotropyRatioClampsInsteadOfFailing()
     {
         if (!Ready()) return;
         using var presenter = new PresenterUnderTest(_vulkan!);
@@ -473,9 +473,8 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         presenter.Run(() =>
         {
             using var preparation = presenter.RenderHost.BeginPreparation();
-            var failure = Assert.Throws<SchedulerFatalException>(() =>
-                presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot, 0x12340000)));
-            Assert.Contains("anisotropy ratio is unknown: ratio=6", failure.Message);
+            presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot, 0x12340000));
+            Assert.Empty(fatal.Messages);
         });
         presenter.Harness.Shutdown();
     }
