@@ -438,6 +438,60 @@ public sealed class AprStreamingContractTests
         }
     }
 
+    // A batch reads the host root configuration once for all of its paths; the
+    // next batch must still see a configuration the host changed in between.
+    [Fact]
+    public void ResolveFilepathsToIdsAndFileSizes_EachBatchSeesTheCurrentRoots()
+    {
+        const ulong memoryBase = 0x1_0000_0000;
+        const ulong pathListAddress = memoryBase + 0x100;
+        const ulong firstPathAddress = memoryBase + 0x200;
+        const ulong secondPathAddress = memoryBase + 0x300;
+        const ulong idsAddress = memoryBase + 0x800;
+        const ulong sizesAddress = memoryBase + 0x900;
+        var first = Path.Combine(Path.GetTempPath(), $"sharpemu-apr-roots-a-{Guid.NewGuid():N}");
+        var second = Path.Combine(Path.GetTempPath(), $"sharpemu-apr-roots-b-{Guid.NewGuid():N}");
+        var previous = Environment.GetEnvironmentVariable("SHARPEMU_HOSTAPP_DIR");
+        try
+        {
+            Directory.CreateDirectory(first);
+            Directory.CreateDirectory(second);
+            File.WriteAllBytes(Path.Combine(first, "a.bin"), new byte[3]);
+            File.WriteAllBytes(Path.Combine(first, "b.bin"), new byte[4]);
+            File.WriteAllBytes(Path.Combine(second, "a.bin"), new byte[7]);
+            File.WriteAllBytes(Path.Combine(second, "b.bin"), new byte[8]);
+            var memory = new FakeCpuMemory(memoryBase, 0x1000);
+            var context = new CpuContext(memory, Generation.Gen5);
+            memory.WriteCString(firstPathAddress, "/hostapp/a.bin");
+            memory.WriteCString(secondPathAddress, "/hostapp/b.bin");
+            WriteUInt64(memory, pathListAddress, firstPathAddress);
+            WriteUInt64(memory, pathListAddress + sizeof(ulong), secondPathAddress);
+
+            ulong[] Resolve()
+            {
+                context[CpuRegister.Rdi] = pathListAddress;
+                context[CpuRegister.Rsi] = 2;
+                context[CpuRegister.Rdx] = idsAddress;
+                context[CpuRegister.Rcx] = sizesAddress;
+                context[CpuRegister.R8] = 0;
+                Assert.Equal(0, KernelMemoryCompatExports.KernelAprResolveFilepathsToIdsAndFileSizes(context));
+                return [ReadUInt64(memory, sizesAddress), ReadUInt64(memory, sizesAddress + sizeof(ulong))];
+            }
+
+            Environment.SetEnvironmentVariable("SHARPEMU_HOSTAPP_DIR", first);
+            Assert.Equal([3UL, 4UL], Resolve());
+
+            Environment.SetEnvironmentVariable("SHARPEMU_HOSTAPP_DIR", second);
+            Assert.Equal([7UL, 8UL], Resolve());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SHARPEMU_HOSTAPP_DIR", previous);
+            Directory.Delete(first, recursive: true);
+            Directory.Delete(second, recursive: true);
+        }
+    }
+
     private static ulong ReadUInt64(FakeCpuMemory memory, ulong address)
     {
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];

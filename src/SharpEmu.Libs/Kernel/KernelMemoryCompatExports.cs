@@ -1777,6 +1777,7 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var roots = RootConfigurationToken();
         for (ulong i = 0; i < count; i++)
         {
             if (idsAddress != 0 &&
@@ -1792,7 +1793,7 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            var hostPath = ResolveGuestPath(guestPath);
+            var hostPath = ResolveGuestPath(guestPath, roots);
             if (!TryGetAprFileSize(hostPath, out var fileSize))
             {
                 // Stop at the first miss and report its index.
@@ -1878,6 +1879,7 @@ public static partial class KernelMemoryCompatExports
             _ = TryReadNullTerminatedUtf8(ctx, prefixAddress, MaxGuestStringLength, out prefix);
         }
 
+        var roots = RootConfigurationToken();
         for (ulong i = 0; i < count; i++)
         {
             if (idsAddress != 0 &&
@@ -1894,7 +1896,7 @@ public static partial class KernelMemoryCompatExports
             }
 
             var guestPath = CombineAprPrefixedPath(prefix, relativePath);
-            var hostPath = ResolveGuestPath(guestPath);
+            var hostPath = ResolveGuestPath(guestPath, roots);
             if (!TryGetAprFileSize(hostPath, out var fileSize))
             {
                 if (_logIo)
@@ -1983,6 +1985,7 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var roots = RootConfigurationToken();
         for (ulong i = 0; i < count; i++)
         {
             if (!TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), uint.MaxValue))
@@ -1997,7 +2000,7 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            var hostPath = ResolveGuestPath(guestPath);
+            var hostPath = ResolveGuestPath(guestPath, roots);
             if (!TryGetAprFileSize(hostPath, out _))
             {
                 if (_logIo)
@@ -4982,14 +4985,28 @@ public static partial class KernelMemoryCompatExports
             Environment.GetEnvironmentVariable("SHARPEMU_DOWNLOAD0_DIR"), "|",
             Environment.GetEnvironmentVariable("SHARPEMU_SAVEDATA_DIR"));
 
-    public static string ResolveGuestPath(string guestPath)
+    public static string ResolveGuestPath(string guestPath) =>
+        string.IsNullOrWhiteSpace(guestPath)
+            ? guestPath
+            : ResolveGuestPath(guestPath, RootConfigurationToken());
+
+    /// <summary>
+    /// <see cref="ResolveGuestPath(string)"/> under a root configuration the
+    /// caller read once for a whole batch.
+    /// </summary>
+    /// <remarks>
+    /// The token is six environment reads and a concatenation, which is most of
+    /// what a memoized resolve costs. An APR batch resolves up to 1024 paths in
+    /// one guest call, during which the host configuration cannot meaningfully
+    /// change, so reading it per path only multiplied that cost by the batch size.
+    /// </remarks>
+    internal static string ResolveGuestPath(string guestPath, string roots)
     {
         if (string.IsNullOrWhiteSpace(guestPath))
         {
             return guestPath;
         }
 
-        var roots = RootConfigurationToken();
         if (_resolvedGuestPaths.TryGetValue(guestPath, out var memoized) &&
             string.Equals(memoized.Root, roots, StringComparison.Ordinal))
         {
