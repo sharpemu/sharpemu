@@ -165,4 +165,167 @@ public sealed class JsonExportRegistrationTests
         Assert.Equal(userDataAddress, BitConverter.ToUInt64(parameter, 8));
         Assert.All(parameter[0x10..], value => Assert.Equal(0, value));
     }
+
+    private const ulong ArrayMemoryBase = 0x1_0000_0000;
+    private const ulong ArrayRoot = ArrayMemoryBase;
+    private const ulong ArrayText = ArrayMemoryBase + 0x100;
+    private const ulong ArrayKey = ArrayMemoryBase + 0x300;
+    private const ulong ArrayBeginIterator = ArrayMemoryBase + 0x400;
+    private const ulong ArrayEndIterator = ArrayMemoryBase + 0x408;
+
+    private static (CpuContext Context, FakeCpuMemory Memory) Parse(string json)
+    {
+        JsonObjectHeap.ResetForTests();
+        var memory = new FakeCpuMemory(ArrayMemoryBase, 0x10000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        ctx[CpuRegister.Rdi] = ArrayRoot;
+        JsonExports.ValueConstructor(ctx);
+        memory.WriteCString(ArrayText, json);
+        ctx[CpuRegister.Rdi] = ArrayRoot;
+        ctx[CpuRegister.Rsi] = ArrayText;
+        ctx[CpuRegister.Rdx] = (ulong)json.Length;
+        Assert.Equal(0, JsonExports.ParserParseBuffer(ctx));
+        return (ctx, memory);
+    }
+
+    private static ulong Member(CpuContext ctx, FakeCpuMemory memory, string name)
+    {
+        memory.WriteCString(ArrayKey, name);
+        ctx[CpuRegister.Rdi] = ArrayRoot;
+        ctx[CpuRegister.Rsi] = ArrayKey;
+        JsonExports.ValueIndexCString(ctx);
+        return ctx[CpuRegister.Rax];
+    }
+
+    private static ulong GetArray(CpuContext ctx, ulong value)
+    {
+        ctx[CpuRegister.Rdi] = value;
+        JsonExports.ValueGetArray(ctx);
+        return ctx[CpuRegister.Rax];
+    }
+
+    private static void Range(CpuContext ctx, ulong array)
+    {
+        ctx[CpuRegister.Rdi] = ArrayBeginIterator;
+        ctx[CpuRegister.Rsi] = array;
+        JsonExports.ArrayBegin(ctx);
+        Assert.Equal(ArrayBeginIterator, ctx[CpuRegister.Rax]);
+        ctx[CpuRegister.Rdi] = ArrayEndIterator;
+        ctx[CpuRegister.Rsi] = array;
+        JsonExports.ArrayEnd(ctx);
+        Assert.Equal(ArrayEndIterator, ctx[CpuRegister.Rax]);
+    }
+
+    private static bool NotAtEnd(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rdi] = ArrayBeginIterator;
+        ctx[CpuRegister.Rsi] = ArrayEndIterator;
+        JsonExports.IteratorNotEqual(ctx);
+        return ctx[CpuRegister.Rax] != 0;
+    }
+
+    [Fact]
+    public void AnArrayOfRealsIsWalkedFromBeginToEnd()
+    {
+        var (ctx, memory) = Parse("{\"scale\":[1.5,-2.25,3.0]}");
+        var array = GetArray(ctx, Member(ctx, memory, "scale"));
+        Range(ctx, array);
+
+        var reals = new List<double>();
+        while (NotAtEnd(ctx))
+        {
+            ctx[CpuRegister.Rdi] = ArrayBeginIterator;
+            JsonExports.IteratorDereference(ctx);
+            var element = ctx[CpuRegister.Rax];
+
+            ctx[CpuRegister.Rdi] = element;
+            JsonExports.ValueGetType(ctx);
+            Assert.Equal(4UL, ctx[CpuRegister.Rax]);
+
+            ctx[CpuRegister.Rdi] = element;
+            JsonExports.ValueGetReal(ctx);
+            Assert.True(ctx.TryReadUInt64(ctx[CpuRegister.Rax], out var bits));
+            reals.Add(BitConverter.Int64BitsToDouble(unchecked((long)bits)));
+
+            ctx[CpuRegister.Rdi] = ArrayBeginIterator;
+            JsonExports.IteratorPreIncrement(ctx);
+            Assert.Equal(ArrayBeginIterator, ctx[CpuRegister.Rax]);
+        }
+
+        Assert.Equal([1.5, -2.25, 3.0], reals);
+        ctx[CpuRegister.Rdi] = array;
+        JsonExports.ArraySize(ctx);
+        Assert.Equal(3UL, ctx[CpuRegister.Rax]);
+    }
+
+    [Fact]
+    public void ReadingTheSameValueAgainReusesItsArray()
+    {
+        var (ctx, memory) = Parse("{\"list\":[1,2]}");
+        var member = Member(ctx, memory, "list");
+
+        Assert.Equal(GetArray(ctx, member), GetArray(ctx, member));
+    }
+
+    [Fact]
+    public void AValueThatIsNotAnArrayReadsAsEmpty()
+    {
+        var (ctx, memory) = Parse("{\"number\":7}");
+        var array = GetArray(ctx, Member(ctx, memory, "number"));
+        Assert.NotEqual(0UL, array);
+        Range(ctx, array);
+
+        Assert.False(NotAtEnd(ctx));
+        ctx[CpuRegister.Rdi] = array;
+        JsonExports.ArrayEmpty(ctx);
+        Assert.Equal(1UL, ctx[CpuRegister.Rax]);
+    }
+
+    [Fact]
+    public void PostfixIncrementAndCopiesKeepTheirOwnPosition()
+    {
+        const ulong old = ArrayMemoryBase + 0x410;
+        const ulong copy = ArrayMemoryBase + 0x418;
+        var (ctx, memory) = Parse("{\"list\":[10,20,30]}");
+        Range(ctx, GetArray(ctx, Member(ctx, memory, "list")));
+        Assert.True(ctx.TryReadUInt64(ArrayBeginIterator, out var first));
+
+        ctx[CpuRegister.Rdi] = copy;
+        ctx[CpuRegister.Rsi] = ArrayBeginIterator;
+        JsonExports.IteratorCopyConstructor(ctx);
+        ctx[CpuRegister.Rdi] = old;
+        ctx[CpuRegister.Rsi] = ArrayBeginIterator;
+        ctx[CpuRegister.Rdx] = 0;
+        JsonExports.IteratorPostIncrement(ctx);
+
+        Assert.Equal(old, ctx[CpuRegister.Rax]);
+        Assert.True(ctx.TryReadUInt64(old, out var oldPosition));
+        Assert.True(ctx.TryReadUInt64(copy, out var copyPosition));
+        Assert.True(ctx.TryReadUInt64(ArrayBeginIterator, out var advanced));
+        Assert.Equal(first, oldPosition);
+        Assert.Equal(first, copyPosition);
+        Assert.Equal(first + 0x20, advanced);
+
+        ctx[CpuRegister.Rdi] = ArrayBeginIterator;
+        ctx[CpuRegister.Rsi] = 2;
+        JsonExports.IteratorAdvance(ctx);
+        Assert.False(NotAtEnd(ctx));
+    }
+
+    [Theory]
+    [InlineData("ONT8As5R1ug", "_ZNK3sce4Json5Value8getArrayEv")]
+    [InlineData("bcH5EnFE2xY", "_ZNK3sce4Json5Array5beginEv")]
+    [InlineData("WXF2ihRF+B8", "_ZNK3sce4Json5Array3endEv")]
+    [InlineData("5AZPp99ogrc", "_ZNK3sce4Json5Array8iteratorneERKS2_")]
+    [InlineData("wcgr5mte7T8", "_ZNK3sce4Json5Array8iteratordeEv")]
+    [InlineData("w5+VCznos5E", "_ZN3sce4Json5Array8iteratorppEv")]
+    [InlineData("9yLjn46Ypfs", "_ZN3sce4Json5Array8iteratorD1Ev")]
+    public void ArrayExportsAreRegistered(string nid, string name)
+    {
+        var manager = CreateRegisteredManager();
+
+        Assert.True(manager.TryGetExport(nid, out var export));
+        Assert.Equal(name, export.Name);
+        Assert.Equal("libSceJson", export.LibraryName);
+    }
 }
