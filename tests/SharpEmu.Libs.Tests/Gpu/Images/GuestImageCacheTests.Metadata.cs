@@ -73,7 +73,8 @@ public sealed partial class GuestImageCacheTests
             GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
         color = AsColorTarget(color);
         color.Description.Metadata.Kind = MetadataKind.Dcc;
-        color.Description.Metadata.Range = new GuestSpan(metadataAddress, 0x100);
+        // A zero range size selects deferred metadata registration.
+        color.Description.Metadata.Range = new GuestSpan(metadataAddress, 0);
         color.Description.Metadata.Compression = DisplayCompression.Dcc256_256_0;
         harness.Acquire(ref color);
         Assert.False(harness.Images.IsMetadataCleared(metadataAddress, 0));
@@ -104,7 +105,8 @@ public sealed partial class GuestImageCacheTests
             GuestPixelFormat.Bits8_8_8_8Srgb, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
         color = AsColorTarget(color);
         color.Description.Metadata.Kind = MetadataKind.Dcc;
-        color.Description.Metadata.Range = new GuestSpan(metadataAddress, 0x100);
+        // Keep this request on the deferred fill path.
+        color.Description.Metadata.Range = new GuestSpan(metadataAddress, 0);
         color.Description.Metadata.Compression = DisplayCompression.Dcc256_256_0;
         harness.Acquire(ref color);
         Assert.True(harness.Images.IsMetadata(metadataAddress));
@@ -480,7 +482,8 @@ public sealed partial class GuestImageCacheTests
             GuestPixelFormat.Bits8_8_8_8UNorm, GuestImageType.Color3D, new Extent3D(1, 1, depth), 1, 4, 1));
         target.View = target.View with { Type = ImageViewType.Type2DArray, LayerCount = depth };
         target.Description.Metadata.Kind = MetadataKind.Dcc;
-        target.Description.Metadata.Range = new GuestSpan(metadata, depth * 4096ul);
+        // Test deferred slice state without consuming native metadata bytes.
+        target.Description.Metadata.Range = new GuestSpan(metadata, 0);
         harness.Acquire(ref target);
         for (uint slice = 0; slice < depth; slice++)
         {
