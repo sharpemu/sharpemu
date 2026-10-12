@@ -3,6 +3,7 @@
 
 using System;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -174,6 +175,39 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	[ThreadStatic]
 	private static List<(IVirtualMemory Memory, ulong Base)>? _nestedGuestCallbackStacks;
+
+	// Nested-callback stacks are cached per host thread;
+	// when an executor thread ends they return here instead of pinning a stack slot forever.
+	private static readonly ConcurrentQueue<(IVirtualMemory Memory, ulong Base)> _reusableNestedCallbackStacks = new();
+
+	private static void ReleaseNestedGuestCallbackStacks()
+	{
+		if (_nestedGuestCallbackStacks is not { } stacks)
+			return;
+
+		foreach (var stack in stacks)
+			_reusableNestedCallbackStacks.Enqueue(stack);
+
+		stacks.Clear();
+	}
+
+	private static bool TryTakeReusableNestedCallbackStack(IVirtualMemory memory, out ulong stackBase)
+	{
+		var count = _reusableNestedCallbackStacks.Count;
+		for (var i = 0; i < count && _reusableNestedCallbackStacks.TryDequeue(out var stack); i++)
+		{
+			if (ReferenceEquals(stack.Memory, memory))
+			{
+				stackBase = stack.Base;
+				return true;
+			}
+
+			_reusableNestedCallbackStacks.Enqueue(stack);
+		}
+
+		stackBase = 0;
+		return false;
+	}
 
 	[ThreadStatic]
 	private static int _nestedGuestCallbackDepth;
@@ -414,6 +448,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		Blocked,
 		Exited,
 		Faulted,
+		Parked,
 	}
 
 	private enum GuestNativeCallExitReason
@@ -428,9 +463,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		public ulong ThreadHandle { get; init; }
 
-		public ulong EntryPoint { get; init; }
+		public ulong EntryPoint { get; set; }
 
-		public ulong Argument { get; init; }
+		public ulong Argument { get; set; }
+
+		public IGuestThreadRecycler? Recycler { get; init; }
 
 		public string Name { get; init; } = string.Empty;
 
@@ -673,6 +710,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			finally
 			{
+				ReleaseNestedGuestCallbackStacks();
 				GuestThreadExecution.RestoreGuestThread(previousGuestThreadHandle);
 				_workAvailable.Dispose();
 			}
@@ -3980,6 +4018,55 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return true;
 	}
 
+	public bool TryRestartParkedThread(ulong threadHandle, ulong entryPoint, ulong argument, out string? error)
+	{
+		if (entryPoint < 65536)
+		{
+			error = $"invalid restart entry=0x{entryPoint:X16}";
+			return false;
+		}
+
+		using (LockGate("TryRestartParkedThread"))
+		{
+			if (!_guestThreads.TryGetValue(threadHandle, out var thread) ||
+				thread.State != GuestThreadRunState.Parked ||
+				thread.ExecutorActive)
+			{
+				error = $"guest thread 0x{threadHandle:X16} is not parked";
+				return false;
+			}
+
+			// The previous entry's frames are dead:
+			// start over at the stack top and keep the thread's TLS, like a fresh entry on the same thread.
+			var previous = thread.Context;
+			var context = new CpuContext(previous.Memory, previous.TargetGeneration)
+			{
+				Rip = entryPoint,
+				Rflags = 0x202,
+				FsBase = previous.FsBase,
+				GsBase = previous.GsBase,
+			};
+			context[CpuRegister.Rsp] = thread.StackBase + thread.StackSize - sizeof(ulong);
+			context[CpuRegister.Rdi] = argument;
+			if (!InitializeGuestThreadFrame(context))
+			{
+				error = "failed to reinitialize guest thread stack";
+				return false;
+			}
+
+			thread.Context = context;
+			thread.EntryPoint = entryPoint;
+			thread.Argument = argument;
+			thread.ExitValue = 0;
+			thread.State = GuestThreadRunState.Ready;
+			EnqueueReadyGuestThreadLocked(thread);
+		}
+
+		DispatchReadyGuestThreads();
+		error = null;
+		return true;
+	}
+
 	public bool SupportsGuestContextTransfer => true;
 
 	public bool TryGetGuestThreadStackBounds(
@@ -4499,7 +4586,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			else
 			{
-				if (!TryMapGuestThreadRegion(
+				if (!TryTakeReusableNestedCallbackStack(virtualMemory, out callbackStackBase) &&
+					!TryMapGuestThreadRegion(
 						virtualMemory,
 						GuestThreadStackBaseAddress,
 						GuestThreadStackSize,
@@ -4964,7 +5052,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				return true;
 			}
 
-			if (target.State is GuestThreadRunState.Exited or GuestThreadRunState.Faulted)
+			if (target.State is GuestThreadRunState.Exited or GuestThreadRunState.Faulted or GuestThreadRunState.Parked)
 			{
 				error = $"guest exception target 0x{threadHandle:X16} is no longer running";
 				return false;
@@ -5582,6 +5670,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			StackBase = stackBase,
 			StackSize = stackSize,
 			State = GuestThreadRunState.Ready,
+			Recycler = request.Recycler,
 		};
 		error = null;
 		return true;
@@ -5951,6 +6040,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 			thread.HostThread = Thread.CurrentThread;
 		}
+		IGuestThreadRecycler? parkedRecycler = null;
 		var previousLastError = LastError;
 		var previousGuestThreadHandle = GuestThreadExecution.EnterGuestThread(thread.ThreadHandle);
 		var previousGuestThreadState = _activeGuestThreadState;
@@ -6000,6 +6090,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				{
 					case GuestNativeCallExitReason.Returned:
 						thread.ExitValue = thread.Context[CpuRegister.Rax];
+						if (thread.Recycler is not null)
+						{
+							thread.State = GuestThreadRunState.Parked;
+							parkedRecycler = thread.Recycler;
+							break;
+						}
 						thread.State = GuestThreadRunState.Exited;
 						if (_logGuestThreads)
 						Console.Error.WriteLine(
@@ -6077,6 +6173,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					$"error={pendingError ?? "unknown"}");
 			}
 		}
+
+		// Reported once the executor is released, so the owner can restart the parked thread straight from this callback.
+		parkedRecycler?.OnEntryReturned(thread.ThreadHandle, thread.ExitValue);
 	}
 
 	private bool TryReleaseGuestThreadExecutorLocked(
@@ -7110,7 +7209,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			var sawBlockedThread = false;
 			foreach (var thread in _guestThreads.Values)
 			{
-				if (thread.State is GuestThreadRunState.Exited or GuestThreadRunState.Faulted)
+				if (thread.State is GuestThreadRunState.Exited or GuestThreadRunState.Faulted or GuestThreadRunState.Parked)
 				{
 					continue;
 				}
