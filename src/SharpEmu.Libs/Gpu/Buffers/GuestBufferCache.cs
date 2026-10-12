@@ -240,7 +240,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         _ = SynchronizeBuffer(buffer, guestAddress, size, isWritten, isTexelBuffer, preserveCpuWriteHotPages: false);
         if (isWritten)
         {
-            buffer.NoteGpuWrite();
+            buffer.NoteGpuWrite(buffer.Offset(guestAddress), size);
             if (Diagnostics.DccWriterTrace.Enabled)
             {
                 Diagnostics.DccWriterTrace.Record(RequireImageCache(), guestAddress, size);
@@ -1275,7 +1275,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         for (var index = 0; index < pending.Copies.Count; index++)
         {
             var copy = pending.Copies[index];
-            if (copy.Buffer.LastGpuWriteTick != pending.WriteTicks[index] ||
+            if (copy.Buffer.GetLastGpuWriteTick(copy.SourceOffset, copy.Size) != pending.WriteTicks[index] ||
                 !_gpuModifiedRanges.Contains(copy.Address, copy.Size) ||
                 !ReferenceEquals(FindOwner(copy.Address, copy.Size), copy.Buffer))
             {
@@ -1509,7 +1509,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         var ticks = new ulong[copies.Count];
         for (var index = 0; index < copies.Count; index++)
         {
-            var written = copies[index].Buffer.LastGpuWriteTick;
+            var written = copies[index].Buffer.GetLastGpuWriteTick(copies[index].SourceOffset, copies[index].Size);
             if (written == 0)
             {
                 return false;
@@ -1547,7 +1547,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     }
 
     // Copies the pieces on the readback queue after only the tick that last wrote their
-    // buffers, instead of appending the copy to the main queue and draining all of it.
+    // ranges, instead of appending the copy to the main queue and draining all of it.
     private bool TryDownloadAsync(List<DownloadPiece> copies)
     {
         if (AsyncReadback is not { } readback || copies.Count == 0)
@@ -1559,7 +1559,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         var total = 0UL;
         foreach (var copy in copies)
         {
-            var written = copy.Buffer.LastGpuWriteTick;
+            var written = copy.Buffer.GetLastGpuWriteTick(copy.SourceOffset, copy.Size);
             // A GPU-modified range with no recorded writer: keep the conservative path.
             if (written == 0)
             {
@@ -1729,7 +1729,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             preserveCpuWriteHotPages);
         if (source != null)
         {
-            buffer.NoteGpuWrite();
+            foreach (var copy in copies) buffer.NoteGpuWrite(copy.DstOffset, copy.Size);
             var command = _scheduler.Current;
             command.EndRendering();
             var native = new CommandBuffer(command.Handle);

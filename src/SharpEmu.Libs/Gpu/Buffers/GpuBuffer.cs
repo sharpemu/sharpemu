@@ -31,6 +31,7 @@ public unsafe class GpuBuffer : IDisposable
     private DeviceMemory _memory;
     private readonly ulong _memoryOffset;
     private readonly GpuMemorySlabs.Block? _slab;
+    private BufferWriteDependencies? _writeDependencies;
 
     // allowSlab: the caller records on the scheduler's current command buffer, which clears a recycled slab block.
     public GpuBuffer(GpuDeviceInfo device, SubmissionScheduler scheduler, GpuBufferUsage usage, ulong cpuAddress, BufferUsageFlags flags, ulong size,
@@ -169,17 +170,30 @@ public unsafe class GpuBuffer : IDisposable
     public void AddStreamScore(int score) => StreamScore += score;
 
     // The highest scheduler tick whose command buffer may write this buffer on the GPU.
-    // A readback of it only has to wait for that tick, not for all queued work.
+    // Kept for callers that need a whole-buffer dependency. Readbacks use their range.
     public ulong LastGpuWriteTick { get; private set; }
 
     // Called by every path that records a GPU write into this buffer.
-    public void NoteGpuWrite()
+    public void NoteGpuWrite() => NoteGpuWrite(0, Size);
+
+    public void NoteGpuWrite(ulong offset, ulong size)
     {
+        if (offset > Size || size > Size - offset)
+            throw SubmissionScheduler.Fatal("The buffer write dependency range is invalid.");
+        if (size == 0) return;
         var tick = _scheduler.CurrentTick;
         if (tick > LastGpuWriteTick)
         {
             LastGpuWriteTick = tick;
         }
+        (_writeDependencies ??= new BufferWriteDependencies()).Record(offset, size, tick);
+    }
+
+    internal ulong GetLastGpuWriteTick(ulong offset, ulong size)
+    {
+        if (offset > Size || size > Size - offset)
+            throw SubmissionScheduler.Fatal("The buffer read dependency range is invalid.");
+        return _writeDependencies?.Latest(offset, size) ?? 0;
     }
 
     public void Write(ulong offset, ReadOnlySpan<byte> source)
@@ -243,7 +257,7 @@ public unsafe class GpuBuffer : IDisposable
         }
 
         command.EndRendering();
-        NoteGpuWrite();
+        NoteGpuWrite(destinationOffset, size);
         var vk = _device.Vk;
         var native = new CommandBuffer(command.Handle);
         var before = stackalloc BufferMemoryBarrier2[2];
@@ -271,7 +285,7 @@ public unsafe class GpuBuffer : IDisposable
 
         var command = _scheduler.Current;
         command.EndRendering();
-        NoteGpuWrite();
+        NoteGpuWrite(offset, size);
         var vk = _device.Vk;
         var native = new CommandBuffer(command.Handle);
         var before = CreateBarrier(offset, size, MemoryAccess, AccessFlags.TransferWriteBit);
