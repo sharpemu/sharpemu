@@ -40,6 +40,17 @@ public sealed class LibrarySelectionTests
         Assert.Same(first, selected);
     }
 
+    [Theory]
+    [InlineData("Hades", "01.003.000", "Hades v01.003.000")]
+    [InlineData("Hades", null, "Hades")]
+    [InlineData("Hades", " ", "Hades")]
+    [InlineData("Hades 01.003.000", "01.003.000", "Hades 01.003.000")]
+    [InlineData("Game", "1.0/beta", "Game v1.0_beta")]
+    public void SuggestedArchiveName_AddsTheVersionOnce(string folder, string? version, string expected)
+    {
+        Assert.Equal(expected, MainWindow.SuggestedArchiveName(folder, version));
+    }
+
     private static GameEntry CreateGame(string name) =>
         new(name, null, null, $"/games/{name}/eboot.bin", 0, null, null);
 }

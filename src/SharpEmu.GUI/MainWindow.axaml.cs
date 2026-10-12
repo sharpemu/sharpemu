@@ -2526,7 +2526,7 @@ public partial class MainWindow : Window
         var options = new FilePickerSaveOptions
         {
             Title = loc.Get("Dialog.SaveZar"),
-            SuggestedFileName = Path.GetFileName(gameFolder),
+            SuggestedFileName = SuggestedArchiveName(Path.GetFileName(gameFolder), game.Version),
             DefaultExtension = "zar",
             FileTypeChoices = [new FilePickerFileType(loc.Get("Dialog.ZarFiles")) { Patterns = ["*.zar"] }],
         };
@@ -2557,6 +2557,23 @@ public partial class MainWindow : Window
         {
             SetTitleMusicMuted(false);
         }
+    }
+
+    // The game folder's name with the game version, so archives of different versions of a game
+    // get different names (and different cache folders). A name that already carries the version
+    // is left as it is.
+    internal static string SuggestedArchiveName(string folderName, string? version)
+    {
+        var name = string.IsNullOrWhiteSpace(version) ||
+            folderName.Contains(version, StringComparison.OrdinalIgnoreCase)
+            ? folderName
+            : $"{folderName} v{version.Trim()}";
+        foreach (var invalid in Path.GetInvalidFileNameChars())
+        {
+            name = name.Replace(invalid, '_');
+        }
+
+        return name;
     }
 
     private void SetTitleMusicMuted(bool muted)
