@@ -24,7 +24,7 @@ public sealed partial class GuestImageCache
         in ImageRequest request,
         uint metadataBaseLayer)
     {
-        // Native clears use their own decoder after texture owner validation.
+        // Native clears use the view-aware DCC and CMASK path after texture owner validation.
         if (request.Description.Metadata.Kind != MetadataKind.Dcc || request.Description.Metadata.NativeColorClear)
         {
             return;
