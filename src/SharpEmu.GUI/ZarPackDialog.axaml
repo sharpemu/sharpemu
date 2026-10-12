@@ -19,6 +19,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
                FontWeight="Bold"
                TextWrapping="Wrap" />
 
+    <TextBlock TextWrapping="Wrap"
+               Text="{Binding [Library.Pack.Explanation], Source={x:Static local:Localization.Instance}}" />
+
     <TextBlock x:Name="DestinationText"
                Foreground="{StaticResource MutedBrush}"
                TextWrapping="Wrap" />
