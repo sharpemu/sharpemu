@@ -502,8 +502,9 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         SharpEmu.Libs.Ampr.AmprFileRegistry.BeginApp0IndexPreload(app0Root);
         // Same reason, for the directory listings the path resolver reads its
         // existence/symlink/size answers out of: pay the cold metadata walk
-        // here rather than on the guest thread that resolves first.
-        SharpEmu.Libs.Kernel.HostDirectoryIndex.BeginWarm(app0Root);
+        // here rather than on the guest thread that resolves first. app0 is
+        // read-only, so a later boot of the same dump reads them back instead.
+        SharpEmu.Libs.Kernel.HostDirectoryIndex.BeginWarm(app0Root, persistSnapshot: true);
         return new App0BindingScope(app0VariableName);
     }
 

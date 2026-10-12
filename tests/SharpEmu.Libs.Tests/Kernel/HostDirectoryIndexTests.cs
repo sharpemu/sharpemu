@@ -225,4 +225,124 @@ public sealed class HostDirectoryIndexTests : IDisposable
         HostDirectoryIndex.ClearForTests();
         return folds;
     }
+
+    // A walk of a read-only image saves its listings; the next boot of the same
+    // dump answers from them without asking the host volume at all, which is
+    // what takes the cold metadata reads off the guest's resource scan.
+    [Fact]
+    public void WarmCore_SeedsListingsFromTheSnapshotAPreviousWalkSaved()
+    {
+        var tree = CreateTree();
+        var snapshot = Path.Combine(_root, "snapshot.idx");
+
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+        Assert.True(File.Exists(snapshot));
+
+        HostDirectoryIndex.ClearForTests();
+        // Gone from the host, so only the snapshot can still describe it.
+        File.Delete(Path.Combine(tree, "maps", "m01.bin"));
+
+        Assert.True(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+        var entry = HostDirectoryIndex.Describe(Path.Combine(tree, "maps", "m01.bin"));
+        Assert.Equal(HostDirectoryIndex.Verdict.File, entry.Verdict);
+        Assert.Equal(10, entry.Length);
+        Assert.Equal(
+            HostDirectoryIndex.Verdict.Directory,
+            HostDirectoryIndex.Describe(Path.Combine(tree, "maps", "deep")).Verdict);
+        Assert.Equal(
+            HostDirectoryIndex.Verdict.File,
+            HostDirectoryIndex.Describe(Path.Combine(tree, "maps", "deep", "d.bin")).Verdict);
+        Assert.Equal(
+            HostDirectoryIndex.Verdict.Absent,
+            HostDirectoryIndex.Describe(Path.Combine(tree, "maps", "missing.bin")).Verdict);
+    }
+
+    // The dump fingerprint is what vouches for the snapshot; a dump that changed
+    // is walked again and the snapshot replaced.
+    [Fact]
+    public void WarmCore_WalksAgainWhenTheDumpFingerprintChanged()
+    {
+        var tree = CreateTree();
+        var snapshot = Path.Combine(_root, "snapshot.idx");
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+        HostDirectoryIndex.ClearForTests();
+        File.Delete(Path.Combine(tree, "maps", "m01.bin"));
+
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 43));
+        Assert.Equal(
+            HostDirectoryIndex.Verdict.Absent,
+            HostDirectoryIndex.Describe(Path.Combine(tree, "maps", "m01.bin")).Verdict);
+
+        HostDirectoryIndex.ClearForTests();
+        Assert.True(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 43));
+    }
+
+    // Without a fingerprint there is nothing to validate a snapshot against, so
+    // none is written or read.
+    [Fact]
+    public void WarmCore_KeepsNoSnapshotWithoutAFingerprint()
+    {
+        var tree = CreateTree();
+        var snapshot = Path.Combine(_root, "snapshot.idx");
+
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 0));
+
+        Assert.False(File.Exists(snapshot));
+    }
+
+    // A snapshot cut short would seed a tree missing whole directories, whose
+    // files the index would then report as absent.
+    [Fact]
+    public void WarmCore_RejectsATruncatedSnapshot()
+    {
+        var tree = CreateTree();
+        var snapshot = Path.Combine(_root, "snapshot.idx");
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+        using (var stream = new FileStream(snapshot, FileMode.Open))
+        {
+            stream.SetLength(stream.Length - 4);
+        }
+
+        HostDirectoryIndex.ClearForTests();
+
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+    }
+
+    // The snapshot sits in front of the same containment guard as a live
+    // listing, so a link must come back as a link.
+    [Fact]
+    public void WarmCore_SnapshotKeepsSymlinksAsSymlinks()
+    {
+        var tree = CreateTree();
+        var link = Path.Combine(tree, "maps", "link");
+        try
+        {
+            Directory.CreateSymbolicLink(link, _root);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException)
+        {
+            // An unprivileged host cannot create links; nothing to assert.
+            return;
+        }
+
+        var snapshot = Path.Combine(_root, "snapshot.idx");
+        Assert.False(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+        HostDirectoryIndex.ClearForTests();
+
+        Assert.True(HostDirectoryIndex.WarmCore(tree, snapshot, fingerprint: 42));
+        Assert.Equal(
+            HostDirectoryIndex.Verdict.Symlink,
+            HostDirectoryIndex.Describe(link).Verdict);
+    }
+
+    private string CreateTree()
+    {
+        var tree = Path.Combine(_root, "app0");
+        Directory.CreateDirectory(Path.Combine(tree, "maps", "deep"));
+        File.WriteAllBytes(Path.Combine(tree, "maps", "m01.bin"), new byte[10]);
+        File.WriteAllBytes(Path.Combine(tree, "maps", "deep", "d.bin"), [1]);
+        File.WriteAllBytes(Path.Combine(tree, "top.bin"), [1, 2, 3]);
+        return tree;
+    }
 }

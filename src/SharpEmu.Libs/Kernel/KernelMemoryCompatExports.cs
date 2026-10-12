@@ -5611,6 +5611,8 @@ public static partial class KernelMemoryCompatExports
     private static readonly bool _writableApp0 =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_WRITABLE_APP0"), "1", StringComparison.Ordinal);
 
+    internal static bool IsApp0Writable => _writableApp0;
+
     public static bool IsReadOnlyGuestMutationPath(string guestPath)
     {
         if (_writableApp0)

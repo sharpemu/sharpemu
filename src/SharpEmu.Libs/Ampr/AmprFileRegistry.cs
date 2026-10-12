@@ -455,7 +455,23 @@ internal static class AmprFileRegistry
         return false;
     }
 
-    private static string GetIndexCachePath(string normalizedRoot, int version)
+    private static string GetIndexCachePath(string normalizedRoot, int version) =>
+        GetCacheFilePath(normalizedRoot, $"v{version}");
+
+    /// <summary>
+    /// Where the host directory index persists its listings of this app0 image,
+    /// beside the id cache and under the same per-root name.
+    /// </summary>
+    internal static string GetDirectoryIndexSnapshotPath(string app0Root) =>
+        GetCacheFilePath(Path.GetFullPath(app0Root), "dirs.v1");
+
+    /// <summary>
+    /// The dump fingerprint the id cache is validated against; 0 when there is none.
+    /// </summary>
+    internal static long GetDumpFingerprint(string app0Root) =>
+        GetParamJsonWriteTicks(Path.GetFullPath(app0Root));
+
+    private static string GetCacheFilePath(string normalizedRoot, string tag)
     {
         var overrideDir = Environment.GetEnvironmentVariable("SHARPEMU_AMPR_INDEX_CACHE");
         var cacheDir = !string.IsNullOrWhiteSpace(overrideDir)
@@ -487,7 +503,7 @@ internal static class AmprFileRegistry
         var rootKey = OperatingSystem.IsWindows() ? normalizedRoot.ToLowerInvariant() : normalizedRoot;
         // Keep raw hashes for cache filenames. Guest file identifiers use 31 bits.
         var rootHash = FnvContinueUtf8(OffsetBasis, rootKey);
-        return Path.Combine(cacheDir, $"app0-{rootHash:x8}.v{version}.idx");
+        return Path.Combine(cacheDir, $"app0-{rootHash:x8}.{tag}.idx");
     }
 
     private static bool TryLoadIndexCache(

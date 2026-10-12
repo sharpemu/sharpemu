@@ -3,8 +3,12 @@
 
 using System.Collections.Concurrent;
 using System.Collections.Frozen;
+using System.Diagnostics;
 using System.IO.Enumeration;
 using System.Runtime.InteropServices;
+using System.Text;
+using SharpEmu.HLE.FileSystem;
+using SharpEmu.Libs.Ampr;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -190,9 +194,17 @@ internal static partial class HostDirectoryIndex
     /// stats it replaces), so it runs here, overlapped with module load, rather
     /// than in front of the guest.
     /// </remarks>
-    internal static void BeginWarm(string? hostRoot)
+    internal static void BeginWarm(string? hostRoot, bool persistSnapshot = false)
     {
         if (!Enabled || string.IsNullOrWhiteSpace(hostRoot) || !Directory.Exists(hostRoot))
+        {
+            return;
+        }
+
+        // A .zar-mounted app0 keeps only the files extracted so far on disk, and
+        // extraction adds to that directory at run time: its listings are
+        // neither the image nor stable, so there is nothing to warm or save.
+        if (App0Archive.IsMounted)
         {
             return;
         }
@@ -205,13 +217,17 @@ internal static partial class HostDirectoryIndex
         // A dedicated thread, not the pool: the walk blocks on device latency for
         // seconds, and a pool worker parked that long makes the pool inject
         // threads for everything else queued behind it.
-        var warmer = new Thread(static root => Warm((string)root!))
+        var warmer = new Thread(static state =>
+        {
+            var (root, persist) = ((string, bool))state!;
+            Warm(root, persist);
+        })
         {
             IsBackground = true,
             Name = "dir-index-warm",
             Priority = ThreadPriority.BelowNormal,
         };
-        warmer.Start(hostRoot);
+        warmer.Start((hostRoot, persistSnapshot));
     }
 
     // setiopolicy_np(IOPOL_TYPE_DISK, IOPOL_SCOPE_THREAD, IOPOL_THROTTLE): the
@@ -247,28 +263,29 @@ internal static partial class HostDirectoryIndex
         }
     }
 
-    private static void Warm(string root)
+    private static void Warm(string root, bool persistSnapshot)
     {
-        ThrottleThreadIo();
-        // Breadth-first so the shallow directories a title opens first are ready
-        // before the deep asset trees it streams later.
-        var pending = new Queue<string>();
-        pending.Enqueue(root);
+        string? snapshotPath = null;
+        long fingerprint = 0;
+        // A writable app0 changes under the index without touching the dump
+        // fingerprint, so only the read-only image may be described from disk.
+        if (persistSnapshot && !KernelMemoryCompatExports.IsApp0Writable)
+        {
+            try
+            {
+                snapshotPath = AmprFileRegistry.GetDirectoryIndexSnapshotPath(root);
+                fingerprint = AmprFileRegistry.GetDumpFingerprint(root);
+            }
+            catch (Exception exception) when (
+                exception is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                snapshotPath = null;
+            }
+        }
+
         try
         {
-            while (pending.Count > 0 &&
-                   Volatile.Read(ref _indexedEntries) < MaxIndexedEntries)
-            {
-                var directory = pending.Dequeue();
-                var listing = GetListing(directory);
-                foreach (var (name, entry) in listing.Ordinal)
-                {
-                    if (entry.Verdict == Verdict.Directory)
-                    {
-                        pending.Enqueue(Path.Combine(directory, name));
-                    }
-                }
-            }
+            _ = WarmCore(root, snapshotPath, fingerprint);
         }
         catch (Exception exception)
         {
@@ -278,6 +295,280 @@ internal static partial class HostDirectoryIndex
                 $"[LOADER][WARN] dir_index.warm_failed root={root}: {exception.Message}");
         }
     }
+
+    /// <summary>
+    /// Lists every directory under <paramref name="root"/>, or seeds those
+    /// listings from the snapshot a previous walk of the same dump saved.
+    /// </summary>
+    /// <returns>True when the listings came from the snapshot.</returns>
+    /// <remarks>
+    /// Listing the tree is ~20k directory reads and one stat per file (~223k for
+    /// Demon's Souls) on the external game volume. The guest's resource scan
+    /// needs those answers while the same volume streams its first assets, and
+    /// whenever the host had dropped the metadata from its cache the scan paid
+    /// that contention on every path: GatherResourceFileInfo took 33-80 s
+    /// instead of ~9 s. The image is read-only, so the answers a complete walk
+    /// produced stay valid for as long as the dump fingerprint the app0 id
+    /// cache trusts does.
+    /// </remarks>
+    internal static bool WarmCore(string root, string? snapshotPath, long fingerprint)
+    {
+        root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        if (snapshotPath is not null && TryLoadSnapshot(root, snapshotPath, fingerprint))
+        {
+            return true;
+        }
+
+        ThrottleThreadIo();
+        var walked = snapshotPath is null ? null : new List<(string Relative, DirectoryListing Listing)>();
+        var complete = true;
+        // Breadth-first so the shallow directories a title opens first are ready
+        // before the deep asset trees it streams later.
+        var pending = new Queue<(string Directory, string Relative)>();
+        pending.Enqueue((root, string.Empty));
+        while (pending.Count > 0)
+        {
+            if (Volatile.Read(ref _indexedEntries) >= MaxIndexedEntries)
+            {
+                complete = false;
+                break;
+            }
+
+            var (directory, relative) = pending.Dequeue();
+            var listing = GetListing(directory);
+            complete &= listing.Complete;
+            walked?.Add((relative, listing));
+            foreach (var (name, entry) in listing.Ordinal)
+            {
+                if (entry.Verdict == Verdict.Directory)
+                {
+                    pending.Enqueue((
+                        Path.Combine(directory, name),
+                        relative.Length == 0 ? name : relative + "/" + name));
+                }
+            }
+        }
+
+        if (walked is not null && complete)
+        {
+            TrySaveSnapshot(root, snapshotPath!, fingerprint, walked);
+        }
+
+        return false;
+    }
+
+    private const uint SnapshotMagic = 0x31584944u; // 'DIX1'
+    private const uint SnapshotVersion = 1;
+
+    private static bool TryLoadSnapshot(string root, string snapshotPath, long fingerprint)
+    {
+        if (fingerprint == 0 ||
+            string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_AMPR_REINDEX"),
+                "1",
+                StringComparison.Ordinal) ||
+            !File.Exists(snapshotPath))
+        {
+            return false;
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        var parsed = new List<(string Directory, DirectoryListing Listing)>();
+        var total = 0;
+        try
+        {
+            using var stream = new FileStream(
+                snapshotPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                1 << 16,
+                FileOptions.SequentialScan);
+            using var reader = new BinaryReader(stream, Encoding.UTF8);
+            if (reader.ReadUInt32() != SnapshotMagic ||
+                reader.ReadUInt32() != SnapshotVersion ||
+                !string.Equals(reader.ReadString(), root, HostFsPath.Comparison) ||
+                reader.ReadInt64() != fingerprint)
+            {
+                return false;
+            }
+
+            var directoryCount = reader.ReadInt32();
+            if (directoryCount <= 0 || directoryCount > MaxIndexedEntries)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < directoryCount; i++)
+            {
+                var relative = reader.ReadString();
+                var foldsCase = reader.ReadBoolean();
+                var entryCount = reader.ReadInt32();
+                total += entryCount;
+                if (!IsSnapshotRelative(relative) ||
+                    entryCount < 0 ||
+                    entryCount > MaxDirectoryEntries ||
+                    total > MaxIndexedEntries)
+                {
+                    return false;
+                }
+
+                var entries = new Dictionary<string, Entry>(entryCount, HostFsPath.Comparer);
+                for (var j = 0; j < entryCount; j++)
+                {
+                    var name = reader.ReadString();
+                    var verdict = (Verdict)reader.ReadByte();
+                    var length = reader.ReadInt64();
+                    if (!IsSnapshotName(name) ||
+                        verdict is not (Verdict.Directory or Verdict.File or Verdict.Symlink) ||
+                        length < 0)
+                    {
+                        return false;
+                    }
+
+                    entries[name] = new Entry(verdict, length);
+                }
+
+                var directory = relative.Length == 0
+                    ? root
+                    : Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
+                parsed.Add((directory, CreateListing(entries, foldsCase)));
+            }
+
+            // A snapshot cut short must not seed half a tree whose missing
+            // directories would then be listed as if they did not exist.
+            if (reader.ReadUInt32() != SnapshotMagic)
+            {
+                return false;
+            }
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or
+                ArgumentException or NotSupportedException or EndOfStreamException)
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] dir_index.snapshot_load_failed path={snapshotPath}: {exception.Message}");
+            return false;
+        }
+
+        // The host volume may have been reformatted or the dump copied under the
+        // same path; a case-folding answer that no longer holds would turn
+        // misspelled lookups into wrong hits or misses.
+        if (parsed.Count == 0 || parsed[0].Directory != root)
+        {
+            return false;
+        }
+
+        var rootListing = parsed[0].Listing;
+        if (FoldsCase(root, rootListing.Ordinal) != (rootListing.IgnoreCase is not null))
+        {
+            return false;
+        }
+
+        foreach (var (directory, listing) in parsed)
+        {
+            // A listing the guest built while this loaded is equivalent; keep it.
+            if (_directories.TryAdd(directory, listing))
+            {
+                Interlocked.Add(ref _indexedEntries, listing.Ordinal.Count);
+            }
+        }
+
+        Console.Error.WriteLine(
+            $"[LOADER][INFO] dir_index.snapshot_hit root={root} dirs={parsed.Count} entries={total} " +
+            $"elapsed_ms={stopwatch.Elapsed.TotalMilliseconds:F1}");
+        return true;
+    }
+
+    private static void TrySaveSnapshot(
+        string root,
+        string snapshotPath,
+        long fingerprint,
+        List<(string Relative, DirectoryListing Listing)> directories)
+    {
+        if (fingerprint == 0)
+        {
+            return;
+        }
+
+        var tempPath = $"{snapshotPath}.{Environment.ProcessId}.tmp";
+        var total = 0;
+        try
+        {
+            using (var stream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16))
+            using (var writer = new BinaryWriter(stream, Encoding.UTF8))
+            {
+                writer.Write(SnapshotMagic);
+                writer.Write(SnapshotVersion);
+                writer.Write(root);
+                writer.Write(fingerprint);
+                writer.Write(directories.Count);
+                foreach (var (relative, listing) in directories)
+                {
+                    writer.Write(relative);
+                    writer.Write(listing.IgnoreCase is not null);
+                    writer.Write(listing.Ordinal.Count);
+                    foreach (var (name, entry) in listing.Ordinal)
+                    {
+                        writer.Write(name);
+                        writer.Write((byte)entry.Verdict);
+                        writer.Write(entry.Length);
+                    }
+
+                    total += listing.Ordinal.Count;
+                }
+
+                writer.Write(SnapshotMagic);
+            }
+
+            File.Move(tempPath, snapshotPath, overwrite: true);
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] dir_index.snapshot_saved path={snapshotPath} dirs={directories.Count} entries={total}");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            try
+            {
+                File.Delete(tempPath);
+            }
+            catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
+            {
+                // Nothing more to do; the next walk overwrites it.
+            }
+
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] dir_index.snapshot_save_failed path={snapshotPath}: {exception.Message}");
+        }
+    }
+
+    // A snapshot names entries relative to the root it was taken of; anything
+    // that could climb out of that root or alias another entry is refused.
+    private static bool IsSnapshotName(string name) =>
+        name.Length is > 0 and <= MaxHostPathComponentLength &&
+        name is not ("." or "..") &&
+        name.IndexOf('\0') < 0 &&
+        name.IndexOf(Path.DirectorySeparatorChar) < 0 &&
+        name.IndexOf(Path.AltDirectorySeparatorChar) < 0;
+
+    private static bool IsSnapshotRelative(string relative)
+    {
+        if (relative.Length == 0)
+        {
+            return true;
+        }
+
+        foreach (var segment in relative.Split('/'))
+        {
+            if (!IsSnapshotName(segment))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private const int MaxHostPathComponentLength = 255;
 
     /// <summary>Test hook: forget every listing and case-folding probe.</summary>
     internal static void ClearForTests()
@@ -363,9 +654,14 @@ internal static partial class HostDirectoryIndex
             return DirectoryListing.Incomplete;
         }
 
+        return CreateListing(entries, FoldsCase(directory, entries));
+    }
+
+    private static DirectoryListing CreateListing(Dictionary<string, Entry> entries, bool foldsCase)
+    {
         var ordinal = entries.ToFrozenDictionary(HostFsPath.Comparer);
         FrozenDictionary<string, Entry>? ignoreCase = null;
-        if (FoldsCase(directory, entries))
+        if (foldsCase)
         {
             var folded = new Dictionary<string, Entry>(
                 entries.Count,
@@ -397,7 +693,7 @@ internal static partial class HostDirectoryIndex
     /// Whether the volume holding <paramref name="directory"/> folds name case.
     /// Probed once per directory and memoized.
     /// </summary>
-    private static bool FoldsCase(string directory, Dictionary<string, Entry> entries)
+    private static bool FoldsCase(string directory, IReadOnlyDictionary<string, Entry> entries)
     {
         if (OperatingSystem.IsWindows())
         {
