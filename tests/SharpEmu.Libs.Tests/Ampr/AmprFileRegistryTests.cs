@@ -109,6 +109,32 @@ public class AmprFileRegistryTests
         Assert.Equal(host, result);
     }
 
+    // Resolving a path the app0 index already knows returns the guest-path hash
+    // and leaves every other spelling of the file pointing at it; resolving one
+    // the index never saw still publishes those spellings itself.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AprResolve_LeavesEveryApp0SpellingResolvable(bool indexedFirst)
+    {
+        AmprFileRegistry.ClearForTests();
+        const string relative = "levels/m01/terrain.cmsh";
+        var host = Path.Combine(Path.GetTempPath(), "apr-spellings.bin");
+        if (indexedFirst)
+        {
+            AmprFileRegistry.RegisterApp0RelativeForTests(relative, host);
+        }
+
+        var id = AmprFileRegistry.RegisterAprResolvedPath("/app0/" + relative, host);
+
+        Assert.Equal(AmprFileRegistry.ComputeFileId("/app0/" + relative), id);
+        foreach (var spelling in new[] { "$/" + relative, "/app0/" + relative, "app0/" + relative, relative })
+        {
+            Assert.True(AmprFileRegistry.TryGetHostPath(AmprFileRegistry.ComputeFileId(spelling), out var result));
+            Assert.Equal(host, result);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

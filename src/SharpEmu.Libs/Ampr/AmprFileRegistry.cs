@@ -87,7 +87,14 @@ internal static class AmprFileRegistry
             else if (!_hostPathsById.TryGetValue(fileId, out var indexed) ||
                      (!indexed.Ambiguous && IsSameHostFile(indexed.HostPath, hostPath)))
             {
-                if (TryGetApp0Relative(guestPath, out var relative) && relative.Length != 0)
+                // An id already mapped to this file was published together with
+                // the file's other app0 spellings (index walk, index cache, or an
+                // earlier resolve), and publishing them again changes nothing.
+                // Skipping it saves four hashes and four dictionary merges per
+                // asset, under this lock, on the ~223k-path boot scan.
+                if (indexed.HostPath is null &&
+                    TryGetApp0Relative(guestPath, out var relative) &&
+                    relative.Length != 0)
                 {
                     RegisterApp0Relative(relative, hostPath);
                 }
