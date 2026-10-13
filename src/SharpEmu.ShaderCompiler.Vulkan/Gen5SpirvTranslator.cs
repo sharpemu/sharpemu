@@ -244,7 +244,8 @@ public static partial class Gen5SpirvTranslator
             uint Variable,
             uint Type,
             Gen5PixelOutputKind Kind,
-            Gen5ColorComponentMapping ComponentMapping);
+            Gen5ColorComponentMapping ComponentMapping,
+            uint DualSourceAlphaVariable = 0);
 
         public bool TryCompile(out Gen5SpirvShader shader, out string error)
         {
@@ -1050,13 +1051,29 @@ public static partial class Gen5SpirvTranslator
                     {
                         _module.AddDecoration(variable, SpirvDecoration.Index, binding.Index);
                     }
+                    var alphaVariable = 0u;
+                    if (binding.DualSourceAlpha && binding.Kind == Gen5PixelOutputKind.Float)
+                    {
+                        alphaVariable = _module.AddGlobalVariable(
+                            outputPointer,
+                            SpirvStorageClass.Output);
+                        _module.AddName(alphaVariable, $"mrt{binding.GuestSlot}_alpha");
+                        _module.AddDecoration(
+                            alphaVariable,
+                            SpirvDecoration.Location,
+                            binding.HostLocation);
+                        _module.AddDecoration(alphaVariable, SpirvDecoration.Index, 1);
+                        _interfaces.Add(alphaVariable);
+                    }
+
                     _pixelOutputs.Add(
                         binding.ExportTarget,
                         new SpirvPixelOutput(
                             variable,
                             outputType,
                             binding.Kind,
-                            binding.ComponentMapping));
+                            binding.ComponentMapping,
+                            alphaVariable));
                     _interfaces.Add(variable);
                 }
             }
@@ -6449,6 +6466,7 @@ public static partial class Gen5SpirvTranslator
                                 UInt(1)),
                     };
                 }
+                var logicalVector = vector;
                 if (output.ComponentMapping != Gen5ColorComponentMapping.Identity)
                 {
                     vector = _module.AddInstruction(
@@ -6477,6 +6495,26 @@ public static partial class Gen5SpirvTranslator
                     vector,
                     Load(output.Type, output.Variable));
                 Store(output.Variable, vector);
+                if (output.DualSourceAlphaVariable != 0)
+                {
+                    var alpha = _module.AddInstruction(
+                        SpirvOp.VectorShuffle,
+                        output.Type,
+                        logicalVector,
+                        logicalVector,
+                        3,
+                        3,
+                        3,
+                        3);
+                    alpha = _module.AddInstruction(
+                        SpirvOp.Select,
+                        output.Type,
+                        Load(_boolType, _exec),
+                        alpha,
+                        Load(output.Type, output.DualSourceAlphaVariable));
+                    Store(output.DualSourceAlphaVariable, alpha);
+                }
+
                 return true;
             }
 

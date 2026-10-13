@@ -37,6 +37,10 @@ public sealed class GraphicsPrograms
 
     // Blending is off for a fill the provider recognised as an overwrite.
     public bool DisableBlending { get; init; }
+
+    // The pixel program was compiled without the color targets it never writes,
+    // so the executor drops them too and attachments stay aligned with its outputs.
+    public bool DropUnwrittenColorTargets { get; init; }
 }
 
 public sealed class ComputeProgram

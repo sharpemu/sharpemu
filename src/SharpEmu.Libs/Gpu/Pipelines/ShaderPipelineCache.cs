@@ -110,6 +110,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderSource? pixelSource = null;
         PixelInputInfo? pixelInfo = null;
         Gen5PixelOutputBinding[] pixelOutputs = [];
+        var dropUnwritten = false;
         var attributeCount = 0u;
         if (pixelActive)
         {
@@ -133,7 +134,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 throw SubmissionScheduler.Fatal($"The pixel program declares too many interpolators: shader=0x{pixel.Address:X16} count={inputCount}.");
             }
 
-            pixelOutputs = ResolveBoundTargets(context, targetExportMapping, depthBound ? pixelProgram.PixelColorExportMasks : null,
+            dropUnwritten = depthBound ||
+                LeavesSingleDualSourceTarget(context, targetExportMapping, pixelProgram.PixelColorExportMasks);
+            pixelOutputs = ResolveBoundTargets(context, targetExportMapping, dropUnwritten ? pixelProgram.PixelColorExportMasks : null,
                 out var outputModes, out var outputMappings);
             pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount);
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
@@ -205,6 +208,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             PixelInput = pixelInfo ?? new PixelInputInfo(),
             SolidClear = solidClear,
             DisableBlending = disableBlending,
+            DropUnwrittenColorTargets = dropUnwritten,
             PositionStream = FindPositionStream(vertexInfo),
         };
     }
@@ -343,6 +347,16 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             outputModes[1] = DualSourceOutputMode;
         }
 
+        // Dual-source blending is limited to a single attachment.
+        if (outputs.Count == 1 &&
+            _host.SupportsDualSourceBlend &&
+            outputs[0].Kind == Gen5PixelOutputKind.Float &&
+            NeedsDualSourceAlpha(context, outputs[0].GuestSlot, outputMappings[outputs[0].GuestSlot]))
+        {
+            outputs[0] = outputs[0] with { DualSourceAlpha = true };
+            outputModes[outputs[0].GuestSlot] |= DualSourceAlphaOutputMode;
+        }
+
         return outputs.ToArray();
     }
 
@@ -355,6 +369,116 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return blend.Enable && (Second(blend.ColorSourceFactor) || Second(blend.ColorDestinationFactor) ||
             Second(blend.AlphaSourceFactor) || Second(blend.AlphaDestinationFactor));
     }
+
+    // Marks a pixel output mode whose program also writes its alpha to the dual-source output.
+    internal const byte DualSourceAlphaOutputMode = 0x08;
+
+    // The hardware blends in shader component order before the component swap lays the result out in memory,
+    // but the host image keeps the memory layout and the program writes the swapped vector.
+    // When that swap moves the shader's alpha out of host alpha (ABGR and ARGBorders),
+    // SRC_ALPHA would read the wrong channel; the program exports the real alpha as the second source and
+    // the blend uses SRC1_ALPHA instead.
+    private static bool NeedsDualSourceAlpha(ContextRegisters context, uint slot, ColorComponentMap mapping) =>
+        mapping.Map(3) != 3 && BlendsWithSourceAlpha(context, slot);
+
+    // The mapping-independent half of NeedsDualSourceAlpha:
+    // an enabled, not bypassed blend that reads the source alpha.
+    private static bool BlendsWithSourceAlpha(ContextRegisters context, uint slot)
+    {
+        var blend = context.BlendControls[slot];
+        if (!blend.Enable || ((context.ColorTargets[slot].Info >> 16) & 0x1) != 0)
+        {
+            return false;
+        }
+
+        var separate = blend.SeparateAlpha;
+        var alphaSource = separate ? blend.AlphaSourceFactor : blend.ColorSourceFactor;
+        var alphaDestination = separate ? blend.AlphaDestinationFactor : blend.ColorDestinationFactor;
+        return UsesSourceAlpha(blend.ColorSourceFactor) || UsesSourceAlpha(blend.ColorDestinationFactor) ||
+            UsesSourceAlpha(alphaSource) || UsesSourceAlpha(alphaDestination);
+    }
+
+    private static bool UsesSourceAlpha(byte factor) => factor is 4 or 5;
+
+    // Dual-source blending allows a single attachment,
+    // but post passes often keep another target bound that the program never writes.
+    // Dropping such targets (as depth passes already do) is invisible to the guest and
+    // lets the remaining target blend correctly. The executor drops the same targets through
+    // GraphicsPrograms.DropUnwrittenColorTargets.
+    private bool LeavesSingleDualSourceTarget(
+        ContextRegisters context,
+        ReadOnlySpan<ColorComponentMap> mappingBySlot,
+        uint pixelColorExportMasks)
+    {
+        // Most draws blend no target with source alpha; skip resolving their targets.
+        if (!_host.SupportsDualSourceBlend || !AnyTargetBlendsWithSourceAlpha(context))
+        {
+            return false;
+        }
+
+        Span<uint> boundSlots = stackalloc uint[(int)ContextRegisters.ColorTargetCount];
+        boundSlots = boundSlots[..BoundColorSlots(context, boundSlots)];
+        if (boundSlots.Length < 2)
+        {
+            return false;
+        }
+
+        var written = 0;
+        var writtenSlot = 0u;
+        foreach (var slot in boundSlots)
+        {
+            if (!RenderExecutor.IsUnwrittenColorTarget(context, slot, mappingBySlot[(int)slot], pixelColorExportMasks))
+            {
+                written++;
+                writtenSlot = slot;
+            }
+        }
+
+        return written == 1 && NeedsDualSourceAlpha(context, writtenSlot, mappingBySlot[(int)writtenSlot]);
+    }
+
+    private static bool AnyTargetBlendsWithSourceAlpha(ContextRegisters context)
+    {
+        for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
+        {
+            if (BlendsWithSourceAlpha(context, slot))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // The slots ResolveBoundTargets considers bound, before any are dropped as unwritten.
+    private static int BoundColorSlots(ContextRegisters context, Span<uint> slots)
+    {
+        var count = 0;
+        for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
+        {
+            if (slot != 0 && (context.RenderTargetMaskForSlot(slot) == 0 || context.ColorTargets[slot].BaseAddress == 0))
+            {
+                continue;
+            }
+
+            if (ColorTargetResolver.Resolve(context, slot, 0, ignoreTargetMask: false, out _) is null)
+            {
+                continue;
+            }
+
+            slots[count++] = slot;
+        }
+
+        return count;
+    }
+
+    // SRC_ALPHA / ONE_MINUS_SRC_ALPHA read the dual-source alpha instead.
+    private static byte ToDualSourceFactor(byte factor) => factor switch
+    {
+        4 => 17,
+        5 => 18,
+        _ => factor,
+    };
 
     private static VertexPositionStream? FindPositionStream(VertexInputInfo info)
     {
@@ -690,12 +814,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             var slot = colors[index].Slot;
             var blend = context.BlendControls[slot];
-            parameters.SetColorSourceBlend(index, (byte)blend.ColorSourceFactor);
+            var dualSource = colors.Length == 1 && pixelActive &&
+                (pixelInput!.TargetOutputModes[slot] & DualSourceAlphaOutputMode) != 0;
+            byte Factor(byte factor) => dualSource ? ToDualSourceFactor(factor) : factor;
+            parameters.SetColorSourceBlend(index, Factor(blend.ColorSourceFactor));
             parameters.SetColorBlendFunction(index, (byte)blend.ColorFunction);
-            parameters.SetColorDestinationBlend(index, (byte)blend.ColorDestinationFactor);
-            parameters.SetAlphaSourceBlend(index, (byte)blend.AlphaSourceFactor);
+            parameters.SetColorDestinationBlend(index, Factor(blend.ColorDestinationFactor));
+            parameters.SetAlphaSourceBlend(index, Factor(blend.AlphaSourceFactor));
             parameters.SetAlphaBlendFunction(index, (byte)blend.AlphaFunction);
-            parameters.SetAlphaDestinationBlend(index, (byte)blend.AlphaDestinationFactor);
+            parameters.SetAlphaDestinationBlend(index, Factor(blend.AlphaDestinationFactor));
             parameters.SetSeparateAlphaBlend(index, blend.SeparateAlpha);
             parameters.SetBlendEnable(index, blend.Enable && !disableBlending);
             parameters.SetBlendBypass(index, ((context.ColorTargets[slot].Info >> 16) & 0x1) != 0);

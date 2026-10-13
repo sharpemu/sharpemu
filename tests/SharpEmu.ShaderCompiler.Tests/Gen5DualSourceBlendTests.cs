@@ -56,6 +56,23 @@ public sealed class Gen5DualSourceBlendTests
     }
 
     [Fact]
+    public void DualSourceAlpha_ExportsAlphaAtLocationZeroIndexOne()
+    {
+        var request = Request(
+            new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float, new Gen5ColorComponentMapping(0x1B))
+            {
+                DualSourceAlpha = true,
+            });
+
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        const uint Decorate = 71, Location = 30, Index = 32;
+        var decorations = Instructions(shader.Spirv).Where(i => i.Op == Decorate).ToArray();
+        var alpha = Assert.Single(decorations, i => i.Args[1] == Index && i.Args[2] == 1).Args[0];
+        Assert.Contains(decorations, i => i.Args[0] == alpha && i.Args[1] == Location && i.Args[2] == 0);
+        Assert.Equal(2, decorations.Count(i => i.Args[1] == Location && i.Args[2] == 0));
+    }
+
+    [Fact]
     public void SecondSource_NeedsASingleTarget()
     {
         var request = Request(
