@@ -21,6 +21,7 @@ public static partial class Gen5ShaderTranslator
     private const ulong FusedContinuationAlignment = 0x100;
     private const ulong ShaderSizeOffset = 0x44;
     private const uint MaximumDeclaredShaderSizeBytes = 1024 * 1024;
+    private const uint NullScalarRegister = 125;
     private static readonly ConditionalWeakTable<object, FusedProgramRegistry> _fusedProgramsByMemory = new();
 
     private sealed class FusedProgramRegistry
@@ -60,7 +61,8 @@ public static partial class Gen5ShaderTranslator
 
     /// <summary>
     /// Records the two code objects that AGC joins into one hardware shader.
-    /// The entry code transfers control to the continuation with S_SETPC_B64.
+    /// The entry code transfers control to the continuation with S_SETPC_B64, or with an
+    /// S_SWAPPC_B64 that writes the return address to NULL.
     /// </summary>
     public static void RegisterFusedProgram(
         CpuContext ctx,
@@ -289,6 +291,12 @@ public static partial class Gen5ShaderTranslator
         return true;
     }
 
+    // S_SWAPPC_B64 stores the address of the next instruction in its destination. With the NULL destination
+    // it stores nothing, so it jumps like S_SETPC_B64 does and the code after it is not reached from here.
+    private static bool IsSwapProgramCounterWithoutReturnAddress(Gen5ShaderInstruction instruction) =>
+        string.Equals(instruction.Opcode, "SSwappcB64", StringComparison.Ordinal) &&
+        instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister, Value: NullScalarRegister }];
+
     private static bool TryDecodeProgramSegment(
         CpuContext ctx,
         ulong address,
@@ -419,7 +427,8 @@ public static partial class Gen5ShaderTranslator
             }
 
             if (stopAtSetProgramCounter &&
-                string.Equals(name, "SSetpcB64", StringComparison.Ordinal))
+                (string.Equals(name, "SSetpcB64", StringComparison.Ordinal) ||
+                 IsSwapProgramCounterWithoutReturnAddress(instruction)))
             {
                 program = new Gen5ShaderProgram(address, instructions);
                 termination = ProgramTermination.SetProgramCounter;
@@ -926,7 +935,10 @@ public static partial class Gen5ShaderTranslator
             0x43 => "VMovrelsB32",
             0x44 => "VMovrelsdB32",
             0x48 => "VMovrelsd2B32",
+            0x50 => "VCvtF16U16",
+            0x51 => "VCvtF16I16",
             0x52 => "VCvtU16F16",
+            0x53 => "VCvtI16F16",
             0x54 => "VRcpF16",
             0x55 => "VSqrtF16",
             0x56 => "VRsqF16",
@@ -1304,8 +1316,14 @@ public static partial class Gen5ShaderTranslator
             0x303 => "VAddNcU16",
             0x34B => "VFmaF16",
             0x351 => "VMin3F16",
+            0x352 => "VMin3I16",
+            0x353 => "VMin3U16",
             0x354 => "VMax3F16",
+            0x355 => "VMax3I16",
+            0x356 => "VMax3U16",
             0x357 => "VMed3F16",
+            0x358 => "VMed3I16",
+            0x359 => "VMed3U16",
             0x360 => "VReadlaneB32",
             0x361 => "VWritelaneB32",
             0x362 => "VLdexpF32",
@@ -1327,8 +1345,11 @@ public static partial class Gen5ShaderTranslator
             0x36D => "VAdd3U32",
             0x36F => "VLshlOrU32",
             0x178 => "VXor3B32",
-            // VOP1 opcode 0x52 is available through VOP3 as opcode 0x1D2.
+            // VOP1 opcodes 0x50-0x53 are available through VOP3 as opcodes 0x1D0-0x1D3.
+            0x1D0 => "VCvtF16U16",
+            0x1D1 => "VCvtF16I16",
             0x1D2 => "VCvtU16F16",
+            0x1D3 => "VCvtI16F16",
             0x371 => "VAndOrB32",
             0x372 => "VOr3U32",
             0x377 => "VPermlane16B32",
@@ -1344,6 +1365,11 @@ public static partial class Gen5ShaderTranslator
             0x30D => "VAddNcI16",
             0x30E => "VSubNcI16",
             0x314 => "VLshlrevB16",
+            0x305 => "VMulLoU16",
+            0x311 => "VPackB32F16",
+            0x340 => "VMadU16",
+            0x35E => "VMadI16",
+            0x375 => "VMadI32I16",
             // VOP3-encoded 64-bit VOPC (opcode < 0x100): V_CMP_*_U64 / V_CMPX_*_U64.
             0x0E0 => "VCmpFU64",
             0x0E1 => "VCmpLtU64",
@@ -1405,8 +1431,20 @@ public static partial class Gen5ShaderTranslator
         // loudly at emission rather than being silently mis-emitted.
         name = opcode switch
         {
+            0x00 => "VPkMadI16",
+            0x01 => "VPkMulLoU16",
             0x02 => "VPkAddI16",
             0x03 => "VPkSubI16",
+            0x04 => "VPkLshlrevB16",
+            0x05 => "VPkLshrrevB16",
+            0x06 => "VPkAshrrevI16",
+            0x07 => "VPkMaxI16",
+            0x08 => "VPkMinI16",
+            0x09 => "VPkMadU16",
+            0x0A => "VPkAddU16",
+            0x0B => "VPkSubU16",
+            0x0C => "VPkMaxU16",
+            0x0D => "VPkMinU16",
             0x0E => "VPkFmaF16",
             0x0F => "VPkAddF16",
             0x10 => "VPkMulF16",
@@ -1449,6 +1487,8 @@ public static partial class Gen5ShaderTranslator
             0x10 => "DsCmpstB32",
             0x12 => "DsMinF32",
             0x13 => "DsMaxF32",
+            0x1E => "DsWriteB8",
+            0x1F => "DsWriteB16",
             0x20 => "DsAddRtnU32",
             0x21 => "DsSubRtnU32",
             0x23 => "DsIncRtnU32",
@@ -1467,8 +1507,12 @@ public static partial class Gen5ShaderTranslator
             0x37 => "DsRead2B32",
             0x38 => "DsRead2St64B32",
             0x39 => "DsReadI8",
+            0x3A => "DsReadU8",
+            0x3B => "DsReadI16",
+            0x3C => "DsReadU16",
             0x3D => "DsConsume",
             0x3E => "DsAppend",
+            0x3F => "DsOrderedCount",
             // gfx10 groups the 64-bit LDS atomics at 0x40..0x4C, directly ahead
             // of DS_WRITE_B64 (0x4D). Only the no-return forms are named here:
             // the RTN variants cannot be split into two 32-bit atomics without
@@ -1481,6 +1525,14 @@ public static partial class Gen5ShaderTranslator
             0x4F => "DsWrite2St64B64",
             0x76 => "DsReadB64",
             0x77 => "DsRead2B64",
+            0xA0 => "DsWriteB8D16Hi",
+            0xA1 => "DsWriteB16D16Hi",
+            0xA2 => "DsReadU8D16",
+            0xA3 => "DsReadU8D16Hi",
+            0xA4 => "DsReadI8D16",
+            0xA5 => "DsReadI8D16Hi",
+            0xA6 => "DsReadU16D16",
+            0xA7 => "DsReadU16D16Hi",
             0xB0 => "DsWriteAddtidB32",
             0xB1 => "DsReadAddtidB32",
             0xB3 => "DsBpermuteB32",
@@ -1806,6 +1858,8 @@ public static partial class Gen5ShaderTranslator
             0x3E => "ImageSampleCBClO",
             0x3F => "ImageSampleCLzO",
             0x40 => "ImageGather4",
+            // The level of detail follows the coordinates; OpImageGather has no Lod operand and reads the base level.
+            0x44 => "ImageGather4L",
             0x47 => "ImageGather4Lz",
             0x48 => "ImageGather4C",
             0x4E => "ImageGather4CBCl",
@@ -2499,8 +2553,10 @@ public static partial class Gen5ShaderTranslator
                 sources = opcode switch
                 {
                     "DsAppend" or "DsConsume" or "DsReadAddtidB32" => [Gen5Operand.Scalar(124)],
+                    // The count comes from the ADDR register of the first active lane.
+                    "DsOrderedCount" => [Gen5Operand.Scalar(124), Gen5Operand.Vector(vectorAddress)],
                     "DsWriteAddtidB32" => [Gen5Operand.Scalar(124), Gen5Operand.Vector(vectorData0)],
-                    "DsWriteB32" => [
+                    "DsWriteB32" or "DsWriteB8" or "DsWriteB16" or "DsWriteB8D16Hi" or "DsWriteB16D16Hi" => [
                         Gen5Operand.Vector(vectorAddress),
                         Gen5Operand.Vector(vectorData0),
                     ],
@@ -2572,11 +2628,12 @@ public static partial class Gen5ShaderTranslator
                 };
                 destinations = opcode switch
                 {
-                    "DsAppend" or "DsConsume" => [
+                    "DsAppend" or "DsConsume" or "DsOrderedCount" => [
                         Gen5Operand.Vector(vectorDestination),
                     ],
-                    "DsReadB32" or "DsReadI8" or "DsReadAddtidB32" or
-                    "DsSwizzleB32" or "DsBpermuteB32" => [
+                    "DsReadB32" or "DsReadI8" or "DsReadU8" or "DsReadI16" or "DsReadU16" or
+                    "DsReadU8D16" or "DsReadU8D16Hi" or "DsReadI8D16" or "DsReadI8D16Hi" or "DsReadU16D16" or "DsReadU16D16Hi" or
+                    "DsReadAddtidB32" or "DsSwizzleB32" or "DsBpermuteB32" => [
                         Gen5Operand.Vector(vectorDestination),
                     ],
                     "DsReadB64" or "DsRead2B32" or "DsRead2St64B32" => [

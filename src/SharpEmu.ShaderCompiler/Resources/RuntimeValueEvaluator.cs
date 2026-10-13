@@ -224,10 +224,17 @@ public sealed class RuntimeValueEvaluator
             return false;
         }
 
-        return ReadRawWord(value.Kind, low, high, (uint)offset, records, (int)memory.Offset, out result);
+        return ReadRawWord(value.Kind, low, high, (uint)offset, records, (int)memory.Offset, IsAbsoluteAddress(value.Kind, handle), out result);
     }
 
-    internal bool ReadRawWord(ScalarValueKind kind, ulong low, ulong high, uint offset, ulong records, long immediate, out ulong result)
+    // An address built from the shader's own literals names a structure of the system, not data of the title.
+    internal static bool IsAbsoluteAddress(ScalarValueKind kind, ScalarValue handle) =>
+        kind == ScalarValueKind.ScalarAddressWord &&
+        handle.Operands[0].Kind == ScalarValueKind.Constant &&
+        handle.Operands[1].Kind == ScalarValueKind.Constant;
+
+    internal bool ReadRawWord(
+        ScalarValueKind kind, ulong low, ulong high, uint offset, ulong records, long immediate, bool absolute, out ulong result)
     {
         result = 0;
         var baseAddress = ((high << 32) | (uint)low) & AddressMask;
@@ -244,8 +251,10 @@ public sealed class RuntimeValueEvaluator
         {
             // Every read is evaluated up front, including ones in branches the shader skips
             // when a pointer is null. A load through a null base cannot execute on hardware,
-            // so its value is never used.
-            if ((baseAddress & ~3ul) == 0)
+            // so its value is never used. An absolute address the shader carries that no guest
+            // mapping backs belongs to the system, not to the title, and the emulator keeps no
+            // such memory: it reads as zero.
+            if ((baseAddress & ~3ul) == 0 || (absolute && _inputs.ReadMemory is not null))
             {
                 result = 0;
                 return true;

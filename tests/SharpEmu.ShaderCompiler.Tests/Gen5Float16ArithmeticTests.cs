@@ -80,6 +80,31 @@ public sealed class Gen5Float16ArithmeticTests
     }
 
     [Theory]
+    [InlineData(0x50u, "VCvtF16U16", SpirvOp.ConvertUToF)]
+    [InlineData(0x51u, "VCvtF16I16", SpirvOp.ConvertSToF)]
+    [InlineData(0x53u, "VCvtI16F16", SpirvOp.ConvertFToS)]
+    public void Float16IntegerConversionsDecodeAndCompileInBothEncodings(
+        uint opcode,
+        string name,
+        SpirvOp conversion)
+    {
+        // VOP1 v0, v1, then the VOP3 form v2, v3.
+        var program = Decode(
+        [
+            0x7E000000u | (opcode << 9) | 257u,
+            (0x35u << 26) | ((0x180u + opcode) << 16) | 2u,
+            259u,
+            SEndpgm,
+        ]);
+
+        Assert.Equal([name, name, "SEndpgm"], program.Instructions.Select(instruction => instruction.Opcode));
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.Contains((ushort)conversion, ReadOpcodes(shader.Spirv));
+        Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
+    }
+
+    [Theory]
     [InlineData(0x351u, "VMin3F16")]
     [InlineData(0x354u, "VMax3F16")]
     [InlineData(0x357u, "VMed3F16")]

@@ -230,6 +230,14 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "cxPZ4Wgvdj8",
+        ExportName = "sceAgcDcbDrawIndirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDrawIndirectGetSize(CpuContext ctx) =>
+        ctx.SetReturn(5 * sizeof(uint));
+
+    [SysAbiExport(
         Nid = "Yw0jKSqop+E",
         ExportName = "sceAgcDcbDrawIndexAuto",
         Target = Generation.Gen5,

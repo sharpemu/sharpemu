@@ -302,11 +302,12 @@ public sealed partial class GuestImageCache
         return false;
     }
 
-    // A broad clear applies to CMask, FMask and HTile; DCC needs a validated fill value.
+    // A broad clear applies to FMask and HTile; DCC and CMask need a validated fill value.
     public bool ClearMetadata(ulong address)
     {
         using var held = _lock.Hold();
-        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Kind is SurfaceMetadataKind.PendingDcc or SurfaceMetadataKind.Dcc)
+        if (!_surfaceMetadata.TryGetValue(address, out var found) ||
+            found.Kind is SurfaceMetadataKind.PendingDcc or SurfaceMetadataKind.Dcc or SurfaceMetadataKind.CMask)
         {
             return false;
         }
@@ -348,6 +349,15 @@ public sealed partial class GuestImageCache
         if (found.Kind == SurfaceMetadataKind.Dcc)
         {
             found.ClearMask = dccClearMask;
+            found.FillValue = fillValue;
+            found.FillSize = size;
+            return true;
+        }
+
+        if (found.Kind == SurfaceMetadataKind.CMask)
+        {
+            // Zero is the cleared state of a fast-cleared surface; any other value marks its tiles as drawn.
+            found.ClearMask = fillValue == 0 ? uint.MaxValue : 0;
             found.FillValue = fillValue;
             found.FillSize = size;
             return true;
@@ -437,6 +447,27 @@ public sealed partial class GuestImageCache
             found.ClearMask &= ~(1u << (int)slice);
         }
 
+        return true;
+    }
+
+    // A fast-cleared color target reads as its clear color until it is drawn to. True, and the state is consumed,
+    // when every layer of the view is still in the cleared state.
+    public bool TryConsumeCmaskClear(ulong address, uint baseLayer, uint layerCount)
+    {
+        using var held = _lock.Hold();
+        if (layerCount == 0 || baseLayer >= 32 || layerCount > 32 - baseLayer ||
+            !_surfaceMetadata.TryGetValue(address, out var found) || found.Kind != SurfaceMetadataKind.CMask)
+        {
+            return false;
+        }
+
+        var layers = (layerCount == 32 ? uint.MaxValue : (1u << (int)layerCount) - 1) << (int)baseLayer;
+        if ((found.ClearMask & layers) != layers)
+        {
+            return false;
+        }
+
+        found.ClearMask &= ~layers;
         return true;
     }
 }

@@ -1021,7 +1021,9 @@ public static class ResourceMaterializer
                     // A null-bound atomic keeps its declared numeric class
                     // (Uint or, since float image atomics were added, Float)
                     // instead of assuming every atomic image is Uint.
-                    NumericClass = baseImage.Atomic ? baseImage.NumericClass : ImageNumericClass.Float,
+                    NumericClass = baseImage.Atomic64
+                        ? ImageNumericClass.Uint64
+                        : baseImage.Atomic ? baseImage.NumericClass : ImageNumericClass.Float,
                     Dimension = ImageDimension.Dim2D,
                     Cube = false,
                 };
@@ -1042,9 +1044,12 @@ public static class ResourceMaterializer
             // MIMG op 0x1D-0x1F) are lowered as a compare-and-swap loop on the
             // raw bit pattern (Gen5SpirvTranslator) and legitimately target a
             // 32-bit float-format UAV instead - reject only formats that are
-            // neither.
-            if (baseImage.Atomic && format != GuestImageFormat.Format32Uint &&
-                GuestImageFormat.SampledNumericClass(format) != ImageNumericClass.Float)
+            // neither. An atomic on two data dwords works on a 64-bit texel,
+            // which the 32_32 UINT format holds.
+            if (baseImage.Atomic64
+                ? format != GuestImageFormat.Format32x2Uint
+                : baseImage.Atomic && format != GuestImageFormat.Format32Uint &&
+                    GuestImageFormat.SampledNumericClass(format) != ImageNumericClass.Float)
             {
                 return Fail($"atomic image descriptor {index} uses unsupported format {format}");
             }
@@ -1065,6 +1070,11 @@ public static class ResourceMaterializer
                 if (rawSintStorage || (baseImage.Atomic && numericClass == ImageNumericClass.Float))
                 {
                     numericClass = ImageNumericClass.Uint;
+                }
+
+                if (baseImage.Atomic64)
+                {
+                    numericClass = ImageNumericClass.Uint64;
                 }
             }
             else if (numericClass == ImageNumericClass.Unsupported)

@@ -197,6 +197,150 @@ public sealed class AgcCommandBufferChainTests
         uint targetDwords)
         => WriteJump(ctx, memory, linkAddress, 1, target, targetDwords);
 
+    // A title reserves room for a NOP with sceAgcCbNopGetSize and then writes it with sceAgcCbNop. The two must agree, or the reserved
+    // room keeps dwords nothing wrote and the command processor reads a zero header there. A one-dword NOP is the type-2 filler.
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(2u)]
+    [InlineData(5u)]
+    public void CbNop_WritesExactlyTheBytesCbNopGetSizeReports(uint dwords)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        PointCommandBufferAt(memory, FirstLinkAddress);
+        for (var index = 0u; index < 8; index++)
+        {
+            WriteUInt32(memory, FirstLinkAddress + (index * sizeof(uint)), 0xDEAD_BEEF);
+        }
+
+        ctx[CpuRegister.Rdi] = dwords;
+        var reservedBytes = (uint)AgcExports.CbNopGetSize(ctx);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = dwords;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.CbNop(ctx));
+
+        Assert.Equal(dwords * sizeof(uint), reservedBytes);
+        Assert.Equal(FirstLinkAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(FirstLinkAddress + reservedBytes, ReadUInt64(memory, CommandBufferAddress + 0x10));
+        Assert.Equal(dwords == 1 ? 0x8000_0000u : 0xC000_1000u | ((dwords - 2) << 16), ReadUInt32(memory, FirstLinkAddress));
+        for (var index = 1u; index < dwords; index++)
+        {
+            Assert.Equal(0u, ReadUInt32(memory, FirstLinkAddress + (index * sizeof(uint))));
+        }
+
+        Assert.Equal(0xDEAD_BEEFu, ReadUInt32(memory, FirstLinkAddress + reservedBytes));
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(0x4002u)]
+    public void CbNopOfAnImpossibleSize_ReportsNoSizeAndWritesNothing(uint dwords)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        PointCommandBufferAt(memory, FirstLinkAddress);
+
+        ctx[CpuRegister.Rdi] = dwords;
+        Assert.Equal(0, AgcExports.CbNopGetSize(ctx));
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = dwords;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.CbNop(ctx));
+
+        Assert.Equal(0ul, ctx[CpuRegister.Rax]);
+        Assert.Equal(FirstLinkAddress, ReadUInt64(memory, CommandBufferAddress + 0x10));
+    }
+
+    [Fact]
+    public void BranchPatch_EncodesTargetAndSizeAndKeepsTheCallMode()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        var branch = WriteBranch(ctx, memory, FirstLinkAddress);
+
+        ctx[CpuRegister.Rdi] = branch;
+        ctx[CpuRegister.Rsi] = 2;
+        ctx[CpuRegister.Rdx] = 0xABCD_1234_5678;
+        ctx[CpuRegister.Rcx] = 0x123;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.Unknown7Wa3ae(ctx));
+
+        Assert.Equal(0x1234_5678u, ReadUInt32(memory, branch + 4));
+        Assert.Equal(0xABCDu, ReadUInt32(memory, branch + 8));
+        Assert.Equal(0x2000_0123u, ReadUInt32(memory, branch + 12));
+    }
+
+    [Fact]
+    public void BranchPatch_RejectsOtherPacketWithoutChangingIt()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        WriteUInt32(memory, FirstLinkAddress, 0xC002_1000);
+        WriteUInt64(memory, FirstLinkAddress + 4, 0xDEAD_BEEF);
+        ctx[CpuRegister.Rdi] = FirstLinkAddress;
+        ctx[CpuRegister.Rsi] = 0;
+        ctx[CpuRegister.Rdx] = SecondLinkAddress;
+        ctx[CpuRegister.Rcx] = 1;
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, AgcExports.Unknown7Wa3ae(ctx));
+        Assert.Equal(0xDEAD_BEEFul, ReadUInt64(memory, FirstLinkAddress + 4));
+    }
+
+    // What a title runs to start a continuation: size a branch and a one-dword NOP with the GetSize exports, write the branch with no
+    // target yet, write the NOP right after it, and patch the branch to call the NOP. The command processor calls the NOP, returns past
+    // the branch and reaches what the title writes next.
+    [Fact]
+    public void BranchPatchedToItsFollowingNop_LetsTheStreamReachWhatFollows()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        var branchBytes = (uint)AgcExports.CbBranchGetSize(ctx);
+        ctx[CpuRegister.Rdi] = 1;
+        var nopBytes = (uint)AgcExports.CbNopGetSize(ctx);
+        var branch = WriteBranch(ctx, memory, FirstLinkAddress);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = 1;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.CbNop(ctx));
+        var nop = ctx[CpuRegister.Rax];
+        Assert.Equal(branch + branchBytes, nop);
+
+        ctx[CpuRegister.Rdi] = branch;
+        ctx[CpuRegister.Rsi] = 0;
+        ctx[CpuRegister.Rdx] = nop;
+        ctx[CpuRegister.Rcx] = nopBytes / sizeof(uint);
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.Unknown7Wa3ae(ctx));
+
+        var afterNop = nop + nopBytes;
+        var waitDwords = WriteUnsatisfiedWait(ctx, memory, afterNop);
+        var totalDwords = ((uint)(afterNop - FirstLinkAddress) / sizeof(uint)) + waitDwords;
+        SubmitDcb(ctx, memory, FirstLinkAddress, totalDwords);
+
+        Assert.Equal(1, StreamOf(memory).BlockedQueueCount);
+        Assert.Equal(afterNop, StreamOf(memory).SnapshotBlocked().SampleWaitAddress);
+    }
+
+    // sceAgcCbBranch(cb, mode 1, function 0, no compare address, mask 0, reference 0, policy 0, no then buffer, 0 dwords, policy 3, no else
+    // buffer, 0 dwords): the first six arguments are registers, the other six are on the stack.
+    private static ulong WriteBranch(CpuContext ctx, FakeCpuMemory memory, ulong linkAddress)
+    {
+        PointCommandBufferAt(memory, linkAddress);
+        ctx[CpuRegister.Rsp] = StackAddress;
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = 1;
+        ctx[CpuRegister.Rdx] = 0;
+        ctx[CpuRegister.Rcx] = 0;
+        ctx[CpuRegister.R8] = 0;
+        ctx[CpuRegister.R9] = 0;
+        WriteUInt64(memory, StackAddress + 8, 0);
+        WriteUInt64(memory, StackAddress + 16, 0);
+        WriteUInt64(memory, StackAddress + 24, 0);
+        WriteUInt64(memory, StackAddress + 32, 3);
+        WriteUInt64(memory, StackAddress + 40, 0);
+        WriteUInt64(memory, StackAddress + 48, 0);
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.CbBranch(ctx));
+        Assert.Equal(linkAddress, ctx[CpuRegister.Rax]);
+        return ctx[CpuRegister.Rax];
+    }
+
     [Fact]
     public void PatchedPlaceholderChain_ReachesContinuation()
     {

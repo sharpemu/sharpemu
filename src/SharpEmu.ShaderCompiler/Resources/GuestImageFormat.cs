@@ -14,6 +14,7 @@ public static class GuestImageFormat
     public const uint Format32Uint = 20;
     public const uint Format32Sint = 21;
     public const uint Format32Float = 22;
+    public const uint Format32x2Uint = 62;
 
     // Only these sample as a Vulkan depth format; comparison sampling of any
     // other format is evaluated in the shader.

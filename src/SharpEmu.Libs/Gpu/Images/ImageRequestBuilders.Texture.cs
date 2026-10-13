@@ -18,13 +18,16 @@ public static partial class ImageRequestBuilders
     {
         var numericClass = shape.NumericClass;
         var storage = shape.Storage;
-        var (format, guestFormat) = numericClass switch
-        {
-            TextureNumericClass.Float => (Format.R32Sfloat, GuestPixelFormat.Bits32Float),
-            TextureNumericClass.Uint => (Format.R32Uint, GuestPixelFormat.Bits32UInt),
-            TextureNumericClass.Sint => (Format.R32Sint, GuestPixelFormat.Bits32SInt),
-            _ => throw SubmissionScheduler.Fatal($"A null image needs a supported numeric class: class={numericClass}."),
-        };
+        // An atomic on 64-bit texels declares an R64 image, which a 32-bit placeholder cannot stand in for.
+        var (format, guestFormat) = shape.Atomic64
+            ? (Format.R64Uint, GuestPixelFormat.Bits32_32UInt)
+            : numericClass switch
+            {
+                TextureNumericClass.Float => (Format.R32Sfloat, GuestPixelFormat.Bits32Float),
+                TextureNumericClass.Uint => (Format.R32Uint, GuestPixelFormat.Bits32UInt),
+                TextureNumericClass.Sint => (Format.R32Sint, GuestPixelFormat.Bits32SInt),
+                _ => throw SubmissionScheduler.Fatal($"A null image needs a supported numeric class: class={numericClass}."),
+            };
         // Depth-reference sampling needs a depth view even for the placeholder.
         var depthCompare = shape.DepthCompare && numericClass == TextureNumericClass.Float && !storage;
         if (depthCompare)
@@ -40,7 +43,7 @@ public static partial class ImageRequestBuilders
             : shape.OneDimensional ? GuestImageType.Color1D : GuestImageType.Color2D;
         description.Extent = new Extent3D(1, 1, 1);
         description.Resources = SubresourceCount.Single;
-        description.BytesPerBlock = 4;
+        description.BytesPerBlock = shape.Atomic64 ? 8u : 4u;
         description.Samples = shape.Multisampled ? 4u : 1u;
         description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 0, Pitch = 1, Height = 1 };
         var view = ImageViewDescription.Default with
@@ -285,8 +288,11 @@ public static partial class ImageRequestBuilders
         {
             pixelFormat = depthFormat.DepthAttachmentFormat;
         }
-        // Atomic storage images are declared as UINT in SPIR-V, including float atomics.
-        var storageViewFormat = storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? Format.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
+        // Atomic storage images are declared as UINT in SPIR-V, including float atomics; an atomic on a
+        // 64-bit texel (32_32 UINT) is declared R64 and views the same texels as one 64-bit integer.
+        var storageViewFormat = storage && shape.Atomic64
+            ? Format.R64Uint
+            : storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? Format.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
         var viewFormat = storage && storageViewFormat != Format.Undefined ? storageViewFormat : pixelFormat;
         var blockBytes = GuestPixelFormats.BlockCompressedBytes(format);
         var description = ImageDescription.Create();

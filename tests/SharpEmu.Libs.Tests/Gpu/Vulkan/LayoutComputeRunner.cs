@@ -140,7 +140,7 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
     public GpuBuffer CreateBuffer(ulong size) => CreateBuffer([], size);
 
     // A clamp-to-edge sampler with one filter for both directions, kept until the runner is disposed.
-    public Sampler CreateSampler(Filter filter)
+    public Sampler CreateSampler(Filter filter, SamplerAddressMode addressMode = SamplerAddressMode.ClampToEdge, float maxLod = 1)
     {
         var info = new SamplerCreateInfo
         {
@@ -148,10 +148,10 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
             MagFilter = filter,
             MinFilter = filter,
             MipmapMode = SamplerMipmapMode.Nearest,
-            AddressModeU = SamplerAddressMode.ClampToEdge,
-            AddressModeV = SamplerAddressMode.ClampToEdge,
-            AddressModeW = SamplerAddressMode.ClampToEdge,
-            MaxLod = 1,
+            AddressModeU = addressMode,
+            AddressModeV = addressMode,
+            AddressModeW = addressMode,
+            MaxLod = maxLod,
         };
         Require(_harness.Vk.CreateSampler(_harness.Device.Device, &info, null, out var sampler), "vkCreateSampler");
         _samplers.Add(sampler);

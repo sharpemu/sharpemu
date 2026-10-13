@@ -257,6 +257,41 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         harness.Shutdown();
     }
 
+    // A tiled volume records one slab in its mip layout, whatever its depth, so a deeper volume at the same address
+    // shares the layout of the slices the shallower one had.
+    [Fact]
+    public void VolumeDepthGrowth_KeepsTheContentsOfTheSharedSlices()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        // A linear 1x1 slice occupies one padded 256-byte slab.
+        const ulong slab = 256;
+        harness.Write(address + 2 * slab, Bytes(0x10203040u));
+        harness.Write(address + 3 * slab, Bytes(0x50607080u));
+        var shallow = SlabVolume(address, 2, slab);
+        var shallowId = harness.Acquire(ref shallow);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, 2 * slab, 0x0a0b0c0du)));
+        Assert.True(harness.Image(shallowId).IsGpuModified);
+
+        var deep = SlabVolume(address, 4, slab);
+        var deepId = harness.Find(ref deep);
+        Assert.True(deepId.IsValid);
+        Assert.NotEqual(shallowId, deepId);
+        Assert.False(harness.Images.Contains(shallowId));
+        Assert.Equal(4u, harness.Image(deepId).Backing.Extent.Depth);
+        Assert.True(harness.Image(deepId).IsGpuModified);
+        Assert.Equal(Bytes(0x0a0b0c0du, 0x0a0b0c0du, 0x10203040u, 0x50607080u), harness.ReadImageBytes(harness.Image(deepId)));
+        harness.Shutdown();
+    }
+
+    private static ImageRequest SlabVolume(ulong address, uint depth, ulong slab)
+    {
+        var request = LinearRequest(address, depth * slab, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color3D, new Extent3D(1, 1, depth), 1, 4, 1);
+        request.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = slab, Pitch = 1, Height = 1 };
+        return request;
+    }
+
     [Fact]
     public void EqualSizeTileModeAlias_KeepsSeparateBackings()
     {

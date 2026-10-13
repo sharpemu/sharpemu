@@ -258,6 +258,95 @@ public sealed class GuestRedZonePatcherTests
         Assert.Equal(6u, image.ReadUInt32(0x2000));
     }
 
+    // A switch compiled as 'cmp; ja; lea table; movsxd; add; jmp' often has the spills of its arguments between the bounds check and the table
+    // load. The table and its four targets are still known, so the short accesses of the cases can borrow the instructions that follow them.
+    [Fact]
+    public unsafe void PatchesShortAccessesInASwitchWhoseSetupSpillsRegisters()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var function = BuildSwitchFunction(spill: [0x48, 0x89, 0x4C, 0x24, 0xD0]);
+        using var image = PatchedImage.Create(function.Code, [(0x2100, 100u)], (SwitchTableOffset, function.Table));
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        {
+            Assert.Equal(1, image.Result.RedZoneFunctions);
+            Assert.Equal(0, image.Result.UnrelocatableSites);
+            Assert.Equal(0, image.Result.IndirectBranchRefusals);
+            Assert.Equal(0, image.Result.FailedSites);
+            Assert.True(image.Result.PatchedSites >= 4);
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            var call = (delegate* unmanaged<ulong, ulong, ulong>)image.Base;
+            for (var selector = 0UL; selector < 4; selector++)
+            {
+                Assert.Equal(101UL + selector, call(selector, image.Base + 0x2100));
+            }
+
+            Assert.Equal(0UL, call(7, image.Base + 0x2100));
+        }
+    }
+
+    // A setup instruction that writes the selector keeps the jump unresolved: the targets the table names are no longer the ones reached.
+    [Fact]
+    public void KeepsRefusingASwitchWhoseSetupChangesTheSelector()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
+            return;
+
+        var function = BuildSwitchFunction(spill: [0x48, 0x89, 0xD1]);
+        using var image = PatchedImage.Create(function.Code, [(0x2100, 100u)], (SwitchTableOffset, function.Table));
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        {
+            Assert.Equal(0, image.Result.PatchedSites);
+            Assert.True(image.Result.IndirectBranchRefusals >= 4);
+        }
+    }
+
+    private const int SwitchTableOffset = 0x2000;
+
+    // switch (ecx) { case 0..3: return *rdx + ecx + 1; default: return 0; } as a jump table, for the Windows argument registers.
+    private static (byte[] Code, byte[] Table) BuildSwitchFunction(byte[] spill)
+    {
+        var code = new List<byte>();
+        code.AddRange([0x83, 0xF9, 0x03]);                          // cmp ecx, 3
+        var boundsBranch = code.Count;
+        code.AddRange([0x77, 0x00]);                                // ja default
+        var tableLoad = code.Count;
+        code.AddRange([0x4C, 0x8D, 0x0D, 0, 0, 0, 0]);              // lea r9, [rip + table]
+        code.AddRange([0x48, 0x89, 0x54, 0x24, 0xD8]);              // mov [rsp-0x28], rdx
+        code.AddRange(spill);                                       // mov [rsp-0x30], rcx (or a register write)
+        code.AddRange([0x49, 0x63, 0x04, 0x89]);                    // movsxd rax, [r9 + rcx*4]
+        code.AddRange([0x4C, 0x01, 0xC8]);                          // add rax, r9
+        code.AddRange([0xFF, 0xE0]);                                // jmp rax
+        var caseOffsets = new int[4];
+        for (var index = 0; index < caseOffsets.Length; index++)
+        {
+            caseOffsets[index] = code.Count;
+            code.AddRange([0x8B, 0x02]);                            // mov eax, [rdx]
+            code.AddRange([0x83, 0xC0, (byte)(index + 1)]);         // add eax, index + 1
+            code.AddRange([0x48, 0x8B, 0x4C, 0x24, 0xD0]);          // mov rcx, [rsp-0x30]
+            code.Add(0xC3);                                         // ret
+        }
+
+        var defaultOffset = code.Count;
+        code.AddRange([0x31, 0xC0, 0xC3]);                          // xor eax, eax; ret
+        code[boundsBranch + 1] = (byte)(defaultOffset - (boundsBranch + 2));
+        var displacement = SwitchTableOffset - (tableLoad + 7);
+        var bytes = code.ToArray();
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(tableLoad + 3), displacement);
+
+        var table = new byte[caseOffsets.Length * sizeof(int)];
+        for (var index = 0; index < caseOffsets.Length; index++)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(table.AsSpan(index * sizeof(int)), caseOffsets[index] - SwitchTableOffset);
+        }
+
+        return (bytes, table);
+    }
+
     private sealed unsafe class PatchedImage : IDisposable
     {
         private const ulong ImageSize = 0x10000;
@@ -274,7 +363,7 @@ public sealed class GuestRedZonePatcherTests
 
         public GuestRedZonePatcher.PatchResult Result { get; }
 
-        public static PatchedImage Create(byte[] function, (ulong Offset, uint Value)[] data)
+        public static PatchedImage Create(byte[] function, (ulong Offset, uint Value)[] data, (ulong Offset, byte[] Bytes)? readOnlyData = null)
         {
             var memory = new PhysicalVirtualMemory();
             const ulong holeSize = 0x4000000;
@@ -296,12 +385,17 @@ public sealed class GuestRedZonePatcherTests
             BinaryPrimitives.WriteUInt32LittleEndian(exceptionFrameHeader.AsSpan(12), 1);
             BinaryPrimitives.WriteUInt64LittleEndian(exceptionFrameHeader.AsSpan(16), imageBase);
             Assert.True(memory.TryWrite(imageBase + 0x1000, exceptionFrameHeader));
-            ProgramHeader[] headers =
-            [
+            var headers = new List<ProgramHeader>
+            {
                 CreateProgramHeader(ProgramHeaderType.Load, ProgramHeaderFlags.Read | ProgramHeaderFlags.Execute,
                     0, (ulong)function.Length),
                 CreateProgramHeader(ProgramHeaderType.GnuEhFrame, ProgramHeaderFlags.Read, 0x1000, (ulong)exceptionFrameHeader.Length),
-            ];
+            };
+            if (readOnlyData is { } table)
+            {
+                Assert.True(memory.TryWrite(imageBase + table.Offset, table.Bytes));
+                headers.Add(CreateProgramHeader(ProgramHeaderType.Load, ProgramHeaderFlags.Read, table.Offset, (ulong)table.Bytes.Length));
+            }
 
             var result = GuestRedZonePatcher.Patch(memory, memory, headers, imageBase, ImageSize);
             return new PatchedImage(memory, imageBase, result);

@@ -500,6 +500,14 @@ public sealed partial class GuestImageCache
                 return new OverlapResolution(GrowImage(requested, cachedImageIdentifier));
             }
 
+            // A volume that gained slices keeps the layout of the slices it had: the deeper image starts with the contents of the shallower one.
+            if (requested.IsVolume && requested.Type == cachedInfo.Type && requested.Resources == cachedInfo.Resources &&
+                requested.Extent.Width >= cachedInfo.Extent.Width && requested.Extent.Height >= cachedInfo.Extent.Height &&
+                requested.Extent.Depth > cachedInfo.Extent.Depth && ViewFormatRules.AreCompatible(cachedInfo.PixelFormat, requested.PixelFormat))
+            {
+                return new OverlapResolution(GrowImage(requested, cachedImageIdentifier));
+            }
+
             throw SubmissionScheduler.Fatal(
                 $"An equal-address image overlap cannot be resolved: address=0x{requested.Data.Address:X16} requested={requested.Resources.Levels}x{requested.Resources.Layers} " +
                 $"cached={cachedInfo.Resources.Levels}x{cachedInfo.Resources.Layers} requestedSize=0x{requested.Data.Size:X16} cachedSize=0x{cachedInfo.Data.Size:X16} " +

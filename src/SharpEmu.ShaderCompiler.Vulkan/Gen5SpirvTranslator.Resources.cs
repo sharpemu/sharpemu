@@ -330,20 +330,36 @@ public static partial class Gen5SpirvTranslator
             // they just get there through a bitcast + integer compare-exchange
             // (see Gen5SpirvTranslator.cs's ImageAtomicFmax/Fmin case) instead
             // of through the declared image/sampled type.
-            var kind = atomic
-                ? ImageComponentKind.Uint
-                : numericClass switch
-                {
-                    ImageNumericClass.Uint => ImageComponentKind.Uint,
-                    ImageNumericClass.Sint => ImageComponentKind.Sint,
-                    _ => ImageComponentKind.Float,
-                };
+            // An atomic on a 64-bit texel (a 32_32 UINT image) is declared R64ui with 64-bit unsigned texels.
+            var wide = numericClass == ImageNumericClass.Uint64;
+            var kind = wide
+                ? ImageComponentKind.Uint64
+                : atomic
+                    ? ImageComponentKind.Uint
+                    : numericClass switch
+                    {
+                        ImageNumericClass.Uint => ImageComponentKind.Uint,
+                        ImageNumericClass.Sint => ImageComponentKind.Sint,
+                        _ => ImageComponentKind.Float,
+                    };
             var componentType = kind switch
             {
                 ImageComponentKind.Sint => _intType,
                 ImageComponentKind.Uint => _uintType,
+                ImageComponentKind.Uint64 => _ulongType,
                 _ => _floatType,
             };
+            if (wide)
+            {
+                _module.AddCapability(SpirvCapability.Int64Atomics);
+                _module.AddCapability(SpirvCapability.Int64ImageExt);
+                if (!_declaredImageInt64Extension)
+                {
+                    _declaredImageInt64Extension = true;
+                    _module.AddExtension("SPV_EXT_shader_image_int64");
+                }
+            }
+
             // The image request builder binds guest 1D textures through 1D views,
             // so the shader declaration must be 1D as well.
             var spirvDimension = dimension switch
@@ -358,7 +374,7 @@ public static partial class Gen5SpirvTranslator
             }
             var arrayed = dimension is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray or ImageDimension.Dim2DMsaaArray;
             var multisampled = dimension is ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray;
-            var format = atomic ? SpirvImageFormat.R32ui : SpirvImageFormat.Unknown;
+            var format = wide ? SpirvImageFormat.R64ui : atomic ? SpirvImageFormat.R32ui : SpirvImageFormat.Unknown;
             if (isStorage && !atomic)
             {
                 _module.AddCapability(SpirvCapability.StorageImageReadWithoutFormat);
@@ -1659,6 +1675,7 @@ public static partial class Gen5SpirvTranslator
             {
                 case "DsAppend":
                 case "DsConsume":
+                case "DsOrderedCount":
                     return TryEmitGlobalDataShareCounter(instruction, control, out error);
                 case "DsWriteB32":
                     EmitExecConditional(() => StoreGlobalDataShareWord(GlobalDataShareIndex(GetRawSource(instruction, 0), control.SingleOffsetBytes), GetRawSource(instruction, 1)));
@@ -1865,6 +1882,9 @@ public static partial class Gen5SpirvTranslator
         }
 
         // Append/consume on the GDS counter at M0's base: M0 must carry a size, and the word must be inside the buffer.
+        // DS_ORDERED_COUNT adds the first active lane's ADDR register to the dword offset0[7:2] picks instead. M0's size holds
+        // the wave's launch order there (and the packer id in its low bits for a pixel wave), so it does not gate the access.
+        // The waves are not held back into launch order here: they take their ranges in the order they arrive.
         private bool TryEmitGlobalDataShareCounter(Gen5ShaderInstruction instruction, Gen5DataShareControl control, out string error)
         {
             error = string.Empty;
@@ -1874,12 +1894,20 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            var offset = control.SingleOffsetBytes;
+            var ordered = instruction.Opcode == "DsOrderedCount";
+            var offset = ordered ? control.Offset0 & 0xFCu : control.SingleOffsetBytes;
             var m0 = GetRawSource(instruction, 0);
             var baseAddress = ShiftRightLogical(m0, UInt(16));
             var sizeBytes = BitwiseAnd(m0, UInt(0xFFFF));
             var index = GlobalDataShareIndex(baseAddress, offset);
-            var inBounds = LogicalAnd(IsNotZero(sizeBytes), IsBlockWordInRange(_globalDataShare, index));
+            if (ordered && (control.Offset1 & 4) != 0)
+            {
+                index = IAdd(index, BitwiseAnd(m0, UInt(3)));
+            }
+
+            var inBounds = ordered
+                ? IsBlockWordInRange(_globalDataShare, index)
+                : LogicalAnd(IsNotZero(sizeBytes), IsBlockWordInRange(_globalDataShare, index));
             var destination = instruction.Destinations[0].Value;
             var active = Load(_boolType, _exec);
             var activeMask = BooleanToWaveMask(active);
@@ -1898,12 +1926,12 @@ public static partial class Gen5SpirvTranslator
             EmitConditional(isFirstActive, () =>
             {
                 var original = EmitAtomic(
-                    instruction.Opcode == "DsAppend" ? SpirvOp.AtomicIAdd : SpirvOp.AtomicISub,
+                    instruction.Opcode == "DsConsume" ? SpirvOp.AtomicISub : SpirvOp.AtomicIAdd,
                     _uintType,
                     BlockWordPointer(_globalDataShare, index),
                     scope: 1,
                     semantics: 0x48,
-                    value: () => activeCount,
+                    value: () => ordered ? GetRawSource(instruction, 1) : activeCount,
                     comparator: () => UInt(0));
                 StoreV(destination, original);
             });

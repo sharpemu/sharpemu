@@ -260,6 +260,12 @@ public sealed class ImageDescriptionTests
         dcc.Metadata.Range = new GuestSpan(0x2000, 0x100);
         dcc.Metadata.Compression = DisplayCompression.Unsupported;
         Reject(dcc, "DCC metadata is invalid", fatal);
+        var cmask = image;
+        cmask.Metadata.Kind = MetadataKind.CMask;
+        cmask.Metadata.Range = new GuestSpan(0x2000, 0x100);
+        Reject(cmask, "CMASK metadata is invalid", fatal);
+        cmask.Metadata.Range = new GuestSpan(0x2000, 0);
+        cmask.Validate();
         var stencilCompressed = image;
         stencilCompressed.Metadata.StencilCompressed = true;
         Reject(stencilCompressed, "needs a stencil plane", fatal);

@@ -25,6 +25,7 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
     private const uint Format32Uint = 20;
     private const uint Format32Sint = 21;
     private const uint Format32Float = 22;
+    private const uint Format32x2Uint = 62;
     private const uint ImageType2D = 9;
     private const uint ResultRegister = 8;
     private const uint ResultBytes = 64;
@@ -92,22 +93,61 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         return Program([.. instructions]);
     }
 
-    private static ImageDescription Describe(ulong guestOffset, Format format, GuestPixelFormat guestFormat, uint width, uint height, uint levels)
+    // Three 64-bit unsigned maxes on texel (0, 0): (high 9, low 5), (high 4, low 0xFFFFFFFF) and (high 9, low 6).
+    private static Gen5ShaderProgram WideAtomicMaxProgram()
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, FirstImageRegister, FirstImageAddress, Format32x2Uint));
+        instructions.Add(MoveVector(pc, 1, 0)); pc += 8;
+        instructions.Add(MoveVector(pc, 2, 0)); pc += 8;
+        foreach (var (low, high) in new (uint, uint)[] { (5, 9), (0xFFFF_FFFF, 4), (6, 9) })
+        {
+            instructions.Add(MoveVector(pc, 4, low)); pc += 8;
+            instructions.Add(MoveVector(pc, 5, high)); pc += 8;
+            instructions.Add(Image(pc, "ImageAtomicUmax", FirstImageRegister, vectorAddress: 1, dmask: 3)); pc += 8;
+        }
+
+        instructions.Add(EndProgram(pc));
+        return Program([.. instructions]);
+    }
+
+    // A gather of the first channel at (u, v) with a level of detail; the four texels go to the result buffer.
+    private static Gen5ShaderProgram GatherAtLevelProgram(float u, float v, float lod)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, FirstImageRegister, FirstImageAddress, Format32Float, lastLevel: 3));
+        instructions.AddRange(SamplerWords(ref pc, SamplerRegister));
+        instructions.Add(MoveVector(pc, 0, BitConverter.SingleToUInt32Bits(u))); pc += 8;
+        instructions.Add(MoveVector(pc, 1, BitConverter.SingleToUInt32Bits(v))); pc += 8;
+        instructions.Add(MoveVector(pc, 2, BitConverter.SingleToUInt32Bits(lod))); pc += 8;
+        instructions.Add(Image(pc, "ImageGather4L", FirstImageRegister, SamplerRegister, dmask: 1)); pc += 8;
+        for (uint texel = 0; texel < 4; texel++)
+        {
+            instructions.Add(BufferAccess(pc, "BufferStoreDword", ResultRegister, (int)texel * 4, 1, vectorData: 4 + texel)); pc += 8;
+        }
+
+        instructions.Add(EndProgram(pc));
+        return Program([.. instructions]);
+    }
+
+    private static ImageDescription Describe(ulong guestOffset, Format format, GuestPixelFormat guestFormat, uint width, uint height, uint levels, uint bytesPerBlock = 4)
     {
         var description = ImageDescription.Create();
-        description.Data = new GuestSpan(ArrayBackedSpace.Base + guestOffset, (ulong)width * height * 4 * 2);
+        description.Data = new GuestSpan(ArrayBackedSpace.Base + guestOffset, (ulong)width * height * bytesPerBlock * 2);
         description.PixelFormat = format;
         description.GuestFormat = guestFormat;
         description.Extent = new Extent3D(width, height, 1);
         description.Resources = new SubresourceCount(levels, 1);
         description.Pitch = width;
-        description.BytesPerBlock = 4;
+        description.BytesPerBlock = bytesPerBlock;
         return description;
     }
 
     private sealed class Run : IDisposable
     {
-        public Run(HeadlessVulkan vulkan, Gen5ShaderProgram program, uint[] registers, uint threadCount)
+        public Run(HeadlessVulkan vulkan, Gen5ShaderProgram program, uint[] registers, uint threadCount, bool imageInt64Atomics = false)
         {
             Plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, 0x5348_4152_5045_4D55, 0, 64);
             var snapshot = new ResourceSnapshot();
@@ -121,7 +161,10 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
                 false,
                 ShaderCompileRequest.RequiresFlattenedTable(Plan, Resources),
                 false);
-            Request = new ShaderCompileRequest(Plan, Resources, layout) { LocalSizeX = threadCount, ThreadCountX = threadCount };
+            Request = new ShaderCompileRequest(Plan, Resources, layout)
+            {
+                LocalSizeX = threadCount, ThreadCountX = threadCount, SupportsImageInt64Atomics = imageInt64Atomics,
+            };
             Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request, out var shader, out var error), error);
             Harness = new ImageTestHarness(vulkan);
             Runner = new LayoutComputeRunner(Harness, Request, shader.Spirv);
@@ -477,6 +520,97 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         });
         Assert.Equal(expected, BinaryPrimitives.ReadUInt32LittleEndian(runner.ReadBack(result, 0, sizeof(uint))));
         harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
+    public void ImageAtomicOnA64BitTexel_UpdatesBothDwordsOnTheDevice()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan) || !vulkan!.SupportsImageInt64Atomics)
+        {
+            return;
+        }
+
+        using var run = new Run(vulkan, WideAtomicMaxProgram(), UserData(), 1, imageInt64Atomics: true);
+        Assert.Equal(ImageNumericClass.Uint64, run.Resources.Info.Images[0].NumericClass);
+
+        // A 32_32 UINT image whose texels the shader sees as one 64-bit integer each.
+        var description = Describe(0, Format.R32G32Uint, GuestPixelFormat.Bits32_32UInt, 4, 4, 1, bytesPerBlock: 8);
+        var target = run.Harness.CreateImage(description);
+        var copies = ImageTestHarness.WholeImageCopies(description, 0);
+        var texelBytes = ImageTestHarness.WholeImageBytes(description);
+        var texels = Enumerable.Repeat(0xAAAA_AAAAu, (int)(texelBytes / 4)).ToArray();
+        texels[0] = 0;
+        texels[1] = 3;
+        run.Harness.UploadImage(target, MemoryMarshal.AsBytes<uint>(texels), copies);
+        var wideView = new DescriptorImageInfo
+        {
+            ImageView = target.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R64Uint, Usage = ImageUsageFlags.StorageBit }),
+            ImageLayout = ImageLayout.General,
+        };
+        var views = new Dictionary<int, DescriptorImageInfo[]> { [0] = [wideView] };
+        run.Dispatch(run.BindImages(views), command =>
+            target.Transition(ImageLayout.General, AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit, null, command));
+
+        var result = MemoryMarshal.Cast<byte, uint>(run.Harness.ReadImage(target, copies, texelBytes)).ToArray();
+        // The second atomic had the larger low dword but the smaller high dword, so it must not win.
+        Assert.Equal(6u, result[0]);
+        Assert.Equal(9u, result[1]);
+        Assert.Equal(0xAAAA_AAAAu, result[2]);
+        Assert.Equal(0xAAAA_AAAAu, result[3]);
+        run.Harness.AssertNoValidationMessages();
+        output.WriteLine($"Verified a 64-bit image atomic on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
+    }
+
+    // An 8x8 image with four levels whose texel (x, y) of level L holds 100 L + 10 y + x. The gather returns the
+    // texels (i, j+1), (i+1, j+1), (i+1, j) and (i, j) of the level the instruction names, addressed by the sampler.
+    [Theory]
+    [InlineData(0.5f, 0.5f, 0f, SamplerAddressMode.ClampToEdge, 43f, 44f, 34f, 33f)]
+    [InlineData(0.5f, 0.5f, 1f, SamplerAddressMode.ClampToEdge, 121f, 122f, 112f, 111f)]
+    [InlineData(0.3f, 0.7f, 1f, SamplerAddressMode.ClampToEdge, 130f, 131f, 121f, 120f)]
+    [InlineData(0.5f, 0.5f, 2f, SamplerAddressMode.ClampToEdge, 210f, 211f, 201f, 200f)]
+    [InlineData(0.5f, 0.5f, 3f, SamplerAddressMode.ClampToEdge, 300f, 300f, 300f, 300f)]
+    [InlineData(0.5f, 0.5f, 1.4f, SamplerAddressMode.ClampToEdge, 121f, 122f, 112f, 111f)]
+    [InlineData(0.5f, 0.5f, 1.6f, SamplerAddressMode.ClampToEdge, 210f, 211f, 201f, 200f)]
+    [InlineData(0.5f, 0.5f, 9f, SamplerAddressMode.ClampToEdge, 300f, 300f, 300f, 300f)]
+    [InlineData(0.5f, 0.5f, -2f, SamplerAddressMode.ClampToEdge, 43f, 44f, 34f, 33f)]
+    [InlineData(0.99f, 0.99f, 1f, SamplerAddressMode.ClampToEdge, 133f, 133f, 133f, 133f)]
+    [InlineData(0.99f, 0.99f, 1f, SamplerAddressMode.Repeat, 103f, 100f, 130f, 133f)]
+    public void GatherWithALevelOfDetail_ReadsTheTexelsOfThatLevel(float u, float v, float lod, SamplerAddressMode addressMode,
+        float lowerLeft, float lowerRight, float upperRight, float upperLeft)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan))
+        {
+            return;
+        }
+
+        using var run = new Run(vulkan, GatherAtLevelProgram(u, v, lod), UserData(), 1);
+        var description = Describe(0, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 8, 8, 4);
+        var image = run.Harness.CreateImage(description);
+        var texels = new List<float>();
+        for (var level = 0; level < 4; level++)
+        {
+            var size = 8 >> level;
+            for (var y = 0; y < size; y++)
+            {
+                for (var x = 0; x < size; x++)
+                {
+                    texels.Add(100 * level + 10 * y + x);
+                }
+            }
+        }
+
+        run.Harness.UploadImage(image, MemoryMarshal.AsBytes<float>(texels.ToArray()), ImageTestHarness.WholeImageCopies(description, 0));
+        var sampler = run.Runner.CreateSampler(Filter.Nearest, addressMode, maxLod: 16);
+        var views = new Dictionary<int, DescriptorImageInfo[]> { [run.ResourceAt(FirstImageAddress)] = [SampledView(image, levelCount: 4)] };
+        run.Dispatch(run.BindImages(views, [sampler]), command =>
+            image.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, command));
+
+        float[] gathered = [.. Enumerable.Range(0, 4).Select(index => BitConverter.UInt32BitsToSingle(run.ResultWord(index)))];
+        Assert.Equal([lowerLeft, lowerRight, upperRight, upperLeft], gathered);
+        run.Harness.AssertNoValidationMessages();
+        output.WriteLine($"Verified a gather at level {lod} on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
     }
 
     [Fact]

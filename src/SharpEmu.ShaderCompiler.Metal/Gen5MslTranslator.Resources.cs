@@ -37,6 +37,12 @@ public static partial class Gen5MslTranslator
             return false;
         }
 
+        if (request.Resources.Info.Images.Any(image => image.NumericClass == ImageNumericClass.Uint64))
+        {
+            error = "64-bit image atomics are not supported by the Metal translator";
+            return false;
+        }
+
         if (request.Stage == ShaderStage.Pixel && !ValidatePixelOutputs(request.PixelOutputs, out error))
         {
             return false;

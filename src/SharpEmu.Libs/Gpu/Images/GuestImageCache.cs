@@ -382,6 +382,27 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
             metadata.Size = Math.Max(metadata.Size, request.Description.DccSliceSize * request.Description.TransferLayers);
         }
+        else if (request.Description.Metadata.Kind == MetadataKind.CMask)
+        {
+            var address = request.Description.Metadata.Range.Address;
+            if (!_surfaceMetadata.TryGetValue(address, out var metadata))
+            {
+                metadata = new SurfaceMetadata { Kind = SurfaceMetadataKind.CMask };
+                _surfaceMetadata.Add(address, metadata);
+            }
+            else if (metadata.Kind == SurfaceMetadataKind.PendingDcc)
+            {
+                // A fill seen before the target was bound is a clear only when it wrote zero.
+                metadata.Kind = SurfaceMetadataKind.CMask;
+                metadata.ClearMask = metadata.FillValue == 0 ? uint.MaxValue : 0;
+            }
+
+            // Metadata of another kind at the address is not ours to track; the target then draws without fast clears.
+            if (metadata.Kind == SurfaceMetadataKind.CMask)
+            {
+                image.Description.Metadata = request.Description.Metadata;
+            }
+        }
 
         TakeGpuOwnership(image);
         ScheduleReadback(imageIdentifier, image);

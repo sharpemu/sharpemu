@@ -16,7 +16,16 @@ public static partial class AgcExports
     #pragma warning disable SHEM006
     [SysAbiExport(Nid = "Ikfdt-rIqCE", ExportName = "sceAgcUnknownIkfdt",
         Target = Generation.Gen5, LibraryName = "libSceAgc")]
-    public static int UnknownIkfdt(CpuContext ctx)
+    public static int UnknownIkfdt(CpuContext ctx) => PatchIndirectBufferTarget(ctx);
+
+    // Uncatalogued name; the NID and import library identify this AGC export.
+    // Observed ABI: the one of sceAgcUnknownIkfdt. A title calls it with the packet sceAgcCbBranch returned,
+    // right after writing the NOP it points the branch at.
+    [SysAbiExport(Nid = "7Wa3aeJgeVU", ExportName = "sceAgcUnknown7Wa3ae",
+        Target = Generation.Gen5, LibraryName = "libSceAgc")]
+    public static int Unknown7Wa3ae(CpuContext ctx) => PatchIndirectBufferTarget(ctx);
+
+    private static int PatchIndirectBufferTarget(CpuContext ctx)
     {
         var packet = ctx[CpuRegister.Rdi];
         var cachePolicy = (uint)ctx[CpuRegister.Rsi];

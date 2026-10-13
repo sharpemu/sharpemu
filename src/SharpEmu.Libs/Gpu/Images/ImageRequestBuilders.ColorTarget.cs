@@ -337,6 +337,8 @@ public static partial class ImageRequestBuilders
         description.Samples = samples;
         description.TileMode = tileMode;
         var hasDcc = words.DccEnabled && words.DccAddress != 0;
+        // FAST_CLEAR keeps the clear state of a single-sample surface in CMASK; DCC takes precedence when both are set.
+        var hasCmask = !hasDcc && words.FastClear && words.CmaskAddress != 0 && samples == 1 && tiled && levels == 1 && !volume;
         if (hasDcc)
         {
             // DCC lives in its own allocation; the address lets the cache match fills seen before the target.
@@ -348,6 +350,11 @@ public static partial class ImageRequestBuilders
             description.Metadata.DccClearWord = words.ClearWord0;
             description.Metadata.DccClearRegisterValid = true;
             description.Metadata.DccAlphaMsb = DccAlphaOnMsb(words);
+        }
+        else if (hasCmask)
+        {
+            description.Metadata.Kind = MetadataKind.CMask;
+            description.Metadata.Range = new GuestSpan(words.CmaskAddress, 0);
         }
 
         for (var level = 0; level < levels; level++)
@@ -371,7 +378,7 @@ public static partial class ImageRequestBuilders
         var viewDescription = new ImageViewDescription(
             targetFormat.HostFormat, viewType, ImageAspectFlags.ColorBit, words.MipLevel, 1, view.BaseLayer, view.LayerCount, default, ImageUsageFlags.ColorAttachmentBit);
         var request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
-        var (clearSupported, fixedClearSupported, clearValue) = DccClearInfo(targetFormat.HostFormat, hasDcc, words.ClearWord0);
+        var (clearSupported, fixedClearSupported, clearValue) = DccClearInfo(targetFormat.HostFormat, hasDcc || hasCmask, words.ClearWord0);
         return new ColorTargetResolution(
             request, words.BaseAddress, backingSize, viewExtent, words.MipLevel, view.BaseLayer, samples, targetFormat.ExportMapping,
             clearSupported, fixedClearSupported, clearValue);

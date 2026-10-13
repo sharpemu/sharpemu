@@ -272,10 +272,24 @@ internal static unsafe partial class VulkanVideoPresenter
             target.Clear = ResolveDccAttachmentClear(target, out target.ClearValue);
         }
 
-        // A DCC fast clear may leave the color allocation stale; the deferred value lands when the surface binds.
+        // A DCC or CMASK fast clear may leave the color allocation stale; the deferred value lands when the surface binds.
         private bool ResolveDccAttachmentClear(ColorAttachment target, out ClearColorValue clearValue)
         {
             clearValue = default;
+            if (target.Request.Description.Metadata.Kind == MetadataKind.CMask)
+            {
+                // Every tile of a CMASK fast-cleared surface reads as the clear word until it is drawn to.
+                var cmaskView = target.Request.View;
+                if (!target.Resolution.MetadataClearSupported ||
+                    !_imageCache.TryConsumeCmaskClear(target.Request.Description.Metadata.Range.Address, cmaskView.BaseLayer, cmaskView.LayerCount))
+                {
+                    return false;
+                }
+
+                clearValue = target.Resolution.ColorClearValue;
+                return true;
+            }
+
             if (target.Request.Description.Metadata.Kind != MetadataKind.Dcc || target.Request.Description.Metadata.Range.Size != 0)
             {
                 return false;

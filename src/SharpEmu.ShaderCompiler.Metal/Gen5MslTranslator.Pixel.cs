@@ -396,6 +396,23 @@ public static partial class Gen5MslTranslator
                 2 => "z",
                 _ => "w",
             };
+            if (opcode == "ImageGather4L")
+            {
+                // gather() has no level argument and reads the base level: sample the four texels of the named
+                // level at their centres, in gather order.
+                var level = Temp(
+                    "uint",
+                    $"(uint)clamp((int)floor({ImageFloatAddress(image, addressCursor + 2)} + 0.5f), 0, (int){texture}.get_num_mip_levels() - 1)");
+                var size = Temp("float2", $"float2((float){texture}.get_width({level}), (float){texture}.get_height({level}))");
+                var corner = Temp("float2", $"floor({coordinates} * {size} - 0.5f)");
+                string Texel(string centre) =>
+                    $"{texture}.sample({samplerName}, ({corner} + float2({centre})) / {size}, level((float){level})).{componentName}";
+                sampled = Temp(
+                    $"vec<{kind}, 4>",
+                    $"{VectorLiteral(kind)}({Texel("0.5f, 1.5f")}, {Texel("1.5f, 1.5f")}, {Texel("1.5f, 0.5f")}, {Texel("0.5f, 0.5f")})");
+                return true;
+            }
+
             sampled = Temp(
                 $"vec<{kind}, 4>",
                 $"{texture}.gather({samplerName}, {coordinates}, {offset}, component::{componentName})");

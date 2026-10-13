@@ -20,6 +20,8 @@ public enum ImageNumericClass : byte
     Float,
     Uint,
     Sint,
+    // A 64-bit unsigned view of a 64 bits per texel image; only image atomics use it.
+    Uint64,
 }
 
 public enum ImageMipMode : byte
@@ -71,6 +73,8 @@ public sealed class ImageResource
     public bool Read { get; set; }
     public bool Written { get; set; }
     public bool Atomic { get; set; }
+    // An atomic on two data dwords (compare-swap: four), which works on 64-bit texels.
+    public bool Atomic64 { get; set; }
     public bool DepthCompare { get; set; }
     // Guest compare function (0..7) evaluated in the shader for a depth-compare
     // image whose format has no Vulkan depth equivalent; -1 when not emulated.

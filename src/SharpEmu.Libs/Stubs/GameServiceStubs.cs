@@ -36,14 +36,42 @@ public static class GameServiceStubs
         return Ok(ctx);
     }
 
+    // Zeroes an optional output structure; a null pointer means it was not requested.
+    private static bool ZeroOutput(CpuContext ctx, ulong address, int size)
+    {
+        if (address == 0)
+        {
+            return true;
+        }
+
+        Span<byte> zeros = stackalloc byte[size];
+        zeros.Clear();
+        return ctx.Memory.TryWrite(address, zeros);
+    }
+
     // ---- NpTrophy2: trophy context/handle registration at boot ----
     public static int NpTrophy2CreateContext(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
     public static int NpTrophy2CreateHandle(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
     public static int NpTrophy2RegisterContext(CpuContext ctx) => Ok(ctx);
 
+    // SceNpTrophy2GameDetails is six uint32 counters and a 128 byte title,
+    // SceNpTrophy2GameData six uint32 counters.
+    private const int NpTrophy2GameDetailsSize = 6 * sizeof(uint) + 128;
+    private const int NpTrophy2GameDataSize = 6 * sizeof(uint);
+
+    // Titles size their trophy arrays from the returned counts, so a success has to
+    // write them: left alone, they hold whatever the caller's heap held (an Unreal
+    // title resizes a TArray to it and aborts). No trophy set is loaded, so both
+    // outputs report an empty one.
     [SysAbiExport(Nid = "4IzqhhUQ3nk", ExportName = "sceNpTrophy2GetGameInfo",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNpTrophy2")]
-    public static int NpTrophy2GetGameInfo(CpuContext ctx) => Ok(ctx);
+    public static int NpTrophy2GetGameInfo(CpuContext ctx)
+    {
+        return ZeroOutput(ctx, ctx[CpuRegister.Rdx], NpTrophy2GameDetailsSize) &&
+            ZeroOutput(ctx, ctx[CpuRegister.Rcx], NpTrophy2GameDataSize)
+                ? Ok(ctx)
+                : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
 
     // ---- CES: Shift-JIS <-> Unicode conversion setup (Japanese text) ----
 

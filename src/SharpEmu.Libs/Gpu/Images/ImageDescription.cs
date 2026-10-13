@@ -21,6 +21,7 @@ public enum MetadataKind : byte
     None,
     Htile,
     Dcc,
+    CMask,
 }
 
 public struct MetadataDescription
@@ -394,6 +395,13 @@ public struct ImageDescription
                     Metadata.Compression == DisplayCompression.Unsupported)
                 {
                     throw SubmissionScheduler.Fatal($"The DCC metadata is invalid: address=0x{Metadata.Range.Address:X16} size=0x{Metadata.Range.Size:X16} compression={Metadata.Compression}.");
+                }
+
+                break;
+            case MetadataKind.CMask:
+                if (Metadata.Range.Address == 0 || Metadata.Range.Address >= TrackerLayout.SpaceBytes || Metadata.Range.Size != 0)
+                {
+                    throw SubmissionScheduler.Fatal($"The CMASK metadata is invalid: address=0x{Metadata.Range.Address:X16} size=0x{Metadata.Range.Size:X16}.");
                 }
 
                 break;

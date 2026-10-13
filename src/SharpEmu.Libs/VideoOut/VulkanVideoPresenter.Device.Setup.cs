@@ -723,6 +723,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private const string Maintenance5ExtensionName = "VK_KHR_maintenance5";
         private const string ImageViewMinLodExtensionName = "VK_EXT_image_view_min_lod";
         private const string FillRectangleExtensionName = "VK_NV_fill_rectangle";
+        private const string ShaderImageAtomicInt64ExtensionName = "VK_EXT_shader_image_atomic_int64";
         private bool _supportsImageViewMinLod;
 
         private void CreateDevice()
@@ -882,6 +883,30 @@ internal static unsafe partial class VulkanVideoPresenter
                 _supportsImageViewMinLod = imageViewMinLodFeatures.MinLod;
             }
 
+            var imageAtomicInt64Features = new PhysicalDeviceShaderImageAtomicInt64FeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceShaderImageAtomicInt64FeaturesExt,
+            };
+            var supportsImageInt64Atomics = false;
+            if (supportedFeatures.ShaderInt64 && IsDeviceExtensionAvailable(ShaderImageAtomicInt64ExtensionName))
+            {
+                var imageAtomicInt64Query = new PhysicalDeviceFeatures2
+                {
+                    SType = StructureType.PhysicalDeviceFeatures2,
+                    PNext = &imageAtomicInt64Features,
+                };
+                _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &imageAtomicInt64Query);
+                supportsImageInt64Atomics = imageAtomicInt64Features.ShaderImageInt64Atomics;
+            }
+
+            SetImageInt64AtomicsCapability(supportsImageInt64Atomics);
+            if (!supportsImageInt64Atomics)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] GPU does not support shaderImageInt64Atomics " +
+                    "translated shaders using an atomic on a 64-bit image texel will fail to compile.");
+            }
+
             // MoltenVK exposes the barycentric builtins, but SPIRV-Cross rejects PerVertexKHR inputs.
             _supportsPerVertexPixelInputs = _supportsFragmentShaderBarycentric &&
                 !IsDeviceExtensionAvailable(PortabilitySubsetExtensionName);
@@ -992,6 +1017,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var maintenance5Extension = (byte*)SilkMarshal.StringToPtr(Maintenance5ExtensionName);
             var imageViewMinLodExtension = (byte*)SilkMarshal.StringToPtr(ImageViewMinLodExtensionName);
             var fillRectangleExtension = (byte*)SilkMarshal.StringToPtr(FillRectangleExtensionName);
+            var imageAtomicInt64Extension = (byte*)SilkMarshal.StringToPtr(ShaderImageAtomicInt64ExtensionName);
             try
             {
                 var extensions = stackalloc byte*[15];
@@ -1039,6 +1065,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (_supportsFillRectangle)
                 {
                     extensions[extensionCount++] = fillRectangleExtension;
+                }
+
+                if (supportsImageInt64Atomics)
+                {
+                    extensions[extensionCount++] = imageAtomicInt64Extension;
                 }
 
                 if (supportsRobustness2)
@@ -1119,6 +1150,17 @@ internal static unsafe partial class VulkanVideoPresenter
                     };
                     renderingChain = &imageViewMinLodFeatures;
                 }
+
+                if (supportsImageInt64Atomics)
+                {
+                    imageAtomicInt64Features = new PhysicalDeviceShaderImageAtomicInt64FeaturesEXT
+                    {
+                        SType = StructureType.PhysicalDeviceShaderImageAtomicInt64FeaturesExt,
+                        ShaderImageInt64Atomics = true,
+                        PNext = renderingChain,
+                    };
+                    renderingChain = &imageAtomicInt64Features;
+                }
                 if (_supportsDepthClipEnable)
                 {
                     depthClipEnableFeatures = new PhysicalDeviceDepthClipEnableFeaturesEXT
@@ -1185,6 +1227,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)maintenance5Extension);
                 SilkMarshal.Free((nint)imageViewMinLodExtension);
                 SilkMarshal.Free((nint)fillRectangleExtension);
+                SilkMarshal.Free((nint)imageAtomicInt64Extension);
                 SilkMarshal.Free((nint)robustness2Extension);
                 SilkMarshal.Free((nint)portabilitySubsetExtension);
                 SilkMarshal.Free((nint)colorWriteEnableExtension);

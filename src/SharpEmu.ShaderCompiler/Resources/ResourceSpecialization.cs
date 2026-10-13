@@ -81,7 +81,9 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
         BaseBufferCount = info.Buffers.Count,
         Buffers = info.Buffers.Select(_ => new BufferSpecialization(0, DescriptorConstants.InvalidFormat, DescriptorConstants.IdentityDestinationSelect)).ToList(),
         Images = info.Images.Select(image => new ImageSpecialization(
-            image.NumericClass == ImageNumericClass.Unsupported ? (image.Atomic ? ImageNumericClass.Uint : ImageNumericClass.Float) : image.NumericClass,
+            image.NumericClass == ImageNumericClass.Unsupported
+                ? (image.Atomic64 ? ImageNumericClass.Uint64 : image.Atomic ? ImageNumericClass.Uint : ImageNumericClass.Float)
+                : image.NumericClass,
             image.Dimension == ImageDimension.Unknown ? ImageDimension.Dim2D : image.Dimension,
             image.MipCount, image.ConversionFormat, image.ShaderSwizzle,
             image.IndirectRoot, image.IndirectMappingOffset, image.IndirectSearchIterations, image.Cube)).ToList(),

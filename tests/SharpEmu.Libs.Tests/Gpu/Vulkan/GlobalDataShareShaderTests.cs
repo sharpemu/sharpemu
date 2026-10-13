@@ -113,6 +113,63 @@ public sealed class GlobalDataShareShaderTests(HeadlessVulkanFixture fixture, IT
         output.WriteLine($"Verified GDS append on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
     }
 
+    // DS_ORDERED_COUNT adds the count the first active lane holds (not the lane count) to the dword offset0[7:2] picks and
+    // hands every lane the old value. M0's size carries the wave's launch order here, so a zero size must not turn it off,
+    // and its low two bits are the packer id only for a pixel wave (offset1 bit 2).
+    [Theory]
+    [InlineData(0u, 3u, 1)]
+    [InlineData(6u, 3u, 1)]
+    [InlineData(0u, 7u, 1)]
+    [InlineData(6u, 7u, 3)]
+    public void OrderedCountOverTheGlobalDataShare_AddsTheFirstLanesCountAndReturnsTheOldValue(uint m0, uint offset1, int counterWord)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true))
+        {
+            return;
+        }
+
+        // v1 = lane + 10: the first lane's count (10) differs from the lane count (32) and from the sum over the lanes.
+        var program = Program(
+            MoveScalar(0, M0, m0),
+            Vop2(8, "VAddI32", 1, Operand(10), Gen5Operand.Vector(0)),
+            DataShare(12, "DsOrderedCount", gds: true, [Gen5Operand.Scalar(M0), Gen5Operand.Vector(1)], [2], offset0: 4, offset1: offset1),
+            Vop2(20, "VLshlrevB32", 5, Operand(2), Gen5Operand.Vector(0)),
+            BufferAccess(24, "BufferStoreDword", ResultRegister, 0, 1, vectorData: 2, offsetEnabled: true, vectorAddress: 5),
+            EndProgram(32));
+
+        using var harness = new ImageTestHarness(vulkan);
+        var request = RequestFor(program, threadCount: 32);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var share = runner.CreateBuffer(new byte[64]);
+        var result = runner.CreateBuffer(ResultBytes);
+        var registers = new uint[256];
+        registers[ResultRegister + 2] = ResultBytes;
+        var bound = new Dictionary<DescriptorBindingKind, GpuBuffer[]>
+        {
+            [DescriptorBindingKind.GlobalDataShare] = [share],
+            [DescriptorBindingKind.Buffers] = [result],
+        };
+        harness.Run(() => runner.Dispatch(registers, bound, 1));
+        harness.Run(() => runner.Dispatch(registers, bound, 1));
+
+        var counters = runner.ReadBack(share, 0, 64);
+        for (var word = 0; word < 16; word++)
+        {
+            Assert.Equal(word == counterWord ? 20u : 0u, ReadWord(counters, word * 4));
+        }
+
+        var results = runner.ReadBack(result, 0, ResultBytes);
+        for (var lane = 0; lane < 32; lane++)
+        {
+            Assert.Equal(10u, ReadWord(results, lane * 4));
+        }
+
+        harness.AssertNoValidationMessages();
+        output.WriteLine($"Verified GDS ordered count on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
+    }
+
     private static ShaderCompileRequest RequestFor(Gen5ShaderProgram program, uint threadCount)
     {
         var (plan, resources, layout) = Prepare(program);

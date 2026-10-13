@@ -273,6 +273,53 @@ public sealed class Gen5ShaderTranslatorTests
         Assert.All(program.Instructions, static instruction => Assert.Null(instruction.AddressOffset));
     }
 
+    // An entry can leave with S_SWAPPC_B64 that writes the return address to NULL (SGPR 125): the swap discards where it came from, so it jumps
+    // like S_SETPC_B64 does. What follows it in the entry (a data word, the code object's footer) is not code.
+    [Fact]
+    public void FusedProgramContinuesAfterASwapProgramCounterThatDropsTheReturnAddress()
+    {
+        const ulong continuationAddress = ProgramAddress + 0x100;
+        const ulong entryHeaderAddress = ProgramAddress + 0x400;
+        const ulong continuationHeaderAddress = ProgramAddress + 0x500;
+        var memory = new FakeCpuMemory(ProgramAddress, 0x1000);
+
+        // s_nop, s_swappc_b64 null, s[6:7], then a data word, "barefoot" and a word that is no instruction.
+        WriteWords(memory, ProgramAddress, 0xBF800000u, 0xBEFD2106u, 0x30306C73u, 0x65726162u, 0x746F6F66u, 0xE58B50C0u);
+        WriteWords(memory, continuationAddress, 0xBF800000u, 0xBF810000u);
+        WriteUInt32(memory, entryHeaderAddress + 0x44, 6 * sizeof(uint));
+        WriteUInt32(memory, continuationHeaderAddress + 0x44, 2 * sizeof(uint));
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Gen5ShaderTranslator.RegisterFusedProgram(context, ProgramAddress, entryHeaderAddress, continuationAddress, continuationHeaderAddress);
+
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, ProgramAddress, out var program, out var error), error);
+        Assert.Equal(["SNop", "SNop", "SNop", "SEndpgm"], program.Instructions.Select(static instruction => instruction.Opcode));
+        Assert.Equal([0u, 4u, 0x100u, 0x104u], program.Instructions.Select(static instruction => instruction.Pc));
+    }
+
+    // A swap that keeps the return address is a call: the entry goes on to the S_SETPC_B64 that leaves it.
+    [Fact]
+    public void FusedProgramKeepsDecodingPastASwapProgramCounterThatSavesTheReturnAddress()
+    {
+        const ulong continuationAddress = ProgramAddress + 0x100;
+        const ulong entryHeaderAddress = ProgramAddress + 0x400;
+        const ulong continuationHeaderAddress = ProgramAddress + 0x500;
+        var memory = new FakeCpuMemory(ProgramAddress, 0x1000);
+
+        // s_swappc_b64 s[2:3], s[6:7], s_setpc_b64 s[0:1]
+        WriteWords(memory, ProgramAddress, 0xBE822106u, 0xBE802000u);
+        WriteWords(memory, continuationAddress, 0xBF800000u, 0xBF810000u);
+        WriteUInt32(memory, entryHeaderAddress + 0x44, 2 * sizeof(uint));
+        WriteUInt32(memory, continuationHeaderAddress + 0x44, 2 * sizeof(uint));
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Gen5ShaderTranslator.RegisterFusedProgram(context, ProgramAddress, entryHeaderAddress, continuationAddress, continuationHeaderAddress);
+
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, ProgramAddress, out var program, out var error), error);
+        Assert.Equal(["SSwappcB64", "SNop", "SNop", "SEndpgm"], program.Instructions.Select(static instruction => instruction.Opcode));
+        Assert.Equal([0u, 4u, 0x100u, 0x104u], program.Instructions.Select(static instruction => instruction.Pc));
+    }
+
     private sealed class TwoRegionMemory(FakeCpuMemory first, FakeCpuMemory second) : ICpuMemory
     {
         public bool TryRead(ulong virtualAddress, Span<byte> destination) =>
