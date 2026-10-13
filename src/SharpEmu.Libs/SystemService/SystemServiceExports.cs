@@ -11,6 +11,7 @@ namespace SharpEmu.Libs.SystemService;
 public static class SystemServiceExports
 {
     private const int OrbisSystemServiceErrorParameter = unchecked((int)0x80A10003);
+    private const int OrbisSystemServiceErrorNoEvent = unchecked((int)0x80A10004);
     private const int SystemServiceStatusSize = 0x0C;
     private const int DisplaySafeAreaInfoSize = sizeof(float) + 128;
     private const int HdrToneMapLuminanceSize = sizeof(float) * 3;
@@ -20,6 +21,21 @@ public static class SystemServiceExports
     private static string? _mainAppTitleId;
     private static int _noticeScreenSkipFlag;
     private static int _systemLanguage = 1;
+
+    [SysAbiExport(
+        Nid = "656LMQSrg6U",
+        ExportName = "sceSystemServiceReceiveEvent",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSystemService")]
+    public static int SystemServiceReceiveEvent(CpuContext ctx)
+    {
+        if (ctx[CpuRegister.Rdi] == 0)
+            return ctx.SetReturn(OrbisSystemServiceErrorParameter);
+
+        // No host system-service events are generated yet. An empty poll must
+        // leave the caller's event record untouched and report NO_EVENT.
+        return ctx.SetReturn(OrbisSystemServiceErrorNoEvent);
+    }
 
     public static void ConfigureApplicationInfo(string? titleId, int systemLanguage = 1)
     {

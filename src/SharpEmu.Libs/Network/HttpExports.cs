@@ -23,7 +23,9 @@ public static partial class HttpExports
         ulong UserAgentAddress,
         int HttpVersion,
         bool AutoProxyConfig,
-        uint ConnectTimeoutMicroseconds = 30_000_000);
+        uint ConnectTimeoutMicroseconds = 30_000_000,
+        uint ReceiveTimeoutMicroseconds = 120_000_000,
+        uint SendTimeoutMicroseconds = 120_000_000);
 
     [SysAbiExport(
         Nid = "A9cVMUtEp4Y",
@@ -104,6 +106,72 @@ public static partial class HttpExports
 
         Templates[id] = template with { ConnectTimeoutMicroseconds = timeoutMicroseconds };
         TraceHttp("set_connect_timeout", id, timeoutMicroseconds, 0, 0, 0);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "yigr4V0-HTM",
+        ExportName = "sceHttpSetRecvTimeOut",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceHttp")]
+    public static int HttpSetRecvTimeOut(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var timeoutMicroseconds = unchecked((uint)ctx[CpuRegister.Rsi]);
+        if (timeoutMicroseconds == 0)
+        {
+            return ctx.SetReturn(HttpErrorInvalidValue);
+        }
+
+        if (!Templates.TryGetValue(id, out var template))
+        {
+            return ctx.SetReturn(HttpErrorInvalidId);
+        }
+
+        Templates[id] = template with { ReceiveTimeoutMicroseconds = timeoutMicroseconds };
+        TraceHttp("set_recv_timeout", id, timeoutMicroseconds, 0, 0, 0);
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "xegFfZKBVlw",
+        ExportName = "sceHttpSetSendTimeOut",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceHttp")]
+    public static int HttpSetSendTimeOut(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var timeoutMicroseconds = unchecked((uint)ctx[CpuRegister.Rsi]);
+        if (timeoutMicroseconds == 0)
+        {
+            return ctx.SetReturn(HttpErrorInvalidValue);
+        }
+
+        if (!Templates.TryGetValue(id, out var template))
+        {
+            return ctx.SetReturn(HttpErrorInvalidId);
+        }
+
+        Templates[id] = template with { SendTimeoutMicroseconds = timeoutMicroseconds };
+        TraceHttp("set_send_timeout", id, timeoutMicroseconds, 0, 0, 0);
+        return ctx.SetReturn(0);
+    }
+
+    // Registers CA certificates on an HTTP context; no host TLS session uses them.
+    [SysAbiExport(
+        Nid = "DK+GoXCNT04",
+        ExportName = "sceHttpsLoadCert",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceHttp")]
+    public static int HttpsLoadCert(CpuContext ctx)
+    {
+        var contextId = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (!Contexts.ContainsKey(contextId))
+        {
+            return ctx.SetReturn(HttpErrorInvalidId);
+        }
+
+        TraceHttp("https_load_cert", contextId, ctx[CpuRegister.Rsi], ctx[CpuRegister.Rdx], ctx[CpuRegister.Rcx], ctx[CpuRegister.R8]);
         return ctx.SetReturn(0);
     }
 

@@ -18,6 +18,22 @@ public sealed class SystemServiceExportsTests
     }
 
     [Fact]
+    public void EmptyEventPollPreservesTheEntireEventRecord()
+    {
+        var memory = new FakeCpuMemory(MemoryBase, 0x2004);
+        var sentinel = Enumerable.Repeat((byte)0xA5, 0x2004).ToArray();
+        Assert.True(memory.TryWrite(MemoryBase, sentinel));
+        var context = new CpuContext(memory, Generation.Gen5) { [CpuRegister.Rdi] = MemoryBase };
+        for (var poll = 0; poll < 3; poll++)
+            Assert.Equal(unchecked((int)0x80A10004), SystemServiceExports.SystemServiceReceiveEvent(context));
+        var actual = new byte[sentinel.Length];
+        Assert.True(memory.TryRead(MemoryBase, actual));
+        Assert.Equal(sentinel, actual);
+        context[CpuRegister.Rdi] = 0;
+        Assert.Equal(unchecked((int)0x80A10003), SystemServiceExports.SystemServiceReceiveEvent(context));
+    }
+
+    [Fact]
     public void GetNoticeScreenSkipFlagWritesOneByteAtMemoryBoundary()
     {
         var memory = new FakeCpuMemory(MemoryBase, 1);
