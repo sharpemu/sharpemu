@@ -1163,6 +1163,17 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public bool TryReadBacking(ulong address, Span<byte> data)
     {
+        // The same lock-free single-view read TryRead takes first. The resource cache
+        // validates every reused materialization through here, a few dozen ranges per
+        // draw, and taking the gate for each one queued it behind every writer waiting
+        // on the gate (a protection change, a mapping) for no reason: one view covering
+        // the range is read through its alias with no lock either way.
+        if (!data.IsEmpty && _backedSpace is { } backed && !_disposed &&
+            backed.TryReadSingleView(address, data))
+        {
+            return true;
+        }
+
         _gate.EnterReadLock();
         try
         {

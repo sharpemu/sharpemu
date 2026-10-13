@@ -396,4 +396,49 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         Assert.Equal(address, host.ReserveHole(address, 2 * size));
         Assert.True(host.FreeHole(address, 2 * size));
     }
+    // The resource cache validates reused materializations through backing reads, and a
+    // read one view covers needs no lock: it must not queue behind a writer holding the
+    // memory gate. A read across two views still takes the gate and waits for it.
+    [Fact]
+    public void ABackingReadInsideOneViewDoesNotWaitForTheMemoryGate()
+    {
+        if (!Supported) return;
+        var host = HostViewMemory.Create();
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var address = Hold(memory, host);
+        Assert.True(memory.TryMapBacked(address, Segment, 0, GuestPageProtection.Read, out _));
+        Assert.True(memory.TryMapBacked(address + Segment, Segment, 4 * Segment, GuestPageProtection.Read, out _));
+        *(ulong*)(address + 8) = Marker;
+        *(ulong*)(address + Segment - 4) = ~Marker;
+        var gate = (ReaderWriterLockSlim)typeof(PhysicalVirtualMemory)
+            .GetField("_gate", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(memory)!;
+
+        var single = new byte[8];
+        var straddle = new byte[8];
+        var singleRead = false;
+        var straddleRead = false;
+        using var singleDone = new ManualResetEventSlim();
+        using var straddleDone = new ManualResetEventSlim();
+        gate.EnterWriteLock();
+        try
+        {
+            new Thread(() => { singleRead = memory.TryReadBacking(address + 8, single); singleDone.Set(); })
+                { IsBackground = true }.Start();
+            Assert.True(singleDone.Wait(TimeSpan.FromSeconds(10)), "a single-view read waited for the gate");
+            new Thread(() => { straddleRead = memory.TryReadBacking(address + Segment - 4, straddle); straddleDone.Set(); })
+                { IsBackground = true }.Start();
+            Assert.False(straddleDone.Wait(TimeSpan.FromMilliseconds(200)), "a read across views skipped the gate");
+        }
+        finally
+        {
+            gate.ExitWriteLock();
+        }
+
+        Assert.True(straddleDone.Wait(TimeSpan.FromSeconds(10)));
+        Assert.True(singleRead);
+        Assert.Equal(Marker, BitConverter.ToUInt64(single));
+        Assert.True(straddleRead);
+        Assert.Equal(unchecked((uint)~Marker), BitConverter.ToUInt32(straddle));
+    }
 }
