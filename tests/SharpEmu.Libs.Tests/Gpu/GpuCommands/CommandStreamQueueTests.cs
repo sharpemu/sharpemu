@@ -602,9 +602,16 @@ public sealed class CommandStreamQueueTests
                 : WaitEqual(address, 1));
         }
         Enqueue(host, queue, Graphics, 1, packets.ToArray());
-        host.BeforeGuestRead = address =>
+        // The CPU resets the last label between its store and the wait that polls it, and the
+        // wait never reads memory once its own store satisfies it.
+        var reset = false;
+        host.BeforePacket = () =>
         {
-            if (address == Label + 6 * 8) host.WriteQword(address, 0);
+            if (!reset && host.ReadQword(Label + 6 * 8) != 0)
+            {
+                host.WriteQword(Label + 6 * 8, 0);
+                reset = true;
+            }
         };
 
         Assert.Equal(IdleOutcome.Completed, await Task.Run(queue.Done).WaitAsync(TimeSpan.FromSeconds(2)));
