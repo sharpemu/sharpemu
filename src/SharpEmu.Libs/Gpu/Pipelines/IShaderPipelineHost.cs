@@ -56,6 +56,9 @@ internal interface IShaderPipelineHost
 
     RenderHostLimits Limits { get; }
 
+    // The device can blend with a second fragment output (dualSrcBlend).
+    bool SupportsDualSourceBlend => false;
+
     // The sample counts a pipeline without attachments can rasterize at.
     SampleCountFlags NoAttachmentSampleCounts { get; }
 

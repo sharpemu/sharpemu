@@ -328,7 +328,32 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             });
         }
 
+        // Dual-source blending reads its second source from the export after target 0's,
+        // as the hardware pairs MRT0 and MRT1. It shares target 0's location as index 1.
+        if (_host.SupportsDualSourceBlend && UsesSecondBlendSource(context.BlendControls[0]) &&
+            outputs.Count == 1 && outputs[0].GuestSlot == 0 && outputs[0].ExportTarget < ContextRegisters.ColorTargetCount)
+        {
+            var first = outputs[0];
+            outputs.Add(new Gen5PixelOutputBinding(1, first.HostLocation, first.Kind, first.ComponentMapping)
+            {
+                ExportTarget = first.ExportTarget + 1,
+                Index = 1,
+            });
+            // Key the compiled program by the second source as well.
+            outputModes[1] = DualSourceOutputMode;
+        }
+
         return outputs.ToArray();
+    }
+
+    private const byte DualSourceOutputMode = 0xFF;
+
+    // BLEND_SRC1_COLOR, BLEND_ONE_MINUS_SRC1_COLOR, BLEND_SRC1_ALPHA, BLEND_ONE_MINUS_SRC1_ALPHA.
+    internal static bool UsesSecondBlendSource(in BlendRegisters blend)
+    {
+        static bool Second(byte factor) => factor is >= 15 and <= 18;
+        return blend.Enable && (Second(blend.ColorSourceFactor) || Second(blend.ColorDestinationFactor) ||
+            Second(blend.AlphaSourceFactor) || Second(blend.AlphaDestinationFactor));
     }
 
     private static VertexPositionStream? FindPositionStream(VertexInputInfo info)

@@ -44,6 +44,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private uint _maxComputeWorkGroupInvocations;
         private ulong _minStorageBufferOffsetAlignment = 1;
         private bool _supportsIndependentBlend;
+        private bool _supportsDualSourceBlend;
         private bool _supportsDepthBiasClamp;
         private bool _supportsShaderSignedZeroInfNanPreserveFloat32;
         private uint _maxColorAttachments;
@@ -761,6 +762,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _supportsIndependentBlend = supportedFeatures.IndependentBlend;
+            _supportsDualSourceBlend = supportedFeatures.DualSrcBlend;
             _supportsDepthBiasClamp = supportedFeatures.DepthBiasClamp;
             _supportsDepthBounds = supportedFeatures.DepthBounds;
             _supportsShaderClipDistance = supportedFeatures.ShaderClipDistance;
@@ -769,6 +771,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 DepthBounds = supportedFeatures.DepthBounds,
                 IndependentBlend = supportedFeatures.IndependentBlend,
+                DualSrcBlend = supportedFeatures.DualSrcBlend,
                 VertexPipelineStoresAndAtomics = supportedFeatures.VertexPipelineStoresAndAtomics,
                 FragmentStoresAndAtomics = supportedFeatures.FragmentStoresAndAtomics,
                 ShaderInt64 = supportedFeatures.ShaderInt64,
@@ -819,6 +822,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 Console.Error.WriteLine(
                     "[LOADER][WARN] GPU does not support vertexPipelineStoresAndAtomics/fragmentStoresAndAtomics " +
                     "translated shaders using storage buffers in vertex/fragment stages may fail.");
+            }
+
+            if (!supportedFeatures.DualSrcBlend)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] GPU does not support dualSrcBlend " +
+                    "blends that read SRC1 factors fall back to a single source.");
             }
 
             if (!supportedFeatures.ShaderImageGatherExtended)

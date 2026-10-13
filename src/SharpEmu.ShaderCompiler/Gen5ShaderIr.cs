@@ -143,6 +143,10 @@ public readonly record struct Gen5PixelOutputBinding(
         get => _exportTarget ?? GuestSlot;
         init => _exportTarget = value;
     }
+
+    // The fragment output index: 1 is the second source of dual-source blending, which
+    // shares its location with the first and is not a render target.
+    public uint Index { get; init; }
 }
 
 public readonly record struct Gen5ComputeSystemRegisters(

@@ -132,6 +132,25 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.False(description.StaticParameters.CullBack);
     }
 
+    [Theory]
+    [InlineData(true, 15, 0, 1, 0, true)]
+    [InlineData(true, 1, 16, 1, 0, true)]
+    [InlineData(true, 1, 0, 17, 0, true)]
+    [InlineData(true, 1, 0, 1, 18, true)]
+    [InlineData(true, 4, 5, 1, 0, false)]
+    [InlineData(false, 15, 16, 17, 18, false)]
+    public void SecondBlendSource_IsUsedOnlyByEnabledSrc1Factors(bool enable, byte colorSource, byte colorDestination,
+        byte alphaSource, byte alphaDestination, bool expected)
+    {
+        var blend = new BlendRegisters
+        {
+            Enable = enable, ColorSourceFactor = colorSource, ColorDestinationFactor = colorDestination,
+            AlphaSourceFactor = alphaSource, AlphaDestinationFactor = alphaDestination,
+        };
+
+        Assert.Equal(expected, ShaderPipelineCache.UsesSecondBlendSource(blend));
+    }
+
     [Fact]
     public void DepthTarget_FoldsTheDepthAndStencilState()
     {

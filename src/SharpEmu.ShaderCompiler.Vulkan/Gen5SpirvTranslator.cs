@@ -1046,6 +1046,10 @@ public static partial class Gen5SpirvTranslator
                         variable,
                         SpirvDecoration.Location,
                         binding.HostLocation);
+                    if (binding.Index != 0)
+                    {
+                        _module.AddDecoration(variable, SpirvDecoration.Index, binding.Index);
+                    }
                     _pixelOutputs.Add(
                         binding.ExportTarget,
                         new SpirvPixelOutput(
