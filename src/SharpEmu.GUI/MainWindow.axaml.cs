@@ -2557,7 +2557,7 @@ public partial class MainWindow : Window
         var options = new FilePickerSaveOptions
         {
             Title = loc.Get("Dialog.SaveZar"),
-            SuggestedFileName = SuggestedArchiveName(Path.GetFileName(gameFolder), game.TitleId, game.Version),
+            SuggestedFileName = SuggestedArchiveName(Path.GetFileName(gameFolder), game.TitleId, game.Version) + ".zar",
             DefaultExtension = "zar",
             FileTypeChoices = [new FilePickerFileType(loc.Get("Dialog.ZarFiles")) { Patterns = ["*.zar"] }],
         };
@@ -2568,11 +2568,13 @@ public partial class MainWindow : Window
         }
 
         var file = await StorageProvider.SaveFilePickerAsync(options);
-        var destination = file?.TryGetLocalPath();
-        if (string.IsNullOrEmpty(destination))
+        var picked = file?.TryGetLocalPath();
+        if (string.IsNullOrEmpty(picked))
         {
             return;
         }
+
+        var destination = ArchiveDestination(picked);
 
         // A running game may hold files in the folder open, so it is never deleted then.
         var dialog = new ZarPackDialog(game.Name, gameFolder, destination, canDeleteSource: !_isRunning);
@@ -2589,6 +2591,12 @@ public partial class MainWindow : Window
             SetTitleMusicMuted(false);
         }
     }
+
+    // A version-suffixed name such as PPSA01234-1.001 already ends in what the save dialog takes for
+    // an extension, so the dialog keeps it and does not add .zar; the archive then looks like a
+    // split-archive part. The extension is added here when it is missing.
+    internal static string ArchiveDestination(string path) =>
+        path.EndsWith(".zar", StringComparison.OrdinalIgnoreCase) ? path : path + ".zar";
 
     // TITLEID-version (PPSA01234-1.004): the title id differs between regions of the same game and
     // the version between updates, so each archive gets its own name and cache folder. Without a

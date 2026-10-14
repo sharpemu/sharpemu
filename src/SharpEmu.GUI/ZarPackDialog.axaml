@@ -36,13 +36,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                Foreground="{StaticResource MutedBrush}"
                TextWrapping="Wrap" />
 
-    <StackPanel Spacing="4">
-      <CheckBox x:Name="DeleteSourceCheck"
-                Content="{Binding [Library.Pack.DeleteSource], Source={x:Static local:Localization.Instance}}" />
-      <TextBlock Margin="28,0,0,0"
-                 Foreground="{StaticResource DangerBrush}"
+    <!-- Shown only once the finished archive is checked to hold the whole folder. -->
+    <StackPanel x:Name="DeleteSourcePanel" Spacing="6" IsVisible="False">
+      <TextBlock Foreground="{StaticResource DangerBrush}"
                  TextWrapping="Wrap"
                  Text="{Binding [Library.Pack.DeleteSourceWarning], Source={x:Static local:Localization.Instance}}" />
+      <Button x:Name="DeleteSourceButton"
+              Classes="ghost"
+              Content="{Binding [Library.Pack.DeleteSource], Source={x:Static local:Localization.Instance}}" />
     </StackPanel>
 
     <Grid Margin="0,8,0,0" ColumnDefinitions="Auto,*,Auto">

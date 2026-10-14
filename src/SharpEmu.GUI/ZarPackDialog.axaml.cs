@@ -7,14 +7,15 @@ using SharpEmu.HLE.FileSystem;
 namespace SharpEmu.GUI;
 
 // Packs a game folder into a .zar on a worker thread and shows its progress. The button cancels
-// while packing and closes once done; the dialog returns true when the archive was written. When
-// the user opts in, the game folder is deleted afterwards, but only once the finished archive opens
-// and holds every file of the folder at the same size.
+// while packing and closes once done; the dialog returns true when the archive was written. Deleting
+// the game folder is offered only after packing, once the finished archive opens and holds every
+// file of the folder at the same size, so an interrupted or incomplete archive never costs the folder.
 public partial class ZarPackDialog : Window
 {
     private readonly CancellationTokenSource _cancellation = new();
     private readonly string _sourceFolder = string.Empty;
     private readonly string _destination = string.Empty;
+    private readonly bool _canDeleteSource;
     private bool _finished;
     private bool _succeeded;
 
@@ -28,11 +29,12 @@ public partial class ZarPackDialog : Window
     {
         _sourceFolder = sourceFolder;
         _destination = destination;
-        DeleteSourceCheck.IsEnabled = canDeleteSource;
+        _canDeleteSource = canDeleteSource;
         HeadingText.Text = Localization.Instance.Format("Library.Pack.Heading", gameName);
         DestinationText.Text = destination;
         StatusText.Text = Localization.Instance.Get("Library.Pack.Preparing");
         CloseButton.Click += (_, _) => OnCloseClicked();
+        DeleteSourceButton.Click += async (_, _) => StatusText.Text = await DeleteSourceAsync();
         MuteMusicButton.IsCheckedChanged += (_, _) =>
         {
             var muted = MuteMusicButton.IsChecked == true;
@@ -111,40 +113,62 @@ public partial class ZarPackDialog : Window
         StatusText.Text = _succeeded
             ? Localization.Instance.Get("Library.Pack.Done")
             : Localization.Instance.Format("Library.Pack.Failed", error ?? string.Empty);
-        DeleteSourceCheck.IsEnabled = false;
-        if (_succeeded && DeleteSourceCheck.IsChecked == true)
+        if (_succeeded && _canDeleteSource)
         {
-            StatusText.Text = await DeleteSourceAsync();
+            CloseButton.IsEnabled = false;
+            StatusText.Text = Localization.Instance.Get("Library.Pack.Verifying");
+            var verified = await ArchiveHoldsSourceAsync();
+            StatusText.Text = Localization.Instance.Get(verified ? "Library.Pack.Done" : "Library.Pack.DeleteSkipped");
+            DeleteSourcePanel.IsVisible = verified;
         }
 
         CloseButton.Content = Localization.Instance.Get("Library.Pack.Close");
         CloseButton.IsEnabled = true;
     }
 
-    // Deletes the game folder once the archive is confirmed to hold all of it. Returns the status
-    // to show.
+    // The archive exists, opens, and holds every file of the game folder at the same size.
+    private async Task<bool> ArchiveHoldsSourceAsync()
+    {
+        var source = _sourceFolder;
+        var destination = _destination;
+        try
+        {
+            return File.Exists(destination) && File.Exists(Path.Combine(source, "eboot.bin")) &&
+                   await Task.Run(() => ZArchiveWriter.MatchesFolder(destination, source));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    // Deletes the game folder the verified archive holds. Returns the status to show.
     private async Task<string> DeleteSourceAsync()
     {
         var loc = Localization.Instance;
+        DeleteSourcePanel.IsVisible = false;
         CloseButton.IsEnabled = false;
-        StatusText.Text = loc.Get("Library.Pack.Verifying");
         try
         {
-            var source = _sourceFolder;
-            var destination = _destination;
-            if (!File.Exists(Path.Combine(source, "eboot.bin")) ||
-                !await Task.Run(() => ZArchiveWriter.MatchesFolder(destination, source)))
+            // The archive could have been moved or replaced since it was checked.
+            StatusText.Text = loc.Get("Library.Pack.Verifying");
+            if (!await ArchiveHoldsSourceAsync())
             {
                 return loc.Get("Library.Pack.DeleteSkipped");
             }
 
             StatusText.Text = loc.Get("Library.Pack.Deleting");
+            var source = _sourceFolder;
             await Task.Run(() => Directory.Delete(source, recursive: true));
             return loc.Get("Library.Pack.DoneDeleted");
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
             return loc.Format("Library.Pack.DeleteFailed", exception.Message);
+        }
+        finally
+        {
+            CloseButton.IsEnabled = true;
         }
     }
 
