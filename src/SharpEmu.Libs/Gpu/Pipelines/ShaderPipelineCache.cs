@@ -28,6 +28,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private uint[]? _vertexUserData;
     private uint[]? _pixelUserData;
     private readonly List<Gen5PixelOutputBinding> _boundOutputs = new(ContextRegisters.ColorTargetCount);
+    private readonly VertexTableMetadataCache _vertexTables = new();
     private readonly Dictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
     private readonly Dictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
     private readonly object _gate = new();
@@ -246,7 +247,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,
-            shaderInterface.VertexOutputControl, clipSpace);
+            shaderInterface.VertexOutputControl, clipSpace, _vertexTables, source.Hash);
     }
 
     // The interpolated attributes a pixel program reads, ascending. A program never changes, and this
