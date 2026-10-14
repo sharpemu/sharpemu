@@ -300,6 +300,12 @@ public sealed class SelfLoader : ISelfLoader
             out var initializerFunctions);
         var procParamAddress = ResolveProcParamAddress(programHeaders, imageBase);
 
+        // Main executable only (clearVirtualMemory). After segments, relocations and import binding; before the red-zone scan so it sees patched code.
+        if (clearVirtualMemory)
+        {
+            GuestBytePatcher.ApplyFromEnvironment(virtualMemory, programHeaders, imageBase);
+        }
+
         if (virtualMemory is PhysicalVirtualMemory patchableMemory)
         {
             _ = GuestRedZonePatcher.Patch(
