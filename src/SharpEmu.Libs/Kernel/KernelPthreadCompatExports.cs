@@ -333,6 +333,19 @@ public static class KernelPthreadCompatExports
         LibraryName = "libKernel")]
     public static int PthreadRename(CpuContext ctx)
     {
+        if (SharpEmu.HLE.Host.GuestThreadQosPolicy.IsEnabled && ctx[CpuRegister.Rsi] != 0)
+        {
+            Span<byte> renameBytes = stackalloc byte[64];
+            if (ctx.Memory.TryRead(ctx[CpuRegister.Rsi], renameBytes))
+            {
+                var renameLength = renameBytes.IndexOf((byte)0);
+                var renamed = System.Text.Encoding.UTF8.GetString(
+                    renameLength >= 0 ? renameBytes[..renameLength] : renameBytes);
+                SharpEmu.HLE.Host.GuestThreadQosPolicy.OnRename(
+                    ctx[CpuRegister.Rdi], GuestThreadExecution.CurrentGuestThreadHandle, renamed);
+            }
+        }
+
         if (_tracePthreads)
         {
             var nameAddress = ctx[CpuRegister.Rsi];

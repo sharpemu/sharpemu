@@ -770,7 +770,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		private readonly object _gate = new();
 		private readonly AutoResetEvent _workAvailable = new(false);
-		private readonly Thread _thread;
+		private readonly Thread? _thread;
+		private readonly SharpEmu.HLE.Host.HostQosThread? _qosThread;
+		private readonly string _hostName;
 		private Action? _work;
 		private volatile bool _stopping;
 
@@ -784,10 +786,27 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		public GuestExecutionRunner(ulong guestThreadHandle, string name, ThreadPriority priority)
 		{
-			_thread = new Thread(() => ThreadMain(guestThreadHandle), GuestExecutionStackBytes)
+			_hostName = $"SharpEmu-{name}";
+			// A matched SHARPEMU_GUEST_THREAD_QOS rule wins over the explicit host
+			// priority: the thread is created at the rule's class (natively on macOS,
+			// where CoreCLR-created threads can never take a QoS class afterwards).
+			if (SharpEmu.HLE.Host.GuestThreadQosPolicy.TryGetClassForNewThread(name, out var qosClass))
+			{
+				// The class travels as an argument: the thread may run before the
+				// constructor has stored _qosThread.
+				_qosThread = SharpEmu.HLE.Host.HostQosThread.TryStart(
+					_hostName, qosClass, GuestExecutionStackBytes, () => ThreadMain(guestThreadHandle, qosClass), out var errno);
+				if (_qosThread is not null)
+				{
+					return;
+				}
+				Console.Error.WriteLine(
+					$"[SCHED][QOS] thread={name} class={qosClass} ok=False errno={errno} (thread create failed, using managed thread)");
+			}
+			_thread = new Thread(() => ThreadMain(guestThreadHandle, null), GuestExecutionStackBytes)
 			{
 				IsBackground = true,
-				Name = $"SharpEmu-{name}",
+				Name = _hostName,
 				Priority = priority,
 			};
 			_thread.Start();
@@ -810,12 +829,44 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 		}
 
-		private void ThreadMain(ulong guestThreadHandle)
+		// Diagnostic: SHARPEMU_GUEST_THREAD_QOS=interactive|initiated|default|utility|background forces a
+		// class on every guest pthread executor; SHARPEMU_LOG_GUEST_THREAD_QOS=1 logs the class each one
+		// starts with. A value containing '=' is a per-thread rule list instead (GuestThreadQosPolicy).
+		private static readonly string? _guestThreadQosOverride =
+			Environment.GetEnvironmentVariable("SHARPEMU_GUEST_THREAD_QOS");
+		private static readonly bool _logGuestThreadQos =
+			Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_THREAD_QOS") == "1";
+
+		private void ThreadMain(ulong guestThreadHandle, SharpEmu.HLE.Host.HostThreadQos? createdAtClass)
 		{
-			// Guest pthreads keep the default class. On Linux a new thread starts at
-			// its creator's nice value, which for a thread spawned from the guest's
-			// raised main thread would put every worker on the frame-deadline boost.
-			SharpEmu.HLE.Host.HostThreadQualityOfService.ReleaseInheritedPriority();
+			if (createdAtClass is { } qosClass)
+			{
+				SharpEmu.HLE.Host.GuestThreadQosPolicy.LogQosThreadStart(_hostName["SharpEmu-".Length..], qosClass);
+			}
+			else
+			{
+				// Guest pthreads keep the default class. On Linux a new thread starts at
+				// its creator's nice value, which for a thread spawned from the guest's
+				// raised main thread would put every worker on the frame-deadline boost.
+				SharpEmu.HLE.Host.HostThreadQualityOfService.ReleaseInheritedPriority();
+				var inheritedQos = SharpEmu.HLE.Host.HostThreadQualityOfService.DescribeCurrentThread();
+				bool? applied = _guestThreadQosOverride switch
+				{
+					"interactive" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.UserInteractive),
+					"initiated" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.UserInitiated),
+					"default" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.Default),
+					"utility" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.Utility),
+					"background" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.Background),
+					_ => null,
+				};
+				if (_logGuestThreadQos)
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][INFO] guest_thread.qos name='{_hostName}' inherited={inheritedQos} " +
+						$"override={_guestThreadQosOverride ?? "none"} applied={applied?.ToString() ?? "n/a"} " +
+						$"now={SharpEmu.HLE.Host.HostThreadQualityOfService.DescribeCurrentThread()}");
+				}
+			}
 			var previousGuestThreadHandle = GuestThreadExecution.EnterGuestThread(guestThreadHandle);
 			try
 			{
@@ -860,9 +911,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		public void Dispose()
 		{
 			RequestStop();
-			if (!ReferenceEquals(Thread.CurrentThread, _thread))
+			if (_qosThread is not null)
 			{
-				_thread.Join(500);
+				if (!_qosThread.IsCurrentThread)
+				{
+					_qosThread.Join(500);
+				}
+			}
+			else if (!ReferenceEquals(Thread.CurrentThread, _thread))
+			{
+				_thread!.Join(500);
 			}
 		}
 	}
@@ -7503,7 +7561,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				MapGuestThreadPriority(thread.Priority));
 		}
 		ProfileGuestThreadScheduled(thread);
-		runner.Schedule(() => RunGuestThread(thread, reason));
+		runner.Schedule(() =>
+		{
+			SharpEmu.HLE.Host.GuestThreadQosPolicy.ApplyPendingForCurrentThread(thread.ThreadHandle);
+			RunGuestThread(thread, reason);
+		});
 	}
 
 	// Caller must hold _guestThreadGate. A guest wait can be satisfied before
