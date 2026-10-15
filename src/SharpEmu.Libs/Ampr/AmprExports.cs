@@ -1242,7 +1242,8 @@ public static class AmprExports
         // 4 MiB chunks cut syscall/Rosetta round-trips on DeS' large sequential
         // APR reads without blowing the ArrayPool for small probes.
         const int ChunkSize = 4 * 1024 * 1024;
-        var buffer = ArrayPool<byte>.Shared.Rent((int)Math.Min((ulong)ChunkSize, size));
+        // Rented only for a chunk that cannot be read in place.
+        byte[]? buffer = null;
 
         try
         {
@@ -1269,7 +1270,29 @@ public static class AmprExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
                 }
 
-                var request = (int)Math.Min((ulong)buffer.Length, size - bytesRead);
+                var request = (int)Math.Min((ulong)ChunkSize, size - bytesRead);
+                var chunkDestination = destination + bytesRead;
+
+                // A backed destination with a single host view takes the pread
+                // directly, with the write tracking TryWrite would have issued;
+                // anything else stages through the bounce buffer as before.
+                if (ctx.Memory.TryFillInPlace(
+                        chunkDestination,
+                        request,
+                        (File: cachedFile, Offset: unchecked((long)absoluteOffset)),
+                        static (state, span) => state.File.Read(span, state.Offset),
+                        out var filled))
+                {
+                    if (filled <= 0)
+                    {
+                        break;
+                    }
+
+                    bytesRead += (ulong)filled;
+                    continue;
+                }
+
+                buffer ??= ArrayPool<byte>.Shared.Rent((int)Math.Min((ulong)ChunkSize, size));
                 var read = cachedFile.Read(
                     buffer.AsSpan(0, request),
                     unchecked((long)absoluteOffset));
@@ -1279,7 +1302,7 @@ public static class AmprExports
                     break;
                 }
 
-                if (!ctx.Memory.TryWrite(destination + bytesRead, buffer.AsSpan(0, read)))
+                if (!ctx.Memory.TryWrite(chunkDestination, buffer.AsSpan(0, read)))
                 {
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
                 }
@@ -1297,7 +1320,10 @@ public static class AmprExports
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            if (buffer is not null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1308,14 +1334,20 @@ public static class AmprExports
         file = null!;
         result = (int)OrbisGen2Result.ORBIS_GEN2_OK;
 
-        string cachePath;
-        try
+        // Registry paths come out of GetFullPath (ResolveGuestPath, or a
+        // normalized app0 root joined with an indexed relative path), so a
+        // rooted one is already the cache key; only a relative one is resolved.
+        string cachePath = hostPath;
+        if (!Path.IsPathFullyQualified(hostPath))
         {
-            cachePath = Path.GetFullPath(hostPath);
-        }
-        catch
-        {
-            cachePath = hostPath;
+            try
+            {
+                cachePath = Path.GetFullPath(hostPath);
+            }
+            catch
+            {
+                cachePath = hostPath;
+            }
         }
 
         lock (_hostFileCacheGate)

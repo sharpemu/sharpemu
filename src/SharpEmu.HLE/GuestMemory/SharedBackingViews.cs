@@ -136,6 +136,34 @@ public sealed unsafe class SharedBackingViews : IDisposable
         }
     }
 
+    // TryWriteSingleView with the bytes produced in place by fill instead of copied from a
+    // source span: false, with fill never called, for anything that path would refuse.
+    // If fill throws, the bytes it wrote stay.
+    public bool TryFillSingleView<TState>(ulong address, int length, TState state, GuestSpanFill<TState> fill, out int filled)
+    {
+        filled = 0;
+        if (length <= 0 || !TryAccessSingleView(address, (ulong)length, out var target))
+        {
+            return false;
+        }
+
+        try
+        {
+            var produced = fill(state, new Span<byte>((void*)target, length));
+            if ((uint)produced > (uint)length)
+            {
+                throw new InvalidOperationException($"In-place fill reported {produced} bytes for a {length}-byte range.");
+            }
+
+            filled = produced;
+            return true;
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _activeAccesses);
+        }
+    }
+
     public bool TryReadBacking(ulong address, Span<byte> data)
     {
         if (TryAccessSingleView(address, (ulong)data.Length, out var source))

@@ -3,6 +3,10 @@
 
 namespace SharpEmu.HLE;
 
+// Produces bytes straight into destination and returns how many leading bytes
+// it wrote (0..destination.Length).
+public delegate int GuestSpanFill<TState>(TState state, Span<byte> destination);
+
 public interface ICpuMemory
 {
     bool TryRead(ulong virtualAddress, Span<byte> destination);
@@ -22,6 +26,18 @@ public interface ICpuMemory
     }
 
     bool TryCopy(ulong destinationAddress, ulong sourceAddress, ulong length) => false;
+
+    // Lets fill write [virtualAddress, virtualAddress + length) in place in the
+    // host memory behind it, skipping a staging buffer (e.g. a positional file
+    // read). The bytes fill reports get the same write tracking a TryWrite of
+    // them would. False, with fill never called, when this memory cannot hand
+    // the range out in place; the caller then stages through TryWrite.
+    // Exceptions from fill propagate, and bytes it wrote before throwing stay.
+    bool TryFillInPlace<TState>(ulong virtualAddress, int length, TState state, GuestSpanFill<TState> fill, out int filled)
+    {
+        filled = 0;
+        return false;
+    }
 
     // Finds the first (or last) byte equal to needle in the NUL-terminated string
     // at address, the terminator included, scanning mapped memory in place.

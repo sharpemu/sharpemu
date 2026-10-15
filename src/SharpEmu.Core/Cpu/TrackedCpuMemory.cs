@@ -51,6 +51,9 @@ public sealed class TrackedCpuMemory : ICpuMemory, ITrackedCpuMemory, IGuestMemo
     public bool TryCopy(ulong destinationAddress, ulong sourceAddress, ulong length) =>
         _inner.TryCopy(destinationAddress, sourceAddress, length);
 
+    public bool TryFillInPlace<TState>(ulong virtualAddress, int length, TState state, GuestSpanFill<TState> fill, out int filled) =>
+        _inner.TryFillInPlace(virtualAddress, length, state, fill, out filled);
+
     public bool CanRead(ulong address, ulong size) => _inner.CanRead(address, size);
 
     public bool TryScanCString(ulong address, byte needle, bool findLast, ulong maxLength, out ulong match) =>
