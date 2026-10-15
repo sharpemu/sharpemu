@@ -88,7 +88,7 @@ public sealed class GuiSettings
     // leaves them alone. Not the window size, and not what the game is told.
     public string DisplayPatchResolution { get; set; } = "1080p";
 
-    internal static readonly string[] DisplayPatchResolutionChoices = ["1080p", "Native"];
+    internal static readonly string[] DisplayPatchResolutionChoices = ["1080p", "720p", "Native"];
 
     public bool OverlayEnabled { get; set; } = true;
     public string OverlayCorner { get; set; } = "TopRight";

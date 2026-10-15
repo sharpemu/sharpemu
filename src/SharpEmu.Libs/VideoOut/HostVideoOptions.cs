@@ -43,6 +43,9 @@ public enum DisplayPatchResolution
 
     /// <summary>The title's own compiled sizes: the display patches are off.</summary>
     Native,
+
+    /// <summary>1280x720: cuts a patched title's pixel work below 1080p.</summary>
+    Hd720,
 }
 
 public enum PerformanceOverlayCorner
@@ -97,6 +100,7 @@ public sealed record HostVideoOptions
     public (uint Width, uint Height)? DisplayPatchSize => DisplayResolution switch
     {
         DisplayPatchResolution.Native => null,
+        DisplayPatchResolution.Hd720 => (1280u, 720u),
         _ => (1920u, 1080u),
     };
 

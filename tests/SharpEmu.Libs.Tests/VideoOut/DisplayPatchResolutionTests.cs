@@ -23,6 +23,14 @@ public sealed class DisplayPatchResolutionTests
     }
 
     [Fact]
+    public void The720pTargetIs1280x720()
+    {
+        var options = new HostVideoOptions { DisplayResolution = DisplayPatchResolution.Hd720 };
+
+        Assert.Equal((1280u, 720u), options.DisplayPatchSize);
+    }
+
+    [Fact]
     public void NativeTurnsThePatchesOff()
     {
         var options = new HostVideoOptions { DisplayResolution = DisplayPatchResolution.Native };

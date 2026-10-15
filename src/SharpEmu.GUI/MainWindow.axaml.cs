@@ -131,6 +131,7 @@ public partial class MainWindow : Window
     private readonly LocalizedChoice[] _displayPatchChoices =
     [
         LocalizedChoice.Literal("1080p", "1080p"),
+        LocalizedChoice.Literal("720p", "720p"),
         LocalizedChoice.FromKey("Native", "Common.Off"),
     ];
     private readonly LocalizedChoice[] _binkPlaybackChoices =

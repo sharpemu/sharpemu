@@ -1024,7 +1024,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--display-resolution=<1080p|native>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--display-resolution=<720p|1080p|native>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1580,12 +1580,13 @@ internal static partial class Program
         return Enum.IsDefined(mode);
     }
 
-    /// <summary>The target of the title display patches: 1080p, or native to keep a title's
+    /// <summary>The target of the title display patches: 720p, 1080p, or native to keep a title's
     /// own compiled sizes.</summary>
     private static bool TryParseDisplayResolution(string value, out DisplayPatchResolution resolution)
     {
         resolution = value.Trim().ToLowerInvariant() switch
         {
+            "720p" or "720" or "hd720" or "1280x720" => DisplayPatchResolution.Hd720,
             "1080p" or "1080" or "fhd" or "1920x1080" => DisplayPatchResolution.Hd,
             "native" or "off" => DisplayPatchResolution.Native,
             _ => (DisplayPatchResolution)(-1),
