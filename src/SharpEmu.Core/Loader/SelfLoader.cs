@@ -304,6 +304,7 @@ public sealed class SelfLoader : ISelfLoader
         if (clearVirtualMemory)
         {
             GuestBytePatcher.ApplyFromEnvironment(virtualMemory, programHeaders, imageBase);
+            ApplyTitleDisplayPatch(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId);
         }
 
         if (virtualMemory is PhysicalVirtualMemory patchableMemory)
@@ -535,6 +536,29 @@ public sealed class SelfLoader : ISelfLoader
                 sourceOffset,
                 fileData,
                 header.Flags);
+        }
+    }
+
+    /// <summary>Rewrites a title's compiled display sizes to the host's display patch
+    /// resolution; see <see cref="TitleDisplayPatches"/>.</summary>
+    private static void ApplyTitleDisplayPatch(
+        IVirtualMemory virtualMemory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase,
+        string? titleId)
+    {
+        if (SharpEmu.Libs.VideoOut.HostVideoHost.CurrentOptions.DisplayPatchSize is not { } size)
+        {
+            return;
+        }
+
+        try
+        {
+            TitleDisplayPatches.Apply(virtualMemory, programHeaders, imageBase, titleId, size.Width, size.Height);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] title display size patch failed: {exception.Message}");
         }
     }
 

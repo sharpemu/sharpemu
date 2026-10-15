@@ -62,7 +62,7 @@ public sealed class GuestBytePatcherTests
             GuestBytePatcher.Apply(memory, headers, imageBase, GuestBytePatcher.Parse("3fff=0000")));
     }
 
-    private static ProgramHeader CreateLoad(ulong virtualAddress, ulong memorySize)
+    internal static ProgramHeader CreateLoad(ulong virtualAddress, ulong memorySize)
     {
         var bytes = new byte[56];
         BitConverter.TryWriteBytes(bytes.AsSpan(0), (uint)ProgramHeaderType.Load);
