@@ -242,15 +242,49 @@ public sealed class CommandStreamQueueTests
         Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
         Assert.Equal(1, queue.BlockedQueueCount);
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
-        Assert.Equal(0, queue.BlockedQueueCount);
-        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        // The compute submission finishing says nothing about the label the graphics
+        // head is comparing, so that head is left asleep instead of re-running a
+        // slice to read the same value and suspend again.
+        Assert.Equal(1, queue.BlockedQueueCount);
         Assert.Equal(SliceResult.AllBlocked, queue.ProcessOne());
 
+        // A write the queue cannot observe — here the test host's own — is what the
+        // blocked-retry fallback is for.
         host.WriteDword(Label, 1);
         queue.RetryBlocked();
         Assert.Equal(SliceResult.Completed, queue.ProcessOne());
         Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
         Assert.Equal(1UL, queue.BlockedRetries);
+    }
+
+    /// <summary>
+    /// A head waiting on guest memory wakes when those bytes are written and stays
+    /// asleep when other bytes are. Waking every head on every event is what made
+    /// Demon's Souls run 952,889 slices for 371,022 submissions.
+    /// </summary>
+    [Fact]
+    public void MemoryWaitWakesOnlyForAWriteThatTouchesItsOwnBytes()
+    {
+        var (host, queue) = NewQueue();
+        host.WriteDword(Label, 0);
+        Enqueue(host, queue, Graphics, 1, WaitEqual(Label, 1), CreateInstanceCountPacket(9));
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+        Assert.Equal(1, queue.BlockedQueueCount);
+
+        // Somewhere else entirely: the head has no reason to look again.
+        queue.NotifyGuestMemoryWritten(Label + 0x1000, sizeof(uint));
+        Assert.Equal(1, queue.BlockedQueueCount);
+        Assert.Equal(SliceResult.AllBlocked, queue.ProcessOne());
+
+        // Its own bytes: it looks again, and the value is still wrong, so it sleeps.
+        queue.NotifyGuestMemoryWritten(Label, sizeof(uint));
+        Assert.Equal(0, queue.BlockedQueueCount);
+        Assert.Equal(SliceResult.BlockedWithoutProgress, queue.ProcessOne());
+
+        host.WriteDword(Label, 1);
+        queue.NotifyGuestMemoryWritten(Label, sizeof(uint));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
     }
 
     [Fact]

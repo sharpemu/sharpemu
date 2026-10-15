@@ -131,7 +131,18 @@ public sealed class CommandStreamQueue
 
         lock (_gate)
         {
-            return _interpreters[queueId] ??= new GpuCommandInterpreter(_host, queueId, queueId == 0 ? 0 : GpuCommandInterpreter.ComputeQueueBase + queueId - 1);
+            if (_interpreters[queueId] is { } existing)
+            {
+                return existing;
+            }
+
+            var created = new GpuCommandInterpreter(
+                _host, queueId, queueId == 0 ? 0 : GpuCommandInterpreter.ComputeQueueBase + queueId - 1)
+            {
+                GuestMemoryWritten = NotifyGuestMemoryWritten,
+            };
+            _interpreters[queueId] = created;
+            return created;
         }
     }
 
@@ -357,7 +368,8 @@ public sealed class CommandStreamQueue
         Monitor.PulseAll(_gate);
     }
 
-    // A completed GPU tick can make a blocked memory wait ready.
+    // A completed GPU tick can make a blocked memory wait ready. A flip slot or a
+    // presented flip is not something a tick decides, so those heads stay asleep.
     public void NotifyCompletedGpuTick(ulong completedTick)
     {
         lock (_gate)
@@ -368,10 +380,16 @@ public sealed class CommandStreamQueue
             }
 
             _lastCompletedGpuTick = completedTick;
-            RetryBlocked();
+            WakeMatchingLocked(wait => wait.Kind is CommandWaitKind.GuestMemory or
+                CommandWaitKind.EngineCounter or CommandWaitKind.Unknown);
         }
     }
 
+    /// <summary>
+    /// Wakes every blocked head. This is the fallback: it is what a timer does when
+    /// nothing told us which wait could have changed, and what a guest CPU write we
+    /// cannot observe is eventually caught by.
+    /// </summary>
     public void RetryBlocked()
     {
         lock (_gate)
@@ -386,6 +404,70 @@ public sealed class CommandStreamQueue
 
             BlockedRetries++;
             Monitor.PulseAll(_gate);
+        }
+    }
+
+    /// <summary>How many heads a targeted wake has unblocked since startup.</summary>
+    public ulong TargetedWakes { get; private set; }
+
+    /// <summary>How many blocked heads a targeted wake has left alone.</summary>
+    public ulong TargetedWakesSkipped { get; private set; }
+
+    // Caller holds the gate. Wakes the heads a condition predicate selects.
+    private void WakeMatchingLocked(Func<CommandWaitCondition, bool> matches)
+    {
+        var woke = false;
+        foreach (var queue in _queues)
+        {
+            if (queue.First is not { } head || !head.Value.Blocked)
+            {
+                continue;
+            }
+
+            if (matches(head.Value.Wait))
+            {
+                head.Value.Blocked = false;
+                TargetedWakes++;
+                woke = true;
+            }
+            else
+            {
+                TargetedWakesSkipped++;
+            }
+        }
+
+        if (woke)
+        {
+            Monitor.PulseAll(_gate);
+        }
+    }
+
+    /// <summary>
+    /// These guest bytes changed, so a compare against them may pass now. Everything
+    /// that writes guest memory on the command-stream thread reports through here:
+    /// the interpreter's own label stores, end-of-pipe values included, and the memory
+    /// operations it executes.
+    /// </summary>
+    public void NotifyGuestMemoryWritten(ulong address, ulong size)
+    {
+        if (size == 0 || _submissionCount == 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            WakeMatchingLocked(wait => wait.Kind == CommandWaitKind.Unknown || wait.TouchedBy(address, size));
+        }
+    }
+
+    /// <summary>The presenter freed a flip slot.</summary>
+    public void NotifyFlipSlotAvailable()
+    {
+        lock (_gate)
+        {
+            WakeMatchingLocked(wait =>
+                wait.Kind is CommandWaitKind.FlipSlot or CommandWaitKind.FlipDone or CommandWaitKind.Unknown);
         }
     }
 
@@ -486,6 +568,7 @@ public sealed class CommandStreamQueue
                 submission!.Blocked = true;
                 submission.BlockedSinceTicks = System.Diagnostics.Stopwatch.GetTimestamp();
                 submission.BlockedPacketAddress = submission.Commands.CurrentPacketAddress;
+                submission.Wait = submission.Commands.SuspendCondition;
                 _queues[submission.QueueId].AddFirst(submission);
                 _submissionCount++;
                 result = submission.Commands.MadeProgress ? SliceResult.Progressed : SliceResult.BlockedWithoutProgress;
@@ -498,14 +581,12 @@ public sealed class CommandStreamQueue
                     _doneCount++;
                 }
 
-                foreach (var queue in _queues)
-                {
-                    if (queue.First is { } head)
-                    {
-                        head.Value.Blocked = false;
-                    }
-                }
-
+                // A finished submission frees a flip slot and advances the engine
+                // counters of its own queue, and anything it wrote into guest memory
+                // has already been reported through NotifyGuestMemoryWritten. Waking
+                // every head here instead made each one re-run a slice, re-read its
+                // label and suspend again.
+                WakeMatchingLocked(wait => wait.Kind is not CommandWaitKind.GuestMemory);
                 result = SliceResult.Completed;
             }
 

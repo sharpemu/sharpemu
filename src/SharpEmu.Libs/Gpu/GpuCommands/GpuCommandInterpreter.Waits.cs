@@ -41,7 +41,7 @@ public sealed partial class GpuCommandInterpreter
 
         if (!satisfied)
         {
-            Suspend();
+            SuspendOn(CommandWaitCondition.Memory(address, is64Bit ? sizeof(ulong) : (ulong)sizeof(uint)));
         }
     }
 
@@ -91,7 +91,7 @@ public sealed partial class GpuCommandInterpreter
     {
         if (ConstantEngineCount <= DrawEngineCount && !ConstantEngineComplete)
         {
-            Suspend();
+            SuspendOn(new CommandWaitCondition(CommandWaitKind.EngineCounter));
         }
     }
 
@@ -104,7 +104,7 @@ public sealed partial class GpuCommandInterpreter
 
         if (ConstantEngineCount - DrawEngineCount >= difference)
         {
-            Suspend();
+            SuspendOn(new CommandWaitCondition(CommandWaitKind.EngineCounter));
         }
     }
 

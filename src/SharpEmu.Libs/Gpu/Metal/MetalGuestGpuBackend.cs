@@ -102,6 +102,7 @@ internal sealed class MetalGuestGpuBackend : IGuestGpuBackend, IGuestImageSnapsh
             var host = new MetalCommandStreamHost(memory, this, this);
             var queue = new CommandStreamQueue(host);
             host.AttachQueue(queue);
+            MetalVideoPresenter.AttachCommandStream(queue);
             _commandStreamWorker = new CommandStreamWorker(queue, host, static () => false, cancelBlockedAtStop: true, "SharpEmu Metal command stream");
             _commandStreamWorker.Start();
             _commandStream = queue;

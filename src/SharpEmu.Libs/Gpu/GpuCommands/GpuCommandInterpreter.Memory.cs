@@ -112,6 +112,10 @@ public sealed partial class GpuCommandInterpreter
         if (sourceSelect == 2)
         {
             _host.FillBuffer(destination, byteCount, (uint)sourceOrImmediate, destinationIsGds);
+            if (!destinationIsGds)
+            {
+                GuestMemoryWritten?.Invoke(destination, byteCount);
+            }
             return;
         }
 
@@ -126,6 +130,10 @@ public sealed partial class GpuCommandInterpreter
         }
 
         _host.CopyBuffer(destination, sourceOrImmediate, byteCount, destinationIsGds, sourceIsGds);
+        if (!destinationIsGds)
+        {
+            GuestMemoryWritten?.Invoke(destination, byteCount);
+        }
     }
 
     private static bool TryDecodeGds(uint selector, out bool isGds)
