@@ -242,6 +242,8 @@
   "Options.VSync.Desc": "Utiliser la présentation FIFO pour un affichage sans déchirement.",
   "Options.Hdr.Label": "Sortie HDR",
   "Options.Hdr.Desc": "Utiliser le HDR lorsque l’écran sélectionné et le backend graphique le prennent en charge. Le mode automatique revient au SDR.",
+  "Options.DisplayPatch.Label": "Résolution du correctif d'affichage",
+  "Options.DisplayPatch.Desc": "Remplace par cette taille les tailles de rendu 4K intégrées à certains jeux (par exemple Demon's Souls et les titres Unreal Engine). Désactivé, le jeu conserve ses propres tailles. Ce qui est communiqué au jeu sur l'écran ne change pas.",
   "Options.Hdr.Auto": "Automatique",
   "Options.Env.BinkPlayback.Label": "Lecture vidéo Bink",
   "Options.Env.BinkPlayback.Desc": "Hôte lit les vidéos Bink via le pont FFmpeg, mais certains jeux peuvent rencontrer des problèmes.\nInvité utilise le décodeur propre au moteur du jeu.\nIgnorer permet de passer les vidéos Bink, ce qui peut faciliter le développement.",

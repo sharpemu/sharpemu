@@ -79,6 +79,8 @@
   "Options.VSync.Desc": "Yırtılmasız görüntü için FIFO sunumunu kullan.",
   "Options.Hdr.Label": "HDR çıkışı",
   "Options.Hdr.Desc": "Seçili ekran ve grafik backend'i destekliyorsa HDR kullan. Otomatik mod SDR'ye geri döner.",
+  "Options.DisplayPatch.Label": "Görüntü yaması çözünürlüğü",
+  "Options.DisplayPatch.Desc": "Bazı oyunlara gömülü 4K işleme boyutlarını (örneğin Demon's Souls ve Unreal Engine oyunları) bu boyuta yeniden yazar. Kapalıyken oyun kendi boyutlarını korur. Oyuna ekran hakkında bildirilen bilgi değişmez.",
 
   "Options.CpuEngine.Label": "CPU motoru",
   "Options.CpuEngine.Desc": "Oyun kodunu çalıştırmak için kullanılan yürütme motoru.",

@@ -124,6 +124,8 @@
   "Options.VSync.Desc": "Use FIFO presentation for tear-free output.",
   "Options.Hdr.Label": "HDR output",
   "Options.Hdr.Desc": "Use HDR when the selected display and graphics backend support it. Auto falls back to SDR.",
+  "Options.DisplayPatch.Label": "Display patch resolution",
+  "Options.DisplayPatch.Desc": "Rewrites the 4K render sizes some games have built in (for example Demon's Souls and Unreal Engine titles) to this size. When off, the game keeps its own sizes. What the game is told about the display does not change.",
   "Options.Hdr.Auto": "Auto",
   "Options.Env.BinkPlayback.Label": "Bink video playback",
   "Options.Env.BinkPlayback.Desc": "Host plays Bink videos through the FFmpeg bridge, but some games may have issues.\nGuest uses the game engine's own decoder.\nSkip skips Bink videos, which can make development easier.",

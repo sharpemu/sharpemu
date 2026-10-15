@@ -128,6 +128,11 @@ public partial class MainWindow : Window
         LocalizedChoice.FromKey("On", "Common.On"),
         LocalizedChoice.FromKey("Off", "Common.Off"),
     ];
+    private readonly LocalizedChoice[] _displayPatchChoices =
+    [
+        LocalizedChoice.Literal("1080p", "1080p"),
+        LocalizedChoice.FromKey("Native", "Common.Off"),
+    ];
     private readonly LocalizedChoice[] _binkPlaybackChoices =
     [
         LocalizedChoice.FromKey("Host", "Options.Env.BinkPlayback.Host"),
@@ -383,6 +388,8 @@ public partial class MainWindow : Window
         ScalingModeBox.SelectionChanged += (_, _) => _settings.ScalingMode = SelectedComboText(ScalingModeBox, "Fit");
         VSyncToggle.IsCheckedChanged += (_, _) => _settings.VSync = VSyncToggle.IsChecked == true;
         HdrModeBox.SelectionChanged += (_, _) => _settings.HdrMode = SelectedComboText(HdrModeBox, "Auto");
+        DisplayPatchBox.SelectionChanged += (_, _) =>
+            _settings.DisplayPatchResolution = SelectedComboText(DisplayPatchBox, "1080p");
         OverlayEnabledToggle.IsCheckedChanged += (_, _) => _settings.OverlayEnabled = OverlayEnabledToggle.IsChecked == true;
         OverlayModeBox.SelectionChanged += (_, _) => _settings.OverlayMode = SelectedComboText(OverlayModeBox, "TitleBar");
         OverlayCornerBox.SelectionChanged += (_, _) => _settings.OverlayCorner = SelectedComboText(OverlayCornerBox, "TopRight");
@@ -1407,6 +1414,7 @@ public partial class MainWindow : Window
         WindowModeBox.ItemsSource = _windowModeChoices;
         ScalingModeBox.ItemsSource = _scalingModeChoices;
         HdrModeBox.ItemsSource = _hdrModeChoices;
+        DisplayPatchBox.ItemsSource = _displayPatchChoices;
         BinkPlaybackBox.ItemsSource = _binkPlaybackChoices;
         OverlayModeBox.ItemsSource = _overlayModeChoices;
         OverlayCornerBox.ItemsSource = _overlayCornerChoices;
@@ -1421,6 +1429,7 @@ public partial class MainWindow : Window
         RefreshChoices(_windowModeChoices);
         RefreshChoices(_scalingModeChoices);
         RefreshChoices(_hdrModeChoices);
+        RefreshChoices(_displayPatchChoices);
         RefreshChoices(_binkPlaybackChoices);
         RefreshChoices(_overlayModeChoices);
         RefreshChoices(_overlayCornerChoices);
@@ -1488,6 +1497,8 @@ public partial class MainWindow : Window
         ScalingModeBox.SelectedIndex = ChoiceIndex(_settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         VSyncToggle.IsChecked = _settings.VSync;
         HdrModeBox.SelectedIndex = ChoiceIndex(_settings.HdrMode, "Auto", "On", "Off");
+        DisplayPatchBox.SelectedIndex = ChoiceIndex(
+            _settings.DisplayPatchResolution, GuiSettings.DisplayPatchResolutionChoices);
         OverlayEnabledToggle.IsChecked = _settings.OverlayEnabled;
         OverlayModeBox.SelectedIndex = ChoiceIndex(_settings.OverlayMode, "Full", "Minimal", "TitleBar");
         OverlayCornerBox.SelectedIndex = ChoiceIndex(_settings.OverlayCorner, "TopLeft", "TopRight", "BottomRight", "BottomLeft");
@@ -3310,6 +3321,7 @@ public partial class MainWindow : Window
         arguments.Add($"--scaling={launch.Settings.ScalingMode.ToLowerInvariant()}");
         arguments.Add($"--vsync={(launch.Settings.VSync ? "on" : "off")}");
         arguments.Add($"--hdr={launch.Settings.HdrMode.ToLowerInvariant()}");
+        arguments.Add($"--display-resolution={launch.Settings.DisplayPatchResolution.ToLowerInvariant()}");
         arguments.Add($"--overlay={(launch.Settings.OverlayEnabled ? "on" : "off")}");
         arguments.Add($"--overlay-mode={launch.Settings.OverlayMode.ToLowerInvariant()}");
         arguments.Add($"--overlay-corner={launch.Settings.OverlayCorner.ToLowerInvariant()}");

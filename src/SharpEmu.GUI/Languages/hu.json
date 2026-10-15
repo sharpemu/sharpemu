@@ -240,6 +240,8 @@
   "Options.VSync.Desc": "FIFO megjelenítés használata képtörésmentes kimenethez.",
   "Options.Hdr.Label": "HDR-kimenet",
   "Options.Hdr.Desc": "HDR használata, ha a kiválasztott kijelző és grafikus backend támogatja. Az automatikus mód SDR-re vált vissza.",
+  "Options.DisplayPatch.Label": "Kijelzőjavítás felbontása",
+  "Options.DisplayPatch.Desc": "Egyes játékok beépített 4K-s renderelési méreteit (például Demon's Souls és Unreal Engine-címek) erre a méretre írja át. Kikapcsolva a játék megtartja a saját méreteit. A játéknak a kijelzőről átadott adatok nem változnak.",
   "Options.Hdr.Auto": "Automatikus",
   "Options.Env.BinkPlayback.Label": "Bink videólejátszás",
   "Options.Env.BinkPlayback.Desc": "A Host az FFmpeg hídon keresztül játssza le a Bink videókat, de egyes játékoknál problémák jelentkezhetnek.\nA Guest a játékmotor saját dekóderét használja.\nA Skip kihagyja a Bink videókat, ami megkönnyítheti a fejlesztést.",

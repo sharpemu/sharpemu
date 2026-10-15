@@ -240,6 +240,8 @@
   "Options.VSync.Desc": "Utiliza apresentação FIFO para evitar cortes na imagem.",
   "Options.Hdr.Label": "Saída HDR",
   "Options.Hdr.Desc": "Utiliza HDR quando o ecrã selecionado e o backend gráfico o suportam. O modo automático regressa a SDR.",
+  "Options.DisplayPatch.Label": "Resolução do patch de apresentação",
+  "Options.DisplayPatch.Desc": "Reescreve para este tamanho os tamanhos de renderização 4K incorporados em alguns jogos (por exemplo, Demon's Souls e títulos da Unreal Engine). Quando desativado, o jogo mantém os seus próprios tamanhos. O que é comunicado ao jogo sobre o ecrã não muda.",
   "Options.Hdr.Auto": "Automático",
   "Options.Env.BinkPlayback.Label": "Reprodução de vídeo Bink",
   "Options.Env.BinkPlayback.Desc": "Host reproduz vídeos Bink pela ponte FFmpeg, mas alguns jogos podem apresentar problemas.\nGuest usa o descodificador do próprio motor do jogo.\nSkip ignora os vídeos Bink, o que pode facilitar o desenvolvimento.",
