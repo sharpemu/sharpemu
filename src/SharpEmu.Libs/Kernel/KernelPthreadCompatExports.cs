@@ -57,9 +57,18 @@ public static class KernelPthreadCompatExports
     private static int _pthreadFastPathTraceWritten;
     private static readonly ConcurrentDictionary<ulong, byte> _pthreadFastPathBusyTraced = new();
 
+    // Unlock policy for contended mutexes. Default "wake": the unlocker releases the mutex and
+    // wakes the queue head, which re-contends; running threads may barge in meanwhile. FIFO
+    // direct handoff (SHARPEMU_MUTEX_HANDOFF=fifo) instead transfers ownership to the head even
+    // while it is parked, so every other locker queues behind that thread's host wake-up (a
+    // handoff convoy). Each mutex captures the policy when it is created.
+    internal static bool DefaultMutexFifoHandoff = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_MUTEX_HANDOFF"), "fifo", StringComparison.OrdinalIgnoreCase);
+
     private sealed class PthreadMutexState
     {
         public long ProfileIdentity { get; } = MutexHandoffProfile.CreateIdentity();
+        public bool FifoHandoff { get; init; } = DefaultMutexFifoHandoff;
         private long _ownerThreadId;
         private int _recursionCount;
         private int _queuedWaiterCount;
@@ -145,6 +154,11 @@ public static class KernelPthreadCompatExports
         public int Granted;
         // Set while the waiter spins for its grant instead of parking; the unlock then skips the wake.
         public int Spinning;
+        // Release-and-wake only, read and written under SyncRoot. 1 = an unlock (or the park
+        // recheck) woke this waiter and it will re-check the mutex before it sleeps again, so a
+        // later unlock need not wake it. The waiter clears it in the same SyncRoot section in
+        // which it sees the mutex still owned, so that owner's unlock wakes it again.
+        public int Woken;
     }
 
     private sealed class PthreadCondState
@@ -908,7 +922,7 @@ public static class KernelPthreadCompatExports
         }
 
         var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
-        if (state.TryAcquireUncontended(currentThreadId, allowWaiterBarge: tryOnly))
+        if (state.TryAcquireUncontended(currentThreadId, allowWaiterBarge: tryOnly || !state.FifoHandoff))
         {
             TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1027,10 +1041,11 @@ public static class KernelPthreadCompatExports
             // (POSIX gives it no fairness obligation). Gating trylock on an empty
             // wait queue is wrong and, worse, lets a single stale/undrainable
             // waiter wedge a spin-on-trylock loop forever even though the mutex
-            // is free (owner==0). The blocking lock still honours FIFO so real
-            // blocked waiters are not starved by a barging locker.
+            // is free (owner==0). Under FIFO handoff the blocking lock still
+            // honours FIFO so real blocked waiters are not starved by a barging
+            // locker; under release-and-wake a running locker may barge too.
             if (state.OwnerThreadId == 0 &&
-                (tryOnly || state.Waiters.Count == 0) &&
+                (tryOnly || !state.FifoHandoff || state.Waiters.Count == 0) &&
                 state.TryAcquireOwner(currentThreadId))
             {
                 TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
@@ -1109,6 +1124,8 @@ public static class KernelPthreadCompatExports
         }
 
         PthreadMutexWaiter? nextWaiter = null;
+        PthreadMutexWaiter? wokenWaiter = null;
+        var wokenCooperative = false;
         lock (state.SyncRoot)
         {
             if (state.RecursionCount <= 0)
@@ -1130,16 +1147,25 @@ public static class KernelPthreadCompatExports
                 state.OwnerThreadId = 0;
                 ProfileMutexHandoff(state, "Released", mutexAddress);
 
-                // Hand the mutex directly to the head waiter instead of only
-                // waking it and relying on it to re-acquire. A woken waiter that
-                // fails to self-grant (its wake races or is lost) would leave the
-                // mutex "free with a queued waiter"; the fast-acquire path refuses
-                // such a mutex (OwnerThreadId == 0 && Waiters.Count == 0), so every
-                // later locker — including the game's main thread — then queues
-                // behind a head that never advances and the process wedges.
-                if (state.Waiters.First is { } headNode &&
+                if (!state.FifoHandoff)
+                {
+                    // Release-and-wake: the mutex is already free; wake the head so it
+                    // re-contends. A running thread may take the mutex first; the head
+                    // then keeps its place and the new owner's unlock wakes it again.
+                    // Barging is what keeps a free mutex with a queued waiter from
+                    // wedging later lockers (see the FIFO note below).
+                    wokenWaiter = SignalMutexHeadLocked(state, out wokenCooperative);
+                }
+                else if (state.Waiters.First is { } headNode &&
                     TryGrantMutexWaiterLocked(state, headNode.Value))
                 {
+                    // FIFO handoff: hand the mutex directly to the head waiter instead of only
+                    // waking it and relying on it to re-acquire. A woken waiter that
+                    // fails to self-grant (its wake races or is lost) would leave the
+                    // mutex "free with a queued waiter"; the FIFO fast-acquire path refuses
+                    // such a mutex (OwnerThreadId == 0 && Waiters.Count == 0), so every
+                    // later locker — including the game's main thread — then queues
+                    // behind a head that never advances and the process wedges.
                     nextWaiter = headNode.Value;
                     if (!nextWaiter.Cooperative)
                     {
@@ -1147,6 +1173,11 @@ public static class KernelPthreadCompatExports
                     }
                 }
             }
+        }
+
+        if (wokenWaiter is not null)
+        {
+            FinishMutexHeadWake(state, wokenWaiter, wokenCooperative);
         }
 
         // A granted head that is still spinning sees the grant itself.
@@ -2192,7 +2223,7 @@ public static class KernelPthreadCompatExports
     [Conditional("DEBUG")]
     private static void RunSynchronizationSelfChecks()
     {
-        var mutex = new PthreadMutexState();
+        var mutex = new PthreadMutexState { FifoHandoff = true };
         PthreadMutexWaiter first;
         PthreadMutexWaiter second;
         lock (mutex.SyncRoot)
@@ -2205,6 +2236,18 @@ public static class KernelPthreadCompatExports
             mutex.OwnerThreadId = 0;
             mutex.RecursionCount = 0;
             Debug.Assert(TryGrantMutexWaiterLocked(mutex, second), "The second mutex waiter was not granted after release.");
+        }
+
+        var wakeMutex = new PthreadMutexState { FifoHandoff = false };
+        lock (wakeMutex.SyncRoot)
+        {
+            first = EnqueueMutexWaiterLocked(wakeMutex, 0x101, cooperative: false);
+            second = EnqueueMutexWaiterLocked(wakeMutex, 0x202, cooperative: false);
+            Debug.Assert(SignalMutexHeadLocked(wakeMutex, out _) == first && Volatile.Read(ref first.Woken) == 1, "Release-and-wake did not wake the queue head.");
+            Debug.Assert(SignalMutexHeadLocked(wakeMutex, out _) is null, "An already-woken head was woken again.");
+            Debug.Assert(TryGrantMutexWaiterLocked(wakeMutex, second), "A running queued waiter could not take a free mutex.");
+            Debug.Assert(wakeMutex.OwnerThreadId == second.ThreadId && ReferenceEquals(wakeMutex.Waiters.First, first.Node), "The woken head lost its queue position.");
+            Debug.Assert(!TryGrantMutexWaiterLocked(wakeMutex, first), "A woken head took an owned mutex.");
         }
 
         var cond = new PthreadCondState();
@@ -2232,9 +2275,12 @@ public static class KernelPthreadCompatExports
             return true;
         }
 
+        // FIFO handoff grants only the head. Under release-and-wake any queued waiter that is
+        // running (spinning, woken, or re-checking before it parks) may take a free mutex, like
+        // any other barging locker; queue order only decides whom an unlock wakes.
         if (state.OwnerThreadId != 0 ||
             waiter.Node is null ||
-            !ReferenceEquals(state.Waiters.First, waiter.Node))
+            (state.FifoHandoff && !ReferenceEquals(state.Waiters.First, waiter.Node)))
         {
             return false;
         }
@@ -2254,6 +2300,23 @@ public static class KernelPthreadCompatExports
 
     private static void WakeFirstMutexWaiter(PthreadMutexState state)
     {
+        if (!state.FifoHandoff)
+        {
+            PthreadMutexWaiter? head;
+            bool cooperative;
+            lock (state.SyncRoot)
+            {
+                head = SignalMutexHeadLocked(state, out cooperative);
+            }
+
+            if (head is not null)
+            {
+                FinishMutexHeadWake(state, head, cooperative);
+            }
+
+            return;
+        }
+
         PthreadMutexWaiter? nextWaiter;
         lock (state.SyncRoot)
         {
@@ -2277,12 +2340,53 @@ public static class KernelPthreadCompatExports
         }
     }
 
+    // Release-and-wake, caller holds SyncRoot right after releasing the mutex. Picks the queue
+    // head to wake, or null when there is nothing to do: the mutex was already re-taken (that
+    // owner's unlock wakes the head), the queue is empty, or the head is already woken and will
+    // re-check before it sleeps. A host waiter is signalled here, under SyncRoot, so the signal
+    // orders against its check-then-Reset; a cooperative head is woken by FinishMutexHeadWake
+    // outside the lock. Its park recheck runs TryGrantBlockedMutexLock under SyncRoot after it
+    // stops spinning, so a wake that finds it not yet parked is not lost.
+    private static PthreadMutexWaiter? SignalMutexHeadLocked(PthreadMutexState state, out bool cooperative)
+    {
+        cooperative = false;
+        if (state.OwnerThreadId != 0 ||
+            state.Waiters.First?.Value is not { } head ||
+            Volatile.Read(ref head.Woken) != 0)
+        {
+            return null;
+        }
+
+        cooperative = head.Cooperative;
+        if (!cooperative)
+        {
+            Volatile.Write(ref head.Woken, 1);
+            head.HostSignal!.Set();
+        }
+
+        ProfileMutexHandoff(state, "Woken", waiter: head);
+        return head;
+    }
+
+    private static void FinishMutexHeadWake(
+        PthreadMutexState state,
+        PthreadMutexWaiter head,
+        bool cooperative)
+    {
+        // A spinning head sees the free mutex itself.
+        if (cooperative && Volatile.Read(ref head.Spinning) == 0)
+        {
+            WakeProfiledMutexWaiter(state, head);
+        }
+    }
+
     private static readonly long MutexWaiterSpinTicks = Stopwatch.Frequency * 40 / 1_000_000;
 
-    // A queued waiter spins briefly for its grant before it parks. The unlock hands the mutex
-    // to the queue head, and parking and waking a guest thread costs far more than most
-    // critical sections, so a head that parks holds every later locker behind its wake-up
-    // (a lock convoy). Order stays FIFO: only the head can be granted.
+    // A queued waiter spins briefly for its grant before it parks. Under FIFO handoff the unlock
+    // hands the mutex to the queue head, and parking and waking a guest thread costs far more
+    // than most critical sections, so a head that parks holds every later locker behind its
+    // wake-up (a lock convoy); only the head can be granted. Under release-and-wake any spinning
+    // waiter simply takes the mutex when it sees it free.
     private static bool SpinForMutexGrant(PthreadMutexState state, PthreadMutexWaiter waiter)
     {
         Volatile.Write(ref waiter.Spinning, 1);
@@ -2336,7 +2440,11 @@ public static class KernelPthreadCompatExports
             waiter?.ThreadId ?? 0, waiter?.WakeKey ?? "none", state.QueuedWaiterCount, result);
     }
 
-    private static int WaitForHostMutexLock(CpuContext ctx, PthreadMutexState state, PthreadMutexWaiter waiter)
+    private static int WaitForHostMutexLock(
+        CpuContext ctx,
+        PthreadMutexState state,
+        PthreadMutexWaiter waiter,
+        bool deliverGuestExceptions = true)
     {
         ManualResetEventSlim? hostSignal = null;
         try
@@ -2357,10 +2465,12 @@ public static class KernelPthreadCompatExports
                         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                     }
 
+                    // Still owned: from here on the owner's unlock must signal this waiter.
+                    Volatile.Write(ref waiter.Woken, 0);
                     hostSignal.Reset();
                 }
 
-                if (!hostSignal.Wait(10))
+                if (!hostSignal.Wait(10) && deliverGuestExceptions)
                 {
                     // Deliver the exception outside the mutex lock, then resume the wait.
                     GuestThreadExecution.Scheduler?.DeliverPendingGuestExceptionIfReady(ctx);
@@ -2383,7 +2493,23 @@ public static class KernelPthreadCompatExports
         var granted = false;
         lock (state.SyncRoot)
         {
-            granted = TryGrantMutexWaiterLocked(state, waiter);
+            if (state.FifoHandoff)
+            {
+                granted = TryGrantMutexWaiterLocked(state, waiter);
+            }
+            else if (Volatile.Read(ref waiter.Granted) != 0)
+            {
+                granted = true;
+            }
+            else if (state.OwnerThreadId == 0 && waiter.Node is not null)
+            {
+                // Release-and-wake: make the thread runnable without taking ownership for it;
+                // it re-contends in CompleteBlockedMutexLock. Woken tells later unlocks that it
+                // will re-check, so they need not wake it again. If the mutex is owned, stay
+                // parked: that owner's unlock wakes this head.
+                Volatile.Write(ref waiter.Woken, 1);
+                granted = true;
+            }
         }
 
         TracePthreadMutex(
@@ -2405,6 +2531,11 @@ public static class KernelPthreadCompatExports
         PthreadMutexWaiter waiter)
     {
         var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
+        if (!state.FifoHandoff && Volatile.Read(ref waiter.Granted) == 0)
+        {
+            ReacquireWokenMutex(ctx, state, waiter);
+        }
+
         if (Volatile.Read(ref waiter.Granted) == 1)
         {
             TracePthreadMutex(ctx, "lock-resume", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
@@ -2413,6 +2544,27 @@ public static class KernelPthreadCompatExports
 
         TracePthreadMutex(ctx, "lock-resume-ungranted", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY);
         return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+    }
+
+    // Release-and-wake: a woken cooperative waiter re-contends when it resumes. It is still
+    // queued at its old position and Woken is still 1, so unlocks meanwhile leave it alone. If a
+    // barger owns the mutex it spins, then sleeps on its host signal as a host waiter: the
+    // scheduler cannot re-park a thread from Resume. Guest exceptions are not delivered from
+    // this wait, because no import frame of this thread is current here.
+    private static void ReacquireWokenMutex(CpuContext ctx, PthreadMutexState state, PthreadMutexWaiter waiter)
+    {
+        lock (state.SyncRoot)
+        {
+            if (TryGrantMutexWaiterLocked(state, waiter))
+            {
+                return;
+            }
+        }
+
+        if (!SpinForMutexGrant(state, waiter))
+        {
+            _ = WaitForHostMutexLock(ctx, state, waiter, deliverGuestExceptions: false);
+        }
     }
 
     private static bool IsGuestTrackedSelfLock(CpuContext ctx, ulong mutexAddress, ulong currentThreadId) =>
