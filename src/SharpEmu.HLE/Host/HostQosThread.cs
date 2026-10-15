@@ -54,20 +54,13 @@ public sealed unsafe partial class HostQosThread
     /// </summary>
     public static HostQosThread? TryStart(string name, HostThreadQos qos, int stackBytes, Action body, out int errno)
     {
-        var thread = new HostQosThread(name, qos, body);
         if (!OperatingSystem.IsMacOS())
         {
             errno = 0;
-            var managed = new Thread(thread.RunManaged, stackBytes)
-            {
-                IsBackground = true,
-                Name = name,
-            };
-            thread._managedThread = managed;
-            managed.Start();
-            return thread;
+            return StartManaged(name, qos, stackBytes, body);
         }
 
+        var thread = new HostQosThread(name, qos, body);
         errno = -1;
         var handle = GCHandle.Alloc(thread);
         byte* attr = stackalloc byte[128];
@@ -105,6 +98,37 @@ public sealed unsafe partial class HostQosThread
             return null;
         }
 
+        return thread;
+    }
+
+    /// <summary>
+    /// As <see cref="TryStart"/>, but never fails: when the host cannot create the
+    /// thread at its class it logs that and starts an ordinary managed thread, which
+    /// still asks for the class itself.
+    /// </summary>
+    public static HostQosThread Start(string name, HostThreadQos qos, int stackBytes, Action body)
+    {
+        var thread = TryStart(name, qos, stackBytes, body, out var errno);
+        if (thread is not null)
+        {
+            return thread;
+        }
+
+        Console.Error.WriteLine(
+            $"[HOST][QOS] {name}: creating a {qos} thread failed (errno={errno}); using a managed thread.");
+        return StartManaged(name, qos, stackBytes, body);
+    }
+
+    private static HostQosThread StartManaged(string name, HostThreadQos qos, int stackBytes, Action body)
+    {
+        var thread = new HostQosThread(name, qos, body);
+        var managed = new Thread(thread.RunManaged, stackBytes)
+        {
+            IsBackground = true,
+            Name = name,
+        };
+        thread._managedThread = managed;
+        managed.Start();
         return thread;
     }
 

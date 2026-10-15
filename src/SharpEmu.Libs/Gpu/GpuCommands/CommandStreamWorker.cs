@@ -10,8 +10,15 @@ public sealed class CommandStreamWorker
     private readonly ICommandStreamHost _host;
     private readonly Func<bool> _hasPendingCommands;
     private readonly bool _cancelBlockedAtStop;
-    private readonly Thread _thread;
+    private readonly string _threadName;
+    private SharpEmu.HLE.Host.HostQosThread? _thread;
+    // Set by the thread itself, which may run before Start has stored _thread.
+    private volatile Thread? _workerThread;
     private Exception? _failure;
+
+    // A natively created thread would otherwise get Darwin's 512 KiB default
+    // secondary stack, smaller than a managed thread's; the reservation is virtual.
+    private const int WorkerStackBytes = 16 * 1024 * 1024;
 
     public CommandStreamWorker(CommandStreamQueue queue, ICommandStreamHost host, Func<bool> hasPendingCommands, bool cancelBlockedAtStop, string threadName)
     {
@@ -19,19 +26,24 @@ public sealed class CommandStreamWorker
         _host = host;
         _hasPendingCommands = hasPendingCommands;
         _cancelBlockedAtStop = cancelBlockedAtStop;
-        _thread = new Thread(Run) { IsBackground = true, Name = threadName };
+        _threadName = threadName;
     }
 
-    public bool IsWorkerThread => Thread.CurrentThread == _thread;
+    public bool IsWorkerThread => ReferenceEquals(Thread.CurrentThread, _workerThread);
 
-    public void Start() => _thread.Start();
+    // The GPU submission thread: every guest draw and every flip passes through
+    // here on its way to the backend, so it sits on the frame deadline just as
+    // much as the presenter does. HostQosThread creates it at UserInteractive -
+    // natively on macOS, where CoreCLR threads refuse a QoS class (EPERM).
+    public void Start() => _thread = SharpEmu.HLE.Host.HostQosThread.Start(
+        _threadName, SharpEmu.HLE.Host.HostThreadQos.UserInteractive, WorkerStackBytes, Run);
 
     // Stops accepting work, drains the queue and joins; a worker failure is rethrown here.
     public IdleOutcome Stop()
     {
         _queue.StopAccepting();
         _queue.Wake();
-        if (_thread.IsAlive && !IsWorkerThread)
+        if (_thread is { IsAlive: true } && !IsWorkerThread)
         {
             _thread.Join();
         }
@@ -46,11 +58,7 @@ public sealed class CommandStreamWorker
 
     private void Run()
     {
-        // The GPU submission thread: every guest draw and every flip passes
-        // through here on its way to the backend, so it sits on the frame
-        // deadline just as much as the presenter does.
-        SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
-            SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
+        _workerThread = Thread.CurrentThread;
         try
         {
             for (;;)

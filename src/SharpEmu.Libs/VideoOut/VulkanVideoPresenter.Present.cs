@@ -410,6 +410,13 @@ internal static unsafe partial class VulkanVideoPresenter
 
     private static void Run()
     {
+        // The render and present loop owns the frame deadline. Set here rather than
+        // beside the Thread construction above, because this body also runs on the
+        // process main thread when HostMainThread owns the window loop, and every
+        // host can only classify the calling thread. (The main thread was not
+        // created by CoreCLR, so macOS accepts the class there.)
+        SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+            SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
         SharpEmu.HLE.Host.HostLaneReservation.ApplyToRenderThread();
         uint width;
         uint height;
