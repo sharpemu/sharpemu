@@ -2370,6 +2370,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return true;
 	}
 
+	private static readonly bool _lockFreeTransferRipProbe =
+		!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_TRANSFER_RIP_PROBE_LOCKFREE"), "0", StringComparison.Ordinal);
+
 	internal static bool TryValidateGuestContextTransferTarget(
 		ICpuMemory memory,
 		in GuestCpuContinuation target,
@@ -2379,6 +2382,20 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			error = $"invalid guest context transfer target rip=0x{target.Rip:X16} rsp=0x{target.Rsp:X16}";
 			return false;
+		}
+
+		// A target RIP inside a committed executable page is accepted through the lock-free
+		// executable-page cache instead of a 1-byte ICpuMemory.TryRead. Titles whose text
+		// segment is execute-only (Demon's Souls: PT_LOAD flags=0x1) otherwise escalate that
+		// read to the global address-space write lock plus two protection changes on EVERY
+		// fiber switch, which also stalls every other thread's guest-memory access (DS: ~2x
+		// frame time). The cache sits in front of the host region query on every OS (Win32
+		// VirtualQuery on Windows, the tracked-region table on Linux and macOS), so a hit takes
+		// no lock anywhere. SHARPEMU_TRANSFER_RIP_PROBE_LOCKFREE=0 restores the old probe.
+		if (_lockFreeTransferRipProbe && IsExecutableAddress(target.Rip))
+		{
+			error = null;
+			return true;
 		}
 
 		Span<byte> ripProbe = stackalloc byte[1];
