@@ -46,6 +46,11 @@ public sealed class CommandStreamWorker
 
     private void Run()
     {
+        // The GPU submission thread: every guest draw and every flip passes
+        // through here on its way to the backend, so it sits on the frame
+        // deadline just as much as the presenter does.
+        SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+            SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
         try
         {
             for (;;)

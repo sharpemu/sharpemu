@@ -812,6 +812,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		private void ThreadMain(ulong guestThreadHandle)
 		{
+			// Guest pthreads keep the default class. On Linux a new thread starts at
+			// its creator's nice value, which for a thread spawned from the guest's
+			// raised main thread would put every worker on the frame-deadline boost.
+			SharpEmu.HLE.Host.HostThreadQualityOfService.ReleaseInheritedPriority();
 			var previousGuestThreadHandle = GuestThreadExecution.EnterGuestThread(guestThreadHandle);
 			try
 			{
