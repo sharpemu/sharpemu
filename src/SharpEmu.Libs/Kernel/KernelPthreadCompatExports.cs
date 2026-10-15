@@ -143,6 +143,8 @@ public static class KernelPthreadCompatExports
         public ManualResetEventSlim? HostSignal { get; set; }
         public LinkedListNode<PthreadMutexWaiter>? Node { get; set; }
         public int Granted;
+        // Set while the waiter spins for its grant instead of parking; the unlock then skips the wake.
+        public int Spinning;
     }
 
     private sealed class PthreadCondState
@@ -1046,7 +1048,7 @@ public static class KernelPthreadCompatExports
             acquiredWhileQueueing = TryGrantMutexWaiterLocked(state, waiter);
         }
 
-        if (acquiredWhileQueueing)
+        if (acquiredWhileQueueing || SpinForMutexGrant(state, waiter!))
         {
             waiter!.HostSignal?.Dispose();
             TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
@@ -1147,7 +1149,8 @@ public static class KernelPthreadCompatExports
             }
         }
 
-        if (nextWaiter is { Cooperative: true })
+        // A granted head that is still spinning sees the grant itself.
+        if (nextWaiter is { Cooperative: true } && Volatile.Read(ref nextWaiter.Spinning) == 0)
         {
             WakeProfiledMutexWaiter(state, nextWaiter);
         }
@@ -2266,9 +2269,55 @@ public static class KernelPthreadCompatExports
             }
         }
 
-        if (nextWaiter is { Cooperative: true })
+        // A spinning head takes the mutex by itself. If it stops spinning and parks after this
+        // check, the scheduler's check right after the block grants the mutex to it.
+        if (nextWaiter is { Cooperative: true } && Volatile.Read(ref nextWaiter.Spinning) == 0)
         {
             WakeProfiledMutexWaiter(state, nextWaiter);
+        }
+    }
+
+    private static readonly long MutexWaiterSpinTicks = Stopwatch.Frequency * 40 / 1_000_000;
+
+    // A queued waiter spins briefly for its grant before it parks. The unlock hands the mutex
+    // to the queue head, and parking and waking a guest thread costs far more than most
+    // critical sections, so a head that parks holds every later locker behind its wake-up
+    // (a lock convoy). Order stays FIFO: only the head can be granted.
+    private static bool SpinForMutexGrant(PthreadMutexState state, PthreadMutexWaiter waiter)
+    {
+        Volatile.Write(ref waiter.Spinning, 1);
+        try
+        {
+            var deadline = Stopwatch.GetTimestamp() + MutexWaiterSpinTicks;
+            for (var round = 0; ; round++)
+            {
+                if (Volatile.Read(ref waiter.Granted) != 0)
+                {
+                    return true;
+                }
+
+                if (state.OwnerThreadId == 0)
+                {
+                    lock (state.SyncRoot)
+                    {
+                        if (TryGrantMutexWaiterLocked(state, waiter))
+                        {
+                            return true;
+                        }
+                    }
+                }
+
+                if (Stopwatch.GetTimestamp() >= deadline)
+                {
+                    return false;
+                }
+
+                Thread.SpinWait(Math.Min(4 << Math.Min(round, 4), 64));
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref waiter.Spinning, 0);
         }
     }
 
