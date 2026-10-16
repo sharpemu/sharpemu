@@ -364,6 +364,25 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Equal(ImageRequestBuilders.DestinationSwizzle(new TextureDescriptorWords(words)), resolution.Swizzle);
     }
 
+    // A T# addresses memory in 256-byte units, so a view may start inside a larger allocation at an
+    // offset smaller than the layout alignment; the tiled offsets stay relative to that base.
+    [Theory]
+    [InlineData(0x5032B23800UL)]
+    [InlineData(0x5032B23100UL)]
+    [InlineData(0x5032B23000UL)]
+    public void Texture_Tiled4KBAcceptsAnyDescriptorAddress(ulong address)
+    {
+        var words = RegisterWords.Texture(address, GuestPixelFormat.Bits16_16_16_16Float, 32, 16,
+            GuestImageType.Color2D, GuestTileMode.Standard4KB);
+
+        var description = ImageRequestBuilders.Texture(words, Sampled2D).Request.Description;
+
+        Assert.Equal(address, description.Data.Address);
+        Assert.Equal(0x1000UL, description.Data.Size);
+        Assert.Equal(GuestTileMode.Standard4KB, description.TileMode);
+        Assert.Equal(0UL, description.MipLayout[0].Offset);
+    }
+
     [Fact]
     public void Texture_MipWindowFollowsTheDescriptor()
     {
