@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.GuestMemory;
 
 namespace SharpEmu.HLE.Host.Windows;
 
@@ -26,7 +27,6 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
     private const uint PAGE_EXECUTE_READWRITE = 0x40;
     private const uint PAGE_EXECUTE_WRITECOPY = 0x80;
     private const uint SEC_COMMIT = 0x8000000;
-    private const uint FILE_MAP_READ_WRITE = 0x6;
     private static readonly nint InvalidHandle = -1;
 
     public WindowsHostViews()
@@ -55,7 +55,14 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
             return false;
         }
 
-        var alias = FailAliasMapForTests ? null : MapViewOfFile(handle, FILE_MAP_READ_WRITE, 0, 0, (nuint)size);
+        // Keep the host alias above the guest mapping range.
+        var requirements = new MemoryAddressRequirements
+        {
+            LowestStartingAddress = (void*)(WindowsGuestAddressReservation.DataStart + WindowsGuestAddressReservation.DataSize),
+        };
+        var parameter = new MemoryExtendedParameter { Type = 1, Pointer = &requirements };
+        var alias = FailAliasMapForTests ? null : MapViewOfFile3(
+            handle, GetCurrentProcess(), null, 0, (nuint)size, 0, PAGE_READWRITE, &parameter, 1);
         if (alias == null)
         {
             CloseHandle(handle);
@@ -77,6 +84,8 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
         var ptr = VirtualAlloc2(GetCurrentProcess(), (void*)address, (nuint)size, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, null, 0);
         if (ptr == null)
         {
+            ReservationDiagnostics.Record("native-reserve-failed", address, size, Granularity,
+                error: Marshal.GetLastPInvokeError());
             return 0;
         }
 
@@ -133,8 +142,14 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
     public bool SplitHole(ulong address, ulong size) =>
         VirtualFree((void*)address, (nuint)size, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
 
-    public bool JoinHoles(ulong address, ulong size) =>
-        VirtualFree((void*)address, (nuint)size, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS);
+    public bool JoinHoles(ulong address, ulong size)
+    {
+        if (VirtualQuery((void*)address, out var region, (nuint)sizeof(MemoryBasicInformation)) != 0 &&
+            region.BaseAddress == address && region.AllocationBase == address &&
+            region.State == MEM_RESERVE && region.RegionSize == size)
+            return true;
+        return VirtualFree((void*)address, (nuint)size, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS);
+    }
 
     public bool FreeHole(ulong address, ulong size) =>
         VirtualFree((void*)address, 0, MEM_RELEASE);
@@ -170,7 +185,9 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
             // A view cannot map as no-access. Map writable, then apply the protection.
             var mapProtection = protection == HostPageProtection.NoAccess ? PAGE_READWRITE : GetNativeProtection(protection);
             var process = GetCurrentProcess();
-            var ptr = MapViewOfFile3(backing.Handle, process, (void*)address, offset, (nuint)size, MEM_REPLACE_PLACEHOLDER, mapProtection, null, 0);
+            void* ptr;
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.HostViewNativeMap))
+                ptr = MapViewOfFile3(backing.Handle, process, (void*)address, offset, (nuint)size, MEM_REPLACE_PLACEHOLDER, mapProtection, null, 0);
             if (ptr == null)
             {
                 failure = HostViewFailure.PlaceholderMapFailed;
@@ -184,11 +201,17 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
                 return false;
             }
 
-            if (FailProtectForTests || !VirtualProtect(ptr, (nuint)size, GetNativeProtection(protection), out _))
+            if (protection == HostPageProtection.NoAccess)
             {
-                UnmapViewOfFile2(process, ptr, MEM_PRESERVE_PLACEHOLDER);
-                failure = HostViewFailure.ProtectFailed;
-                return false;
+                bool protectedView;
+                using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.HostViewProtection))
+                    protectedView = !FailProtectForTests && VirtualProtect(ptr, (nuint)size, PAGE_NOACCESS, out _);
+                if (!protectedView)
+                {
+                    UnmapViewOfFile2(process, ptr, MEM_PRESERVE_PLACEHOLDER);
+                    failure = HostViewFailure.ProtectFailed;
+                    return false;
+                }
             }
 
             failure = HostViewFailure.None;
@@ -326,8 +349,20 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial nint CreateFileMappingW(nint file, void* attributes, uint protect, uint maximumSizeHigh, uint maximumSizeLow, ushort* name);
 
-    [LibraryImport("kernel32.dll", SetLastError = true)]
-    private static partial void* MapViewOfFile(nint fileMapping, uint desiredAccess, uint offsetHigh, uint offsetLow, nuint bytesToMap);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryAddressRequirements
+    {
+        public void* LowestStartingAddress;
+        public void* HighestEndingAddress;
+        public nuint Alignment;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryExtendedParameter
+    {
+        public ulong Type;
+        public void* Pointer;
+    }
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

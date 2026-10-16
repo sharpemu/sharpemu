@@ -236,39 +236,58 @@ public sealed partial class ResourceTracker
         return new DescriptorSource { Dwords = dwords };
     }
 
-    private uint PossibleBits(ScalarValue value)
+    private uint PossibleBits(ScalarValue value, int depth = 0)
     {
+        // Unresolved operation cycles and deep graphs keep an unknown bound.
+        if (depth >= 128)
+        {
+            return uint.MaxValue;
+        }
+
         if (value.Kind == ScalarValueKind.Phi)
         {
             var invariant = _graph.ResolveInvariantPhi(value);
-            return invariant is null ? uint.MaxValue : PossibleBits(invariant);
+            return invariant is null ? uint.MaxValue : PossibleBits(invariant, depth + 1);
         }
+
         if (value.IsConstant)
         {
             return value.Type == ScalarValueType.U32 ? value.ConstantU32 : uint.MaxValue;
         }
 
+        if (value.Kind == ScalarValueKind.Select)
+        {
+            return PossibleBits(value.Operands[1], depth + 1) | PossibleBits(value.Operands[2], depth + 1);
+        }
+
         if (value.Kind != ScalarValueKind.Operation)
         {
-            if (value.Kind == ScalarValueKind.Select)
-                return PossibleBits(value.Operands[1]) | PossibleBits(value.Operands[2]);
             return uint.MaxValue;
         }
 
         return value.Operation switch
         {
-            ScalarOperation.And32 => PossibleBits(value.Operands[0]) & PossibleBits(value.Operands[1]),
-            ScalarOperation.Or32 => PossibleBits(value.Operands[0]) | PossibleBits(value.Operands[1]),
+            ScalarOperation.And32 => PossibleBits(value.Operands[0], depth + 1) & PossibleBits(value.Operands[1], depth + 1),
+            ScalarOperation.Or32 => PossibleBits(value.Operands[0], depth + 1) | PossibleBits(value.Operands[1], depth + 1),
             ScalarOperation.ShiftLeft32 when value.Operands[1].IsConstant =>
-                PossibleBits(value.Operands[0]) << (int)(value.Operands[1].ConstantU32 & 31),
+                PossibleBits(value.Operands[0], depth + 1) << (int)(value.Operands[1].ConstantU32 & 31),
             _ => uint.MaxValue,
         };
     }
 
     private ScalarValue CanonicalizeSampleAdjustDword3(ScalarValue value)
     {
-        for (;;)
+        var original = value;
+        for (var depth = 0; depth < 128; depth++)
         {
+            if (value.Kind == ScalarValueKind.Phi)
+            {
+                var invariant = _graph.ResolveInvariantPhi(value);
+                if (invariant is null)
+                    return value;
+                value = invariant;
+            }
+
             if (value.Kind != ScalarValueKind.Operation || value.Operation != ScalarOperation.Or32)
             {
                 return value;
@@ -296,6 +315,8 @@ public sealed partial class ResourceTracker
                 return value;
             }
         }
+        // Keep unresolved operation cycles and deep graphs unchanged.
+        return original;
     }
 
     private bool ValidateSource(DescriptorSource source, out uint badDword) => ValidateSource(source, out badDword, out _);
@@ -390,10 +411,63 @@ public sealed partial class ResourceTracker
         handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
         handle.Operands.All(dword =>
             dword.Type == ScalarValueType.U32 &&
-            (_plan.ValidateRuntimeValue(dword) || DependsOnScalarBufferWord(dword))) &&
-        handle.Operands.Any(DependsOnScalarBufferWord);
+            (_plan.ValidateRuntimeValue(dword) || DependsOnScalarMemoryWord(dword))) &&
+        handle.Operands.Any(DependsOnScalarMemoryWord);
 
-    private static bool DependsOnScalarBufferWord(ScalarValue value)
+    private bool HasDeviceRecordCount(ScalarValue? handle) =>
+        handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
+        !_plan.ValidateRuntimeValue(handle.Operands[2]) &&
+        IsLaneDerivedRecordCount(handle.Operands[2]) &&
+        _plan.ValidateRuntimeValue(handle.Operands[0]) &&
+        _plan.ValidateRuntimeValue(handle.Operands[1]) &&
+        _plan.ValidateRuntimeValue(handle.Operands[3]);
+
+    private bool IsLaneDerivedRecordCount(ScalarValue value)
+    {
+        var pending = new Stack<ScalarValue>();
+        var visited = new HashSet<ScalarValue>();
+        var grounded = new HashSet<ScalarValue>();
+        var merges = new List<ScalarValue>();
+        var hasLaneValue = false;
+        pending.Push(value);
+        while (pending.TryPop(out var current))
+        {
+            if (!visited.Add(current)) continue;
+            if (current.Type != ScalarValueType.U32) return false;
+            if (current.Kind == ScalarValueKind.Phi)
+            {
+                if (current.Operands.Length == 0) return false;
+                merges.Add(current);
+                foreach (var incoming in current.Operands) pending.Push(incoming);
+            }
+            else if (current.Kind == ScalarValueKind.FirstLane)
+            {
+                hasLaneValue = true;
+                grounded.Add(current);
+            }
+            else if (_plan.ValidateRuntimeValue(current))
+            {
+                grounded.Add(current);
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        // A loop must have an incoming value, not only a cycle of merge nodes.
+        bool changed;
+        do
+        {
+            changed = false;
+            foreach (var merge in merges)
+                if (!grounded.Contains(merge) && merge.Operands.Any(grounded.Contains))
+                    changed |= grounded.Add(merge);
+        } while (changed);
+        return hasLaneValue && merges.All(grounded.Contains);
+    }
+
+    private bool DependsOnScalarMemoryWord(ScalarValue value)
     {
         var pending = new Stack<ScalarValue>();
         var visited = new HashSet<ScalarValue>();
@@ -405,7 +479,8 @@ public sealed partial class ResourceTracker
                 continue;
             }
 
-            if (current.Kind == ScalarValueKind.ScalarBufferWord)
+            if (current.Kind == ScalarValueKind.ScalarBufferWord ||
+                current.Kind == ScalarValueKind.ScalarAddressWord && !_plan.ValidateRuntimeValue(current))
             {
                 return true;
             }
@@ -740,11 +815,6 @@ public sealed partial class ResourceTracker
             }
         }
 
-        if (_info.Images.Count >= ShaderResourceInfo.MaxImages)
-        {
-            return DescriptorConstants.NoIndex;
-        }
-
         var added = new ImageResource
         {
             Source = source,
@@ -781,11 +851,6 @@ public sealed partial class ResourceTracker
             }
         }
 
-        if (_info.Samplers.Count >= ShaderResourceInfo.MaxSamplers)
-        {
-            return DescriptorConstants.NoIndex;
-        }
-
         _info.Samplers.Add(new SamplerResource { Source = source, FirstUsePc = pc });
         return (uint)(_info.Samplers.Count - 1);
     }
@@ -799,11 +864,6 @@ public sealed partial class ResourceTracker
                 pair.FirstUsePc = Math.Min(pair.FirstUsePc, pc);
                 return;
             }
-        }
-
-        if (_info.SampledPairs.Count >= ShaderResourceInfo.MaxSampledPairs)
-        {
-            throw Failure(pc, "sampled image/sampler pair limit exceeded");
         }
 
         _info.SampledPairs.Add(new SampledImagePair { Image = image, Sampler = sampler, FirstUsePc = pc });
@@ -854,6 +914,15 @@ public sealed partial class ResourceTracker
 
         if (!isBuffer && !isAddress && !isImage)
         {
+            return;
+        }
+
+        if (isBuffer && _graph.Program.FunctionBufferAccesses.Contains(memory.Pc))
+        {
+            if (access?.Handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 })
+                throw Failure(memory.Pc, "linked function buffer has no descriptor handle");
+            memory.DeviceDescriptor = true;
+            _info.UsesDeviceAddresses = true;
             return;
         }
 
@@ -957,7 +1026,8 @@ public sealed partial class ResourceTracker
             // Scalar loads can address buffers that have no host descriptor binding, while
             // vector buffer descriptors loaded from scalar-buffer data must stay device-side.
             if ((memory.Kind == MemoryResourceKind.ScalarBuffer && !IsHostBufferHandle(access.Handle)) ||
-                (memory.Kind == MemoryResourceKind.Buffer && IsDeviceLoadedBufferHandle(access.Handle)))
+                (memory.Kind == MemoryResourceKind.Buffer &&
+                    (IsDeviceLoadedBufferHandle(access.Handle) || HasDeviceRecordCount(access.Handle))))
             {
                 memory.DeviceDescriptor = true;
                 _info.UsesDeviceAddresses = true;

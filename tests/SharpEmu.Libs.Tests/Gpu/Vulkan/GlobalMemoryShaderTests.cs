@@ -385,7 +385,7 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
             var pageCount = (BufferAddress >> Gen5SpirvTranslator.DeviceAddressPageBits) + 1;
             bindings[DescriptorBindingKind.DeviceAddressPageTable] =
                 [runner.CreatePageTable(pageCount, traceMissingPage ? [] : [(BufferAddress, records, 0ul)])];
-            bindings[DescriptorBindingKind.FaultBuffer] = [runner.CreateBuffer(((pageCount + 31) / 32) * sizeof(uint) + (traceMissingPage ? 32UL : 0UL))];
+            bindings[DescriptorBindingKind.FaultBuffer] = [runner.CreateBuffer(((pageCount + 31) / 32) * sizeof(uint) + (traceMissingPage ? 64UL : 0UL))];
         }
 
         var flattenedTable = snapshot.FlattenedResourceTable.ToArray();
@@ -400,7 +400,7 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
         if (traceMissingPage)
         {
             var faults = bindings[DescriptorBindingKind.FaultBuffer][0];
-            var diagnostic = harness.ReadBack(faults.Handle, faults.Size - 32, 32);
+            var diagnostic = harness.ReadBack(faults.Handle, faults.Size - 64, 32);
             Assert.Equal(expectFault ? 1u : 0u, ReadWord(diagnostic, 0));
             if (expectFault)
             {

@@ -22,7 +22,7 @@ internal static partial class RegisterWriters
     private static readonly uint[] IgnoredShaderOffsets =
     [
         SpiShaderPaceIdPs, SpiGraphicsShaderControlPs, SpiShaderPaceIdGs, SpiShaderPgmRsrc4Gs, SpiGraphicsShaderControlGs,
-        SpiShaderUserDataAddrLoGs, SpiShaderUserDataAddrHiGs, SpiShaderPgmChksumHs, SpiShaderPgmRsrc4Hs, SpiGraphicsShaderControlHs,
+        SpiShaderPgmChksumHs, SpiShaderPgmRsrc4Hs, SpiGraphicsShaderControlHs,
         SpiShaderUserDataAddrLoHs, SpiShaderUserDataAddrHiHs,
     ];
 
@@ -71,6 +71,10 @@ internal static partial class RegisterWriters
         direct[SpiGraphicsShaderControlGs] = ForwardShaderPacket;
         direct[SpiShaderUserDataAddrLoGs] = ForwardShaderPacket;
         direct[SpiShaderUserDataAddrHiGs] = ForwardShaderPacket;
+        indirect[SpiShaderUserDataAddrLoGs] = static (banks, _, value) =>
+            banks.Shader.Vertex.GeometryUserDataAddress = (banks.Shader.Vertex.GeometryUserDataAddress & 0xFFFFFFFF00000000UL) | value;
+        indirect[SpiShaderUserDataAddrHiGs] = static (banks, _, value) =>
+            banks.Shader.Vertex.GeometryUserDataAddress = (banks.Shader.Vertex.GeometryUserDataAddress & uint.MaxValue) | ((ulong)value << 32);
         direct[SpiGraphicsShaderControlHs] = ForwardShaderPacket;
         direct[SpiShaderUserDataAddrLoHs] = ForwardShaderPacket;
         direct[SpiShaderUserDataAddrHiHs] = ForwardShaderPacket;

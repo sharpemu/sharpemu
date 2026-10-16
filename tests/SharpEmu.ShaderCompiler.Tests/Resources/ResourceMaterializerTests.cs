@@ -39,7 +39,7 @@ public sealed class ResourceMaterializerTests
         var previousSpecialization = specialization;
         var success = ResourceMaterializer.Materialize(plan, Inputs(userData, readCleanMemory: memory.Read),
             ref snapshot, ref specialization, out var failure);
-        Assert.Equal(distinctCount <= ShaderResourceInfo.MaxImages, success);
+        Assert.Equal(distinctCount <= ShaderResourceInfo.MaxIndirectImageCandidates, success);
         if (success)
         {
             Assert.Equal(ResourceMaterializationFailure.None, failure);

@@ -603,7 +603,8 @@ public sealed partial class GuestImageCache
         foreach (var imageIdentifier in FindImagesInRange(stencil.Address, stencil.Size, pageOverlap: false))
         {
             var owner = _slots.TryGet(imageIdentifier);
-            if (owner != null && owner.Description.Data.Address == stencil.Address)
+            if (owner != null && owner.Description.Data == stencil &&
+                owner.Description.Extent.Equals(depth.Description.Extent))
             {
                 association = imageIdentifier;
             }
@@ -619,6 +620,11 @@ public sealed partial class GuestImageCache
 
         var record = _slots[association];
         TouchImage(record);
+        // Release the former image watch on conversion. Keep an active stencil watch on reuse.
+        if (!record.DepthOwner.IsValid)
+        {
+            UnwatchImage(association);
+        }
         record.AssociateDepth(depthImageIdentifier);
         return association;
     }

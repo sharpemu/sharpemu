@@ -7,9 +7,7 @@ using SharpEmu.Libs.Gpu.Images;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
-// What a draw's program resolution reads besides the stage and context registers: the export
-// mapping of every bound color slot, whether the pixel stage runs and whether a depth target is
-// bound. All three follow from the register banks alone.
+// Program inputs include target mappings, stage activity, and indexed draw mode.
 public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
 {
     [System.Runtime.CompilerServices.InlineArray(RenderingState.ColorAttachmentCapacity)]
@@ -21,6 +19,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
     public ExportMappings Mapping;
     public bool PixelActive;
     public bool DepthBound;
+    public bool Indexed;
 
     public static GraphicsProgramInputs Create()
     {
@@ -30,7 +29,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
     }
 
     public readonly bool Equals(GraphicsProgramInputs other) =>
-        PixelActive == other.PixelActive && DepthBound == other.DepthBound &&
+        PixelActive == other.PixelActive && DepthBound == other.DepthBound && Indexed == other.Indexed &&
         ((ReadOnlySpan<ColorComponentMap>)Mapping).SequenceEqual(other.Mapping);
 
     public override readonly bool Equals(object? obj) => obj is GraphicsProgramInputs other && Equals(other);
@@ -45,6 +44,7 @@ public struct GraphicsProgramInputs : IEquatable<GraphicsProgramInputs>
 
         hash.Add(PixelActive);
         hash.Add(DepthBound);
+        hash.Add(Indexed);
         return hash.ToHashCode();
     }
 }
@@ -76,7 +76,7 @@ public sealed partial class RenderExecutor
 
     // The inputs ResolveShaderPrograms derives from the targets TryResolveDrawTargets binds, from the
     // registers alone: the target requests and the pixel and depth activity, without the images.
-    public static GraphicsProgramInputs ProgramInputsOf(RegisterBanks banks, IImageFormatSupport formats, Func<string, Exception> fatal)
+    public static GraphicsProgramInputs ProgramInputsOf(RegisterBanks banks, IImageFormatSupport formats, Func<string, Exception> fatal, bool indexed = false)
     {
         var inputs = GraphicsProgramInputs.Create();
         var context = banks.Context;
@@ -96,6 +96,7 @@ public sealed partial class RenderExecutor
 
         inputs.DepthBound = DepthTargetResolver.Resolve(context, formats, fatal) is not null;
         inputs.PixelActive = HasActivePixelShader(banks);
+        inputs.Indexed = indexed;
         return inputs;
     }
 
@@ -103,6 +104,21 @@ public sealed partial class RenderExecutor
     public GraphicsPrograms ResolveGraphicsPrograms(RegisterBanks banks, in GraphicsProgramInputs inputs)
     {
         var context = banks.Context;
+        if (UsesMeshExecution(banks))
+        {
+            var userConfig = banks.UserConfig;
+            if (inputs.Indexed && userConfig.PrimitiveType is
+                (uint)GuestPrimitiveType.TriangleList or (uint)GuestPrimitiveType.TriangleStrip)
+            {
+                userConfig = userConfig.Copy();
+                userConfig.PrimitiveType = (uint)GuestPrimitiveType.TriangleList;
+            }
+
+            return _pipelines.GetMeshGraphicsPrograms(
+                banks.Shader.Vertex, banks.Shader.Pixel, context.ShaderInterface, context,
+                userConfig, inputs.Mapping, inputs.PixelActive, inputs.DepthBound);
+        }
+
         return _pipelines.GetGraphicsPrograms(
             banks.Shader.Vertex,
             banks.Shader.Pixel,

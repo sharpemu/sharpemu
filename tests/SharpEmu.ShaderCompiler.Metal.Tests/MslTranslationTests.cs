@@ -13,6 +13,28 @@ namespace SharpEmu.ShaderCompiler.Metal.Tests;
 /// </summary>
 public sealed class MslTranslationTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ShaderCallsReportTheBackendLimitation(bool linked)
+    {
+        var program = new Gen5ShaderProgram(0x1000, [
+            new(0, Gen5ShaderEncoding.Sop1, "SSwappcB64", [0xBE8E2100],
+                [Gen5Operand.Scalar(0)], [Gen5Operand.Scalar(14)], null),
+            new(4, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null)]);
+        if (linked)
+        {
+            var function = new Gen5ShaderProgram(0x2000, [
+                new(0, Gen5ShaderEncoding.Sop1, "SSetpcB64", [0xBE80200E],
+                    [Gen5Operand.Scalar(14)], [], null)]);
+            program = Gen5ShaderCallLinker.Link(program, [new ShaderCallSite(0, 0, 2, 14, 0x1004,
+                [new ShaderCallTarget(0x2000, 0, function)])]);
+        }
+        var request = Gen5ComputeFixtures.RequestOrThrow(program, ShaderStage.Compute);
+        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var error));
+        Assert.Equal("Metal does not support linked shader calls.", error);
+    }
+
     [Fact]
     public void ComputeFixturesResolveDescriptorFormatsBeforeCompilation()
     {
@@ -53,6 +75,24 @@ public sealed class MslTranslationTests
         Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
         Assert.Contains("uint v[256]", shader.Source, StringComparison.Ordinal);
         Assert.Contains("((max(v[0], v[1]) - min(v[0], v[1])) + (v[2]))", shader.Source, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FlbitI32B64CompilesWithWordSizedScansAndZeroFallback()
+    {
+        var scan = new Gen5ShaderInstruction(
+            0, Gen5ShaderEncoding.Sop1, "SFlbitI32B64", [0xBE821600],
+            [Gen5Operand.Scalar(0)], [Gen5Operand.Scalar(2)], null);
+        var end = new Gen5ShaderInstruction(
+            4, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null);
+        var request = Gen5ComputeFixtures.RequestOrThrow(
+            new Gen5ShaderProgram(0, [scan, end]), ShaderStage.Compute, localSizeX: 1);
+
+        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.Contains("clz(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains(">> 32", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("32u + clz(", shader.Source, StringComparison.Ordinal);
+        Assert.Contains("0xFFFFFFFFu", shader.Source, StringComparison.Ordinal);
     }
 
     [Fact]

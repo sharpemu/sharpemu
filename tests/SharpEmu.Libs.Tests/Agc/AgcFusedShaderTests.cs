@@ -10,11 +10,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
-// sceAgcGetFusedShaderSize (dolOmWH+huQ) and sceAgcFuseShaderHalves (fd5Bp5tGTgo)
-// join a GS or HS front/back shader half pair into one shader: the fused header
-// is the back half retyped, the back half's SH registers become the fused
-// register image, and the front half contributes its program address
-// (SPI_SHADER_PGM_LO/HI_ES) and checksum registers.
+// Fusion combines shader halves and preserves their register and program data.
 public sealed class AgcFusedShaderTests
 {
     private const ulong BaseAddress = 0x1_0000_0000;
@@ -74,8 +70,10 @@ public sealed class AgcFusedShaderTests
         Assert.Equal(0UL, ReadUInt64(memory, SizeResult));
     }
 
-    [Fact]
-    public void FuseShaderHalves_GsPairWithScratch_BuildsFusedShader()
+    [Theory]
+    [InlineData("nApJjpKNBl4")]
+    [InlineData("fd5Bp5tGTgo")]
+    public void FuseShaderHalves_ExportDispatchWithScratch_BuildsFusedShader(string nid)
     {
         var (memory, ctx) = CreateGsPair();
 
@@ -83,9 +81,14 @@ public sealed class AgcFusedShaderTests
         ctx[CpuRegister.Rsi] = FrontShader;
         ctx[CpuRegister.Rdx] = BackShader;
         ctx[CpuRegister.Rcx] = Scratch;
-        var result = AgcExports.FuseShaderHalves(ctx);
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+        Assert.True(manager.TryGetExport(nid, out var export));
+        Assert.Equal("sceAgcFuseShaderHalves", export.Name);
+        Assert.Equal("libSceAgc", export.LibraryName);
+        var result = manager.Dispatch(nid, ctx);
 
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, result);
 
         // Fused header is the back half with type kGs, cleared user data, and
         // registers relocated to the scratch image.
@@ -109,6 +112,95 @@ public sealed class AgcFusedShaderTests
         Assert.Equal(0xAAAA_0001u, ReadUInt32(memory, Scratch + 20));
         Assert.Equal(0xBBBB_0002u, ReadUInt32(memory, Scratch + 28));
         Assert.Equal(0x5555_5555u, ReadUInt32(memory, Scratch + 36));
+    }
+
+    [Theory]
+    [InlineData("nApJjpKNBl4", true)]
+    [InlineData("nApJjpKNBl4", false)]
+    [InlineData("fd5Bp5tGTgo", true)]
+    [InlineData("fd5Bp5tGTgo", false)]
+    public void FusionExportsMergeResourceFieldsAndSelectUserData(string nid, bool useScratch)
+    {
+        var (memory, context) = CreateGsPair();
+        WriteUInt64(memory, FrontShader + ShaderUserDataOffset, SizeResult);
+        WriteByte(memory, BackShader + ShaderNumShRegistersOffset, 7);
+        WriteRegister(memory, FrontRegisters, 0, 0x8A, 0x40000007);
+        WriteRegister(memory, FrontRegisters, 1, 0x8B, 0x38060022);
+        WriteRegister(memory, BackRegisters, 5, 0x8A, 0x20000003);
+        WriteRegister(memory, BackRegisters, 6, 0x8B, 0x10010001);
+        context[CpuRegister.Rdi] = FusedShader;
+        context[CpuRegister.Rsi] = FrontShader;
+        context[CpuRegister.Rdx] = BackShader;
+        context[CpuRegister.Rcx] = useScratch ? Scratch : 0;
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, manager.Dispatch(nid, context));
+
+        var registers = useScratch ? Scratch : BackRegisters;
+        var preservesUserData = nid == "nApJjpKNBl4";
+        Assert.Equal(preservesUserData ? SizeResult : 0UL,
+            ReadUInt64(memory, FusedShader + ShaderUserDataOffset));
+        Assert.Equal(0x40000007u, ReadUInt32(memory, registers + 44));
+        Assert.Equal(preservesUserData ? 0x38060023u : 0x08060023u,
+            ReadUInt32(memory, registers + 52));
+        if (useScratch)
+        {
+            Assert.Equal(0x10010001u, ReadUInt32(memory, BackRegisters + 52));
+        }
+    }
+
+    [Theory]
+    [InlineData("nApJjpKNBl4", false, false)]
+    [InlineData("nApJjpKNBl4", false, true)]
+    [InlineData("nApJjpKNBl4", true, false)]
+    [InlineData("nApJjpKNBl4", true, true)]
+    [InlineData("fd5Bp5tGTgo", false, false)]
+    [InlineData("fd5Bp5tGTgo", false, true)]
+    [InlineData("fd5Bp5tGTgo", true, false)]
+    [InlineData("fd5Bp5tGTgo", true, true)]
+    public void FusionExportsKeepFrontUserScalarsWhenBackCountIsLarger(string nid, bool hull, bool scratch)
+    {
+        var (memory, context) = CreateGsPair();
+        WriteByte(memory, FrontShader + ShaderTypeOffset, hull ? HsFront : GsFront);
+        WriteByte(memory, BackShader + ShaderTypeOffset, hull ? HsBack : GsBack);
+        var resourceOffset = hull ? 0x10Au : 0x8Au;
+        WriteByte(memory, BackShader + ShaderNumShRegistersOffset, 7);
+        WriteRegister(memory, FrontRegisters, 0, resourceOffset, 7);
+        WriteRegister(memory, FrontRegisters, 1, resourceOffset + 1, 4);
+        WriteRegister(memory, BackRegisters, 5, resourceOffset, 3);
+        WriteRegister(memory, BackRegisters, 6, resourceOffset + 1, 0x0800003E);
+        context[CpuRegister.Rdi] = FusedShader;
+        context[CpuRegister.Rsi] = FrontShader;
+        context[CpuRegister.Rdx] = BackShader;
+        context[CpuRegister.Rcx] = scratch ? Scratch : 0;
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, manager.Dispatch(nid, context));
+        Assert.Equal(4u, ReadUInt32(memory, (scratch ? Scratch : BackRegisters) + 52) & 0x0800003E);
+        if (scratch) Assert.Equal(0x0800003Eu, ReadUInt32(memory, BackRegisters + 52));
+    }
+
+    [Theory]
+    [InlineData("nApJjpKNBl4", true)]
+    [InlineData("nApJjpKNBl4", false)]
+    [InlineData("fd5Bp5tGTgo", true)]
+    [InlineData("fd5Bp5tGTgo", false)]
+    public void FusionExportsRejectUnreadableRegisterTables(string nid, bool invalidFront)
+    {
+        var (memory, context) = CreateGsPair();
+        var shader = invalidFront ? FrontShader : BackShader;
+        WriteUInt64(memory, shader + ShaderShRegistersOffset, BaseAddress + MemorySize - 4);
+        WriteByte(memory, shader + ShaderNumShRegistersOffset, 1);
+        context[CpuRegister.Rdi] = FusedShader;
+        context[CpuRegister.Rsi] = FrontShader;
+        context[CpuRegister.Rdx] = BackShader;
+        context[CpuRegister.Rcx] = 0;
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT, manager.Dispatch(nid, context));
     }
 
     [Fact]
@@ -361,6 +453,39 @@ public sealed class AgcFusedShaderTests
         Assert.Equal(
             ["SNop", "SNop", "SNop", "SEndpgm"],
             program.Instructions.Select(static instruction => instruction.Opcode));
+    }
+
+    [Fact]
+    public void CreateShader_RediscoversFusedPairWhenAddressesAreReused()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1_0000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var header = BaseAddress + 0x100;
+        var code = BaseAddress + 0x1000;
+        var backHeader = code + 0x80;
+        WriteUInt32(memory, header, 0x34333231);
+        WriteUInt32(memory, header + 4, 0x18);
+        WriteUInt32(memory, header + 0x44, 8);
+        WriteByte(memory, header + ShaderTypeOffset, GsFront);
+        WriteWords(memory, code, 0xBF800000, 0xBE802000);
+        WriteUInt32(memory, backHeader, 0x34333231);
+        WriteUInt32(memory, backHeader + 4, 0x18);
+        WriteUInt32(memory, backHeader + 0x44, 8);
+        WriteByte(memory, backHeader + ShaderTypeOffset, GsBack);
+
+        foreach (var continuation in new[] { code + 0x200, code + 0x300, code + 0x300 })
+        {
+            WriteUInt64(memory, backHeader + ShaderCodeOffset, continuation);
+            WriteWords(memory, continuation, 0xBF800000, 0xBF810000);
+            context[CpuRegister.Rdi] = 0;
+            context[CpuRegister.Rsi] = header;
+            context[CpuRegister.Rdx] = code;
+            Assert.Equal(0, AgcExports.CreateShader(context));
+            Assert.True(Gen5ShaderTranslator.TryGetFusedProgramParts(context, code, out var actual, out _));
+            Assert.Equal(continuation, actual);
+            Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, code, out var program, out var error), error);
+            Assert.Equal(4, program.Instructions.Count);
+        }
     }
 
     private static (FakeCpuMemory Memory, CpuContext Ctx) CreateGsPair()

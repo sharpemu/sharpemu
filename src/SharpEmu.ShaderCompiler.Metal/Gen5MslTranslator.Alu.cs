@@ -191,10 +191,8 @@ public static partial class Gen5MslTranslator
                     $"{F16(instruction, 0)} * {F16(instruction, 1)}"),
                 "VMinF32" => FloatResult(instruction, $"fmin({F(instruction, 0)}, {F(instruction, 1)})"),
                 "VMaxF32" => FloatResult(instruction, $"fmax({F(instruction, 0)}, {F(instruction, 1)})"),
-                "VMinF16" => Float16Result(
-                    instruction,
-                    destination,
-                    $"fmin({F16(instruction, 0)}, {F16(instruction, 1)})"),
+                "VMin3F16" => MinimumHalfResult(instruction, destination, true),
+                "VMinF16" => MinimumHalfResult(instruction, destination, false),
                 "VMaxF16" => Float16Result(
                     instruction,
                     destination,
@@ -216,9 +214,9 @@ public static partial class Gen5MslTranslator
                 "VFractF32" => FloatResult(instruction, $"fract({F(instruction, 0)})"),
                 "VSqrtF32" => FloatResult(instruction, $"sqrt({F(instruction, 0)})"),
                 "VRsqF32" => FloatResult(instruction, $"rsqrt({F(instruction, 0)})"),
-                "VRcpF16" => Float16Result(instruction, destination, $"(1.0f / {F16(instruction, 0)})"),
-                "VSqrtF16" => Float16Result(instruction, destination, $"sqrt({F16(instruction, 0)})"),
-                "VLogF16" => Float16Result(instruction, destination, $"log2({F16(instruction, 0)})"),
+                "VRcpF16" => Float16Reciprocal(instruction, destination),
+                "VSqrtF16" => Float16SquareRoot(instruction, destination),
+                "VLogF16" => Float16Logarithm(instruction, destination),
                 "VExpF16" => Float16Result(instruction, destination, $"exp2({F16(instruction, 0)})"),
                 "VFloorF16" => Float16Result(instruction, destination, $"floor({F16(instruction, 0)})"),
                 "VCeilF16" => Float16Result(instruction, destination, $"ceil({F16(instruction, 0)})"),
@@ -239,8 +237,6 @@ public static partial class Gen5MslTranslator
                 "VCosF32" => FloatResult(instruction, $"cos({F(instruction, 0)} * {TauLiteral})"),
                 "VLdexpF32" =>
                     FloatResult(instruction, $"ldexp({F(instruction, 0)}, as_type<int>({RawSource(instruction, 1)}))"),
-                "VMin3F16" => Float16Result(instruction, destination,
-                    $"fmin(fmin({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)})"),
                 "VMax3F16" => Float16Result(instruction, destination,
                     $"fmax(fmax({F16(instruction, 0)}, {F16(instruction, 1)}), {F16(instruction, 2)})"),
                 "VMed3F16" => Float16Result(instruction, destination,
@@ -355,7 +351,7 @@ public static partial class Gen5MslTranslator
                 "VLshlrevB32" => $"(({RawSource(instruction, 1)}) << (({RawSource(instruction, 0)}) & 31u))",
                 "VLshrB32" => $"(({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))",
                 "VLshrrevB32" => $"(({RawSource(instruction, 1)}) >> (({RawSource(instruction, 0)}) & 31u))",
-                "VLshrrevB64" => EmitLshrrevB64(instruction, destination),
+                "VLshlrevB64" or "VLshrrevB64" => EmitLogicalShift64(instruction, destination),
                 "VAshrI32" =>
                     AsUInt($"(as_type<int>({RawSource(instruction, 0)}) >> (({RawSource(instruction, 1)}) & 31u))"),
                 "VAshrrevI32" =>
@@ -497,10 +493,11 @@ public static partial class Gen5MslTranslator
             return $"({AsUInt(signedLeft)} * {AsUInt(signedRight)})";
         }
 
-        private string EmitLshrrevB64(Gen5ShaderInstruction instruction, uint destination)
+        private string EmitLogicalShift64(Gen5ShaderInstruction instruction, uint destination)
         {
             var shift = Temp("uint", $"({RawSource(instruction, 0)}) & 63u");
-            var shifted = Temp("ulong", $"({RawSource64(instruction, 1)}) >> {shift}");
+            var operation = instruction.Opcode == "VLshlrevB64" ? "<<" : ">>";
+            var shifted = Temp("ulong", $"({RawSource64(instruction, 1)}) {operation} {shift}");
             StoreVector(destination + 1, $"(uint)({shifted} >> 32)");
             return $"(uint){shifted}";
         }
@@ -1079,7 +1076,6 @@ public static partial class Gen5MslTranslator
                     {
                         immediate = instruction.Words[0] & 0xFFFF;
                     }
-
                     return TryEmitScalarCompareK(instruction, destination, immediate, out error);
                 }
 
@@ -1158,10 +1154,11 @@ public static partial class Gen5MslTranslator
 
             if (instruction.Opcode == "SFlbitI32B64")
             {
-                var wide = Temp("ulong", RawSource64(instruction, 0));
-                var result = Temp(
-                    "uint",
-                    $"{wide} == 0ul ? 0xFFFFFFFFu : (uint)clz({wide})");
+                var source = Temp("ulong", RawSource64(instruction, 0));
+                var low = Temp("uint", $"(uint){source}");
+                var high = Temp("uint", $"(uint)({source} >> 32)");
+                var result = Temp("uint",
+                    $"{high} != 0u ? clz({high}) : ({low} != 0u ? 32u + clz({low}) : 0xFFFFFFFFu)");
                 StoreScalar(destination, result);
                 return true;
             }
@@ -1243,7 +1240,18 @@ public static partial class Gen5MslTranslator
                 {
                     var result = Temp("uint", $"reverse_bits({left})");
                     StoreScalar(destination, result);
-                    Line($"scc = {result} != 0u;");
+                    return true;
+                }
+                case "SBitreplicateB64B32":
+                {
+                    var source = Temp("uint", left);
+                    for (uint half = 0; half < 2; half++)
+                    {
+                        var expanded = Temp("uint", "0u");
+                        for (uint bit = 0; bit < 16; bit++)
+                            Line($"{expanded} |= ((({source} >> {half * 16 + bit}u) & 1u) * 3u) << {bit * 2}u;");
+                        StoreScalar(destination + half, expanded);
+                    }
                     return true;
                 }
                 case "SBcnt1I32B32":
@@ -1254,10 +1262,11 @@ public static partial class Gen5MslTranslator
                     return true;
                 }
                 case "SFF1I32B32":
+                case "SFlbitI32B32":
                 {
                     var result = Temp(
                         "uint",
-                        $"{left} == 0u ? 0xFFFFFFFFu : (uint)ctz({left})");
+                        $"{left} == 0u ? 0xFFFFFFFFu : (uint){(instruction.Opcode == "SFlbitI32B32" ? "clz" : "ctz")}({left})");
                     StoreScalar(destination, result);
                     return true;
                 }
@@ -1548,15 +1557,6 @@ public static partial class Gen5MslTranslator
         {
             error = string.Empty;
 
-            // S_SWAPPC_B64 is a dynamic call/return operation.  The Gen5
-            // translator has already linearized the reachable shader body,
-            // so there is no host program counter to exchange here.  Its
-            // single pair operand must not be treated as a binary 64-bit op.
-            if (instruction.Opcode == "SSwappcB64")
-            {
-                return true;
-            }
-
             var left = Temp("ulong", RawSource64(instruction, 0));
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
@@ -1599,6 +1599,10 @@ public static partial class Gen5MslTranslator
             {
                 case "SMovB64":
                     value = left;
+                    setsScc = false;
+                    break;
+                case "SCmovB64":
+                    value = $"(scc ? {left} : {Scalar64Expression(destination)})";
                     setsScc = false;
                     break;
                 case "SNotB64":
@@ -1902,6 +1906,97 @@ public static partial class Gen5MslTranslator
             }
 
             return expression;
+        }
+
+        private string Float16Logarithm(Gen5ShaderInstruction instruction, uint destination)
+        {
+            var source = Temp("float", F16(instruction, 0));
+            return Float16Result(instruction, destination,
+                $"({source} == 0.0f ? as_type<float>(0xFF800000u) : " +
+                $"({source} > 0.0f ? (isinf({source}) ? {source} : log2({source})) : as_type<float>(0xFFC00000u)))");
+        }
+
+        private string Float16Reciprocal(Gen5ShaderInstruction instruction, uint destination)
+        {
+            var source = Temp("float", F16(instruction, 0));
+            var bits = Temp("uint", $"as_type<uint>({source})");
+            var magnitude = Temp("uint", $"({bits} & 0x7FFFFFFFu)");
+            return Float16Result(instruction, destination,
+                $"({magnitude} == 0u ? as_type<float>(({bits} & 0x80000000u) | 0x7F800000u) : " +
+                $"({magnitude} == 0x7F800000u ? as_type<float>({bits} & 0x80000000u) : (1.0f / {source})))");
+        }
+
+        private string Float16SquareRoot(Gen5ShaderInstruction instruction, uint destination)
+        {
+            var source = Temp("float", F16(instruction, 0));
+            return Float16Result(instruction, destination,
+                $"({source} == 0.0f ? {source} : ({source} > 0.0f ? " +
+                $"(isinf({source}) ? {source} : sqrt({source})) : as_type<float>(0xFFC00000u)))");
+        }
+
+        private string ReadMinimumHalfBits(Gen5ShaderInstruction instruction, int sourceIndex)
+        {
+            var operand = instruction.Sources[sourceIndex];
+            string bits;
+            if (operand.Kind == Gen5OperandKind.EncodedConstant &&
+                Gen5InlineConstants.TryDecode(operand.Value, out var inline))
+            {
+                var number = operand.Value switch
+                {
+                    >= 128 and <= 192 => (float)(operand.Value - 128),
+                    >= 193 and <= 208 => -(float)(operand.Value - 192),
+                    _ => BitConverter.UInt32BitsToSingle(inline),
+                };
+                bits = FormatUInt(BitConverter.HalfToUInt16Bits((Half)number));
+            }
+            else
+            {
+                var raw = RawSource(instruction, sourceIndex, applySdwaIntegerModifiers: false);
+                var shift = instruction.Control is Gen5Vop3Control selection &&
+                    (selection.OperandSelect & (1u << sourceIndex)) != 0 ? 16 : 0;
+                bits = $"((({raw}) >> {shift}) & 0xFFFFu)";
+            }
+            var (absolute, negate) = instruction.Control switch
+            {
+                Gen5Vop3Control control => (control.AbsoluteMask, control.NegateMask),
+                Gen5SdwaControl control => (control.AbsoluteMask, control.NegateMask),
+                Gen5DppControl control => (control.AbsoluteMask, control.NegateMask),
+                _ => (0u, 0u),
+            };
+            if ((absolute & (1u << sourceIndex)) != 0) bits = $"({bits} & 0x7FFFu)";
+            if ((negate & (1u << sourceIndex)) != 0) bits = $"({bits} ^ 0x8000u)";
+            return Temp("uint", bits);
+        }
+
+        private string MinimumHalfBits(string left, string right)
+        {
+            var leftNan = Temp("bool", $"(({left} & 0x7FFFu) > 0x7C00u)");
+            var rightNan = Temp("bool", $"(({right} & 0x7FFFu) > 0x7C00u)");
+            string Ordered(string value) => $"({value} ^ (({value} & 0x8000u) != 0u ? 0xFFFFu : 0x8000u))";
+            var result = $"({leftNan} ? {right} : ({rightNan} ? {left} : ({Ordered(left)} < {Ordered(right)} ? {left} : {right})))";
+            if (_request.IeeeMode)
+                result = $"(({leftNan} && ({left} & 0x200u) == 0u) ? ({left} | 0x200u) : " +
+                    $"(({rightNan} && ({right} & 0x200u) == 0u) ? ({right} | 0x200u) : {result}))";
+            return Temp("uint", result);
+        }
+
+        private string MinimumHalfResult(Gen5ShaderInstruction instruction, uint destination, bool ternary)
+        {
+            var bits = MinimumHalfBits(ReadMinimumHalfBits(instruction, 0), ReadMinimumHalfBits(instruction, 1));
+            if (ternary) bits = MinimumHalfBits(bits, ReadMinimumHalfBits(instruction, 2));
+            var control = instruction.Control as Gen5Vop3Control;
+            var modifier = _request.IeeeMode ? 0u : control?.OutputModifier ?? 0u;
+            if (modifier != 0)
+            {
+                var scale = modifier == 1 ? "2.0f" : modifier == 2 ? "4.0f" : "0.5f";
+                bits = Temp("uint", $"(({bits} & 0x7FFFu) > 0x7C00u ? {bits} : " +
+                    $"(uint)as_type<ushort>(half((float)as_type<half>((ushort){bits}) * {scale})))");
+            }
+            if (control?.Clamp == true)
+                bits = Temp("uint", $"((({bits} & 0x8000u) != 0u || ({bits} & 0x7FFFu) > 0x7C00u) ? 0u : min({bits}, 0x3C00u))");
+            return ((control?.OperandSelect ?? 0) & 8) != 0
+                ? $"((v[{destination}] & 0x0000FFFFu) | ({bits} << 16))"
+                : $"((v[{destination}] & 0xFFFF0000u) | {bits})";
         }
 
         /// <summary>Rounds to f16 and preserves the unselected VGPR half.</summary>

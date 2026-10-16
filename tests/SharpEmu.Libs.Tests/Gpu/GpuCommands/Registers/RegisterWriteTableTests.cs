@@ -16,6 +16,20 @@ public sealed class RegisterWriteTableTests
 {
     private const ulong PacketAddress = 0x1_0000_1000;
 
+    [Fact]
+    public void GeometryUserDataPointerPreservesBothWordsAndSubmissionCopy()
+    {
+        var banks = NewBanks();
+        WriteShader(banks, SpiShaderUserDataAddrLoGs, 0x12345678, 0x20);
+        Assert.Equal(0x2012345678UL, banks.Shader.Vertex.GeometryUserDataAddress);
+        var copy = banks.Shader.Vertex.Copy();
+        RegisterWriteTable.WriteShaderEntry(banks, SpiShaderUserDataAddrHiGs, 0x31, PacketAddress);
+        Assert.Equal(0x3112345678UL, banks.Shader.Vertex.GeometryUserDataAddress);
+        RegisterWriteTable.WriteShaderEntry(banks, SpiShaderUserDataAddrLoGs, 0x87654321, PacketAddress);
+        Assert.Equal(0x3187654321UL, banks.Shader.Vertex.GeometryUserDataAddress);
+        Assert.Equal(0x2012345678UL, copy.GeometryUserDataAddress);
+    }
+
     private static RegisterBanks NewBanks() => new(static message => new InvalidOperationException(message));
 
     private static PacketContext Packet(uint opcode, int valueCount) =>
@@ -93,7 +107,24 @@ public sealed class RegisterWriteTableTests
 
         Assert.Equal(0u, WriteContext(banks, SpiVsOutConfig));
         Assert.Contains("count=0", Assert.Throws<InvalidOperationException>(() => WriteShader(banks, SpiShaderPgmLoPs)).Message);
-        Assert.Contains("consumed no values", Assert.Throws<InvalidOperationException>(() => WriteContext(banks, DbCountControl)).Message);
+        Assert.Contains("count=0", Assert.Throws<InvalidOperationException>(() => WriteContext(banks, DbCountControl)).Message);
+    }
+
+    [Fact]
+    public void DepthCountControl_PreservesDirectIndirectAndSavedContextValues()
+    {
+        var banks = NewBanks();
+        Assert.Equal(0u, banks.Context.DepthCountControl);
+        WriteContext(banks, DbCountControl, 0x1103);
+        Assert.Equal(0x1103u, banks.Context.DepthCountControl);
+        var copy = banks.Context.Copy();
+        RegisterWriteTable.WriteContextEntry(banks, DbCountControl, 0, PacketAddress);
+        Assert.Equal(0u, banks.Context.DepthCountControl);
+        Assert.Equal(0x1103u, copy.DepthCountControl);
+        banks.ApplyContextState(ContextStateOperation.PushClear);
+        WriteContext(banks, DbCountControl, 1);
+        banks.ApplyContextState(ContextStateOperation.Pop);
+        Assert.Equal(0u, banks.Context.DepthCountControl);
     }
 
     [Fact]

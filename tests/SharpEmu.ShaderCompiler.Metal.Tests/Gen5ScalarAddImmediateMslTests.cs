@@ -48,6 +48,19 @@ public sealed class Gen5ScalarAddImmediateMslTests
         Assert.DoesNotContain("scc = ((~(", Compile(word), StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(0x80u)]
+    [InlineData(0x81u)]
+    public void BitReverseLeavesSccAlone(uint operand)
+    {
+        var source = Compile(0xBE840B00u | operand);
+        var baseline = Compile(0xBE840300u | operand);
+        Assert.Contains("reverse_bits(", source, StringComparison.Ordinal);
+        Assert.Equal(
+            baseline.Split('\n').Where(line => line.Contains("scc =", StringComparison.Ordinal)),
+            source.Split('\n').Where(line => line.Contains("scc =", StringComparison.Ordinal)));
+    }
+
     private static Gen5ShaderProgram DecodeProgram(params uint[] words)
     {
         var memory = new AddImmediateTestMemory(ShaderAddress, 0x1000);

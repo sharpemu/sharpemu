@@ -19,6 +19,8 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 {
     public string BackendName => "Vulkan";
 
+    public bool LinkedShaderCallsSupported => true;
+
 
     private static readonly IGuestCompiledShader DepthOnlyFragmentShader =
         new VulkanCompiledGuestShader(SpirvFixedShaders.CreateDepthOnlyFragment());
@@ -31,7 +33,7 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             return false;
         }
 
-        shader = new VulkanCompiledGuestShader(compiled.Spirv);
+        shader = new VulkanCompiledGuestShader(compiled.Spirv) { InputLocationMask = compiled.InputLocationMask };
         return true;
     }
 

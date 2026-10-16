@@ -94,6 +94,7 @@ public sealed partial class GuestImageCache
             foreach (var association in associations)
             {
                 var associated = _slots[association];
+                ReportImageLifetime(associated, "delete-depth-association", deletion: true);
                 if (associated.IsGpuModified)
                 {
                     associated.ClearGpuModified();
@@ -109,8 +110,12 @@ public sealed partial class GuestImageCache
         }
 
         _scheduledReadbacks.Remove(imageIdentifier);
-        if (image.Description.HasMetadata)
+        if (image.Description.HasMetadata &&
+            _surfaceMetadata.TryGetValue(image.Description.Metadata.Range.Address, out var registeredMetadata) &&
+            ReferenceEquals(registeredMetadata, image.MetadataRegistration))
         {
+            RecordMetadataEvent("remove-image-metadata", image.Description.Metadata.Range.Address,
+                image.Description.Metadata.Range.Size);
             _surfaceMetadata.Remove(image.Description.Metadata.Range.Address);
         }
 
@@ -128,6 +133,7 @@ public sealed partial class GuestImageCache
     private void ReleaseImage(ResourceSlotIdentifier imageIdentifier)
     {
         var image = _slots[imageIdentifier];
+        TraceVolumeState("release", image, ImageRequest.Refresh(image.Description, ImageRole.Texture));
         if (image.IsGpuModified)
         {
             image.ClearGpuModified();
@@ -365,21 +371,25 @@ public sealed partial class GuestImageCache
     bool IGuestImageStore.MarkCpuWrite(ulong address, ulong size)
     {
         GpuMemoryAccessProfile.CountImageCpuWrite();
-        if (!IsValidRange(address, size) || !_pageOwners.MayHaveOwners(address, size))
+        if (!IsValidRange(address, size))
         {
             return false;
         }
 
-        // Most CPU writes (AGC command building, labels) touch no image page. Checking
-        // the page owners without the lock keeps those writes from spinning behind the
-        // render thread, which holds the lock for most of a frame. The check sees the
-        // same state a locked call made before the write would.
-        if (!MayOwnPages(address, size))
+        // Skip the lock only when neither image pages nor metadata can cover the write.
+        if (!MayOwnPages(address, size) && !MayOverlapMetadata(address, size))
         {
             return false;
         }
 
         using var held = _lock.Hold();
+        if (!_pageOwners.MayHaveOwners(address, size))
+        {
+            // Metadata can occupy a page with no image data owner.
+            InvalidateMetadataForCpuWrite(address, size);
+            return false;
+        }
+
         return InvalidateAliases(address, size);
     }
 
@@ -420,6 +430,10 @@ public sealed partial class GuestImageCache
     // or makes the image maybe dirty. Returns whether any image shares a page with the range.
     private bool InvalidateAliases(ulong address, ulong size)
     {
+        RecordResourceHistory("cpu-write-notification", address, size);
+        if (ImageClearTrace.Enabled)
+            _metadataHistory.RecordRange(CreateMetadataEvent("cpu-write-notification", address, size, guestCpuWrite: true));
+        InvalidateMetadataForCpuWrite(address, size);
         var pageBegin = address & ~(TrackerLayout.PageBytes - 1);
         var pageEnd = (address + size + TrackerLayout.PageBytes - 1) & ~(TrackerLayout.PageBytes - 1);
         var covered = false;
@@ -466,6 +480,9 @@ public sealed partial class GuestImageCache
         }
 
         using var held = _lock.Hold();
+        if (ImageClearTrace.Enabled)
+            _metadataHistory.RecordRange(CreateMetadataEvent("gpu-write-notification", address, size));
+        RecordResourceHistory("gpu-buffer-write-notification", address, size);
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
         {
             var image = _slots[imageIdentifier];
@@ -477,6 +494,28 @@ public sealed partial class GuestImageCache
             if (image.IsGpuModified)
             {
                 image.ClearGpuModified();
+            }
+
+            image.MarkBufferModified();
+        }
+    }
+
+    // A GPU-modified image owns its bytes; a raw binding can overlap it without writing there.
+    public void InvalidateMemoryCopiesFromGpu(ulong address, ulong size)
+    {
+        if (!IsValidRange(address, size))
+        {
+            return;
+        }
+
+        using var held = _lock.Hold();
+        RecordResourceHistory("gpu-buffer-write-notification", address, size);
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
+        {
+            var image = _slots[imageIdentifier];
+            if (image.DepthOwner.IsValid || image.IsGpuModified || !image.Overlaps(address, size))
+            {
+                continue;
             }
 
             image.MarkBufferModified();
@@ -536,6 +575,10 @@ public sealed partial class GuestImageCache
         }
 
         using var held = _lock.Hold();
+        if (ImageClearTrace.Enabled)
+            _metadataHistory.RecordRange(CreateMetadataEvent("unmap", address, size));
+        RecordResourceHistory("unmap", address, size);
+        Interlocked.Increment(ref _unmapGeneration);
         var end = address + size;
         var stale = new List<ulong>();
         foreach (var metadataAddress in _surfaceMetadata.Keys)

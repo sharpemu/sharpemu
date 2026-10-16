@@ -52,6 +52,29 @@ public sealed class ShaderProgramCacheTests : IDisposable
     private readonly FatalScope _fatal = new();
     private readonly PipelineTestGuest _guest = new();
 
+    [Fact]
+    public void PixelOutputModesHaveSeparateProgramKeys()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.EndProgram);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        var cursor = 0u;
+        ShaderProgram CompileOutput(params SharpEmu.ShaderCompiler.Gen5PixelOutputBinding[] outputs) =>
+            _guest.Programs.GetOrCompile(source, new StageCompileOptions
+            {
+                PixelInfo = new PixelInputInfo(), PixelOutputs = outputs,
+            }, ref cursor, out _);
+        var primary = new SharpEmu.ShaderCompiler.Gen5PixelOutputBinding(0, 0,
+            SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float);
+        var ordinary = CompileOutput(primary);
+        var synthetic = CompileOutput(primary with { DualSourceAlpha = true });
+        var explicitPair = CompileOutput(primary, primary with { GuestSlot = 1, ExportTarget = 1, Index = 1 });
+        Assert.NotEqual(ordinary, synthetic);
+        Assert.NotEqual(ordinary, explicitPair);
+        Assert.NotEqual(synthetic, explicitPair);
+        Assert.Equal(ordinary, CompileOutput(primary));
+        Assert.Equal(synthetic, CompileOutput(primary with { DualSourceAlpha = true }));
+    }
+
     public void Dispose() => _fatal.Dispose();
 
     private ShaderProgram Compile(ulong code, uint[] userData, ref uint cursor, out ShaderStageResources stage, uint threadsX = 64) =>

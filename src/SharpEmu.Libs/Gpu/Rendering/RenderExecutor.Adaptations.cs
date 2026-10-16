@@ -42,8 +42,10 @@ public sealed partial class RenderExecutor
             return false;
         }
 
+        // Later draws can read these stores before flip. Do not defer their producer.
         if (state.ColorCount == 0 && !state.Depth.HasTarget && state.PixelActive &&
-            programs.PixelInput.Stage.Program is { Images.Length: > 0 } pixelProgram && !WritesStorageImage(pixelProgram) &&
+            programs.PixelInput.Stage.Program is { Images.Length: > 0 } &&
+            !DrawWritesMemory(programs.PixelInput.Stage) && !DrawWritesMemory(programs.VertexInput.Stage) &&
             _host.TryRetainTargetlessDraw(banks, programs, in arguments))
         {
             TraceTargetlessAttachments(banks, arguments.SubmitId);

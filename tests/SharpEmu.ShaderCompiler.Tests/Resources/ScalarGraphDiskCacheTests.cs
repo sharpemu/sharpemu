@@ -10,6 +10,69 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 public sealed class ScalarGraphDiskCacheTests
 {
     [Fact]
+    public void CachePreservesConditionalMasksAndMedianSources()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "sharpemu-graph-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var program = Program(
+                new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vop3, "VMed3U32", [0u, 0u],
+                    [Operand(0x10000), Operand(0x20000), Gen5Operand.Vector(7)],
+                    [Gen5Operand.Vector(3)], null),
+                new Gen5ShaderInstruction(8, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [0u, 0u],
+                    [Gen5Operand.Vector(3), Gen5Operand.Vector(7)], [Gen5Operand.Vector(4)],
+                    new Gen5SdwaControl(5, 0, 4, 5, false, false, 0, 0, 0, false, null)),
+                EndProgram(16));
+            var direct = ScalarGraphDiskCache.Build(program, 0, 4, null, 64, "0");
+            var fresh = ScalarGraphDiskCache.Build(program, 0, 4, null, 64, directory);
+            var file = Assert.Single(Directory.GetFiles(directory, "*.graph"));
+            var timestamp = File.GetLastWriteTimeUtc(file);
+            var restored = ScalarGraphDiskCache.Build(program, 0, 4, null, 64, directory);
+            Assert.Equal(timestamp, File.GetLastWriteTimeUtc(file));
+            byte[] Snapshot(ScalarValueGraph graph)
+            {
+                Assert.Single(graph.ConditionalMaskResults);
+                Assert.Equal(3, Assert.Single(graph.UnsignedMedianSources).Value.Length);
+                using var stream = new MemoryStream();
+                using var writer = new BinaryWriter(stream);
+                graph.WriteSnapshot(writer);
+                return stream.ToArray();
+            }
+            Assert.Equal(Snapshot(direct), Snapshot(fresh));
+            Assert.Equal(Snapshot(direct), Snapshot(restored));
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void CachePreservesExcludedRegistersAcrossReloads()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "sharpemu-graph-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var program = Program(ScalarLoad(0, 2, 8), EndProgram(8));
+            foreach (var mask in new[] { 0UL, 0xFCUL })
+            {
+                var direct = ScalarGraphDiskCache.Build(program, 0, 16, null, 64, "0", mask);
+                var fresh = ScalarGraphDiskCache.Build(program, 0, 16, null, 64, directory, mask);
+                var path = Path.Combine(directory, ScalarGraphDiskCache.Key(program, 0, 16, null, 64, mask) + ".graph");
+                var timestamp = File.GetLastWriteTimeUtc(path);
+                var restored = ScalarGraphDiskCache.Build(program, 0, 16, null, 64, directory, mask);
+                Assert.Equal(timestamp, File.GetLastWriteTimeUtc(path));
+                foreach (var graph in new[] { direct, fresh, restored })
+                {
+                    Assert.Equal(mask, graph.ExcludedUserDataRegisters);
+                    Assert.Equal(mask != 0, graph.Accesses[0]!.Handle!.Operands[0].IsUndefined);
+                    Assert.Equal(mask == 0 ? new uint[] { 2, 3 } : Array.Empty<uint>(),
+                        BindingLayout.CollectUserDataRegisters(program, 0, 16, graph.ExcludedUserDataRegisters));
+                }
+            }
+            Assert.Equal(2, Directory.GetFiles(directory, "*.graph").Length);
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+    }
+
+    [Fact]
     public void SnapshotPreservesCyclesInterningAndInstructionProvenance()
     {
         var program = Program(ScalarLoad(0, 0, 4), EndProgram(8));
@@ -22,6 +85,8 @@ public sealed class ScalarGraphDiskCacheTests
         var scan = graph.FindLowestSetBit(graph.UserData(1), 12);
         graph.BranchConditions[4] = undefined;
         graph.BranchConditions[12] = scan;
+        graph.ConditionalMaskResults[4] = phi;
+        graph.UnsignedMedianSources[8] = [phi, undefined, scan];
         using var stream = new MemoryStream();
         using (var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, true)) graph.WriteSnapshot(writer);
         stream.Position = 0;
@@ -29,6 +94,9 @@ public sealed class ScalarGraphDiskCacheTests
         var restored = ScalarValueGraph.ReadSnapshot(reader, program, 0, 4, null, 64);
         var loop = restored.BranchConditions[0];
         Assert.Same(loop, loop.Operands[1]);
+        Assert.Same(loop, restored.ConditionalMaskResults[4]);
+        Assert.Equal(new[] { loop, restored.BranchConditions[4], restored.BranchConditions[12] },
+            restored.UnsignedMedianSources[8]);
         Assert.Equal(new[] { 1, 2 }, loop.PhiPredecessors);
         Assert.Same(restored.UserData(0), loop.Operands[0]);
         Assert.Same(restored.BranchConditions[4], restored.Undefined(ScalarValueType.U32));

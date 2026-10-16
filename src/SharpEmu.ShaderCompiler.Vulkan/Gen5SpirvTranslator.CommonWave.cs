@@ -20,7 +20,7 @@ public static partial class Gen5SpirvTranslator
             _waveLowering.CurrentExecMask();
 
         private uint NormalizeExecMask(uint mask) =>
-            _waveLowering.NormalizeExecMask(mask);
+            _pairedMeshLanes ? mask : _waveLowering.NormalizeExecMask(mask);
     }
 }
 

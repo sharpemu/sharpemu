@@ -382,7 +382,7 @@ internal sealed class WaveMaskSelectorBounds(ScalarValue firstRecord, ScalarValu
         {
             if (index < 0 || index >= _instructions.Length || !IsBranch(_instructions[index])) return -1;
             var instruction = _instructions[index];
-            var target = unchecked(instruction.Pc + 4 + (uint)((short)instruction.Words[0] * 4));
+            if (!Ir.Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target)) return -1;
             // A branch may target a wait that was removed from the matching sequence.
             return Array.FindIndex(_instructions, candidate => candidate.Pc >= target);
         }
@@ -409,7 +409,7 @@ internal sealed class WaveMaskSelectorBounds(ScalarValue firstRecord, ScalarValu
             if (register.Kind == Gen5OperandKind.ScalarRegister && register.Value is 106 or 107 &&
                 instruction.Opcode.StartsWith("VCmp", StringComparison.Ordinal) && scalarDestination is null) return true;
             return instruction.Destinations.Any(destination => destination == register ||
-                destination.Kind == register.Kind && instruction.Opcode.Contains("64", StringComparison.Ordinal) &&
+                destination.Kind == register.Kind && instruction.DestinationWidth > 1 &&
                 register.Value == destination.Value + 1);
         }
 

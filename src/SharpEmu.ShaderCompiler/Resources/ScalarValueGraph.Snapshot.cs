@@ -47,6 +47,15 @@ public sealed partial class ScalarValueGraph
         }
         writer.Write(BranchConditions.Count);
         foreach (var (pc, value) in BranchConditions) { writer.Write(pc); Reference(value); }
+        writer.Write(ConditionalMaskResults.Count);
+        foreach (var (pc, value) in ConditionalMaskResults) { writer.Write(pc); Reference(value); }
+        writer.Write(UnsignedMedianSources.Count);
+        foreach (var (pc, sources) in UnsignedMedianSources)
+        {
+            writer.Write(pc);
+            writer.Write(sources.Length);
+            foreach (var source in sources) Reference(source);
+        }
         writer.Write(_undefinedOrigins.Count);
         foreach (var (value, origin) in _undefinedOrigins)
         {
@@ -59,11 +68,11 @@ public sealed partial class ScalarValueGraph
     }
 
     internal static ScalarValueGraph ReadSnapshot(BinaryReader reader, Gen5ShaderProgram program,
-        uint userDataBase, uint userDataCount, IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize)
+        uint userDataBase, uint userDataCount, IReadOnlySet<uint>? fixedFunctionVertexLoads, uint waveSize, ulong excludedUserDataRegisters = 0)
     {
         var graph = new ScalarValueGraph(program,
             IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance),
-            MemoryAccessTable.Build(program, fixedFunctionVertexLoads), userDataBase, userDataCount, waveSize);
+            MemoryAccessTable.Build(program, fixedFunctionVertexLoads), userDataBase, userDataCount, waveSize, excludedUserDataRegisters);
         int Count(int maximum = 1_000_000)
         {
             var count = reader.ReadInt32();
@@ -120,6 +129,17 @@ public sealed partial class ScalarValueGraph
             if (reader.ReadBoolean()) graph.Accesses[i] = new(Reference(), Reference(), Reference(), Reference(), Reference());
         var branches = Count();
         for (var i = 0; i < branches; i++) graph.BranchConditions.Add(reader.ReadUInt32(), Required());
+        var conditionalMasks = Count();
+        for (var index = 0; index < conditionalMasks; index++)
+            graph.ConditionalMaskResults.Add(reader.ReadUInt32(), Required());
+        var unsignedMedians = Count();
+        for (var index = 0; index < unsignedMedians; index++)
+        {
+            var instructionPc = reader.ReadUInt32();
+            var sources = new ScalarValue[Count(3)];
+            for (var source = 0; source < sources.Length; source++) sources[source] = Required();
+            graph.UnsignedMedianSources.Add(instructionPc, sources);
+        }
         var origins = Count(count);
         for (var i = 0; i < origins; i++) graph._undefinedOrigins.Add(Required(), (reader.ReadUInt32(), reader.ReadString()));
         var bitScans = Count(count);

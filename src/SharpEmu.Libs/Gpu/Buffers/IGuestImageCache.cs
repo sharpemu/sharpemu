@@ -15,9 +15,17 @@ public interface IGuestImageCache
 
     bool OverlapsDccMetadata(ulong address, ulong size);
 
+    void TraceMetadataFill(ulong address, ulong size, uint value) { }
+
+    // Records a memory write for the image-clear trace; see docs/image-clear-tracing.md.
+    void TraceGuestWrite(string operation, ulong address, ulong size, ulong source = 0, ulong shaderHash = 0) { }
+
     void InvalidateMemory(ulong address, ulong size);
 
     void InvalidateMemoryFromGpu(ulong address, ulong size);
+
+    // A possible shader write through a raw buffer: only images that copy memory become stale.
+    void InvalidateMemoryCopiesFromGpu(ulong address, ulong size) { }
 
     bool TrySynchronizeBufferFromImage(GpuBuffer buffer, ulong address, ulong size);
 }

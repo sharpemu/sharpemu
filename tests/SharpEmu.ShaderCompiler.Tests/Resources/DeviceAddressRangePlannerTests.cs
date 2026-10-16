@@ -29,8 +29,7 @@ public sealed class DeviceAddressRangePlannerTests
         Assert.Equal(expected, plan.Memory[index].AddressSpace);
     }
 
-    // A high dword clamped between the hard-coded PS5 aperture bounds
-    // (v_med3_u32 0x80000000, 0x70000000, sp) always lands in LDS or scratch.
+    // These bounds exclude global memory. The emitter validates the exact local tag.
     [Fact]
     public void FlatAddressClampedIntoTheApertures_IsLocal()
     {
@@ -78,17 +77,98 @@ public sealed class DeviceAddressRangePlannerTests
         Assert.Equal(FlatAddressSpace.Global, plan.Memory[index].AddressSpace);
     }
 
+    [Fact]
+    public void ApertureSubtractedFromItself_KeepsTheGlobalWriteRange()
+    {
+        var plan = Extract(Program(
+            Sop1(0, "SMovB32", 8, Gen5Operand.Source(Gen5InlineConstants.SharedBase)),
+            Sop2(4, "SSubU32", 9, Gen5Operand.Scalar(8), Gen5Operand.Scalar(8)),
+            Vop1(8, "VMovB32", 1, Gen5Operand.Scalar(9)),
+            Vop1(12, "VMovB32", 0, Operand(16)),
+            GlobalAccess(16, "FlatStoreDword", 0, vectorAddress: 0),
+            EndProgram(24)));
+
+        Assert.True(Assert.Single(plan.DeviceAddressRanges).Written);
+        Assert.True(plan.Memory.TryGetIndex(16, 0, out var index));
+        Assert.Equal(FlatAddressSpace.Global, plan.Memory[index].AddressSpace);
+    }
+
     // A 32-bit read returns the aperture's high dword; a 64-bit read the full address.
     [Fact]
     public void ApertureOperands_DecodeConsistentlyAsHighDwordAndAddress()
     {
         Assert.True(Gen5InlineConstants.TryDecode(Gen5InlineConstants.SharedBase, out var shared));
-        Assert.Equal(Gen5InlineConstants.SharedApertureHigh, shared);
+        Assert.Equal((uint)(Gen5InlineConstants.SharedApertureBase >> 32), shared);
         Assert.True(Gen5InlineConstants.TryDecode(Gen5InlineConstants.PrivateLimit, out var privateLimit));
-        Assert.Equal(Gen5InlineConstants.PrivateApertureHigh, privateLimit);
-        Assert.Equal(0x7000_0000_0000_0000ul, Gen5InlineConstants.DecodeAperture64(Gen5InlineConstants.SharedBase));
-        Assert.Equal(0x7000_0000_FFFF_FFFFul, Gen5InlineConstants.DecodeAperture64(Gen5InlineConstants.SharedLimit));
-        Assert.Equal(0x8000_0000_0000_0000ul, Gen5InlineConstants.DecodeAperture64(Gen5InlineConstants.PrivateBase));
+        Assert.Equal((uint)(Gen5InlineConstants.PrivateApertureBase >> 32), privateLimit);
+        Assert.Equal(Gen5InlineConstants.SharedApertureBase, Gen5InlineConstants.DecodeAperture64(Gen5InlineConstants.SharedBase));
+        Assert.Equal(Gen5InlineConstants.SharedApertureBase | uint.MaxValue,
+            Gen5InlineConstants.DecodeAperture64(Gen5InlineConstants.SharedLimit));
+        Assert.Equal(Gen5InlineConstants.PrivateApertureBase, Gen5InlineConstants.DecodeAperture64(Gen5InlineConstants.PrivateBase));
+        Assert.Equal(0x8000_0000_0000_0000ul, Gen5InlineConstants.SharedFlatApertureBase);
+        Assert.Equal(0x7000_0000_0000_0000ul, Gen5InlineConstants.PrivateFlatApertureBase);
+    }
+
+    [Fact]
+    public void MeshPointerIsPlannedButSystemScalarsRemainDynamic()
+    {
+        var program = Program(ScalarLoad(0, 0, 40, 8), ScalarLoad(8, 2, 48, 4), EndProgram(16));
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Mesh, Hash, 0, 12);
+        Assert.Equal(0xFCUL, plan.Graph.ExcludedUserDataRegisters);
+        Assert.Equal(new uint[] { 0, 1 }, BindingLayout.CollectUserDataRegisters(program, 0, 12,
+            plan.Graph.ExcludedUserDataRegisters));
+        Assert.DoesNotContain(plan.Graph.Values, value => value.Kind == ScalarValueKind.UserData &&
+            value.UserDataRegister >= 2 && value.UserDataRegister < 8);
+    }
+    [Theory]
+    [InlineData(0x70000000u, false, false)]
+    [InlineData(0x70000000u, true, true)]
+    [InlineData(0u, false, true)]
+    public void FlatMedianAddress_ExcludesGlobalMemoryOnlyWithProof(uint lowerBound, bool changeExec, bool expectedRange)
+    {
+        var plan = Extract(Program(
+            Sop1(0, "SMovB64", 126, Gen5Operand.Scalar(60)),
+            new Gen5ShaderInstruction(4, Gen5ShaderEncoding.Vop3, "VMed3U32", [0u, 0u],
+                [Operand(lowerBound), Operand(0x80000000), Gen5Operand.Vector(7)], [Gen5Operand.Vector(3)], null),
+            changeExec ? Sop1(12, "SMovB64", 126, Operand(1)) : Nop(12),
+            GlobalAccess(16, "FlatStoreDword", 0, vectorAddress: 2),
+            EndProgram(24)));
+        Assert.Equal(expectedRange ? 1 : 0, plan.DeviceAddressRanges.Count);
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    public void FlatApertureSelection_RequiresBothLocalTagsAndUnchangedExec(bool globalAlternative, bool changeExec, bool loop)
+    {
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            Sop1(0, "SMovB64", 8, Gen5Operand.Source(235)),
+            Sop1(4, "SMovB64", 10, Gen5Operand.Source(237)),
+            Sop2(8, "SLshrB32", 9, Gen5Operand.Scalar(9), Operand(16)),
+            Sop2(12, "SOrB32", 9, Gen5Operand.Scalar(9), globalAlternative ? Operand(0) : Gen5Operand.Scalar(11)),
+            Nop(16),
+            new(20, Gen5ShaderEncoding.Vop2, "VCndmaskB32", [0u, 0u],
+                [Gen5Operand.Scalar(9), Gen5Operand.Scalar(9)], [Gen5Operand.Vector(3)],
+                new Gen5SdwaControl(5, 0, 4, 5, false, false, 0, 0, 0, false, null)),
+            changeExec ? Sop1(28, "SMovB64", 126, Operand(1)) : Nop(28),
+            GlobalAccess(32, "FlatStoreDword", 0, vectorAddress: 2),
+            loop ? Branch(40, "SCbranchScc1", -7) : Nop(40),
+            EndProgram(44),
+        };
+        var plan = Extract(Program([
+            Vopc(0, "VCmpEqU32", Gen5Operand.Vector(6), 7),
+            Sop1(4, "SMovB64", 126, Gen5Operand.Scalar(60)),
+            .. instructions.Select(instruction => instruction with { Pc = instruction.Pc + 8 })]));
+        if (!globalAlternative && !changeExec) Assert.Empty(plan.DeviceAddressRanges);
+        else
+        {
+            var range = Assert.Single(plan.DeviceAddressRanges);
+            Assert.True(range.Written);
+            Assert.False(range.Plannable);
+        }
     }
 
     [Fact]

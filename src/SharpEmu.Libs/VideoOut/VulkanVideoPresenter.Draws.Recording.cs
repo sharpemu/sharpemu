@@ -64,6 +64,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // captures, but formatting them and calling the debug-utils driver hooks
         // for every draw is measurable overhead in normal gameplay.
         private static readonly bool _vulkanDebugUtilsEnabled =
+            SharpEmu.Libs.Gpu.GpuCommands.IndexedDrawTrace.Enabled ||
             _vulkanValidationEnabled ||
             string.Equals(
                 Environment.GetEnvironmentVariable("SHARPEMU_VK_DEBUG_LABELS"),

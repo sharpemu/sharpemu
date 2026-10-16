@@ -14,6 +14,7 @@ public enum ShaderStageKind
     Vertex,
     Pixel,
     Compute,
+    Mesh,
 }
 
 public enum ImageResourceClass : byte
@@ -46,6 +47,7 @@ public class ShaderProgramInfo
     public uint UserDataBase { get; init; }
     public uint UserDataCount { get; init; }
     public uint ParameterExportMask { get; init; }
+    public uint? InputLocationMask { get; init; }
     // Four component bits per color target (MRT0 in the low nibble) the pixel program exports.
     public uint PixelColorExportMasks { get; init; } = uint.MaxValue;
     public int VertexOffsetScalarRegister { get; init; } = NoScalarRegister;
@@ -80,6 +82,8 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
 
     public DispatchThreadLimits? ThreadLimits { get; init; }
 
+    public MeshDrawParameters? MeshDraw { get; init; }
+
     public void WriteDispatchThreadLimits(Span<uint> shaderData)
     {
         if (Program?.Bindings is not { UsesDispatchThreadLimits: true } layout) return;
@@ -93,9 +97,33 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
         shaderData[offset + 1] = limits.Y;
         shaderData[offset + 2] = limits.Z;
     }
+
+    public void WriteMeshDrawParameters(Span<uint> shaderData)
+    {
+        if (Program?.Bindings is not { UsesMeshDrawParameters: true } layout) return;
+        if (MeshDraw is not { } draw || shaderData.Length != layout.ShaderDataDwordCount)
+        {
+            throw SubmissionScheduler.Fatal("The mesh draw has missing parameters or invalid shader data.");
+        }
+
+        var offset = (int)layout.MeshDrawParametersDword;
+        shaderData[offset] = draw.VertexCount;
+        shaderData[offset + 1] = draw.FirstVertex;
+        shaderData[offset + 2] = draw.FirstInstance;
+        shaderData[offset + 3] = draw.IndexElementSize;
+        shaderData[offset + 4] = (uint)draw.IndexAddress;
+        shaderData[offset + 5] = (uint)(draw.IndexAddress >> 32);
+    }
 }
 
 public readonly record struct DispatchThreadLimits(uint X, uint Y, uint Z);
+
+public readonly record struct MeshDrawParameters(
+    uint VertexCount,
+    uint FirstVertex,
+    uint FirstInstance,
+    uint IndexElementSize,
+    ulong IndexAddress);
 
 // The vertex buffer words of one fetch slot as the vertex program declares them.
 public readonly record struct VertexInputBuffer(ulong Address, uint Stride, uint RecordCount, bool PerInstance = false)
@@ -132,10 +160,43 @@ public sealed class VertexInputInfo
     public bool FetchEmbedded { get; init; }
     public int FetchAttributeRegister { get; init; }
     public int FetchBufferRegister { get; init; }
+    public bool IeeeMode { get; set; }
     public uint ScratchDwords { get; init; }
     public uint PositionExportControl { get; init; }
     public ClipSpaceTransform ClipSpace { get; init; }
     public ShaderStageResources Stage { get; set; }
+}
+
+public sealed record MeshDrawConfiguration
+{
+    public GuestGeometryConfiguration Geometry { get; init; } = new();
+    public MeshExecutionLimits Execution { get; init; } = new();
+}
+
+public readonly record struct MeshExecutionLimits
+{
+    public uint DeviceSubgroupLaneCount { get; init; }
+    public uint MaxGroupCountX { get; init; }
+    public uint MaxGroupCountY { get; init; }
+    public uint MaxGroupTotalCount { get; init; }
+}
+
+public readonly record struct GuestGeometryConfiguration
+{
+    public uint ThreadsPerGroup { get; init; }
+    public bool InputTriangleStrip { get; init; }
+    public bool InputPointList { get; init; }
+    public uint InputPrimitiveCountPerWorkgroup { get; init; }
+    public uint InputVertexCountPerWorkgroup { get; init; }
+    public uint OutputVertexCapacity { get; init; }
+    public uint OutputPrimitiveCapacity { get; init; }
+    public uint ProvokingVertex { get; init; }
+    public uint WaveSize { get; init; }
+    public bool IeeeMode { get; init; }
+    public uint ScratchDwords { get; init; }
+    public uint LocalDataShareDwords { get; init; }
+    public uint PositionExportControl { get; init; }
+    public ClipSpaceTransform ClipSpace { get; init; }
 }
 
 public sealed class PixelInputInfo
@@ -151,6 +212,7 @@ public sealed class PixelInputInfo
     public uint[] InterpolatorSettings { get; init; } = new uint[InterpolatorCount];
     public byte[] TargetOutputModes { get; init; } = new byte[TargetCount];
     public ColorComponentMap[] TargetExportMappings { get; init; } = new ColorComponentMap[TargetCount];
+    public bool IeeeMode { get; set; }
     public uint ScratchDwords { get; init; }
     public bool PositionX { get; init; }
     public bool PositionY { get; init; }
@@ -185,6 +247,7 @@ public sealed class ComputeInputInfo
     public bool ThreadGroupSizeEnabled { get; init; }
     public uint WaveSize { get; init; } = 64;
     public uint LocalDataShareDwords { get; init; }
+    public bool IeeeMode { get; set; }
     public uint ScratchDwords { get; init; }
     public bool NeedsLocalDataShareBarriers { get; init; }
     public int WorkgroupRegister { get; init; }

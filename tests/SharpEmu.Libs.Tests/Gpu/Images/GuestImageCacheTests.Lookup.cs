@@ -12,8 +12,10 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 
 public sealed partial class GuestImageCacheTests
 {
-    [Fact]
-    public void FindImage_ReusesASameBackingLookupUntilTheIndexChanges()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("00000001,00000002")]
+    public void FindImage_ReusesASameBackingLookupUntilTheIndexChanges(string? descriptor)
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
         using var harness = new CacheHarness(_vulkan);
@@ -21,12 +23,15 @@ public sealed partial class GuestImageCacheTests
         harness.Write(address, Bytes(0x44332211u));
 
         var first = Sampled(address);
+        first.TraceTextureDescriptor = descriptor;
         var firstId = harness.Find(ref first);
         var created = Sampled(address);
+        created.TraceTextureDescriptor = descriptor;
         Assert.Equal(firstId, harness.Find(ref created));
         var baseline = harness.Images.LookupMemoCounters;
 
         var repeated = Sampled(address);
+        repeated.TraceTextureDescriptor = descriptor is null ? null : new string(descriptor.ToCharArray());
         Assert.Equal(firstId, harness.Find(ref repeated));
         Assert.Equal(baseline.Hits + 1, harness.Images.LookupMemoCounters.Hits);
         Assert.Equal(first.View, repeated.View);
@@ -35,10 +40,12 @@ public sealed partial class GuestImageCacheTests
         harness.Images.AddPageOwner(address, stale);
         Assert.True(harness.Images.RemovePageOwner(address, stale));
         var afterChange = Sampled(address);
+        afterChange.TraceTextureDescriptor = descriptor;
         Assert.Equal(firstId, harness.Find(ref afterChange));
         Assert.Equal(baseline.Hits + 1, harness.Images.LookupMemoCounters.Hits);
 
         var reusedAgain = Sampled(address);
+        reusedAgain.TraceTextureDescriptor = descriptor;
         Assert.Equal(firstId, harness.Find(ref reusedAgain));
         Assert.Equal(baseline.Hits + 2, harness.Images.LookupMemoCounters.Hits);
     }

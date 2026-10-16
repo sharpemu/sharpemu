@@ -215,6 +215,55 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         harness.AssertNoValidationMessages();
     }
 
+    [Theory]
+    [InlineData(GuestPixelFormat.Bc1UNorm, Format.BC1RgbaUnormBlock, Format.R32G32Uint, 8u)]
+    [InlineData(GuestPixelFormat.Bc7UNorm, Format.BC7UnormBlock, Format.R32G32B32A32Uint, 16u)]
+    public void GetOrCreateView_CompressedImageSupportsIntegerStorageView(
+        GuestPixelFormat guestFormat, Format imageFormat, Format storageFormat, uint blockBytes)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var description = Color2D(64, 64, levels: 2) with
+        {
+            GuestFormat = guestFormat,
+            PixelFormat = imageFormat,
+            BytesPerBlock = blockBytes,
+        };
+        var image = harness.CreateImage(description);
+        if ((image.Backing.Flags & ImageCreateFlags.CreateBlockTexelViewCompatibleBit) == 0)
+        {
+            Assert.True(OperatingSystem.IsMacOS());
+            Assert.Equal((ImageUsageFlags)0, image.Backing.Usage & ImageUsageFlags.StorageBit);
+            image.GetOrCreateView(ImageViewDescription.Default with { Format = imageFormat });
+            harness.AssertNoValidationMessages();
+            return;
+        }
+        var storageFeatures = _vulkan.DeviceInfo.GetFormatProperties(storageFormat).OptimalTilingFeatures;
+        var supportsStorage = (storageFeatures & FormatFeatureFlags.StorageImageBit) != 0 &&
+            _vulkan.DeviceInfo.TryGetImageFormatProperties(imageFormat, ImageType.Type2D, ImageTiling.Optimal,
+                image.Backing.Usage | ImageUsageFlags.StorageBit, image.Backing.Flags, out var properties) &&
+            (properties.SampleCounts & SampleCountFlags.Count1Bit) != 0;
+        Assert.Equal(supportsStorage, (image.Backing.Usage & ImageUsageFlags.StorageBit) != 0);
+        var sampled = image.GetOrCreateView(ImageViewDescription.Default with { Format = imageFormat });
+        Assert.NotEqual(0UL, sampled.Handle);
+        var storageRequest = ImageViewDescription.Default with
+        {
+            Format = storageFormat,
+            Usage = ImageUsageFlags.StorageBit,
+        };
+        if (!supportsStorage)
+        {
+            using var fatal = new FatalScope();
+            Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(storageRequest));
+            harness.AssertNoValidationMessages();
+            return;
+        }
+        var storage = image.GetOrCreateView(storageRequest);
+        Assert.NotEqual(0UL, storage.Handle);
+        Assert.NotEqual(sampled, storage);
+        harness.AssertNoValidationMessages();
+    }
+
     [Fact]
     public void GetOrCreateView_NormalizesAndCachesViews()
     {

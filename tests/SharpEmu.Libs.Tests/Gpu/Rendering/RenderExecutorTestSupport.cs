@@ -80,6 +80,11 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public List<string> Calls { get; } = new();
 
+    public List<(string Disposition, ulong Address, ulong PixelShader, ulong VertexShader)> DrawTargets { get; } = new();
+
+    public void TraceDrawTarget(string disposition, ulong address, ulong pixelShaderAddress, ulong vertexShaderAddress) =>
+        DrawTargets.Add((disposition, address, pixelShaderAddress, vertexShaderAddress));
+
     public List<RenderingState> BegunRenderings { get; } = new();
 
     public List<DynamicDrawState> DynamicStates { get; } = new();
@@ -89,6 +94,8 @@ internal sealed class RecordingRenderHost : IRenderHost
     public bool Recording { get; set; } = true;
 
     public RenderHostLimits Limits { get; set; } = new(16384, 8192, 16384, 16384);
+
+    public bool SupportsNativeRectangles { get; set; }
 
     public IImageFormatSupport FormatSupport { get; } = new AcceptingFormatSupport();
 
@@ -149,6 +156,16 @@ internal sealed class RecordingRenderHost : IRenderHost
     }
 
     public BufferBinding NullBuffer => new(NullHandle, 0);
+
+    public uint[]? MeshIndices { get; private set; }
+
+    public ulong UploadMeshVertexIndices(ReadOnlySpan<uint> indices)
+    {
+        Assert.True(PreparationDepth > 0);
+        MeshIndices = indices.ToArray();
+        Calls.Add("upload_mesh_indices");
+        return 0x8000;
+    }
 
     public void RunPendingOperations() => Calls.Add("pending");
 
@@ -328,6 +345,9 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void DrawIndexedIndirect(BufferBinding arguments) =>
         Calls.Add($"draw_indexed_indirect {arguments.Handle:X}:{arguments.Offset:X}");
 
+    public void DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ) =>
+        Calls.Add($"draw_mesh {groupCountX} {groupCountY} {groupCountZ}");
+
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ) => Calls.Add($"dispatch {groupsX} {groupsY} {groupsZ}");
 
     public bool TryDispatchIndirect(ulong argumentsAddress) => false;
@@ -408,8 +428,7 @@ internal sealed class RecordingRenderHost : IRenderHost
     public Exception Fatal(string message) => new RenderExecutorFatalException(message);
 }
 
-// Takes nothing, but checks that the inputs a draw resolves its programs with are the ones its
-// register banks alone give: a prefetch computed ahead of the draw would use those.
+// Check register-derived inputs while preserving the draw mode supplied by the packet.
 internal sealed class InputsCheckingPrefetch(IRenderHost host) : IProgramPrefetch
 {
     public List<string> Mismatches { get; } = new();
@@ -419,7 +438,7 @@ internal sealed class InputsCheckingPrefetch(IRenderHost host) : IProgramPrefetc
     public bool TryTakeGraphics(RegisterBanks banks, in GraphicsProgramInputs inputs, out GraphicsPrograms programs)
     {
         Checks++;
-        var expected = RenderExecutor.ProgramInputsOf(banks, host.FormatSupport, host.Fatal);
+        var expected = RenderExecutor.ProgramInputsOf(banks, host.FormatSupport, host.Fatal, inputs.Indexed);
         if (!expected.Equals(inputs))
         {
             Mismatches.Add(
@@ -439,6 +458,28 @@ internal sealed class InputsCheckingPrefetch(IRenderHost host) : IProgramPrefetc
 internal sealed class FakePipelineProvider : IShaderPipelineProvider
 {
     public GraphicsPrograms Graphics { get; set; } = RenderExecutorFixtures.Programs();
+
+    public bool MeshShadersSupported { get; set; }
+
+    public uint MeshPrimitiveType { get; private set; }
+
+    public bool MeshDepthBound { get; private set; }
+
+    public GraphicsPrograms GetMeshGraphicsPrograms(
+        VertexStageRegisters vertex,
+        PixelStageRegisters pixel,
+        ShaderInterfaceRegisters shaderInterface,
+        ContextRegisters context,
+        UserConfigRegisters userConfig,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound)
+    {
+        Calls.Add($"get_mesh_programs pixelActive={pixelActive}");
+        MeshPrimitiveType = userConfig.PrimitiveType;
+        MeshDepthBound = depthBound;
+        return Graphics;
+    }
 
     public ComputeProgram Compute { get; set; } = RenderExecutorFixtures.ComputeProgram();
 

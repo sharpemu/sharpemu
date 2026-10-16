@@ -135,9 +135,7 @@ public readonly record struct Gen5PixelOutputBinding(
 
     private readonly uint? _exportTarget;
 
-    // The blend reads source alpha but the component mapping moves the shader's alpha out of
-    // the host alpha channel: the program also writes that alpha to the dual-source output
-    // (Location 0, Index 1) so the pipeline can blend with SRC1_ALPHA.
+    // Preserve shader alpha at location zero, index one when component mapping moves it.
     public bool DualSourceAlpha { get; init; }
 
     // The EXP MRT target that feeds this slot. It differs from the slot when the pixel
@@ -350,12 +348,17 @@ public sealed record Gen5ShaderInstruction(
     public ulong? AddressOffset { get; init; }
 
     public ulong ProgramOffset => AddressOffset ?? Pc;
+    public uint DestinationWidth => Opcode is "SBcnt1I32B64" or "SFF1I32B64" or "SFlbitI32B64"
+        ? 1u : Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
 }
 
 public sealed record Gen5ShaderProgram(
     ulong Address,
     IReadOnlyList<Gen5ShaderInstruction> Instructions)
 {
+    public IReadOnlySet<uint> FunctionBufferAccesses { get; init; } = new HashSet<uint>();
+    public bool IsFusedProgram { get; init; }
+
     private const uint PixelColorTargetCount = 8;
     private const int PixelColorMaskBits = 4;
     private readonly uint _pixelColorExportMasks = ComputePixelColorExportMasks(Instructions);

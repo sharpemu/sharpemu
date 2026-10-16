@@ -27,13 +27,36 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public ICpuMemory Memory => GuestMemory;
 
+    public Func<int, ulong>? ReadOcclusionSamples { get; set; }
+
+    public bool TryReadOcclusionCounter(int queueId, out ulong value)
+    {
+        value = ReadOcclusionSamples?.Invoke(queueId) ?? 0;
+        return ReadOcclusionSamples is not null;
+    }
+
     public List<string> Calls { get; } = new();
+
+    public List<(string Operation, ulong Address, ulong Size, byte[] Bytes)> TracedWrites { get; } = new();
+
+    public void TraceGuestWrite(string operation, ulong address, ulong size)
+    {
+        var bytes = new byte[checked((int)size)];
+        GuestMemory.TryRead(address, bytes);
+        TracedWrites.Add((operation, address, size, bytes));
+    }
 
     public List<EndOfPipeWrite> EndOfPipeWrites { get; } = new();
 
     public List<ulong> GuestReads { get; } = new();
 
     public Action<ulong>? BeforeGuestRead { get; set; }
+    public List<(ulong Address, int Size)> GuestReadRanges { get; } = new();
+
+    public List<(string Subject, ulong Address, ulong Size)> WriterRequests { get; } = new();
+
+    public void TraceWritersOf(string subject, ulong address, ulong size) =>
+        WriterRequests.Add((subject, address, size));
 
     public List<DrawIndexedArguments> IndexedDraws { get; } = new();
 
@@ -58,6 +81,7 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
     {
         GuestReads.Add(address);
         BeforeGuestRead?.Invoke(address);
+        GuestReadRanges.Add((address, destination.Length));
         if (PendingGpuValues.Remove(address, out var pending))
         {
             WriteQword(address, pending);

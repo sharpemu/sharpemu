@@ -11,16 +11,238 @@ namespace SharpEmu.Libs.Tests.Memory.GuestMemory;
 [Collection(GuestMemoryStateCollection.Name)]
 public sealed unsafe class SharedBackingTransferTests
 {
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void SingleMappingTransfersDoNotAllocateTemporarySegments(bool copy)
+    [Fact]
+    public void SingleViewReadsResumeAfterTheLastCopyReservation()
     {
         if (!Supported) return;
         using var mapping = new TransferMappings();
-        var data = Enumerable.Range(0, 32).Select(value => (byte)value).ToArray();
-        var source = mapping.Address + Segment - (ulong)data.Length;
-        var destination = mapping.Address + 2 * Segment - (ulong)data.Length;
+        var expected = BitConverter.GetBytes(Marker);
+        var actual = new byte[expected.Length];
+        Assert.True(mapping.Store.TryWriteBacking(mapping.Address, expected));
+        Assert.True(mapping.Store.TryReadSingleView(mapping.Address, actual));
+        Assert.Equal(expected, actual);
+        Assert.True(mapping.Store.TryEnterAliasAccess());
+        mapping.Store.ExitAliasAccess();
+        Assert.True(mapping.Store.TryReserveCopy(mapping.Address + 64, mapping.Address, 8, out var first));
+        try
+        {
+            Assert.True(mapping.Store.TryReserveCopy(mapping.Address + 192, mapping.Address + 128, 8, out var second));
+            try
+            {
+                actual.AsSpan().Clear();
+                Assert.False(mapping.Store.TryReadSingleView(mapping.Address, actual));
+                Assert.All(actual, value => Assert.Equal((byte)0, value));
+            }
+            finally { second.Dispose(); }
+            Assert.False(mapping.Store.TryReadSingleView(mapping.Address, actual));
+            Assert.False(mapping.Store.TryEnterAliasAccess());
+        }
+        finally { first.Dispose(); }
+        Assert.True(mapping.Store.TryReadSingleView(mapping.Address, actual));
+        Assert.Equal(expected, actual);
+        Assert.True(mapping.Store.TryEnterAliasAccess());
+        mapping.Store.ExitAliasAccess();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CopyReservationWaitsForAnAdmittedAccess(bool aliasAccess)
+    {
+        if (!Supported) return;
+        using var mapping = new TransferMappings();
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var access = typeof(SharedBackingViews).GetMethod("TryAccessSingleView", flags)!;
+        var active = typeof(SharedBackingViews).GetField("_activeAccesses", flags)!;
+        var blocked = typeof(SharedBackingViews).GetField("_copyAccessBlocked", flags)!;
+        Assert.True(aliasAccess ? mapping.Store.TryEnterAliasAccess() :
+            (bool)access.Invoke(mapping.Store, [mapping.Address, 8UL, 0UL])!);
+        Exception? failure = null;
+        using var reserved = new ManualResetEventSlim();
+        var transfer = new Thread(() =>
+        {
+            try
+            {
+                Assert.True(mapping.Store.TryReserveCopy(mapping.Address + 64, mapping.Address, 8, out var reservation));
+                using (reservation) reserved.Set();
+            }
+            catch (Exception exception) { failure = exception; }
+        }) { IsBackground = true };
+        try
+        {
+            transfer.Start();
+            Assert.True(SpinWait.SpinUntil(() => (int)blocked.GetValue(mapping.Store)! != 0 || !transfer.IsAlive,
+                TimeSpan.FromSeconds(10)));
+            Assert.False(reserved.IsSet);
+            Assert.True(transfer.IsAlive);
+            Assert.False(mapping.Store.TryReadSingleView(mapping.Address, new byte[8]));
+            Assert.False(mapping.Store.TryEnterAliasAccess());
+        }
+        finally
+        {
+            // Release the private access lease held by this test. No other lease can enter.
+            if (aliasAccess) mapping.Store.ExitAliasAccess();
+            else active.SetValue(mapping.Store, 0);
+            Assert.True(transfer.Join(TimeSpan.FromSeconds(10)));
+        }
+        Assert.Null(failure);
+        Assert.True(reserved.IsSet);
+        Assert.True(mapping.Store.TryReadSingleView(mapping.Address, new byte[8]));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CrossMappingBufferWaitsForReservedAlias(bool read)
+    {
+        if (!Supported) return;
+        using var mapping = new TransferMappings(aliasSecondView: true);
+        Assert.True(mapping.Store.TryReserveCopy(mapping.Address + 64, mapping.Address, 8, out var reservation));
+        Exception? failure = null;
+        var transfer = new Thread(() =>
+        {
+            try
+            {
+                var bufferAddress = mapping.Address + Segment - 4;
+                if (read)
+                    Assert.True(mapping.Store.TryReadBacking(mapping.Address + 128, new Span<byte>((void*)bufferAddress, 8)));
+                else
+                    Assert.True(mapping.Store.TryWriteBacking(mapping.Address + 128, new ReadOnlySpan<byte>((void*)bufferAddress, 8)));
+            }
+            catch (Exception exception) { failure = exception; }
+        }) { IsBackground = true };
+        try
+        {
+            transfer.Start();
+            Assert.True(SpinWait.SpinUntil(() => !transfer.IsAlive || HasWaitingCopyOperation(mapping.Store), TimeSpan.FromSeconds(10)));
+            Assert.True(HasWaitingCopyOperation(mapping.Store));
+        }
+        finally
+        {
+            reservation.Dispose();
+            Assert.True(transfer.Join(TimeSpan.FromSeconds(10)));
+        }
+        Assert.Null(failure);
+    }
+
+    [Fact]
+    public void DisjointTransfersProceedWhileACopyIsReserved()
+    {
+        if (!Supported) return;
+        using var mapping = new TransferMappings(segmentSize: 256 * 1024);
+        const ulong copySize = 64 * 1024;
+        var data = Enumerable.Repeat((byte)0xA5, (int)copySize).ToArray();
+        Assert.True(mapping.Store.TryWriteBacking(mapping.Address + copySize, data));
+        Assert.True(mapping.Store.TryReserveCopy(mapping.Address + 256 * 1024, mapping.Address, copySize, out var reservation));
+        using (reservation)
+        {
+            Exception? transferFailure = null;
+            var transfer = new Thread(() =>
+            {
+                try
+                {
+                    var destination = mapping.Address + 320 * 1024;
+                    Assert.True(mapping.Store.TryCopyBacking(destination, mapping.Address + copySize, copySize));
+                    var actual = new byte[data.Length];
+                    Assert.True(mapping.Store.TryReadBacking(destination, actual));
+                    Assert.Equal(data, actual);
+                    Assert.True(mapping.Store.TryWriteBacking(destination, BitConverter.GetBytes(Marker)));
+                }
+                catch (Exception exception) { transferFailure = exception; }
+            })
+            { IsBackground = true };
+            transfer.Start();
+            Assert.True(transfer.Join(TimeSpan.FromSeconds(10)));
+            Assert.Null(transferFailure);
+        }
+    }
+
+    [Theory]
+    [InlineData("read")]
+    [InlineData("write")]
+    [InlineData("read_buffer")]
+    [InlineData("write_buffer")]
+    [InlineData("copy")]
+    [InlineData("clear")]
+    [InlineData("unmap")]
+    [InlineData("dispose")]
+    public void ConflictingAccessAndMappingChangesWaitForCopy(string operation)
+    {
+        if (!Supported) return;
+        using var mapping = new TransferMappings(aliasSecondView: true);
+        Assert.True(mapping.Store.TryReserveCopy(mapping.Address + 64, mapping.Address, 32, out var reservation));
+        Thread? pending = null;
+        Exception? transferFailure = null;
+        try
+        {
+            pending = new Thread(() =>
+            {
+                try
+                {
+                    // The second guest view has a different address but aliases the reserved bytes.
+                    var alias = mapping.Address + Segment;
+                    switch (operation)
+                    {
+                        case "read": Assert.True(mapping.Store.TryReadBacking(alias, new byte[8])); break;
+                        case "write": Assert.True(mapping.Store.TryWriteBacking(alias, new byte[8])); break;
+                        case "read_buffer": Assert.True(mapping.Store.TryReadBacking(alias + 128, new Span<byte>((void*)alias, 8))); break;
+                        case "write_buffer": Assert.True(mapping.Store.TryWriteBacking(alias + 128, new ReadOnlySpan<byte>((void*)alias, 8))); break;
+                        case "copy": Assert.True(mapping.Store.TryCopyBacking(alias + 128, alias, 8)); break;
+                        case "clear": Assert.True(mapping.Store.Clear(Segment, 8)); break;
+                        case "unmap": Assert.True(mapping.Store.Unmap(mapping.Address, Segment, out _)); break;
+                        case "dispose": mapping.Store.Dispose(); break;
+                    }
+                }
+                catch (Exception exception) { transferFailure = exception; }
+            })
+            { IsBackground = true };
+            pending.Start();
+            Assert.True(SpinWait.SpinUntil(() => HasWaitingCopyOperation(mapping.Store), TimeSpan.FromSeconds(10)));
+            Assert.True(pending.IsAlive);
+        }
+        finally
+        {
+            reservation.Dispose();
+            if (pending is not null) Assert.True(pending.Join(TimeSpan.FromSeconds(10)));
+        }
+        Assert.Null(transferFailure);
+    }
+
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(1, 0)]
+    public void LargeAliasedCopiesPreserveOverlappingBytes(int sourceOffset, int destinationOffset)
+    {
+        if (!Supported) return;
+        using var mapping = new TransferMappings(aliasSecondView: true, segmentSize: 128 * 1024);
+        var expected = Enumerable.Range(0, 128 * 1024).Select(value => (byte)value).ToArray();
+        Assert.True(mapping.Store.TryWriteBacking(mapping.Address, expected));
+        expected.AsSpan(sourceOffset, 64 * 1024).CopyTo(expected.AsSpan(destinationOffset, 64 * 1024));
+        Assert.True(mapping.Store.TryCopyBacking(mapping.Address + 128 * 1024 + (ulong)destinationOffset,
+            mapping.Address + (ulong)sourceOffset, 64 * 1024));
+        Assert.Equal(expected, new ReadOnlySpan<byte>((void*)mapping.Address, expected.Length).ToArray());
+    }
+
+    private static bool HasWaitingCopyOperation(SharedBackingViews store)
+    {
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var gate = typeof(SharedBackingViews).GetField("_lock", flags)!.GetValue(store)!;
+        lock (gate)
+            return (int)typeof(SharedBackingViews).GetField("_copyWaiters", flags)!.GetValue(store)! != 0;
+    }
+
+    [Theory]
+    [InlineData(false, 32)]
+    [InlineData(true, 32)]
+    [InlineData(true, 65536)]
+    public void SingleMappingTransfersDoNotAllocateTemporarySegments(bool copy, int length)
+    {
+        if (!Supported) return;
+        var segmentSize = Math.Max(Segment, (ulong)length);
+        using var mapping = new TransferMappings(segmentSize: segmentSize);
+        var data = Enumerable.Range(0, length).Select(value => (byte)value).ToArray();
+        var source = mapping.Address + segmentSize - (ulong)data.Length;
+        var destination = mapping.Address + 2 * segmentSize - (ulong)data.Length;
         Assert.True(mapping.Store.TryWriteBacking(source, data));
         var succeeded = true;
         void Transfer(int count)
@@ -146,16 +368,16 @@ public sealed unsafe class SharedBackingTransferTests
         public ulong Address { get; }
         private readonly ulong _holeSize;
 
-        public TransferMappings(bool aliasSecondView = false)
+        public TransferMappings(bool aliasSecondView = false, ulong segmentSize = Segment)
         {
-            Store = new SharedBackingViews(Host, BackingSize);
-            _holeSize = HoleSize(Host);
+            Store = new SharedBackingViews(Host, Math.Max(BackingSize, 4 * segmentSize));
+            _holeSize = AlignUp(4 * segmentSize, Host.Granularity);
             Address = ReserveFreeHole(Host, _holeSize);
-            Assert.True(Host.SplitHole(Address, Segment));
-            Assert.True(Host.SplitHole(Address + Segment, Segment));
-            Assert.True(Store.TryMapReservedRange(Address, Segment, Segment, HostPageProtection.ReadWrite, out _));
-            Assert.True(Store.TryMapReservedRange(Address + Segment, Segment,
-                aliasSecondView ? Segment : 2 * Segment, HostPageProtection.ReadWrite, out _));
+            Assert.True(Host.SplitHole(Address, segmentSize));
+            Assert.True(Host.SplitHole(Address + segmentSize, segmentSize));
+            Assert.True(Store.TryMapReservedRange(Address, segmentSize, segmentSize, HostPageProtection.ReadWrite, out _));
+            Assert.True(Store.TryMapReservedRange(Address + segmentSize, segmentSize,
+                aliasSecondView ? segmentSize : 2 * segmentSize, HostPageProtection.ReadWrite, out _));
         }
 
         public void Dispose()

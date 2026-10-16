@@ -7,6 +7,7 @@ using SharpEmu.ShaderCompiler.Vulkan;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Tests.Resources;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using Xunit;
 
 namespace SharpEmu.ShaderCompiler.Tests;
@@ -141,6 +142,72 @@ public sealed class Gen5ScalarLaneTransferTests
         Assert.Contains((ushort)SpirvOp.Select, opcodes);
         Assert.Contains((ushort)SpirvOp.IMul, opcodes);
         Assert.Contains((ushort)SpirvOp.BitCount, opcodes);
+    }
+
+    [Fact]
+    public void FlbitI32B64DecodesAndCompiles()
+    {
+        const ulong shaderAddress = 0x1000;
+        var memory = new TestCpuMemory(shaderAddress, 0x100);
+        Span<byte> shader = stackalloc byte[2 * sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(shader, 0xBE821600);
+        BinaryPrimitives.WriteUInt32LittleEndian(shader[sizeof(uint)..], 0xBF810000);
+
+        Assert.True(memory.TryWrite(shaderAddress, shader));
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(
+            context, shaderAddress, out var program, out var decodeError), decodeError);
+        var scan = program.Instructions[0];
+        Assert.Equal("SFlbitI32B64", scan.Opcode);
+        Assert.Equal([Gen5Operand.Scalar(0)], scan.Sources);
+        Assert.Equal([Gen5Operand.Scalar(2)], scan.Destinations);
+        Assert.Equal(1u, scan.DestinationWidth);
+
+        var request = ResourceTestProgram.Request(program);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(
+            request, out var compiled, out var compileError), compileError);
+        Assert.Contains((ushort)SpirvOp.ExtInst, ReadSpirvOpcodes(compiled.Spirv));
+        ValidateWithInstalledSdk(compiled.Spirv);
+    }
+
+    [Theory]
+    [InlineData(0ul, uint.MaxValue)]
+    [InlineData(1ul, 63u)]
+    [InlineData(1ul << 32, 31u)]
+    [InlineData(1ul << 40, 23u)]
+    [InlineData(1ul << 63, 0u)]
+    public void FlbitI32B64CountsLeadingZeros(ulong source, uint expected)
+    {
+        Gen5ShaderInstruction[] instructions =
+        [
+            ResourceTestProgram.MoveScalar(0, 0, (uint)source),
+            ResourceTestProgram.MoveScalar(4, 1, (uint)(source >> 32)),
+            ResourceTestProgram.Sop1(8, "SFlbitI32B64", 2, Gen5Operand.Scalar(0)),
+            ResourceTestProgram.ScalarLoad(12, 2, 100),
+            ResourceTestProgram.EndProgram(20),
+        ];
+        var plan = ResourceTestProgram.Extract(new Gen5ShaderProgram(0, instructions), userDataCount: 0);
+        var access = Assert.Single(plan.Accesses);
+        var evaluator = new RuntimeValueEvaluator(plan, ResourceTestProgram.Inputs([]));
+        Assert.True(evaluator.Evaluate(access!.Handle!.Operands[0], out var actual));
+        Assert.Equal(expected, actual);
+    }
+
+    [Theory]
+    [InlineData("SBcnt1I32B64")]
+    [InlineData("SFF1I32B64")]
+    [InlineData("SFlbitI32B64")]
+    public void ScalarPairScanKeepsTheAdjacentUserDataRegisterLive(string opcode)
+    {
+        var program = new Gen5ShaderProgram(0,
+        [
+            ResourceTestProgram.Sop1(0, opcode, 0, Gen5Operand.Scalar(4)),
+            ResourceTestProgram.MoveScalarRegister(4, 6, 1),
+            ResourceTestProgram.EndProgram(8),
+        ]);
+
+        var registers = BindingLayout.CollectUserDataRegisters(program, 0, 8);
+        Assert.Equal(new uint[] { 1, 4, 5 }, registers);
     }
 
     [Fact]
@@ -336,6 +403,35 @@ public sealed class Gen5ScalarLaneTransferTests
             sources,
             destination.HasValue ? [destination.Value] : [],
             null);
+
+    private static void ValidateWithInstalledSdk(byte[] spirv)
+    {
+        var sdk = Environment.GetEnvironmentVariable("VULKAN_SDK");
+        var validator = sdk is null ? null : Path.Combine(sdk, "Bin", "spirv-val.exe");
+        if (validator is null || !File.Exists(validator))
+        {
+            return;
+        }
+
+        var path = Path.Combine(Path.GetTempPath(), $"sharpemu-flbit-{Guid.NewGuid():N}.spv");
+        try
+        {
+            File.WriteAllBytes(path, spirv);
+            using var process = Process.Start(new ProcessStartInfo(validator)
+            {
+                ArgumentList = { "--target-env", "vulkan1.2", path },
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+            })!;
+            var output = process.StandardError.ReadToEnd() + process.StandardOutput.ReadToEnd();
+            process.WaitForExit();
+            Assert.True(process.ExitCode == 0, output);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
 
     private static IReadOnlyList<ushort> ReadSpirvOpcodes(byte[] spirv)
     {

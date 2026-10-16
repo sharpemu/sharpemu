@@ -23,7 +23,8 @@ public static partial class Gen5SpirvTranslator
             BindingLayoutValidator.Validate(
                 request.Bindings,
                 request.Resources.Info,
-                BindingLayout.CollectUserDataRegisters(request.Program, request.UserDataBase, request.UserDataCount),
+                BindingLayout.CollectUserDataRegisters(request.Program, request.UserDataBase, request.UserDataCount,
+                    request.ExcludedUserDataRegisters),
                 request.UsesGlobalDataShare,
                 request.UsesFlattenedTable,
                 request.ReadsShaderBase,
@@ -38,6 +39,21 @@ public static partial class Gen5SpirvTranslator
 
         if (request.Stage == ShaderStage.Pixel)
         {
+            if (request.PixelOutputs.Any(output => output.DualSourceAlpha) &&
+                (request.PixelOutputs.Count != 1 || request.PixelOutputs[0].Index != 0 ||
+                 request.PixelOutputs[0].HostLocation != 0 || request.PixelOutputs[0].Kind != Gen5PixelOutputKind.Float))
+            {
+                error = "synthetic alpha requires one floating-point primary output at location zero";
+                return false;
+            }
+            var dualSource = request.PixelOutputs.Any(output => output.Index != 0);
+            if (dualSource && (request.PixelOutputs.Count != 2 ||
+                request.PixelOutputs.Any(output => output.HostLocation != 0 || output.Kind != Gen5PixelOutputKind.Float) ||
+                !request.PixelOutputs.Select(output => output.Index).Order().SequenceEqual(new uint[] { 0, 1 })))
+            {
+                error = "dual-source pixel outputs require a primary and second source at host location zero with indices zero and one";
+                return false;
+            }
             if (request.PixelOutputs.Count > 8 || request.PixelOutputs.Any(output => output.GuestSlot > 7))
             {
                 error = "pixel outputs must contain at most eight guest slots in the 0..7 range";
@@ -106,10 +122,13 @@ public static partial class Gen5SpirvTranslator
         public CompilationContext(ShaderCompileRequest request)
         {
             _request = request;
+            _hasIndirectControlFlow = request.Program.Instructions.Any(
+                static instruction => instruction.Opcode is "SSetpcB64" or "SSwappcB64");
             _stage = request.Stage switch
             {
                 ShaderStage.Vertex => Gen5SpirvStage.Vertex,
                 ShaderStage.Pixel => Gen5SpirvStage.Pixel,
+                ShaderStage.Mesh => Gen5SpirvStage.Mesh,
                 _ => Gen5SpirvStage.Compute,
             };
             _pixelOutputBindings = request.PixelOutputs;
@@ -119,8 +138,10 @@ public static partial class Gen5SpirvTranslator
             _pixelExecExcludesHelpers =
                 _stage == Gen5SpirvStage.Pixel && PixelLiveExec &&
                 request.Program.Instructions.Any(static instruction => instruction.Opcode is "DsAppend" or "DsConsume");
-            _enableGraphicsSubgroupOperations = _stage == Gen5SpirvStage.Compute || request.EnableGraphicsSubgroupOperations;
+            _enableGraphicsSubgroupOperations = _stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh || request.EnableGraphicsSubgroupOperations;
             _waveLaneCount = request.WaveSize == 64 ? 64u : 32u;
+            _pairedMeshLanes = _stage == Gen5SpirvStage.Mesh && _waveLaneCount == 64 &&
+                request.Mesh?.DeviceSubgroupLaneCount == 32;
             _localSizeX = Math.Max(request.LocalSizeX, 1);
             _localSizeY = Math.Max(request.LocalSizeY, 1);
             _localSizeZ = Math.Max(request.LocalSizeZ, 1);
@@ -132,10 +153,15 @@ public static partial class Gen5SpirvTranslator
             {
                 _waveLowering = new NativeWave32Lowering(this);
             }
-            else if (request.HostWave64Supported)
+            else if (request.HostWave64Supported ||
+                     (_stage == Gen5SpirvStage.Mesh && request.Mesh?.DeviceSubgroupLaneCount == 64))
             {
                 _waveLowering = new NativeWave64Lowering(this);
                 _guestLaneFromSubgroup = true;
+            }
+            else if (_pairedMeshLanes)
+            {
+                _waveLowering = new NativeWave32Lowering(this);
             }
             else if (_stage == Gen5SpirvStage.Compute &&
                      request.HostComputeSubgroup32 &&
@@ -152,7 +178,6 @@ public static partial class Gen5SpirvTranslator
             {
                 _waveLowering = new EmulatedWave64Lowering(this);
             }
-
             _requiredVertexOutputCount = request.RequiredVertexOutputCount;
             _pixelInputEnable = request.PixelInputEnable;
             _pixelInputAddress = request.PixelInputAddress;
@@ -242,11 +267,14 @@ public static partial class Gen5SpirvTranslator
                 _interfaces.Add(_runtimeBufferBiases);
             }
 
-            if (info.UsesDeviceAddresses)
+            if (info.UsesDeviceAddresses || _stage == Gen5SpirvStage.Mesh)
             {
                 _module.AddCapability(SpirvCapability.PhysicalStorageBufferAddresses);
                 _module.SetPhysicalStorageBuffer64MemoryModel();
                 _physicalUintPointer = _module.TypePointer(SpirvStorageClass.PhysicalStorageBuffer, _uintType);
+            }
+            if (info.UsesDeviceAddresses)
+            {
                 var privateUlongPointer = _module.TypePointer(SpirvStorageClass.Private, _ulongType);
                 _deviceEntryScratch = _module.AddGlobalVariable(privateUlongPointer, SpirvStorageClass.Private, _module.Constant64(_ulongType, 0));
                 _deviceWordScratch = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(0));
@@ -455,7 +483,7 @@ public static partial class Gen5SpirvTranslator
         // A bounds-checked dword of a storage block; outside the block reads zero.
         private uint LoadBlockWord(uint block, uint dwordIndex)
         {
-            var length = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, block, 0);
+            var length = StorageBlockLength(block);
             var inRange = _module.AddInstruction(SpirvOp.ULessThan, _boolType, dwordIndex, length);
             var safeIndex = _module.AddInstruction(SpirvOp.Select, _uintType, inRange, dwordIndex, UInt(0));
             var pointer = _module.AddInstruction(SpirvOp.AccessChain, _storageUintPointer, block, UInt(0), safeIndex);
@@ -471,7 +499,26 @@ public static partial class Gen5SpirvTranslator
                 SpirvOp.ULessThan,
                 _boolType,
                 dwordIndex,
-                _module.AddInstruction(SpirvOp.ArrayLength, _uintType, block, 0));
+                StorageBlockLength(block));
+
+        private uint _shaderDataLength;
+        private uint _flattenedTableLength;
+
+        private void InitializeStorageBlockLengths()
+        {
+            if (_stage is not (Gen5SpirvStage.Mesh or Gen5SpirvStage.Compute)) return;
+            if (_shaderData != 0)
+                _shaderDataLength = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _shaderData, 0);
+            if (_flattenedTable != 0)
+                _flattenedTableLength = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _flattenedTable, 0);
+        }
+
+        private uint StorageBlockLength(uint block)
+        {
+            if (block == _shaderData && _shaderDataLength != 0) return _shaderDataLength;
+            if (block == _flattenedTable && _flattenedTableLength != 0) return _flattenedTableLength;
+            return _module.AddInstruction(SpirvOp.ArrayLength, _uintType, block, 0);
+        }
 
         private uint LoadFlattenedWord(uint slot) => LoadBlockWord(_flattenedTable, slot);
 
@@ -567,7 +614,7 @@ public static partial class Gen5SpirvTranslator
                 if (_request.TraceDeviceAddressFaults)
                 {
                     var length = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _faultBuffer, 0);
-                    var recordStart = _module.AddInstruction(SpirvOp.ISub, _uintType, length, UInt(8));
+                    var recordStart = _module.AddInstruction(SpirvOp.ISub, _uintType, length, UInt(16));
                     var claim = _module.AddInstruction(SpirvOp.AtomicCompareExchange, _uintType,
                         BlockWordPointer(_faultBuffer, recordStart), UInt(1), UInt(0), UInt(0), UInt(1), UInt(0));
                     EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, claim, UInt(0)), () =>
@@ -910,6 +957,20 @@ public static partial class Gen5SpirvTranslator
             if (instruction.Opcode.StartsWith("Scratch", StringComparison.Ordinal))
             {
                 return TryEmitScratchMemory(instruction, control, out error);
+            }
+
+            if (control.UsesFlatAddress &&
+                (instruction.Opcode.StartsWith("FlatLoadDword", StringComparison.Ordinal) ||
+                 instruction.Opcode.StartsWith("FlatStoreDword", StringComparison.Ordinal)))
+            {
+                return TryEmitFlatDwordMemory(instruction, control, out error);
+            }
+
+            if (control.UsesFlatAddress && _request.Program.Instructions.Any(operation =>
+                    operation.Sources.Any(source => source.Kind == Gen5OperandKind.EncodedConstant && source.Value is >= 235 and <= 238)))
+            {
+                error = $"local aperture access is not supported for {instruction.Opcode}";
+                return false;
             }
 
             var request = _request;
@@ -1461,7 +1522,7 @@ public static partial class Gen5SpirvTranslator
             }
 
             var classElements = imageClass.Resources.ToList();
-            var element = classElements.IndexOf((uint)resourceIndex);
+            var element = classElements.IndexOf(info.GetCanonicalImageBinding((uint)resourceIndex));
             if (element < 0)
             {
                 return false;
@@ -1564,7 +1625,7 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            var element = imageClass.Resources.ToList().IndexOf((uint)resourceIndex);
+            var element = imageClass.Resources.ToList().IndexOf(info.GetCanonicalImageBinding((uint)resourceIndex));
             if (element < 0)
             {
                 error = $"image {resourceIndex} is not an element of {kind.Value}";
@@ -1604,7 +1665,9 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
-                var samplerPointer = _module.AddInstruction(SpirvOp.AccessChain, _samplerPointer, _samplerArray, UInt(samplerIndex));
+                var samplerElement = request.Bindings.Find(DescriptorBindingKind.Samplers)!.Resources.ToList()
+                    .IndexOf(info.SamplerBinding(samplerIndex));
+                var samplerPointer = _module.AddInstruction(SpirvOp.AccessChain, _samplerPointer, _samplerArray, UInt((uint)samplerElement));
                 var sampler = Load(_samplerType, samplerPointer);
                 objectType = _module.TypeSampledImage(imageClass.ImageType);
                 imageObject = _module.AddInstruction(SpirvOp.SampledImage, objectType, imageValue, sampler);
