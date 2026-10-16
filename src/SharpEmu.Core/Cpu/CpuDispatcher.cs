@@ -8,11 +8,13 @@ using SharpEmu.Core.Cpu.Native;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.Logging;
 
 namespace SharpEmu.Core.Cpu;
 
 public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
 {
+    private static readonly SharpEmuLogger Log = SharpEmuLog.For("SharpEmu.Core.Cpu");
     private enum EntryFrameKind
     {
         ProcessEntry,
@@ -88,8 +90,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         string processImageName = "eboot.bin",
         CpuExecutionOptions executionOptions = default)
     {
-        Console.Error.WriteLine("[DISPATCHER] === DispatchEntry START ===");
-        Console.Error.WriteLine($"[DISPATCHER] entryPoint=0x{entryPoint:X16}, generation={generation}");
+        Log.Debug($"DispatchEntry: entryPoint=0x{entryPoint:X16}, generation={generation}");
 
         try
         {
@@ -97,8 +98,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[DISPATCHER] FATAL EXCEPTION in DispatchEntry: {ex.GetType().Name}: {ex.Message}");
-            Console.Error.WriteLine($"[DISPATCHER] Stack trace: {ex.StackTrace}");
+            Log.Error($"FATAL EXCEPTION in DispatchEntry", ex);
             throw;
         }
     }
@@ -111,8 +111,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         string moduleName = "module",
         CpuExecutionOptions executionOptions = default)
     {
-        Console.Error.WriteLine("[DISPATCHER] === DispatchModuleInitializer START ===");
-        Console.Error.WriteLine($"[DISPATCHER] moduleInit=0x{entryPoint:X16}, generation={generation}, module={moduleName}");
+        Log.Debug($"DispatchModuleInitializer: moduleInit=0x{entryPoint:X16}, generation={generation}, module={moduleName}");
 
         try
         {
@@ -127,8 +126,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[DISPATCHER] FATAL EXCEPTION in DispatchModuleInitializer: {ex.GetType().Name}: {ex.Message}");
-            Console.Error.WriteLine($"[DISPATCHER] Stack trace: {ex.StackTrace}");
+            Log.Error($"FATAL EXCEPTION in DispatchModuleInitializer", ex);
             throw;
         }
     }
@@ -156,8 +154,6 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         CpuExecutionOptions executionOptions = default,
         EntryFrameKind frameKind = EntryFrameKind.ProcessEntry)
     {
-        Console.Error.WriteLine("[DISPATCHER] DispatchEntryCore STARTING...");
-
         LastEntryPoint = entryPoint;
         LastTrapInfo = null;
         LastMemoryFaultInfo = null;
@@ -347,7 +343,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             LastMilestoneLog,
             Environment.NewLine,
             $"CpuEngine native-only failed: {backendError}");
-        Console.Error.WriteLine($"[DISPATCHER] Native backend FAILED: {backendError}");
+        Log.Warn($"Native backend FAILED: {backendError}");
         return FailEarly(
             OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_IMPLEMENTED,
             CpuExitReason.NativeBackendUnavailable);
@@ -488,8 +484,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
 
         if (arguments.Count > 1)
         {
-            Console.Error.WriteLine(
-                $"[DISPATCHER] Guest arguments: {string.Join(' ', arguments.Skip(1))}");
+            Log.Debug($"Guest arguments: {string.Join(' ', arguments.Skip(1))}");
         }
 
         var entryStackPointer = entryParamsAddress - sizeof(ulong);
