@@ -194,10 +194,24 @@ public sealed class IndirectSelectorValues
 
         private static bool WritesRegister(Gen5ShaderInstruction instruction, Gen5Operand register)
         {
+            // GFX10 VCMPX writes EXEC only; legacy scalar destination metadata
+            // is ignored by the translator, including decoded Destinations.
+            if (instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal))
+                return register.Kind == Gen5OperandKind.ScalarRegister && register.Value is 126 or 127;
+
+            // Mixed-precision FMA writes its explicit vector result. Unknown
+            // vector operations still conservatively invalidate VCC.
             if (register.Kind == Gen5OperandKind.ScalarRegister && register.Value is 106 or 107 &&
-                instruction.Opcode.StartsWith('V')) return true;
-            if (instruction.Control is Gen5Vop3Control { ScalarDestination: { } scalarDestination } &&
-                register.Kind == Gen5OperandKind.ScalarRegister && register.Value >= scalarDestination && register.Value - scalarDestination < 2) return true;
+                instruction.Opcode.StartsWith('V') && instruction.Opcode is not
+                    ("VFmaMixF32" or "VFmaMixloF16" or "VFmaMixhiF16")) return true;
+            var scalarDestination = instruction.Control switch
+            {
+                Gen5Vop3Control control => control.ScalarDestination,
+                Gen5SdwaControl control => control.ScalarDestination,
+                _ => null,
+            };
+            if (scalarDestination is { } scalar && register.Kind == Gen5OperandKind.ScalarRegister &&
+                register.Value >= scalar && register.Value - scalar < 2) return true;
             return instruction.Destinations.Any(destination => destination == register ||
                 (destination.Kind == register.Kind && instruction.Opcode.Contains("64", StringComparison.Ordinal) &&
                     register.Value > destination.Value && register.Value - destination.Value == 1));
