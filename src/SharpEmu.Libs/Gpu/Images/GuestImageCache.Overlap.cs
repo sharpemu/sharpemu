@@ -586,7 +586,7 @@ public sealed partial class GuestImageCache
         return replacementImageIdentifier;
     }
 
-    private ResourceSlotIdentifier AssociateStencilRange(ResourceSlotIdentifier depthImageIdentifier, GuestSpan stencil)
+    private ResourceSlotIdentifier AssociateStencilRange(ResourceSlotIdentifier depthImageIdentifier, GuestSpan stencil, bool restoreNativeStencil = false)
     {
         if (!ImageDescription.IsValidRange(stencil))
         {
@@ -619,6 +619,21 @@ public sealed partial class GuestImageCache
 
         var record = _slots[association];
         TouchImage(record);
+        // A current ordinary image becomes an S8 proxy below. Preserve its native
+        // bytes before changing the owner; clean flags alone cannot refresh S8.
+        // Definite CPU/buffer updates instead use the normal stencil upload. A
+        // maybe-dirty hash may resolve unchanged, so it still needs preservation.
+        if (restoreNativeStencil && !record.DepthOwner.IsValid && record.Backing.Exists && record.Description.Data == stencil &&
+            !record.IsDefinitelyCpuDirty && !record.IsBufferModified &&
+            !depth.Description.Metadata.StencilCompressed && depth.Backing.Samples == 1 &&
+            record.Backing.Format is Format.R8Uint or Format.R8Unorm &&
+            record.Backing.ImageType == ImageType.Type2D && record.Backing.Samples == 1 &&
+            record.Backing.MipLevels == 1 && depth.Backing.MipLevels == 1 &&
+            record.Backing.Layers == depth.Backing.Layers && SameExtent(record.Backing.Extent, depth.Backing.Extent))
+        {
+            depth.CopyStencilStorage(record, _bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: true);
+        }
+
         record.AssociateDepth(depthImageIdentifier);
         return association;
     }

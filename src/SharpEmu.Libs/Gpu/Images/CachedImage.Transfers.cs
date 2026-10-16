@@ -493,7 +493,7 @@ public sealed unsafe partial class CachedImage
     {
         if ((ViewFormatRules.FullAspects(Backing.Format) & ImageAspectFlags.StencilBit) == 0 ||
             Backing.ImageType != ImageType.Type2D || Backing.Samples != 1 || Backing.MipLevels != 1 ||
-            storage.Backing.Format != Format.R8Uint || storage.Backing.ImageType != ImageType.Type2D ||
+            storage.Backing.Format is not (Format.R8Uint or Format.R8Unorm) || storage.Backing.ImageType != ImageType.Type2D ||
             storage.Backing.Samples != 1 || storage.Backing.MipLevels != 1 || storage.Backing.Layers != Backing.Layers ||
             storage.Backing.Extent.Width != Backing.Extent.Width || storage.Backing.Extent.Height != Backing.Extent.Height)
         {

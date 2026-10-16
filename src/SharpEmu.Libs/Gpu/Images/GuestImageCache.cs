@@ -507,7 +507,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
     private void RefreshStencilPlane(ResourceSlotIdentifier depthIdentifier, CachedImage depth, bool stencilCompressed)
     {
-        var association = AssociateStencilRange(depthIdentifier, depth.Description.Stencil);
+        var association = AssociateStencilRange(depthIdentifier, depth.Description.Stencil, restoreNativeStencil: true);
         if (stencilCompressed || depth.Description.Samples != 1)
         {
             return;
