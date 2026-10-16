@@ -156,8 +156,10 @@ public sealed class ScalarValueGraphTests
         Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(invariant, invariant.Info.Buffers[0].Source, Inputs([]), out var result));
         Assert.Equal(7u, result.Dwords[0]);
 
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(PhiProgram(7, 9)));
-        Assert.Contains("not a valid runtime value", error.Message);
+        // A divergent phi has no single descriptor to bind: the access reads it from its registers.
+        var divergent = Extract(PhiProgram(7, 9));
+        Assert.Empty(divergent.Info.Buffers);
+        Assert.Contains(divergent.Memory.Entries, memory => memory.DeviceDescriptor);
     }
 
     [Fact]

@@ -569,7 +569,8 @@ public sealed partial class ResourceTracker
 
     private bool IsHostBufferHandle(ScalarValue? handle) =>
         handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
-        handle.Operands.All(dword => dword.Type == ScalarValueType.U32 && _plan.ValidateRuntimeValue(dword));
+        handle.Operands.All(dword => dword.Type == ScalarValueType.U32 && _plan.ValidateRuntimeValue(dword) &&
+            !DependsOnLoopCarriedRead(dword));
 
     private bool IsDeviceLoadedBufferHandle(ScalarValue? handle) =>
         handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
@@ -657,6 +658,56 @@ public sealed partial class ResourceTracker
 
         return false;
     }
+
+    // A value that a loop recomputes from memory it read on the previous iteration (a
+    // pointer walk) differs per iteration even when its phis look structurally invariant.
+    private bool DependsOnLoopCarriedRead(ScalarValue value)
+    {
+        var phis = new HashSet<ScalarValue>();
+        var pending = new Stack<ScalarValue>();
+        var visited = new HashSet<ScalarValue>();
+        pending.Push(value);
+        while (pending.TryPop(out var current))
+        {
+            if (!visited.Add(current))
+                continue;
+            if (current.Kind == ScalarValueKind.Phi)
+                phis.Add(current);
+            foreach (var operand in Dependencies(current))
+                pending.Push(operand);
+        }
+
+        foreach (var phi in phis)
+        {
+            // Look for the phi again below a memory read reached from its own operands.
+            var stack = new Stack<(ScalarValue Value, bool ThroughRead)>();
+            var seen = new HashSet<(ScalarValue, bool)>();
+            foreach (var operand in phi.Operands)
+                stack.Push((operand, false));
+            while (stack.TryPop(out var entry))
+            {
+                if (!seen.Add(entry))
+                    continue;
+                if (ReferenceEquals(entry.Value, phi) && entry.ThroughRead)
+                    return true;
+                if (ReferenceEquals(entry.Value, phi))
+                    continue;
+                var throughRead = entry.ThroughRead ||
+                    entry.Value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord or
+                        ScalarValueKind.ResourceTableWord;
+                foreach (var operand in Dependencies(entry.Value))
+                    stack.Push((operand, throughRead));
+            }
+        }
+
+        return false;
+    }
+
+    // A resource-table word stands for the flattened read it names.
+    private IEnumerable<ScalarValue> Dependencies(ScalarValue value) =>
+        value.Kind == ScalarValueKind.ResourceTableWord && value.Payload < (ulong)_plan.TableReads.Count
+            ? [_plan.TableReads[(int)value.Payload].Value]
+            : value.Operands;
 
     private uint GetHandleSource(
         ScalarValue? handle,
@@ -1187,6 +1238,22 @@ public sealed partial class ResourceTracker
             if ((memory.Kind == MemoryResourceKind.ScalarBuffer && !IsHostBufferHandle(access.Handle)) ||
                 (memory.Kind == MemoryResourceKind.Buffer &&
                     (IsDeviceLoadedBufferHandle(access.Handle) || HasDeviceRecordCount(access.Handle))))
+            {
+                memory.DeviceDescriptor = true;
+                _info.UsesDeviceAddresses = true;
+                return;
+            }
+
+            // A V# chosen by control flow (a phi over several descriptors) has no single source
+            // to bind. Its SGPRs hold the selected descriptor when the access runs, so the
+            // access reads it there, as the hardware does, through the device-address table.
+            // A typed (tbuffer) access has no device lowering and keeps the plan error.
+            if (memory.Kind == MemoryResourceKind.Buffer &&
+                access.Handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
+                !memory.Opcode.StartsWith("TBuffer", StringComparison.Ordinal) &&
+                ((!ValidateSource(MakeSource(access.Handle, 4, false, false, memory.Pc), out _, out var controlDependent) &&
+                  controlDependent) ||
+                 access.Handle.Operands.Any(DependsOnLoopCarriedRead)))
             {
                 memory.DeviceDescriptor = true;
                 _info.UsesDeviceAddresses = true;

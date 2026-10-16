@@ -957,8 +957,86 @@ public sealed class ResourceTrackerTests
             BufferLoad(32, 8),
             EndProgram(36));
 
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(program));
+        // The unevaluated branch picks the V#, so the access reads it from its registers.
+        var plan = Extract(program);
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Memory.TryGetIndex(32, 0, out var index));
+        Assert.True(plan.Memory[index].DeviceDescriptor);
+    }
+
+    // A branch the plan cannot evaluate picks the V#: a descriptor loaded from memory, or one built from a lane value.
+    private static Gen5ShaderProgram PhiSelectedDescriptor(string opcode = "BufferLoadDwordx3") => Program(
+        Branch(0, "SCbranchScc1", 3),
+        ScalarLoad(4, 2, 8, count: 4), Branch(12, "SBranch", 4),
+        ReadFirstLane(16, 8, 0), MoveScalar(20, 9, 0), MoveScalar(24, 10, 64), MoveScalar(28, 11, 0),
+        BufferAccess(32, opcode, 8, dwords: 3),
+        EndProgram(40));
+
+    [Fact]
+    public void DescriptorChosenByControlFlow_ReadsThroughRegisters()
+    {
+        var plan = Extract(PhiSelectedDescriptor());
+
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.True(plan.Memory.TryGetIndex(32, 0, out var index));
+        Assert.True(plan.Memory[index].DeviceDescriptor);
+    }
+
+    [Fact]
+    public void DescriptorWalkedByALoop_ReadsThroughRegisters()
+    {
+        // Each iteration loads the next V# through the base of the current one.
+        var plan = Extract(Program(
+            ScalarLoad(0, 2, 8, count: 4),
+            BufferLoad(8, 8, dwords: 3),
+            ScalarLoad(16, 8, 8, count: 4),
+            Branch(24, "SCbranchScc1", -5),
+            EndProgram(32)));
+
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.True(plan.Memory.TryGetIndex(8, 0, out var index));
+        Assert.False(plan.Memory[index].DeviceDescriptor);
+        Assert.Equal(BufferDescriptorProvenance.Runtime, plan.Memory[index].BufferDescriptor?.Provenance);
+    }
+
+    [Fact]
+    public void DescriptorWalkedByALoopFromALaneValue_IsNeverBoundStatically()
+    {
+        var plan = Extract(Program(
+            ReadFirstLane(0, 8, 0), MoveScalar(4, 9, 0), MoveScalar(8, 10, 64), MoveScalar(12, 11, 0),
+            BufferLoad(16, 8, dwords: 3),
+            ScalarLoad(24, 8, 8, count: 4),
+            Branch(32, "SCbranchScc1", -5),
+            EndProgram(36)));
+
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Memory.TryGetIndex(16, 0, out var index));
+        Assert.True(plan.Memory[index].DeviceDescriptor ||
+            plan.Memory[index].BufferDescriptor?.Provenance == BufferDescriptorProvenance.Runtime);
+    }
+
+    [Fact]
+    public void DescriptorChosenByControlFlow_KeepsTypedAccessRejected()
+    {
+        var error = Assert.ThrowsAny<ResourcePlanException>(() => Extract(PhiSelectedDescriptor("TBufferLoadFormatXyz")));
         Assert.Contains("not a valid runtime value", error.Message);
+    }
+
+    [Fact]
+    public void StaticDescriptor_StaysHostBound()
+    {
+        var plan = Extract(Program(
+            MoveScalar(0, 8, 0x1000), MoveScalar(4, 9, 0), MoveScalar(8, 10, 256), MoveScalar(12, 11, 0),
+            BufferLoad(16, 8, dwords: 3), EndProgram(24)));
+        var userDataPlan = Extract(Program(BufferLoad(0, 0, dwords: 3), EndProgram(8)));
+
+        foreach (var candidate in new[] { plan, userDataPlan })
+        {
+            Assert.Single(candidate.Info.Buffers);
+            Assert.DoesNotContain(candidate.Memory.Entries, memory => memory.DeviceDescriptor);
+        }
     }
 
     [Fact]

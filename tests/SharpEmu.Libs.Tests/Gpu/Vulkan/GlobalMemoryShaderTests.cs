@@ -169,6 +169,80 @@ public class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITestOutputH
         Assert.Equal(expected, RunOnce(vulkan, shader, initial));
     }
 
+    // A branch the plan cannot evaluate (its selector is a scalar load through a lane-derived
+    // offset) picks the V#: from memory when the selector is non-zero, otherwise one built from
+    // a lane value. The load reads whichever descriptor the registers hold when it runs, and
+    // each dword past the descriptor's size reads as zero.
+    [Theory]
+    [InlineData(1u, 0u, 40u)]
+    [InlineData(0u, 0u, 40u)]
+    [InlineData(1u, 32u, 40u)]
+    [InlineData(0u, 32u, 40u)]
+    [InlineData(0u, 8u, 12u)]
+    public void ControlFlowSelectedDescriptor_DwordLoadReadsTheSelectedBuffer(uint selector, uint offset, uint size)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+
+        const int selectorOffset = 100;
+        const uint memoryBase = 16;
+        var initial = CreateInput();
+        WriteWord(initial, selectorOffset, selector);
+        WriteWord(initial, DescriptorOffset, (uint)((BufferAddress + memoryBase) & uint.MaxValue));
+        WriteWord(initial, DescriptorOffset + 4, (uint)((BufferAddress + memoryBase) >> 32));
+        WriteWord(initial, DescriptorOffset + 8, size);
+        WriteWord(initial, DescriptorOffset + 12, 0);
+
+        var words = new List<uint>
+        {
+            // v_readfirstlane_b32 s20, v0: a lane-derived offset the plan cannot resolve.
+            0x7E000000u | (20u << 17) | (2u << 9) | 256u,
+            // s_buffer_load_dword s21, s[0:3], s20 offset:selectorOffset
+            0xF4000000u | (8u << 18) | (21u << 6), (20u << 25) | selectorOffset,
+            0xBF8CC07F,
+            // s_cmp_eq_u32 s21, 0 ; s_cbranch_scc1 +4 (to the lane-built descriptor)
+            0xBF068015,
+            0xBF850000u | 4,
+            // s_buffer_load_dwordx4 s[16:19], s[0:3], s20 offset:DescriptorOffset
+            0xF4000000u | (10u << 18) | (16u << 6), (20u << 25) | DescriptorOffset,
+            0xBF8CC07F,
+            // s_branch +7 (to the access)
+            0xBF820000u | 7,
+            // v_add_nc_u32 v1, BufferAddress.lo, v0 ; v_readfirstlane_b32 s16, v1
+            0x4A0200FF, (uint)(BufferAddress & uint.MaxValue),
+            0x7E000000u | (16u << 17) | (2u << 9) | 257u,
+            // s_mov_b32 s17, BufferAddress.hi ; s_mov_b32 s18, size ; s_mov_b32 s19, 0
+            0xBE910382,
+            0xBE9203FF, size,
+            0xBE930380,
+            // buffer_load_dwordx3 v[4:6], v0, s[16:19], 0 offset:offset
+            0xE0000000u | (15u << 18) | offset, 0x80040400,
+            // buffer_store_dwordx3 v[4:6], v0, s[0:3], 0 offset:MemoryOffset
+            0xE0000000u | (31u << 18) | MemoryOffset, 0x80000400,
+            0xBF810000,
+        };
+        var program = DecodeProgram(words);
+        var listing = string.Join(' ', program.Instructions.Select(instruction => instruction.Opcode));
+        var load = program.Instructions.SingleOrDefault(instruction => instruction.Opcode == "BufferLoadDwordx3")
+            ?? throw new Xunit.Sdk.XunitException(listing);
+        Assert.Equal(3u, Assert.IsType<Gen5BufferMemoryControl>(load.Control).DwordCount);
+        Assert.True(program.Instructions.Any(instruction => instruction.Opcode == "BufferStoreDwordx3"), listing);
+        var shader = CompileProgram(program, BaseScalars());
+        Assert.Contains(shader.Plan.Memory.Entries, memory => memory.Pc == load.Pc && memory.DeviceDescriptor);
+        Assert.DoesNotContain(shader.Plan.Info.Buffers, buffer => buffer.FirstUsePc == load.Pc);
+
+        var sourceBase = selector != 0 ? memoryBase : 0u;
+        var expected = (byte[])initial.Clone();
+        for (var index = 0u; index < 3; index++)
+        {
+            var at = offset + index * 4;
+            WriteWord(expected, MemoryOffset + (int)index * 4,
+                at + 4 <= size ? ReadWord(initial, (int)(sourceBase + at)) : 0u);
+        }
+
+        Assert.Equal(expected, RunOnce(vulkan, shader, initial));
+    }
+
     [Theory]
     [InlineData(1u, 188u, true)]
     [InlineData(2u, 184u, true)]
