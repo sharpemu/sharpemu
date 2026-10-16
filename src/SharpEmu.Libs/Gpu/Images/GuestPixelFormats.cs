@@ -307,7 +307,7 @@ public static class GuestPixelFormats
     [
         new(GuestPixelFormat.Bits8UNorm, 1, 0, 1, true, false),
         new(GuestPixelFormat.Bits8UScaled, 1, 0, 1, true, false),
-        new(GuestPixelFormat.Bits8SNorm, 0, 0, 1, false, false),
+        new(GuestPixelFormat.Bits8SNorm, 1, 0, 1, true, false),
         new(GuestPixelFormat.Bits8UInt, 1, 0, 1, true, true),
         new(GuestPixelFormat.Bits8SInt, 1, 0, 1, true, false, true),
         new(GuestPixelFormat.Bits16UNorm, 2, 0, 2, true, false),
@@ -431,6 +431,7 @@ public static class GuestPixelFormats
     private static readonly (GuestPixelFormat Guest, Format Host)[] HostFormats =
     [
         (GuestPixelFormat.Bits8UNorm, Format.R8Unorm),
+        (GuestPixelFormat.Bits8SNorm, Format.R8SNorm),
         (GuestPixelFormat.Bits8UInt, Format.R8Uint),
         (GuestPixelFormat.Bits8SInt, Format.R8Sint),
         (GuestPixelFormat.Bits16UNorm, Format.R16Unorm),
