@@ -20,6 +20,7 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
 
     private static void Detach(CacheHarness harness) => harness.Worker.Run(() =>
     {
+        harness.Cache.Shutdown();
         harness.Cache.AsyncReadback?.Dispose();
         harness.Cache.AsyncReadback = null;
     });
