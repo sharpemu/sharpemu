@@ -8,6 +8,23 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 
 public sealed class RenderPhaseProfileTests
 {
+    [Theory]
+    [InlineData((int)RenderPhaseProfile.Phase.ProgramTranslation)]
+    [InlineData((int)RenderPhaseProfile.Phase.ProgramLayoutRequest)]
+    public void PreparationDetail_RestoresTheOuterScopeAfterFailure(int phase)
+    {
+        using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.ProgramPreparation))
+        {
+            Assert.Throws<InvalidOperationException>((Action)(() =>
+            {
+                using var detail = RenderPhaseProfile.MeasureDetail((RenderPhaseProfile.Phase)phase);
+                throw new InvalidOperationException();
+            }));
+            Assert.Equal(RenderPhaseProfile.Enabled, RenderPhaseProfile.DetailMeasurementsEnabled);
+        }
+        Assert.False(RenderPhaseProfile.DetailMeasurementsEnabled);
+    }
+
     [Fact]
     public void DisabledDetailMeasurement_DoesNotAllocateOnANewThread()
     {

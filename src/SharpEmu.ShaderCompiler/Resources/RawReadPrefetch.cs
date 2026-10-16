@@ -278,6 +278,7 @@ internal static class RawReadPrefetch
         {
             var word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(addresses[index] - first)..]);
             evaluator.Seed(scratch.Values[index], word);
+            evaluator.RecordPrefetchedConsumer(scratch.Values[index], scratch.Addresses[index]);
         }
     }
 

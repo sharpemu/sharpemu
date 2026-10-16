@@ -82,6 +82,11 @@ public static class GuestMemoryProfile
         RelayCallerCompletion,
         ReservationWriteLockAcquisition,
         ReservationLockedSelection,
+        WrittenUploadRegionSetup,
+        WrittenUploadLockWait,
+        WrittenUploadRangeScan,
+        WrittenUploadSource,
+        WrittenUploadOwnership,
         Count,
     }
 

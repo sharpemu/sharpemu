@@ -139,6 +139,23 @@ internal static class RenderPhaseProfile
         SubmissionCapacity,
         CompletedSubmissionCleanup,
         MovieFramePolling,
+        ProgramPrefetchWait,
+        ProgramPrefetchValidation,
+        ProgramPrefetchOrderWait,
+        ProgramPrefetchDrainWait,
+        ProgramPrefetchPauseWait,
+        ProgramSynchronousResolution,
+        GraphicsResolveLockWait,
+        ComputeResolveLockWait,
+        ProgramSharedGateWait,
+        PipelineSharedGateWait,
+        DeferredDrawTranslation,
+        DeferredDispatchTranslation,
+        ComputePipelineWait,
+        ProgramDecode,
+        ProgramPlanning,
+        ProgramLayoutRequest,
+        ProgramTranslation,
         Count,
     }
 
@@ -468,6 +485,8 @@ internal static class RenderPhaseProfile
             string.Join(" ", parts.Select(part => $"{part.Phase}={part.Milliseconds:F2}ms/n{part.Entries}")));
 
         GpuWaitSiteProfile.Report();
+        ComputeCompileProfile.Report();
+        SharpEmu.ShaderCompiler.Vulkan.ShaderTranslationProfile.Report();
         ReportImageUploads();
         BufferUploadProfile.Report();
         Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeReport());
@@ -476,6 +495,7 @@ internal static class RenderPhaseProfile
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Images.GuestImageCache.TakeLookupReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Images.GuestImageCache.TakeDccReport());
         SharpEmu.ShaderCompiler.Resources.ResourceMaterializationProfile.WriteReport();
+        DescriptorStallProfile.WriteReport();
         SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.WriteReport();
         SharpEmu.HLE.GpuMemory.GpuMemoryAccessProfile.WriteReport();
         WindowPollProfile.Report();

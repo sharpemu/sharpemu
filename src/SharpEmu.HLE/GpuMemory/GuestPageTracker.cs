@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
+using SharpEmu.HLE.GuestMemory;
 
 namespace SharpEmu.HLE.GpuMemory;
 
@@ -255,7 +256,8 @@ public sealed class GuestPageTracker
         bool preserveCpuWriteHotPages = true)
     {
         RejectUploadCallbackReentry();
-        VisitRegions(vaddr, size, create: true, static (_, _, _) => false);
+        using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadRegionSetup) : default)
+            VisitRegions(vaddr, size, create: true, static (_, _, _) => false);
         var previousOwner = _uploadOwner;
         _uploadOwner = this;
         var held = new List<TrackedRegion>();
@@ -266,9 +268,12 @@ public sealed class GuestPageTracker
             {
                 VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
                 {
-                    region.Lock.Enter();
+                    using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadLockWait) : default)
+                        region.Lock.Enter();
                     held.Add(region);
                     var address = region.BaseAddress + offset;
+                    using var scan = isWritten
+                        ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadRangeScan) : default;
                     region.ForEachCpuUploadRange(
                         preserveHotPages: !isWritten && preserveCpuWriteHotPages,
                         address,
@@ -284,12 +289,14 @@ public sealed class GuestPageTracker
                     return false;
                 });
             }
-            uploadFunc();
+            using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadSource) : default)
+                uploadFunc();
             if (isWritten)
             {
                 VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
                 {
-                    region.ChangeState(WriteOrigin.Gpu, enable: true, region.BaseAddress + offset, bytes);
+                    using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadOwnership))
+                        region.ChangeState(WriteOrigin.Gpu, enable: true, region.BaseAddress + offset, bytes);
                     region.Lock.Exit();
                     held.Remove(region);
                     return false;

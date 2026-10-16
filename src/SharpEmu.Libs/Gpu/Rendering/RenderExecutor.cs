@@ -781,6 +781,7 @@ public sealed partial class RenderExecutor
             return;
         }
 
+        using var resolveScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSynchronousResolution);
         state.Programs = ResolveGraphicsPrograms(banks, in inputs);
     }
 

@@ -224,10 +224,16 @@ public sealed class RuntimeValueEvaluator
             return false;
         }
 
-        return ReadRawWord(value.Kind, low, high, (uint)offset, records, (int)memory.Offset, out result);
+        return ReadRawWord(value.Kind, low, high, (uint)offset, records, (int)memory.Offset, out result, value);
     }
 
-    internal bool ReadRawWord(ScalarValueKind kind, ulong low, ulong high, uint offset, ulong records, long immediate, out ulong result)
+    internal ScalarValue GetCompiledReadNode(int index) => _compiled!.Values[index];
+
+    internal void RecordPrefetchedConsumer(ScalarValue node, ulong address) =>
+        ResourceMaterializationCache.RecordReadConsumer(_plan, node, address);
+
+    internal bool ReadRawWord(ScalarValueKind kind, ulong low, ulong high, uint offset, ulong records, long immediate,
+        out ulong result, ScalarValue node)
     {
         result = 0;
         var baseAddress = ((high << 32) | (uint)low) & AddressMask;
@@ -255,6 +261,7 @@ public sealed class RuntimeValueEvaluator
         }
 
         result = word;
+        ResourceMaterializationCache.RecordReadConsumer(_plan, node, address);
         return true;
     }
 
@@ -427,6 +434,8 @@ public sealed class RuntimeValueEvaluator
         out bool[] activeSources,
         int additionalTableWords = 0)
     {
+        using var sourceProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.SourceEvaluation);
+        ResourceMaterializationCache.RecordEvaluationPath(plan, "baseline_evaluator");
         results = [];
         table = [];
         activeSources = [];
@@ -446,9 +455,14 @@ public sealed class RuntimeValueEvaluator
         var cleanEvaluator = new RuntimeValueEvaluator(cleanScratch, plan, inputs.WithReader(inputs.ReadCleanMemory));
         var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs, cleanFlatSlots, cleanEvaluator);
         if (evaluateTable && plan.ResourceBranches.Count != 0)
+        {
+            using var branchProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.BranchSelection);
             activeSources = EvaluateActiveSources(plan, inputs, cleanEvaluator, cleanScratch);
+        }
         var evaluated = new List<DescriptorWords>(sources.Count);
-        RawReadPrefetch.PrefetchSources(plan, sources, activeSources, evaluator);
+        using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.DescriptorPrefetch))
+            RawReadPrefetch.PrefetchSources(plan, sources, activeSources, evaluator);
+        using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.DescriptorEvaluation))
         foreach (var sourceIndex in sources)
         {
             if (sourceIndex >= plan.DescriptorSources.Count)
@@ -479,7 +493,9 @@ public sealed class RuntimeValueEvaluator
             inputs.TablePhase?.Invoke(true);
             try
             {
-                RawReadPrefetch.PrefetchTable(plan, evaluator, cleanEvaluator, cleanFlatSlots);
+                using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.TablePrefetch))
+                    RawReadPrefetch.PrefetchTable(plan, evaluator, cleanEvaluator, cleanFlatSlots);
+                using var tableProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.TableEvaluation);
                 for (var index = 0; index < plan.TableReads.Count; index++)
                 {
                     var read = plan.TableReads[index];

@@ -17,6 +17,14 @@ public static partial class Gen5SpirvTranslator
 
     public static bool TryCompileProgram(ShaderCompileRequest request, out Gen5SpirvShader shader, out string error)
     {
+        var profile = new ShaderTranslationProfile.Scope(ShaderTranslationProfile.Part.Validation);
+        try { return TryCompileProfiled(request, out shader, out error, ref profile); }
+        finally { profile.Dispose(); }
+    }
+
+    private static bool TryCompileProfiled(ShaderCompileRequest request, out Gen5SpirvShader shader,
+        out string error, ref ShaderTranslationProfile.Scope profile)
+    {
         shader = default!;
         try
         {
@@ -78,7 +86,8 @@ public static partial class Gen5SpirvTranslator
             }
         }
 
-        return new CompilationContext(request).TryCompile(out shader, out error);
+        profile.Switch(ShaderTranslationProfile.Part.ContextSetup);
+        return new CompilationContext(request).TryCompile(out shader, out error, ref profile);
     }
 
     private sealed partial class CompilationContext

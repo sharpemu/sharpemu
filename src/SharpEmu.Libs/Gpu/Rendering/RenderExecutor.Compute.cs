@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
@@ -155,6 +156,7 @@ public sealed partial class RenderExecutor
             PipelineHandle pipeline;
             while (!_pipelines.TryCreateComputePipeline(input, computeProgram.Program, out pipeline))
             {
+                using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputePipelineWait);
                 Thread.Sleep(1);
             }
 

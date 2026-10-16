@@ -396,6 +396,88 @@ Each variable writes data to files.
 
 Each variable records timings or counts.
 
+### Resource preparation and compilation details
+
+These reports use existing switches. Set them before starting the game process.
+No new environment variable is required. The performance and frame-trace
+switches are also available in the GUI.
+
+| Switches set to `1` | Additional measurements |
+| --- | --- |
+| `SHARPEMU_PROFILE_PERFORMANCE` | Resource-cache diagnostics and written-upload timers. Also enables the render and compilation measurements below. |
+| `SHARPEMU_PROFILE_RENDER` | Render phases, compute compilation, and shader translation. This switch alone does not enable resource-cache or written-upload diagnostics. |
+| Either profile above, plus `SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE` | Descriptor preparation and binding details, including stall reports. |
+| `SHARPEMU_PROFILE_PERFORMANCE` plus `SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE` | Detailed resource-materialization phases, allocation totals, and sampled recorder and consumer-lookup timings. |
+
+Frame trace alone does not enable these profiles. For all details, use:
+
+```powershell
+$env:SHARPEMU_PROFILE_PERFORMANCE = '1'
+$env:SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE = '1'
+```
+
+Render phase reports separate deferred draw and dispatch translation, program
+prefetch waits and validation, synchronous resolution, and shared-gate waits.
+They also measure program decoding, planning, layout/request construction,
+translation, and compute pipeline waiting. Detail scopes require an active
+render profile scope on the calling thread.
+
+`[PERF][COMPUTE_COMPILE]` reports cumulative asynchronous compile start delay,
+compiler-slot wait, pipeline-cache load, driver compilation, and result
+consumption delay. These are worker wall times, not GPU execution times.
+`[PERF][SHADER_TRANSLATION]` reports cumulative translation pass times and
+instruction/block counts across compile threads, including prewarm work.
+
+`[PERF][DESCRIPTOR_DETAIL]` reports cumulative preparation and binding times.
+`[PERF][DESCRIPTOR_STALL]` records each measured operation that takes at least
+10 ms. It includes the shader hash, resource counts, thread allocations, and
+process-wide GC counts. GC counts do not establish the cause of a stall.
+
+Resource-cache reports include:
+
+- `[PERF][RESOURCE_CACHE]`: cache outcomes, variant visits, generation changes,
+  and refresh-rejection counters.
+- `[PERF][RESOURCE_CACHE_TIME]`: lookup/validation, table refresh, full
+  materialization, and cache-storage time, with totals and shader details.
+- `[PERF][RESOURCE_CACHE_DETAIL]`: validation reads and comparisons, refresh
+  reads and comparisons, table evaluation, and verification. `attempted_bytes`
+  includes requested reads that fail; it is not a transferred-byte count.
+- `[PERF][RESOURCE_CACHE_MISS]` and `[PERF][RESOURCE_CACHE_SHADER]`: stale entries,
+  previously evicted keys, other key misses, and report overflow.
+- `[PERF][RESOURCE_CHANGED_WORD]`, `[PERF][RESOURCE_READ_CONSUMER]`, and
+  `[PERF][RESOURCE_CONSUMER_PENDING]`: changed dependency words, observed
+  descriptor/table/address-range consumers, and unmatched consumer requests.
+- `[PERF][RESOURCE_EVALUATION_PATH]`: evaluation-path call counts.
+
+Cache timing, detail, and miss reports reset their interval counters when read.
+Changed-word samples are limited to four per shader and 256 overall per report.
+Pending consumer requests and consumer samples are each limited to 256.
+Each consumer sample lists at most 32 consumers. Missing samples do not prove
+that a word has no consumer. Per-shader timing and miss maps keep at most 4,096
+keys; reports print up to 24 shader rows and identify timing overflow/unprinted
+totals or miss overflow. These limits do not change cache acceptance decisions.
+
+`[PERF][RESOURCE_MATERIALIZATION]` reports cumulative inclusive phase times and
+allocation totals. `ReadRecording` and `ConsumerLookup` sample one call in 64
+per thread and phase. Their reported times and call counts cover only sampled
+calls; they are not extrapolated totals. Other listed phases are not sampled.
+
+`[PERF][GUEST_MEMORY]` adds `WrittenUploadRegionSetup`, `WrittenUploadLockWait`,
+`WrittenUploadRangeScan`, `WrittenUploadSource`, and `WrittenUploadOwnership`.
+These measure written-upload setup, locking, range processing, source upload,
+and ownership publication. They require the performance switch, not frame trace.
+
+Do not add nested inclusive timings or concurrent worker times to obtain frame
+cost. Compare matching scene windows and use differences for cumulative reports.
+Profiling can change execution time. These reports do not prove an FPS gain.
+
+Implementation: `RenderPhaseProfile.cs`, `ComputeCompileProfile.cs`,
+`ShaderTranslationProfile.cs`, `DescriptorStallProfile.cs`,
+`ResourceMaterializationCache.Diagnostics.cs`, `ResourceMaterializationProfile.cs`,
+`GuestMemoryProfile.cs`, and their instrumented callers.
+
+### Reservation details and other switches
+
 With `SHARPEMU_PROFILE_PERFORMANCE=1`, the memory report includes
 `[PERF][RESERVATION_TOTAL]` call counts and inclusive query times by stage.
 `[PERF][RESERVATION_DETAIL]` records owned overlaps, native reservation failures,

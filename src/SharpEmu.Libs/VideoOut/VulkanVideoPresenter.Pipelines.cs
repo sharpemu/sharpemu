@@ -1175,6 +1175,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public Task<Pipeline> Compile = Task.FromResult(default(Pipeline));
             public long StartTimestamp;
             public long CompileMilliseconds;
+            public long CompletedTimestamp;
         }
 
         private readonly Dictionary<ulong, PendingComputePipeline> _pendingComputePipelines = new();
@@ -1210,6 +1211,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 _pendingComputePipelines.Remove(key);
                 var compiled = pending.Compile.GetAwaiter().GetResult();
+                ComputeCompileProfile.Record(ComputeCompileProfile.Part.ConsumeDelay, pending.CompletedTimestamp);
                 ReportPipelineCreation(
                     Interlocked.Read(ref pending.CompileMilliseconds),
                     "compute-async",
@@ -1258,17 +1260,25 @@ internal static unsafe partial class VulkanVideoPresenter
             started.Compile = Task.Factory.StartNew(
                 () =>
                 {
+                    ComputeCompileProfile.Record(ComputeCompileProfile.Part.StartDelay, started.StartTimestamp);
                     // Each compile blocks its thread inside the Metal compiler service,
                     // so the number in flight is bounded instead of one thread per
                     // program the frame happens to touch.
+                    var slotStart = ComputeCompileProfile.Start();
                     _computeCompileSlots.Wait();
+                    ComputeCompileProfile.Record(ComputeCompileProfile.Part.SlotWait, slotStart);
                     var compileStart = Stopwatch.GetTimestamp();
                     try
                     {
                         // Importing a MoltenVK cache compiles its MSL libraries.
                         // Keep that work inside the same bounded compiler slot.
-                        var cache = ResolveGuestPipelineCache(cacheSource);
-                        return CompileComputePipeline(vk, device, cache, computeModule, layout, requiredSubgroupSize);
+                        PipelineCache cache;
+                        var cacheStart = ComputeCompileProfile.Start();
+                        try { cache = ResolveGuestPipelineCache(cacheSource); }
+                        finally { ComputeCompileProfile.Record(ComputeCompileProfile.Part.CacheLoad, cacheStart); }
+                        var driverStart = ComputeCompileProfile.Start();
+                        try { return CompileComputePipeline(vk, device, cache, computeModule, layout, requiredSubgroupSize); }
+                        finally { ComputeCompileProfile.Record(ComputeCompileProfile.Part.DriverCompile, driverStart); }
                     }
                     finally
                     {
@@ -1276,6 +1286,7 @@ internal static unsafe partial class VulkanVideoPresenter
                             ref started.CompileMilliseconds,
                             (long)Stopwatch.GetElapsedTime(compileStart).TotalMilliseconds);
                         _computeCompileSlots.Release();
+                        started.CompletedTimestamp = ComputeCompileProfile.Start();
                     }
                 },
                 CancellationToken.None,

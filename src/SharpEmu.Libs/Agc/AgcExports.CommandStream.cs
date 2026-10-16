@@ -257,6 +257,7 @@ public static partial class AgcExports
             {
                 case PendingDraw draw:
                 {
+                    using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DeferredDrawTranslation);
                     var executing = _executing;
                     _executing = draw.State;
                     RecordKnownColorTargets(draw.State, draw.Banks);
@@ -283,6 +284,7 @@ public static partial class AgcExports
                 }
                 case PendingDispatch dispatch:
                 {
+                    using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DeferredDispatchTranslation);
                     var executing = _executing;
                     _executing = dispatch.State;
                     try

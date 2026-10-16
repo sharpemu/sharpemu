@@ -155,8 +155,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool depthBound,
         MeshDrawConfiguration? mesh)
     {
+        using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsResolveLockWait);
         lock (_resolveGate)
         {
+            using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             return ResolveGraphicsProgramsCore(vertex, pixel, shaderInterface, context, targetExportMapping, pixelActive, depthBound, mesh);
         }
     }
@@ -220,8 +222,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderProgram pixelProgramHandle = default;
         ShaderStageResources vertexStage;
         ShaderStageResources pixelStage = default;
+        profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramSharedGateWait);
         lock (_gate)
         {
+            profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
             var pushDataCursor = 0u;
             if (pixelSource is not null)
             {
@@ -600,8 +604,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionY,
         uint dimensionZ)
     {
+        using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputeResolveLockWait);
         lock (_resolveGate)
         {
+            using var workScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
             return GetComputeProgramCore(compute, shaderInterface, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
         }
     }
@@ -619,8 +625,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var program = _programs.Decode(source);
         if (_skipRayTracing)
         {
+            profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramSharedGateWait);
             lock (_gate)
             {
+                profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
                 if (!_rayTracingComputePrograms.TryGetValue(program, out var usesRayTracing))
                 {
                     usesRayTracing = program.Instructions.Any(instruction =>
@@ -648,8 +656,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         ShaderProgram handle;
         ShaderStageResources stage;
+        profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramSharedGateWait);
         lock (_gate)
         {
+            profileScope.SwitchPhase(RenderPhaseProfile.Phase.ProgramPreparation);
             var pushDataCursor = 0u;
             if (!TryPrepareProgram(
                 source,
@@ -752,8 +762,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
             vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts);
         var key = KeyOf(description);
+        profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
         lock (_gate)
         {
+            profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineCreation);
             if (_graphicsPipelines.TryGetValue(key, out var cached))
             {
                 return cached;
@@ -1002,8 +1014,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
         }
 
+        profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
         lock (_gate)
         {
+            profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineCreation);
             if (_computePipelines.TryGetValue(key, out var cached))
             {
                 return cached;
@@ -1045,8 +1059,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
         }
 
+        profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
         lock (_gate)
         {
+            profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineCreation);
             if (_computePipelines.TryGetValue(key, out var cached))
             {
                 handle = cached;

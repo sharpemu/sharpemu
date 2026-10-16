@@ -201,6 +201,7 @@ internal sealed class ShaderProgramCache
             return program;
         }
 
+        using var decodeScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramDecode);
         var recording = _host.ShaderPrewarm is not null ? new RecordingCpuMemory(_context.Memory) : null;
         var context = recording is null ? _context : new CpuContext(recording, _context.TargetGeneration);
         if (!Gen5ShaderTranslator.TryDecodeProgram(context, source.Address, out program, out var error))
@@ -457,6 +458,7 @@ internal sealed class ShaderProgramCache
 
     private ProgramSourceEntry CreateEntry(ShaderSource source, StageCompileOptions options)
     {
+        using var planningScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPlanning);
         var program = Decode(source);
         var dumpPlanning = CompiledShaderDump.ShouldWrite(source.Address, source.Hash);
         if (dumpPlanning) ShaderPlanningDump.WriteInput(source, program);
@@ -637,6 +639,7 @@ internal sealed class ShaderProgramCache
         BindingLayout layout;
         try
         {
+            using var layoutScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramLayoutRequest);
             resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, source.UserDataBase, (uint)source.UserData.Length, pushDataCursor,
                 source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions,
@@ -647,7 +650,11 @@ internal sealed class ShaderProgramCache
             throw SubmissionScheduler.Fatal($"The shader binding layout is invalid: stage={source.Label} hash=0x{source.Hash:X16} error={exception.Message}.");
         }
 
-        var request = BuildRequest(source, options, entry, resources, layout);
+        ShaderCompileRequest request;
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramLayoutRequest))
+        {
+            request = BuildRequest(source, options, entry, resources, layout);
+        }
         if (request.Mesh is { } mesh)
         {
             var limits = _host.MeshLimits;
@@ -666,7 +673,14 @@ internal sealed class ShaderProgramCache
         var permutationDump = ShaderPermutationDump.WriteInputs(
             source, key, sourceWasCached, _programs.Keys, entry.Permutations,
             specialization, request, pushDataCursor, _nextProgramId + 1);
-        if (!_compiler.TryCompileProgram(request, out var compiled, out var error) || compiled is null)
+        IGuestCompiledShader? compiled;
+        string error;
+        bool translated;
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramTranslation))
+        {
+            translated = _compiler.TryCompileProgram(request, out compiled, out error);
+        }
+        if (!translated || compiled is null)
         {
             ShaderCallDump.Write(permutationDump, program, snapshot, plan.Memory, _host.TryReadCleanGuestWord);
             throw new ShaderProgramRejectedException($"The shader program cannot be compiled: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={error}.");

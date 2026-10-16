@@ -252,7 +252,7 @@ public static partial class Gen5SpirvTranslator
             Gen5ColorComponentMapping ComponentMapping,
             uint DualSourceAlphaVariable = 0);
 
-        public bool TryCompile(out Gen5SpirvShader shader, out string error)
+        public bool TryCompile(out Gen5SpirvShader shader, out string error, ref ShaderTranslationProfile.Scope profile)
         {
             shader = default!;
             error = string.Empty;
@@ -290,7 +290,10 @@ public static partial class Gen5SpirvTranslator
                     }
                 }
 
+                profile.Switch(ShaderTranslationProfile.Part.Blocks);
                 var blocks = BuildBasicBlocks(_request.Program.Instructions, _stage == Gen5SpirvStage.Mesh);
+                profile.Switch(ShaderTranslationProfile.Part.FlowAnalysis);
+                ShaderTranslationProfile.RecordBlocks(_request.Program.Instructions.Count, blocks.Count);
                 // Mesh blocks use their own barrier convergence path.
                 var structuredForward = _stage != Gen5SpirvStage.Mesh && StructuredForwardBlocks &&
                     blocks.Count != 0 && TryBuildLoopRegions(blocks, out _loopLatchByHeader);
@@ -302,6 +305,7 @@ public static partial class Gen5SpirvTranslator
 
                 _directMeshBlocks = CanEmitDirectMeshBlocks(blocks);
                 FindLocalComparisonPredicates(blocks);
+                profile.Switch(ShaderTranslationProfile.Part.Declarations);
                 DeclareModule();
                 DeclareIntegerReciprocalFunction();
                 var functionType = _module.TypeFunction(_voidType);
@@ -335,8 +339,10 @@ public static partial class Gen5SpirvTranslator
                     _module.AddStatement(SpirvOp.Return);
                     _module.AddLabel();
                 }
+                profile.Switch(ShaderTranslationProfile.Part.InitialState);
                 InitializeStorageBlockLengths();
                 EmitInitialState();
+                profile.Switch(ShaderTranslationProfile.Part.Emission);
                 if (_directMeshBlocks)
                 {
                     if (!TryEmitDirectMeshBlocks(blocks, out error)) return false;
@@ -375,6 +381,7 @@ public static partial class Gen5SpirvTranslator
                 {
                     return false;
                 }
+                profile.Switch(ShaderTranslationProfile.Part.Finalization);
                 if (_stage == Gen5SpirvStage.Pixel &&
                     Environment.GetEnvironmentVariable(
                         "SHARPEMU_TRACE_TITLE_SHADER_STATE") == "1" &&
@@ -507,6 +514,7 @@ public static partial class Gen5SpirvTranslator
                 var attributeCount = _stage == Gen5SpirvStage.Vertex
                     ? (uint)_vertexOutputs.Count
                     : (uint)_pixelInputs.Count;
+                profile.Switch(ShaderTranslationProfile.Part.Serialization);
                 shader = new Gen5SpirvShader(_module.Build(), attributeCount)
                 {
                     InputLocationMask = _stage == Gen5SpirvStage.Pixel ? _pixelInputLocationMask : null,

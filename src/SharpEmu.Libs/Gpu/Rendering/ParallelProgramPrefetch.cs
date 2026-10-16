@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.Libs.Gpu.Rendering;
 
@@ -79,6 +80,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             return;
         }
 
+        using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchDrainWait);
         lock (_lock)
         {
             while (_outstanding != 0)
@@ -112,6 +114,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
             return;
         }
 
+        using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchOrderWait);
         lock (_lock)
         {
             while (_finished < count)
@@ -124,6 +127,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
     // Holds the worker between jobs, for host work that changes what a resolution reads.
     public void Pause()
     {
+        using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchPauseWait);
         lock (_lock)
         {
             _paused = true;
@@ -154,6 +158,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
         Current = null;
         WaitFor(job);
+        using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchValidation);
         if (job.State != 1 || !job.Inputs.Equals(inputs) || !_concurrent.IsStillCurrent(job.Assumptions!))
         {
             return false;
@@ -165,6 +170,7 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     private void WaitFor(Job job)
     {
+        using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchWait);
         var spinner = new SpinWait();
         for (var spin = 0; spin < 64 && job.State == 0; spin++)
         {
