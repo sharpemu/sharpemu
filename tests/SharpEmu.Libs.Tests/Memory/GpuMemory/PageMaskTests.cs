@@ -9,6 +9,41 @@ namespace SharpEmu.Libs.Tests.Memory.GpuMemory;
 public sealed class PageMaskTests
 {
     [Fact]
+    public void CombinedRangeUpdateMatchesSeparateUpdates()
+    {
+        var random = new System.Random(413);
+        for (var iteration = 0; iteration < 3000; iteration++)
+        {
+            var target = new PageMask();
+            var first = new PageMask();
+            var second = new PageMask();
+            var third = new PageMask();
+            for (var page = 0; page < 1024; page++)
+            {
+                if (random.Next(2) != 0) target.Set(page);
+                if (random.Next(2) != 0) first.Set(page);
+                if (random.Next(2) != 0) second.Set(page);
+                if (random.Next(2) != 0) third.Set(page);
+            }
+            var expectedTarget = target;
+            var expectedFirst = first;
+            var expectedSecond = second;
+            var expectedThird = third;
+            var start = iteration == 0 ? 0 : random.Next(1024);
+            var end = iteration == 0 ? 1024 : random.Next(start, 1025);
+            expectedTarget.SetRange(start, end);
+            expectedFirst.UnsetRange(start, end);
+            expectedSecond.UnsetRange(start, end);
+            expectedThird.UnsetRange(start, end);
+            target.SetRangeAndClear(start, end, ref first, ref second, ref third);
+            Assert.True((target ^ expectedTarget).None);
+            Assert.True((first ^ expectedFirst).None);
+            Assert.True((second ^ expectedSecond).None);
+            Assert.True((third ^ expectedThird).None);
+        }
+    }
+
+    [Fact]
     public void RangeQueryPreservesBitsAndUsesExclusiveEnd()
     {
         var mask = new PageMask();

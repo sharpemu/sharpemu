@@ -8,6 +8,15 @@ namespace SharpEmu.HLE.GpuMemory;
 
 public sealed class GuestPageTracker
 {
+    [ThreadStatic]
+    private static UploadScratch? _availableUploadScratch;
+
+    private sealed class UploadScratch
+    {
+        internal readonly List<TrackedRegion> Held = new();
+        internal readonly List<(TrackedRegion Region, ulong Address, ulong Size)> Cleared = new();
+    }
+
     private const ulong BlockBytes = TrackerLayout.BlockBytes;
     private const ulong PageBytes = TrackerLayout.PageBytes;
 
@@ -258,12 +267,18 @@ public sealed class GuestPageTracker
         RejectUploadCallbackReentry();
         using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadRegionSetup) : default)
             VisitRegions(vaddr, size, create: true, static (_, _, _) => false);
+        var scratch = _availableUploadScratch ?? new UploadScratch();
+        // Nested uploads on another tracker must use separate storage.
+        _availableUploadScratch = null;
+        var held = scratch.Held;
+        var releasedCount = 0;
+        var cleared = scratch.Cleared;
         var previousOwner = _uploadOwner;
         _uploadOwner = this;
-        var held = new List<TrackedRegion>();
-        var cleared = new List<(TrackedRegion Region, ulong Address, ulong Size)>();
         try
         {
+            TrackedRegion? currentRegion = null;
+            Action<ulong, ulong> recordCleared = (address, bytes) => cleared.Add((currentRegion!, address, bytes));
             using (GpuMemoryAccessProfile.Measure(GpuMemoryAccessProfile.Operation.UploadTracking, size))
             {
                 VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
@@ -271,6 +286,7 @@ public sealed class GuestPageTracker
                     using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadLockWait) : default)
                         region.Lock.Enter();
                     held.Add(region);
+                    currentRegion = region;
                     var address = region.BaseAddress + offset;
                     using var scan = isWritten
                         ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadRangeScan) : default;
@@ -278,7 +294,7 @@ public sealed class GuestPageTracker
                         preserveHotPages: !isWritten && preserveCpuWriteHotPages,
                         address,
                         bytes,
-                        (runAddress, runSize) => cleared.Add((region, runAddress, runSize)),
+                        recordCleared,
                         rangeFunc);
                     if (!isWritten)
                     {
@@ -298,13 +314,16 @@ public sealed class GuestPageTracker
                     using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadOwnership))
                         region.ChangeState(WriteOrigin.Gpu, enable: true, region.BaseAddress + offset, bytes);
                     region.Lock.Exit();
-                    held.Remove(region);
+                    releasedCount++;
                     return false;
                 });
             }
         }
         catch
         {
+            // Rollback must see only locks that are still held.
+            held.RemoveRange(0, releasedCount);
+            releasedCount = 0;
             // Runs the buffer never received go back to the CPU; a run another operation made
             // GPU-owned after this upload released its lock keeps that newer ownership.
             var lockedThroughout = new HashSet<TrackedRegion>(held);
@@ -343,17 +362,20 @@ public sealed class GuestPageTracker
         }
         finally
         {
-            foreach (var region in held)
+            for (var index = releasedCount; index < held.Count; index++)
             {
-                region.Lock.Exit();
+                held[index].Lock.Exit();
             }
 
             _uploadOwner = previousOwner;
+            held.Clear();
+            cleared.Clear();
+            _availableUploadScratch ??= scratch;
         }
     }
 
     [Conditional("DEBUG")]
-    public void ValidateGpuDirtyPages(SpanSet dirty, ulong vaddr, ulong size, string operation)
+    public void ValidateGpuDirtyPages(AvlSpanSet dirty, ulong vaddr, ulong size, string operation)
     {
         if (!new GuestSpan(vaddr, size).IsValid || vaddr % PageBytes != 0 || size % PageBytes != 0)
         {
@@ -370,7 +392,7 @@ public sealed class GuestPageTracker
     }
 
     [Conditional("DEBUG")]
-    public void ValidateGpuDirtyOwnership(SpanSet dirty, ulong vaddr, ulong size, string operation)
+    public void ValidateGpuDirtyOwnership(AvlSpanSet dirty, ulong vaddr, ulong size, string operation)
     {
         ValidateRange(vaddr, size);
         var end = (vaddr + size + PageBytes - 1) & ~(PageBytes - 1);

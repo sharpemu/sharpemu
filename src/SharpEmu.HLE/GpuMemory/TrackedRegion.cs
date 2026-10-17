@@ -121,31 +121,28 @@ public sealed class TrackedRegion
     public void ChangeState(WriteOrigin side, bool enable, ulong address, ulong size)
     {
         var (start, end) = GetPageRange(address, size);
-        if (enable && side == WriteOrigin.Cpu && new PageMask(_gpuDirty, start, end).Any)
+        if (enable && side == WriteOrigin.Cpu && _gpuDirty.AnyInRange(start, end))
         {
             PageGuard.OnFatal("Cannot mark GPU-dirty pages as CPU-dirty.");
         }
 
-        if (enable && side == WriteOrigin.Gpu && new PageMask(_cpuDirty, start, end).Any)
+        if (enable && side == WriteOrigin.Gpu && _cpuDirty.AnyInRange(start, end))
         {
             PageGuard.OnFatal("Cannot mark CPU-dirty pages as GPU-dirty.");
         }
 
         ref var bits = ref GetDirtyMask(side);
-        if (enable)
+        if (enable && side == WriteOrigin.Gpu)
+        {
+            bits.SetRangeAndClear(start, end, ref _recentCpuUploads, ref _repeatedCpuWrites, ref _hotCpuWrites);
+        }
+        else if (enable)
         {
             bits.SetRange(start, end);
         }
         else
         {
             bits.UnsetRange(start, end);
-        }
-
-        if (enable && side == WriteOrigin.Gpu)
-        {
-            _recentCpuUploads.UnsetRange(start, end);
-            _repeatedCpuWrites.UnsetRange(start, end);
-            _hotCpuWrites.UnsetRange(start, end);
         }
 
         if (side == WriteOrigin.Cpu)
@@ -167,6 +164,12 @@ public sealed class TrackedRegion
         Action<ulong, ulong> visitUpload)
     {
         var (start, end) = GetPageRange(address, size);
+        if (!_cpuDirty.AnyInRange(start, end))
+        {
+            UpdateCpuProtection(track: true);
+            return;
+        }
+
         var upload = new PageMask(_cpuDirty, start, end);
         var cleared = preserveHotPages ? upload & ~_hotCpuWrites : upload;
         foreach (var (runStart, runEnd) in cleared)

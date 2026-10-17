@@ -87,6 +87,20 @@ public struct PageMask
         }
     }
 
+    public void SetRangeAndClear(int start, int end, ref PageMask first, ref PageMask second, ref PageMask third)
+    {
+        if (start < 0 || end > Bits || start >= end) return;
+        var fullBlock = start == 0 && end == Bits;
+        for (var word = start / WordBits; word <= (end - 1) / WordBits; word++)
+        {
+            var mask = fullBlock ? ~0UL : RangeWord(word, start, end);
+            _words[word] |= mask;
+            first._words[word] &= ~mask;
+            second._words[word] &= ~mask;
+            third._words[word] &= ~mask;
+        }
+    }
+
     public static PageMask operator ^(in PageMask left, in PageMask right)
     {
         var result = default(PageMask);

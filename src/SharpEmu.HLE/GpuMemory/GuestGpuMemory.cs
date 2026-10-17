@@ -30,7 +30,7 @@ public sealed class GuestGpuMemory : IDisposable
     private readonly PageGuard _pages;
     private readonly ReaderWriterLockSlim _spansLock = new();
     private readonly SpanSet _spans = new();
-    private SpanSnapshot _spanSnapshot = SpanSnapshot.Empty;
+    private SpanSnapshot? _spanSnapshot = SpanSnapshot.Empty;
     private long _spanVersion;
 
     public long SpanVersion => Interlocked.Read(ref _spanVersion);
@@ -154,7 +154,8 @@ public sealed class GuestGpuMemory : IDisposable
             return false;
         }
 
-        return Volatile.Read(ref _spanSnapshot).Contains(address, size);
+        var snapshot = Volatile.Read(ref _spanSnapshot) ?? throw new ObjectDisposedException(nameof(GuestGpuMemory));
+        return snapshot.Contains(address, size);
     }
 
     public void ForEachSpan(Action<ulong, ulong> visit)
@@ -391,5 +392,6 @@ public sealed class GuestGpuMemory : IDisposable
     {
         _pages.Dispose();
         _spansLock.Dispose();
+        Volatile.Write(ref _spanSnapshot, null);
     }
 }

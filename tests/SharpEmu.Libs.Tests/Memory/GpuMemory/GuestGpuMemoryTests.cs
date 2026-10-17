@@ -126,6 +126,104 @@ public sealed class GuestGpuMemoryTests
         _memory.Dispose();
     }
 
+    [Fact]
+    public void CoverageQueryRejectsDisposedMemory()
+    {
+        var memory = new GuestGpuMemory(new RecordingAddressSpace());
+        memory.Register(0x10000, 0x1000, ReadWrite);
+        memory.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => memory.Covers(0x10000, 8));
+    }
+
+    [Fact]
+    public void CoveragePublicationPreservesSplitRangesAndVersions()
+    {
+        using var memory = new GuestGpuMemory(new RecordingAddressSpace());
+        memory.Register(0x10000, 0x4000, ReadWrite);
+        var version = memory.SpanVersion;
+        memory.Unregister(0x11000, 0x2000);
+        Assert.True(memory.SpanVersion > version);
+        Assert.True(memory.Covers(0x10000, 0x1000));
+        Assert.True(memory.Covers(0x13000, 0x1000));
+        Assert.False(memory.Covers(0x10fff, 2));
+        Assert.False(memory.Covers(0x12000, 8));
+        memory.Register(0x11000, 0x2000, ReadWrite);
+        Assert.True(memory.Covers(0x10000, 0x4000));
+        memory.Unregister(0x10000, 0x4000);
+        Assert.False(memory.Covers(0x10000, 8));
+    }
+
+    [Fact]
+    public async Task ReadersObserveCompletedCoveragePublications()
+    {
+        using var memory = new GuestGpuMemory(new RecordingAddressSpace());
+        using var phases = new Barrier(5);
+        var failures = 0;
+        var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+        {
+            for (var iteration = 0; iteration < 100; iteration++)
+            {
+                for (var phase = 0; phase < 2; phase++)
+                {
+                    Assert.True(phases.SignalAndWait(TimeSpan.FromSeconds(10)));
+                    for (var read = 0; read < 100; read++)
+                        if (memory.Covers(0x10000, 0x1000) != (phase == 0)) Interlocked.Increment(ref failures);
+                    Assert.True(phases.SignalAndWait(TimeSpan.FromSeconds(10)));
+                }
+            }
+        })).ToArray();
+        for (var iteration = 0; iteration < 100; iteration++)
+        {
+            memory.Register(0x10000, 0x1000, ReadWrite);
+            Assert.True(phases.SignalAndWait(TimeSpan.FromSeconds(10)));
+            Assert.True(phases.SignalAndWait(TimeSpan.FromSeconds(10)));
+            memory.Unregister(0x10000, 0x1000);
+            Assert.True(phases.SignalAndWait(TimeSpan.FromSeconds(10)));
+            Assert.True(phases.SignalAndWait(TimeSpan.FromSeconds(10)));
+        }
+        await Task.WhenAll(readers).WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(0, failures);
+    }
+
+    [Fact]
+    public async Task CoverageReadersKeepStableRangesDuringMappingChanges()
+    {
+        using var memory = new GuestGpuMemory(new RecordingAddressSpace());
+        memory.Register(0x10000, 0x1000, ReadWrite);
+        using var ready = new CountdownEvent(4);
+        var stop = 0;
+        var failures = 0;
+        var readers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+        {
+            ready.Signal();
+            while (Volatile.Read(ref stop) == 0)
+            {
+                if (!memory.Covers(0x10000, 0x1000) || memory.Covers(0x12000, 8))
+                    Interlocked.Increment(ref failures);
+                memory.Covers(0x14000, 8);
+            }
+        })).ToArray();
+        try
+        {
+            Assert.True(ready.Wait(TimeSpan.FromSeconds(10)));
+            for (var iteration = 0; iteration < 500; iteration++)
+            {
+                memory.Register(0x14000, 0x2000, ReadWrite);
+                memory.Unregister(0x14000, 0x1000);
+                memory.Unregister(0x15000, 0x1000);
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref stop, 1);
+            await Task.WhenAll(readers).WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        Assert.Equal(0, failures);
+        Assert.False(memory.Covers(0x14000, 0x2000));
+        memory.Unregister(0x10000, 0x1000);
+    }
+
     [Theory]
     [InlineData(FaultKind.Write, "buffer.write 10010+8", "image.write 10010+8")]
     [InlineData(FaultKind.Read, "buffer.pull 10010+8")]
