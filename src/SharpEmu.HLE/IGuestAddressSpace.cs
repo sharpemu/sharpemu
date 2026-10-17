@@ -13,6 +13,9 @@ namespace SharpEmu.HLE;
 /// </summary>
 public interface IGuestAddressSpace : IGuestMemoryAllocator
 {
+    // The smallest range that this address space can protect independently.
+    ulong ProtectionPageSize => (ulong)Environment.SystemPageSize;
+
     ulong AllocateAt(ulong desiredAddress, ulong size, bool executable = true, bool allowAlternative = true);
 
     /// <summary>
@@ -27,6 +30,12 @@ public interface IGuestAddressSpace : IGuestMemoryAllocator
     bool TryBackFixedRange(ulong address, ulong size, bool executable);
 
     bool TryAllocateAtOrAbove(ulong desiredAddress, ulong size, bool executable, ulong alignment, out ulong actualAddress);
+
+    /// <summary>
+    /// Makes an allocated guest range accessible to native guest code.
+    /// A sparse reservation can stay uncommitted until the guest maps this range.
+    /// </summary>
+    bool TryEnsureRangeCommitted(ulong address, ulong size);
 
     bool TryProtect(ulong address, ulong size, GuestPageProtection protection);
 }

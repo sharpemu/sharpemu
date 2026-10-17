@@ -5,19 +5,6 @@ using System.Runtime.InteropServices;
 
 namespace SharpEmu.Libs.Gpu.Metal;
 
-// Core Graphics / Metal ABI structs passed by value through objc_msgSend. Struct
-// *returns* are deliberately never used: on x86-64 (this process runs under Rosetta
-// on Apple silicon) large struct returns switch to objc_msgSend_stret, and avoiding
-// them entirely keeps one calling convention everywhere.
-[StructLayout(LayoutKind.Sequential)]
-internal struct CGRect
-{
-    public double X;
-    public double Y;
-    public double Width;
-    public double Height;
-}
-
 [StructLayout(LayoutKind.Sequential)]
 internal struct CGSize
 {
@@ -73,6 +60,12 @@ internal struct MtlOrigin
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct NsRange
+{
+    public nuint Location;
+    public nuint Length;
+}
+
 internal struct MtlScissorRect
 {
     public nuint X;
@@ -93,31 +86,21 @@ internal struct MtlViewport
 }
 
 /// <summary>
-/// Objective-C runtime access for the Metal presenter: AppKit, QuartzCore, and Metal
+/// Objective-C runtime access for the Metal presenter: QuartzCore and Metal
 /// through objc_msgSend, with one LibraryImport overload per distinct native
 /// signature. Dependency-free by design — this plus the OS frameworks is the entire
 /// Metal path, which is what keeps it NativeAOT-clean.
 /// </summary>
 internal static partial class MetalNative
 {
-    private const string CoreFoundation =
-        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
-
-    [LibraryImport(CoreFoundation)]
-    public static partial nint CFRunLoopGetMain();
-
-    [LibraryImport(CoreFoundation)]
-    public static partial void CFRunLoopStop(nint runLoop);
-
     private const string ObjCLibrary = "/usr/lib/libobjc.A.dylib";
     private const string MetalFramework = "/System/Library/Frameworks/Metal.framework/Metal";
-    private const string AppKitFramework = "/System/Library/Frameworks/AppKit.framework/AppKit";
     private const string QuartzCoreFramework = "/System/Library/Frameworks/QuartzCore.framework/QuartzCore";
 
     private static bool _frameworksLoaded;
 
     /// <summary>
-    /// Makes the AppKit and QuartzCore classes visible to objc_getClass; Metal is
+    /// Makes QuartzCore classes visible to objc_getClass; Metal is
     /// pulled in by its own LibraryImport. Call once before any Class() lookup.
     /// </summary>
     public static void EnsureFrameworksLoaded()
@@ -127,7 +110,6 @@ internal static partial class MetalNative
             return;
         }
 
-        NativeLibrary.Load(AppKitFramework);
         NativeLibrary.Load(QuartzCoreFramework);
         _frameworksLoaded = true;
     }
@@ -140,16 +122,6 @@ internal static partial class MetalNative
 
     [LibraryImport(ObjCLibrary, StringMarshalling = StringMarshalling.Utf8)]
     private static partial nint sel_registerName(string name);
-
-    [LibraryImport(ObjCLibrary, StringMarshalling = StringMarshalling.Utf8)]
-    public static partial nint objc_allocateClassPair(nint superclass, string name, nuint extraBytes);
-
-    [LibraryImport(ObjCLibrary)]
-    public static partial void objc_registerClassPair(nint cls);
-
-    [LibraryImport(ObjCLibrary, StringMarshalling = StringMarshalling.Utf8)]
-    [return: MarshalAs(UnmanagedType.I1)]
-    public static partial bool class_addMethod(nint cls, nint name, nint imp, string types);
 
     [LibraryImport(ObjCLibrary)]
     public static partial nint objc_autoreleasePoolPush();
@@ -168,14 +140,6 @@ internal static partial class MetalNative
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint Send(nint receiver, nint selector, nint argument);
-
-
-    /// <summary>objc_msgSend for a CGRect-returning selector (e.g. -bounds).
-    /// A 32-byte struct is returned via the x86-64 stret ABI — a hidden
-    /// pointer to caller storage passed ahead of self/_cmd — so this must not
-    /// be folded into the plain objc_msgSend overloads.</summary>
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend_stret")]
-    public static partial void SendStretRect(out CGRect result, nint receiver, nint selector);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint Send(nint receiver, nint selector, nint argument, ref nint error);
@@ -209,17 +173,6 @@ internal static partial class MetalNative
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoid(nint receiver, nint selector, nint argument0, nint argument1);
 
-    /// <summary>performSelectorOnMainThread:withObject:waitUntilDone: — the SEL
-    /// to perform is itself an argument, followed by the object and the wait
-    /// flag.</summary>
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial void SendVoidPerformSelector(
-        nint receiver,
-        nint selector,
-        nint performedSelector,
-        nint argument,
-        [MarshalAs(UnmanagedType.I1)] bool waitUntilDone);
-
     /// <summary>setSwizzle: on MTLTextureDescriptor. Four one-byte
     /// MTLTextureSwizzle values, passed packed like the framework expects.</summary>
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
@@ -236,9 +189,6 @@ internal static partial class MetalNative
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidSize(nint receiver, nint selector, CGSize size);
-
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial void SendVoidRect(nint receiver, nint selector, CGRect rect);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidClearColor(nint receiver, nint selector, MtlClearColor color);
@@ -306,6 +256,21 @@ internal static partial class MetalNative
     public static partial void SendSetBuffer(nint receiver, nint selector, nint buffer, nuint offset, nuint index);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendFillBuffer(nint receiver, nint selector, nint buffer, NsRange range, byte value);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendCopyBuffer(nint receiver, nint selector, nint source, nuint sourceOffset, nint destination, nuint destinationOffset, nuint size);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendUseResource(nint receiver, nint selector, nint resource, nuint usage, nuint stages);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial void SendUseResourceUsage(nint receiver, nint selector, nint resource, nuint usage);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
+    public static partial ulong SendGpuAddress(nint receiver, nint selector);
+
+    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial void SendVoidScissor(nint receiver, nint selector, MtlScissorRect rect);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
@@ -327,37 +292,6 @@ internal static partial class MetalNative
         nint indexBuffer,
         nuint indexBufferOffset,
         nuint instanceCount);
-
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial nint SendTimer(
-        nint receiver,
-        nint selector,
-        double interval,
-        nint target,
-        nint timerSelector,
-        nint userInfo,
-        [MarshalAs(UnmanagedType.I1)] bool repeats);
-
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial nint SendInitFrame(nint receiver, nint selector, CGRect frame);
-
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial nint SendInitWindow(
-        nint receiver,
-        nint selector,
-        CGRect contentRect,
-        nuint styleMask,
-        nuint backing,
-        [MarshalAs(UnmanagedType.I1)] bool defer);
-
-    [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
-    public static partial nint SendNextEvent(
-        nint receiver,
-        nint selector,
-        ulong eventMask,
-        nint untilDate,
-        nint inMode,
-        [MarshalAs(UnmanagedType.I1)] bool dequeue);
 
     [LibraryImport(ObjCLibrary, EntryPoint = "objc_msgSend")]
     public static partial nint SendTextureDescriptor(

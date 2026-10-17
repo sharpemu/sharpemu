@@ -23,6 +23,10 @@ internal static class GuestDataPool
 
     public static void Trim() => ((BoundedByteArrayPool)Shared).Trim();
 
+    /// <summary>Outstanding lease count and idle cached bytes, for leak diagnostics.</summary>
+    public static (int LeaseCount, ulong CachedBytes) DiagnosticStats() =>
+        ((BoundedByteArrayPool)Shared).Stats();
+
     private sealed class BoundedByteArrayPool : ArrayPool<byte>
     {
         private readonly object _gate = new();
@@ -116,6 +120,14 @@ internal static class GuestDataPool
             {
                 _cachedByBucket.Clear();
                 _cachedBytes = 0;
+            }
+        }
+
+        public (int LeaseCount, ulong CachedBytes) Stats()
+        {
+            lock (_gate)
+            {
+                return (_leases.Count, _cachedBytes);
             }
         }
 

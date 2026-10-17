@@ -1,8 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
@@ -11,28 +9,12 @@ using SharpEmu.ShaderCompiler.Metal;
 namespace SharpEmu.Libs.Gpu.Metal;
 
 /// <summary>
-/// The Metal presenter: an AppKit window hosting a CAMetalLayer. A CADisplayLink
-/// requested from the content view drives <see cref="RenderFrame"/> in sync with the
-/// display refresh, on the main run loop — the loop whose Core Animation observer
-/// commits presented drawables to the window server, so it must be a real running
-/// run loop (a hand-pumped event drain never fires that observer and the window
-/// stays black). Everything AppKit runs on the process main thread via
-/// <see cref="HostMainThread"/> (AppKit traps off-main), which the CLI parks for us.
+/// The Metal presenter uses SDL for its host window, events and input, then renders
+/// into the CAMetalLayer owned by SDL's Metal view. Windowing and input therefore
+/// share the Vulkan path while all Metal command encoding remains native.
 /// </summary>
 internal static partial class MetalVideoPresenter
 {
-    private const uint DefaultWindowWidth = 1280;
-    private const uint DefaultWindowHeight = 720;
-
-    // NSWindow style: Titled | Closable | Miniaturizable | Resizable. Resizable
-    // both lets the user drag the window edges and turns the green zoom button
-    // into the full-screen toggle (paired with the collection behavior below).
-    private const nuint WindowStyleMask = 1 | 2 | 4 | 8;
-
-    // NSWindowCollectionBehaviorFullScreenPrimary: opt this window into native
-    // full-screen, so the green button enters full-screen rather than zooming.
-    private const nuint FullScreenPrimaryBehavior = 1 << 7;
-    private const nuint BackingStoreBuffered = 2;
     private const nuint PixelFormatBgra8Unorm = (nuint)MtlPixelFormat.Bgra8Unorm;
     private const nuint LoadActionLoad = 1;
     private const nuint LoadActionClear = 2;
@@ -67,19 +49,16 @@ internal static partial class MetalVideoPresenter
     // presenter does; the panel texture lives for the window's lifetime.
     private static nint _overlayTexture;
     private static readonly byte[] _overlayPixels =
-        new byte[PerfOverlay.PanelWidth * PerfOverlay.PanelHeight * 4];
+        new byte[PerfOverlay.PixelBufferWidth * PerfOverlay.PixelBufferHeight * 4];
 
-    // Presenter objects and per-frame present state, shared between window setup
-    // and the display-link RenderFrame callback (both on the main thread).
+    // Presenter objects and per-frame present state, all used on the SDL host thread.
     private static nint _device;
     private static nint _commandQueue;
     private static nint _metalLayer;
     private static nint _presentPipeline;
     private static nint _presentSampler;
-    private static nint _window;
-    private static nint _application;
-    private static nint _renderTimer;
-    private static nint _renderTimerTarget;
+    private static SdlHostWindow? _hostWindow;
+    private static HostVideoOptions _videoOptions = HostVideoOptions.Default;
     private static double _drawableWidth;
     private static double _drawableHeight;
     private static nint _frameTexture;
@@ -91,9 +70,22 @@ internal static partial class MetalVideoPresenter
     private static nint _ownedVersionTexture;
     private static ulong _presentGuestAddress;
     private static long _presentedSequence = -1;
-    private static bool _userClosed;
     private static uint _windowWidth;
     private static uint _windowHeight;
+
+    public static bool TryConfigureVideo(HostVideoOptions options)
+    {
+        lock (_gate)
+        {
+            if (_thread is not null)
+            {
+                return false;
+            }
+
+            _videoOptions = options.Normalize();
+            return true;
+        }
+    }
 
     public static void EnsureStarted(uint width, uint height)
     {
@@ -183,6 +175,7 @@ internal static partial class MetalVideoPresenter
     public static void RequestClose()
     {
         Volatile.Write(ref _closeRequested, true);
+        Volatile.Read(ref _hostWindow)?.Close();
     }
 
     private static void StartPresenterLocked()
@@ -247,33 +240,23 @@ internal static partial class MetalVideoPresenter
             VideoOutExports.SetSelectedGpuName(deviceName);
         }
 
-        // Fixed window like the Vulkan presenter: guest frames letterbox into
-        // it. Sizing the window from the guest's display mode (4K) exceeds the
-        // screen — macOS clamps the window while the layer keeps the requested
-        // geometry, leaving the visible region showing nothing but clear.
-        const uint width = DefaultWindowWidth;
-        const uint height = DefaultWindowHeight;
+        HostVideoOptions videoOptions;
+        lock (_gate)
+        {
+            videoOptions = _videoOptions;
+        }
 
+        using var hostWindow = new SdlHostWindow(
+            VideoOutExports.GetWindowTitle(),
+            videoOptions,
+            SdlGraphicsApi.Metal,
+            ToggleMetalPerformanceHud);
+        Volatile.Write(ref _hostWindow, hostWindow);
         var setupPool = MetalNative.objc_autoreleasePoolPush();
         try
         {
-            _application = MetalNative.Send(
-                MetalNative.Class("NSApplication"), MetalNative.Selector("sharedApplication"));
-            // NSApplicationActivationPolicyRegular: dock icon + key window like any app.
-            MetalNative.Send(_application, MetalNative.Selector("setActivationPolicy:"), 0);
-            MetalNative.SendVoid(_application, MetalNative.Selector("finishLaunching"));
-
-            _window = CreateWindow(width, height);
-
-            // Swap in the key-capturing view before the metal layer attaches so
-            // the layer lands on the input-aware content view.
-            var keyView = MetalNative.SendInitFrame(
-                MetalNative.Send(CreateKeyViewClass(), MetalNative.Selector("alloc")),
-                MetalNative.Selector("initWithFrame:"),
-                new CGRect { X = 0, Y = 0, Width = width, Height = height });
-            MetalNative.SendVoid(_window, MetalNative.Selector("setContentView:"), keyView);
-
-            _metalLayer = CreateLayer(_device, _window, out _drawableWidth, out _drawableHeight);
+            _metalLayer = hostWindow.CreateMetalLayer();
+            ConfigureMetalLayer(_device, _metalLayer);
             _commandQueue = MetalNative.Send(_device, MetalNative.Selector("newCommandQueue"));
             if (!TryCreatePresentPipeline(_device, out _presentPipeline, out var pipelineError))
             {
@@ -282,31 +265,7 @@ internal static partial class MetalVideoPresenter
             }
 
             _presentSampler = CreateLinearSampler(_device);
-
-            MetalNative.SendVoid(_window, MetalNative.Selector("makeKeyAndOrderFront:"), 0);
-            MetalNative.SendVoidBool(
-                _application, MetalNative.Selector("activateIgnoringOtherApps:"), true);
-            MetalNative.SendVoid(_window, MetalNative.Selector("makeFirstResponder:"), keyView);
-            MetalHostInput.Attach();
-
-            // A repeating NSTimer on this (main) run loop fires onFrame: at the
-            // display rate. CADisplayLink (NSView.displayLinkWithTarget:selector:)
-            // is the natural choice but its callback never fires under the x86-64
-            // Rosetta process this emulator runs as — proven in isolation against
-            // a bare AppKit harness, where a timer fires and composites and the
-            // display link does not. nextDrawable still throttles presentation to
-            // the display, so the timer only needs to keep up, not pace precisely.
-            _renderTimerTarget = CreateRenderTimerTarget();
-            _renderTimer = MetalNative.Send(
-                MetalNative.SendTimer(
-                    MetalNative.Class("NSTimer"),
-                    MetalNative.Selector("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
-                    1.0 / 60.0,
-                    _renderTimerTarget,
-                    MetalNative.Selector("onFrame:"),
-                    0,
-                    repeats: true),
-                MetalNative.Selector("retain"));
+            SyncDrawableSizeToLayer();
         }
         finally
         {
@@ -314,25 +273,26 @@ internal static partial class MetalVideoPresenter
         }
 
         Console.Error.WriteLine("[LOADER][INFO] Metal VideoOut presenter started.");
-
-        // [NSApp run] runs the main run loop (its Core Animation observer commits
-        // presented drawables to the window server) AND fully activates the app,
-        // which a bare CFRunLoopRun does not — the CADisplayLink is only serviced
-        // once the app is running, and NSApp dispatches window events itself.
-        // Returns once RenderFrame stops it.
-        MetalNative.SendVoid(_application, MetalNative.Selector("run"));
-
-        var closePool = MetalNative.objc_autoreleasePoolPush();
         try
         {
-            MetalNative.SendVoid(_window, MetalNative.Selector("close"));
+            hostWindow.Run(
+                static () => { },
+                static _ => RenderFrameSafely(),
+                static () => { });
         }
         finally
         {
-            MetalNative.objc_autoreleasePoolPop(closePool);
+            Volatile.Write(ref _hostWindow, null);
+            _metalLayer = 0;
+            if (_overlayTexture != 0)
+            {
+                // Submitted command buffers retain the texture until their GPU work completes.
+                MetalNative.SendVoid(_overlayTexture, MetalNative.Selector("release"));
+                _overlayTexture = 0;
+            }
         }
 
-        if (_userClosed)
+        if (hostWindow.ClosedByUser)
         {
             Console.Error.WriteLine(
                 "[LOADER][WARN] Metal VideoOut window closed; requesting emulator shutdown.");
@@ -340,114 +300,7 @@ internal static partial class MetalVideoPresenter
         }
     }
 
-    /// <summary>
-    /// An NSView subclass that records key events for pad emulation. Overriding
-    /// keyDown:/keyUp: (instead of an event monitor) needs no ObjC blocks, and
-    /// swallowing the events also silences the system alert beep AppKit plays
-    /// for unhandled keys. Registered once per process.
-    /// </summary>
-    private static unsafe nint CreateKeyViewClass()
-    {
-        var cls = MetalNative.objc_allocateClassPair(
-            MetalNative.Class("NSView"), "SharpEmuMetalView", 0);
-        if (cls == 0)
-        {
-            return MetalNative.Class("SharpEmuMetalView");
-        }
-
-        var keyDown = (nint)(delegate* unmanaged[Cdecl]<nint, nint, nint, void>)&OnKeyDown;
-        MetalNative.class_addMethod(cls, MetalNative.Selector("keyDown:"), keyDown, "v@:@");
-        var keyUp = (nint)(delegate* unmanaged[Cdecl]<nint, nint, nint, void>)&OnKeyUp;
-        MetalNative.class_addMethod(cls, MetalNative.Selector("keyUp:"), keyUp, "v@:@");
-        // Command-modified keys never reach keyDown: — AppKit routes them through
-        // performKeyEquivalent:, so Cmd+F1 (Metal Performance HUD) hooks in here.
-        var keyEquivalent = (nint)(delegate* unmanaged[Cdecl]<nint, nint, nint, byte>)&OnPerformKeyEquivalent;
-        MetalNative.class_addMethod(
-            cls, MetalNative.Selector("performKeyEquivalent:"), keyEquivalent, "c@:@");
-        // First responder status is what routes key events to this view.
-        var accepts = (nint)(delegate* unmanaged[Cdecl]<nint, nint, byte>)&AcceptsFirstResponder;
-        MetalNative.class_addMethod(
-            cls, MetalNative.Selector("acceptsFirstResponder"), accepts, "c@:");
-        MetalNative.objc_registerClassPair(cls);
-        return cls;
-    }
-
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    private static void OnKeyDown(nint self, nint cmd, nint nsEvent)
-    {
-        try
-        {
-            var keyCode = (ushort)(MetalNative.Send(nsEvent, MetalNative.Selector("keyCode")) & 0xFFFF);
-            var isRepeat = MetalNative.SendBool(nsEvent, MetalNative.Selector("isARepeat"));
-
-            // Function keys can arrive here even with Command held (AppKit only
-            // reroutes some chords through the key-equivalent path), so catch
-            // Cmd+F1 in both places — and keep it away from MetalHostInput so it
-            // never toggles the plain-F1 perf overlay.
-            var modifiers = (ulong)MetalNative.Send(nsEvent, MetalNative.Selector("modifierFlags"));
-            if (keyCode == KeyCodeF1 && (modifiers & NsEventModifierFlagCommand) != 0)
-            {
-                if (!isRepeat)
-                {
-                    ToggleMetalPerformanceHud();
-                }
-
-                return;
-            }
-
-            MetalHostInput.KeyDown(keyCode, isRepeat);
-        }
-        catch (Exception exception)
-        {
-            Console.Error.WriteLine($"[LOADER][WARN] Metal key-down handler failed: {exception.Message}");
-        }
-    }
-
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    private static void OnKeyUp(nint self, nint cmd, nint nsEvent)
-    {
-        try
-        {
-            var keyCode = (ushort)(MetalNative.Send(nsEvent, MetalNative.Selector("keyCode")) & 0xFFFF);
-            MetalHostInput.KeyUp(keyCode);
-        }
-        catch (Exception exception)
-        {
-            Console.Error.WriteLine($"[LOADER][WARN] Metal key-up handler failed: {exception.Message}");
-        }
-    }
-
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    private static byte AcceptsFirstResponder(nint self, nint cmd) => 1;
-
-    private const ushort KeyCodeF1 = 0x7A;
-    private const ulong NsEventModifierFlagCommand = 1UL << 20;
     private static bool _metalHudVisible;
-
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    private static byte OnPerformKeyEquivalent(nint self, nint cmd, nint nsEvent)
-    {
-        try
-        {
-            var keyCode = (ushort)(MetalNative.Send(nsEvent, MetalNative.Selector("keyCode")) & 0xFFFF);
-            var modifiers = (ulong)MetalNative.Send(nsEvent, MetalNative.Selector("modifierFlags"));
-            if (keyCode == KeyCodeF1 && (modifiers & NsEventModifierFlagCommand) != 0)
-            {
-                if (!MetalNative.SendBool(nsEvent, MetalNative.Selector("isARepeat")))
-                {
-                    ToggleMetalPerformanceHud();
-                }
-
-                return 1; // handled: no system beep, no further routing
-            }
-        }
-        catch (Exception exception)
-        {
-            Console.Error.WriteLine($"[LOADER][WARN] Metal key-equivalent handler failed: {exception.Message}");
-        }
-
-        return 0;
-    }
 
     /// <summary>
     /// Cmd+F1: Apple's Metal Performance HUD on the CAMetalLayer (plain F1 keeps
@@ -456,7 +309,7 @@ internal static partial class MetalVideoPresenter
     /// mode=default|disabled and logging=default, plus any MTL_HUD_* environment
     /// keys directly in the dictionary — all three HUD flags (enabled, per-frame
     /// logging, shader-compile logging) ride in one property set. Runs on the
-    /// AppKit main thread (the key-equivalent path), same thread as the render loop.
+    /// SDL host thread, the same thread as the render loop.
     /// </summary>
     private static void ToggleMetalPerformanceHud()
     {
@@ -508,33 +361,13 @@ internal static partial class MetalVideoPresenter
             $"[LOADER][INFO] Metal Performance HUD {(_metalHudVisible ? "shown" : "hidden")} (Cmd+F1).");
     }
 
-    private static unsafe nint CreateRenderTimerTarget()
+    /// <summary>The SDL host loop drains guest work continuously. The method
+    /// remains as the enqueue-side hook used by guest image synchronization.</summary>
+    internal static void ScheduleGuestWorkDrain()
     {
-        // A minimal NSObject subclass whose onFrame: is our unmanaged callback —
-        // the dependency-free way to hand a target/selector to NSTimer without a
-        // binding library. Registered once per process.
-        var cls = MetalNative.objc_allocateClassPair(
-            MetalNative.Class("NSObject"), "SharpEmuRenderTimerTarget", 0);
-        if (cls != 0)
-        {
-            var imp = (nint)(delegate* unmanaged[Cdecl]<nint, nint, nint, void>)&OnRenderTimer;
-            // "v@:@": void return, self, _cmd, one object argument (the timer).
-            MetalNative.class_addMethod(cls, MetalNative.Selector("onFrame:"), imp, "v@:@");
-            var wakeImp = (nint)(delegate* unmanaged[Cdecl]<nint, nint, nint, void>)&OnGuestWorkWake;
-            MetalNative.class_addMethod(cls, MetalNative.Selector("onGuestWork:"), wakeImp, "v@:@");
-            MetalNative.objc_registerClassPair(cls);
-        }
-        else
-        {
-            cls = MetalNative.Class("SharpEmuRenderTimerTarget");
-        }
-
-        return MetalNative.Send(
-            MetalNative.Send(cls, MetalNative.Selector("alloc")), MetalNative.Selector("init"));
     }
 
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    private static void OnRenderTimer(nint self, nint cmd, nint timer)
+    private static void RenderFrameSafely()
     {
         try
         {
@@ -546,78 +379,13 @@ internal static partial class MetalVideoPresenter
         }
     }
 
-    /// <summary>Set while an onGuestWork: wake is scheduled on the main run
-    /// loop; coalesces enqueue-side wake requests to one in-flight message.</summary>
-    private static int _guestWorkWakeScheduled;
-
-    /// <summary>Wakes the main run loop to drain guest work now instead of at
-    /// the next render tick. Guest submit→wait round-trips (release-mem labels,
-    /// CPU-visible write-backs) otherwise cost a full frame interval each —
-    /// games that chain several per frame crawl at a fraction of the display
-    /// rate. Safe from any thread; no-op until the presenter starts.</summary>
-    internal static void ScheduleGuestWorkDrain()
-    {
-        if (Interlocked.CompareExchange(ref _guestWorkWakeScheduled, 1, 0) != 0)
-        {
-            return;
-        }
-
-        var target = _renderTimerTarget;
-        if (target == 0)
-        {
-            Volatile.Write(ref _guestWorkWakeScheduled, 0);
-            return;
-        }
-
-        MetalNative.SendVoidPerformSelector(
-            target,
-            MetalNative.Selector("performSelectorOnMainThread:withObject:waitUntilDone:"),
-            MetalNative.Selector("onGuestWork:"),
-            0,
-            waitUntilDone: false);
-    }
-
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    private static void OnGuestWorkWake(nint self, nint cmd, nint argument)
-    {
-        Volatile.Write(ref _guestWorkWakeScheduled, 0);
-        if (_device == 0 || _commandQueue == 0 || Volatile.Read(ref _closeRequested))
-        {
-            return;
-        }
-
-        var pool = MetalNative.objc_autoreleasePoolPush();
-        try
-        {
-            DrainGuestWork(_device, _commandQueue);
-        }
-        catch (Exception exception)
-        {
-            Console.Error.WriteLine($"[LOADER][ERROR] Metal guest work wake failed: {exception}");
-        }
-        finally
-        {
-            MetalNative.objc_autoreleasePoolPop(pool);
-        }
-    }
-
     private static void RenderFrame()
     {
-        MetalHostInput.PumpAutoKeys();
         var pool = MetalNative.objc_autoreleasePoolPush();
         try
         {
-            // NSApp.run dispatches window events itself, so there is no manual
-            // event drain here.
-            var visible = MetalNative.SendBool(_window, MetalNative.Selector("isVisible"));
-            if (Volatile.Read(ref _closeRequested) || !visible)
+            if (Volatile.Read(ref _closeRequested))
             {
-                _userClosed = !visible && !Volatile.Read(ref _closeRequested);
-                MetalNative.SendVoid(_renderTimer, MetalNative.Selector("invalidate"));
-                // Stop both the AppKit loop and the underlying CFRunLoop so
-                // [NSApp run] returns.
-                MetalNative.SendVoid(_application, MetalNative.Selector("stop:"), 0);
-                MetalNative.CFRunLoopStop(MetalNative.CFRunLoopGetMain());
                 return;
             }
 
@@ -715,8 +483,7 @@ internal static partial class MetalVideoPresenter
                 if (!string.Equals(title, _lastWindowTitle, StringComparison.Ordinal))
                 {
                     _lastWindowTitle = title;
-                    MetalNative.SendVoid(
-                        _window, MetalNative.Selector("setTitle:"), MetalNative.NsString(title));
+                    Volatile.Read(ref _hostWindow)?.SetTitle(title);
                 }
             }
 
@@ -725,7 +492,19 @@ internal static partial class MetalVideoPresenter
             // for a drawable, or nextDrawable keeps handing back the original
             // resolution and Core Animation stretches it (blurry, mis-scaled
             // overlay). No-op when the size is unchanged, i.e. almost every tick.
+            var hostWindow = Volatile.Read(ref _hostWindow);
+            if (hostWindow?.ConsumeSurfaceRestore() == true)
+            {
+                _drawableWidth = 0;
+                _drawableHeight = 0;
+            }
+
             SyncDrawableSizeToLayer();
+
+            if (hostWindow?.IsMinimized == true)
+            {
+                return;
+            }
 
             var drawable = MetalNative.Send(_metalLayer, MetalNative.Selector("nextDrawable"));
             if (drawable == 0)
@@ -761,7 +540,7 @@ internal static partial class MetalVideoPresenter
                     _drawableHeight);
             }
 
-            if (PerfOverlay.Enabled)
+            if (PerfOverlay.DrawOnScreen)
             {
                 EncodeOverlay(encoder);
             }
@@ -777,8 +556,7 @@ internal static partial class MetalVideoPresenter
         }
     }
 
-    /// <summary>Draws the CPU-rasterized perf panel over the frame's top-left
-    /// corner, reusing the present pipeline with a panel-sized viewport.</summary>
+    // Uses the present pipeline with a viewport at the selected corner.
     private static void EncodeOverlay(nint encoder)
     {
         if (_overlayTexture == 0)
@@ -787,8 +565,8 @@ internal static partial class MetalVideoPresenter
                 MetalNative.Class("MTLTextureDescriptor"),
                 MetalNative.Selector("texture2DDescriptorWithPixelFormat:width:height:mipmapped:"),
                 PixelFormatBgra8Unorm,
-                PerfOverlay.PanelWidth,
-                PerfOverlay.PanelHeight,
+                (nuint)PerfOverlay.DisplayWidth,
+                (nuint)PerfOverlay.DisplayHeight,
                 mipmapped: false);
             _overlayTexture = MetalNative.Send(
                 _device, MetalNative.Selector("newTextureWithDescriptor:"), descriptor);
@@ -807,15 +585,15 @@ internal static partial class MetalVideoPresenter
         PerfOverlay.Fill(_overlayPixels, pendingWork, 0);
         ReplaceTextureContents(
             _overlayTexture,
-            PerfOverlay.PanelWidth,
-            PerfOverlay.PanelHeight,
+            (uint)PerfOverlay.DisplayWidth,
+            (uint)PerfOverlay.DisplayHeight,
             _overlayPixels,
-            PerfOverlay.PanelWidth,
+            PerfOverlay.PixelBufferWidth,
             bytesPerPixel: 4);
 
-        const double margin = 16;
-        var panelWidth = Math.Min(PerfOverlay.PanelWidth, _drawableWidth - margin);
-        var panelHeight = Math.Min(PerfOverlay.PanelHeight, _drawableHeight - margin);
+        var rectangle = PerfOverlay.GetRectangle((int)_drawableWidth, (int)_drawableHeight);
+        var panelWidth = rectangle.Width;
+        var panelHeight = rectangle.Height;
         if (panelWidth <= 0 || panelHeight <= 0)
         {
             return;
@@ -827,8 +605,8 @@ internal static partial class MetalVideoPresenter
             MetalNative.Selector("setViewport:"),
             new MtlViewport
             {
-                OriginX = margin,
-                OriginY = margin,
+                OriginX = rectangle.Left,
+                OriginY = rectangle.Top,
                 Width = panelWidth,
                 Height = panelHeight,
                 ZNear = 0,
@@ -846,43 +624,57 @@ internal static partial class MetalVideoPresenter
             3);
     }
 
-    private static nint CreateWindow(uint width, uint height)
+    private static void ConfigureMetalLayer(nint device, nint layer)
     {
-        var window = MetalNative.SendInitWindow(
-            MetalNative.Send(MetalNative.Class("NSWindow"), MetalNative.Selector("alloc")),
-            MetalNative.Selector("initWithContentRect:styleMask:backing:defer:"),
-            new CGRect { X = 0, Y = 0, Width = width, Height = height },
-            WindowStyleMask,
-            BackingStoreBuffered,
-            defer: false);
-        // The presenter owns the handle; AppKit must not free it on user close.
-        MetalNative.SendVoidBool(window, MetalNative.Selector("setReleasedWhenClosed:"), false);
-        MetalNative.Send(
-            window, MetalNative.Selector("setCollectionBehavior:"), (nint)FullScreenPrimaryBehavior);
-        MetalNative.SendVoid(
-            window,
-            MetalNative.Selector("setTitle:"),
-            MetalNative.NsString(VideoOutExports.GetWindowTitle()));
-        MetalNative.SendVoid(window, MetalNative.Selector("center"));
-        // makeKeyAndOrderFront happens after the metal layer is attached.
-        return window;
+        MetalNative.SendVoid(layer, MetalNative.Selector("setDevice:"), device);
+        MetalNative.Send(layer, MetalNative.Selector("setPixelFormat:"), (nint)PixelFormatBgra8Unorm);
+        MetalNative.SendVoidBool(layer, MetalNative.Selector("setOpaque:"), true);
+        MetalNative.SendVoidBool(layer, MetalNative.Selector("setFramebufferOnly:"), true);
+
+        var setDisplaySync = MetalNative.Selector("setDisplaySyncEnabled:");
+        if (MetalNative.SendBool(layer, MetalNative.Selector("respondsToSelector:"), setDisplaySync))
+        {
+            MetalNative.SendVoidBool(layer, setDisplaySync, _videoOptions.VSync);
+        }
     }
 
-    /// <summary>Keeps the CAMetalLayer's drawable size (pixels) matched to its
-    /// current bounds (points) × scale as the window resizes or moves between
-    /// displays. CAMetalLayer never updates drawableSize on its own, even as a
-    /// view's backing layer, so the render loop drives it.</summary>
+    /// <summary>Keeps the SDL-owned CAMetalLayer drawable in host pixels as the
+    /// window resizes or moves between displays with different scale factors.</summary>
     private static void SyncDrawableSizeToLayer()
     {
-        MetalNative.SendStretRect(out var bounds, _metalLayer, MetalNative.Selector("bounds"));
-        var scale = MetalNative.SendDouble(_metalLayer, MetalNative.Selector("contentsScale"));
-        if (scale <= 0)
+        var hostWindow = Volatile.Read(ref _hostWindow);
+        if (hostWindow is null || _metalLayer == 0)
         {
-            scale = 1;
+            return;
         }
 
-        var width = Math.Max(1, Math.Round(bounds.Width * scale));
-        var height = Math.Max(1, Math.Round(bounds.Height * scale));
+        var pixelSize = hostWindow.PixelSize;
+        var width = (double)pixelSize.Width;
+        var height = (double)pixelSize.Height;
+
+        // Retina hosts often present at 3840x2160 into a 1920x1080 window.
+        // Cap is opt-in: defaulting it on silently drops present resolution for
+        // every Metal title. SHARPEMU_METAL_CAP_DRAWABLE=1 enables the long-edge
+        // cap; SHARPEMU_METAL_FULL_DRAWABLE=1 remains a no-op when the cap is off.
+        if (string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_METAL_CAP_DRAWABLE"),
+                "1",
+                StringComparison.Ordinal) &&
+            !string.Equals(
+                Environment.GetEnvironmentVariable("SHARPEMU_METAL_FULL_DRAWABLE"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            const double maxLongEdge = 1920.0;
+            var longEdge = Math.Max(width, height);
+            if (longEdge > maxLongEdge)
+            {
+                var scale = maxLongEdge / longEdge;
+                width = Math.Round(width * scale);
+                height = Math.Round(height * scale);
+            }
+        }
+
         if (width == _drawableWidth && height == _drawableHeight)
         {
             return;
@@ -894,57 +686,6 @@ internal static partial class MetalVideoPresenter
             _metalLayer,
             MetalNative.Selector("setDrawableSize:"),
             new CGSize { Width = width, Height = height });
-    }
-
-    private static nint CreateLayer(nint device, nint window, out double drawableWidth, out double drawableHeight)
-    {
-        var contentView = MetalNative.Send(window, MetalNative.Selector("contentView"));
-        var scale = MetalNative.SendDouble(window, MetalNative.Selector("backingScaleFactor"));
-        if (scale <= 0)
-        {
-            scale = 1;
-        }
-
-        const uint width = DefaultWindowWidth;
-        const uint height = DefaultWindowHeight;
-        drawableWidth = width * scale;
-        drawableHeight = height * scale;
-
-        var layer = MetalNative.Send(
-            MetalNative.Send(MetalNative.Class("CAMetalLayer"), MetalNative.Selector("alloc")),
-            MetalNative.Selector("init"));
-        MetalNative.SendVoid(layer, MetalNative.Selector("setDevice:"), device);
-        MetalNative.Send(layer, MetalNative.Selector("setPixelFormat:"), (nint)PixelFormatBgra8Unorm);
-        // A Core Animation layer composites with its alpha channel by default, so
-        // a presented frame whose guest alpha is zero would show through as the
-        // window background (black). The presenter output is a finished opaque
-        // frame; mark the layer opaque so alpha never reaches the compositor.
-        MetalNative.SendVoidBool(layer, MetalNative.Selector("setOpaque:"), true);
-        MetalNative.SendVoidBool(layer, MetalNative.Selector("setFramebufferOnly:"), true);
-        MetalNative.SendVoidDouble(layer, MetalNative.Selector("setContentsScale:"), scale);
-        MetalNative.SendVoidSize(
-            layer,
-            MetalNative.Selector("setDrawableSize:"),
-            new CGSize { Width = drawableWidth, Height = drawableHeight });
-
-        // A manually created layer defaults to a zero-size frame, and a hosted
-        // layer's geometry is the caller's job: without this the presenter
-        // happily presents every drawable into a layer with no on-screen
-        // extent — a permanently black window.
-        MetalNative.SendVoidRect(
-            layer,
-            MetalNative.Selector("setFrame:"),
-            new CGRect { X = 0, Y = 0, Width = width, Height = height });
-
-        // wantsLayer FIRST, then the layer: that makes the metal layer the
-        // view's AppKit-managed BACKING layer (geometry and window-server
-        // commits handled by AppKit) — the SDL/GLFW pattern. The reverse order
-        // creates a layer-hosting view whose tree the app must commit itself,
-        // which never composites under a manually pumped run loop.
-        MetalNative.SendVoidBool(contentView, MetalNative.Selector("setWantsLayer:"), true);
-        MetalNative.SendVoid(contentView, MetalNative.Selector("setLayer:"), layer);
-        MetalNative.SendVoid(MetalNative.Class("CATransaction"), MetalNative.Selector("flush"));
-        return layer;
     }
 
     private static bool TryCreatePresentPipeline(nint device, out nint pipeline, out string error)
@@ -1105,10 +846,24 @@ internal static partial class MetalVideoPresenter
     {
         MetalNative.SendVoid(encoder, MetalNative.Selector("setRenderPipelineState:"), pipeline);
 
-        // Aspect-fit letterbox: scale the frame into the drawable via the viewport.
-        var scale = Math.Min(drawableWidth / frameWidth, drawableHeight / frameHeight);
-        var viewportWidth = frameWidth * scale;
-        var viewportHeight = frameHeight * scale;
+        var scaleX = drawableWidth / frameWidth;
+        var scaleY = drawableHeight / frameHeight;
+        var viewportWidth = drawableWidth;
+        var viewportHeight = drawableHeight;
+        if (_videoOptions.ScalingMode != HostScalingMode.Stretch)
+        {
+            var scale = _videoOptions.ScalingMode == HostScalingMode.Cover
+                ? Math.Max(scaleX, scaleY)
+                : Math.Min(scaleX, scaleY);
+            if (_videoOptions.ScalingMode == HostScalingMode.Integer && scale >= 1)
+            {
+                scale = Math.Floor(scale);
+            }
+
+            viewportWidth = frameWidth * scale;
+            viewportHeight = frameHeight * scale;
+        }
+
         MetalNative.SendVoidViewport(
             encoder,
             MetalNative.Selector("setViewport:"),

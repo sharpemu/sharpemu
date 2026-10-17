@@ -1,0 +1,197 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Control themes for SplitNumericUpDown and its spinner parts
+-->
+
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:settingsControls="using:SharpEmu.GUI.Controls.Settings">
+  <ControlTheme x:Key="SplitNumericRepeatButtonTheme" TargetType="RepeatButton">
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="MinHeight" Value="0" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="#B8FFFFFF" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="FocusAdorner" Value="{x:Null}" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <ContentPresenter x:Name="PART_ContentPresenter"
+                          Background="{TemplateBinding Background}"
+                          BorderBrush="Transparent"
+                          BorderThickness="0"
+                          Content="{TemplateBinding Content}"
+                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}">
+          <ContentPresenter.Transitions>
+            <Transitions>
+              <BrushTransition Property="Background"
+                               Duration="0:0:0.18"
+                               Easing="CubicEaseOut" />
+              <BrushTransition Property="Foreground"
+                               Duration="0:0:0.18"
+                               Easing="CubicEaseOut" />
+            </Transitions>
+          </ContentPresenter.Transitions>
+        </ContentPresenter>
+      </ControlTemplate>
+    </Setter>
+    <Style Selector="^:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#16FFFFFF" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="^:pressed /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#22FFFFFF" />
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="^:disabled /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Opacity" Value="0.45" />
+    </Style>
+  </ControlTheme>
+
+  <ControlTheme x:Key="SplitNumericSpinnerTheme" TargetType="ButtonSpinner">
+    <Setter Property="MinHeight" Value="44" />
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="#E8FFFFFF" />
+    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    <Setter Property="VerticalContentAlignment" Value="Stretch" />
+    <Setter Property="Focusable" Value="True" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Grid ColumnDefinitions="*,52"
+              ColumnSpacing="8">
+          <Border x:Name="PART_ValueSurface"
+                  MinHeight="{TemplateBinding MinHeight}"
+                  Background="{TemplateBinding Background}"
+                  BorderBrush="Transparent"
+                  BorderThickness="0"
+                  CornerRadius="14"
+                  ClipToBounds="True">
+            <ContentPresenter x:Name="PART_ContentPresenter"
+                              Content="{TemplateBinding Content}"
+                              ContentTemplate="{TemplateBinding ContentTemplate}"
+                              Padding="{TemplateBinding Padding}"
+                              HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                              VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+            <Border.Transitions>
+              <Transitions>
+                <BrushTransition Property="Background"
+                                 Duration="0:0:0.18"
+                                 Easing="CubicEaseOut" />
+              </Transitions>
+            </Border.Transitions>
+          </Border>
+
+          <Border x:Name="PART_SpinnerSurface"
+                  Grid.Column="1"
+                  MinHeight="{TemplateBinding MinHeight}"
+                  Background="{TemplateBinding Background}"
+                  BorderBrush="Transparent"
+                  BorderThickness="0"
+                  CornerRadius="14"
+                  ClipToBounds="True"
+                  IsVisible="{TemplateBinding ShowButtonSpinner}">
+            <Grid RowDefinitions="*,*">
+              <RepeatButton x:Name="PART_IncreaseButton"
+                            Grid.Row="0"
+                            Theme="{StaticResource SplitNumericRepeatButtonTheme}"
+                            IsTabStop="{TemplateBinding IsTabStop}">
+                <TextBlock Classes="materialSymbol compact"
+                           Text="keyboard_arrow_up" />
+              </RepeatButton>
+              <RepeatButton x:Name="PART_DecreaseButton"
+                            Grid.Row="1"
+                            Theme="{StaticResource SplitNumericRepeatButtonTheme}"
+                            IsTabStop="{TemplateBinding IsTabStop}">
+                <TextBlock Classes="materialSymbol compact"
+                           Text="keyboard_arrow_down" />
+              </RepeatButton>
+              <Border Height="1"
+                      Grid.RowSpan="2"
+                      Background="#14FFFFFF"
+                      VerticalAlignment="Center"
+                      IsHitTestVisible="False" />
+            </Grid>
+            <Border.Transitions>
+              <Transitions>
+                <BrushTransition Property="Background"
+                                 Duration="0:0:0.18"
+                                 Easing="CubicEaseOut" />
+              </Transitions>
+            </Border.Transitions>
+          </Border>
+        </Grid>
+      </ControlTemplate>
+    </Setter>
+    <Style Selector="^:pointerover /template/ Border#PART_ValueSurface,
+                     ^:focus-within /template/ Border#PART_ValueSurface">
+      <Setter Property="Background" Value="#20FFFFFF" />
+    </Style>
+    <Style Selector="^:pointerover /template/ Border#PART_SpinnerSurface,
+                     ^:focus-within /template/ Border#PART_SpinnerSurface">
+      <Setter Property="Background" Value="#20FFFFFF" />
+    </Style>
+  </ControlTheme>
+
+  <ControlTheme x:Key="{x:Type settingsControls:SplitNumericUpDown}"
+                TargetType="settingsControls:SplitNumericUpDown">
+    <Setter Property="MinHeight" Value="44" />
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="#E8FFFFFF" />
+    <Setter Property="HorizontalContentAlignment" Value="Left" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="TextAlignment" Value="Left" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <DataValidationErrors>
+          <ButtonSpinner x:Name="PART_Spinner"
+                         Theme="{StaticResource SplitNumericSpinnerTheme}"
+                         Background="{TemplateBinding Background}"
+                         BorderBrush="Transparent"
+                         BorderThickness="0"
+                         IsTabStop="False"
+                         Padding="0"
+                         MinWidth="0"
+                         HorizontalContentAlignment="Stretch"
+                         VerticalContentAlignment="Stretch"
+                         AllowSpin="{TemplateBinding AllowSpin}"
+                         ShowButtonSpinner="{TemplateBinding ShowButtonSpinner}">
+            <TextBox x:Name="PART_TextBox"
+                     Classes="splitNumericTextBox"
+                     MinHeight="{TemplateBinding MinHeight}"
+                     MinWidth="0"
+                     Margin="0"
+                     Padding="17,0"
+                     Background="Transparent"
+                     BorderBrush="Transparent"
+                     BorderThickness="0"
+                     Foreground="{TemplateBinding Foreground}"
+                     PlaceholderText="{TemplateBinding PlaceholderText}"
+                     PlaceholderForeground="{TemplateBinding PlaceholderForeground}"
+                     IsReadOnly="{TemplateBinding IsReadOnly}"
+                     VerticalContentAlignment="Center"
+                     HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                     Text="{TemplateBinding Text}"
+                     TextAlignment="{TemplateBinding TextAlignment}"
+                     AcceptsReturn="False"
+                     TextWrapping="NoWrap"
+                     InnerLeftContent="{Binding InnerLeftContent, RelativeSource={RelativeSource TemplatedParent}}"
+                     InnerRightContent="{Binding InnerRightContent, RelativeSource={RelativeSource TemplatedParent}}" />
+          </ButtonSpinner>
+        </DataValidationErrors>
+      </ControlTemplate>
+    </Setter>
+  </ControlTheme>
+</ResourceDictionary>

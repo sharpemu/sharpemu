@@ -54,6 +54,40 @@ public sealed class SysAbiExportAnalyzerTests
     }
 
     [Fact]
+    public void DuplicateNidOnTheSameMultiAttributeHandlerIsReported()
+    {
+        var diagnostics = Analyze("""
+            using SharpEmu.HLE;
+
+            public static class Exports
+            {
+                [SysAbiExport(Nid = "Zxa0VhQVTsk", ExportName = "sceKernelWaitSema")]
+                [SysAbiExport(Nid = "Zxa0VhQVTsk", ExportName = "sceKernelWaitSema")]
+                public static int Shared(CpuContext ctx) => 0;
+            }
+            """);
+
+        AssertSingle(diagnostics, "SHEM001");
+    }
+
+    [Fact]
+    public void EveryAttributeOnAMultiAttributeHandlerIsAnalyzed()
+    {
+        var diagnostics = Analyze("""
+            using SharpEmu.HLE;
+
+            public static class Exports
+            {
+                [SysAbiExport(Nid = "Zxa0VhQVTsk", ExportName = "sceKernelWaitSema")]
+                [SysAbiExport(Nid = "not_a_nid")]
+                public static int Shared(CpuContext ctx) => 0;
+            }
+            """);
+
+        AssertSingle(diagnostics, "SHEM002");
+    }
+
+    [Fact]
     public void MalformedNidIsReported()
     {
         var diagnostics = Analyze("""

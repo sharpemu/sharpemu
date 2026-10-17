@@ -47,6 +47,47 @@ static inline void sharpemu_store_bytes(device uint* b, uint bytes, uint addr, u
     }
 }
 
+static inline void sharpemu_store_masked_word(device uint* b, uint bytes, uint index, uint value, uint mask)
+{
+    if (mask == 0u || index >= (bytes >> 2))
+    {
+        return;
+    }
+    if (mask == 0xFFFFFFFFu)
+    {
+        b[index] = value;
+        return;
+    }
+    // The other bits of the word survive stores from neighbouring invocations.
+    device atomic_uint* word = (device atomic_uint*)(b + index);
+    uint observed = atomic_load_explicit(word, memory_order_relaxed);
+    while (!atomic_compare_exchange_weak_explicit(word, &observed, (observed & ~mask) | value, memory_order_relaxed, memory_order_relaxed))
+    {
+    }
+}
+
+static inline void sharpemu_store_element(device uint* b, uint bytes, uint addr, uint count, uint4 values, uint4 masks)
+{
+    uint shift = (addr & 3u) * 8u;
+    uint index = addr >> 2;
+    uint carryValue = 0u;
+    uint carryMask = 0u;
+    for (uint k = 0u; k <= count; k++)
+    {
+        uint value = carryValue;
+        uint mask = carryMask;
+        if (k < count)
+        {
+            uint element = values[k] & masks[k];
+            value |= element << shift;
+            mask |= masks[k] << shift;
+            carryValue = shift == 0u ? 0u : element >> (32u - shift);
+            carryMask = shift == 0u ? 0u : masks[k] >> (32u - shift);
+        }
+        sharpemu_store_masked_word(b, bytes, index + k, value, mask);
+    }
+}
+
 static inline uint sharpemu_ballot(bool value)
 {
     return {{ballot_return}};

@@ -41,21 +41,36 @@ def write_pair(nid: str, export_name: str) -> None:
 
 
 def lookup(args: argparse.Namespace) -> int:
-    value = args.value.strip()
-    if NID_PATTERN.fullmatch(value):
-        for export_name in read_names(args.names):
-            if compute_nid(export_name) == value:
-                write_pair(value, export_name)
-                return 0
+    values = [value.strip() for value in args.value.split(",") if value.strip()]
+    names = read_names(args.names)
+    name_set = set(names)
 
-        print(f"NID not found in catalog: {value}", file=sys.stderr)
-        return 1
+    result = 0
 
-    names = set(read_names(args.names))
-    write_pair(compute_nid(value), value)
-    if value not in names:
-        print("Warning: export name is not present in the catalog.", file=sys.stderr)
-    return 0
+    for value in values:
+        if NID_PATTERN.fullmatch(value):
+            found = False
+
+            for export_name in names:
+                if compute_nid(export_name) == value:
+                    write_pair(value, export_name)
+                    found = True
+                    break
+
+            if not found:
+                print(f"NID not found in catalog: {value}", file=sys.stderr)
+                result = 1
+
+            continue
+
+        write_pair(compute_nid(value), value)
+
+        if value not in name_set:
+            print(
+                f"Warning: export name is not present in the catalog: {value}",
+                file=sys.stderr,
+            )
+    return result
 
 
 def search(args: argparse.Namespace) -> int:
@@ -132,7 +147,9 @@ def create_parser() -> argparse.ArgumentParser:
     lookup_parser = subparsers.add_parser(
         "lookup", help="resolve a NID or calculate the NID for an export name"
     )
-    lookup_parser.add_argument("value", help="11-character NID or exact export name")
+    lookup_parser.add_argument(
+        "value", help="11-character NID or exact export name; comma-separated values are supported"
+    )
     lookup_parser.set_defaults(handler=lookup)
 
     search_parser = subparsers.add_parser(

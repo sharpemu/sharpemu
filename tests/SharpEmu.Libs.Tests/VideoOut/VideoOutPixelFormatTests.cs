@@ -97,6 +97,24 @@ public sealed class VideoOutPixelFormatTests
         Assert.Equal(56u, InvokeMapPixelFormat(0xDEADBEEFUL));
     }
 
+    [Theory]
+    [InlineData(0x88740000UL)]
+    [InlineData(0x8100070422000000UL)]
+    [InlineData(0x8100070400000000UL)]
+    public void IsHdrPixelFormat_PqFormats_ReturnTrue(ulong pixelFormat)
+    {
+        Assert.True(VideoOutExports.IsHdrPixelFormat(pixelFormat));
+    }
+
+    [Theory]
+    [InlineData(0x80000000UL)]
+    [InlineData(0x88060000UL)]
+    [InlineData(0x8100000622000000UL)]
+    public void IsHdrPixelFormat_SdrFormats_ReturnFalse(ulong pixelFormat)
+    {
+        Assert.False(VideoOutExports.IsHdrPixelFormat(pixelFormat));
+    }
+
     // ---- Self-check activation ----
 
     [Fact]

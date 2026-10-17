@@ -10,6 +10,8 @@ public readonly struct SharpEmuRuntimeOptions
 {
     public CpuExecutionEngine CpuEngine { get; init; }
 
+    public int? SystemLanguage { get; init; }
+
     public bool StrictDynlibResolution { get; init; }
 
     public int ImportTraceLimit { get; init; }

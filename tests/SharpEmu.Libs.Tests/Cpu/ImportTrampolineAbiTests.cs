@@ -60,15 +60,34 @@ public sealed class ImportTrampolineAbiTests
         }
     }
 
+    [Fact]
+    public void GeneratedTrampoline_SavesGrownHostBoundsBeforeGuestReturn()
+    {
+        if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64) return;
+
+        var code = CreateTrampolineBytes();
+        var stateSave = code.AsSpan().IndexOf(new byte[] { 0x4C, 0x89, 0x54, 0x24, 0x30 });
+        var stateRestore = code.AsSpan().IndexOf(new byte[] { 0x4C, 0x8B, 0x54, 0x24, 0x30 });
+        Assert.True(stateSave >= 0 && stateRestore > stateSave);
+
+        ReadOnlySpan<byte> saveBounds = [
+            0x65, 0x4C, 0x8B, 0x1C, 0x25, 0x08, 0, 0, 0, 0x4D, 0x89, 0x5A, 0x08,
+            0x65, 0x4C, 0x8B, 0x1C, 0x25, 0x10, 0, 0, 0, 0x4D, 0x89, 0x5A, 0x10];
+        Assert.True(code.AsSpan(stateRestore + 5).StartsWith(saveBounds));
+        var guestRestore = code.AsSpan(stateRestore).IndexOf(
+            new byte[] { 0x65, 0x4C, 0x89, 0x34, 0x25, 0x08, 0, 0, 0 });
+        Assert.True(guestRestore > saveBounds.Length);
+    }
+
     private static unsafe byte[] CreateTrampolineBytes()
     {
+        // GetUninitializedObject skips the field initializers, so every reference
+        // field the emitter touches has to be supplied here, including the
+        // per-index trampoline cache.
         var backend = (DirectExecutionBackend)RuntimeHelpers.GetUninitializedObject(
             typeof(DirectExecutionBackend));
-        var trampolineList = typeof(DirectExecutionBackend).GetField(
-            "_importHandlerTrampolines",
-            BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert.NotNull(trampolineList);
-        trampolineList.SetValue(backend, new List<nint>());
+        SetPrivateField(backend, "_importHandlerTrampolines", new List<nint>());
+        SetPrivateField(backend, "_importHandlerTrampolineByIndex", new Dictionary<int, nint>());
 
         var createTrampoline = typeof(DirectExecutionBackend).GetMethod(
             "CreateImportHandlerTrampoline",
@@ -79,12 +98,21 @@ public sealed class ImportTrampolineAbiTests
 
         try
         {
-            return new ReadOnlySpan<byte>((void*)trampoline, 512).ToArray();
+            return new ReadOnlySpan<byte>((void*)trampoline, 1024).ToArray();
         }
         finally
         {
             Assert.True(HostMemory.Free((void*)trampoline, 0, HostMemory.MEM_RELEASE));
         }
+    }
+
+    private static void SetPrivateField(DirectExecutionBackend backend, string name, object value)
+    {
+        var field = typeof(DirectExecutionBackend).GetField(
+            name,
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.True(field is not null, $"DirectExecutionBackend has no field '{name}'.");
+        field!.SetValue(backend, value);
     }
 
     private static void AssertContains(ReadOnlySpan<byte> code, ReadOnlySpan<byte> expected)

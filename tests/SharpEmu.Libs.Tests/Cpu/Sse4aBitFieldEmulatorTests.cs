@@ -41,8 +41,6 @@ public sealed class Sse4aBitFieldEmulatorTests
     [Fact]
     public void ExtractBitField_MasksImmediatesToLowSixBits()
     {
-        // length=0x28 (40) and index=0 is exactly the idiom SharpEmu's load-time
-        // Sse4aExtrqBlendPatch already recognizes; the general emulator must agree with it.
         var result = Sse4aBitFieldEmulator.ExtractBitField(0x0000_0000_0000_00FF, length: 0x28, index: 0);
 
         Assert.Equal(0xFFUL, result);
@@ -53,25 +51,20 @@ public sealed class Sse4aBitFieldEmulatorTests
     [InlineData(0x0000_0000_0000_0000UL)]
     [InlineData(0xFFFF_FFFF_FFFF_FFFFUL)]
     [InlineData(0x00FF_00FF_00FF_00FFUL)]
-    public void ExtractBitField_AgreesWithSse4aExtrqBlendPatchsByteFourRule(ulong value)
+    public void ExtractBitField_FortyBitFieldRetainsOnlyByteFourInUpperWord(ulong value)
     {
-        // Sse4aExtrqBlendPatch's own comment states that after "EXTRQ xmmN, 0x28, 0x00", dword
-        // lane 1 (bits 63:32) of the result equals byte 4 of the source zero-extended. The
-        // general emulator (used for every other EXTRQ occurrence) must produce a result
-        // consistent with that independently-reverse-engineered rule for the one idiom both
-        // paths can be checked against.
         var extractedLow64 = Sse4aBitFieldEmulator.ExtractBitField(value, length: 0x28, index: 0);
-        var dword1 = (uint)(extractedLow64 >> 32);
+        var upperWord = (uint)(extractedLow64 >> 32);
         var byteFourZeroExtended = (uint)((value >> 32) & 0xFF);
 
-        Assert.Equal(byteFourZeroExtended, dword1);
+        Assert.Equal(byteFourZeroExtended, upperWord);
     }
 
     [Fact]
-    public void ExtractBitField_RejectsUndefinedFieldPastRegisterEnd()
+    public void ExtractBitField_ClampsUndefinedFieldPastRegisterEnd()
     {
         Assert.False(Sse4aBitFieldEmulator.IsValidBitField(length: 8, index: 60));
-        Assert.Equal(0UL, Sse4aBitFieldEmulator.ExtractBitField(
+        Assert.Equal(0xFUL, Sse4aBitFieldEmulator.ExtractBitField(
             0xFFFF_FFFF_FFFF_FFFF,
             length: 8,
             index: 60));
@@ -81,6 +74,12 @@ public sealed class Sse4aBitFieldEmulatorTests
     public void ExtractBitField_RejectsZeroLengthAtNonZeroIndex()
     {
         Assert.False(Sse4aBitFieldEmulator.IsValidBitField(length: 0, index: 1));
+        Assert.Equal(
+            0x7FFF_FFFF_FFFF_FFFFUL,
+            Sse4aBitFieldEmulator.ExtractBitField(
+                0xFFFF_FFFF_FFFF_FFFF,
+                length: 0,
+                index: 1));
     }
 
     [Fact]
@@ -143,5 +142,19 @@ public sealed class Sse4aBitFieldEmulatorTests
             index: 20);
 
         Assert.Equal(0xABCD_EF01_0005_6789UL, result);
+    }
+
+    [Fact]
+    public void InsertBitField_ClampsUndefinedFieldPastRegisterEnd()
+    {
+        Assert.False(Sse4aBitFieldEmulator.IsValidBitField(length: 8, index: 60));
+
+        var result = Sse4aBitFieldEmulator.InsertBitField(
+            destination: 0,
+            source: ulong.MaxValue,
+            length: 8,
+            index: 60);
+
+        Assert.Equal(0xF000_0000_0000_0000UL, result);
     }
 }

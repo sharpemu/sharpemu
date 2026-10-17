@@ -33,7 +33,7 @@ public static class GuestTlsTemplate
     private sealed class ModuleTemplate
     {
         public required ulong ModuleId { get; init; }
-        public required byte[] InitImage { get; init; }
+        public required byte[] InitImage { get; set; }
         public required ulong MemorySize { get; init; }
         public required ulong Alignment { get; init; }
         public required ulong AlignmentBias { get; init; }
@@ -190,6 +190,22 @@ public static class GuestTlsTemplate
             _maximumAlignment = Math.Max(_maximumAlignment, normalizedAlignment);
             _generation++;
             return staticOffset;
+        }
+    }
+
+    /// <summary>Stores relocated initialization bytes before a thread uses the module.</summary>
+    public static void UpdateInitializationImage(ulong moduleId, ReadOnlySpan<byte> initializationImage)
+    {
+        lock (_gate)
+        {
+            if (!_modules.TryGetValue(moduleId, out var module))
+                throw new ArgumentOutOfRangeException(nameof(moduleId));
+            if (initializationImage.Length != module.InitImage.Length)
+                throw new ArgumentException("TLS initialization size must not change.", nameof(initializationImage));
+            if (_threadDtvs.Values.Any(thread => thread.Entries.ContainsKey(moduleId)))
+                throw new InvalidOperationException("Cannot change TLS initialization after a thread uses the module.");
+
+            module.InitImage = initializationImage.ToArray();
         }
     }
 

@@ -22,6 +22,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="ppy.SDL3-CS" />
+    <PackageReference Include="ZstdSharp.Port" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Forces build ordering for the aerolib task below; loaded as a build component,
          never a runtime dependency. -->
     <ProjectReference Include="..\SharpEmu.SourceGenerators\SharpEmu.SourceGenerators.csproj"

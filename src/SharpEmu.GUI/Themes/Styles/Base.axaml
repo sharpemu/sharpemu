@@ -1,0 +1,41 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Window and text defaults shared by all launcher views.
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Style Selector="Window">
+    <Setter Property="FontFamily" Value="Inter, Segoe UI, sans-serif" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.materialSymbol">
+    <Setter Property="FontFamily" Value="{StaticResource MaterialSymbolsRounded}" />
+    <Setter Property="FontFeatures" Value="+liga" />
+    <Setter Property="FontSize" Value="18" />
+    <Setter Property="FontWeight" Value="Normal" />
+    <Setter Property="LineHeight" Value="20" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="TextAlignment" Value="Center" />
+  </Style>
+
+  <Style Selector="TextBlock.materialSymbol.compact">
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="LineHeight" Value="18" />
+  </Style>
+
+  <Style Selector="TextBlock.sectionTitle">
+    <Setter Property="FontSize" Value="11" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="LetterSpacing" Value="1.5" />
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.fieldLabel">
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+    <Setter Property="Margin" Value="0,0,0,6" />
+  </Style>
+</Styles>

@@ -1,0 +1,132 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:SharpEmu.GUI"
+             xmlns:controls="clr-namespace:SharpEmu.GUI.Controls"
+             x:Class="SharpEmu.GUI.TrophyHubView"
+             ClipToBounds="True">
+  <Grid>
+    <Grid Margin="0,4,0,0" RowDefinitions="Auto,Auto,*">
+      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="16" Margin="0,0,12,16">
+        <Grid Width="60" Height="60">
+          <Border Width="76" Height="76" CornerRadius="38" IsHitTestVisible="False">
+            <Border.Background>
+              <RadialGradientBrush>
+                <GradientStop Color="#409ED8F2" Offset="0" />
+                <GradientStop Color="#009ED8F2" Offset="1" />
+              </RadialGradientBrush>
+            </Border.Background>
+          </Border>
+          <controls:TrophyMedal x:Name="HeroMedal" Grade="1" Width="56" Height="56" />
+        </Grid>
+        <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+          <TextBlock Text="{Binding [Trophies.Title], Source={x:Static local:Localization.Instance}}"
+                     FontSize="22"
+                     FontWeight="Bold" />
+          <TextBlock x:Name="TotalOfText" Foreground="{StaticResource SecondaryTextBrush}" FontSize="12" />
+          <WrapPanel x:Name="TotalGrades" Orientation="Horizontal" Margin="0,4,0,0" />
+        </StackPanel>
+        <Grid Grid.Column="2" Width="84" Height="84" VerticalAlignment="Center">
+          <controls:TrophyProgressRing x:Name="TotalRing" Thickness="6" />
+          <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+            <TextBlock x:Name="TotalEarnedText" FontSize="21" FontWeight="Bold" HorizontalAlignment="Center" />
+            <TextBlock Text="{Binding [Trophies.EarnedTotal], Source={x:Static local:Localization.Instance}}"
+                       Foreground="{StaticResource SecondaryTextBrush}"
+                       FontSize="10.5"
+                       HorizontalAlignment="Center" />
+          </StackPanel>
+        </Grid>
+      </Grid>
+
+      <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="0,0,12,12">
+        <StackPanel x:Name="SortBar" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" />
+        <Border x:Name="SearchFrame"
+                Grid.Column="1"
+                Width="240"
+                Height="32"
+                CornerRadius="16"
+                Padding="14,0,6,0"
+                VerticalAlignment="Center"
+                Background="#16FFFFFF"
+                BorderBrush="#26FFFFFF"
+                BorderThickness="1">
+          <Border.Styles>
+            <Style Selector="Border#SearchFrame:pointerover">
+              <Setter Property="Background" Value="#1FFFFFFF" />
+            </Style>
+            <Style Selector="Border#SearchFrame:focus-within">
+              <Setter Property="Width" Value="300" />
+              <Setter Property="Background" Value="#24FFFFFF" />
+              <Setter Property="BorderBrush" Value="#40FFFFFF" />
+                          </Style>
+            <Style Selector="TextBox#SearchBox /template/ Border#PART_BorderElement">
+              <Setter Property="Background" Value="Transparent" />
+              <Setter Property="BorderThickness" Value="0" />
+            </Style>
+            <Style Selector="TextBox#SearchBox:pointerover /template/ Border#PART_BorderElement">
+              <Setter Property="Background" Value="Transparent" />
+              <Setter Property="BorderThickness" Value="0" />
+            </Style>
+            <Style Selector="TextBox#SearchBox:focus /template/ Border#PART_BorderElement">
+              <Setter Property="Background" Value="Transparent" />
+              <Setter Property="BorderThickness" Value="0" />
+            </Style>
+          </Border.Styles>
+          <Border.Transitions>
+            <Transitions>
+              <DoubleTransition Property="Width" Duration="0:0:0.22" Easing="CubicEaseOut" />
+              <BrushTransition Property="Background" Duration="0:0:0.18" />
+              <BrushTransition Property="BorderBrush" Duration="0:0:0.18" />
+            </Transitions>
+          </Border.Transitions>
+          <Grid ColumnDefinitions="Auto,*,Auto">
+            <TextBlock Classes="materialSymbol compact"
+                       Text="search"
+                       Foreground="{StaticResource SecondaryTextBrush}"
+                       VerticalAlignment="Center"
+                       Margin="0,0,8,0" />
+            <TextBox x:Name="SearchBox"
+                     Grid.Column="1"
+                     Background="Transparent"
+                     BorderThickness="0"
+                     Padding="0"
+                     MinHeight="0"
+                     FontSize="12.5"
+                     VerticalAlignment="Center"
+                     VerticalContentAlignment="Center" />
+            <Button x:Name="SearchClear"
+                    Grid.Column="2"
+                    Classes="iconGhost"
+                    Width="28"
+                    Height="28"
+                    IsVisible="False"
+                    VerticalAlignment="Center">
+              <TextBlock Classes="materialSymbol compact" Text="close" />
+            </Button>
+          </Grid>
+        </Border>
+      </Grid>
+
+      <ScrollViewer Grid.Row="2" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel x:Name="GameList" Spacing="10" Margin="0,4,12,12" />
+      </ScrollViewer>
+
+      <StackPanel x:Name="LoadingState"
+                  Grid.Row="2"
+                  Spacing="14"
+                  HorizontalAlignment="Center"
+                  VerticalAlignment="Center"
+                  IsVisible="False">
+        <ProgressBar IsIndeterminate="{Binding $parent[StackPanel].IsVisible}" Width="180" Height="3" />
+        <TextBlock Text="{Binding [Trophies.Loading], Source={x:Static local:Localization.Instance}}"
+                   FontSize="13"
+                   Foreground="{StaticResource MutedBrush}"
+                   HorizontalAlignment="Center" />
+      </StackPanel>
+    </Grid>
+  </Grid>
+</UserControl>

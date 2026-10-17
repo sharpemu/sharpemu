@@ -46,11 +46,6 @@ internal static partial class MetalVideoPresenter
         uint Height,
         uint PitchInPixel);
 
-    private sealed record OrderedGuestFlipWait(
-        long Version,
-        int VideoOutHandle,
-        int DisplayBufferIndex);
-
     private sealed record GuestImageBlit(ulong SourceAddress, ulong DestinationAddress);
 
     /// <summary>A guest-addressed Metal texture (or an immutable captured version).</summary>
@@ -126,8 +121,7 @@ internal static partial class MetalVideoPresenter
     private static readonly Dictionary<ulong, long> _guestImageWorkSequences = new();
     private static readonly Queue<Presentation> _pendingGuestImagePresentations = new();
     private static readonly Dictionary<long, GuestImage> _guestImageVersions = new();
-    private static readonly Dictionary<(int Handle, int BufferIndex), long>
-        _lastOrderedGuestFlipVersions = new();
+    private static readonly Dictionary<ulong, ulong> _untrackedGuestImageContentProbes = new();
     private static long _orderedGuestFlipVersionSequence;
     private static volatile ICpuMemory? _guestMemory;
 
@@ -162,6 +156,22 @@ internal static partial class MetalVideoPresenter
     public static void AttachGuestMemory(ICpuMemory memory) =>
         _guestMemory = memory;
 
+    private static int _cpuWrittenGuestImageSyncRequested;
+    private static long _guestImageCpuSyncTraceCount;
+
+    public static void RequestCpuWrittenGuestImageSync(
+        ulong scopeAddress = 0,
+        ulong scopeByteCount = ulong.MaxValue)
+    {
+        _ = scopeAddress;
+        if (scopeByteCount == 0 || !GuestImageWriteTracker.Enabled)
+        {
+            return;
+        }
+
+        Volatile.Write(ref _cpuWrittenGuestImageSyncRequested, 1);
+    }
+
     public static long SubmitOrderedGuestAction(Action action, string debugName)
     {
         ArgumentNullException.ThrowIfNull(action);
@@ -172,25 +182,6 @@ internal static partial class MetalVideoPresenter
                 : EnqueueGuestWorkLocked(new OrderedGuestAction(action, debugName));
         }
     }
-
-    public static long SubmitOrderedGuestFlipWait(int videoOutHandle, int displayBufferIndex)
-    {
-        lock (_gate)
-        {
-            var version = _lastOrderedGuestFlipVersions.TryGetValue(
-                (videoOutHandle, displayBufferIndex),
-                out var lastVersion)
-                    ? lastVersion
-                    : 0;
-            return _closed || _thread is null
-                ? 0
-                : EnqueueGuestWorkLocked(
-                    new OrderedGuestFlipWait(version, videoOutHandle, displayBufferIndex));
-        }
-    }
-
-    public static long CurrentGuestWorkSequenceForDiagnostics =>
-        Volatile.Read(ref _executingGuestWorkSequence);
 
     public static bool WaitForGuestWork(long workSequence, int timeoutMilliseconds)
     {
@@ -253,8 +244,110 @@ internal static partial class MetalVideoPresenter
         }
     }
 
-    public static bool IsGuestImageUploadKnown(ulong address, uint format, uint numberType) =>
-        IsGuestImageAvailable(address, format, numberType);
+    public static bool IsGuestImageUploadKnown(ulong address, uint format, uint numberType)
+    {
+        var guestFormat = GetGuestTextureFormat(format, numberType);
+        if (address == 0 || guestFormat == 0)
+        {
+            return false;
+        }
+
+        ulong probeByteCount = 0;
+        lock (_gate)
+        {
+            if (!_availableGuestImages.TryGetValue(address, out var availableFormat) ||
+                availableFormat != guestFormat)
+            {
+                return false;
+            }
+
+            if (GuestImageWriteTracker.Enabled)
+            {
+                return true;
+            }
+
+            if (_guestImageExtents.TryGetValue(address, out var extent))
+            {
+                probeByteCount = extent.ByteCount;
+            }
+        }
+
+        return IsUntrackedGuestImageContentUnchanged(address, probeByteCount);
+    }
+
+    private static bool IsUntrackedGuestImageContentUnchanged(ulong address, ulong byteCount)
+    {
+        var memory = _guestMemory;
+        if (memory is null || byteCount == 0)
+        {
+            return true;
+        }
+
+        var probe = ComputeSparseGuestContentProbe(memory, address, byteCount);
+        lock (_gate)
+        {
+            if (!_untrackedGuestImageContentProbes.TryGetValue(address, out var previous))
+            {
+                _untrackedGuestImageContentProbes[address] = probe;
+                return true;
+            }
+
+            if (previous == probe)
+            {
+                return true;
+            }
+
+            _untrackedGuestImageContentProbes[address] = probe;
+            return false;
+        }
+    }
+
+    private static ulong ComputeSparseGuestContentProbe(
+        ICpuMemory memory,
+        ulong address,
+        ulong byteCount)
+    {
+        Span<byte> sample = stackalloc byte[64];
+        ulong hash = 14695981039346656037UL;
+        Span<ulong> offsets = stackalloc ulong[3];
+        var offsetCount = 0;
+        offsets[offsetCount++] = 0;
+        if (byteCount > 128)
+        {
+            offsets[offsetCount++] = byteCount / 2;
+        }
+
+        if (byteCount > 64)
+        {
+            offsets[offsetCount++] = byteCount - 64;
+        }
+
+        for (var o = 0; o < offsetCount; o++)
+        {
+            var offset = offsets[o];
+            if (offset >= byteCount)
+            {
+                continue;
+            }
+
+            var length = (int)Math.Min(64UL, byteCount - offset);
+            if (!memory.TryRead(address + offset, sample[..length]))
+            {
+                hash ^= 0x9E3779B97F4A7C15UL + offset;
+                continue;
+            }
+
+            for (var i = 0; i < length; i++)
+            {
+                hash ^= sample[i];
+                hash *= 1099511628211UL;
+            }
+
+            hash ^= (ulong)length + offset;
+        }
+
+        return hash ^ byteCount;
+    }
 
     public static bool GuestImageWantsInitialData(ulong address)
     {
@@ -392,7 +485,6 @@ internal static partial class MetalVideoPresenter
             }
 
             var version = ++_orderedGuestFlipVersionSequence;
-            _lastOrderedGuestFlipVersions[(videoOutHandle, displayBufferIndex)] = version;
             return EnqueueGuestWorkLocked(
                 new OrderedGuestFlip(
                     version,
@@ -599,7 +691,8 @@ internal static partial class MetalVideoPresenter
         var completedWork = 0;
         RecycleCompletedUploadPages();
         RecycleCompletedSnapshotResources();
-        EvictDirtyCachedDrawTextures();
+        ScanCompletedFaultBitmaps();
+        DrainGuestImageCpuSync(device);
         try
         {
             while (completedWork < MaxGuestWorkPerRender)
@@ -634,10 +727,6 @@ internal static partial class MetalVideoPresenter
                             FlushBatchedGuestCommands();
                             ExecuteOrderedGuestFlip(device, queue, flip);
                             break;
-                        case OrderedGuestFlipWait:
-                            // Reaching this marker in queue order is the guarantee:
-                            // the flip it follows has already captured its image.
-                            break;
                         case GuestImageBlit blit:
                             FlushBatchedGuestCommands();
                             ExecuteGuestImageBlit(queue, blit);
@@ -647,6 +736,15 @@ internal static partial class MetalVideoPresenter
                             break;
                         case ComputeGuestDispatch computeDispatch:
                             ExecuteComputeDispatch(device, queue, computeDispatch);
+                            break;
+                        case GlobalDataShareFill fill:
+                            ExecuteGlobalDataShareFill(device, queue, fill);
+                            break;
+                        case GlobalDataShareCopyFromGuest copyFromGuest:
+                            ExecuteGlobalDataShareCopyFromGuest(device, queue, copyFromGuest);
+                            break;
+                        case GlobalDataShareCopyToGuest copyToGuest:
+                            ExecuteGlobalDataShareCopyToGuest(device, queue, copyToGuest);
                             break;
                     }
                 }

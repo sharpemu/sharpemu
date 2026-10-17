@@ -9,6 +9,7 @@
 [Aa]rtifacts/
 logs/
 .tmp/
+src/SharpEmu.Demo/
 
 x86/
 x64/
@@ -43,3 +44,5 @@ ehthumbs.db
 .vs/
 .idea/
 .vscode/
+clean_test/
+.debug/

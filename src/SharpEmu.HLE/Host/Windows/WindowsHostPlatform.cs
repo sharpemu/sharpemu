@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.Host.Sdl;
+
 namespace SharpEmu.HLE.Host.Windows;
 
 internal sealed class WindowsHostPlatform : IHostPlatform
@@ -11,7 +13,7 @@ internal sealed class WindowsHostPlatform : IHostPlatform
 
     public IHostSymbolResolver Symbols { get; } = new WindowsHostSymbolResolver();
 
-    public IHostAudioOutput Audio { get; } = new WindowsWaveOutAudio();
+    public IHostAudioOutput Audio { get; } = new SdlHostAudio();
 
-    public IHostInput Input { get; } = new WindowsHostInput();
+    public IHostInput Input { get; } = new WindowHostInput();
 }

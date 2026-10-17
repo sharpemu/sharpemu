@@ -1,0 +1,12 @@
+<!--
+Copyright (C) 2018 VGMToolbox Project
+SPDX-License-Identifier: MIT
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>SharpEmu.LibAtrac9</AssemblyName>
+    <RootNamespace>LibAtrac9</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+</Project>

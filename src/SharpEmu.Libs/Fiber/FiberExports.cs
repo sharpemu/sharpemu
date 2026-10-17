@@ -49,6 +49,7 @@ public static class FiberExports
     private const int FiberMagicEndOffset = 104;
 
     private static int _contextSizeCheck;
+    private static readonly bool TraceEnabled = Environment.GetEnvironmentVariable("SHARPEMU_LOG_FIBER") == "1";
 
     private static readonly object _fiberGate = new();
     private static readonly ConcurrentDictionary<ulong, FiberContinuation> _continuations = new();
@@ -287,9 +288,10 @@ public static class FiberExports
 
         _ = GuestThreadExecution.EnterFiber(0);
         GuestThreadExecution.RequestCurrentContextTransfer(transferTarget);
-        TraceFiber(
-            $"return-to-thread fiber=0x{fiberAddress:X16} " +
-            $"resume=0x{transferTarget.Rip:X16} rsp=0x{transferTarget.Rsp:X16} arg=0x{returnArgument:X16}");
+        if (TraceEnabled)
+            TraceFiber(
+                $"return-to-thread fiber=0x{fiberAddress:X16} " +
+                $"resume=0x{transferTarget.Rip:X16} rsp=0x{transferTarget.Rsp:X16} arg=0x{returnArgument:X16}");
         return SetReturn(ctx, 0);
     }
 
@@ -306,13 +308,7 @@ public static class FiberExports
             return SetReturn(ctx, FiberErrorNull);
         }
 
-        var fiberAddress = ResolveCurrentFiberAddress(ctx);
-        if (fiberAddress == 0)
-        {
-            return SetReturn(ctx, FiberErrorPermission);
-        }
-
-        return TryWriteUInt64(ctx, outAddress, fiberAddress)
+        return TryWriteUInt64(ctx, outAddress, ResolveCurrentFiberAddress(ctx))
             ? SetReturn(ctx, 0)
             : SetReturn(ctx, FiberErrorInvalid);
     }
@@ -341,7 +337,7 @@ public static class FiberExports
             return SetReturn(ctx, FiberErrorInvalid);
         }
 
-        if (!TryReadFiberFields(ctx, fiber, out var fields))
+        if (!TryReadFiberFields(ctx, fiber, out var fields, readName: true))
         {
             return SetReturn(ctx, FiberErrorInvalid);
         }
@@ -527,9 +523,10 @@ public static class FiberExports
             _stackRanges[fiber] = new FiberStackRange(contextAddress, contextSize);
         }
 
-        TraceFiber(
-            $"init fiber=0x{fiber:X16} entry=0x{entry:X16} ctx=0x{contextAddress:X16} " +
-            $"size=0x{contextSize:X} flags=0x{flags:X} build=0x{buildVersion:X8} name='{name}'");
+        if (TraceEnabled)
+            TraceFiber(
+                $"init fiber=0x{fiber:X16} entry=0x{entry:X16} ctx=0x{contextAddress:X16} " +
+                $"size=0x{contextSize:X} flags=0x{flags:X} build=0x{buildVersion:X8} name='{name}'");
         return SetReturn(ctx, 0);
     }
 
@@ -589,7 +586,8 @@ public static class FiberExports
             }
             if (fields.State != FiberStateIdle)
             {
-                TraceFiber($"run-state-error reason={reason} fiber=0x{fiber:X16} state=0x{fields.State:X8}");
+                if (TraceEnabled)
+                    TraceFiber($"run-state-error reason={reason} fiber=0x{fiber:X16} state=0x{fields.State:X8}");
                 return SetReturn(ctx, FiberErrorState);
             }
 
@@ -676,9 +674,10 @@ public static class FiberExports
 
         _ = GuestThreadExecution.EnterFiber(fiber);
         GuestThreadExecution.RequestCurrentContextTransfer(transferTarget);
-        TraceFiber(
-            $"transfer reason={reason} from=0x{previousFiber:X16} to=0x{fiber:X16} resume={resumed} " +
-            $"rip=0x{transferTarget.Rip:X16} rsp=0x{transferTarget.Rsp:X16} arg=0x{argOnRun:X16}");
+        if (TraceEnabled)
+            TraceFiber(
+                $"transfer reason={reason} from=0x{previousFiber:X16} to=0x{fiber:X16} resume={resumed} " +
+                $"rip=0x{transferTarget.Rip:X16} rsp=0x{transferTarget.Rsp:X16} arg=0x{argOnRun:X16}");
         return SetReturn(ctx, 0);
     }
 
@@ -977,7 +976,7 @@ public static class FiberExports
         return true;
     }
 
-    private static bool TryReadFiberFields(CpuContext ctx, ulong fiber, out FiberFields fields)
+    private static bool TryReadFiberFields(CpuContext ctx, ulong fiber, out FiberFields fields, bool readName = false)
     {
         fields = default;
         if (!TryReadUInt32(ctx, fiber + FiberStateOffset, out var state) ||
@@ -986,7 +985,7 @@ public static class FiberExports
             !TryReadUInt64(ctx, fiber + FiberContextAddressOffset, out var contextAddress) ||
             !TryReadUInt64(ctx, fiber + FiberContextSizeOffset, out var contextSize) ||
             !TryReadUInt32(ctx, fiber + FiberFlagsOffset, out var flags) ||
-            !TryReadInlineName(ctx, fiber + FiberNameOffset, out var name))
+            !TryReadInlineName(ctx, fiber + FiberNameOffset, out var name, decode: readName))
         {
             return false;
         }
@@ -1071,7 +1070,7 @@ public static class FiberExports
         return ctx.Memory.TryWrite(address, buffer);
     }
 
-    private static bool TryReadInlineName(CpuContext ctx, ulong address, out string value)
+    private static bool TryReadInlineName(CpuContext ctx, ulong address, out string value, bool decode)
     {
         Span<byte> buffer = stackalloc byte[MaxNameLength + 1];
         if (!ctx.Memory.TryRead(address, buffer))
@@ -1086,7 +1085,9 @@ public static class FiberExports
             length = buffer.Length;
         }
 
-        value = Encoding.UTF8.GetString(buffer[..length]);
+        // A switch validates the same bytes but does not need a managed name.
+        // Only sceFiberGetInfo exposes the decoded name to its caller.
+        value = decode ? Encoding.UTF8.GetString(buffer[..length]) : string.Empty;
         return true;
     }
 
@@ -1123,10 +1124,7 @@ public static class FiberExports
 
     private static void TraceFiber(string message)
     {
-        if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_FIBER"), "1", StringComparison.Ordinal))
-        {
-            Console.Error.WriteLine($"[LOADER][TRACE] fiber.{message}");
-        }
+        Console.Error.WriteLine($"[LOADER][TRACE] fiber.{message}");
     }
 
     private readonly record struct FiberFields(

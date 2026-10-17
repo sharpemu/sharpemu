@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.Host;
+
 namespace SharpEmu.Libs.Pad;
 
 /// <summary>
@@ -16,11 +18,16 @@ internal readonly record struct PadState(
     byte RightX,
     byte RightY,
     byte L2,
-    byte R2);
+    byte R2,
+    HostGamepadType Type = HostGamepadType.Generic,
+    HostGamepadConnection Connection = HostGamepadConnection.Unknown,
+    HostMotionState Motion = default,
+    HostTouchState Touch = default);
 
 /// <summary>SCE_PAD_BUTTON bit values.</summary>
 internal static class OrbisPadButton
 {
+    internal const uint Share = 0x0001;
     internal const uint L3 = 0x0002;
     internal const uint R3 = 0x0004;
     internal const uint Options = 0x0008;

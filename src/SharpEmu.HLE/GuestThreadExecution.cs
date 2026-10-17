@@ -12,7 +12,19 @@ public readonly record struct GuestThreadStartRequest(
     ulong AttributeAddress,
     string Name,
     int Priority,
-    ulong AffinityMask);
+    ulong AffinityMask,
+    ulong StackSize = 0,
+    IGuestThreadRecycler? Recycler = null);
+
+/// <summary>
+/// Owner of a recyclable guest thread. When the thread's entry returns,
+/// the scheduler parks it instead of exiting it, then reports the return here;
+/// the owner may hand the parked thread new work with <see cref="IGuestThreadScheduler.TryRestartParkedThread"/>.
+/// </summary>
+public interface IGuestThreadRecycler
+{
+    void OnEntryReturned(ulong threadHandle, ulong returnValue);
+}
 
 public readonly record struct GuestThreadSnapshot(
     ulong ThreadHandle,
@@ -49,7 +61,32 @@ public interface IGuestThreadScheduler
     /// </summary>
     void RegisterGuestThreadContext(ulong threadHandle, CpuContext context);
 
+    /// <summary>
+    /// Returns the exact mapped guest stack owned by a scheduler thread. The
+    /// default keeps alternate/test schedulers source-compatible when they do
+    /// not own guest stack mappings.
+    /// </summary>
+    bool TryGetGuestThreadStackBounds(
+        ulong threadHandle,
+        out ulong stackBase,
+        out ulong stackSize)
+    {
+        stackBase = 0;
+        stackSize = 0;
+        return false;
+    }
+
     bool TryStartThread(CpuContext creatorContext, GuestThreadStartRequest request, out string? error);
+
+    /// <summary>
+    /// Runs a new entry on a parked recyclable thread, from a fresh frame at
+    /// the top of its stack. False when the thread is not parked.
+    /// </summary>
+    bool TryRestartParkedThread(ulong threadHandle, ulong entryPoint, ulong argument, out string? error)
+    {
+        error = "this scheduler does not recycle guest threads";
+        return false;
+    }
 
     bool TryJoinThread(
         CpuContext callerContext,
@@ -60,6 +97,14 @@ public interface IGuestThreadScheduler
     void Pump(CpuContext callerContext, string reason);
 
     int WakeBlockedThreads(string wakeKey, int maxCount = int.MaxValue);
+
+    /// <summary>
+    /// Reports whether the current guest thread has an exception that waits for an import safe point.
+    /// </summary>
+    bool HasPendingGuestExceptionForCurrentThread();
+
+    // Host waits must allow exception delivery before the import call returns.
+    void DeliverPendingGuestExceptionIfReady(CpuContext context) { }
 
     /// <summary>
     /// Applies a new guest scheduling priority to a live thread, mapping it
@@ -92,6 +137,19 @@ public interface IGuestThreadScheduler
         ulong arg0,
         ulong arg1,
         ulong arg2,
+        ulong stackAddress,
+        ulong stackSize,
+        string reason,
+        out ulong returnValue,
+        out string? error);
+
+    bool TryCallGuestFunction(
+        CpuContext callerContext,
+        ulong entryPoint,
+        ulong arg0,
+        ulong arg1,
+        ulong arg2,
+        ulong arg3,
         ulong stackAddress,
         ulong stackSize,
         string reason,
@@ -221,16 +279,43 @@ public static class GuestThreadExecution
 
     public static IGuestThreadScheduler? Scheduler { get; set; }
 
+    /// <summary>
+    /// Fired when a guest thread is torn down without a clean pthread_exit
+    /// (e.g. TBB execute-AV → worker_abort). Libs use this to abandon mutexes.
+    /// </summary>
+    public static event Func<ulong, string, int>? GuestThreadAbandoned;
+
+    public static int NotifyGuestThreadAbandoned(ulong threadHandle, string reason)
+    {
+        if (threadHandle == 0 || GuestThreadAbandoned is null)
+        {
+            return 0;
+        }
+
+        try
+        {
+            return GuestThreadAbandoned.Invoke(threadHandle, reason);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
     public static bool IsGuestThread => _currentGuestThreadHandle != 0;
 
     public static ulong CurrentGuestThreadHandle => _currentGuestThreadHandle;
+
+    public static bool HasPendingCurrentThreadBlock => _pendingBlockReason is not null;
 
     public static ulong CurrentFiberAddress => _currentFiberAddress;
 
     public static ulong EnterGuestThread(ulong threadHandle)
     {
+        GpuMemory.GpuMemoryAccessProfile.InitializeCurrentThread();
         var previous = _currentGuestThreadHandle;
         _currentGuestThreadHandle = threadHandle;
+        GuestFastPath.BindGuestThread(threadHandle);
         _pendingBlockReason = null;
         _pendingBlockContinuationValid = false;
         _pendingBlockContinuation = default;
@@ -252,6 +337,7 @@ public static class GuestThreadExecution
     public static void RestoreGuestThread(ulong previousThreadHandle)
     {
         _currentGuestThreadHandle = previousThreadHandle;
+        GuestFastPath.BindGuestThread(previousThreadHandle);
         _pendingBlockReason = null;
         _pendingBlockContinuationValid = false;
         _pendingBlockContinuation = default;

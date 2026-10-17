@@ -75,30 +75,6 @@ public sealed class AvPlayerPathTests : IDisposable
         AssertPathIsInsideApp0(resolved);
     }
 
-    [Theory]
-    [InlineData(false, "ffmpeg", "ffprobe")]
-    [InlineData(true, "ffmpeg.exe", "ffprobe.exe")]
-    public void MediaToolLookupUsesPlatformNames(
-        bool isWindows,
-        string ffmpegName,
-        string ffprobeName)
-    {
-        var toolDirectory = Path.Combine(_tempRoot, "Media Tools");
-        Directory.CreateDirectory(toolDirectory);
-        var ffmpeg = Path.Combine(toolDirectory, ffmpegName);
-        File.WriteAllBytes(ffmpeg, []);
-
-        var resolved = AvPlayerExports.FindFfmpeg(
-            configured: null,
-            searchPath: $"\"{toolDirectory}\"",
-            isWindows);
-
-        Assert.Equal(ffmpeg, resolved);
-        Assert.Equal(
-            Path.Combine(toolDirectory, ffprobeName),
-            AvPlayerExports.GetFfprobePath(ffmpeg, isWindows));
-    }
-
     [Fact]
     public void RelativeFileUriCannotEscapeApp0()
     {

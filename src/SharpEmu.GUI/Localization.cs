@@ -1,9 +1,13 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 
 namespace SharpEmu.GUI;
+
+public sealed record LanguageInfo(string Code, string NativeName);
 
 /// <summary>
 /// Loads UI strings for the launcher. Every language ships embedded in the
@@ -12,27 +16,50 @@ namespace SharpEmu.GUI;
 /// executable overrides the embedded copy for that code, so a translation
 /// fix or a brand-new language never needs a rebuild.
 /// </summary>
-public sealed class Localization
+public sealed class Localization : INotifyPropertyChanged
 {
     public static Localization Instance { get; } = new();
 
-    public sealed record LanguageInfo(string Code, string NativeName);
-
     private const string EmbeddedResourcePrefix = "Languages.";
     private const string EmbeddedResourceSuffix = ".json";
+    private const string IndexerPropertyName = "Item";
 
+    private readonly string _languagesDirectory;
     private Dictionary<string, string> _strings = new();
     private Dictionary<string, string> _fallbackStrings = new();
+    private string _currentCode = "en";
 
-
-    private Localization()
+    private Localization() : this(LanguagesDirectory)
     {
+    }
+
+    internal Localization(string languagesDirectory)
+    {
+        _languagesDirectory = languagesDirectory;
     }
 
     /// <summary>Directory holding optional *.json language overrides, next to the executable.</summary>
     public static string LanguagesDirectory => Path.Combine(AppContext.BaseDirectory, "Languages");
 
-    public string CurrentCode { get; private set; } = "en";
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>Exposes localized strings to XAML bindings by key.</summary>
+    public string this[string key] => Get(key);
+
+    public string CurrentCode
+    {
+        get => _currentCode;
+        private set
+        {
+            if (_currentCode == value)
+            {
+                return;
+            }
+
+            _currentCode = value;
+            OnPropertyChanged();
+        }
+    }
 
     public string Get(string key)
     {
@@ -67,7 +94,7 @@ public sealed class Localization
 
         try
         {
-            foreach (var file in Directory.EnumerateFiles(LanguagesDirectory, "*.json"))
+            foreach (var file in Directory.EnumerateFiles(_languagesDirectory, "*.json"))
             {
                 var code = Path.GetFileNameWithoutExtension(file);
                 using var stream = File.OpenRead(file);
@@ -84,47 +111,36 @@ public sealed class Localization
         return result;
     }
 
-    /// <summary>Loads a language by code (e.g. "en"): a loose override file first, then the embedded copy.</summary>
-    /// english is the fallback language
+    /// <summary>
+    /// Loads a language by code. Loose files overlay the embedded language,
+    /// while English supplies values missing from the selected language.
+    /// </summary>
     public void Load(string code)
     {
-        if (_fallbackStrings.Count == 0 && !string.Equals(code, "en", StringComparison.OrdinalIgnoreCase))
+        _fallbackStrings = LoadMergedLanguage("en");
+        _strings = string.Equals(code, "en", StringComparison.OrdinalIgnoreCase)
+            ? _fallbackStrings
+            : LoadMergedLanguage(code);
+
+        CurrentCode = code;
+        OnPropertyChanged(IndexerPropertyName);
+    }
+
+    private Dictionary<string, string> LoadMergedLanguage(string code)
+    {
+        var merged = TryLoadEmbedded(code, out var embedded)
+            ? embedded
+            : new Dictionary<string, string>();
+
+        if (TryLoadLooseFile(code, out var loose))
         {
-            if (!TryLoadLooseFile("en", out var fallback) && !TryLoadEmbedded("en", out fallback))
+            foreach (var (key, value) in loose)
             {
-                fallback = new Dictionary<string, string>();
+                merged[key] = value;
             }
-            _fallbackStrings = fallback;
-        }
-        else if (string.Equals(code, "en", StringComparison.OrdinalIgnoreCase))
-        {
-            if (TryLoadLooseFile("en", out var enDict) || TryLoadEmbedded("en", out enDict))
-            {
-                _strings = enDict;
-                _fallbackStrings = enDict;
-            }
-            else
-            {
-                _strings = new Dictionary<string, string>();
-                _fallbackStrings = new Dictionary<string, string>();
-            }
-            CurrentCode = "en";
-            return;
         }
 
-        // Load the requested language
-        if (TryLoadLooseFile(code, out var loaded) || TryLoadEmbedded(code, out loaded))
-        {
-            _strings = loaded;
-        }
-        else
-        {
-            if (_fallbackStrings.Count > 0)
-                _strings = new Dictionary<string, string>(_fallbackStrings);
-            else
-                _strings = new Dictionary<string, string>();
-        }
-        CurrentCode = code;
+        return merged;
     }
 
     private static IEnumerable<string> EmbeddedLanguageCodes()
@@ -161,44 +177,12 @@ public sealed class Localization
         return null;
     }
 
-    private bool TryLoadLooseFile(string code)
-    {
-        try
-        {
-            var path = Path.Combine(LanguagesDirectory, $"{code}.json");
-            return File.Exists(path) && TryLoad(code, File.ReadAllText(path));
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-    }
-
-    private bool TryLoadEmbedded(string code)
-    {
-        try
-        {
-            using var stream = OpenEmbeddedLanguageStream(code);
-            if (stream is null)
-            {
-                return false;
-            }
-
-            using var reader = new StreamReader(stream);
-            return TryLoad(code, reader.ReadToEnd());
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-    }
-
     private bool TryLoadLooseFile(string code, out Dictionary<string, string> result)
     {
         result = new Dictionary<string, string>();
         try
         {
-            var path = Path.Combine(LanguagesDirectory, $"{code}.json");
+            var path = Path.Combine(_languagesDirectory, $"{code}.json");
             if (!File.Exists(path))
                 return false;
 
@@ -242,15 +226,7 @@ public sealed class Localization
         result = loaded;
         return true;
     }
-    
-    private bool TryLoad(string code, string json)
-    {
-        if (TryLoad(json, out var dict))
-        {
-            _strings = dict;
-            CurrentCode = code;
-            return true;
-        }
-        return false;
-    }
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 }

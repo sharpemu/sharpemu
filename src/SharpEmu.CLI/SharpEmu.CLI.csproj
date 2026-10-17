@@ -20,6 +20,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <!-- osx-x64 is the macOS target: the CPU backend executes guest x86-64
          natively, so on Apple Silicon it runs under Rosetta 2. -->
     <RuntimeIdentifiers>win-x64;linux-x64;osx-x64;osx-arm64</RuntimeIdentifiers>
+    <!-- A plain "dotnet publish" with no -r defaults $(RuntimeIdentifier) to
+         the host's own RID; see Directory.Build.props, which is where that
+         default actually has to live (PublishDir's RID suffix is decided
+         there, evaluated before this file, so a default set only here would
+         be too late for it). -->
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
@@ -60,7 +65,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <PropertyGroup>
     <NoWarn>$(NoWarn);1591</NoWarn>
   </PropertyGroup>
-  
+
   <ItemGroup>
     <Content Include="..\..\LICENSE.txt">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
@@ -72,19 +77,178 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <TargetPath>Languages\%(Filename)%(Extension)</TargetPath>
       <Visible>False</Visible>
     </Content>
+    <Content Include="..\SharpEmu.LibAtrac9\LICENSE.txt">
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+      <TargetPath>licenses\LibAtrac9.txt</TargetPath>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      <Visible>False</Visible>
+    </Content>
   </ItemGroup>
 
-  <!-- Keep glfw as a loose file next to the executable; every other native
-       library is embedded into the single-file bundle. -->
-  <Target Name="KeepGlfwOutsideSingleFile" AfterTargets="ComputeResolvedFilesToPublishList">
+  <Target Name="KeepLibAtrac9External" BeforeTargets="_ComputeFilesToBundle">
     <ItemGroup>
-      <_GlfwPublishFiles Include="@(ResolvedFileToPublish)"
-                         Condition="$([System.String]::Copy('%(ResolvedFileToPublish.Filename)').StartsWith('glfw')) Or $([System.String]::Copy('%(ResolvedFileToPublish.Filename)').StartsWith('libglfw'))" />
-      <ResolvedFileToPublish Remove="@(_GlfwPublishFiles)" />
-      <ResolvedFileToPublish Include="@(_GlfwPublishFiles)">
+      <ResolvedFileToPublish Update="@(ResolvedFileToPublish)"
+        Condition="'%(Filename)%(Extension)' == 'SharpEmu.LibAtrac9.dll'">
         <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+        <RelativePath>plugins\SharpEmu.LibAtrac9.dll</RelativePath>
       </ResolvedFileToPublish>
     </ItemGroup>
+  </Target>
+
+  <!-- These are native debug symbols emitted by Skia/HarfBuzz, not managed
+       symbols that single-file publish can bundle. They are not needed at
+       runtime and would otherwise add more than 100 MB to every release. -->
+  <Target Name="RemoveNativeDebugSymbols" AfterTargets="Publish">
+    <ItemGroup>
+      <_NativeDebugSymbols Include="$(PublishDir)**\*.pdb" />
+    </ItemGroup>
+    <Delete Files="@(_NativeDebugSymbols)" />
+  </Target>
+
+  <!-- Native FFmpeg libraries publish into a subfolder next to the
+       executable instead of sitting loose beside it, so the publish
+       directory stays uncluttered as more native deps get added. The folder
+       name is a fixed constant, not derived from the RID/architecture: each
+       publish output only ever holds one architecture's binaries anyway, so
+       varying the name added a class of bugs (RID resolution timing, host-OS
+       vs. target-RID mixups) for no benefit. Runtime code (FfmpegRuntime)
+       uses the same literal "plugins" folder name. -->
+  <PropertyGroup>
+    <NativeLibraryFolderName>plugins</NativeLibraryFolderName>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <FfmpegRuntimeTag>3b502d4</FfmpegRuntimeTag>
+    <FfmpegRuntimeDir>
+      $(BaseIntermediateOutputPath)ffmpeg-runtime/$(FfmpegRuntimeTag)/$(RuntimeIdentifier)</FfmpegRuntimeDir>
+    <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'win-x64'">ffmpeg-windows-x64.zip</FfmpegRuntimePackage>
+    <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'linux-x64'">ffmpeg-linux-x64.zip</FfmpegRuntimePackage>
+    <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'osx-x64'">ffmpeg-macos-x64.zip</FfmpegRuntimePackage>
+    <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'osx-arm64'">ffmpeg-macos-arm64.zip</FfmpegRuntimePackage>
+    <FfmpegRuntimeArchive>$(FfmpegRuntimeDir)/$(FfmpegRuntimePackage)</FfmpegRuntimeArchive>
+    <FfmpegRuntimeExtractDir>$(FfmpegRuntimeDir)/extracted</FfmpegRuntimeExtractDir>
+  </PropertyGroup>
+
+  <Target Name="FetchFfmpegRuntime"
+    BeforeTargets="Publish;Build"
+    Condition="'$(RuntimeIdentifier)' != '' And '$(FfmpegRuntimePackage)' != ''">
+    <DownloadFile
+      SourceUrl="https://github.com/sharpemu/ffmpeg-core/releases/download/$(FfmpegRuntimeTag)/$(FfmpegRuntimePackage)"
+      DestinationFolder="$(FfmpegRuntimeDir)"
+      Condition="!Exists('$(FfmpegRuntimeArchive)')" />
+    <Unzip
+      SourceFiles="$(FfmpegRuntimeArchive)"
+      DestinationFolder="$(FfmpegRuntimeExtractDir)"
+      Condition="!Exists('$(FfmpegRuntimeExtractDir)')" />
+  </Target>
+
+  <Target Name="PublishFfmpegRuntime"
+    AfterTargets="Publish"
+    DependsOnTargets="FetchFfmpegRuntime"
+    Condition="'$(RuntimeIdentifier)' != '' And '$(FfmpegRuntimePackage)' != ''">
+    <!-- Keyed off the target $(RuntimeIdentifier), not the host OS: publishing
+         e.g. linux-x64 from a Windows machine is a supported cross-publish,
+         and the extracted archive's own layout (bin/*.dll vs lib/*.so*) only
+         depends on which platform's ffmpeg-core package was fetched. -->
+    <ItemGroup>
+      <_FfmpegRuntimeFiles Condition="$(RuntimeIdentifier.StartsWith('win'))"
+        Include="$(FfmpegRuntimeExtractDir)/bin/*.dll" />
+      <_FfmpegRuntimeFiles Condition="!$(RuntimeIdentifier.StartsWith('win'))"
+        Include="$(FfmpegRuntimeExtractDir)/lib/*.so;$(FfmpegRuntimeExtractDir)/lib/*.so.*;$(FfmpegRuntimeExtractDir)/lib/*.dylib" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_FfmpegRuntimeFiles)"
+      DestinationFolder="$(PublishDir)$(NativeLibraryFolderName)"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- Mirrors PublishFfmpegRuntime for plain `dotnet build`: devs running
+       straight out of the build output directory (no publish step) still
+       need the FFmpeg plugins present, otherwise AvPlayer/Bink video probing
+       throws NotSupportedException the first time a guest opens a movie. -->
+  <Target Name="BuildFfmpegRuntime"
+    AfterTargets="Build"
+    DependsOnTargets="FetchFfmpegRuntime"
+    Condition="'$(RuntimeIdentifier)' != '' And '$(FfmpegRuntimePackage)' != ''">
+    <ItemGroup>
+      <_FfmpegRuntimeFiles Condition="$(RuntimeIdentifier.StartsWith('win'))"
+        Include="$(FfmpegRuntimeExtractDir)/bin/*.dll" />
+      <_FfmpegRuntimeFiles Condition="!$(RuntimeIdentifier.StartsWith('win'))"
+        Include="$(FfmpegRuntimeExtractDir)/lib/*.so;$(FfmpegRuntimeExtractDir)/lib/*.so.*;$(FfmpegRuntimeExtractDir)/lib/*.dylib" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_FfmpegRuntimeFiles)"
+      DestinationFolder="$(OutDir)$(NativeLibraryFolderName)"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+  <PropertyGroup>
+    <SharpEmuDemoTag>49e6b3b</SharpEmuDemoTag>
+    <SharpEmuDemoFolderName>demo</SharpEmuDemoFolderName>
+    <SharpEmuDemoCacheDir>$(BaseIntermediateOutputPath)sharpemu-demo/$(SharpEmuDemoTag)</SharpEmuDemoCacheDir>
+    <SharpEmuDemoArchive>$(SharpEmuDemoCacheDir)/sharpemu-demo.zip</SharpEmuDemoArchive>
+    <SharpEmuDemoDir>$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '..', 'SharpEmu.Demo'))</SharpEmuDemoDir>
+    <SharpEmuDemoStamp>$(SharpEmuDemoDir).tag</SharpEmuDemoStamp>
+  </PropertyGroup>
+
+  <Target Name="FetchSharpEmuDemo" BeforeTargets="Publish;Build">
+    <ReadLinesFromFile File="$(SharpEmuDemoStamp)" Condition="Exists('$(SharpEmuDemoStamp)')">
+      <Output TaskParameter="Lines" PropertyName="_SharpEmuDemoExtractedTag" />
+    </ReadLinesFromFile>
+    <PropertyGroup>
+      <_SharpEmuDemoCurrent Condition="'$(SharpEmuDemoTag)' != '' And '$(_SharpEmuDemoExtractedTag)' == '$(SharpEmuDemoTag)'">true</_SharpEmuDemoCurrent>
+    </PropertyGroup>
+    <DownloadFile
+      SourceUrl="https://github.com/sharpemu/sharpemu-demo/releases/download/$(SharpEmuDemoTag)/sharpemu-demo.zip"
+      DestinationFolder="$(SharpEmuDemoCacheDir)"
+      Condition="'$(SharpEmuDemoTag)' != '' And '$(_SharpEmuDemoCurrent)' != 'true' And !Exists('$(SharpEmuDemoArchive)')"
+      ContinueOnError="WarnAndContinue" />
+    <RemoveDir Directories="$(SharpEmuDemoDir)" Condition="'$(_SharpEmuDemoCurrent)' != 'true'" />
+    <Unzip
+      SourceFiles="$(SharpEmuDemoArchive)"
+      DestinationFolder="$(SharpEmuDemoDir)"
+      Condition="'$(SharpEmuDemoTag)' != '' And '$(_SharpEmuDemoCurrent)' != 'true' And Exists('$(SharpEmuDemoArchive)')"
+      ContinueOnError="WarnAndContinue" />
+    <!-- Older demo releases include preview music; keep the bundled demo silent. -->
+    <Delete Files="$(SharpEmuDemoDir)sce_sys/snd0.at9" />
+    <PropertyGroup>
+      <SharpEmuDemoComplete Condition="Exists('$(SharpEmuDemoDir)eboot.bin') And Exists('$(SharpEmuDemoDir)sce_sys/param.json') And Exists('$(SharpEmuDemoDir)sce_sys/icon0.png') And Exists('$(SharpEmuDemoDir)sce_sys/pic0.png')">true</SharpEmuDemoComplete>
+    </PropertyGroup>
+    <WriteLinesToFile
+      File="$(SharpEmuDemoStamp)"
+      Lines="$(SharpEmuDemoTag)"
+      Overwrite="true"
+      Condition="'$(SharpEmuDemoComplete)' == 'true' And '$(_SharpEmuDemoCurrent)' != 'true'" />
+    <RemoveDir Directories="$(SharpEmuDemoDir)" Condition="'$(SharpEmuDemoComplete)' != 'true'" />
+    <Delete Files="$(SharpEmuDemoArchive)" Condition="'$(SharpEmuDemoComplete)' != 'true' And Exists('$(SharpEmuDemoArchive)')" />
+  </Target>
+
+  <Target Name="BuildSharpEmuDemo" AfterTargets="Build" DependsOnTargets="FetchSharpEmuDemo">
+    <ItemGroup>
+      <_SharpEmuDemoFiles Include="$(SharpEmuDemoDir)**/*" Exclude="$(SharpEmuDemoStamp)" Condition="'$(SharpEmuDemoComplete)' == 'true'" />
+    </ItemGroup>
+    <RemoveDir
+      Directories="$(OutDir)$(SharpEmuDemoFolderName)"
+      Condition="'$(SharpEmuDemoComplete)' != 'true'"
+      ContinueOnError="WarnAndContinue" />
+    <Copy
+      SourceFiles="@(_SharpEmuDemoFiles)"
+      DestinationFiles="@(_SharpEmuDemoFiles->'$(OutDir)$(SharpEmuDemoFolderName)/%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Delete Files="$(OutDir)$(SharpEmuDemoFolderName)/sce_sys/snd0.at9" />
+  </Target>
+
+  <Target Name="PublishSharpEmuDemo" AfterTargets="Publish" DependsOnTargets="FetchSharpEmuDemo">
+    <ItemGroup>
+      <_SharpEmuDemoFiles Include="$(SharpEmuDemoDir)**/*" Exclude="$(SharpEmuDemoStamp)" Condition="'$(SharpEmuDemoComplete)' == 'true'" />
+    </ItemGroup>
+    <RemoveDir
+      Directories="$(PublishDir)$(SharpEmuDemoFolderName)"
+      Condition="'$(SharpEmuDemoComplete)' != 'true'"
+      ContinueOnError="WarnAndContinue" />
+    <Copy
+      SourceFiles="@(_SharpEmuDemoFiles)"
+      DestinationFiles="@(_SharpEmuDemoFiles->'$(PublishDir)$(SharpEmuDemoFolderName)/%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+    <Delete Files="$(PublishDir)$(SharpEmuDemoFolderName)/sce_sys/snd0.at9" />
   </Target>
 
 </Project>

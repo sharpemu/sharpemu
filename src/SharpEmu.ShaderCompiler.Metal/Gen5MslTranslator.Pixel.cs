@@ -10,238 +10,6 @@ public static partial class Gen5MslTranslator
 {
     private sealed partial class CompilationContext
     {
-        private const uint ImageDescriptorDwords = 8;
-        private const uint SamplerDescriptorDwords = 4;
-
-        // ---- image resources ----
-
-        /// <summary>
-        /// Classifies every image binding (storage vs sampled, component kind
-        /// from the descriptor's unified format) and seeds the PC lookup,
-        /// mirroring DeclareImages on the SPIR-V side. MSL needs no format on
-        /// the texture type — only the component type and access.
-        /// </summary>
-        private void DeclareImageKinds()
-        {
-            for (var index = 0; index < _evaluation.ImageBindings.Count; index++)
-            {
-                var binding = _evaluation.ImageBindings[index];
-                _imageBindingByPc.TryAdd(binding.Pc, index);
-                var isStorage = Gen5ShaderTranslator.IsStorageImageOperation(binding.Opcode);
-                _imageKinds.Add((isStorage, DecodeImageComponentKind(binding.ResourceDescriptor)));
-            }
-
-            // Seed each binding's access from the opcode that defined it; the body
-            // emission (TryEmitImage) then ORs in the access of every instruction
-            // that resolves to the same binding, so a load and a store sharing one
-            // binding correctly become read_write.
-            _imageBindingReads = new bool[_imageKinds.Count];
-            _imageBindingWrites = new bool[_imageKinds.Count];
-            for (var index = 0; index < _evaluation.ImageBindings.Count; index++)
-            {
-                MarkImageBindingAccess(index, _evaluation.ImageBindings[index].Opcode);
-            }
-
-            // Assign one sampler per sampled image (storage images take none).
-            // Computed before body emission because the sample calls reference
-            // the slots. Samplers live in an argument buffer (see
-            // EmitImageArguments), so there is no 16-slot cap to dedup against —
-            // each image keeps its own sampler, matching the SPIR-V/Vulkan path.
-            _samplerSlots = new int[_imageKinds.Count];
-            _samplerCount = 0;
-            for (var index = 0; index < _imageKinds.Count; index++)
-            {
-                _samplerSlots[index] = _imageKinds[index].IsStorage ? -1 : _samplerCount++;
-            }
-        }
-
-        /// <summary>Records that <paramref name="opcode"/> reads and/or writes the
-        /// storage image at <paramref name="bindingIndex"/>, so EmitImageArguments
-        /// can pick the minimal Metal access qualifier.</summary>
-        private void MarkImageBindingAccess(int bindingIndex, string opcode)
-        {
-            if ((uint)bindingIndex >= (uint)_imageBindingReads.Length)
-            {
-                return;
-            }
-
-            if (opcode.StartsWith("ImageStore", StringComparison.Ordinal))
-            {
-                _imageBindingWrites[bindingIndex] = true;
-            }
-            else if (opcode.StartsWith("ImageAtomic", StringComparison.Ordinal))
-            {
-                _imageBindingReads[bindingIndex] = true;
-                _imageBindingWrites[bindingIndex] = true;
-            }
-            else
-            {
-                // ImageLoad/ImageLoadMip and ImageGetResinfo read the texture;
-                // sampled ops are non-storage and ignore these flags.
-                _imageBindingReads[bindingIndex] = true;
-            }
-        }
-
-        /// <summary>"float", "int", or "uint" from the descriptor's unified format.</summary>
-        private static string DecodeImageComponentKind(IReadOnlyList<uint> descriptor)
-        {
-            if (descriptor.Count < 2)
-            {
-                return "float";
-            }
-
-            var unifiedFormat = (descriptor[1] >> 20) & 0x1FFu;
-            if (!Gfx10UnifiedFormat.TryDecode(unifiedFormat, out _, out var numberType))
-            {
-                return "float";
-            }
-
-            return numberType switch
-            {
-                4 => "uint",
-                5 => "int",
-                _ => "float",
-            };
-        }
-
-        /// <summary>Per image binding: its sampler's [[id(N)]] inside the sampler
-        /// argument buffer, or -1 for storage images. Set by DeclareImageKinds.</summary>
-        private int[] _samplerSlots = [];
-
-        /// <summary>Number of sampled images (= sampler argument-buffer entries).</summary>
-        private int _samplerCount;
-
-        /// <summary>Buffer slot the sampler argument buffer binds to, past this
-        /// stage's global buffers, uniforms, and scalar-state buffer.</summary>
-        private int SamplerArgBufferIndex =>
-            Math.Max(UniformsBufferIndex, _initialScalarBufferIndex) + 1;
-
-        /// <summary>Emits the texture arguments (direct [[texture(N)]] slots, which
-        /// run to 31 — enough) plus, when the stage samples anything, the sampler
-        /// argument buffer. Samplers go through an argument buffer rather than
-        /// [[sampler(N)]] slots because Metal caps those at 16 per stage while
-        /// real shaders sample more (void Terrarium's scene shader: 17); argument
-        /// buffers have no such limit on Apple Silicon.</summary>
-        private void EmitImageArguments(StringBuilder source)
-        {
-            for (var index = 0; index < _imageKinds.Count; index++)
-            {
-                var (isStorage, kind) = _imageKinds[index];
-                var textureSlot = _imageBindingBase + index;
-                if (isStorage)
-                {
-                    // Minimal access keeps read_write textures under Metal's cap
-                    // of 8 per function: only images that are both read and
-                    // written (or resolve a load and a store to one binding) need
-                    // read_write; the rest are read-only or write-only.
-                    var access = _imageBindingWrites[index]
-                        ? (_imageBindingReads[index] ? "read_write" : "write")
-                        : "read";
-                    source.AppendLine(
-                        $"    texture2d<{kind}, access::{access}> tex{index} [[texture({textureSlot})]],");
-                }
-                else
-                {
-                    source.AppendLine($"    texture2d<{kind}> tex{index} [[texture({textureSlot})]],");
-                }
-            }
-
-            if (_samplerCount > 0)
-            {
-                source.AppendLine(
-                    $"    constant Gen5Samplers& sharpemu_samplers [[buffer({SamplerArgBufferIndex})]],");
-            }
-        }
-
-        /// <summary>Declares the sampler argument-buffer struct at file scope (one
-        /// sampler per sampled image). Empty when the stage samples nothing.</summary>
-        private void EmitSamplerArgumentBufferStruct(StringBuilder source)
-        {
-            if (_samplerCount == 0)
-            {
-                return;
-            }
-
-            source.AppendLine("struct Gen5Samplers");
-            source.AppendLine("{");
-            for (var slot = 0; slot < _samplerCount; slot++)
-            {
-                source.AppendLine($"    sampler smp{slot} [[id({slot})]];");
-            }
-
-            source.AppendLine("};");
-            source.AppendLine();
-        }
-
-        private bool TryResolveDominatingImageBinding(
-            Gen5ShaderInstruction instruction,
-            Gen5ImageControl control,
-            out int bindingIndex)
-        {
-            if (_imageBindingByPc.TryGetValue(instruction.Pc, out bindingIndex) &&
-                bindingIndex < _imageKinds.Count)
-            {
-                return true;
-            }
-
-            var storage = Gen5ShaderTranslator.IsStorageImageOperation(instruction.Opcode);
-            for (var index = 0; index < _evaluation.ImageBindings.Count; index++)
-            {
-                var candidate = _evaluation.ImageBindings[index];
-                if (candidate.Control.ScalarResource != control.ScalarResource ||
-                    candidate.Control.ScalarSampler != control.ScalarSampler ||
-                    Gen5ShaderTranslator.IsStorageImageOperation(candidate.Opcode) != storage ||
-                    !HasSameScalarDefinitions(
-                        candidate.Pc,
-                        instruction.Pc,
-                        control.ScalarResource,
-                        ImageDescriptorDwords) ||
-                    (UsesSampler(instruction.Opcode) &&
-                     !HasSameScalarDefinitions(
-                         candidate.Pc,
-                         instruction.Pc,
-                         control.ScalarSampler,
-                         SamplerDescriptorDwords)))
-                {
-                    continue;
-                }
-
-                bindingIndex = index;
-                _imageBindingByPc.Add(instruction.Pc, index);
-                return true;
-            }
-
-            bindingIndex = -1;
-            return false;
-        }
-
-        private bool HasSameScalarDefinitions(
-            uint candidatePc,
-            uint targetPc,
-            uint firstRegister,
-            uint registerCount)
-        {
-            if (firstRegister + registerCount > ScalarRegisterFileCount ||
-                !_scalarDefinitionsBeforePc.TryGetValue(candidatePc, out var candidate) ||
-                !_scalarDefinitionsBeforePc.TryGetValue(targetPc, out var target))
-            {
-                return false;
-            }
-
-            for (var register = firstRegister;
-                 register < firstRegister + registerCount;
-                 register++)
-            {
-                var definition = candidate[register];
-                if (definition is ConflictingScalarDefinition or UnreachableScalarDefinition ||
-                    target[register] != definition)
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
 
         private static bool UsesSampler(string opcode) =>
             opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
@@ -255,18 +23,75 @@ public static partial class Gen5MslTranslator
             out string error)
         {
             error = string.Empty;
-            if (!TryResolveDominatingImageBinding(instruction, image, out var bindingIndex))
+            if (instruction.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
             {
-                error = $"unresolved image binding t=s{image.ScalarResource} s=s{image.ScalarSampler}";
-                return false;
+                // Metal has no bound representation of GFX10's raw BVH
+                // descriptor in this backend. Preserve the hardware miss
+                // fallback used by the Vulkan path and keep the shader valid.
+                for (uint component = 0; component < 4; component++)
+                {
+                    StoreVector(image.VectorData + component, "0u");
+                }
+
+                return true;
             }
 
-            // The resolving instruction may differ from the one that defined the
-            // binding (a store can dominate a load's binding); fold its access in.
-            MarkImageBindingAccess(bindingIndex, instruction.Opcode);
-            var (isStorage, kind) = _imageKinds[bindingIndex];
-            var texture = $"tex{bindingIndex}";
+            string texture;
+            string samplerName;
+            string kind;
+            bool isStorage;
+            uint dstSelect;
+            string mipLevel;
+            {
+                if (TryGetImageElementCases(instruction, image, out var selector, out var elements, out error))
+                {
+                    // One case per descriptor over a constant element, like a switch on the selector.
+                    for (var index = 0; index < elements.Count; index++)
+                    {
+                        Line($"if ({selector} == {index}u)");
+                        Line("{");
+                        _indent++;
+                        var emitted =
+                            TryResolveLayoutImage(instruction, image, out texture, out samplerName, out kind, out isStorage, out dstSelect, out mipLevel, out error, elements[index]) &&
+                            EmitImageOperation(instruction, image, texture, samplerName, kind, isStorage, dstSelect, mipLevel, out error);
+                        _indent--;
+                        Line("}");
+                        if (!emitted)
+                        {
+                            return false;
+                        }
+                    }
 
+                    return true;
+                }
+
+                if (error.Length != 0)
+                {
+                    return false;
+                }
+
+                if (!TryResolveLayoutImage(instruction, image, out texture, out samplerName, out kind, out isStorage, out dstSelect, out mipLevel, out error))
+                {
+                    return false;
+                }
+            }
+
+            return EmitImageOperation(instruction, image, texture, samplerName, kind, isStorage, dstSelect, mipLevel, out error);
+        }
+
+        // One image operation over a resolved texture; its results are register writes.
+        private bool EmitImageOperation(
+            Gen5ShaderInstruction instruction,
+            Gen5ImageControl image,
+            string texture,
+            string samplerName,
+            string kind,
+            bool isStorage,
+            uint dstSelect,
+            string mipLevel,
+            out string error)
+        {
+            error = string.Empty;
             if (instruction.Opcode == "ImageGetResinfo")
             {
                 var width = Temp("uint", isStorage
@@ -307,11 +132,16 @@ public static partial class Gen5MslTranslator
                 var x = Temp("int", $"as_type<int>({ImageIntegerAddress(image, 0)})");
                 var y = Temp("int", $"as_type<int>({ImageIntegerAddress(image, 1)})");
                 var components = new string[4];
-                uint sourceIndex = 0;
                 for (var component = 0; component < 4; component++)
                 {
-                    components[component] = (image.Dmask & (1u << component)) != 0
-                        ? ImageTexelComponent(kind, ImageStoreComponent(image, kind, sourceIndex++))
+                    var sourceIndex = Gen5ShaderTranslator.GetImageStoreSourceIndex(
+                        dstSelect,
+                        image.Dmask,
+                        component);
+                    components[component] = sourceIndex >= 0
+                        ? ImageTexelComponent(
+                            kind,
+                            ImageStoreComponent(image, kind, (uint)sourceIndex))
                         : kind == "float" ? "0.0f" : "0";
                 }
 
@@ -335,9 +165,8 @@ public static partial class Gen5MslTranslator
             var writeAllComponents = false;
             if (instruction.Opcode is "ImageLoad" or "ImageLoadMip")
             {
-                var mip = _evaluation.ImageBindings[bindingIndex].MipLevel ?? 0;
-                var widthQuery = isStorage ? $"{texture}.get_width()" : $"{texture}.get_width({mip}u)";
-                var heightQuery = isStorage ? $"{texture}.get_height()" : $"{texture}.get_height({mip}u)";
+                var widthQuery = isStorage ? $"{texture}.get_width()" : $"{texture}.get_width({mipLevel})";
+                var heightQuery = isStorage ? $"{texture}.get_height()" : $"{texture}.get_height({mipLevel})";
                 var x = Temp(
                     "uint",
                     $"(uint)clamp(as_type<int>({ImageIntegerAddress(image, 0)}), 0, (int){widthQuery} - 1)");
@@ -348,18 +177,18 @@ public static partial class Gen5MslTranslator
                     $"vec<{kind}, 4>",
                     isStorage
                         ? $"{texture}.read(uint2({x}, {y}))"
-                        : $"{texture}.read(uint2({x}, {y}), {mip}u)");
+                        : $"{texture}.read(uint2({x}, {y}), {mipLevel})");
             }
             else if (instruction.Opcode.StartsWith("ImageSample", StringComparison.Ordinal))
             {
-                if (!TryEmitImageSample(instruction, image, bindingIndex, kind, out sampled, out error))
+                if (!TryEmitImageSample(instruction, image, texture, samplerName, kind, out sampled, out error))
                 {
                     return false;
                 }
             }
             else if (instruction.Opcode.StartsWith("ImageGather4", StringComparison.Ordinal))
             {
-                if (!TryEmitImageGather(instruction, image, bindingIndex, kind, out sampled, out error))
+                if (!TryEmitImageGather(instruction, image, texture, samplerName, kind, out sampled, out error))
                 {
                     return false;
                 }
@@ -409,7 +238,8 @@ public static partial class Gen5MslTranslator
         private bool TryEmitImageSample(
             Gen5ShaderInstruction instruction,
             Gen5ImageControl image,
-            int bindingIndex,
+            string texture,
+            string samplerName,
             string kind,
             out string sampled,
             out string error)
@@ -417,8 +247,6 @@ public static partial class Gen5MslTranslator
             sampled = string.Empty;
             error = string.Empty;
             var opcode = instruction.Opcode;
-            var texture = $"tex{bindingIndex}";
-            var samplerName = $"sharpemu_samplers.smp{_samplerSlots[bindingIndex]}";
             var hasOffset = opcode.EndsWith("O", StringComparison.Ordinal);
             var hasCompare = opcode.Contains("SampleC", StringComparison.Ordinal);
             var hasGradients = opcode.Contains("SampleD", StringComparison.Ordinal);
@@ -516,7 +344,8 @@ public static partial class Gen5MslTranslator
         private bool TryEmitImageGather(
             Gen5ShaderInstruction instruction,
             Gen5ImageControl image,
-            int bindingIndex,
+            string texture,
+            string samplerName,
             string kind,
             out string sampled,
             out string error)
@@ -524,8 +353,6 @@ public static partial class Gen5MslTranslator
             sampled = string.Empty;
             error = string.Empty;
             var opcode = instruction.Opcode;
-            var texture = $"tex{bindingIndex}";
-            var samplerName = $"sharpemu_samplers.smp{_samplerSlots[bindingIndex]}";
             var hasOffset = opcode.EndsWith("O", StringComparison.Ordinal);
             var hasCompare = opcode.Contains("Gather4C", StringComparison.Ordinal);
             var addressCursor = 0;
@@ -680,10 +507,18 @@ public static partial class Gen5MslTranslator
                 return true;
             }
 
+            // EXP.VM communicates the current EXEC mask independently of the
+            // export data target. NULL exports are the hardware-defined way to
+            // update only fragment validity, and the final VM export wins.
+            if (export.ValidMask && _usesPixelValidMask)
+            {
+                Line("pixel_valid_mask_active = exec;");
+            }
+
             Gen5PixelOutputBinding? binding = null;
             foreach (var candidate in _pixelOutputBindings)
             {
-                if (candidate.GuestSlot == export.Target)
+                if (candidate.ExportTarget == export.Target)
                 {
                     binding = candidate;
                     break;
@@ -707,7 +542,20 @@ public static partial class Gen5MslTranslator
             {
                 if ((export.EnableMask & (1u << component)) == 0)
                 {
-                    values[component] = $"{field}[{component}]";
+                    var outputComponent = (uint)component;
+                    if (!binding.Value.ComponentMapping.IsIdentity)
+                    {
+                        for (var physicalComponent = 0u; physicalComponent < 4; physicalComponent++)
+                        {
+                            if (binding.Value.ComponentMapping.Map(physicalComponent) == component)
+                            {
+                                outputComponent = physicalComponent;
+                                break;
+                            }
+                        }
+                    }
+
+                    values[component] = $"{field}[{outputComponent}]";
                     continue;
                 }
 
@@ -731,6 +579,18 @@ public static partial class Gen5MslTranslator
                     Gen5PixelOutputKind.Sint => $"as_type<int>({raw})",
                     _ => $"as_type<float>({raw})",
                 };
+            }
+
+            if (binding.Value.ComponentMapping != Gen5ColorComponentMapping.Identity)
+            {
+                var mappedValues = new string[4];
+                for (var component = 0; component < mappedValues.Length; component++)
+                {
+                    mappedValues[component] = values[
+                        binding.Value.ComponentMapping.Map((uint)component)];
+                }
+
+                values = mappedValues;
             }
 
             // A lane removed from EXEC keeps the previous output value; killed
@@ -790,24 +650,50 @@ public static partial class Gen5MslTranslator
         /// </summary>
         private bool TryEmitVertexInputFetch(
             Gen5BufferMemoryControl control,
-            Gen5VertexInputBinding input,
+            ShaderVertexInput input,
             out string error)
         {
             error = string.Empty;
-            if (control.DwordCount == 0 || control.DwordCount > input.ComponentCount)
+            if (control.DwordCount == 0)
             {
                 error =
-                    $"invalid vertex input fetch components={control.DwordCount} " +
-                    $"input={input.ComponentCount}";
+                    $"invalid vertex input fetch components={control.DwordCount}";
                 return false;
             }
 
             for (uint component = 0; component < control.DwordCount; component++)
             {
-                var value = input.ComponentCount == 1
-                    ? $"sharpemu_vin.in{input.Location}"
-                    : $"sharpemu_vin.in{input.Location}[{component}]";
-                StoreVector(control.VectorData + component, AsUInt(value));
+                var selector = (input.DestinationSelect >> (int)(component * 3)) & 0x7u;
+                if (selector == 0)
+                {
+                    StoreVector(control.VectorData + component, "0u");
+                }
+                else if (selector == 1)
+                {
+                    StoreVector(
+                        control.VectorData + component,
+                        input.NumberFormat is 4u or 5u ? "1u" : "0x3f800000u");
+                }
+                else if (selector is >= 4u and <= 7u)
+                {
+                    var sourceComponent = selector - 4u;
+                    if (sourceComponent >= input.ComponentCount)
+                    {
+                        error =
+                            $"vertex input destination selector exceeds source components: selector={selector} components={input.ComponentCount}";
+                        return false;
+                    }
+
+                    var value = input.ComponentCount == 1
+                        ? $"sharpemu_vin.in{input.Location}"
+                        : $"sharpemu_vin.in{input.Location}[{sourceComponent}]";
+                    StoreVector(control.VectorData + component, AsUInt(value));
+                }
+                else
+                {
+                    error = $"unsupported vertex input destination selector={selector}";
+                    return false;
+                }
             }
 
             return true;

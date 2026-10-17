@@ -11,6 +11,7 @@ import tempfile
 import textwrap
 import threading
 import unittest
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -19,6 +20,7 @@ sys.path.insert(0, str(FRONTEND_ROOT))
 
 from debugger_frontend import (  # noqa: E402
     BridgeError,
+    CSRF_HEADER,
     DebuggerBridge,
     EmulatorProcessManager,
     FrontendHttpServer,
@@ -145,6 +147,11 @@ class DebuggerBridgeTests(unittest.TestCase):
         with self.assertRaises(BridgeError):
             self.bridge.request({})
 
+    def test_remote_debugger_is_rejected_without_explicit_opt_in(self) -> None:
+        bridge = DebuggerBridge()
+        with self.assertRaisesRegex(BridgeError, "Remote debugger connections are disabled"):
+            bridge.connect("example.com", 5714)
+
     def test_journal_cursor_returns_only_new_messages(self) -> None:
         cursor = self.bridge.snapshot()["cursor"]
         self.bridge.request({"command": "status"})
@@ -193,6 +200,7 @@ class FrontendHttpTests(unittest.TestCase):
         )
         self.http_server = FrontendHttpServer(("127.0.0.1", 0), handler)
         self.http_port = self.http_server.server_address[1]
+        self.csrf_token = self.http_server.csrf_token
         self.http_thread = threading.Thread(target=self.http_server.serve_forever, daemon=True)
         self.http_thread.start()
 
@@ -204,14 +212,53 @@ class FrontendHttpTests(unittest.TestCase):
         self.http_thread.join(timeout=1)
         self.debugger.close()
 
-    def post(self, path: str, payload: dict[str, object]) -> dict[str, object]:
+    def post(
+        self,
+        path: str,
+        payload: dict[str, object],
+        *,
+        include_token: bool = True,
+        origin: str | None = "same-origin",
+        referer: str | None = None,
+        host: str | None = None,
+        content_type: str = "application/json",
+        fetch_site: str | None = None,
+    ) -> dict[str, object]:
+        headers = {"Content-Type": content_type}
+        if include_token:
+            headers[CSRF_HEADER] = self.csrf_token
+        if origin == "same-origin":
+            headers["Origin"] = f"http://127.0.0.1:{self.http_port}"
+        elif origin is not None:
+            headers["Origin"] = origin
+        if referer == "same-origin":
+            headers["Referer"] = f"http://127.0.0.1:{self.http_port}/"
+        elif referer is not None:
+            headers["Referer"] = referer
+        if host is not None:
+            headers["Host"] = host
+        if fetch_site is not None:
+            headers["Sec-Fetch-Site"] = fetch_site
         request = Request(
             f"http://127.0.0.1:{self.http_port}{path}",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
-        with urlopen(request, timeout=2) as response:
+        with urlopen(request, timeout=5) as response:
+            return json.load(response)
+
+    def assert_post_rejected(
+        self,
+        path: str,
+        payload: dict[str, object],
+        status: int,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        with self.assertRaises(HTTPError) as caught:
+            self.post(path, payload, **kwargs)
+        with caught.exception as response:
+            self.assertEqual(status, response.code)
             return json.load(response)
 
     def test_api_connect_and_command_round_trip(self) -> None:
@@ -226,8 +273,12 @@ class FrontendHttpTests(unittest.TestCase):
         with urlopen(f"http://127.0.0.1:{self.http_port}/", timeout=2) as response:
             body = response.read().decode("utf-8")
             self.assertEqual("text/html; charset=utf-8", response.headers["Content-Type"])
+            self.assertEqual("DENY", response.headers["X-Frame-Options"])
+            self.assertEqual("same-origin", response.headers["Cross-Origin-Resource-Policy"])
         self.assertIn("SharpEmu <span>Debugger</span>", body)
         self.assertIn('rel="icon" type="image/webp"', body)
+        self.assertIn(f'content="{self.csrf_token}"', body)
+        self.assertNotIn("__SHARPEMU_CSRF_TOKEN__", body)
 
         with urlopen(f"http://127.0.0.1:{self.http_port}/sharpemu-logo.webp", timeout=2) as response:
             logo = response.read()
@@ -239,7 +290,7 @@ class FrontendHttpTests(unittest.TestCase):
             root = Path(temporary_directory)
             eboot = root / "eboot.bin"
             eboot.write_bytes(b"test")
-            emulator = root / "fake-sharpemu"
+            emulator = root / "fake-sharpemu.py"
             emulator.write_text(textwrap.dedent("""\
                 #!/usr/bin/env python3
                 import json
@@ -255,29 +306,36 @@ class FrontendHttpTests(unittest.TestCase):
                 print("Fake SharpEmu debug server ready", flush=True)
                 while True:
                     client, _ = listener.accept()
-                    with client:
-                        reader = client.makefile("r", encoding="utf-8")
-                        writer = client.makefile("w", encoding="utf-8")
-                        writer.write(json.dumps({"event": "hello", "protocol": "json-lines/1", "state": "Paused"}) + "\\n")
-                        writer.flush()
-                        for line in reader:
-                            request = json.loads(line)
-                            command = request["command"]
-                            data = {"state": "Paused", "breakpoints": 0} if command == "status" else {"breakpoints": []}
-                            writer.write(json.dumps({"ok": True, "command": command, "data": data}) + "\\n")
+                    try:
+                        with client:
+                            reader = client.makefile("r", encoding="utf-8")
+                            writer = client.makefile("w", encoding="utf-8")
+                            writer.write(json.dumps({"event": "hello", "protocol": "json-lines/1", "state": "Paused"}) + "\\n")
                             writer.flush()
+                            for line in reader:
+                                request = json.loads(line)
+                                command = request["command"]
+                                data = {"state": "Paused", "breakpoints": 0} if command == "status" else {"breakpoints": []}
+                                writer.write(json.dumps({"ok": True, "command": command, "data": data}) + "\\n")
+                                writer.flush()
+                    except OSError:
+                        pass
                 """), encoding="utf-8")
             emulator.chmod(0o755)
+            self.process_manager = EmulatorProcessManager(self.bridge.journal, str(emulator))
+            self.http_server.RequestHandlerClass.process_manager = self.process_manager
 
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
                 reservation.bind(("127.0.0.1", 0))
                 debug_port = reservation.getsockname()[1]
 
-            launched = self.post("/api/launch", {
-                "ebootPath": str(eboot),
-                "debugPort": debug_port,
-                "emulatorPath": str(emulator),
-            })
+            try:
+                launched = self.post("/api/launch", {
+                    "ebootPath": str(eboot),
+                    "debugPort": debug_port,
+                })
+            except HTTPError as exc:
+                self.fail(exc.read().decode("utf-8", "replace"))
             self.assertTrue(launched["connected"])
             self.assertTrue(launched["emulator"]["running"])
             self.assertEqual(str(eboot), launched["emulator"]["eboot"])
@@ -285,6 +343,134 @@ class FrontendHttpTests(unittest.TestCase):
             stopped = self.post("/api/stop-emulator", {})
             self.assertFalse(stopped["connected"])
             self.assertFalse(stopped["emulator"]["running"])
+
+    def test_post_without_csrf_token_is_rejected(self) -> None:
+        result = self.assert_post_rejected(
+            "/api/launch",
+            {"ebootPath": "ignored", "debugPort": 5714},
+            403,
+            include_token=False,
+        )
+        self.assertIn("CSRF", str(result["error"]))
+
+    def test_api_rejects_non_ascii_tokens_without_changing_connection(self) -> None:
+        self.post("/api/connect", {"host": "127.0.0.1", "port": self.debugger.port})
+        for method, path in (("GET", "/api/snapshot"), ("POST", "/api/disconnect")):
+            for supplied_token in ("\u00e9", self.csrf_token + "\u00e9"):
+                with self.subTest(method=method, token=supplied_token):
+                    request = Request(
+                        f"http://127.0.0.1:{self.http_port}{path}",
+                        data=b"{}" if method == "POST" else None,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Origin": f"http://127.0.0.1:{self.http_port}",
+                            CSRF_HEADER: supplied_token,
+                        },
+                        method=method,
+                    )
+                    with self.assertRaises(HTTPError) as caught:
+                        urlopen(request, timeout=2)
+                    with caught.exception as response:
+                        self.assertEqual(403, response.code)
+                        self.assertIn("token", str(json.load(response)["error"]).lower())
+                    self.assertTrue(self.bridge.snapshot()["connected"])
+
+        disconnected = self.post("/api/disconnect", {})
+        self.assertFalse(disconnected["connected"])
+
+    def test_reported_text_plain_no_cors_launch_is_rejected(self) -> None:
+        result = self.assert_post_rejected(
+            "/api/launch",
+            {
+                "ebootPath": "/etc/hostname",
+                "debugPort": 5999,
+                "emulatorPath": "/tmp/payload.sh",
+            },
+            403,
+            include_token=False,
+            origin="https://evil.example",
+            content_type="text/plain;charset=UTF-8",
+        )
+        self.assertIn("CSRF", str(result["error"]))
+
+    def test_json_content_type_is_required_after_authentication(self) -> None:
+        result = self.assert_post_rejected(
+            "/api/disconnect",
+            {},
+            400,
+            content_type="text/plain",
+        )
+        self.assertIn("Content-Type", str(result["error"]))
+
+    def test_cross_origin_post_is_rejected_even_with_token(self) -> None:
+        result = self.assert_post_rejected(
+            "/api/disconnect",
+            {},
+            403,
+            origin="https://attacker.example",
+        )
+        self.assertIn("Origin", str(result["error"]))
+
+    def test_cross_site_fetch_metadata_is_rejected(self) -> None:
+        result = self.assert_post_rejected(
+            "/api/disconnect",
+            {},
+            403,
+            fetch_site="cross-site",
+        )
+        self.assertIn("Cross-origin", str(result["error"]))
+
+    def test_post_without_browser_provenance_is_rejected(self) -> None:
+        result = self.assert_post_rejected(
+            "/api/disconnect",
+            {},
+            403,
+            origin=None,
+        )
+        self.assertIn("Origin or Referer", str(result["error"]))
+
+    def test_same_origin_referer_is_accepted_when_origin_is_absent(self) -> None:
+        snapshot = self.post("/api/disconnect", {}, origin=None, referer="same-origin")
+        self.assertFalse(snapshot["connected"])
+
+    def test_non_loopback_host_header_is_rejected(self) -> None:
+        result = self.assert_post_rejected(
+            "/api/disconnect",
+            {},
+            403,
+            host=f"attacker.example:{self.http_port}",
+        )
+        self.assertIn("Host", str(result["error"]))
+
+    def test_launch_rejects_client_supplied_emulator_path(self) -> None:
+        result = self.assert_post_rejected(
+            "/api/launch",
+            {
+                "ebootPath": "ignored",
+                "debugPort": 5714,
+                "emulatorPath": "C:/Windows/System32/calc.exe",
+            },
+            400,
+        )
+        self.assertIn("cannot be supplied over HTTP", str(result["error"]))
+
+    def test_connect_rejects_remote_ssrf_target_by_default(self) -> None:
+        result = self.assert_post_rejected(
+            "/api/connect",
+            {"host": "192.0.2.1", "port": 80},
+            502,
+        )
+        self.assertIn("Remote debugger connections are disabled", str(result["error"]))
+
+    def test_api_get_requires_token(self) -> None:
+        with self.assertRaises(HTTPError) as caught:
+            urlopen(f"http://127.0.0.1:{self.http_port}/api/snapshot", timeout=2)
+        with caught.exception as response:
+            self.assertEqual(403, response.code)
+
+    def test_frontend_cannot_bind_beyond_loopback(self) -> None:
+        with self.assertRaisesRegex(SystemExit, "only listen on localhost"):
+            create_frontend_server("0.0.0.0", 0, self.http_server.RequestHandlerClass)
 
     def test_rerun_replaces_existing_frontend_on_same_port(self) -> None:
         replacement_handler = type(
@@ -300,7 +486,11 @@ class FrontendHttpTests(unittest.TestCase):
         self.http_server = replacement
         self.http_thread = threading.Thread(target=replacement.serve_forever, daemon=True)
         self.http_thread.start()
-        with urlopen(f"http://127.0.0.1:{self.http_port}/api/health", timeout=2) as response:
+        health_request = Request(
+            f"http://127.0.0.1:{self.http_port}/api/health",
+            headers={CSRF_HEADER: replacement.csrf_token},
+        )
+        with urlopen(health_request, timeout=2) as response:
             health = json.load(response)
         self.assertEqual("sharpemu-debugger-frontend", health["application"])
 

@@ -12,8 +12,6 @@ public static class HostSessionControl
     private static Action<string>? _shutdownHandler;
     private static string? _pendingShutdownReason;
     private static int _shutdownRequested;
-    private static long _embeddedHostWindow;
-    private static long _embeddedHostDisplay;
 
     /// <summary>
     /// Indicates that the active host session is being stopped. Runtime code
@@ -21,21 +19,6 @@ public static class HostSessionControl
     /// GUI to its library.
     /// </summary>
     public static bool IsShutdownRequested => Volatile.Read(ref _shutdownRequested) != 0;
-
-    /// <summary>
-    /// Native GUI surface used by an isolated emulator child. Input backends
-    /// use it to treat the launcher window as the active game window.
-    /// </summary>
-    public static nint EmbeddedHostWindow => unchecked((nint)Interlocked.Read(ref _embeddedHostWindow));
-
-    /// <summary>X11 Display* paired with <see cref="EmbeddedHostWindow"/> when available.</summary>
-    public static nint EmbeddedHostDisplay => unchecked((nint)Interlocked.Read(ref _embeddedHostDisplay));
-
-    public static void SetEmbeddedHostSurface(nint window, nint display = 0)
-    {
-        Interlocked.Exchange(ref _embeddedHostDisplay, unchecked((long)display));
-        Interlocked.Exchange(ref _embeddedHostWindow, unchecked((long)window));
-    }
 
     /// <summary>
     /// Starts a fresh session after the previous guest has fully left its

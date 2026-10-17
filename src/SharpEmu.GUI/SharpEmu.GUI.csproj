@@ -9,16 +9,15 @@ SPDX-License-Identifier: GPL-2.0-or-later
        the executable is started without arguments. -->
   <PropertyGroup>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
-    <!-- Required by the source-generated LibraryImport stubs in the linked
-         controller readers below. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <!-- Dependency-free; provides the BuildInfo provenance shown in the
        title bar. -->
   <ItemGroup>
-    <!-- The GUI owns the native presentation control while each game runs in
-         an isolated emulator process. -->
+    <!-- Games run in isolated SDL-window processes; the GUI owns launch and
+         session controls only. -->
+    <ProjectReference Include="..\SharpEmu.LibAtrac9\SharpEmu.LibAtrac9.csproj" />
     <ProjectReference Include="..\SharpEmu.Core\SharpEmu.Core.csproj" />
     <ProjectReference Include="..\SharpEmu.Libs\SharpEmu.Libs.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
@@ -37,12 +36,21 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <ItemGroup>
+    <AvaloniaResource Include="Assets\Fonts\MaterialSymbolsRounded-400.ttf" />
     <AvaloniaResource Include="..\..\assets\images\SharpEmu.ico" Link="Assets/SharpEmu.ico" />
     <AvaloniaResource Include="..\..\assets\images\github.png" Link="Assets/github.png" />
     <AvaloniaResource Include="..\..\assets\images\discord.png" Link="Assets/discord.png" />
     <AvaloniaResource Include="..\..\assets\images\update-icon.png" Link="Assets/update-icon.png" />
     <AvaloniaResource Include="..\..\assets\images\commit-icon.png" Link="Assets/commit-icon.png" />
     <AvaloniaResource Include="..\..\assets\images\pic0.png" Link="Assets/pic0.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\LICENSES\Apache-2.0.txt"
+          Link="licenses\Apache-2.0.txt"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          TargetPath="licenses\Apache-2.0.txt" />
   </ItemGroup>
 
   <ItemGroup>

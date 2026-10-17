@@ -1,0 +1,721 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using System.Runtime.InteropServices;
+using System.Buffers.Binary;
+
+namespace SharpEmu.Libs.Media;
+
+/// <summary>
+/// Host-side movie bridge for games that decode video inside their own
+/// executable instead of going through an HLE decoder.
+///
+/// Such a game never imports libSceVideodec or sceAvPlayer, so no HLE export
+/// can see its movie frames. Kernel file opens identify the active movie and
+/// the presenter requests frames from <see cref="FfmpegVideoDecoder"/> — the
+/// same decoder sceAvPlayer uses, so every format is handled in one place.
+/// Frames reach the presenter as <see cref="HostMovieYuv420"/> planes.
+/// </summary>
+internal static class HostMovieBridge
+{
+    private const uint MaxDimension = 16384;
+    private const uint MaxHostVideoWidth = 1920;
+    private const uint MaxHostVideoHeight = 1080;
+
+    private static readonly string[] SelfDecodedMovieExtensions = [".bk2"];
+
+    internal static bool IsSelfDecodedMovie(string hostPath)
+    {
+        foreach (var extension in SelfDecodedMovieExtensions)
+        {
+            if (hostPath.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static readonly object Gate = new();
+    private static string? _activePath;
+    private static Bink2MovieInfo _activeInfo;
+    private static byte[]? _frameBuffer;
+    private static bool _frameBufferPresented;
+    private static MediaFramePlayback? _playback;
+    private static Timer? _playbackWatchdog;
+    private static long _watchdogFrameIndex = -1;
+    private static readonly TimeSpan StalledPlaybackTimeout = TimeSpan.FromSeconds(60);
+    private static long _frameSerial;
+    private static uint _presentationWidth = MaxHostVideoWidth;
+    private static uint _presentationHeight = MaxHostVideoHeight;
+    // TimedOutMoviePaths.Count, readable without Gate: every guest file read asks
+    // whether its file timed out, and almost none ever does.
+    private static int _timedOutMovieCount;
+
+    internal static bool IsHostPlaybackActive
+    {
+        get
+        {
+            lock (Gate)
+            {
+                return _playback is not null || _frameBuffer is not null;
+            }
+        }
+    }
+
+    internal static void SetPresentationSize(uint width, uint height)
+    {
+        if (width == 0 || height == 0)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            _presentationWidth = Math.Min(width, MaxHostVideoWidth);
+            _presentationHeight = Math.Min(height, MaxHostVideoHeight);
+        }
+    }
+
+    /// <summary>
+    /// Returns true only when movie skipping was explicitly requested. Without
+    /// a host adapter the guest must be allowed to run the Bink implementation
+    /// statically linked into its executable.
+    /// </summary>
+    internal static bool ShouldSkipGuestMovie(string hostPath) =>
+        IsSelfDecodedMovie(hostPath) &&
+        ResolveMode() == MovieMode.Skip;
+
+    /// <summary>
+    /// Starts or queues host decoding. Decoded frames are only exposed as a
+    /// sampled guest texture; presentation and UI composition remain guest-owned.
+    /// </summary>
+    internal static bool ObserveGuestMovie(string hostPath)
+    {
+        if (!IsSelfDecodedMovie(hostPath) || !File.Exists(hostPath))
+        {
+            return false;
+        }
+
+        lock (Gate)
+        {
+            if (string.Equals(_activePath, hostPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return _playback is not null || _frameBuffer is not null;
+            }
+
+            var mode = ResolveMode();
+            if (mode is MovieMode.Guest or MovieMode.Skip)
+            {
+                return false;
+            }
+
+            if (_playback is not null || _frameBuffer is not null)
+            {
+                if (PendingMoviePathSet.Add(hostPath))
+                {
+                    PendingMoviePaths.Enqueue(hostPath);
+                    Console.Error.WriteLine(
+                        "[LOADER][INFO] Bink2 bridge queued: " +
+                        Path.GetFileName(hostPath));
+                }
+                return PendingMoviePathSet.Contains(hostPath);
+            }
+
+            AttachMovieLocked(hostPath, mode);
+            return string.Equals(_activePath, hostPath, StringComparison.OrdinalIgnoreCase) &&
+                   (_playback is not null || _frameBuffer is not null);
+        }
+    }
+
+    internal static bool TryDecodeNextFrame(
+        bool advanceClock,
+        out byte[] pixels,
+        out uint width,
+        out uint height,
+        out bool advanced,
+        out long frameSerial,
+        out string hostPath)
+    {
+        // The render thread asks before every draw and dispatch. With no movie attached
+        // it must not queue on Gate behind guest file reads (Demon's Souls: ~15 % of the
+        // render thread blocked here). A movie attached meanwhile is picked up next call.
+        if (Volatile.Read(ref _playback) is null && Volatile.Read(ref _frameBuffer) is null)
+        {
+            pixels = [];
+            width = 0;
+            height = 0;
+            advanced = false;
+            frameSerial = Volatile.Read(ref _frameSerial);
+            hostPath = string.Empty;
+            return false;
+        }
+
+        lock (Gate)
+        {
+            pixels = [];
+            width = 0;
+            height = 0;
+            advanced = false;
+            frameSerial = _frameSerial;
+            hostPath = _activePath ?? string.Empty;
+
+            if (_playback is not null)
+            {
+                if (!_playback.TryGetFrame(advanceClock, out pixels, out advanced))
+                {
+                    if (_playback.IsFinished)
+                    {
+                        var completedPath = _activePath;
+                        var progress = _playback.PlaybackProgress;
+                        CloseActiveLocked();
+                        Console.Error.WriteLine(
+                            "[LOADER][INFO] Bink2 bridge completed: " +
+                            $"{Path.GetFileName(completedPath)} after " +
+                            $"{progress.Seconds:F2}s at frame {progress.FrameIndex}");
+                        AttachNextQueuedMovieLocked();
+                    }
+                    return false;
+                }
+
+                width = _activeInfo.Width;
+                height = _activeInfo.Height;
+                if (advanced)
+                {
+                    frameSerial = ++_frameSerial;
+                }
+                return true;
+            }
+
+            if (_frameBuffer is null)
+            {
+                return false;
+            }
+
+            pixels = _frameBuffer;
+            width = _activeInfo.Width;
+            height = _activeInfo.Height;
+            advanced = !_frameBufferPresented;
+            _frameBufferPresented = true;
+            if (advanced)
+            {
+                frameSerial = ++_frameSerial;
+            }
+            return true;
+        }
+    }
+
+    private static bool IsValid(Bink2MovieInfo info) =>
+        info.Width > 0 && info.Height > 0 &&
+        info.Width <= MaxDimension && info.Height <= MaxDimension &&
+        (ulong)info.Width * info.Height * 4 <= int.MaxValue;
+
+    private static int GetFrameBufferLength(Bink2MovieInfo info) =>
+        checked((int)((ulong)info.Width * info.Height * 4));
+
+    private static void AttachMovieLocked(string hostPath, MovieMode mode)
+    {
+        switch (mode)
+        {
+            case MovieMode.Dummy:
+                AttachDummyMovieLocked(hostPath);
+                return;
+            case MovieMode.Native:
+                AttachNativeMovieLocked(hostPath);
+                return;
+        }
+    }
+
+    private static void AttachNativeMovieLocked(string hostPath)
+    {
+        if (!FfmpegVideoDecoder.TryOpen(
+                hostPath, _presentationWidth, _presentationHeight, out var source) ||
+            source is null)
+        {
+            Console.Error.WriteLine(
+                "[LOADER][WARN] Bink2 bridge could not open movie '" +
+                Path.GetFileName(hostPath) + "'.");
+            return;
+        }
+
+        var info = new Bink2MovieInfo(
+            source.Width, source.Height, source.FramesPerSecondNumerator, source.FramesPerSecondDenominator);
+        if (!IsValid(info))
+        {
+            source.Dispose();
+            Console.Error.WriteLine(
+                "[LOADER][WARN] Bink2 bridge rejected invalid movie dimensions for '" +
+                Path.GetFileName(hostPath) + "'.");
+            return;
+        }
+
+        AttachPlaybackLocked(hostPath, info, new HostMovieYuv420Decoder(source));
+        Console.Error.WriteLine(
+            "[LOADER][INFO] Bink2 bridge attached: " + Path.GetFileName(hostPath) + " " +
+            info.Width + "x" + info.Height + " @ " +
+            info.FramesPerSecondNumerator + "/" + info.FramesPerSecondDenominator + " fps.");
+    }
+
+    private static MovieMode ResolveMode()
+    {
+        var configured = Environment.GetEnvironmentVariable("SHARPEMU_BINK_MODE");
+        if (string.Equals(configured, "dummy", StringComparison.OrdinalIgnoreCase))
+        {
+            return MovieMode.Dummy;
+        }
+
+        if (string.Equals(configured, "native", StringComparison.OrdinalIgnoreCase))
+        {
+            return MovieMode.Native;
+        }
+
+        if (string.Equals(configured, "skip", StringComparison.OrdinalIgnoreCase))
+        {
+            return MovieMode.Skip;
+        }
+
+        if (string.Equals(configured, "guest", StringComparison.OrdinalIgnoreCase))
+        {
+            return MovieMode.Guest;
+        }
+
+        if (string.Equals(configured, "ffmpeg", StringComparison.OrdinalIgnoreCase))
+        {
+            return MovieMode.Native;
+        }
+
+        return MovieMode.Guest;
+    }
+
+    private static void AttachDummyMovieLocked(string hostPath)
+    {
+        if (!TryReadBinkInfo(hostPath, out var info) || !IsValid(info))
+        {
+            Console.Error.WriteLine(
+                "[LOADER][WARN] Bink dummy could not read movie header '" +
+                Path.GetFileName(hostPath) + "'.");
+            return;
+        }
+
+        CloseActiveLocked();
+        _activePath = hostPath;
+        _activeInfo = info;
+        var bgra = GC.AllocateUninitializedArray<byte>(GetFrameBufferLength(info));
+        FillDummyFrame(bgra, info.Width, info.Height);
+        _frameBuffer = GC.AllocateUninitializedArray<byte>(
+            HostMovieYuv420.FrameLength(info.Width, info.Height));
+        HostMovieYuv420.ConvertFromBgra(bgra, info.Width, info.Height, _frameBuffer);
+        _frameBufferPresented = false;
+        ArmPlaybackWatchdogLocked(hostPath);
+        Console.Error.WriteLine(
+            "[LOADER][INFO] Bink dummy attached: " + Path.GetFileName(hostPath) + " " +
+            info.Width + "x" + info.Height + ".");
+    }
+
+    private static void AttachPlaybackLocked(
+        string hostPath,
+        Bink2MovieInfo info,
+        IMediaFrameDecoder decoder)
+    {
+        CloseActiveLocked();
+        _activePath = hostPath;
+        _activeInfo = info;
+        _playback = new MediaFramePlayback(decoder);
+        ArmPlaybackWatchdogLocked(hostPath);
+    }
+
+    private static void ArmPlaybackWatchdogLocked(string hostPath)
+    {
+        _playbackWatchdog?.Dispose();
+        _watchdogFrameIndex = -1;
+        var timeout = TryReadBinkInfo(hostPath, out var info)
+            ? GetPlaybackWatchdogTimeout(info)
+            : TimeSpan.FromSeconds(150);
+        _playbackWatchdog = new Timer(
+            static state =>
+            {
+                var path = (string)state!;
+                lock (Gate)
+                {
+                    if (!string.Equals(_activePath, path, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return;
+                    }
+
+                    // Playback follows the guest's own decode and audio clock, so a slow host plays a
+                    // movie slower than real time. Expire only a movie that stopped advancing: forcing EOF
+                    // under a guest decoder that is still mid-stream wedges it on the last frame.
+                    var frameIndex = _playback?.PlaybackProgress.FrameIndex ?? -1;
+                    if (_playback is not null && frameIndex > _watchdogFrameIndex)
+                    {
+                        _watchdogFrameIndex = frameIndex;
+                        _playbackWatchdog?.Change(StalledPlaybackTimeout, Timeout.InfiniteTimeSpan);
+                        return;
+                    }
+
+                    Console.Error.WriteLine(
+                        "[LOADER][WARN] Bink2 host watchdog expired for " +
+                        Path.GetFileName(path) + "; advancing to the next movie.");
+                    TimedOutMoviePaths.Add(path);
+                    Volatile.Write(ref _timedOutMovieCount, TimedOutMoviePaths.Count);
+                    CloseActiveLocked();
+                    AttachNextQueuedMovieLocked();
+                }
+            },
+            hostPath,
+            timeout,
+            Timeout.InfiniteTimeSpan);
+    }
+
+    // Must outlast the whole movie: Demon's Souls ships a 171 s intro and 756 s credits.
+    internal static TimeSpan GetPlaybackWatchdogTimeout(Bink2MovieInfo info)
+    {
+        if (info.FrameCount == 0 ||
+            info.FramesPerSecondNumerator == 0 ||
+            info.FramesPerSecondDenominator == 0)
+        {
+            return TimeSpan.FromSeconds(150);
+        }
+
+        var duration = (double)info.FrameCount *
+            info.FramesPerSecondDenominator /
+            info.FramesPerSecondNumerator;
+        return TimeSpan.FromSeconds(Math.Max(90, duration + 60));
+    }
+
+    internal static bool TryReadBinkInfo(string path, out Bink2MovieInfo info)
+    {
+        info = default;
+        Span<byte> header = stackalloc byte[36];
+        try
+        {
+            using var stream = File.OpenRead(path);
+            stream.ReadExactly(header);
+            if (!header[..3].SequenceEqual("KB2"u8))
+            {
+                return false;
+            }
+
+            info = new Bink2MovieInfo(
+                BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(0x14, 4)),
+                BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(0x18, 4)),
+                BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(8, 4)),
+                BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(0x1C, 4)),
+                BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(0x20, 4)));
+            return info.FramesPerSecondNumerator != 0 &&
+                   info.FramesPerSecondDenominator != 0;
+        }
+        catch (Exception exception) when (exception is IOException or EndOfStreamException)
+        {
+            return false;
+        }
+    }
+
+    private static void FillDummyFrame(byte[] pixels, uint width, uint height)
+    {
+        for (var y = 0u; y < height; y++)
+        {
+            for (var x = 0u; x < width; x++)
+            {
+                var offset = checked((int)(((ulong)y * width + x) * 4));
+                var band = ((x / 96) + (y / 96)) & 1;
+                pixels[offset] = band == 0 ? (byte)0x28 : (byte)0x18;
+                pixels[offset + 1] = band == 0 ? (byte)0x18 : (byte)0x28;
+                pixels[offset + 2] = 0x10;
+                pixels[offset + 3] = 0xFF;
+            }
+        }
+    }
+
+
+    private static void CloseActiveLocked()
+    {
+        _playbackWatchdog?.Dispose();
+        _playbackWatchdog = null;
+        _playback?.Dispose();
+        _playback = null;
+        _activePath = null;
+        _activeInfo = default;
+        _frameBuffer = null;
+        _frameBufferPresented = false;
+
+        // Wake any guest _read() blocked in WaitForHostPlaybackToFinish: its
+        // movie either just finished or is being pre-empted by a new attach.
+        Monitor.PulseAll(Gate);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal readonly struct Bink2MovieInfo
+    {
+        public readonly uint FrameCount;
+        public readonly uint Width;
+        public readonly uint Height;
+        public readonly uint FramesPerSecondNumerator;
+        public readonly uint FramesPerSecondDenominator;
+
+        internal Bink2MovieInfo(
+            uint width,
+            uint height,
+            uint frameCount,
+            uint framesPerSecondNumerator,
+            uint framesPerSecondDenominator)
+        {
+            Width = width;
+            Height = height;
+            FrameCount = frameCount;
+            FramesPerSecondNumerator = framesPerSecondNumerator;
+            FramesPerSecondDenominator = framesPerSecondDenominator;
+        }
+
+        internal Bink2MovieInfo(
+            uint width,
+            uint height,
+            uint framesPerSecondNumerator,
+            uint framesPerSecondDenominator)
+            : this(width, height, 0, framesPerSecondNumerator, framesPerSecondDenominator)
+        {
+        }
+    }
+
+    private enum MovieMode
+    {
+        Guest,
+        Skip,
+        Dummy,
+        Native,
+    }
+
+    private static readonly Queue<string> PendingMoviePaths = new();
+    private static readonly HashSet<string> PendingMoviePathSet =
+        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> TimedOutMoviePaths =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    internal static bool ShouldForceGuestMovieEof(string hostPath)
+    {
+        if (Volatile.Read(ref _timedOutMovieCount) == 0)
+        {
+            return false;
+        }
+
+        lock (Gate)
+        {
+            return TimedOutMoviePaths.Contains(hostPath);
+        }
+    }
+    private static void AttachNextQueuedMovieLocked()
+    {
+        while (PendingMoviePaths.Count > 0)
+        {
+            var path = PendingMoviePaths.Dequeue();
+            PendingMoviePathSet.Remove(path);
+            if (!File.Exists(path))
+            {
+                continue;
+            }
+
+            AttachMovieLocked(path, ResolveMode());
+            if (_playback is not null || _frameBuffer is not null)
+            {
+                return;
+            }
+        }
+    }
+    // Longest a guest _read() will block waiting for real host playback to
+    // finish. A safety net, not a target: real movies finish well under
+    // this. Bounds the damage if a movie fails to attach/decode after being
+    // queued, so the guest thread doesn't hang forever.
+    private const long MaxCompletionWaitMilliseconds = 5 * 60 * 1000;
+    /// <summary>
+    /// Blocks the calling (guest I/O) thread until the host has actually
+    /// finished presenting <paramref name="hostPath"/> — either because it
+    /// played through, or because something else took over the timeline.
+    ///
+    /// The completion shim tells the guest's own Bink header parse "this
+    /// movie is one frame and already done" so its native decoder never
+    /// blocks the guest on real per-frame work. Without this wait, that lie
+    /// lands the instant the guest reads the header, so guest-side game
+    /// logic races far ahead of whatever the host is still showing on
+    /// screen: pressing a button lands on the (already-advanced) guest
+    /// state, but the video visibly keeps playing, and any real-time-gated
+    /// trigger later in the guest's own flow can fire against a clock that
+    /// no longer matches wall time. Gating the "done" read on real host
+    /// completion keeps guest pacing and on-screen playback in lockstep.
+    /// </summary>
+    internal static void WaitForHostPlaybackToFinish(string hostPath)
+    {
+        var deadline = Environment.TickCount64 + MaxCompletionWaitMilliseconds;
+        lock (Gate)
+        {
+            while (IsTrackedLocked(hostPath))
+            {
+                var remaining = deadline - Environment.TickCount64;
+                if (remaining <= 0)
+                {
+                    Console.Error.WriteLine(
+                        "[LOADER][WARN] Bink2 bridge completion wait timed out for '" +
+                        Path.GetFileName(hostPath) + "'.");
+                    return;
+                }
+
+                Monitor.Wait(Gate, (int)Math.Min(remaining, 200));
+            }
+        }
+    }
+
+    private static bool IsTrackedLocked(string hostPath) =>
+        string.Equals(_activePath, hostPath, StringComparison.OrdinalIgnoreCase) ||
+        PendingMoviePathSet.Contains(hostPath);
+
+    internal static bool TryTakeOverGuestMovie(
+        string hostPath,
+        out BinkGuestCompletionShim completionShim,
+        out bool observed)
+    {
+        completionShim = default;
+        observed = ObserveGuestMovie(hostPath);
+
+        // Keep the real header visible so the guest creates its movie surface
+        // and draw. Host-decoded pixels replace that sampled image later; a
+        // one-frame completion shim would finish before the descriptor exists.
+        return false;
+    }
+
+    internal static void NotifyGuestMovieClosed(string hostPath)
+    {
+        lock (Gate)
+        {
+            TimedOutMoviePaths.Remove(hostPath);
+            Volatile.Write(ref _timedOutMovieCount, TimedOutMoviePaths.Count);
+            if (PendingMoviePathSet.Remove(hostPath))
+            {
+                var retained = PendingMoviePaths
+                    .Where(path => !string.Equals(
+                        path,
+                        hostPath,
+                        StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                PendingMoviePaths.Clear();
+                foreach (var path in retained)
+                {
+                    PendingMoviePaths.Enqueue(path);
+                }
+            }
+
+            if (!string.Equals(_activePath, hostPath, StringComparison.OrdinalIgnoreCase))
+            {
+                Monitor.PulseAll(Gate);
+                return;
+            }
+
+            Console.Error.WriteLine(
+                "[LOADER][INFO] Bink2 bridge stopped by guest close: " +
+                Path.GetFileName(hostPath));
+            CloseActiveLocked();
+            AttachNextQueuedMovieLocked();
+        }
+    }
+
+    internal static bool TryReadGuestCompletionShim(
+        string hostPath,
+        out BinkGuestCompletionShim completionShim)
+    {
+        completionShim = default;
+        Span<byte> header = stackalloc byte[48];
+        try
+        {
+            using var stream = File.OpenRead(hostPath);
+            stream.ReadExactly(header);
+            if (!header[..3].SequenceEqual("KB2"u8))
+            {
+                return false;
+            }
+
+            var frameCount = BinaryPrimitives.ReadUInt32LittleEndian(header[8..12]);
+            var audioTrackCount = BinaryPrimitives.ReadUInt32LittleEndian(header[40..44]);
+            if (frameCount < 2 || audioTrackCount > 256)
+            {
+                return false;
+            }
+
+            var revision = header[3];
+            var frameIndexOffset = 44L + checked(12L * audioTrackCount);
+            if (revision == (byte)'m')
+            {
+                frameIndexOffset += 16;
+            }
+            else if (revision is (byte)'i' or (byte)'j' or (byte)'k' or (byte)'n')
+            {
+                frameIndexOffset += 4;
+            }
+
+            Span<byte> frameOffsets = stackalloc byte[8];
+            stream.Position = frameIndexOffset;
+            stream.ReadExactly(frameOffsets);
+            var firstFrameOffset = BinaryPrimitives.ReadUInt32LittleEndian(frameOffsets[..4]) & ~1u;
+            var secondFrameOffset = BinaryPrimitives.ReadUInt32LittleEndian(frameOffsets[4..]) & ~1u;
+            if (firstFrameOffset < frameIndexOffset + 8 ||
+                secondFrameOffset <= firstFrameOffset ||
+                secondFrameOffset > stream.Length)
+            {
+                return false;
+            }
+
+            completionShim = new BinkGuestCompletionShim(
+                secondFrameOffset - 8,
+                secondFrameOffset - firstFrameOffset);
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is IOException or EndOfStreamException or OverflowException)
+        {
+            return false;
+        }
+    }
+
+    internal readonly struct BinkGuestCompletionShim
+    {
+        private readonly uint _fileSizeMinusHeader;
+        private readonly uint _largestFrameSize;
+
+        internal BinkGuestCompletionShim(uint fileSizeMinusHeader, uint largestFrameSize)
+        {
+            _fileSizeMinusHeader = fileSizeMinusHeader;
+            _largestFrameSize = largestFrameSize;
+        }
+
+        /// <summary>
+        /// Rewrites the frame-count/size fields the guest's own Bink header
+        /// parse reads, if this read covers them. Returns true when the
+        /// NumFrames field (the field that tells the guest "this movie is
+        /// done") was in range, so the caller can gate that specific read on
+        /// the host's real playback actually finishing first.
+        /// </summary>
+        internal bool Patch(long fileOffset, Span<byte> bytes)
+        {
+            PatchUInt32(fileOffset, bytes, 4, _fileSizeMinusHeader);
+            var touchedCompletionField = PatchUInt32(fileOffset, bytes, 8, 1);
+            PatchUInt32(fileOffset, bytes, 12, _largestFrameSize);
+            return touchedCompletionField;
+        }
+
+        private static bool PatchUInt32(
+            long fileOffset,
+            Span<byte> bytes,
+            long fieldOffset,
+            uint value)
+        {
+            var relativeOffset = fieldOffset - fileOffset;
+            if (relativeOffset < 0 || relativeOffset + sizeof(uint) > bytes.Length)
+            {
+                return false;
+            }
+
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                bytes.Slice((int)relativeOffset, sizeof(uint)),
+                value);
+            return true;
+        }
+    }
+}

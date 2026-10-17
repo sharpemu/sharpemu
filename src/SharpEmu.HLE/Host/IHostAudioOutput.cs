@@ -19,5 +19,11 @@ public interface IHostAudioOutput
     /// Throws when the host has no usable output device; callers degrade to a silent
     /// port and pace the guest instead.
     /// </summary>
-    IHostAudioStream OpenStereoPcm16Stream(uint sampleRate);
+    /// <param name="sampleRate">Host stream sample rate in Hz.</param>
+    /// <param name="maxQueuedPcmBytes">
+    /// Soft backpressure cap for queued stereo PCM16. Default 32 KiB (~171 ms at
+    /// 48 kHz) matches classic AudioOut latency. Bursty AudioOut2 / FMOD feeders
+    /// may pass a deeper cap to avoid underruns.
+    /// </param>
+    IHostAudioStream OpenStereoPcm16Stream(uint sampleRate, int maxQueuedPcmBytes = 32 * 1024);
 }

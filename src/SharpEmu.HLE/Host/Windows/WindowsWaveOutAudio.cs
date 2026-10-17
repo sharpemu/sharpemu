@@ -9,7 +9,8 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
 {
     public string BackendName => "winmm";
 
-    public IHostAudioStream OpenStereoPcm16Stream(uint sampleRate) => new WaveOutStream(sampleRate);
+    public IHostAudioStream OpenStereoPcm16Stream(uint sampleRate, int maxQueuedPcmBytes = 32 * 1024) =>
+        new WaveOutStream(sampleRate, maxQueuedPcmBytes);
 
     private sealed partial class WaveOutStream : IHostAudioStream
     {
@@ -17,8 +18,8 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
         private const uint CallbackEvent = 0x0005_0000;
         private const ushort WaveFormatPcm = 1;
         private const uint WaveHeaderDone = 0x0000_0001;
-        private const int MaximumQueuedPcmBytes = 32 * 1024;
 
+        private readonly int _maximumQueuedPcmBytes;
         private readonly object _gate = new();
         private readonly AutoResetEvent _completion = new(false);
         private readonly Queue<NativeBuffer> _buffers = new();
@@ -26,8 +27,9 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
         private int _queuedPcmBytes;
         private bool _disposed;
 
-        public WaveOutStream(uint sampleRate)
+        public WaveOutStream(uint sampleRate, int maxQueuedPcmBytes)
         {
+            _maximumQueuedPcmBytes = Math.Max(maxQueuedPcmBytes, 4 * 1024);
             var format = new WaveFormat
             {
                 FormatTag = WaveFormatPcm,
@@ -62,7 +64,7 @@ internal sealed partial class WindowsWaveOutAudio : IHostAudioOutput
 
                 ReapCompletedBuffers();
                 while (_queuedPcmBytes != 0 &&
-                       _queuedPcmBytes + stereoPcm16.Length > MaximumQueuedPcmBytes)
+                       _queuedPcmBytes + stereoPcm16.Length > _maximumQueuedPcmBytes)
                 {
                     if (!_completion.WaitOne(TimeSpan.FromSeconds(1)))
                     {

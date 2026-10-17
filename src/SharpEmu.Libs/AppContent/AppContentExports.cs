@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
@@ -10,6 +11,10 @@ namespace SharpEmu.Libs.AppContent;
 
 public static class AppContentExports
 {
+    private const ulong FallbackAvailableSpaceKb = 1024UL * 1024UL; // 1 GiB
+    private const int AppContentErrorParameter = unchecked((int)0x80D90002);
+    private const int AppContentErrorDrmNoEntitlement = unchecked((int)0x80D90007);
+    private const int MountPointSize = 16;
     private const ulong BootParamAttrOffset = 4;
     private const string Temp0MountPoint = "/temp0";
     private const uint AppParamSkuFlag = 0;
@@ -98,6 +103,29 @@ public static class AppContentExports
     }
 
     [SysAbiExport(
+        Nid = "VANhIWcqYak",
+        ExportName = "sceAppContentAddcontMount",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAppContent")]
+    public static int AppContentAddcontMount(CpuContext ctx)
+    {
+        var entitlementLabelAddress = ctx[CpuRegister.Rsi];
+        var mountPointAddress = ctx[CpuRegister.Rdx];
+        if (entitlementLabelAddress == 0 || mountPointAddress == 0)
+        {
+            return ctx.SetReturn(AppContentErrorParameter);
+        }
+
+        Span<byte> emptyMountPoint = stackalloc byte[MountPointSize];
+        if (!ctx.Memory.TryWrite(mountPointAddress, emptyMountPoint))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return ctx.SetReturn(AppContentErrorDrmNoEntitlement);
+    }
+
+    [SysAbiExport(
         Nid = "buYbeLOGWmA",
         ExportName = "sceAppContentTemporaryDataMount2",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -110,7 +138,7 @@ public static class AppContentExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        Directory.CreateDirectory(ResolveTemp0Root());
+        Directory.CreateDirectory(KernelMemoryCompatExports.ResolveTemp0Root());
         var mountPointBytes = Encoding.ASCII.GetBytes($"{Temp0MountPoint}\0");
         if (!ctx.Memory.TryWrite(mountPointAddress, mountPointBytes))
         {
@@ -121,22 +149,31 @@ public static class AppContentExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    // Download data is not emulated as a real quota; report a comfortable
-    // fixed amount of free space so titles never take the "storage full" path.
+    [SysAbiExport(
+        Nid = "SaKib2Ug0yI",
+        ExportName = "sceAppContentTemporaryDataGetAvailableSpaceKb",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAppContent")]
+    public static int AppContentTemporaryDataGetAvailableSpaceKb(CpuContext ctx) =>
+        WriteAvailableSpaceKb(ctx, "temporary_data");
+
     [SysAbiExport(
         Nid = "Gl6w5i0JokY",
         ExportName = "sceAppContentDownloadDataGetAvailableSpaceKb",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceAppContent")]
     public static int AppContentDownloadDataGetAvailableSpaceKb(CpuContext ctx)
+        => WriteAvailableSpaceKb(ctx, "download_data");
+
+    private static int WriteAvailableSpaceKb(CpuContext ctx, string storageKind)
     {
-        const ulong availableSpaceKb = 1024UL * 1024UL; // 1 GiB
         var availableSpaceAddress = ctx[CpuRegister.Rsi];
         if (availableSpaceAddress == 0)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var availableSpaceKb = GetHostAvailableSpaceKb();
         Span<byte> spaceBytes = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(spaceBytes, availableSpaceKb);
         if (!ctx.Memory.TryWrite(availableSpaceAddress, spaceBytes))
@@ -144,8 +181,33 @@ public static class AppContentExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
+        TraceAppContent($"{storageKind}_available_space_kb value={availableSpaceKb}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static ulong GetHostAvailableSpaceKb()
+    {
+        try
+        {
+            var storageRoot = KernelMemoryCompatExports.ResolveTemp0Root();
+            Directory.CreateDirectory(storageRoot);
+            var volumeRoot = Path.GetPathRoot(Path.GetFullPath(storageRoot));
+            if (!string.IsNullOrWhiteSpace(volumeRoot))
+            {
+                var availableBytes = new DriveInfo(volumeRoot).AvailableFreeSpace;
+                if (availableBytes > 0)
+                {
+                    return checked((ulong)availableBytes / 1024UL);
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            TraceAppContent($"available_space_fallback error='{exception.Message}'");
+        }
+
+        return FallbackAvailableSpaceKb;
     }
 
     private static bool TryReadUserDefinedParam(uint paramId, out int value)
@@ -205,28 +267,4 @@ public static class AppContentExports
         Console.Error.WriteLine($"[LOADER][TRACE] app_content.{message}");
     }
 
-    private static string ResolveTemp0Root()
-    {
-        const string temp0VariableName = "SHARPEMU_TEMP0_DIR";
-        var configuredRoot = Environment.GetEnvironmentVariable(temp0VariableName);
-        if (!string.IsNullOrWhiteSpace(configuredRoot))
-        {
-            return Path.GetFullPath(configuredRoot);
-        }
-
-        var app0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
-        var appName = string.IsNullOrWhiteSpace(app0Root)
-            ? "default"
-            : Path.GetFileName(Path.TrimEndingDirectorySeparator(app0Root));
-        if (string.IsNullOrWhiteSpace(appName))
-        {
-            appName = "default";
-        }
-
-        var invalidChars = Path.GetInvalidFileNameChars();
-        appName = new string(appName.Select(ch => invalidChars.Contains(ch) ? '_' : ch).ToArray());
-        var root = Path.Combine(Path.GetTempPath(), "SharpEmu", appName, "temp0");
-        Environment.SetEnvironmentVariable(temp0VariableName, root);
-        return root;
-    }
 }

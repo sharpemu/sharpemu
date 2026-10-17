@@ -1,0 +1,36 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Window chrome button sizing and interaction states.
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Style Selector="Button.windowChrome">
+    <Setter Property="Width" Value="46" />
+    <Setter Property="Height" Value="44" />
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="MinHeight" Value="0" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="TextBlock.windowChromeGlyph">
+    <Setter Property="IsHitTestVisible" Value="False" />
+  </Style>
+  <Style Selector="TextBlock.windowCloseGlyph">
+    <Setter Property="Margin" Value="0,-1,0,1" />
+  </Style>
+  <Style Selector="Button.windowChrome:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="Button.windowClose:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource DangerBrush}" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+</Styles>

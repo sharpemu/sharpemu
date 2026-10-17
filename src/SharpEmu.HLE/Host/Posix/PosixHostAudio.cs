@@ -12,10 +12,10 @@ internal sealed class PosixHostAudio : IHostAudioOutput
 {
     public string BackendName => OperatingSystem.IsMacOS() ? "coreaudio" : "alsa";
 
-    public IHostAudioStream OpenStereoPcm16Stream(uint sampleRate)
+    public IHostAudioStream OpenStereoPcm16Stream(uint sampleRate, int maxQueuedPcmBytes = 32 * 1024)
     {
         return OperatingSystem.IsMacOS()
-            ? new PosixCoreAudioStream(sampleRate)
-            : new PosixAlsaAudioStream(sampleRate);
+            ? new PosixCoreAudioStream(sampleRate, maxQueuedPcmBytes)
+            : new PosixAlsaAudioStream(sampleRate, maxQueuedPcmBytes);
     }
 }

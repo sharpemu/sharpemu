@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.FileSystem;
 using SharpEmu.Libs.Kernel;
 using System.Buffers;
 using System.Buffers.Binary;
@@ -15,6 +16,16 @@ public static class Ngs2Exports
     private const int OrbisNgs2ErrorInvalidSystemHandle = unchecked((int)0x804A0230);
     private const int OrbisNgs2ErrorInvalidRackHandle = unchecked((int)0x804A0261);
     private const int OrbisNgs2ErrorInvalidVoiceHandle = unchecked((int)0x804A0300);
+    // Waveform-parse error codes. The PS5 error base is 0x804A80xx while the PS4
+    // library (and OrbisNgs2ErrorInvalidOutAddress above) used 0x804A00xx; the parse
+    // APIs only exist with the newer numbering.
+    private const int OrbisNgs2ErrorInvalidParseOutAddress = unchecked((int)0x804A8010);
+    private const int OrbisNgs2ErrorInvalidWaveformAddress = unchecked((int)0x804A8055);
+    private const int OrbisNgs2ErrorInvalidWaveformData = unchecked((int)0x804A8430);
+    private const int OrbisNgs2ErrorInvalidWaveformFormat = unchecked((int)0x804A8431);
+    // Container headers are small; RIFF/VAG descriptors always fit well inside this.
+    private const ulong MaximumWaveformHeaderBytes = 0x1000;
+    private const int MaximumWaveformPathBytes = 1024;
     private const ulong HandleStorageSize = 0x20;
     private const int RenderBufferInfoSize = 0x18;
     private const ulong MaximumRenderBufferSize = 16 * 1024 * 1024;
@@ -30,7 +41,7 @@ public static class Ngs2Exports
     // The grain length defaults to 256 frames (matching the 8192-byte AudioOut
     // buffers games copy it into) until the title overrides it.
     private const int DefaultGrainSamples = 256;
-    private const double OutputSampleRate = 48000.0;
+    private const int DefaultSampleRate = 48000;
 
     private sealed class SystemState
     {
@@ -38,6 +49,7 @@ public static class Ngs2Exports
 
         public uint Uid { get; }
         public int GrainSamples { get; set; } = DefaultGrainSamples;
+        public int SampleRate { get; set; } = DefaultSampleRate;
     }
 
     private sealed record RackState(ulong SystemHandle, uint RackId);
@@ -496,6 +508,7 @@ public static class Ngs2Exports
             return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
+        Span<byte> renderBufferInfo = stackalloc byte[RenderBufferInfoSize];
         for (uint i = 0; i < bufferInfoCount; i++)
         {
             var entryAddress = bufferInfoAddress + (i * RenderBufferInfoSize);
@@ -527,10 +540,9 @@ public static class Ngs2Exports
 
                 if (ShouldTrace() && Interlocked.Increment(ref _renderInfoDumps) <= 4)
                 {
-                    Span<byte> rbi = stackalloc byte[RenderBufferInfoSize];
-                    ctx.Memory.TryRead(entryAddress, rbi);
+                    ctx.Memory.TryRead(entryAddress, renderBufferInfo);
                     Console.Error.WriteLine(
-                        $"[LOADER][TRACE] ngs2.renderbufinfo addr=0x{bufferAddress:X} size={bufferSize} ch={channels} raw={Convert.ToHexString(rbi)}");
+                        $"[LOADER][TRACE] ngs2.renderbufinfo addr=0x{bufferAddress:X} size={bufferSize} ch={channels} raw={Convert.ToHexString(renderBufferInfo)}");
                 }
             }
         }
@@ -552,6 +564,7 @@ public static class Ngs2Exports
         CpuContext ctx, ulong systemHandle, ulong bufferAddress, ulong bufferSize, int channels)
     {
         int grain;
+        int sampleRate;
         lock (StateGate)
         {
             if (!Systems.TryGetValue(systemHandle, out var system))
@@ -560,6 +573,7 @@ public static class Ngs2Exports
             }
 
             grain = system.GrainSamples;
+            sampleRate = system.SampleRate;
         }
 
         var capacityFrames = (int)Math.Min((ulong)grain, bufferSize / (ulong)(channels * sizeof(float)));
@@ -590,7 +604,7 @@ public static class Ngs2Exports
                         continue;
                     }
 
-                    MixOneVoice(accum, capacityFrames, channels, voice);
+                    MixOneVoice(accum, capacityFrames, channels, sampleRate, voice);
                     mixedAnything = true;
                 }
             }
@@ -606,15 +620,20 @@ public static class Ngs2Exports
         }
     }
 
-    // Resample one voice from its source rate to 48 kHz (nearest-sample) and add
+    // Resample one voice to the system rate and add
     // it to the front stereo pair. Advances the voice cursor and handles loop /
     // one-shot end. Must be called under StateGate.
-    private static void MixOneVoice(float[] accum, int frames, int channels, VoiceState voice)
+    private static void MixOneVoice(
+        float[] accum,
+        int frames,
+        int channels,
+        int outputSampleRate,
+        VoiceState voice)
     {
         var pcm = voice.Pcm!;
         var loopEnd = voice.LoopEnd > 0 && voice.LoopEnd <= pcm.Length ? voice.LoopEnd : pcm.Length;
         var loopStart = voice.LoopStart;
-        var step = voice.SourceRate / OutputSampleRate;
+        var step = voice.SourceRate / (double)outputSampleRate;
         var gain = voice.Gain / 32768f;
         var pos = voice.Position;
         for (var f = 0; f < frames; f++)
@@ -640,7 +659,14 @@ public static class Ngs2Exports
                 break;
             }
 
-            var sample = pcm[idx] * gain;
+            var next = idx + 1;
+            if (next >= loopEnd)
+            {
+                next = loopStart >= 0 && loopStart < loopEnd ? loopStart : idx;
+            }
+
+            var fraction = pos - idx;
+            var sample = (float)((pcm[idx] + ((pcm[next] - pcm[idx]) * fraction)) * gain);
             var baseIndex = f * channels;
             accum[baseIndex] += sample;
             if (channels > 1)
@@ -736,7 +762,27 @@ public static class Ngs2Exports
         ExportName = "sceNgs2SystemSetSampleRate",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceNgs2")]
-    public static int Ngs2SystemSetSampleRate(CpuContext ctx) => ValidateSystem(ctx);
+    public static int Ngs2SystemSetSampleRate(CpuContext ctx)
+    {
+        var systemHandle = ctx[CpuRegister.Rdi];
+        var sampleRate = unchecked((int)ctx[CpuRegister.Rsi]);
+        lock (StateGate)
+        {
+            if (!Systems.TryGetValue(systemHandle, out var system))
+            {
+                return SetReturn(ctx, OrbisNgs2ErrorInvalidSystemHandle);
+            }
+
+            if (sampleRate is < 8000 or > 192000)
+            {
+                return SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            }
+
+            system.SampleRate = sampleRate;
+        }
+
+        return SetReturn(ctx, 0);
+    }
 
     [SysAbiExport(
         Nid = "gThZqM5PYlQ",
@@ -862,6 +908,197 @@ public static class Ngs2Exports
                      .ToArray())
         {
             Voices.Remove(voiceHandle);
+        }
+    }
+
+    // ABI: int32_t sceNgs2ParseWaveformData(const void *data, size_t dataSize,
+    // SceNgs2WaveformInfo *outInfo).
+    [SysAbiExport(
+        Nid = "hyVLT2VlOYk",
+        ExportName = "sceNgs2ParseWaveformData",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2ParseWaveformData(CpuContext ctx)
+    {
+        var dataAddress = ctx[CpuRegister.Rdi];
+        var dataSize = ctx[CpuRegister.Rsi];
+        var outInfoAddress = ctx[CpuRegister.Rdx];
+        if (outInfoAddress == 0)
+        {
+            return SetReturn(ctx, OrbisNgs2ErrorInvalidParseOutAddress);
+        }
+
+        if (dataAddress == 0 || dataSize == 0)
+        {
+            return SetReturn(ctx, OrbisNgs2ErrorInvalidWaveformAddress);
+        }
+
+        // Only the container header is needed; cap the copy so a title that
+        // declares a multi-megabyte streaming buffer does not drag it all in.
+        var length = (int)Math.Min(dataSize, MaximumWaveformHeaderBytes);
+        var buffer = ArrayPool<byte>.Shared.Rent(length);
+        try
+        {
+            var span = buffer.AsSpan(0, length);
+            if (!ctx.Memory.TryRead(dataAddress, span))
+            {
+                return SetReturn(ctx, OrbisNgs2ErrorInvalidWaveformAddress);
+            }
+
+            return WriteParsedWaveform(ctx, span, dataSize, outInfoAddress);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    // ABI: int32_t sceNgs2ParseWaveformFile(const char *path, uint64_t offset,
+    // SceNgs2WaveformInfo *outInfo).
+    [SysAbiExport(
+        Nid = "iprCTXPVWMI",
+        ExportName = "sceNgs2ParseWaveformFile",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2ParseWaveformFile(CpuContext ctx)
+    {
+        var pathAddress = ctx[CpuRegister.Rdi];
+        var offset = ctx[CpuRegister.Rsi];
+        var outInfoAddress = ctx[CpuRegister.Rdx];
+        if (outInfoAddress == 0)
+        {
+            return SetReturn(ctx, OrbisNgs2ErrorInvalidParseOutAddress);
+        }
+
+        if (pathAddress == 0 || !TryReadGuestPath(ctx, pathAddress, out var guestPath))
+        {
+            return SetReturn(ctx, OrbisNgs2ErrorInvalidWaveformAddress);
+        }
+
+        var hostPath = KernelMemoryCompatExports.ResolveGuestPath(guestPath);
+        byte[] header;
+        long fileLength;
+        try
+        {
+            using var stream = App0Archive.OpenReadOrFile(hostPath);
+            fileLength = stream.Length;
+            if (offset >= (ulong)fileLength)
+            {
+                return SetReturn(ctx, OrbisNgs2ErrorInvalidWaveformData);
+            }
+
+            stream.Position = (long)offset;
+            var length = (int)Math.Min((ulong)(fileLength - (long)offset), MaximumWaveformHeaderBytes);
+            header = new byte[length];
+            stream.ReadExactly(header, 0, length);
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            Trace($"parse-waveform-file open-failed path={guestPath} error={exception.Message}");
+            return SetReturn(ctx, OrbisNgs2ErrorInvalidWaveformData);
+        }
+
+        return WriteParsedWaveform(ctx, header, (ulong)fileLength - offset, outInfoAddress);
+    }
+
+    // ABI: int32_t sceNgs2ParseWaveformUser(SceNgs2ParseReadHandler handler,
+    // uintptr_t userData, SceNgs2WaveformInfo *outInfo). The handler is a guest
+    // callback, which this HLE cannot drive, so report the data as unparsable
+    // rather than publishing a fabricated description.
+    [SysAbiExport(
+        Nid = "t9T0QM17Kvo",
+        ExportName = "sceNgs2ParseWaveformUser",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceNgs2")]
+    public static int Ngs2ParseWaveformUser(CpuContext ctx) =>
+        SetReturn(
+            ctx,
+            ctx[CpuRegister.Rdx] == 0
+                ? OrbisNgs2ErrorInvalidParseOutAddress
+                : OrbisNgs2ErrorInvalidWaveformData);
+
+    private static int WriteParsedWaveform(
+        CpuContext ctx,
+        ReadOnlySpan<byte> header,
+        ulong totalDataSize,
+        ulong outInfoAddress)
+    {
+        if (!Ngs2WaveformParser.TryParse(header, out var parsed))
+        {
+            Trace(
+                Ngs2WaveformParser.IsSupportedContainer(header)
+                    ? "parse-waveform unsupported-format"
+                    : "parse-waveform unknown-container");
+            return SetReturn(
+                ctx,
+                Ngs2WaveformParser.IsSupportedContainer(header)
+                    ? OrbisNgs2ErrorInvalidWaveformFormat
+                    : OrbisNgs2ErrorInvalidWaveformData);
+        }
+
+        // Only the container header was copied in. When the real image is longer,
+        // the data chunk continues past it, so extend it from the caller's total
+        // length instead of reporting the truncated size.
+        if ((ulong)header.Length < totalDataSize && totalDataSize > parsed.DataOffset)
+        {
+            var available = totalDataSize - parsed.DataOffset;
+            parsed.DataSize = (uint)Math.Min(available, uint.MaxValue);
+            if (parsed.AudioUnitSize != 0 &&
+                parsed.WaveformType != Ngs2WaveformParser.WaveformTypeAtrac9)
+            {
+                parsed.NumSamples =
+                    parsed.DataSize / parsed.AudioUnitSize * parsed.NumAudioUnitSamples;
+                parsed.LoopEndPosition = parsed.LoopEndPosition == 0 && parsed.NumSamples != 0
+                    ? parsed.NumSamples - 1
+                    : parsed.LoopEndPosition;
+            }
+        }
+
+        Span<byte> info = stackalloc byte[Ngs2WaveformParser.WaveformInfoSize];
+        Ngs2WaveformParser.Write(parsed, info);
+        if (!ctx.Memory.TryWrite(outInfoAddress, info))
+        {
+            return SetReturn(ctx, OrbisNgs2ErrorInvalidParseOutAddress);
+        }
+
+        Trace(
+            $"parse-waveform type=0x{parsed.WaveformType:X} channels={parsed.NumChannels} " +
+            $"rate={parsed.SampleRate} dataOffset=0x{parsed.DataOffset:X} " +
+            $"dataSize=0x{parsed.DataSize:X} samples={parsed.NumSamples}");
+        return SetReturn(ctx, 0);
+    }
+
+    private static bool TryReadGuestPath(CpuContext ctx, ulong address, out string path)
+    {
+        Span<byte> buffer = stackalloc byte[MaximumWaveformPathBytes];
+        var length = 0;
+        Span<byte> one = stackalloc byte[1];
+        while (length < buffer.Length)
+        {
+            if (!ctx.Memory.TryRead(address + (ulong)length, one))
+            {
+                break;
+            }
+
+            if (one[0] == 0)
+            {
+                path = System.Text.Encoding.UTF8.GetString(buffer[..length]);
+                return length != 0;
+            }
+
+            buffer[length++] = one[0];
+        }
+
+        path = string.Empty;
+        return false;
+    }
+
+    private static void Trace(string message)
+    {
+        if (ShouldTrace())
+        {
+            Console.Error.WriteLine($"[LOADER][TRACE] ngs2.{message}");
         }
     }
 

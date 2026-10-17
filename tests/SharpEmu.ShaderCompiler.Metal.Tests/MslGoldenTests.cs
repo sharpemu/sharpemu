@@ -24,37 +24,28 @@ public sealed class MslGoldenTests
         return data;
     }
 
-    [Fact]
-    public void PixelShaderMatchesGolden()
-    {
-        var shader = Gen5ComputeFixtures.CompilePixelOrThrow();
-        AssertMatchesGolden("pixel", shader.Source);
-    }
-
-    [Fact]
-    public void VertexShaderMatchesGolden()
-    {
-        var shader = Gen5ComputeFixtures.CompileVertexOrThrow(requiredVertexOutputCount: 1);
-        AssertMatchesGolden("vertex", shader.Source);
-    }
-
+    // The same fixtures through a compile request: the argument buffer replaces the uniforms.
     [Theory]
     [MemberData(nameof(FixtureNames))]
-    public void EmittedMslMatchesGolden(string name)
+    public void RequestPathMatchesGolden(string name)
     {
-        Gen5ComputeFixture? fixture = null;
-        foreach (var candidate in Gen5ComputeFixtures.All)
-        {
-            if (candidate.Name == name)
-            {
-                fixture = candidate;
-                break;
-            }
-        }
+        var fixture = Gen5ComputeFixtures.All.Single(candidate => candidate.Name == name);
+        var shader = Gen5ComputeFixtures.CompileRequestOrThrow(fixture);
+        AssertMatchesGolden($"{name}-layout", shader.Source);
+    }
 
-        Assert.NotNull(fixture);
-        var shader = Gen5ComputeFixtures.CompileOrThrow(fixture);
-        AssertMatchesGolden(name, shader.Source);
+    [Fact]
+    public void PixelRequestMatchesGolden()
+    {
+        var shader = Gen5ComputeFixtures.CompileStageRequestOrThrow(Gen5ComputeFixtures.PixelWords, Resources.ShaderStage.Pixel);
+        AssertMatchesGolden("pixel-layout", shader.Source);
+    }
+
+    [Fact]
+    public void VertexRequestMatchesGolden()
+    {
+        var shader = Gen5ComputeFixtures.CompileStageRequestOrThrow(Gen5ComputeFixtures.VertexWords, Resources.ShaderStage.Vertex, requiredVertexOutputCount: 1);
+        AssertMatchesGolden("vertex-layout", shader.Source);
     }
 
     private static void AssertMatchesGolden(string name, string source)

@@ -26,22 +26,21 @@ public sealed unsafe class CpuPatcher : IDisposable
 
     internal unsafe class UnsafeCodeReader : Iced.Intel.CodeReader
     {
-        private byte* _start;
-        private byte* _current;
-        private int _length;
+        private readonly byte* _start;
+        private readonly ulong _length;
+        public ulong Position { get; private set; }
 
-        public UnsafeCodeReader(byte* start, int length)
+        public UnsafeCodeReader(byte* start, ulong length)
         {
             _start = start;
-            _current = start;
             _length = length;
         }
 
         public override int ReadByte()
         {
-            if (_current >= _start + _length)
+            if (Position >= _length)
                 return -1;
-            return *_current++;
+            return _start[Position++];
         }
     }
 }

@@ -59,4 +59,159 @@ public static class GameServiceStubs
     public static int NpUniversalDataSystemCreateEvent(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
     public static int NpUniversalDataSystemPostEvent(CpuContext ctx) => Ok(ctx);
     public static int NpUniversalDataSystemDestroyEvent(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "0HBYxYAjmf0", ExportName = "sceNpGameIntentTerminate",
+        Target = Generation.Gen5, LibraryName = "libSceNpGameIntent")]
+    public static int NpGameIntentTerminate(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "mlYGfmqE3fQ", ExportName = "sceSigninDialogInitialize",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSigninDialog")]
+    public static int SigninDialogInitialize(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "JlpJVoRWv7U", ExportName = "sceSigninDialogOpen",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSigninDialog")]
+    public static int SigninDialogOpen(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "Bw31liTFT3A", ExportName = "sceSigninDialogUpdateStatus",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSigninDialog")]
+    public static int SigninDialogUpdateStatus(CpuContext ctx) => ctx.SetReturn(3);
+
+    [SysAbiExport(Nid = "nqG7rqnYw1U", ExportName = "sceSigninDialogGetResult",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSigninDialog")]
+    public static int SigninDialogGetResult(CpuContext ctx)
+    {
+        var address = ctx[CpuRegister.Rdi];
+        if (address == 0)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        Span<byte> result = stackalloc byte[16];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(result, 1); // User canceled.
+        return ctx.Memory.TryWrite(address, result)
+            ? Ok(ctx)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(Nid = "LXlmS6PvJdU", ExportName = "sceSigninDialogTerminate",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSigninDialog")]
+    public static int SigninDialogTerminate(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "UOjiprYwVNw", ExportName = "sceTextToSpeech2Initialize",
+        Target = Generation.Gen5, LibraryName = "libSceTextToSpeech2")]
+    public static int TextToSpeech2Initialize(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "X0HZNbSiqyg", ExportName = "sceTextToSpeech2Open",
+        Target = Generation.Gen5, LibraryName = "libSceTextToSpeech2")]
+    public static int TextToSpeech2Open(CpuContext ctx) =>
+        ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_IMPLEMENTED);
+
+    [SysAbiExport(Nid = "2jiIxUmcsGo", ExportName = "sceTextToSpeech2Cancel",
+        Target = Generation.Gen5, LibraryName = "libSceTextToSpeech2")]
+    public static int TextToSpeech2Cancel(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "08JSg9p6bgQ", ExportName = "sceTextToSpeech2GetSpeechStatus",
+        Target = Generation.Gen5, LibraryName = "libSceTextToSpeech2")]
+    public static int TextToSpeech2GetSpeechStatus(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "kvYEw2lBndk", ExportName = "sceGameLiveStreamingInitialize",
+        Target = Generation.Gen5, LibraryName = "libSceGameLiveStreaming")]
+    public static int GameLiveStreamingInitialize(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "isruqthpYcw", ExportName = "sceSharePlayInitialize",
+        Target = Generation.Gen5, LibraryName = "libSceSharePlay")]
+    public static int SharePlayInitialize(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "0IL1keINExQ", ExportName = "sceShareTerminate",
+        Target = Generation.Gen5, LibraryName = "libSceShareUtility")]
+    public static int ShareTerminate(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "YBiIdcDPrxs", ExportName = "sceShareFeaturePermit",
+        Target = Generation.Gen5, LibraryName = "libSceShareUtility")]
+    public static int ShareFeaturePermit(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "9TrhuGzberQ", ExportName = "sceVoiceInit",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceInit(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "clyKUyi3RYU", ExportName = "sceVoiceSetThreadsParams",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceSetThreadsParams(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "nXpje5yNpaE", ExportName = "sceVoiceCreatePort",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceCreatePort(CpuContext ctx) => OkWithHandle(ctx, CpuRegister.Rdi);
+
+    [SysAbiExport(Nid = "b7kJI+nx2hg", ExportName = "sceVoiceDeletePort",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceDeletePort(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "oV9GAdJ23Gw", ExportName = "sceVoiceConnectIPortToOPort",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceConnectIPortToOPort(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "ajVj3QG2um4", ExportName = "sceVoiceDisconnectIPortFromOPort",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceDisconnectIPortFromOPort(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "Oo0S5PH7FIQ", ExportName = "sceVoiceEnd",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceEnd(CpuContext ctx) => Ok(ctx);
+
+
+    [SysAbiExport(Nid = "amuBfI-AQc4", ExportName = "sceRudpInit",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceRudp")]
+    public static int RudpInit(CpuContext ctx) => Ok(ctx);
+
+        [SysAbiExport(Nid = "6PBNpsgyaxw", ExportName = "sceRudpEnableInternalIOThread",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceRudp")]
+    public static int RudpEnableInternalIOThread(CpuContext ctx) => Ok(ctx);
+
+        [SysAbiExport(Nid = "SUEVes8gvmw", ExportName = "sceRudpSetEventHandler",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceRudp")]
+    public static int RudpSetEventHandler(CpuContext ctx) => Ok(ctx);
+
+
+    [SysAbiExport(Nid = "84fDxStrG44", ExportName = "sceDeviceServiceInitialize",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceDeviceService")]
+    public static int DeviceServiceInitialize(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "9ddRUOV8Q5A", ExportName = "sceDeviceServiceGetEventState",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceDeviceService")]
+    public static int DeviceServiceGetEventState(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "UNMEa+5lrUA", ExportName = "sceDeviceServiceQueryDeviceInfo_",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceDeviceService")]
+    public static int DeviceServiceQueryDeviceInfo(CpuContext ctx)
+    {
+        // No host device-service backend yet. Report the device as unavailable
+        // so callers can take their normal gamepad/non-special-device fallback.
+        const int notFound = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        ctx[CpuRegister.Rax] = unchecked((ulong)notFound);
+        return notFound;
+    }
+
+    [SysAbiExport(Nid = "c812oYs7Vsc", ExportName = "sceHmd2Initialize",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceHmd2")]
+    public static int Hmd2Initialize(CpuContext ctx)
+    {
+        // HMD2 is optional for this title; keep VR unavailable rather than
+        // advertising an initialized headset that SharpEmu cannot service.
+        const int notFound = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        ctx[CpuRegister.Rax] = unchecked((ulong)notFound);
+        return notFound;
+    }
+
+    [SysAbiExport(Nid = "dPj4ZtRcIWk", ExportName = "sceContentSearchInit",
+        Target = Generation.Gen5, LibraryName = "libSceContentSearch")]
+    public static int ContentSearchInit(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "zoxb0wEChEM", ExportName = "sceContentDeleteInitialize",
+        Target = Generation.Gen5, LibraryName = "libSceContentDelete")]
+    public static int ContentDeleteInitialize(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "Fc8qxlKINYQ", ExportName = "sceVideoRecordingSetInfo",
+        Target = Generation.Gen5, LibraryName = "libSceVideoRecording")]
+    public static int VideoRecordingSetInfo(CpuContext ctx) => Ok(ctx);
+
 }

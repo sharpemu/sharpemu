@@ -56,6 +56,8 @@ public sealed class SelfLoader : ISelfLoader
     private const long DtSceStrSize = 0x61000037;
     private const long DtSceSymTab = 0x61000039;
     private const long DtSceSymTabSize = 0x6100003F;
+    private const long DtSceNeededModule = 0x6100000F;
+    private const long DtSceNeededModuleNext = 0x61000045;
 
     private const uint RelocationTypeNone = 0;
     private const uint RelocationTypeAbsolute64 = 1;
@@ -169,6 +171,7 @@ public sealed class SelfLoader : ISelfLoader
 
         if (clearVirtualMemory)
         {
+            SharpEmu.Libs.Kernel.KernelMemoryCompatExports.ResetBackingMappings(virtualMemory as IGuestBackedSpace);
             virtualMemory.Clear();
             _nextTlsModuleId = 1;
             GuestTlsTemplate.Reset();
@@ -199,9 +202,32 @@ public sealed class SelfLoader : ISelfLoader
             {
                 if (!physicalVm.TryAllocateAtExact(imageBase, totalImageSize, executable: true, out var allocatedBase))
                 {
-                    var reason = physicalVm.DescribeAddressForDiagnostics(imageBase);
-                    throw new InvalidOperationException(
-                        $"Could not allocate main image at required base 0x{imageBase:X16} (size=0x{totalImageSize:X}): {reason}.");
+                    // Exact allocation failed — the host may have already claimed
+                    // part of this range (ASLR, Rosetta 2, or another process).
+                    // Try backing the fixed range page by page to claim whatever
+                    // free gaps exist. If the whole range is occupied the backfill
+                    // returns false and we surface the original failure reason.
+                    Console.Error.WriteLine(
+                        $"[LOADER] Exact allocation at main image base 0x{imageBase:X16} " +
+                        $"(size=0x{totalImageSize:X}) failed; attempting fixed-range backfill.");
+                    if (!physicalVm.TryBackFixedRange(imageBase, totalImageSize, executable: true))
+                    {
+                        // TryBackFixedRange may have partially backed pages before
+                        // failing. The earlier Clear() already reset all regions, so
+                        // this second Clear() is idempotent for everything except the
+                        // partial backfill — it frees only those orphaned pages.
+                        physicalVm.Clear();
+                        var reason = physicalVm.DescribeAddressForDiagnostics(imageBase);
+                        throw new InvalidOperationException(
+                            $"Could not allocate main image at required base 0x{imageBase:X16} " +
+                            $"(size=0x{totalImageSize:X}): {reason}. " +
+                            "Try closing other applications, rebooting, or " +
+                            (OperatingSystem.IsWindows()
+                                ? "setting SHARPEMU_DISABLE_MITIGATION_RELAUNCH=1."
+                                : "ensuring no other process maps into this address range."));
+                    }
+
+                    allocatedBase = imageBase;
                 }
 
                 imageBase = allocatedBase;
@@ -236,7 +262,14 @@ public sealed class SelfLoader : ISelfLoader
             imageBase,
             _moduleManager,
             tlsModuleId,
-            out var importedRelocations);
+            out var importedRelocations,
+            out var importedModuleNames);
+        if (tlsModuleId != 0)
+        {
+            // Thread copies must include pointers written by relocation.
+            GuestTlsTemplate.UpdateInitializationImage(
+                tlsModuleId, ReadTlsInitializationImage(processTlsHeader, virtualMemory, imageBase));
+        }
         var effectiveImportStubs = importStubs.Count == 0
             ? new Dictionary<ulong, string>()
             : new Dictionary<ulong, string>(importStubs);
@@ -266,6 +299,16 @@ public sealed class SelfLoader : ISelfLoader
             out var preInitializerFunctions,
             out var initializerFunctions);
         var procParamAddress = ResolveProcParamAddress(programHeaders, imageBase);
+
+        if (virtualMemory is PhysicalVirtualMemory patchableMemory)
+        {
+            _ = GuestRedZonePatcher.Patch(
+                virtualMemory,
+                patchableMemory,
+                programHeaders,
+                imageBase,
+                totalImageSize);
+        }
 
         Console.WriteLine($"[LOADER] ELF e_entry: 0x{elfHeader.EntryPoint:X16}");
         Console.WriteLine($"[LOADER] Generation: {(isNextGen ? "Gen5 (PS5)" : "Gen4 (PS4)")}");
@@ -308,7 +351,8 @@ public sealed class SelfLoader : ISelfLoader
             applicationInfo.Version,
             tlsModuleId,
             tlsInfo.MemorySize,
-            tlsInfo.StaticOffset);
+            tlsInfo.StaticOffset,
+            importedModuleNames);
     }
 
     private static (string? Title, string? TitleId, string? Version) TryLoadParamJson(
@@ -516,18 +560,7 @@ public sealed class SelfLoader : ISelfLoader
             return default;
         }
 
-        // tdata (initialized) bytes come from the mapped segment; tbss is the
-        // implicitly-zero remainder up to MemorySize.
-        var fileSize = (int)Math.Min(tlsHeader.FileSize, tlsHeader.MemorySize);
-        var initImage = fileSize > 0 ? new byte[fileSize] : [];
-        if (fileSize > 0 &&
-            !virtualMemory.TryRead(imageBase + tlsHeader.VirtualAddress, initImage))
-        {
-            Console.Error.WriteLine(
-                $"[LOADER][TLS] Failed to read TLS init image at 0x{imageBase + tlsHeader.VirtualAddress:X}; seeding zeros.");
-            initImage = [];
-        }
-
+        var initImage = ReadTlsInitializationImage(tlsHeader, virtualMemory, imageBase);
         var staticOffset = GuestTlsTemplate.RegisterModule(
             tlsModuleId,
             initImage,
@@ -541,6 +574,19 @@ public sealed class SelfLoader : ISelfLoader
         return new ModuleTlsInfo(tlsHeader.MemorySize, staticOffset);
     }
 
+    private static byte[] ReadTlsInitializationImage(
+        ProgramHeader header, IVirtualMemory virtualMemory, ulong imageBase)
+    {
+        if (header.FileSize > header.MemorySize || header.FileSize > int.MaxValue)
+            throw new InvalidDataException("PT_TLS initialization size is invalid.");
+
+        var initializationImage = new byte[(int)header.FileSize];
+        var address = checked(imageBase + header.VirtualAddress);
+        if (initializationImage.Length != 0 && !virtualMemory.TryRead(address, initializationImage))
+            throw new InvalidDataException($"Cannot read TLS initialization bytes at 0x{address:X}.");
+        return initializationImage;
+    }
+
     private static IReadOnlyDictionary<ulong, string> ResolveAndPatchImportStubs(
         ReadOnlySpan<byte> imageData,
         LoadContext loadContext,
@@ -550,9 +596,11 @@ public sealed class SelfLoader : ISelfLoader
         ulong imageBase,
         IModuleManager? moduleManager,
         uint tlsModuleId,
-        out IReadOnlyList<ImportedSymbolRelocation> importedRelocations)
+        out IReadOnlyList<ImportedSymbolRelocation> importedRelocations,
+        out IReadOnlyList<string> importedModuleNames)
     {
         importedRelocations = Array.Empty<ImportedSymbolRelocation>();
+        importedModuleNames = Array.Empty<string>();
         if (!TryGetProgramHeader(programHeaders, ProgramHeaderType.Dynamic, out var dynamicHeader, out var dynamicHeaderIndex))
         {
             return EmptyImportStubs;
@@ -643,15 +691,21 @@ public sealed class SelfLoader : ISelfLoader
 
         byte[] stringTable = Array.Empty<byte>();
         byte[] symbolTable = Array.Empty<byte>();
+        if (dynamicInfo.StrTabOffset != 0 && dynamicInfo.StrTabSize != 0 &&
+            !TryLoadTableBytes(
+                elfData,
+                virtualMemory,
+                imageBase,
+                dynamicInfo.StrTabOffset,
+                dynamicInfo.StrTabSize,
+                out stringTable))
+        {
+            return EmptyImportStubs;
+        }
+
         if (maxSymbolIndex != 0)
         {
-            if (!TryLoadTableBytes(
-                    elfData,
-                    virtualMemory,
-                    imageBase,
-                    dynamicInfo.StrTabOffset,
-                    dynamicInfo.StrTabSize,
-                    out stringTable))
+            if (stringTable.Length == 0)
             {
                 return EmptyImportStubs;
             }
@@ -670,6 +724,8 @@ public sealed class SelfLoader : ISelfLoader
                 return EmptyImportStubs;
             }
         }
+
+        importedModuleNames = ReadImportedModuleNames(dynamicTable, stringTable);
 
         var descriptors = new List<RelocationDescriptor>(256);
         var orderedImportNids = new List<string>(128);
@@ -714,8 +770,9 @@ public sealed class SelfLoader : ISelfLoader
 
         importedRelocations = BuildImportedRelocations(descriptors);
 
+        var stubEligibleNids = CollectStubEligibleNids(descriptors, moduleManager);
         var stubImportNids = orderedImportNids
-            .Where(nid => ShouldCreateImportStub(nid, descriptors, moduleManager))
+            .Where(stubEligibleNids.Contains)
             .ToArray();
         var stubsByAddress = CreateImportStubMapping(virtualMemory, stubImportNids);
         Console.WriteLine($"[LOADER] Created {stubsByAddress.Count} import stubs");
@@ -1158,6 +1215,35 @@ public sealed class SelfLoader : ISelfLoader
             IsDataImport: GetSymbolType(symbol.Info) == SymbolTypeObject,
             writeKind,
             isWeak);
+    }
+
+    // Collects every NID that needs a trap import stub in a single pass over the
+    // descriptors. This mirrors ShouldCreateImportStub applied per NID, but avoids
+    // the O(nids * descriptors) rescan that filtering each unique NID against the
+    // full descriptor list would incur on large modules. A NID qualifies as soon as
+    // one of its descriptors is non-weak, or is weak but resolvable via the module
+    // manager.
+    private static HashSet<string> CollectStubEligibleNids(
+        IReadOnlyList<RelocationDescriptor> descriptors,
+        IModuleManager? moduleManager)
+    {
+        var eligible = new HashSet<string>(StringComparer.Ordinal);
+        for (var i = 0; i < descriptors.Count; i++)
+        {
+            var descriptor = descriptors[i];
+            var nid = descriptor.ImportNid;
+            if (nid is null || eligible.Contains(nid))
+            {
+                continue;
+            }
+
+            if (!descriptor.IsWeak || moduleManager?.TryGetExport(nid, out _) == true)
+            {
+                eligible.Add(nid);
+            }
+        }
+
+        return eligible;
     }
 
     private static bool ShouldCreateImportStub(
@@ -1932,6 +2018,39 @@ public sealed class SelfLoader : ISelfLoader
             preInitArraySize);
     }
 
+    private static IReadOnlyList<string> ReadImportedModuleNames(
+        ReadOnlySpan<byte> dynamicTable,
+        ReadOnlySpan<byte> stringTable)
+    {
+        if (stringTable.IsEmpty)
+        {
+            return Array.Empty<string>();
+        }
+
+        var names = new List<string>();
+        for (var offset = 0; offset + DynamicEntrySize <= dynamicTable.Length; offset += DynamicEntrySize)
+        {
+            var tag = BinaryPrimitives.ReadInt64LittleEndian(dynamicTable.Slice(offset, sizeof(long)));
+            var value = BinaryPrimitives.ReadUInt64LittleEndian(dynamicTable.Slice(offset + sizeof(long), sizeof(ulong)));
+            if (tag == DtNull)
+            {
+                break;
+            }
+
+            if (tag is not (DtSceNeededModule or DtSceNeededModuleNext) ||
+                !TryReadNullTerminatedAscii(stringTable, (uint)value, out var name) ||
+                string.IsNullOrWhiteSpace(name) ||
+                names.Contains(name, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            names.Add(name);
+        }
+
+        return names.Count == 0 ? Array.Empty<string>() : names;
+    }
+
     private static bool IsSupportedRelocationType(uint relocationType)
     {
         return relocationType is
@@ -2431,6 +2550,19 @@ public sealed class SelfLoader : ISelfLoader
         Debug.Assert(
             !ShouldCreateImportStub("weak", [weak], moduleManager: null),
             "An unresolved weak symbol incorrectly received a trap import stub.");
+
+        var strong = new RelocationDescriptor(
+            TargetAddress: 0x3000,
+            Addend: 0,
+            ImportNid: "strong",
+            SymbolValue: 0,
+            RelocationValueKind.Pointer,
+            IsDataImport: false);
+        var mixed = new List<RelocationDescriptor> { weak, strong };
+        var eligible = CollectStubEligibleNids(mixed, moduleManager: null);
+        Debug.Assert(
+            eligible.Contains("strong") && !eligible.Contains("weak"),
+            "CollectStubEligibleNids disagreed with the per-NID stub eligibility rule.");
     }
 
     private static ulong AlignUp(ulong value, ulong alignment)

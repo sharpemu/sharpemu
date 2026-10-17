@@ -5,7 +5,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
+    <ProjectReference Include="..\SharpEmu.LibAtrac9\SharpEmu.LibAtrac9.csproj" />
     <ProjectReference Include="..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
+    <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
     <ProjectReference Include="..\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
     <ProjectReference Include="..\SharpEmu.ShaderCompiler.Metal\SharpEmu.ShaderCompiler.Metal.csproj" />
     <ProjectReference Include="..\SharpEmu.ShaderCompiler.Vulkan\SharpEmu.ShaderCompiler.Vulkan.csproj" />
@@ -22,14 +24,20 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
+    <!-- The runtime reads internal load-progress diagnostics. -->
+    <InternalsVisibleTo Include="SharpEmu.Core" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Silk.NET.Input" />
+    <PackageReference Include="FFmpeg.AutoGen" />
+    <PackageReference Include="NLayer" />
+    <PackageReference Include="ppy.SDL3-CS" />
     <PackageReference Include="Silk.NET.Vulkan" />
     <PackageReference Include="Silk.NET.Vulkan.Extensions.EXT" />
     <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />
-    <PackageReference Include="Silk.NET.Windowing" />
+    <PackageReference Include="SkiaSharp" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux" />
+    <PackageReference Include="System.IO.Hashing" />
   </ItemGroup>
 
   <PropertyGroup>

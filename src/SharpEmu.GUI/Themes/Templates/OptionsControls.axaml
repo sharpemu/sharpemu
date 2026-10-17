@@ -1,0 +1,76 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Options-only control resources: compact toggle theme
+-->
+
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <ControlTheme x:Key="OptionToggleTheme" TargetType="ToggleSwitch">
+    <Setter Property="Width" Value="46" />
+    <Setter Property="Height" Value="26" />
+    <Setter Property="MinWidth" Value="46" />
+    <Setter Property="MinHeight" Value="26" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Background" Value="#2BFFFFFF" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="FocusAdorner" Value="{x:Null}" />
+    <Setter Property="HorizontalAlignment" Value="Center" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="KnobTransitions">
+      <Transitions>
+        <DoubleTransition Property="Canvas.Left"
+                          Duration="0:0:0.18"
+                          Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border x:Name="PART_Track"
+                Width="{TemplateBinding Width}"
+                Height="{TemplateBinding Height}"
+                Padding="3"
+                Background="{TemplateBinding Background}"
+                BorderThickness="0"
+                CornerRadius="13"
+                ClipToBounds="True">
+          <Canvas x:Name="PART_SwitchKnob"
+                  Width="20"
+                  Height="20"
+                  HorizontalAlignment="Left"
+                  VerticalAlignment="Center">
+            <Grid x:Name="PART_MovingKnobs"
+                  Width="20"
+                  Height="20"
+                  Canvas.Left="0">
+              <Border x:Name="PART_Thumb"
+                      Background="{StaticResource TextBrush}"
+                      BorderThickness="0"
+                      CornerRadius="10" />
+            </Grid>
+          </Canvas>
+          <Border.Transitions>
+            <Transitions>
+              <BrushTransition Property="Background"
+                               Duration="0:0:0.16"
+                               Easing="CubicEaseOut" />
+            </Transitions>
+          </Border.Transitions>
+        </Border>
+      </ControlTemplate>
+    </Setter>
+    <Style Selector="^:pointerover /template/ Border#PART_Track">
+      <Setter Property="Background" Value="#38FFFFFF" />
+    </Style>
+    <Style Selector="^:checked /template/ Border#PART_Track">
+      <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+    </Style>
+    <Style Selector="^:checked:pointerover /template/ Border#PART_Track">
+      <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
+    </Style>
+    <Style Selector="^:disabled /template/ Border#PART_Track">
+      <Setter Property="Opacity" Value="0.45" />
+    </Style>
+  </ControlTheme>
+</ResourceDictionary>

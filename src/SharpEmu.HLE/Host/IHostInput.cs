@@ -32,6 +32,11 @@ public interface IHostInput
     /// </summary>
     void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger);
 
+    /// <summary>Applies native DualSense trigger effects when supported.</summary>
+    void SetAdaptiveTriggerEffect(
+        HostAdaptiveTriggerEffect? leftTrigger,
+        HostAdaptiveTriggerEffect? rightTrigger);
+
     void SetLightbar(byte red, byte green, byte blue);
 
     void ResetLightbar();

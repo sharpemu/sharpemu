@@ -13,11 +13,11 @@ namespace SharpEmu.HLE.Host.Posix;
 /// </summary>
 internal sealed unsafe class PosixCoreAudioStream : IHostAudioStream
 {
-    private const int MaximumQueuedPcmBytes = 32 * 1024;
     private const uint FormatLinearPcm = 0x6C70636D; // 'lpcm'
     private const uint FlagIsSignedInteger = 0x4;
     private const uint FlagIsPacked = 0x8;
 
+    private readonly int _maximumQueuedPcmBytes;
     private readonly object _gate = new();
     private readonly AutoResetEvent _completion = new(false);
     private readonly Queue<nint> _freeBuffers = new();
@@ -27,12 +27,14 @@ internal sealed unsafe class PosixCoreAudioStream : IHostAudioStream
     private bool _started;
     private bool _disposed;
 
-    public PosixCoreAudioStream(uint sampleRate)
+    public PosixCoreAudioStream(uint sampleRate, int maxQueuedPcmBytes = 32 * 1024)
     {
         if (!OperatingSystem.IsMacOS())
         {
             throw new PlatformNotSupportedException("CoreAudio is only available on macOS.");
         }
+
+        _maximumQueuedPcmBytes = Math.Max(maxQueuedPcmBytes, 4 * 1024);
 
         var format = new AudioStreamBasicDescription
         {
@@ -73,7 +75,7 @@ internal sealed unsafe class PosixCoreAudioStream : IHostAudioStream
 
             var outputLength = stereoPcm16.Length;
             while (_queuedPcmBytes != 0 &&
-                   _queuedPcmBytes + outputLength > MaximumQueuedPcmBytes)
+                   _queuedPcmBytes + outputLength > _maximumQueuedPcmBytes)
             {
                 Monitor.Exit(_gate);
                 try

@@ -25,6 +25,10 @@ internal static class AudioPcmConversion
         float volume)
     {
         var sourceFrameSize = checked(channels * bytesPerSample);
+        // Volume is constant for the whole submission, so clamp it once here
+        // rather than per sample inside the loop (this runs on every real-time
+        // audio buffer, hundreds of frames at a time).
+        var clampedVolume = Math.Clamp(volume, 0.0f, 1.0f);
         for (var frame = 0; frame < frames; frame++)
         {
             var sourceFrame = source.Slice(frame * sourceFrameSize, sourceFrameSize);
@@ -32,10 +36,50 @@ internal static class AudioPcmConversion
             var right = channels == 1
                 ? left
                 : ReadSample(sourceFrame, 1, bytesPerSample, isFloat);
-            left = ApplyVolume(left, volume);
-            right = ApplyVolume(right, volume);
+            left = ApplyVolume(left, clampedVolume);
+            right = ApplyVolume(right, clampedVolume);
             BinaryPrimitives.WriteInt16LittleEndian(destination[(frame * OutputFrameSize)..], left);
             BinaryPrimitives.WriteInt16LittleEndian(destination[((frame * OutputFrameSize) + 2)..], right);
+        }
+    }
+
+    /// <summary>
+    /// Copies interleaved PCM without changing its channel layout. SDL can convert
+    /// this directly to the physical device, which preserves surround mixes that
+    /// would otherwise be truncated to the first two guest channels.
+    /// </summary>
+    public static void CopyWithVolume(
+        ReadOnlySpan<byte> source,
+        Span<byte> destination,
+        bool isFloat,
+        float volume)
+    {
+        var clampedVolume = Math.Clamp(volume, 0.0f, 1.0f);
+        if (clampedVolume >= 1.0f)
+        {
+            source.CopyTo(destination);
+            return;
+        }
+
+        if (isFloat)
+        {
+            for (var offset = 0; offset < source.Length; offset += sizeof(float))
+            {
+                var sample = BinaryPrimitives.ReadSingleLittleEndian(source.Slice(offset, sizeof(float)));
+                BinaryPrimitives.WriteSingleLittleEndian(
+                    destination.Slice(offset, sizeof(float)),
+                    sample * clampedVolume);
+            }
+
+            return;
+        }
+
+        for (var offset = 0; offset < source.Length; offset += sizeof(short))
+        {
+            var sample = BinaryPrimitives.ReadInt16LittleEndian(source.Slice(offset, sizeof(short)));
+            BinaryPrimitives.WriteInt16LittleEndian(
+                destination.Slice(offset, sizeof(short)),
+                ApplyVolume(sample, clampedVolume));
         }
     }
 
@@ -67,9 +111,10 @@ internal static class AudioPcmConversion
         return checked((short)MathF.Round(value * scale));
     }
 
+    // <paramref name="volume"/> is expected pre-clamped to [0, 1] by the caller.
     private static short ApplyVolume(short sample, float volume)
     {
-        var scaled = MathF.Round(sample * Math.Clamp(volume, 0.0f, 1.0f));
+        var scaled = MathF.Round(sample * volume);
         return (short)Math.Clamp(scaled, short.MinValue, short.MaxValue);
     }
 }

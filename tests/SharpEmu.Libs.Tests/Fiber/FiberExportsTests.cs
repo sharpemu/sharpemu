@@ -15,6 +15,7 @@ namespace SharpEmu.Libs.Tests.Fiber;
 /// validation and layout behaviour of <see cref="FiberExports"/>; they do not
 /// exercise a live guest thread scheduler.
 /// </summary>
+[Collection(FiberStateCollection.Name)]
 public sealed class FiberExportsTests
 {
     private const ulong Base = 0x3_0000_0000UL;
@@ -69,7 +70,7 @@ public sealed class FiberExportsTests
     }
 
     [Fact]
-    public void GetSelf_OutsideFiberContext_ReturnsPermissionError()
+    public void GetSelf_OutsideFiberContext_ReturnsNullFiberAddress()
     {
         var memory = new FakeCpuMemory(Base, RegionSize);
         var context = new CpuContext(memory, Generation.Gen5);
@@ -78,7 +79,8 @@ public sealed class FiberExportsTests
 
         var result = FiberExports.FiberGetSelf(context);
 
-        Assert.Equal(ErrorPermission, result);
+        Assert.Equal(0, result);
+        Assert.Equal(0UL, ReadUInt64(memory, Base + 0x100));
     }
 
     [Fact]

@@ -34,7 +34,7 @@ concurrency:
 jobs:
   init:
     name: Init
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     outputs:
       release-name: ${{ steps.vars.outputs.release-name }}
       release-tag: ${{ steps.vars.outputs.release-tag }}
@@ -71,7 +71,7 @@ jobs:
   reuse:
     name: REUSE Compliance
     needs: init
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -80,7 +80,7 @@ jobs:
         uses: fsfe/reuse-action@v6
 
   build:
-    name: Build Archive
+    name: Build win-x64
     needs:
       - init
       - reuse
@@ -138,7 +138,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-26.04
             rid: linux-x64
           - os: macos-latest
             rid: osx-x64
@@ -227,10 +227,15 @@ jobs:
     # Versioned releases are immutable and tag-driven. Branch and manual runs
     # still produce Actions artifacts without modifying a published release.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
@@ -258,6 +263,61 @@ jobs:
           tar -czf "release-assets/sharpemu-${VERSION}-linux-x64.tar.gz" -C "${linux_dir}" .
           tar -czf "release-assets/sharpemu-${VERSION}-osx-x64.tar.gz" -C "${macos_dir}" .
 
+      - name: Build release notes
+        shell: bash
+        env:
+          MAX_COMMITS: 200
+          RELEASE_TAG: ${{ needs.init.outputs.release-tag }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          SHORT_SHA: ${{ needs.init.outputs.short-sha }}
+          VERSION: ${{ needs.init.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          previous_tag="$(git describe --tags --abbrev=0 --match 'v*' "${RELEASE_TAG}^" 2>/dev/null || true)"
+
+          if [ -n "${previous_tag}" ]; then
+            range="${previous_tag}..${RELEASE_TAG}"
+          else
+            range="${RELEASE_TAG}"
+          fi
+
+          git log --no-merges --reverse --pretty=tformat:"%H%x1f%h%x1f%s" "${range}" > commits.txt
+          total="$(wc -l < commits.txt)"
+
+          {
+            printf 'Automated SharpEmu v%s build for commit [`%s`](%s/commit/%s).\n\n' \
+              "${VERSION}" "${SHORT_SHA}" "${REPO_URL}" "${GITHUB_SHA}"
+
+            if [ -n "${previous_tag}" ]; then
+              printf '## Changes since %s\n\n' "${previous_tag}"
+            else
+              printf '## Changes\n\n'
+            fi
+
+            if [ "${total}" -eq 0 ]; then
+              printf '_No commits since %s._\n' "${previous_tag}"
+            else
+              head -n "${MAX_COMMITS}" commits.txt | while IFS=$'\x1f' read -r sha short subject; do
+                printf -- '- %s ([`%s`](%s/commit/%s))\n' "${subject}" "${short}" "${REPO_URL}" "${sha}"
+              done
+
+              if [ "${total}" -gt "${MAX_COMMITS}" ]; then
+                printf '\n_…and %s more commits._\n' "$((total - MAX_COMMITS))"
+              fi
+            fi
+
+            printf '\n'
+
+            if [ -n "${previous_tag}" ]; then
+              printf '**Full changelog**: %s/compare/%s...%s\n' "${REPO_URL}" "${previous_tag}" "${RELEASE_TAG}"
+            else
+              printf '**Full changelog**: %s/commits/%s\n' "${REPO_URL}" "${RELEASE_TAG}"
+            fi
+          } > release-notes.md
+
+          cat release-notes.md
+
       - name: Create release
         shell: bash
         env:
@@ -265,15 +325,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_NAME: ${{ needs.init.outputs.release-name }}
           RELEASE_TAG: ${{ needs.init.outputs.release-tag }}
-          VERSION: ${{ needs.init.outputs.version }}
         run: |
           mapfile -t assets < <(find release-assets -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) | sort)
           if [ "${#assets[@]}" -ne 3 ]; then
             echo "Expected 3 release assets, found ${#assets[@]}." >&2
             exit 1
           fi
-
-          notes="Automated SharpEmu v${VERSION} build for commit ${GITHUB_SHA}."
 
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             echo "Release ${RELEASE_TAG} already exists and will not be modified." >&2
@@ -283,4 +340,4 @@ jobs:
           gh release create "${RELEASE_TAG}" "${assets[@]}" \
             --verify-tag \
             --title "${RELEASE_NAME}" \
-            --notes "${notes}"
+            --notes-file release-notes.md

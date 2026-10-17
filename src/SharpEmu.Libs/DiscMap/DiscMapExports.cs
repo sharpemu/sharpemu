@@ -16,9 +16,6 @@ namespace SharpEmu.Libs.DiscMap;
 public static class DiscMapExports
 {
     private const int DiscMapErrorInvalidArgument = unchecked((int)0x81100001);
-    private const int DiscMapErrorLocationNotMapped = unchecked((int)0x81100002);
-    private const int DiscMapErrorFileNotFound = unchecked((int)0x81100003);
-    private const int DiscMapErrorNoBitmapInfo = unchecked((int)0x81100004);
 
     [SysAbiExport(
         Nid = "lbQKqsERhtE",

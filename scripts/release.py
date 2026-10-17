@@ -157,6 +157,62 @@ def ensure_tag_does_not_exist(
         raise ReleaseError(f"Tag {tag} already exists on {remote}.")
 
 
+def get_previous_tag(repository_root: Path) -> str:
+    try:
+        return run_git(
+            "describe",
+            "--tags",
+            "--abbrev=0",
+            "--match",
+            "v*",
+            "HEAD",
+            cwd=repository_root,
+            capture_output=True,
+        )
+    except ReleaseError:
+        return ""
+
+
+def get_release_commits(
+    repository_root: Path,
+    previous_tag: str,
+) -> list[str]:
+    revision_range = f"{previous_tag}..HEAD" if previous_tag else "HEAD"
+
+    output = run_git(
+        "log",
+        "--no-merges",
+        "--reverse",
+        "--pretty=tformat:%h %s",
+        revision_range,
+        cwd=repository_root,
+        capture_output=True,
+    )
+
+    return output.splitlines()
+
+
+def print_release_notes_preview(repository_root: Path) -> None:
+    previous_tag = get_previous_tag(repository_root)
+    commits = get_release_commits(repository_root, previous_tag)
+
+    print()
+
+    if previous_tag:
+        print(f"Commits since {previous_tag} ({len(commits)}):")
+    else:
+        print(f"Commits in this release ({len(commits)}):")
+
+    if not commits:
+        print("  (none)")
+
+    for commit in commits:
+        print(f"  {commit}")
+
+    print()
+    print("These commits go into the generated release notes.")
+
+
 def read_version(props_path: Path) -> str:
     if not props_path.exists():
         raise ReleaseError(f"Version file not found: {props_path}")
@@ -322,6 +378,8 @@ def create_release_tag(
         tag,
         remote,
     )
+
+    print_release_notes_preview(repository_root)
 
     run_git(
         "tag",

@@ -1,0 +1,61 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:SharpEmu.GUI"
+             xmlns:controls="clr-namespace:SharpEmu.GUI.Controls"
+             x:Class="SharpEmu.GUI.TrophyGameView"
+             ClipToBounds="True">
+  <Grid>
+    <Grid Margin="0,4,0,0" RowDefinitions="Auto,Auto,Auto,*">
+      <Button x:Name="BackButton"
+              Classes="ghost"
+              HorizontalAlignment="Left"
+              Margin="0,0,0,14">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <TextBlock Classes="materialSymbol compact" Text="arrow_back" VerticalAlignment="Center" />
+          <TextBlock Text="{Binding [Trophies.Title], Source={x:Static local:Localization.Instance}}" VerticalAlignment="Center" />
+        </StackPanel>
+      </Button>
+
+      <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="28" Margin="0,0,0,26">
+        <Border x:Name="CoverFrame"
+                Width="128"
+                Height="128"
+                CornerRadius="22"
+                ClipToBounds="True"
+                Background="#22FFFFFF"
+                BoxShadow="0 14 32 0 #A0000000">
+          <Image x:Name="CoverImage" Stretch="UniformToFill" />
+        </Border>
+        <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="8">
+          <TextBlock x:Name="GameNameText"
+                     FontSize="32"
+                     FontWeight="SemiBold"
+                     TextTrimming="CharacterEllipsis" />
+          <TextBlock x:Name="ProgressText" Foreground="{StaticResource SecondaryTextBrush}" FontSize="14" />
+          <WrapPanel x:Name="GradeCounts" Orientation="Horizontal" Margin="0,6,0,0" />
+        </StackPanel>
+        <Grid Grid.Column="2" Width="136" Height="136" VerticalAlignment="Center">
+          <controls:TrophyProgressRing x:Name="ProgressRing" Thickness="11" />
+          <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+            <TextBlock x:Name="PercentText" FontSize="32" FontWeight="Bold" HorizontalAlignment="Center" />
+            <TextBlock Text="{Binding [Trophies.Completed], Source={x:Static local:Localization.Instance}}"
+                       Foreground="{StaticResource SecondaryTextBrush}"
+                       FontSize="11"
+                       HorizontalAlignment="Center" />
+          </StackPanel>
+        </Grid>
+      </Grid>
+
+      <StackPanel x:Name="FilterBar" Grid.Row="2" Orientation="Horizontal" Spacing="8" Margin="0,0,0,16" />
+
+      <ScrollViewer x:Name="TrophyScroll" Grid.Row="3" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel x:Name="TrophyList" Spacing="10" Margin="0,4,12,12" />
+      </ScrollViewer>
+    </Grid>
+  </Grid>
+</UserControl>

@@ -8,6 +8,7 @@ namespace SharpEmu.GUI;
 
 public sealed class PerGameSettings
 {
+
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         WriteIndented = true,
@@ -21,7 +22,27 @@ public sealed class PerGameSettings
 
     public bool? LogToFile { get; set; }
 
+    public string? WindowMode { get; set; }
+
+    public string? Resolution { get; set; }
+
+    public int? DisplayIndex { get; set; }
+
+    public int? RefreshRate { get; set; }
+
+    public string? ScalingMode { get; set; }
+
+    public bool? VSync { get; set; }
+
+    public string? HdrMode { get; set; }
+
+    public bool? OverlayEnabled { get; set; }
+    public string? OverlayCorner { get; set; }
+    public string? OverlayMode { get; set; }
+
     public List<string>? EnvironmentToggles { get; set; }
+
+    public List<string>? CustomEnvironmentVariables { get; set; }
 
     [JsonIgnore]
     public bool IsEmpty =>
@@ -29,7 +50,18 @@ public sealed class PerGameSettings
         ImportTraceLimit is null &&
         StrictDynlibResolution is null &&
         LogToFile is null &&
-        EnvironmentToggles is null;
+        WindowMode is null &&
+        Resolution is null &&
+        DisplayIndex is null &&
+        RefreshRate is null &&
+        ScalingMode is null &&
+        VSync is null &&
+        HdrMode is null &&
+        OverlayEnabled is null &&
+        OverlayCorner is null &&
+        OverlayMode is null &&
+        EnvironmentToggles is null &&
+        CustomEnvironmentVariables is null;
 
     public static string DirectoryPath =>
         Path.Combine(AppContext.BaseDirectory, "user", "custom_configs");
@@ -67,8 +99,98 @@ public sealed class PerGameSettings
         {
             settings.EnvironmentToggles = toggles.Where(entry => !string.IsNullOrEmpty(entry)).ToList();
         }
+        if (settings?.CustomEnvironmentVariables is { } customEnvironmentVariables)
+        {
+            settings.CustomEnvironmentVariables = customEnvironmentVariables
+                .Where(entry => !string.IsNullOrWhiteSpace(entry))
+                .ToList();
+        }
 
         return settings;
+    }
+
+    /// <summary>
+    /// Removes values that already match the global configuration so the
+    /// remaining object contains only effective per-game overrides.
+    /// </summary>
+    internal void RemoveInheritedValues(GuiSettings global)
+    {
+        if (string.Equals(LogLevel, global.LogLevel, StringComparison.OrdinalIgnoreCase))
+        {
+            LogLevel = null;
+        }
+
+        if (ImportTraceLimit == global.ImportTraceLimit)
+        {
+            ImportTraceLimit = null;
+        }
+
+        if (StrictDynlibResolution == global.StrictDynlibResolution)
+        {
+            StrictDynlibResolution = null;
+        }
+
+        if (LogToFile == global.LogToFile)
+        {
+            LogToFile = null;
+        }
+
+        if (string.Equals(WindowMode, global.WindowMode, StringComparison.OrdinalIgnoreCase))
+        {
+            WindowMode = null;
+        }
+
+        if (string.Equals(Resolution, global.Resolution, StringComparison.OrdinalIgnoreCase))
+        {
+            Resolution = null;
+        }
+
+        if (DisplayIndex == global.DisplayIndex)
+        {
+            DisplayIndex = null;
+        }
+
+        if (RefreshRate == global.RefreshRate)
+        {
+            RefreshRate = null;
+        }
+
+        if (string.Equals(ScalingMode, global.ScalingMode, StringComparison.OrdinalIgnoreCase))
+        {
+            ScalingMode = null;
+        }
+
+        if (VSync == global.VSync)
+        {
+            VSync = null;
+        }
+
+        if (string.Equals(HdrMode, global.HdrMode, StringComparison.OrdinalIgnoreCase))
+        {
+            HdrMode = null;
+        }
+
+        if (OverlayEnabled == global.OverlayEnabled)
+        {
+            OverlayEnabled = null;
+        }
+
+        if (string.Equals(OverlayCorner, global.OverlayCorner, StringComparison.OrdinalIgnoreCase))
+        {
+            OverlayCorner = null;
+        }
+
+        if (string.Equals(OverlayMode, global.OverlayMode, StringComparison.OrdinalIgnoreCase))
+        {
+            OverlayMode = null;
+        }
+
+        if (EnvironmentToggles is { } environmentToggles &&
+            EnvironmentEntriesEqual(environmentToggles, global.EnvironmentToggles))
+        {
+            EnvironmentToggles = null;
+        }
+
     }
 
     public void Save(string titleId)
@@ -109,6 +231,38 @@ public sealed class PerGameSettings
 
         return trimmed.Length == 0 ? "UNKNOWN" : trimmed;
     }
+
+    private static bool EnvironmentEntriesEqual(
+        IEnumerable<string> left,
+        IEnumerable<string> right) =>
+        NormalizeEnvironmentEntries(left).SetEquals(NormalizeEnvironmentEntries(right));
+
+    private static HashSet<string> NormalizeEnvironmentEntries(IEnumerable<string> entries)
+    {
+        var normalized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (StrictComputeSettings.IsEnabled(entries)) normalized.Add(StrictComputeSettings.VariableName);
+        foreach (var entry in entries)
+        {
+            var parts = entry.Split('=', 2, StringSplitOptions.TrimEntries);
+            // An explicit zero differs from the enabled default for this switch.
+            if (string.Equals(parts[0], StrictComputeSettings.VariableName, StringComparison.OrdinalIgnoreCase)) continue;
+            if (parts.Length == 0 || string.IsNullOrWhiteSpace(parts[0]))
+            {
+                continue;
+            }
+
+            if (parts.Length == 2 && parts[1] == "0")
+            {
+                continue;
+            }
+
+            normalized.Add(parts.Length == 2 && parts[1] != "1"
+                ? $"{parts[0]}={parts[1]}"
+                : parts[0]);
+        }
+
+        return normalized;
+    }
 }
 
 public sealed record EffectiveLaunchSettings(
@@ -116,6 +270,16 @@ public sealed record EffectiveLaunchSettings(
     int ImportTraceLimit,
     bool StrictDynlibResolution,
     bool LogToFile,
+    string WindowMode,
+    string Resolution,
+    int DisplayIndex,
+    int RefreshRate,
+    string ScalingMode,
+    bool VSync,
+    string HdrMode,
+    bool OverlayEnabled,
+    string OverlayCorner,
+    string OverlayMode,
     IReadOnlyList<string> EnvironmentToggles)
 {
     public static EffectiveLaunchSettings Resolve(GuiSettings global, PerGameSettings? perGame) => new(
@@ -123,5 +287,15 @@ public sealed record EffectiveLaunchSettings(
         perGame?.ImportTraceLimit ?? global.ImportTraceLimit,
         perGame?.StrictDynlibResolution ?? global.StrictDynlibResolution,
         perGame?.LogToFile ?? global.LogToFile,
+        perGame?.WindowMode ?? global.WindowMode,
+        perGame?.Resolution ?? global.Resolution,
+        Math.Max(0, perGame?.DisplayIndex ?? global.DisplayIndex),
+        Math.Clamp(perGame?.RefreshRate ?? global.RefreshRate, 0, 1000),
+        perGame?.ScalingMode ?? global.ScalingMode,
+        perGame?.VSync ?? global.VSync,
+        perGame?.HdrMode ?? global.HdrMode,
+        perGame?.OverlayEnabled ?? global.OverlayEnabled,
+        perGame?.OverlayCorner ?? global.OverlayCorner,
+        perGame?.OverlayMode ?? global.OverlayMode,
         perGame?.EnvironmentToggles ?? global.EnvironmentToggles);
 }

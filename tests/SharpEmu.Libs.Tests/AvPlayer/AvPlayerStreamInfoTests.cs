@@ -19,36 +19,39 @@ public sealed class AvPlayerStreamInfoTests
     private const byte Sentinel = 0xAB;
 
     [Theory]
-    [InlineData(false, 0u)]
-    [InlineData(true, 0u)]
-    [InlineData(false, 1u)]
-    [InlineData(true, 1u)]
-    public void GetStreamInfoFunctionsDoNotWritePastThe32ByteStructure(
-        bool useExtendedFunction,
-        uint streamIndex)
+    [InlineData(Generation.Gen5, 0u, 32, 1u)]
+    [InlineData(Generation.Gen5, 1u, 32, 2u)]
+    [InlineData(Generation.Gen4, 0u, 40, 0u)]
+    [InlineData(Generation.Gen4, 1u, 40, 1u)]
+    public void GetStreamInfoUsesTheGenerationSpecificLayout(
+        Generation generation,
+        uint streamIndex,
+        int structureSize,
+        uint expectedStreamType)
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
-        var context = new CpuContext(memory, Generation.Gen5);
+        var context = new CpuContext(memory, generation);
+        AvPlayerExports.RegisterPlayerForTest(
+            Handle,
+            1280,
+            720,
+            DurationMilliseconds,
+            hasAudio: true);
 
-        AvPlayerExports.RegisterPlayerForTest(Handle, 1280, 720, DurationMilliseconds);
         try
         {
-            Span<byte> window = stackalloc byte[40];
+            Span<byte> window = stackalloc byte[48];
             window.Fill(Sentinel);
             Assert.True(memory.TryWrite(InfoAddress, window));
 
             context[CpuRegister.Rdi] = Handle;
             context[CpuRegister.Rsi] = streamIndex;
             context[CpuRegister.Rdx] = InfoAddress;
+            Assert.Equal(0, AvPlayerExports.AvPlayerGetStreamInfo(context));
 
-            var resultCode = useExtendedFunction
-                ? AvPlayerExports.AvPlayerGetStreamInfoEx(context)
-                : AvPlayerExports.AvPlayerGetStreamInfo(context);
-            Assert.Equal(0, resultCode);
-
-            Span<byte> result = stackalloc byte[40];
+            Span<byte> result = stackalloc byte[48];
             Assert.True(memory.TryRead(InfoAddress, result));
-            Assert.Equal(streamIndex, BinaryPrimitives.ReadUInt32LittleEndian(result));
+            Assert.Equal(expectedStreamType, BinaryPrimitives.ReadUInt32LittleEndian(result));
             if (streamIndex == 0)
             {
                 Assert.Equal(1280u, BinaryPrimitives.ReadUInt32LittleEndian(result[8..]));
@@ -61,7 +64,71 @@ public sealed class AvPlayerStreamInfoTests
             }
             Assert.Equal(DurationMilliseconds, BinaryPrimitives.ReadUInt64LittleEndian(result[24..]));
 
-            for (var index = 32; index < result.Length; index++)
+            for (var index = structureSize; index < result.Length; index++)
+            {
+                Assert.Equal(Sentinel, result[index]);
+            }
+        }
+        finally
+        {
+            AvPlayerExports.RemovePlayerForTest(Handle);
+        }
+    }
+
+    [Fact]
+    public void StreamInfoRejectsAudioIndexForVideoOnlyMedia()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var context = new CpuContext(memory, Generation.Gen5);
+        AvPlayerExports.RegisterPlayerForTest(Handle, 1280, 720, DurationMilliseconds);
+
+        try
+        {
+            context[CpuRegister.Rdi] = Handle;
+            context[CpuRegister.Rsi] = 1;
+            context[CpuRegister.Rdx] = InfoAddress;
+            Assert.NotEqual(0, AvPlayerExports.AvPlayerGetStreamInfo(context));
+            Assert.NotEqual(0, AvPlayerExports.AvPlayerGetStreamInfoEx(context));
+        }
+        finally
+        {
+            AvPlayerExports.RemovePlayerForTest(Handle);
+        }
+    }
+
+    [Fact]
+    public void GetStreamInfoExWritesThe104ByteGen5Descriptor()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var context = new CpuContext(memory, Generation.Gen5);
+        AvPlayerExports.RegisterPlayerForTest(
+            Handle,
+            378,
+            150,
+            DurationMilliseconds,
+            framesPerSecond: 29.97);
+
+        try
+        {
+            Span<byte> window = stackalloc byte[120];
+            window.Fill(Sentinel);
+            Assert.True(memory.TryWrite(InfoAddress, window));
+
+            context[CpuRegister.Rdi] = Handle;
+            context[CpuRegister.Rsi] = 0;
+            context[CpuRegister.Rdx] = InfoAddress;
+            Assert.Equal(0, AvPlayerExports.AvPlayerGetStreamInfoEx(context));
+
+            Span<byte> result = stackalloc byte[120];
+            Assert.True(memory.TryRead(InfoAddress, result));
+            Assert.Equal(104UL, BinaryPrimitives.ReadUInt64LittleEndian(result));
+            Assert.Equal(1u, BinaryPrimitives.ReadUInt32LittleEndian(result[8..]));
+            Assert.Equal(378u, BinaryPrimitives.ReadUInt32LittleEndian(result[16..]));
+            Assert.Equal(150u, BinaryPrimitives.ReadUInt32LittleEndian(result[20..]));
+            Assert.Equal(29.97, BinaryPrimitives.ReadDoubleLittleEndian(result[0x40..]));
+            Assert.Equal(DurationMilliseconds, BinaryPrimitives.ReadUInt64LittleEndian(result[0x60..]));
+
+            for (var index = 104; index < result.Length; index++)
             {
                 Assert.Equal(Sentinel, result[index]);
             }
@@ -79,7 +146,12 @@ public sealed class AvPlayerStreamInfoTests
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var context = new CpuContext(memory, Generation.Gen5);
-        AvPlayerExports.RegisterPlayerForTest(Handle, 1280, 720, DurationMilliseconds);
+        AvPlayerExports.RegisterPlayerForTest(
+            Handle,
+            1280,
+            720,
+            DurationMilliseconds,
+            hasAudio: true);
 
         try
         {

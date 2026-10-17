@@ -60,10 +60,19 @@ internal static class PakDirectoryTracker
             // related assets, and the guest streams them with locality, so disambiguate collisions
             // by choosing the unconsumed match nearest the running read cursor.
             DirectoryEntry? best = null;
+            DirectoryEntry? uniqueMatch = null;
+            var matchCount = 0;
             var bestDistance = ulong.MaxValue;
             foreach (var entry in entries)
             {
-                if (entry.Consumed || entry.FileLen != requestedSize)
+                if (entry.FileLen != requestedSize)
+                {
+                    continue;
+                }
+
+                uniqueMatch = entry;
+                matchCount++;
+                if (entry.Consumed)
                 {
                     continue;
                 }
@@ -89,6 +98,12 @@ internal static class PakDirectoryTracker
                 }
 
                 return best.FilePos;
+            }
+
+            // A unique archive member may be opened again after its first read.
+            if (matchCount == 1)
+            {
+                return uniqueMatch!.FilePos;
             }
         }
 

@@ -1,0 +1,100 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Shared navigation for global and per-game options
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Style Selector="Border.optionsNavSurface">
+    <Setter Property="Width" Value="244" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="VerticalAlignment" Value="Top" />
+  </Style>
+
+  <Style Selector="Border.optionsNavIndicator">
+    <Setter Property="Height" Value="54" />
+    <Setter Property="Margin" Value="0,3,0,0" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="Background" Value="#13FFFFFF" />
+    <Setter Property="BorderBrush" Value="#E6FFFFFF" />
+    <Setter Property="BorderThickness" Value="2" />
+    <Setter Property="BoxShadow" Value="0 8 24 0 #24000000" />
+  </Style>
+
+  <Style Selector="Button.optionsNav">
+    <Setter Property="Height" Value="61" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
+    <Setter Property="Padding" Value="16,0" />
+    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="#8FFFFFFF" />
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="FontWeight" Value="Medium" />
+    <Setter Property="FocusAdorner" Value="{x:Null}" />
+    <Setter Property="RenderTransform" Value="none" />
+  </Style>
+
+  <Style Selector="Button.optionsNav /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Foreground" Value="#8FFFFFFF" />
+  </Style>
+
+  <Style Selector="Button.optionsNav:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                   Button.optionsNav:focus-visible /template/ ContentPresenter#PART_ContentPresenter,
+                   Button.optionsNav.active /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <Style Selector="Button.optionsNav:pressed">
+    <Setter Property="RenderTransform" Value="none" />
+  </Style>
+
+  <Style Selector="TextBlock.optionsNavIcon">
+    <Setter Property="Width" Value="20" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="HorizontalAlignment" Value="Left" />
+    <Setter Property="Padding" Value="0,0,0,5" />
+    <Setter Property="Foreground" Value="#8FFFFFFF" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Foreground"
+                         Duration="0:0:0.18"
+                         Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <Style Selector="TextBlock.optionsNavLabel">
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="FontWeight" Value="Medium" />
+    <Setter Property="LineHeight" Value="20" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="Padding" Value="0,0,0,4" />
+    <Setter Property="Foreground" Value="#8FFFFFFF" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Foreground"
+                         Duration="0:0:0.18"
+                         Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <Style Selector="Button.optionsNav:pointerover TextBlock.optionsNavIcon,
+                   Button.optionsNav:focus-visible TextBlock.optionsNavIcon,
+                   Button.optionsNav.active TextBlock.optionsNavIcon,
+                   Button.optionsNav:pointerover TextBlock.optionsNavLabel,
+                   Button.optionsNav:focus-visible TextBlock.optionsNavLabel,
+                   Button.optionsNav.active TextBlock.optionsNavLabel">
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+</Styles>

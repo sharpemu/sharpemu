@@ -1,0 +1,29 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Shared text input and context-menu styles.
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Style Selector="TextBox">
+    <Setter Property="CornerRadius" Value="8" />
+  </Style>
+
+  <Style Selector="ContextMenu">
+    <Setter Property="Background" Value="{StaticResource CardBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="Padding" Value="6" />
+  </Style>
+  <Style Selector="ContextMenu MenuItem">
+    <Setter Property="Padding" Value="10,7" />
+    <Setter Property="CornerRadius" Value="7" />
+  </Style>
+  <Style Selector="ContextMenu Separator">
+    <Setter Property="Background" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="Height" Value="1" />
+    <Setter Property="Margin" Value="8,4" />
+  </Style>
+</Styles>

@@ -110,24 +110,27 @@ public sealed class KernelEventQueueCompatExportsTests
     // the queued event with the registered ident/filter and the trigger data.
     // DequeueEvents runs before the blocking path, so a pre-triggered queue
     // returns immediately without touching the guest thread scheduler.
-    [Fact]
-    public void CreateAddTriggerWait_DeliversTriggeredUserEvent()
+    // The id is an int that the kernel stores in a uintptr_t ident, so -1 (0xFFFFFFFF in the register)
+    // is delivered as 0xFFFFFFFFFFFFFFFF.
+    [Theory]
+    [InlineData(0x4242UL, 0x4242UL)]
+    [InlineData(0xFFFF_FFFFUL, ulong.MaxValue)]
+    public void CreateAddTriggerWait_DeliversTriggeredUserEvent(ulong id, ulong eventIdent)
     {
-        const ulong eventIdent = 0x4242;
         const ulong triggerData = 0x55AA_55AA;
         var handle = CreateEqueue();
 
         // Register the user event on the queue.
         var (addCtx, _) = NewContextWithOutSlot();
         addCtx[CpuRegister.Rdi] = handle;
-        addCtx[CpuRegister.Rsi] = eventIdent;
+        addCtx[CpuRegister.Rsi] = id;
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK,
             KernelEventQueueCompatExports.KernelAddUserEvent(addCtx));
 
         // Trigger it with a distinct data payload.
         var (triggerCtx, _) = NewContextWithOutSlot();
         triggerCtx[CpuRegister.Rdi] = handle;
-        triggerCtx[CpuRegister.Rsi] = eventIdent;
+        triggerCtx[CpuRegister.Rsi] = id;
         triggerCtx[CpuRegister.Rdx] = triggerData;
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK,
             KernelEventQueueCompatExports.KernelTriggerUserEvent(triggerCtx));
@@ -156,7 +159,13 @@ public sealed class KernelEventQueueCompatExportsTests
         Assert.Equal(eventIdent, BinaryPrimitives.ReadUInt64LittleEndian(evt[0x00..]));
         Assert.Equal(KernelEventQueueCompatExports.KernelEventFilterUser,
             BinaryPrimitives.ReadInt16LittleEndian(evt[0x08..]));
-        Assert.Equal(triggerData, BinaryPrimitives.ReadUInt64LittleEndian(evt[0x10..]));
+
+        // sceKernelTriggerUserEvent's third argument is the event's *udata*, not
+        // its data word: the guest reads it back with sceKernelGetEventUserData,
+        // which loads offset 0x18. Routing the payload to data(0x10) instead left
+        // sceKernelGetEventUserData returning 0 for every triggered user event.
+        Assert.Equal(triggerData, BinaryPrimitives.ReadUInt64LittleEndian(evt[0x18..]));
+        Assert.Equal(0UL, BinaryPrimitives.ReadUInt64LittleEndian(evt[0x10..]));
     }
 
     private static ulong CreateEqueue()

@@ -14,9 +14,6 @@ namespace SharpEmu.HLE.Host.Posix;
 /// </summary>
 internal sealed unsafe class PosixAlsaAudioStream : IHostAudioStream
 {
-    // 32KB of stereo PCM16 at 48kHz is ~170ms; keep the same device-side
-    // queue depth the WinMM/CoreAudio ports enforce in managed code.
-    private const uint DeviceLatencyMicroseconds = 170_000;
     private const int StreamPlayback = 0;
     private const int FormatS16LittleEndian = 2;
     private const int AccessReadWriteInterleaved = 3;
@@ -27,7 +24,7 @@ internal sealed unsafe class PosixAlsaAudioStream : IHostAudioStream
     private nint _pcm;
     private bool _disposed;
 
-    public PosixAlsaAudioStream(uint sampleRate)
+    public PosixAlsaAudioStream(uint sampleRate, int maxQueuedPcmBytes = 32 * 1024)
     {
         if (!OperatingSystem.IsLinux())
         {
@@ -47,6 +44,14 @@ internal sealed unsafe class PosixAlsaAudioStream : IHostAudioStream
                 $"snd_pcm_open(\"{device}\") failed: {DescribeError(status)}.");
         }
 
+        // Match WinMM/CoreAudio soft queue depth: 32 KiB stereo PCM16 @ 48 kHz
+        // is ~170 ms. AudioOut2 may request a deeper bed.
+        var queuedBytes = Math.Max(maxQueuedPcmBytes, 4 * 1024);
+        var latencyMicroseconds = (uint)Math.Clamp(
+            (long)queuedBytes * 1_000_000L / Math.Max(sampleRate * 4u, 1u),
+            20_000L,
+            2_000_000L);
+
         status = snd_pcm_set_params(
             _pcm,
             FormatS16LittleEndian,
@@ -54,7 +59,7 @@ internal sealed unsafe class PosixAlsaAudioStream : IHostAudioStream
             2,
             sampleRate,
             1,
-            DeviceLatencyMicroseconds);
+            latencyMicroseconds);
         if (status != 0)
         {
             _ = snd_pcm_close(_pcm);

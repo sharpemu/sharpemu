@@ -133,6 +133,20 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         }
     }
 
+    public bool TryInstallAdditionalModule(
+        IReadOnlyDictionary<ulong, string> importStubs,
+        IReadOnlyDictionary<string, ulong> runtimeSymbols,
+        out string? error)
+    {
+        if (_nativeCpuBackend is not DirectExecutionBackend backend)
+        {
+            error = "the active CPU backend does not support runtime modules";
+            return false;
+        }
+
+        return backend.TryInstallAdditionalModule(importStubs, runtimeSymbols, out error);
+    }
+
     private OrbisGen2Result DispatchEntryCore(
         ulong entryPoint,
         Generation generation,

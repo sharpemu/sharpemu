@@ -17,7 +17,4 @@ public enum Gen5SpirvStage
 
 public sealed record Gen5SpirvShader(
     byte[] Spirv,
-    IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
-    IReadOnlyList<Gen5ImageBinding> ImageBindings,
-    uint AttributeCount,
-    IReadOnlyList<Gen5VertexInputBinding> VertexInputs);
+    uint AttributeCount);

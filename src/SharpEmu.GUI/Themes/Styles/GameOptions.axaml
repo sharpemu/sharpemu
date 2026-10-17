@@ -1,0 +1,198 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Contextual per-game options reveal, actions, and selected-game motion.
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Style Selector="TextBlock.gameStatLabel">
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontWeight" Value="Normal" />
+    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Opacity" Value="0.75" />
+  </Style>
+
+  <Style Selector="TextBlock.gameStatValue">
+    <Setter Property="FontSize" Value="18" />
+    <Setter Property="FontWeight" Value="Medium" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <Style Selector="Panel.backdropLayer">
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+  </Style>
+
+  <Style Selector="Panel.carouselHost">
+    <Setter Property="RenderTransform" Value="translateY(0px) scale(1)" />
+    <Setter Property="Opacity" Value="1" />
+  </Style>
+
+  <Style Selector="Grid.selectedDetailsHost">
+    <Setter Property="RenderTransform" Value="translateY(0px)" />
+    <Setter Property="Opacity" Value="1" />
+  </Style>
+
+  <Style Selector="Grid.gameOptionsOverlay">
+    <Setter Property="RenderTransform" Value="translateY(96px)" />
+    <Setter Property="Opacity" Value="0" />
+  </Style>
+
+  <Style Selector="Panel.backdropLayer.gameOptionsOpen">
+    <Setter Property="RenderTransform" Value="translateY(-92px) scale(1.04)" />
+  </Style>
+
+  <Style Selector="Panel.carouselHost.gameOptionsOpen">
+    <Setter Property="RenderTransform" Value="translateY(-18px) scale(1)" />
+    <Setter Property="Opacity" Value="0" />
+  </Style>
+
+  <Style Selector="Grid.selectedDetailsHost.gameOptionsOpen">
+    <Setter Property="RenderTransform" Value="translateY(-28px)" />
+    <Setter Property="Opacity" Value="0" />
+  </Style>
+
+  <Style Selector="Grid.gameOptionsOverlay.gameOptionsOpen">
+    <Setter Property="RenderTransform" Value="translateY(0px)" />
+    <Setter Property="Opacity" Value="1" />
+  </Style>
+
+  <Style Selector="Button.playButton">
+    <Setter Property="MinHeight" Value="54" />
+    <Setter Property="MinWidth" Value="200" />
+    <Setter Property="Padding" Value="34,13" />
+    <Setter Property="CornerRadius" Value="999" />
+    <Setter Property="Background" Value="White" />
+    <Setter Property="Foreground" Value="#111111" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+
+  <Style Selector="Button.playButton:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <Style Selector="Button.playButton.danger">
+    <Setter Property="Background" Value="{StaticResource DangerBrush}" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <Style Selector="Button.playButton.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource DangerHoverBrush}" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <Style Selector="Button.optionsCircle, ToggleButton.optionsCircle">
+    <Setter Property="Width" Value="54" />
+    <Setter Property="Height" Value="54" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="CornerRadius" Value="27" />
+    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <Style Selector="Button.optionsCircle:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.optionsCircle:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.optionsCircle:checked /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="#24FFFFFF" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <Style Selector="Button.optionsCircle.compact, ToggleButton.optionsCircle.compact">
+    <Setter Property="Width" Value="40" />
+    <Setter Property="Height" Value="40" />
+    <Setter Property="CornerRadius" Value="20" />
+  </Style>
+
+  <Style Selector="TextBlock.selectedGameTitle">
+    <Setter Property="FontSize" Value="28" />
+  </Style>
+
+  <Style Selector="Grid.selectedDetailsHost.gridLayout TextBlock.selectedGameTitle">
+    <Setter Property="FontSize" Value="26" />
+  </Style>
+
+  <Style Selector="Border.selectedDetailsDivider">
+    <Setter Property="Height" Value="1" />
+    <Setter Property="Margin" Value="0,10,0,0" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
+    <Setter Property="Background">
+      <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+        <GradientStop Offset="0" Color="#00FFFFFF" />
+        <GradientStop Offset="0.06" Color="#2EFFFFFF" />
+        <GradientStop Offset="0.55" Color="#14FFFFFF" />
+        <GradientStop Offset="1" Color="#00FFFFFF" />
+      </LinearGradientBrush>
+    </Setter>
+  </Style>
+
+  <Style Selector="Grid.selectedDetailsHost Button.playButton">
+    <Setter Property="MinHeight" Value="44" />
+    <Setter Property="MinWidth" Value="168" />
+    <Setter Property="Padding" Value="28,10" />
+    <Setter Property="FontSize" Value="15" />
+  </Style>
+
+  <Style Selector="Grid.selectedDetailsHost Button.optionsCircle,
+                   Grid.selectedDetailsHost ToggleButton.optionsCircle">
+    <Setter Property="Width" Value="44" />
+    <Setter Property="Height" Value="44" />
+    <Setter Property="CornerRadius" Value="22" />
+  </Style>
+
+  <Style Selector="Button.gameOptionsLaunch">
+    <Setter Property="Width" Value="220" />
+    <Setter Property="Height" Value="46" />
+    <Setter Property="Padding" Value="20,0" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="CornerRadius" Value="999" />
+    <Setter Property="Background" Value="White" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="#111111" />
+    <Setter Property="FontSize" Value="15" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <Style Selector="Button.gameOptionsLaunch /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="BoxShadow" Value="0 0 0 0 Transparent" />
+  </Style>
+
+  <Style Selector="Button.gameOptionsLaunch:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="#EAF3FF" />
+    <Setter Property="Foreground" Value="#111111" />
+  </Style>
+
+  <Style Selector="Button.gameAction">
+    <Setter Property="Width" Value="250" />
+    <Setter Property="Height" Value="48" />
+    <Setter Property="Padding" Value="16,0" />
+    <Setter Property="HorizontalContentAlignment" Value="Left" />
+    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="Background" Value="#0FFFFFFF" />
+    <Setter Property="BorderBrush" Value="#14FFFFFF" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Foreground" Value="White" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontWeight" Value="Medium" />
+  </Style>
+
+  <Style Selector="Button.gameAction:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="#1AFFFFFF" />
+    <Setter Property="BorderBrush" Value="#28FFFFFF" />
+  </Style>
+
+  <Style Selector="Button.gameAction.dangerAction">
+    <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
+    <Setter Property="BorderBrush" Value="#48FF646E" />
+  </Style>
+
+  <Style Selector="Button.gameAction.dangerAction:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="#1FFF646E" />
+    <Setter Property="BorderBrush" Value="{StaticResource DangerBrush}" />
+  </Style>
+</Styles>

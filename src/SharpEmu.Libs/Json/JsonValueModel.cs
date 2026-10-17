@@ -87,6 +87,10 @@ internal static class JsonObjectHeap
 
     public static ulong GlobalNullAccessCallbackContext;
 
+    public static ulong GlobalSpecialFloatHandler;
+
+    public static ulong GlobalSpecialFloatHandlerContext;
+
     public static void SetValue(ulong address, JsonValueState state) => Values[address] = state;
 
     public static void RemoveValue(ulong address) => Values.TryRemove(address, out _);
@@ -106,5 +110,7 @@ internal static class JsonObjectHeap
         Strings.Clear();
         GlobalNullAccessCallback = 0;
         GlobalNullAccessCallbackContext = 0;
+        GlobalSpecialFloatHandler = 0;
+        GlobalSpecialFloatHandlerContext = 0;
     }
 }

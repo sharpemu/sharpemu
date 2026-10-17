@@ -1,0 +1,63 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Control theme for the shared launcher settings row.
+-->
+
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:local="clr-namespace:SharpEmu.GUI">
+  <ControlTheme x:Key="{x:Type local:SettingRow}" TargetType="local:SettingRow">
+    <Setter Property="MinHeight" Value="70" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <Border x:Name="PART_RowSurface"
+                Classes="settingRowSurface"
+                Background="#06FFFFFF"
+                BorderBrush="#0AFFFFFF"
+                BorderThickness="1"
+                CornerRadius="14"
+                Padding="18,12">
+          <Border.Transitions>
+            <Transitions>
+              <BrushTransition Property="Background"
+                               Duration="0:0:0.18"
+                               Easing="CubicEaseOut" />
+              <BrushTransition Property="BorderBrush"
+                               Duration="0:0:0.18"
+                               Easing="CubicEaseOut" />
+            </Transitions>
+          </Border.Transitions>
+          <Grid ColumnDefinitions="*,Auto">
+            <StackPanel VerticalAlignment="Center" Spacing="3" Margin="0,0,18,0">
+              <TextBlock x:Name="PART_Label"
+                         Text="{TemplateBinding Label}"
+                         FontSize="14"
+                         FontWeight="Medium"
+                         TextWrapping="Wrap"
+                         Foreground="{StaticResource TextBrush}" />
+              <TextBlock Text="{TemplateBinding Description}"
+                         FontSize="11"
+                         FontWeight="Normal"
+                         Foreground="{StaticResource SettingsDescriptionBrush}"
+                         LineHeight="16"
+                         MaxWidth="690"
+                         HorizontalAlignment="Left"
+                         TextAlignment="Left"
+                         TextWrapping="Wrap"
+                         IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
+                                     Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            </StackPanel>
+            <ContentPresenter Grid.Column="1"
+                              Content="{TemplateBinding Content}"
+                              VerticalAlignment="Center" />
+          </Grid>
+        </Border>
+      </ControlTemplate>
+    </Setter>
+    <Style Selector="^.controllerFocus /template/ Border#PART_RowSurface">
+      <Setter Property="Background" Value="#16FFFFFF" />
+      <Setter Property="BorderBrush" Value="#C8FFFFFF" />
+    </Style>
+  </ControlTheme>
+</ResourceDictionary>

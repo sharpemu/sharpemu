@@ -14,6 +14,7 @@ internal static partial class MetalVideoPresenter
 {
     private static nint _batchCommandBuffer;
     private static bool _batchOpen;
+    private static nint _lastFlushedCommandBuffer;
 
     /// <summary>Returns the open batch command buffer, opening one on first
     /// use. Render thread only, like the drain it serves.</summary>
@@ -45,6 +46,23 @@ internal static partial class MetalVideoPresenter
         MetalNative.SendVoid(commandBuffer, MetalNative.Selector("commit"));
         TagUploadPages(commandBuffer);
         TagSnapshotResources(commandBuffer);
+        TagFaultScan(commandBuffer);
+        if (_lastFlushedCommandBuffer != 0)
+        {
+            MetalNative.SendVoid(_lastFlushedCommandBuffer, MetalNative.Selector("release"));
+        }
+
+        _lastFlushedCommandBuffer = MetalNative.Send(commandBuffer, MetalNative.Selector("retain"));
         return commandBuffer;
+    }
+
+    // A GPU synchronization point: every batch committed before it has completed when the action finishes.
+    public static long SubmitOrderedGpuWait(string debugName) =>
+        SubmitOrderedGuestAction(static () => WaitForFlushedGuestCommands(), debugName);
+
+    private static void WaitForFlushedGuestCommands()
+    {
+        var committed = FlushBatchedGuestCommands();
+        WaitForCommittedCommandBuffer(committed != 0 ? committed : _lastFlushedCommandBuffer);
     }
 }

@@ -36,4 +36,23 @@ public sealed class VulkanGuestImageByteCountTests
             expected,
             VulkanVideoPresenter.GetGuestImageByteCount(format, width, height));
     }
+
+    [Theory]
+    [InlineData(10u, 8u, 4u, 3u, 384UL)]
+    [InlineData(169u, 5u, 5u, 7u, 224UL)]
+    public void MultipliesSurfaceSizeByVolumeDepth(
+        uint format,
+        uint width,
+        uint height,
+        uint depth,
+        ulong expected)
+    {
+        Assert.Equal(
+            expected,
+            VulkanVideoPresenter.GetGuestImageByteCount(
+                format,
+                width,
+                height,
+                depth));
+    }
 }

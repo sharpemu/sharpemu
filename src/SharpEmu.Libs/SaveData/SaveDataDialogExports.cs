@@ -33,12 +33,17 @@ public static class SaveDataDialogExports
         LibraryName = "libSceSaveDataDialog")]
     public static int SaveDataDialogInitialize(CpuContext ctx)
     {
-        if (Interlocked.CompareExchange(ref _status, StatusInitialized, StatusNone) != StatusNone)
+        var previous = Interlocked.CompareExchange(
+            ref _status,
+            StatusInitialized,
+            StatusNone);
+        if (previous == StatusNone || previous == StatusFinished)
         {
-            return ctx.SetReturn(ErrorAlreadyInitialized);
+            Interlocked.Exchange(ref _status, StatusInitialized);
+            return ctx.SetReturn(ErrorOk);
         }
 
-        return ctx.SetReturn(ErrorOk);
+        return ctx.SetReturn(ErrorAlreadyInitialized);
     }
 
     [SysAbiExport(
@@ -59,8 +64,8 @@ public static class SaveDataDialogExports
             return ctx.SetReturn(ErrorNotInitialized);
         }
 
-        _lastMode = TryReadInt32(ctx, paramAddress, out var mode) ? mode : 0;
-        _lastUserData = ctx.TryReadUInt64(paramAddress + 0xC8, out var userData) ? userData : 0;
+        _lastMode = TryReadInt32(ctx, paramAddress + 0x34, out var mode) ? mode : 0;
+        _lastUserData = ctx.TryReadUInt64(paramAddress + 0x70, out var userData) ? userData : 0;
 
         // There is no host save dialog yet. Enter RUNNING so the close path sees a live
         // dialog; the guest's next status poll auto-dismisses it (see PollStatus).

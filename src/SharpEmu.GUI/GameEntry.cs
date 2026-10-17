@@ -8,7 +8,16 @@ using Avalonia.Media.Imaging;
 
 namespace SharpEmu.GUI;
 
-public sealed class GameEntry : INotifyPropertyChanged
+[Flags]
+internal enum GameEntryChanges
+{
+    None = 0,
+    Metadata = 1,
+    Cover = 2,
+    Background = 4,
+}
+
+public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
 {
     // Placeholder gradients for games without cover art, picked
     // deterministically from the game name so a game keeps its color.
@@ -27,29 +36,39 @@ public sealed class GameEntry : INotifyPropertyChanged
     private Bitmap? _cover;
     private IBrush? _placeholderBrush;
     private long _sizeBytes;
+    private string _name;
+    private string? _titleId;
+    private string? _version;
+    private string? _coverPath;
+    private string? _backgroundPath;
+    private string _initials;
+    private FileStamp _coverStamp;
+    private FileStamp _backgroundStamp;
 
     public GameEntry(
         string name, string? titleId, string? version, string path, long sizeBytes,
         string? coverPath, string? backgroundPath)
     {
-        Name = name;
-        TitleId = titleId;
-        Version = version;
+        _name = name;
+        _titleId = titleId;
+        _version = version;
         Path = path;
         _sizeBytes = sizeBytes;
-        CoverPath = coverPath;
-        BackgroundPath = backgroundPath;
-        Initials = ComputeInitials(name);
+        _coverPath = coverPath;
+        _backgroundPath = backgroundPath;
+        _initials = ComputeInitials(name);
+        _coverStamp = FileStamp.Read(coverPath);
+        _backgroundStamp = FileStamp.Read(backgroundPath);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public string Name { get; }
+    public string Name => _name;
 
-    public string? TitleId { get; }
+    public string? TitleId => _titleId;
 
     /// <summary>Content version from sce_sys/param.json, e.g. "01.000.000".</summary>
-    public string? Version { get; }
+    public string? Version => _version;
 
     public string Path { get; }
 
@@ -75,10 +94,10 @@ public sealed class GameEntry : INotifyPropertyChanged
     }
 
     /// <summary>Path to the cover art image shipped with the game, if found.</summary>
-    public string? CoverPath { get; }
+    public string? CoverPath => _coverPath;
 
     /// <summary>Path to the key art (pic0/pic1) shipped with the game, if found.</summary>
-    public string? BackgroundPath { get; }
+    public string? BackgroundPath => _backgroundPath;
 
     /// <summary>
     /// Decoded key art used as the window backdrop while this game is
@@ -86,7 +105,7 @@ public sealed class GameEntry : INotifyPropertyChanged
     /// </summary>
     public Bitmap? Background { get; set; }
 
-    public string Initials { get; }
+    public string Initials => _initials;
 
     // Built lazily: brushes are AvaloniaObjects that must be created on the
     // UI thread, while GameEntry itself is constructed on the scan thread.
@@ -120,6 +139,74 @@ public sealed class GameEntry : INotifyPropertyChanged
 
     /// <summary>Formatted install size badge shown in the launch bar.</summary>
     public string SizeText => FormatSize(SizeBytes);
+
+    /// <summary>
+    /// Applies a fresh filesystem scan to this presentation object so its
+    /// ListBox container and selection remain stable
+    /// </summary>
+    internal GameEntryChanges UpdateFrom(GameEntry scanned)
+    {
+        if (!Path.Equals(scanned.Path, GameLibraryPath.Comparison))
+        {
+            throw new ArgumentException("Only matching game paths can be reconciled", nameof(scanned));
+        }
+
+        var changes = GameEntryChanges.None;
+        if (!string.Equals(_name, scanned.Name, StringComparison.Ordinal))
+        {
+            _name = scanned.Name;
+            _initials = ComputeInitials(scanned.Name);
+            _placeholderBrush = null;
+            RaisePropertyChanged(nameof(Name));
+            RaisePropertyChanged(nameof(Initials));
+            RaisePropertyChanged(nameof(PlaceholderBrush));
+            changes |= GameEntryChanges.Metadata;
+        }
+
+        if (!string.Equals(_titleId, scanned.TitleId, StringComparison.Ordinal))
+        {
+            _titleId = scanned.TitleId;
+            RaisePropertyChanged(nameof(TitleId));
+            RaisePropertyChanged(nameof(HasTitleId));
+            changes |= GameEntryChanges.Metadata;
+        }
+
+        if (!string.Equals(_version, scanned.Version, StringComparison.Ordinal))
+        {
+            _version = scanned.Version;
+            RaisePropertyChanged(nameof(Version));
+            RaisePropertyChanged(nameof(VersionText));
+            RaisePropertyChanged(nameof(HasVersion));
+            changes |= GameEntryChanges.Metadata;
+        }
+
+        if (!string.Equals(_coverPath, scanned.CoverPath, StringComparison.Ordinal)
+            || _coverStamp != scanned._coverStamp)
+        {
+            _coverPath = scanned.CoverPath;
+            _coverStamp = scanned._coverStamp;
+            var previousCover = Cover;
+            Cover = null;
+            previousCover?.Dispose();
+            changes |= GameEntryChanges.Cover;
+        }
+
+        if (!string.Equals(_backgroundPath, scanned.BackgroundPath, StringComparison.Ordinal)
+            || _backgroundStamp != scanned._backgroundStamp)
+        {
+            _backgroundPath = scanned.BackgroundPath;
+            _backgroundStamp = scanned._backgroundStamp;
+            var previousBackground = Background;
+            Background = null;
+            previousBackground?.Dispose();
+            changes |= GameEntryChanges.Background;
+        }
+
+        return changes;
+    }
+
+    private void RaisePropertyChanged(string propertyName) =>
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 
     private static string ComputeInitials(string name)
     {
@@ -163,5 +250,30 @@ public sealed class GameEntry : INotifyPropertyChanged
             >= 1L << 10 => $"{bytes / (double)(1L << 10):0.0} KiB",
             _ => $"{bytes} B",
         };
+    }
+
+    private readonly record struct FileStamp(long Length, long LastWriteTimeUtcTicks)
+    {
+        public static FileStamp Read(string? path)
+        {
+            if (path is null)
+            {
+                return default;
+            }
+
+            try
+            {
+                var file = new FileInfo(path);
+                return file.Exists
+                    ? new FileStamp(file.Length, file.LastWriteTimeUtc.Ticks)
+                    : default;
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                    or UnauthorizedAccessException)
+            {
+                return default;
+            }
+        }
     }
 }

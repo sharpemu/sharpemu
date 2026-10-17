@@ -8,19 +8,20 @@ using Xunit;
 namespace SharpEmu.Libs.Tests;
 
 /// <summary>
-/// Save data lives under ~/SharpEmu/Saves/&lt;titleId&gt;/&lt;dirName&gt;/ with UI
+/// Save data lives under user/savedata/&lt;titleId&gt;/&lt;dirName&gt;/ with UI
 /// metadata in &lt;slot&gt;/sce_sys/param.json. These guard the pure path and
 /// metadata logic that the SaveData HLE exports build on.
 /// </summary>
 public sealed class SaveDataStorageTests
 {
     [Fact]
-    public void RootHonorsOverrideAndFallsBackToUserProfile()
+    public void RootHonorsOverrideAndFallsBackToPortableDirectory()
     {
         Assert.Equal(Path.GetFullPath("/tmp/custom-saves"), SaveDataStorage.Root("/tmp/custom-saves"));
 
-        var home = System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
-        Assert.Equal(Path.Combine(home, "SharpEmu", "Saves"), SaveDataStorage.Root());
+        Assert.Equal(
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "user", "savedata")),
+            SaveDataStorage.Root());
     }
 
     [Fact]
@@ -109,6 +110,38 @@ public sealed class SaveDataStorageTests
             if (Directory.Exists(slot))
             {
                 Directory.Delete(slot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void LegacyMigrationKeepsTheNewestSaveAndFlattensNumericUsers()
+    {
+        var testRoot = Path.Combine(Path.GetTempPath(), "sharpemu-savemigrate-" + Path.GetRandomFileName());
+        var destination = Path.Combine(testRoot, "portable");
+        var profile = Path.Combine(testRoot, "profile");
+        try
+        {
+            var stale = Path.Combine(destination, "268435456", "PPSA02929", "SAVEDATA00", "save.dat");
+            Directory.CreateDirectory(Path.GetDirectoryName(stale)!);
+            File.WriteAllText(stale, "stale");
+            File.SetLastWriteTimeUtc(stale, DateTime.UtcNow.AddMinutes(-2));
+
+            var current = Path.Combine(profile, "PPSA02929", "SAVEDATA00", "save.dat");
+            Directory.CreateDirectory(Path.GetDirectoryName(current)!);
+            File.WriteAllText(current, "current");
+
+            SaveDataStorage.MigrateLegacyLayout(destination, profile);
+
+            Assert.Equal(
+                "current",
+                File.ReadAllText(Path.Combine(destination, "PPSA02929", "SAVEDATA00", "save.dat")));
+        }
+        finally
+        {
+            if (Directory.Exists(testRoot))
+            {
+                Directory.Delete(testRoot, recursive: true);
             }
         }
     }

@@ -1,0 +1,101 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Shared launcher button variants and page switcher styles.
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Style Selector="Button.accent">
+    <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+    <Setter Property="Foreground" Value="White" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Padding" Value="22,10" />
+    <Setter Property="CornerRadius" Value="8" />
+  </Style>
+  <Style Selector="Button.accent:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <Style Selector="Button.danger">
+    <Setter Property="Background" Value="{StaticResource DangerBrush}" />
+    <Setter Property="Foreground" Value="White" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Padding" Value="22,10" />
+    <Setter Property="CornerRadius" Value="8" />
+  </Style>
+  <Style Selector="Button.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource DangerHoverBrush}" />
+    <Setter Property="Foreground" Value="White" />
+  </Style>
+
+  <Style Selector="Button.ghost">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="Padding" Value="12,7" />
+    <Setter Property="CornerRadius" Value="8" />
+  </Style>
+  <Style Selector="Button.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+
+  <Style Selector="Button.iconGhost">
+    <Setter Property="Width" Value="32" />
+    <Setter Property="Height" Value="32" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.iconGhost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+
+  <Style Selector="ToggleButton.ghost">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="Padding" Value="12,7" />
+    <Setter Property="CornerRadius" Value="8" />
+  </Style>
+  <Style Selector="ToggleButton.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="ToggleButton.ghost:checked /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+
+  <!-- Top-level page switcher (Library / Options): plain transparent
+       buttons, not TabItem, so there is no Fluent selected-tab underline.
+       The active page is conveyed by brightness alone; LB/RB gamepad
+       hints flank the pair. -->
+  <Style Selector="Button.segment">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+    <Setter Property="FontSize" Value="22" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="Padding" Value="6,4" />
+    <Setter Property="CornerRadius" Value="8" />
+  </Style>
+  <Style Selector="Button.segment:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="Button.segment.active">
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+</Styles>
