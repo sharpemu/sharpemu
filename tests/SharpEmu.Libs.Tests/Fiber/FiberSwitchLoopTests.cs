@@ -4,6 +4,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Threading;
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Fiber;
@@ -82,6 +83,76 @@ public sealed class FiberSwitchLoopTests : IDisposable
     }
 
     [Fact]
+    public void PendingSwitch_DoesNotPublishOutgoingFiberToAnotherWorker()
+    {
+        var memory = new FakeCpuMemory(Base, RegionSize);
+        var context = new CpuContext(memory, Generation.Gen5);
+        InitializeFiber(memory, context, FiberA, NameA, EntryA, ArgOnInitializeA, ContextA);
+        InitializeFiber(memory, context, FiberB, NameB, EntryB, ArgOnInitializeB, ContextB);
+        GuestThreadExecution.EnterImportCallFrame(RootReturnRip, RootResumeRsp, RootReturnSlot);
+        context[CpuRegister.Rdi] = FiberA;
+        context[CpuRegister.Rdx] = ArgSlotRoot;
+        Assert.Equal(0, FiberExports.FiberRun(context));
+        Assert.True(ConsumeCompletedTransfer(out _));
+
+        var resumeStack = ContextA + ContextSize - 0x100;
+        GuestThreadExecution.EnterImportCallFrame(ResumeRipA, resumeStack, resumeStack - 8);
+        context[CpuRegister.Rdi] = FiberB;
+        context[CpuRegister.Rdx] = ArgSlotA;
+        Assert.Equal(0, FiberExports.FiberSwitch(context));
+
+        // Keep the outgoing transfer pending while a second worker requests its source.
+        // No native stack transfer runs in this export-level regression.
+        Exception? workerError = null;
+        var resumeResult = int.MinValue;
+        var resumed = false;
+        GuestCpuContinuation resumedSource = default;
+        void RunWorker()
+        {
+            var previousThread = GuestThreadExecution.EnterGuestThread(ThreadHandle + 1);
+            var previousFiber = GuestThreadExecution.EnterFiber(0);
+            try
+            {
+                var workerContext = new CpuContext(memory, Generation.Gen5);
+                GuestThreadExecution.EnterImportCallFrame(RootReturnRip, ContextB + 0x800, ContextB + 0x7F8);
+                workerContext[CpuRegister.Rdi] = FiberA;
+                resumeResult = FiberExports.FiberRun(workerContext);
+                resumed = ConsumeCompletedTransfer(out resumedSource);
+            }
+            catch (Exception error)
+            {
+                workerError = error;
+            }
+            finally
+            {
+                GuestThreadExecution.EnterFiber(previousFiber);
+                GuestThreadExecution.RestoreGuestThread(previousThread);
+            }
+        }
+        var worker = new Thread(RunWorker) { IsBackground = true };
+        worker.Start();
+        Assert.True(worker.Join(TimeSpan.FromSeconds(10)), "The second worker did not finish.");
+        Assert.Null(workerError);
+        Assert.True(ConsumeCompletedTransfer(out var pendingTarget));
+        Assert.Equal(EntryB, pendingTarget.Rip);
+        if (resumed)
+        {
+            Assert.Equal(ResumeRipA, resumedSource.Rip);
+            Assert.Equal(resumeStack, resumedSource.Rsp);
+            Assert.Equal(resumeStack - 8, resumedSource.ReturnSlotAddress);
+        }
+        Assert.False(resumeResult == 0 && resumed,
+            "The second worker acquired the source continuation before the outgoing transfer completed.");
+        worker = new Thread(RunWorker) { IsBackground = true };
+        worker.Start();
+        Assert.True(worker.Join(TimeSpan.FromSeconds(10)));
+        Assert.Null(workerError);
+        Assert.Equal(0, resumeResult);
+        Assert.True(resumed);
+        Assert.Equal(resumeStack, resumedSource.Rsp);
+    }
+
+    [Fact]
     public void WarmSwitchLoop_BoundsAllocationAndPreservesResumeArguments()
     {
         var memory = new FakeCpuMemory(Base, RegionSize);
@@ -92,7 +163,7 @@ public sealed class FiberSwitchLoopTests : IDisposable
         context[CpuRegister.Rdi] = FiberA;
         context[CpuRegister.Rdx] = ArgSlotRoot;
         Assert.Equal(0, FiberExports.FiberRun(context));
-        Assert.True(GuestThreadExecution.TryConsumeCurrentContextTransfer(out _));
+        Assert.True(ConsumeCompletedTransfer(out _));
 
         void SwitchOnce(int index)
         {
@@ -103,7 +174,7 @@ public sealed class FiberSwitchLoopTests : IDisposable
             context[CpuRegister.Rsi] = (ulong)index;
             context[CpuRegister.Rdx] = toB ? ArgSlotA : ArgSlotB;
             if (FiberExports.FiberSwitch(context) != 0 ||
-                !GuestThreadExecution.TryConsumeCurrentContextTransfer(out _))
+                !ConsumeCompletedTransfer(out _))
                 throw new InvalidOperationException("Fiber switch failed.");
         }
 
@@ -140,7 +211,7 @@ public sealed class FiberSwitchLoopTests : IDisposable
         context[CpuRegister.Rdx] = ArgSlotRoot;
         Assert.Equal(0, FiberExports.FiberRun(context));
 
-        Assert.True(GuestThreadExecution.TryConsumeCurrentContextTransfer(out var toA));
+        Assert.True(ConsumeCompletedTransfer(out var toA));
         Assert.Equal(EntryA, toA.Rip);
         Assert.Equal(ArgOnInitializeA, toA.Rdi);
         Assert.Equal(0x1000UL, toA.Rsi);
@@ -153,7 +224,7 @@ public sealed class FiberSwitchLoopTests : IDisposable
         Switch(memory, context, from: FiberA, to: FiberB, ResumeRipA, ResumeRspA, ReturnSlotA,
             ArgSlotA, argOnRun: 0xB000UL, sentinelsA);
 
-        Assert.True(GuestThreadExecution.TryConsumeCurrentContextTransfer(out var toB));
+        Assert.True(ConsumeCompletedTransfer(out var toB));
         Assert.Equal(EntryB, toB.Rip);
         Assert.Equal(ArgOnInitializeB, toB.Rdi);
         Assert.Equal(0xB000UL, toB.Rsi);
@@ -170,7 +241,7 @@ public sealed class FiberSwitchLoopTests : IDisposable
                 ArgSlotB, argToA, sentinelsB);
             expectedB = new FiberExpectation(ResumeRipB, ResumeRspB, ReturnSlotB, sentinelsB);
 
-            Assert.True(GuestThreadExecution.TryConsumeCurrentContextTransfer(out var resumedA));
+            Assert.True(ConsumeCompletedTransfer(out var resumedA));
             AssertResume(resumedA, expectedA, $"round {round}: fiber A");
             Assert.Equal(argToA, ReadUInt64(memory, ArgSlotA));
             Assert.Equal(StateRun, ReadUInt32(memory, FiberA + 4));
@@ -182,7 +253,7 @@ public sealed class FiberSwitchLoopTests : IDisposable
                 ArgSlotA, argToB, nextSentinelsA);
             expectedA = new FiberExpectation(ResumeRipA, ResumeRspA, ReturnSlotA, nextSentinelsA);
 
-            Assert.True(GuestThreadExecution.TryConsumeCurrentContextTransfer(out var resumedB));
+            Assert.True(ConsumeCompletedTransfer(out var resumedB));
             AssertResume(resumedB, expectedB, $"round {round}: fiber B");
             Assert.Equal(argToB, ReadUInt64(memory, ArgSlotB));
             Assert.Equal(StateRun, ReadUInt32(memory, FiberB + 4));
@@ -204,7 +275,7 @@ public sealed class FiberSwitchLoopTests : IDisposable
         context[CpuRegister.Rsi] = 0;
         context[CpuRegister.Rdx] = ArgSlotRoot;
         Assert.Equal(0, FiberExports.FiberRun(context));
-        Assert.True(GuestThreadExecution.TryConsumeCurrentContextTransfer(out var toA));
+        Assert.True(ConsumeCompletedTransfer(out var toA));
 
         // A fresh fiber must start on its own context block, not on the stack of
         // the thread that ran it.
@@ -213,11 +284,69 @@ public sealed class FiberSwitchLoopTests : IDisposable
 
         Switch(memory, context, from: FiberA, to: FiberB, ResumeRipA, ResumeRspA, ReturnSlotA,
             ArgSlotA, argOnRun: 0, Sentinels(0xA0));
-        Assert.True(GuestThreadExecution.TryConsumeCurrentContextTransfer(out var toB));
+        Assert.True(ConsumeCompletedTransfer(out var toB));
 
         Assert.InRange(toB.Rsp, ContextB, ContextB + ContextSize);
         Assert.InRange(toB.ReturnSlotAddress, ContextB, ContextB + ContextSize);
         Assert.NotEqual(toA.Rsp, toB.Rsp);
+    }
+
+    private static bool ConsumeCompletedTransfer(out GuestCpuContinuation continuation)
+    {
+        var consumed = GuestThreadExecution.TryConsumeCurrentContextTransfer(out continuation);
+        if (consumed) GuestThreadExecution.CompleteCurrentContextTransfer(true);
+        return consumed;
+    }
+
+    [Fact]
+    public void FailedSwitch_RestoresSourceAndAllowsRetry()
+    {
+        var memory = new FakeCpuMemory(Base, RegionSize);
+        var context = new CpuContext(memory, Generation.Gen5);
+        InitializeFiber(memory, context, FiberA, NameA, EntryA, ArgOnInitializeA, ContextA);
+        InitializeFiber(memory, context, FiberB, NameB, EntryB, ArgOnInitializeB, ContextB);
+        GuestThreadExecution.EnterImportCallFrame(RootReturnRip, RootResumeRsp, RootReturnSlot);
+        context[CpuRegister.Rdi] = FiberA;
+        Assert.Equal(0, FiberExports.FiberRun(context));
+        Assert.True(ConsumeCompletedTransfer(out _));
+        GuestThreadExecution.EnterImportCallFrame(ResumeRipA, ContextA + 0x800, ContextA + 0x7F8);
+        context[CpuRegister.Rdi] = FiberB;
+        Assert.Equal(0, FiberExports.FiberSwitch(context));
+        Assert.True(GuestThreadExecution.TryConsumeCurrentContextTransfer(out _));
+        GuestThreadExecution.CompleteCurrentContextTransfer(false);
+        Assert.Equal(FiberA, GuestThreadExecution.CurrentFiberAddress);
+        Assert.Equal(StateRun, ReadUInt32(memory, FiberA + 4));
+        Assert.Equal(StateIdle, ReadUInt32(memory, FiberB + 4));
+        Assert.Equal(0, FiberExports.FiberSwitch(context));
+        Assert.True(ConsumeCompletedTransfer(out _));
+        Assert.Equal(StateIdle, ReadUInt32(memory, FiberA + 4));
+    }
+
+    [Fact]
+    public void FailedReturnToThread_RestoresRootRegistrationAndAllowsRetry()
+    {
+        var memory = new FakeCpuMemory(Base, RegionSize);
+        var context = new CpuContext(memory, Generation.Gen5);
+        InitializeFiber(memory, context, FiberA, NameA, EntryA, ArgOnInitializeA, ContextA);
+        GuestThreadExecution.EnterImportCallFrame(RootReturnRip, RootResumeRsp, RootReturnSlot);
+        context[CpuRegister.Rdi] = FiberA;
+        context[CpuRegister.Rdx] = ArgSlotRoot;
+        Assert.Equal(0, FiberExports.FiberRun(context));
+        Assert.True(ConsumeCompletedTransfer(out _));
+        GuestThreadExecution.EnterImportCallFrame(ResumeRipA, ContextA + 0x800, ContextA + 0x7F8);
+        Assert.True(context.TryWriteUInt64(ArgSlotRoot, 123));
+        context[CpuRegister.Rdi] = 456;
+        Assert.Equal(0, FiberExports.FiberReturnToThread(context));
+        Assert.Equal(StateRun, ReadUInt32(memory, FiberA + 4));
+        Assert.True(GuestThreadExecution.TryConsumeCurrentContextTransfer(out _));
+        GuestThreadExecution.CompleteCurrentContextTransfer(false);
+        Assert.Equal(123UL, ReadUInt64(memory, ArgSlotRoot));
+        Assert.Equal(FiberA, GuestThreadExecution.CurrentFiberAddress);
+        Assert.Equal(StateRun, ReadUInt32(memory, FiberA + 4));
+        Assert.Equal(0, FiberExports.FiberReturnToThread(context));
+        Assert.True(ConsumeCompletedTransfer(out var root));
+        Assert.Equal(RootReturnRip, root.Rip);
+        Assert.Equal(StateIdle, ReadUInt32(memory, FiberA + 4));
     }
 
     private static void Switch(

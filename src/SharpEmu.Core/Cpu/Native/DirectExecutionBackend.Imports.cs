@@ -38,8 +38,13 @@ public sealed partial class DirectExecutionBackend
 	private readonly Dictionary<string, int> _importResultLogSamples = new(StringComparer.Ordinal);
 	private int _il2CppExceptionDiagnosticCount;
 
-	private static ulong ImportDispatchGatewayManaged(nint backendHandle, int importIndex, nint argPackPtr)
+    [ThreadStatic]
+    private static nint _preparedContextTransferStub;
+
+	private static unsafe ulong ImportDispatchGatewayManaged(nint backendHandle, int importIndex, nint argPackPtr, nint transferStubAddress)
 	{
+        *(nint*)transferStubAddress = 0;
+        _preparedContextTransferStub = 0;
 		try
 		{
 			if (!(GCHandle.FromIntPtr(backendHandle).Target is DirectExecutionBackend directExecutionBackend))
@@ -55,20 +60,33 @@ public sealed partial class DirectExecutionBackend
 				var r = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
 				RecordPerfHleDispatchTime(System.Diagnostics.Stopwatch.GetTimestamp() - startTicks);
 				directExecutionBackend.ClearActiveImportIndex();
+				CompleteImportContextTransfer(transferStubAddress);
 				return r;
 			}
 
 			var result = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
 			directExecutionBackend.ClearActiveImportIndex();
+			CompleteImportContextTransfer(transferStubAddress);
 			return result;
 		}
 		catch (Exception ex)
 		{
+            GuestThreadExecution.CompleteCurrentContextTransfer(false);
 			Console.Error.WriteLine(
 				$"[LOADER][ERROR] ImportDispatchGatewayManaged exception: {ex.GetType().Name}: {ex.Message}");
 			return 18446744071562199298uL;
 		}
 	}
+
+    private static unsafe void CompleteImportContextTransfer(nint transferStubAddress)
+    {
+        var stub = _preparedContextTransferStub;
+        _preparedContextTransferStub = 0;
+        // The transfer exit uses only the host stack after this publication.
+        // Keep every read of the outgoing guest pack before this point.
+        GuestThreadExecution.CompleteCurrentContextTransfer(stub != 0);
+        *(nint*)transferStubAddress = stub;
+    }
 
 	private unsafe static int RawVectoredHandlerManaged(void* exceptionInfo)
 	{
@@ -800,7 +818,6 @@ public sealed partial class DirectExecutionBackend
 					return cpuContext[CpuRegister.Rax];
 				}
 
-				*(ulong*)(argPackPtr + 96) = unchecked((ulong)transferStub);
 				if (_logFiber)
 				{
 					Console.Error.WriteLine(
@@ -814,6 +831,7 @@ public sealed partial class DirectExecutionBackend
 					Volatile.Write(ref transferGuestThreadState.LastImportRax, transferTarget.Rax);
 					Volatile.Write(ref transferGuestThreadState.LastImportResultValid, 1);
 				}
+				_preparedContextTransferStub = transferStub;
 				return unchecked((ulong)transferFrame);
 			}
 			if (GuestThreadExecution.TryConsumeCurrentEntryExit(out var exitValue, out var exitReason))

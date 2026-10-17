@@ -827,7 +827,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const int MinTlsPatchInstructionBytes = 9;
 
-	private delegate ulong ImportGatewayDelegate(nint backendHandle, int importIndex, nint argPackPtr);
+	private delegate ulong ImportGatewayDelegate(nint backendHandle, int importIndex, nint argPackPtr, nint transferStubAddress);
 	private delegate int RawExceptionHandlerDelegate(void* exceptionInfo);
 	private static readonly ImportGatewayDelegate ImportGatewayDelegateInstance = ImportDispatchGatewayManaged;
 	private static readonly RawExceptionHandlerDelegate RawVectoredHandlerDelegateInstance = RawVectoredHandlerManaged;
@@ -2510,12 +2510,19 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num++] = 184;
 			*(long*)(ptr2 + num) = ImportGatewayPtr;
 			num += 8;
+            // The gateway selects a host-stack transfer without reading the old guest pack.
+            ptr2[num++] = 0x4C; ptr2[num++] = 0x8D; ptr2[num++] = 0x4C; ptr2[num++] = 0x24; ptr2[num++] = 0x20;
 			ptr2[num++] = byte.MaxValue;
 			ptr2[num++] = 208;
 			ptr2[num++] = 0x4C; ptr2[num++] = 0x8B; ptr2[num++] = 0x64; ptr2[num++] = 0x24; ptr2[num++] = 0x28; // mov r12,[rsp+0x28]
 			// Host calls can grow the stack. Keep the new limit before switching back.
 			ptr2[num++] = 0x4C; ptr2[num++] = 0x8B; ptr2[num++] = 0x54; ptr2[num++] = 0x24; ptr2[num++] = 0x30; // mov r10,[rsp+0x30]
 			EmitHostStackBounds(ptr2, ref num, save: true);
+            ptr2[num++] = 0x4C; ptr2[num++] = 0x8B; ptr2[num++] = 0x5C; ptr2[num++] = 0x24; ptr2[num++] = 0x20;
+            ptr2[num++] = 0x4D; ptr2[num++] = 0x85; ptr2[num++] = 0xDB;
+            ptr2[num++] = 0x74; ptr2[num++] = 0x07;
+            ptr2[num++] = 0x48; ptr2[num++] = 0x83; ptr2[num++] = 0xC4; ptr2[num++] = 0x38;
+            ptr2[num++] = 0x41; ptr2[num++] = 0xFF; ptr2[num++] = 0xE3;
 			ptr2[num++] = 72;
 			ptr2[num++] = 131;
 			ptr2[num++] = 196;

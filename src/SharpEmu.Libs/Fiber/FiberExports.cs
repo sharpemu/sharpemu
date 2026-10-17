@@ -56,6 +56,57 @@ public static class FiberExports
     private static readonly ConcurrentDictionary<ulong, FiberStackRange> _stackRanges = new();
     private static readonly ConcurrentDictionary<ulong, FiberThreadState> _threadStates = new();
 
+    [ThreadStatic]
+    private static PendingFiberTransfer? _pendingTransfer;
+
+    private sealed class PendingFiberTransfer
+    {
+        public readonly Action<bool> Completion;
+        public CpuContext Context = null!;
+        public ulong Source;
+        public ulong Target;
+        public ulong ThreadKey;
+        public FiberThreadState? PriorThreadState;
+        public FiberContinuation TargetContinuation;
+        public bool Resumed;
+        public ulong ResumeArgumentAddress;
+        public ulong PreviousResumeArgument;
+
+        public PendingFiberTransfer() => Completion = Complete;
+
+        private void Complete(bool succeeded)
+        {
+            var commitFailed = false;
+            lock (_fiberGate)
+            {
+                if (succeeded && Source != 0 &&
+                    !TryWriteUInt32(Context, Source + FiberStateOffset, FiberStateIdle))
+                {
+                    succeeded = false;
+                    commitFailed = true;
+                }
+                if (!succeeded)
+                {
+                    if (ResumeArgumentAddress != 0)
+                        _ = TryWriteUInt64(Context, ResumeArgumentAddress, PreviousResumeArgument);
+                    if (Target != 0)
+                    {
+                        _ = TryWriteUInt32(Context, Target + FiberStateOffset, FiberStateIdle);
+                        if (Resumed) _continuations[Target] = TargetContinuation;
+                    }
+                    if (Source != 0) _continuations.TryRemove(Source, out _);
+                    if (PriorThreadState is null) _threadStates.TryRemove(ThreadKey, out _);
+                    else _threadStates[ThreadKey] = PriorThreadState;
+                    _ = GuestThreadExecution.EnterFiber(Source);
+                }
+            }
+            Context = null!;
+            PriorThreadState = null;
+            TargetContinuation = default;
+            if (commitFailed) throw new InvalidOperationException("Fiber context transfer did not complete.");
+        }
+    }
+
     static FiberExports()
     {
         RunFiberSelfChecks();
@@ -263,23 +314,22 @@ public static class FiberExports
         var returnArgument = ctx[CpuRegister.Rdi];
         var argOnRunAddress = ctx[CpuRegister.Rsi];
         GuestCpuContinuation transferTarget;
+        var threadKey = GetThreadKey(ctx);
+        FiberThreadState threadState;
+        ulong previousResumeArgument = 0;
         lock (_fiberGate)
         {
             _continuations[fiberAddress] = new FiberContinuation(
                 CaptureContinuation(ctx, frame.ReturnRip, frame.ResumeRsp, frame.ReturnSlotAddress),
                 argOnRunAddress);
 
-            var threadKey = GetThreadKey(ctx);
-            if (!_threadStates.TryGetValue(threadKey, out var threadState) ||
+            if (!_threadStates.TryGetValue(threadKey, out threadState!) ||
+                (threadState.RootContinuation.ArgOnRunAddress != 0 &&
+                 !TryReadUInt64(ctx, threadState.RootContinuation.ArgOnRunAddress, out previousResumeArgument)) ||
                 !TryWriteResumeArgument(ctx, threadState.RootContinuation, returnArgument))
             {
                 _continuations.TryRemove(fiberAddress, out _);
                 return SetReturn(ctx, FiberErrorPermission);
-            }
-
-            if (!TryWriteUInt32(ctx, fiberAddress + FiberStateOffset, FiberStateIdle))
-            {
-                return SetReturn(ctx, FiberErrorInvalid);
             }
 
             transferTarget = threadState.RootContinuation.Context with { Rax = 0 };
@@ -287,7 +337,16 @@ public static class FiberExports
         }
 
         _ = GuestThreadExecution.EnterFiber(0);
-        GuestThreadExecution.RequestCurrentContextTransfer(transferTarget);
+        var pending = _pendingTransfer ??= new PendingFiberTransfer();
+        pending.Context = ctx;
+        pending.Source = fiberAddress;
+        pending.Target = 0;
+        pending.ThreadKey = threadKey;
+        pending.PriorThreadState = threadState;
+        pending.Resumed = false;
+        pending.ResumeArgumentAddress = threadState.RootContinuation.ArgOnRunAddress;
+        pending.PreviousResumeArgument = previousResumeArgument;
+        GuestThreadExecution.RequestCurrentContextTransfer(transferTarget, pending.Completion);
         if (TraceEnabled)
             TraceFiber(
                 $"return-to-thread fiber=0x{fiberAddress:X16} " +
@@ -577,9 +636,13 @@ public static class FiberExports
 
         GuestCpuContinuation transferTarget;
         var resumed = false;
+        FiberContinuation targetContinuation = default;
+        FiberThreadState? priorThreadState = null;
+        var threadKey = GetThreadKey(ctx);
+        ulong previousResumeArgument = 0;
         lock (_fiberGate)
         {
-            var threadKey = GetThreadKey(ctx);
+            _threadStates.TryGetValue(threadKey, out priorThreadState);
             if (!TryReadFiberFields(ctx, fiber, out fields))
             {
                 return SetReturn(ctx, FiberErrorInvalid);
@@ -591,7 +654,6 @@ public static class FiberExports
                 return SetReturn(ctx, FiberErrorState);
             }
 
-            FiberContinuation targetContinuation = default;
             if (_continuations.TryGetValue(fiber, out var savedContinuation))
             {
                 targetContinuation = savedContinuation;
@@ -616,7 +678,9 @@ public static class FiberExports
                     return SetReturn(ctx, FiberErrorInvalid);
                 }
             }
-            else if (!TryWriteResumeArgument(ctx, targetContinuation, argOnRun))
+            else if ((targetContinuation.ArgOnRunAddress != 0 &&
+                      !TryReadUInt64(ctx, targetContinuation.ArgOnRunAddress, out previousResumeArgument)) ||
+                     !TryWriteResumeArgument(ctx, targetContinuation, argOnRun))
             {
                 return SetReturn(ctx, FiberErrorInvalid);
             }
@@ -624,8 +688,7 @@ public static class FiberExports
             if (previousFiber != 0)
             {
                 if (!TryReadUInt32(ctx, previousFiber + FiberStateOffset, out var previousState) ||
-                    previousState != FiberStateRun ||
-                    !TryWriteUInt32(ctx, previousFiber + FiberStateOffset, FiberStateIdle))
+                    previousState != FiberStateRun)
                 {
                     return SetReturn(ctx, FiberErrorState);
                 }
@@ -644,6 +707,8 @@ public static class FiberExports
 
             if (!TryWriteUInt32(ctx, fiber + FiberStateOffset, FiberStateRun))
             {
+                if (resumed && targetContinuation.ArgOnRunAddress != 0)
+                    _ = TryWriteUInt64(ctx, targetContinuation.ArgOnRunAddress, previousResumeArgument);
                 if (previousFiber != 0)
                 {
                     _continuations.TryRemove(previousFiber, out _);
@@ -673,7 +738,17 @@ public static class FiberExports
         }
 
         _ = GuestThreadExecution.EnterFiber(fiber);
-        GuestThreadExecution.RequestCurrentContextTransfer(transferTarget);
+        var pending = _pendingTransfer ??= new PendingFiberTransfer();
+        pending.Context = ctx;
+        pending.Source = previousFiber;
+        pending.Target = fiber;
+        pending.ThreadKey = threadKey;
+        pending.PriorThreadState = priorThreadState;
+        pending.TargetContinuation = targetContinuation;
+        pending.Resumed = resumed;
+        pending.ResumeArgumentAddress = resumed ? targetContinuation.ArgOnRunAddress : 0;
+        pending.PreviousResumeArgument = previousResumeArgument;
+        GuestThreadExecution.RequestCurrentContextTransfer(transferTarget, pending.Completion);
         if (TraceEnabled)
             TraceFiber(
                 $"transfer reason={reason} from=0x{previousFiber:X16} to=0x{fiber:X16} resume={resumed} " +
