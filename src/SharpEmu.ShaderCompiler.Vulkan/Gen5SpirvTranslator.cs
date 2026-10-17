@@ -8480,15 +8480,28 @@ public static partial class Gen5SpirvTranslator
                 }
             }
 
+            Dictionary<uint, int>? instructionIndices = null;
+            if (leaders.Count > 4)
+            {
+                instructionIndices = new Dictionary<uint, int>(instructions.Count);
+                for (var index = 0; index < instructions.Count; index++)
+                    instructionIndices.TryAdd(instructions[index].Pc, index);
+            }
+
+            // Keep first-occurrence indices and sorted leaders, including for linked programs.
             var starts = leaders
-                .Where(pc => instructions.Any(instruction => instruction.Pc == pc))
+                .Where(pc => instructionIndices is not null
+                    ? instructionIndices.ContainsKey(pc)
+                    : instructions.Any(instruction => instruction.Pc == pc))
                 .ToArray();
             var blocks = new List<ShaderBlock>(starts.Length);
             for (var index = 0; index < starts.Length; index++)
             {
-                var startIndex = FindInstructionIndex(instructions, starts[index]);
+                var startIndex = instructionIndices is not null
+                    ? instructionIndices[starts[index]] : FindInstructionIndex(instructions, starts[index]);
                 var endIndex = index + 1 < starts.Length
-                    ? FindInstructionIndex(instructions, starts[index + 1])
+                    ? instructionIndices is not null
+                        ? instructionIndices[starts[index + 1]] : FindInstructionIndex(instructions, starts[index + 1])
                     : instructions.Count;
                 if (startIndex >= 0 && endIndex > startIndex)
                 {
@@ -8519,12 +8532,32 @@ public static partial class Gen5SpirvTranslator
             uint pc,
             out int block)
         {
-            for (var index = 0; index < blocks.Count; index++)
+            if (blocks.Count <= 4)
             {
-                if (blocks[index].StartPc == pc)
+                for (var index = 0; index < blocks.Count; index++)
                 {
-                    block = index;
-                    return true;
+                    if (blocks[index].StartPc == pc)
+                    {
+                        block = index;
+                        return true;
+                    }
+                }
+            }
+            else
+            {
+                var low = 0;
+                var high = blocks.Count - 1;
+                while (low <= high)
+                {
+                    var index = low + ((high - low) >> 1);
+                    var startPc = blocks[index].StartPc;
+                    if (startPc == pc)
+                    {
+                        block = index;
+                        return true;
+                    }
+                    if (startPc < pc) low = index + 1;
+                    else high = index - 1;
                 }
             }
 
