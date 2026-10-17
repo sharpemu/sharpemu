@@ -1086,4 +1086,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return true;
         }
     }
+
+    public Task? GetComputePipelineCompletion(ShaderProgram program)
+    {
+        lock (_gate)
+        {
+            return _host.GetComputePipelineCompletion(program);
+        }
+    }
 }

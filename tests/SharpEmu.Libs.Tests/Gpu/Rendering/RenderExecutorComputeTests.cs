@@ -25,6 +25,50 @@ public sealed class RenderExecutorComputeTests : IDisposable
 
     public void Dispose() => _fatal.Dispose();
 
+    [Fact]
+    public void CompletedPipeline_RetriesPublicationBeforeDispatch()
+    {
+        _pipelines.PendingComputeCompletion = Task.CompletedTask;
+        _executor.Dispatch(5, Banks(), 4, 2, 1, 0x41);
+        Assert.Equal(2, _pipelines.ComputePipelineAttempts);
+        AssertDispatched(4, 2, 1);
+    }
+
+    [Fact]
+    public void FailedPipeline_PropagatesAndEndsPreparationWithoutDispatch()
+    {
+        var failure = new InvalidOperationException("Compile failed.");
+        _pipelines.PendingComputeCompletion = Task.FromException(failure);
+        Assert.Same(failure, Assert.Throws<InvalidOperationException>(() =>
+            _executor.Dispatch(5, Banks(), 4, 2, 1, 0x41)));
+        AssertNotDispatched();
+        Assert.Contains("preparation_end", _host.Calls);
+        Assert.Equal(1, _pipelines.ComputePipelineAttempts);
+    }
+
+    [Fact]
+    public async Task PendingPipeline_WaitsWithoutPolling()
+    {
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var requested = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pipelines.PendingComputeCompletion = completion.Task;
+        _pipelines.CompletionRequested = () => requested.TrySetResult();
+        var dispatch = Task.Run(() => _executor.Dispatch(5, Banks(), 4, 2, 1, 0x41));
+        try
+        {
+            await requested.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.False(dispatch.IsCompleted);
+            Assert.Equal(1, _pipelines.ComputePipelineAttempts);
+        }
+        finally
+        {
+            completion.TrySetResult();
+            await dispatch.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        Assert.Equal(2, _pipelines.ComputePipelineAttempts);
+        AssertDispatched(4, 2, 1);
+    }
+
     private static BufferResourceInfo ClearResource(bool read = false, bool formatted = true, bool written = true, uint maxByteExtent = 16, uint packedStride = 16) =>
         new(read, written, false, formatted, false, maxByteExtent, packedStride);
 

@@ -106,6 +106,8 @@ public interface IShaderPipelineProvider
 
     PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program);
 
+    Task? GetComputePipelineCompletion(ShaderProgram program) => null;
+
     // False means the host is still compiling this pipeline; asking again returns it once
     // the compile finishes, without starting a second one.
     bool TryCreateComputePipeline(ComputeInputInfo input, ShaderProgram program, out PipelineHandle handle)

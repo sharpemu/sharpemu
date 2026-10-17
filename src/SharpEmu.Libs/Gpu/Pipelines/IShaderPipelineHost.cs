@@ -102,6 +102,8 @@ internal interface IShaderPipelineHost
 
     PipelineHandle CreateComputePipeline(ComputePipelineDescription description);
 
+    Task? GetComputePipelineCompletion(ShaderProgram program) => null;
+
     // Creates the compute pipeline without blocking the command stream on the host
     // shader compiler: false means the compile is still running and the caller should ask
     // again, true hands over the finished pipeline. A backend that compiles cheaply keeps

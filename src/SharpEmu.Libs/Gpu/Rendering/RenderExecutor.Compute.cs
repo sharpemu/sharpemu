@@ -157,7 +157,15 @@ public sealed partial class RenderExecutor
             while (!_pipelines.TryCreateComputePipeline(input, computeProgram.Program, out pipeline))
             {
                 using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputePipelineWait);
-                Thread.Sleep(1);
+                var completion = _pipelines.GetComputePipelineCompletion(computeProgram.Program);
+                if (completion is null)
+                {
+                    Thread.Sleep(1);
+                }
+                else
+                {
+                    completion.GetAwaiter().GetResult();
+                }
             }
 
             var bindings = PrepareBindings(input.Stage);

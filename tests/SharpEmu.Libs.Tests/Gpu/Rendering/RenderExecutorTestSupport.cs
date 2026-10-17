@@ -552,6 +552,29 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         Calls.Add("create_compute_pipeline");
         return new PipelineHandle(0xC1, 0xD1, false);
     }
+
+    public Task? PendingComputeCompletion { get; set; }
+    public Action? CompletionRequested { get; set; }
+    public int ComputePipelineAttempts { get; private set; }
+
+    public Task? GetComputePipelineCompletion(ShaderProgram program)
+    {
+        CompletionRequested?.Invoke();
+        return PendingComputeCompletion;
+    }
+
+    public bool TryCreateComputePipeline(ComputeInputInfo input, ShaderProgram program, out PipelineHandle handle)
+    {
+        ComputePipelineAttempts++;
+        if (PendingComputeCompletion is { } completion &&
+            (ComputePipelineAttempts == 1 || !completion.IsCompletedSuccessfully))
+        {
+            handle = default;
+            return false;
+        }
+        handle = CreateComputePipeline(input, program);
+        return true;
+    }
 }
 
 // Register banks and programs for a draw that renders into one 64x64 color target.

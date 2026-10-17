@@ -627,10 +627,11 @@ internal static unsafe partial class VulkanVideoPresenter
             return layout;
         }
 
-        private PipelineHandle RegisterPipeline(RenderPipelineEntry entry)
+        private PipelineHandle RegisterPipeline(RenderPipelineEntry entry, Action? transferOwnership = null)
         {
             entry.Id = ++_nextPipelineId;
             _pipelineEntries.Add(entry.Id, entry);
+            transferOwnership?.Invoke();
             if (_gpuCommandProfile is not null)
             {
                 Console.Error.WriteLine($"[PERF][GPU_PIPELINE] pipeline={entry.Id} vertex=0x{entry.ProfileVertexHash:X16} pixel=0x{entry.ProfilePixelHash:X16} compute=0x{entry.ProfileComputeHash:X16}");
@@ -1179,6 +1180,9 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private readonly Dictionary<ulong, PendingComputePipeline> _pendingComputePipelines = new();
+
+        public Task? GetComputePipelineCompletion(ShaderProgram program) =>
+            _pendingComputePipelines.TryGetValue(program.Id, out var pending) ? pending.Compile : null;
         private static readonly SemaphoreSlim _computeCompileSlots =
             new(Math.Max(2, Environment.ProcessorCount / 2));
 
@@ -1209,7 +1213,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     return false;
                 }
 
-                _pendingComputePipelines.Remove(key);
                 var compiled = pending.Compile.GetAwaiter().GetResult();
                 ComputeCompileProfile.Record(ComputeCompileProfile.Part.ConsumeDelay, pending.CompletedTimestamp);
                 ReportPipelineCreation(
@@ -1228,7 +1231,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     Demand = pending.Demand,
                     UsesPushDescriptors = pending.UsesPushDescriptors,
                     ProfileComputeHash = pending.Hash,
-                });
+                }, () => _pendingComputePipelines.Remove(key));
                 return true;
             }
 
