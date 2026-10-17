@@ -1843,6 +1843,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         _gate.EnterReadLock();
         try
         {
+            var region = FindRegion(virtualAddress, (ulong)destination.Length, out var offset);
+            if (region is not null)
             var region = FindRegion(virtualAddress, (ulong)destination.Length);
             if (IsBackedSpan(region, virtualAddress, (ulong)destination.Length))
             {
@@ -1997,6 +1999,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         _gate.EnterReadLock();
         try
         {
+            var region = FindRegion(virtualAddress, (ulong)expected.Length, out var offset);
+            if (region is null)
             var region = FindRegion(virtualAddress, (ulong)expected.Length);
             if (IsBackedSpan(region, virtualAddress, (ulong)expected.Length))
             {
@@ -2081,6 +2085,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         _gate.EnterReadLock();
         try
         {
+            var region = FindRegion(virtualAddress, (ulong)source.Length, out var offset);
+            if (region is not null)
             var region = FindRegion(virtualAddress, (ulong)source.Length);
             if (IsBackedSpan(region, virtualAddress, (ulong)source.Length))
             {
@@ -2178,6 +2184,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         _gate.EnterReadLock();
         try
         {
+            var sourceRegion = FindRegion(sourceAddress, length, out var sourceOffset);
+            var destinationRegion = FindRegion(destinationAddress, length, out var destinationOffset);
+            if (sourceRegion is null || destinationRegion is null)
             var sourceRegion = FindRegion(sourceAddress, length);
             var destinationRegion = FindRegion(destinationAddress, length);
             var sourceBacked = IsBackedSpan(sourceRegion, sourceAddress, length);
@@ -2238,13 +2247,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private bool TryReadExclusive(ulong virtualAddress, Span<byte> destination)
     {
-        var region = FindRegion(virtualAddress, (ulong)destination.Length);
-        if (region is not null &&
-            TryResolveRegionOffset(
-                virtualAddress,
-                (ulong)destination.Length,
-                region,
-                out var offset))
+        var region = FindRegion(virtualAddress, (ulong)destination.Length, out var offset);
+        if (region is not null)
         {
             var srcPtr = (void*)(region.VirtualAddress + offset);
             if (!EnsureRangeCommitted((ulong)srcPtr, (ulong)destination.Length, region))
@@ -2287,13 +2291,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     private bool TryWriteExclusive(ulong virtualAddress, ReadOnlySpan<byte> source)
     {
-        var region = FindRegion(virtualAddress, (ulong)source.Length);
-        if (region is not null &&
-            TryResolveRegionOffset(
-                virtualAddress,
-                (ulong)source.Length,
-                region,
-                out var offset))
+        var region = FindRegion(virtualAddress, (ulong)source.Length, out var offset);
+        if (region is not null)
         {
             var destPtr = (void*)(region.VirtualAddress + offset);
             if (!EnsureRangeCommitted((ulong)destPtr, (ulong)source.Length, region))
@@ -2399,8 +2398,16 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
     }
 
-    private MemoryRegion? FindRegion(ulong address, ulong size)
+    private MemoryRegion? FindRegion(ulong address, ulong size) =>
+        FindRegion(address, size, out _);
+
+    // Locates the region containing [address, address+size) and reports the
+    // in-region byte offset in the same pass. Callers on the hot read/write path
+    // need that offset immediately, so returning it here avoids a second,
+    // identical TryResolveRegionOffset walk right after the lookup.
+    private MemoryRegion? FindRegion(ulong address, ulong size, out ulong offset)
     {
+        offset = 0;
         var low = 0;
         var high = _regions.Count - 1;
         MemoryRegion? candidate = null;
@@ -2420,7 +2427,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
 
         return candidate is not null &&
-            TryResolveRegionOffset(address, size, candidate, out _)
+            TryResolveRegionOffset(address, size, candidate, out offset)
                 ? candidate
                 : null;
     }
