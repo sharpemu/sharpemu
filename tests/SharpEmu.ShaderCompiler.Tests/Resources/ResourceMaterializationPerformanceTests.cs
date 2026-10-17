@@ -11,6 +11,48 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 public sealed class ResourceMaterializationPerformanceTests
 {
     [Theory]
+    [InlineData(28, false)]
+    [InlineData(32, true)]
+    [InlineData(64, false)]
+    [InlineData(67, true)]
+    public void ResidentRecorderPreservesBatchEntriesAndRefusal(int bytes, bool clean)
+    {
+        var type = typeof(ResourceMaterializationCache).GetNestedType("ReadRecorder", BindingFlags.NonPublic)!;
+        var recorder = Activator.CreateInstance(type, true)!;
+        var refused = false;
+        ResidentGuestBytesReader reader = (address, destination, policy) =>
+        {
+            for (var index = 0; index < destination.Length; index++) destination[index] = (byte)index;
+            Assert.Equal(clean, policy);
+            return !refused;
+        };
+        var wrapped = (ResidentGuestBytesReader)type.GetMethod("WrapResident")!.Invoke(recorder, [reader])!;
+        var records = (List<(ulong Address, uint Word, bool Clean, bool Table)>)type.GetProperty("Reads")!.GetValue(recorder)!;
+        var phase = (Action<bool>)type.GetProperty("TablePhase")!.GetValue(recorder)!;
+        var buffer = new byte[bytes];
+        for (var pass = 0; pass < 2; pass++)
+        {
+            phase(pass != 0);
+            Assert.True(wrapped(0x1000, buffer, clean));
+        }
+        var words = bytes / 4;
+        Assert.Equal(words * 2, records.Count);
+        for (var index = 0; index < records.Count; index++)
+        {
+            var offset = index % words * 4;
+            Assert.Equal((0x1000UL + (ulong)offset, BitConverter.ToUInt32(buffer, offset), clean, index >= words), records[index]);
+        }
+        var saved = records.ToArray();
+        refused = true;
+        Assert.False(wrapped(0x2000, buffer, clean));
+        Array.Fill(buffer, (byte)255);
+        Assert.Equal(saved, records);
+        type.GetMethod("Reset")!.Invoke(recorder, null);
+        Assert.Empty(records);
+        phase(false);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void UserDataStorageRejectsChangedWords(bool useArray)

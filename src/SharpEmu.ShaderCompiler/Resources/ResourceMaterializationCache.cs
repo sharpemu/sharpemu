@@ -2085,6 +2085,17 @@ public sealed partial class ResourceMaterializationCache
                 return false;
 
             using var profile = ResourceMaterializationProfile.MeasureSampled(ResourceMaterializationProfile.Phase.ReadRecording);
+            var wordCount = destination.Length / sizeof(uint);
+            if (wordCount >= 8)
+            {
+                var first = _reads.Count;
+                System.Runtime.InteropServices.CollectionsMarshal.SetCount(_reads, checked(first + wordCount));
+                var recorded = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_reads).Slice(first, wordCount);
+                for (var index = 0; index < wordCount; index++)
+                    recorded[index] = (address + (ulong)index * sizeof(uint),
+                        System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(destination[(index * sizeof(uint))..]), clean, _inTable);
+                return true;
+            }
             for (var offset = 0; offset + sizeof(uint) <= destination.Length; offset += sizeof(uint))
                 _reads.Add((address + (ulong)offset,
                     System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(destination[offset..]), clean, _inTable));
