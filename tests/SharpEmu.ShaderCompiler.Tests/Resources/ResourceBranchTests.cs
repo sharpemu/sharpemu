@@ -16,6 +16,24 @@ public sealed class ResourceBranchTests
 
     private static uint[] UserData(uint condition) => [0x1000, 0, 256, 0, 0x2000, 0, 256, 0, condition];
 
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(1u)]
+    public void EmptySourceEvaluationPreservesBranchActivity(uint condition)
+    {
+        var plan = Extract(ConditionalBuffers());
+        plan.CompileEvaluatorNow();
+        Assert.NotNull(plan.CompiledTableTransaction);
+        var inputs = Inputs(UserData(condition), readCleanMemory: CleanRead);
+        Assert.True(RuntimeValueEvaluator.EvaluateSources(plan, [], inputs, plan.CleanFlatSlots,
+            true, out _, out var table, out var activity));
+        Assert.NotEmpty(activity);
+        Assert.Contains(false, activity);
+        Assert.Contains(true, activity);
+        Assert.True(ResourceMaterializer.TryEvaluateTable(plan, inputs, out var refreshed));
+        Assert.Equal(table, refreshed);
+    }
+
     private static bool CleanRead(ulong address, out uint word) { word = 0; return false; }
 
     private static ResourceSnapshot Materialize(ShaderResourcePlan plan, uint[] userData, GuestWordReader? cleanReader)

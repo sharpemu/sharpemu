@@ -6,6 +6,18 @@ namespace SharpEmu.ShaderCompiler.Resources;
 public sealed partial class ResourceMaterializationCache
 {
     private const int MaximumProfileKeys = 4096;
+    private readonly record struct TransactionBuildKey(ulong Hash, ShaderStage Stage, bool TableOnly);
+    private static readonly Dictionary<TransactionBuildKey, string> TransactionBuilds = [];
+
+    internal static void RecordTransactionBuild(ShaderResourcePlan plan, bool tableOnly, string reason)
+    {
+        if (!MissDiagnosticsEnabled) return;
+        lock (MissReportLock)
+        {
+            if (TransactionBuilds.Count < MaximumProfileKeys)
+                TransactionBuilds[new(plan.Hash, plan.Stage, tableOnly)] = reason;
+        }
+    }
     private static readonly List<string> ChangedWordSamples = [];
     private static readonly Dictionary<(ulong Hash, ShaderStage Stage), int> ChangedWordCounts = [];
     private static readonly Dictionary<(ulong Hash, ShaderStage Stage, string Path), long> EvaluationPaths = [];
@@ -259,6 +271,9 @@ public sealed partial class ResourceMaterializationCache
         lock (MissReportLock)
         {
             var result = new System.Text.StringBuilder();
+            foreach (var (key, reason) in TransactionBuilds)
+                result.Append($"\n[PERF][RESOURCE_TRANSACTION_REJECTED] hash={key.Hash:X16} stage={key.Stage} table_only={key.TableOnly} reason={reason}");
+            TransactionBuilds.Clear();
             foreach (var sample in ChangedWordSamples) result.Append(sample);
             foreach (var sample in ConsumerSamples) result.Append(sample);
             ConsumerSamples.Clear();

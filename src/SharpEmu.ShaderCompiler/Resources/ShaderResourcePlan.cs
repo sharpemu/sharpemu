@@ -45,6 +45,8 @@ public sealed class ShaderResourcePlan
     internal RawReadPrefetchPlan? RawReadPrefetch { get; set; }
     private readonly object _compileGate = new();
     private CompiledResourceEvaluator? _compiledEvaluator;
+    private CompiledResourceTransaction? _compiledTransaction;
+    private CompiledResourceTransaction? _compiledTableTransaction;
     private int _compiledEvaluatorState;
 
     internal CompiledResourceEvaluator? CompiledEvaluator
@@ -72,9 +74,45 @@ public sealed class ShaderResourcePlan
                 compiled = null;
             }
 
+            try
+            {
+                _compiledTransaction = CompiledResourceTransaction.Build(this);
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                _compiledTransaction = null;
+            }
+
+            try
+            {
+                _compiledTableTransaction = CompiledResourceTransaction.Build(this, tableOnly: true);
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                _compiledTableTransaction = null;
+            }
+
             _compiledEvaluator = compiled;
             Volatile.Write(ref _compiledEvaluatorState, 2);
             return compiled;
+        }
+    }
+
+    internal CompiledResourceTransaction? CompiledTransaction
+    {
+        get
+        {
+            _ = CompiledEvaluator;
+            return Volatile.Read(ref _compiledEvaluatorState) == 2 ? _compiledTransaction : null;
+        }
+    }
+
+    internal CompiledResourceTransaction? CompiledTableTransaction
+    {
+        get
+        {
+            _ = CompiledEvaluator;
+            return Volatile.Read(ref _compiledEvaluatorState) == 2 ? _compiledTableTransaction : null;
         }
     }
 

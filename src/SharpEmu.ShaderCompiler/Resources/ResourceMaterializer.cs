@@ -113,9 +113,18 @@ public static class ResourceMaterializer
 
     // Evaluates only the flattened table, laid out as a full materialization lays it out
     // before specialization; the written device-address slots are left zero for the caller.
-    public static bool TryEvaluateTable(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out uint[] table) =>
-        RuntimeValueEvaluator.EvaluateSources(plan, [], inputs, plan.CleanFlatSlots, evaluateTable: true, out _, out table, out _,
-            additionalTableWords: checked(plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount));
+    public static bool TryEvaluateTable(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out uint[] table)
+    {
+        var additionalTableWords = checked(plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount);
+        // Only this table-only caller can omit descriptor branch activity.
+        if (RuntimeValueEvaluator.HasResourceStructure(plan) && plan.CompiledTableTransaction is { } transaction)
+        {
+            ResourceMaterializationCache.RecordEvaluationPath(plan, "compiled_table");
+            return transaction.Evaluate(inputs, additionalTableWords, out _, out table);
+        }
+        return RuntimeValueEvaluator.EvaluateSources(plan, [], inputs, plan.CleanFlatSlots, evaluateTable: true,
+            out _, out table, out _, additionalTableWords: additionalTableWords);
+    }
 
     // ---- snapshot ----
 

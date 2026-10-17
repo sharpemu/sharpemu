@@ -11,6 +11,8 @@ public static class ResourceMaterializationProfile
     {
         Total, Snapshot, DeviceAddressRanges, Specialization, OutputAssembly, GuestRead, CleanGuestRead,
         SourceEvaluation, BranchSelection, DescriptorPrefetch, DescriptorEvaluation, TablePrefetch, TableEvaluation,
+        CompiledEvaluation, CompiledTableEvaluation,
+        CompiledOutputAllocation, CompiledBody, CompiledWordRead, CompiledGroupRead,
         ReadRecording, ConsumerLookup, ConsumerGraph, Count
     }
 
@@ -23,6 +25,18 @@ public static class ResourceMaterializationProfile
     private static long _branchEvaluations;
     private static long _descriptorSources;
     private static long _inactiveSources;
+
+    internal enum ReadCounter
+    {
+        GroupAttempt, GroupIneligible, GroupRefused, GroupSucceeded, GroupWords,
+        ScalarAddress, ScalarBuffer, Count
+    }
+    private static readonly long[] _readCounts = new long[(int)ReadCounter.Count];
+
+    internal static void CountRead(ReadCounter counter, int amount = 1)
+    {
+        if (Enabled) Interlocked.Add(ref _readCounts[(int)counter], amount);
+    }
 
     internal static bool IsEnabled(string? performance, string? frameTrace) => performance == "1" && frameTrace == "1";
 
@@ -81,6 +95,10 @@ public static class ResourceMaterializationProfile
         var parts = new List<string>();
         for (var index = 0; index < (int)Phase.Count; index++)
             parts.Add(FormattableString.Invariant($"{(Phase)index}={Interlocked.Read(ref _elapsedTicks[index]) * 1000.0 / Stopwatch.Frequency:F3}ms/n{Interlocked.Read(ref _calls[index])}"));
-        output.WriteLine($"[PERF][RESOURCE_MATERIALIZATION] cumulative=1 inclusive=1 sample_stride={SampleStride} sampled_phases=ReadRecording,ConsumerLookup allocated_bytes={Interlocked.Read(ref _allocatedBytes)} branch_evaluations={Interlocked.Read(ref _branchEvaluations)} descriptor_sources={Interlocked.Read(ref _descriptorSources)} inactive_sources={Interlocked.Read(ref _inactiveSources)} {string.Join(" ", parts)}");
+        output.WriteLine($"[PERF][RESOURCE_MATERIALIZATION] cumulative=1 inclusive=1 sample_stride={SampleStride} sampled_phases=CompiledOutputAllocation,CompiledBody,CompiledWordRead,CompiledGroupRead,ReadRecording,ConsumerLookup allocated_bytes={Interlocked.Read(ref _allocatedBytes)} branch_evaluations={Interlocked.Read(ref _branchEvaluations)} descriptor_sources={Interlocked.Read(ref _descriptorSources)} inactive_sources={Interlocked.Read(ref _inactiveSources)} {string.Join(" ", parts)}");
+        var reads = new List<string>();
+        for (var index = 0; index < (int)ReadCounter.Count; index++)
+            reads.Add($"{(ReadCounter)index}={Interlocked.Read(ref _readCounts[index])}");
+        output.WriteLine($"[PERF][RESOURCE_READ_COUNTS] cumulative=1 sampled=0 {string.Join(" ", reads)}");
     }
 }

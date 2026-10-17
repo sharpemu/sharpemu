@@ -435,10 +435,26 @@ public sealed class RuntimeValueEvaluator
         int additionalTableWords = 0)
     {
         using var sourceProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.SourceEvaluation);
-        ResourceMaterializationCache.RecordEvaluationPath(plan, "baseline_evaluator");
         results = [];
         table = [];
         activeSources = [];
+        if (evaluateTable && sources.Count == 0 && !HasResourceStructure(plan) && ReferenceEquals(cleanFlatSlots, plan.CleanFlatSlots) &&
+            plan.CompiledTableTransaction is { } tableTransaction)
+        {
+            ResourceMaterializationCache.RecordEvaluationPath(plan, "compiled_table");
+            return tableTransaction.Evaluate(inputs, additionalTableWords, out results, out table);
+        }
+        if (evaluateTable && ReferenceEquals(sources, plan.MaterializationSources) &&
+            ReferenceEquals(cleanFlatSlots, plan.CleanFlatSlots) && plan.CompiledTransaction is { } transaction)
+        {
+            ResourceMaterializationCache.RecordEvaluationPath(plan, "compiled_whole");
+            // A failed transaction must not replay guest reads through the fallback evaluator.
+            return transaction.Evaluate(inputs, additionalTableWords, out results, out table);
+        }
+        ResourceMaterializationCache.RecordEvaluationPath(plan,
+            plan.ResourceBranches.Count != 0 ? "fallback_branches" :
+            plan.IndirectImages.Count != 0 ? "fallback_indirect_images" :
+            plan.BufferCandidateTables.Count != 0 ? "fallback_buffer_candidates" : "fallback_other_or_unavailable");
         var anyClean = false;
         foreach (var clean in cleanFlatSlots)
         {
@@ -519,6 +535,9 @@ public sealed class RuntimeValueEvaluator
         table = flattened;
         return true;
     }
+
+    internal static bool HasResourceStructure(ShaderResourcePlan plan) =>
+        plan.ResourceBranches.Count != 0 || plan.IndirectImages.Count != 0 || plan.BufferCandidateTables.Count != 0;
 
     private static bool[] EvaluateActiveSources(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, RuntimeValueEvaluator cleanEvaluator,
         RuntimeEvaluationScratch scratch)
