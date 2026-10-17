@@ -240,6 +240,8 @@
   "Options.VSync.Desc": "Brug FIFO-præsentation for output uden tearing.",
   "Options.Hdr.Label": "HDR-output",
   "Options.Hdr.Desc": "Brug HDR, når den valgte skærm og grafik-backend understøtter det. Automatisk falder tilbage til SDR.",
+  "Options.DisplayPatch.Label": "Opløsning for skærmpatch",
+  "Options.DisplayPatch.Desc": "Omskriver de indbyggede 4K-renderstørrelser i nogle spil (f.eks. Demon's Souls og Unreal Engine-titler) til denne størrelse. Når den er slået fra, beholder spillet sine egne størrelser. Det, spillet får at vide om skærmen, ændres ikke.",
   "Options.Hdr.Auto": "Automatisk",
   "Options.Env.BinkPlayback.Label": "Bink-videoafspilning",
   "Options.Env.BinkPlayback.Desc": "Host afspiller Bink-videoer via FFmpeg-broen, men nogle spil kan opleve problemer.\nGuest bruger spilmotorens egen dekoder.\nSkip springer Bink-videoer over, hvilket kan gøre udviklingen nemmere.",

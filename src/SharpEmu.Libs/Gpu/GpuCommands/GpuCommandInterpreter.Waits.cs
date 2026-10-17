@@ -28,20 +28,24 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
+        // This queue's own store satisfies the wait whatever memory holds, so it is asked
+        // first: reading the label can make the host finish queued work and download GPU-written
+        // pages before it answers, and that round trip buys nothing when the store decides it.
+        if (TryReadOwnWrite(address, is64Bit, out var ownValue) &&
+            WaitOperation.TryCompare(ownValue, reference, mask, compareFunction, out var satisfied) && satisfied)
+        {
+            return;
+        }
+
         var value = ReadWaitOperand(address, is64Bit);
-        if (!WaitOperation.TryCompare(value, reference, mask, compareFunction, out var satisfied))
+        if (!WaitOperation.TryCompare(value, reference, mask, compareFunction, out satisfied))
         {
             throw _host.Fatal($"The wait compare function is unknown: function={compareFunction} address=0x{address:X16}.");
         }
 
-        if (!satisfied && TryReadOwnWrite(address, is64Bit, out var ownValue))
-        {
-            _ = WaitOperation.TryCompare(ownValue, reference, mask, compareFunction, out satisfied);
-        }
-
         if (!satisfied)
         {
-            Suspend();
+            SuspendOn(CommandWaitCondition.Memory(address, is64Bit ? sizeof(ulong) : (ulong)sizeof(uint)));
         }
     }
 
@@ -91,7 +95,7 @@ public sealed partial class GpuCommandInterpreter
     {
         if (ConstantEngineCount <= DrawEngineCount && !ConstantEngineComplete)
         {
-            Suspend();
+            SuspendOn(new CommandWaitCondition(CommandWaitKind.EngineCounter));
         }
     }
 
@@ -104,7 +108,7 @@ public sealed partial class GpuCommandInterpreter
 
         if (ConstantEngineCount - DrawEngineCount >= difference)
         {
-            Suspend();
+            SuspendOn(new CommandWaitCondition(CommandWaitKind.EngineCounter));
         }
     }
 

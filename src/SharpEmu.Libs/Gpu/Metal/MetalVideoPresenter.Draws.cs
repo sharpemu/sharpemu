@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Metal;
 
@@ -1941,6 +1942,14 @@ internal static partial class MetalVideoPresenter
         return handle;
     }
 
+    // The command stream whose memory waits a write-back can satisfy. Without a GPU tick
+    // of its own, each write-back counts as one: it is when GPU-produced bytes land.
+    private static volatile CommandStreamQueue? _commandStream;
+    private static ulong _writeBackTick;
+
+    public static void AttachCommandStream(CommandStreamQueue queue) =>
+        _commandStream = queue;
+
     private static void WriteBuffersBackToGuest(
         List<(nint Pointer, GuestMemoryBuffer Guest)> writeBackBuffers)
     {
@@ -1962,6 +1971,12 @@ internal static partial class MetalVideoPresenter
                     guest.BaseAddress,
                     new ReadOnlySpan<byte>((void*)pointer, guest.Length));
             }
+        }
+
+        // A suspended wait on these bytes is woken now, not by the blocked-retry timer.
+        if (writeBackBuffers.Count > 0)
+        {
+            _commandStream?.NotifyCompletedGpuTick(Interlocked.Increment(ref _writeBackTick));
         }
     }
 

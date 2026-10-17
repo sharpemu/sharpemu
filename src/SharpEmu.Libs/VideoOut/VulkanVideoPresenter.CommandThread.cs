@@ -51,7 +51,9 @@ internal static partial class VulkanVideoPresenter
         private readonly ICpuMemory _memory;
         private readonly Action<AgcExports.DeferredWork> _runDeferred;
         private readonly ParallelProgramPrefetch? _prefetch;
-        private readonly Thread _thread;
+        private SharpEmu.HLE.Host.HostQosThread? _thread;
+        // Set by the thread itself, which may run before Start has stored _thread.
+        private volatile Thread? _producerThread;
         private readonly object _lock = new();
         private List<Item> _incoming = new();
         private List<Item> _draining = new();
@@ -85,12 +87,16 @@ internal static partial class VulkanVideoPresenter
             _memory = memory;
             _runDeferred = runDeferred;
             _prefetch = prefetch;
-            _thread = new Thread(Run) { IsBackground = true, Name = "SharpEmu command stream" };
         }
 
-        public void Start() => _thread.Start();
+        // Every draw and flip is interpreted here before the render thread sees it, so the
+        // thread sits on the frame deadline. HostQosThread creates it at UserInteractive -
+        // natively on macOS, where CoreCLR threads refuse a QoS class (EPERM); the stack is
+        // a virtual reservation, sized past Darwin's 512 KiB native default.
+        public void Start() => _thread = SharpEmu.HLE.Host.HostQosThread.Start(
+            "SharpEmu command stream", SharpEmu.HLE.Host.HostThreadQos.UserInteractive, 16 * 1024 * 1024, Run);
 
-        public bool IsProducerThread => Environment.CurrentManagedThreadId == _thread.ManagedThreadId;
+        public bool IsProducerThread => ReferenceEquals(Thread.CurrentThread, _producerThread);
 
         public long Gate => _enqueuedNonDraw;
 
@@ -102,7 +108,7 @@ internal static partial class VulkanVideoPresenter
             set => _consumerIdle = value;
         }
 
-        public bool IsAlive => _thread.IsAlive;
+        public bool IsAlive => _thread?.IsAlive == true;
 
         // The producer side, on the command stream thread.
 
@@ -448,10 +454,10 @@ internal static partial class VulkanVideoPresenter
             _stopping = true;
             _queue.Wake();
             var deadline = Stopwatch.GetTimestamp() + 5 * Stopwatch.Frequency;
-            while (_thread.IsAlive && Stopwatch.GetTimestamp() < deadline)
+            while (_thread is { IsAlive: true } thread && Stopwatch.GetTimestamp() < deadline)
             {
                 runItems();
-                _thread.Join(1);
+                thread.Join(1);
             }
 
             runItems();
@@ -459,6 +465,7 @@ internal static partial class VulkanVideoPresenter
 
         private void Run()
         {
+            _producerThread = Thread.CurrentThread;
             try
             {
                 var lastProgress = Stopwatch.GetTimestamp();

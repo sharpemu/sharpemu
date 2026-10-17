@@ -53,6 +53,10 @@ public sealed class PacketCursorStack
 
     public bool Suspended { get; internal set; }
 
+    // Why the last slice suspended; the queue uses it to wake this submission only
+    // when the thing it is waiting for can have changed.
+    public CommandWaitCondition SuspendCondition { get; internal set; } = CommandWaitCondition.Unknown;
+
     public bool MadeProgress { get; internal set; }
 
     public int Depth => _cursors.Count;
@@ -74,6 +78,7 @@ public sealed class PacketCursorStack
     {
         _cursors.Clear();
         Suspended = false;
+        SuspendCondition = CommandWaitCondition.Unknown;
         MadeProgress = false;
     }
 }
@@ -129,4 +134,13 @@ public sealed class CommandSubmission
 
     // Address of the packet the blocked slice stopped on; diagnostics only.
     public ulong BlockedPacketAddress { get; internal set; }
+
+    // What the blocked slice is waiting for; the queue wakes it on that alone.
+    public CommandWaitCondition Wait { get; internal set; } = CommandWaitCondition.Unknown;
+
+    // Set when the last park was skipped because a wake raced the slice. A wake that
+    // arrives while the slice runs is worth one more run, and without remembering that it
+    // was given, a queue that is told of a completion every millisecond never parks at
+    // all: Poppy Playtime spun forty thousand slices in two seconds and drew nothing.
+    public bool RerunForRacedWake { get; internal set; }
 }

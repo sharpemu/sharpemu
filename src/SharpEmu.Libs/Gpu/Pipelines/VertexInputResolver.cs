@@ -16,6 +16,29 @@ public sealed class VertexTableMetadata
     public int VertexAttributeRegister { get; init; } = NoRegister;
     public uint[] InputSemantics { get; init; } = [];
 }
+
+// The header-derived tables of vertex programs already read, keyed by the registered header
+// and the code hash so a different binary at the same address never reuses an entry.
+// Used under the pipeline cache's resolve lock; entries are never mutated after they are stored.
+public sealed class VertexTableMetadataCache
+{
+    private const int MaxEntries = 4096;
+    private readonly Dictionary<(RegisteredShader Shader, ulong CodeHash), VertexTableMetadata> _entries = new();
+
+    internal bool TryGet(RegisteredShader shader, ulong codeHash, out VertexTableMetadata? metadata) =>
+        _entries.TryGetValue((shader, codeHash), out metadata);
+
+    internal void Add(RegisteredShader shader, ulong codeHash, VertexTableMetadata metadata)
+    {
+        if (_entries.Count >= MaxEntries)
+        {
+            _entries.Clear();
+        }
+
+        _entries[(shader, codeHash)] = metadata;
+    }
+}
+
 // One packed input semantic word of a shader header.
 public readonly record struct ShaderInputSemantic(uint Word)
 {
@@ -32,11 +55,18 @@ public readonly record struct ShaderInputSemantic(uint Word)
 public static class VertexInputResolver
 {
     public static VertexInputInfo ResolveVertexInputs(CpuContext context, RegisteredShader shader, ReadOnlySpan<uint> userData,
-        uint positionExportControl = 0, ClipSpaceTransform clipSpace = default)
+        uint positionExportControl = 0, ClipSpaceTransform clipSpace = default,
+        VertexTableMetadataCache? metadataCache = null, ulong codeHash = 0)
     {
-        if (!TryReadTables(context, shader, GpuCommands.Registers.UserScalarRegisters.Capacity, out var metadata, out var error))
+        VertexTableMetadata? metadata = null;
+        if (metadataCache is null || !metadataCache.TryGet(shader, codeHash, out metadata))
         {
-            throw SubmissionScheduler.Fatal($"The vertex program header is invalid: shader=0x{shader.CodeAddress:X16} error={error}.");
+            if (!TryReadTables(context, shader, GpuCommands.Registers.UserScalarRegisters.Capacity, out metadata, out var error))
+            {
+                throw SubmissionScheduler.Fatal($"The vertex program header is invalid: shader=0x{shader.CodeAddress:X16} error={error}.");
+            }
+
+            metadataCache?.Add(shader, codeHash, metadata);
         }
 
         var attributes = new List<VertexAttributeResource>();

@@ -1016,6 +1016,20 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                     HorizontalContentAlignment="Left"
                                     VerticalAlignment="Center" />
                         </local:SettingRow>
+                        <local:SettingRow x:Name="GameDisplayPatchRow"
+                                          Classes="optionRow"
+                                          Label="{Binding [Options.DisplayPatch.Label],
+                                                          Source={x:Static local:Localization.Instance},
+                                                          x:CompileBindings=False}"
+                                          Description="{Binding [Options.DisplayPatch.Desc],
+                                                                Source={x:Static local:Localization.Instance},
+                                                                x:CompileBindings=False}">
+                          <ComboBox x:Name="GameDisplayPatchBox"
+                                    Classes="optionValue"
+                                    ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                    HorizontalContentAlignment="Left"
+                                    VerticalAlignment="Center" />
+                        </local:SettingRow>
                         <local:SettingRow x:Name="GameOverlayEnabledRow"
                                           Classes="optionRow"
                                           Label="{Binding [Options.OverlayEnabled.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
@@ -1624,6 +1638,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Label="{Binding [Options.Hdr.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.Hdr.Desc], Source={x:Static local:Localization.Instance}}">
                         <ComboBox x:Name="HdrModeBox"
+                                  Classes="optionValue"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                  HorizontalContentAlignment="Left"
+                                  VerticalAlignment="Center" />
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="DisplayPatchRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.DisplayPatch.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.DisplayPatch.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ComboBox x:Name="DisplayPatchBox"
                                   Classes="optionValue"
                                   ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
                                   HorizontalContentAlignment="Left"

@@ -39,6 +39,58 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private const int DefaultImportLoopGuardSeconds = 5;
 
+	// The profile keeps its costs per import slot, so it needs the slot names
+	// once rather than a string per dispatch.
+	private void PublishImportProfileNames()
+	{
+		if (!ImportProfile.Enabled)
+		{
+			return;
+		}
+
+		var names = new string[_importEntries.Length];
+		for (var i = 0; i < names.Length; i++)
+		{
+			var entry = _importEntries[i];
+			names[i] = entry.Export is { } export
+				? $"{export.LibraryName}:{export.Name}"
+				: entry.Nid;
+		}
+
+		ImportProfile.Configure(names);
+	}
+
+	// Every NID-keyed decision the dispatch path makes, as one bit each.
+	// DispatchImportCore used to re-derive these with string comparisons on
+	// every guest call - about twenty of them, several unconditional - for
+	// diagnostics that are off in a normal run and for a handful of specially
+	// routed imports. The NID of an import slot never changes, so the whole set
+	// is decided once at stub setup and tested as a bitmask afterwards.
+	[Flags]
+	private enum ImportTraits : uint
+	{
+		None = 0,
+		BootstrapBridge = 1 << 0,
+		DynlibDlsym = 1 << 1,
+		Il2CppApiLookupSymbol = 1 << 2,
+		PrtLazyCommit = 1 << 3,
+		Il2CppExceptionDiagnostic = 1 << 4,
+		MapDirectDiagnostic = 1 << 5,
+		StackCheckFail = 1 << 6,
+		ReturnAddressProbe = 1 << 7,
+		TraceMemset = 1 << 8,
+		TraceCxaAtexit = 1 << 9,
+		TraceEnvSetup = 1 << 10,
+		TracePeriodicFrequent = 1 << 11,
+
+		/// <summary>Any trait that makes the prologue do more than the common case.</summary>
+		PrologueWork = StackCheckFail | ReturnAddressProbe | TraceMemset |
+			TraceCxaAtexit | TraceEnvSetup,
+
+		/// <summary>Any trait that routes the call away from Export.Function.</summary>
+		SpecialDispatch = BootstrapBridge | DynlibDlsym | Il2CppApiLookupSymbol,
+	}
+
 	private readonly struct ImportStubEntry
 	{
 		public ulong Address { get; }
@@ -64,6 +116,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		public ulong NidHash { get; }
 
+		public ImportTraits Traits { get; }
+
+		/// <summary>
+		/// The one failure code this import returns in normal operation, or 0 if
+		/// it has none. A trylock reporting BUSY and a file probe reporting
+		/// NOT_FOUND are routine; logging them would drown the log and cost a
+		/// string-keyed sample lookup per call. Each of these NIDs expects
+		/// exactly one code, so one integer compare replaces the thirteen string
+		/// comparisons the result check used to make.
+		/// </summary>
+		public int ExpectedBenignResult { get; }
+
 		public ImportStubEntry(
 			ulong address,
 			string nid,
@@ -83,8 +147,72 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			SuppressStrlenTrace = suppressStrlenTrace;
 			IsLoopGuardBoundary = isLoopGuardBoundary;
 			NidHash = nidHash;
+			Traits = ClassifyImportTraits(nid);
+			ExpectedBenignResult = ClassifyExpectedBenignResult(nid);
 		}
 	}
+
+	private static ImportTraits ClassifyImportTraits(string nid)
+	{
+		var traits = ImportTraits.None;
+		if (string.Equals(nid, RuntimeStubNids.BootstrapBridge, StringComparison.Ordinal))
+		{
+			traits |= ImportTraits.BootstrapBridge;
+		}
+
+		if (string.Equals(nid, RuntimeStubNids.KernelDynlibDlsym, StringComparison.Ordinal) ||
+			string.Equals(nid, "LwG8g3niqwA", StringComparison.Ordinal))
+		{
+			traits |= ImportTraits.DynlibDlsym;
+		}
+
+		traits |= nid switch
+		{
+			"r8mvOaWdi28" => ImportTraits.Il2CppApiLookupSymbol,
+			"BohYr-F7-is" => ImportTraits.PrtLazyCommit,
+			"cfwBSQyr5Ys" => ImportTraits.Il2CppExceptionDiagnostic,
+			"L-Q3LEjIbgA" => ImportTraits.MapDirectDiagnostic,
+			"Ou3iL1abvng" => ImportTraits.StackCheckFail,
+			"2Z+PpY6CaJg" => ImportTraits.ReturnAddressProbe,
+			"8zTFvBIAIN8" => ImportTraits.TraceMemset,
+			"tsvEmnenz48" => ImportTraits.TraceCxaAtexit | ImportTraits.TracePeriodicFrequent,
+			"bzQExy189ZI" or "8G2LB+A3rzg" => ImportTraits.TraceEnvSetup,
+			"rTXw65xmLIA" => ImportTraits.TracePeriodicFrequent,
+			_ => ImportTraits.None,
+		};
+
+		return traits;
+	}
+
+	// internal for the classification tests: these tables decide what the
+	// dispatch path does without consulting the NID again, so a wrong entry is
+	// silent at runtime.
+	internal static int ClassifyExpectedBenignResult(string nid) => nid switch
+	{
+		// sceKernelStat / sceKernelOpen / sceKernelAprResolveFilepathsToIdsAndFileSizes:
+		// a title probing for an optional file.
+		"eV9wAD2riIA" or "1G3lF1Gg1k8" or "gEpBkcwxUjw" =>
+			unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND),
+		"27bAgiJmOh0" => 60,
+		"fzyMKs9kim0" => unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT),
+		// scePthreadCondTimedwait and sceKernelWaitEventFlag report an elapsed timeout.
+		"BmMjYxmew1w" or "JTvBflhYazQ" =>
+			unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT),
+		// scePthreadMutexLock on an error-checking mutex the caller already owns;
+		// titles use it to build their own recursive locks.
+		"9UK1vLZQft4" => unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK),
+		// scePadReadState on a handle that is not open; titles poll every pad slot.
+		"YndgXqQVV7c" => unchecked((int)0x80920003),
+		"K-jXhbt2gn4" or "upoVrzMHFeE" =>
+			unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY),
+		"H2a+IN9TP0E" => unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN),
+		"12wOHk8ywb0" => unchecked((int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY),
+		"PIWqhn9oSxc" => unchecked((int)0x80410123),
+		"yH17Q6NWtVg" => unchecked((int)0x80960007),
+		"D-CzAxQL0XI" => unchecked((int)0x80960009),
+		"uWIYLFkkwqk" => unchecked((int)0x80B2000C),
+		_ => 0,
+	};
 
 	private readonly record struct RecentImportTraceEntry(
 		long DispatchIndex,
@@ -642,7 +770,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		private readonly object _gate = new();
 		private readonly AutoResetEvent _workAvailable = new(false);
-		private readonly Thread _thread;
+		private readonly Thread? _thread;
+		private readonly SharpEmu.HLE.Host.HostQosThread? _qosThread;
+		private readonly string _hostName;
 		private Action? _work;
 		private volatile bool _stopping;
 
@@ -656,10 +786,27 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 		public GuestExecutionRunner(ulong guestThreadHandle, string name, ThreadPriority priority)
 		{
-			_thread = new Thread(() => ThreadMain(guestThreadHandle), GuestExecutionStackBytes)
+			_hostName = $"SharpEmu-{name}";
+			// A matched SHARPEMU_GUEST_THREAD_QOS rule wins over the explicit host
+			// priority: the thread is created at the rule's class (natively on macOS,
+			// where CoreCLR-created threads can never take a QoS class afterwards).
+			if (SharpEmu.HLE.Host.GuestThreadQosPolicy.TryGetClassForNewThread(name, out var qosClass))
+			{
+				// The class travels as an argument: the thread may run before the
+				// constructor has stored _qosThread.
+				_qosThread = SharpEmu.HLE.Host.HostQosThread.TryStart(
+					_hostName, qosClass, GuestExecutionStackBytes, () => ThreadMain(guestThreadHandle, qosClass), out var errno);
+				if (_qosThread is not null)
+				{
+					return;
+				}
+				Console.Error.WriteLine(
+					$"[SCHED][QOS] thread={name} class={qosClass} ok=False errno={errno} (thread create failed, using managed thread)");
+			}
+			_thread = new Thread(() => ThreadMain(guestThreadHandle, null), GuestExecutionStackBytes)
 			{
 				IsBackground = true,
-				Name = $"SharpEmu-{name}",
+				Name = _hostName,
 				Priority = priority,
 			};
 			_thread.Start();
@@ -682,8 +829,44 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 		}
 
-		private void ThreadMain(ulong guestThreadHandle)
+		// Diagnostic: SHARPEMU_GUEST_THREAD_QOS=interactive|initiated|default|utility|background forces a
+		// class on every guest pthread executor; SHARPEMU_LOG_GUEST_THREAD_QOS=1 logs the class each one
+		// starts with. A value containing '=' is a per-thread rule list instead (GuestThreadQosPolicy).
+		private static readonly string? _guestThreadQosOverride =
+			Environment.GetEnvironmentVariable("SHARPEMU_GUEST_THREAD_QOS");
+		private static readonly bool _logGuestThreadQos =
+			Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_THREAD_QOS") == "1";
+
+		private void ThreadMain(ulong guestThreadHandle, SharpEmu.HLE.Host.HostThreadQos? createdAtClass)
 		{
+			if (createdAtClass is { } qosClass)
+			{
+				SharpEmu.HLE.Host.GuestThreadQosPolicy.LogQosThreadStart(_hostName["SharpEmu-".Length..], qosClass);
+			}
+			else
+			{
+				// Guest pthreads keep the default class. On Linux a new thread starts at
+				// its creator's nice value, which for a thread spawned from the guest's
+				// raised main thread would put every worker on the frame-deadline boost.
+				SharpEmu.HLE.Host.HostThreadQualityOfService.ReleaseInheritedPriority();
+				var inheritedQos = SharpEmu.HLE.Host.HostThreadQualityOfService.DescribeCurrentThread();
+				bool? applied = _guestThreadQosOverride switch
+				{
+					"interactive" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.UserInteractive),
+					"initiated" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.UserInitiated),
+					"default" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.Default),
+					"utility" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.Utility),
+					"background" => SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(SharpEmu.HLE.Host.HostThreadQos.Background),
+					_ => null,
+				};
+				if (_logGuestThreadQos)
+				{
+					Console.Error.WriteLine(
+						$"[LOADER][INFO] guest_thread.qos name='{_hostName}' inherited={inheritedQos} " +
+						$"override={_guestThreadQosOverride ?? "none"} applied={applied?.ToString() ?? "n/a"} " +
+						$"now={SharpEmu.HLE.Host.HostThreadQualityOfService.DescribeCurrentThread()}");
+				}
+			}
 			var previousGuestThreadHandle = GuestThreadExecution.EnterGuestThread(guestThreadHandle);
 			try
 			{
@@ -728,9 +911,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		public void Dispose()
 		{
 			RequestStop();
-			if (!ReferenceEquals(Thread.CurrentThread, _thread))
+			if (_qosThread is not null)
 			{
-				_thread.Join(500);
+				if (!_qosThread.IsCurrentThread)
+				{
+					_qosThread.Join(500);
+				}
+			}
+			else if (!ReferenceEquals(Thread.CurrentThread, _thread))
+			{
+				_thread!.Join(500);
 			}
 		}
 	}
@@ -1399,6 +1589,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			num++;
 		}
 		Console.Error.WriteLine($"[LOADER][INFO] Setup {num2}/{importStubs.Count} import stubs (direct bridge, lle_redirects={num3}, fast_path_stubs={_guestFastPathStubCount})");
+		// A thunked import never reaches the gateway, so it never appears in the
+		// import profile. Say how many were thunked, or a profile comparison
+		// would read the missing rows as calls that stopped happening.
+		Console.Error.WriteLine(
+			$"[LOADER][INFO] native_import_thunks constant_zero={_nativeConstantThunkCount} " +
+			$"allowed={_nativeConstantThunksAllowed} (SHARPEMU_NATIVE_IMPORT_THUNKS=0 to disable)");
+		PublishImportProfileNames();
 		return num2 == importStubs.Count;
 	}
 
@@ -2235,6 +2432,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return true;
 	}
 
+	private static readonly bool _lockFreeTransferRipProbe =
+		!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_TRANSFER_RIP_PROBE_LOCKFREE"), "0", StringComparison.Ordinal);
+
 	internal static bool TryValidateGuestContextTransferTarget(
 		ICpuMemory memory,
 		in GuestCpuContinuation target,
@@ -2244,6 +2444,20 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			error = $"invalid guest context transfer target rip=0x{target.Rip:X16} rsp=0x{target.Rsp:X16}";
 			return false;
+		}
+
+		// A target RIP inside a committed executable page is accepted through the lock-free
+		// executable-page cache instead of a 1-byte ICpuMemory.TryRead. Titles whose text
+		// segment is execute-only (Demon's Souls: PT_LOAD flags=0x1) otherwise escalate that
+		// read to the global address-space write lock plus two protection changes on EVERY
+		// fiber switch, which also stalls every other thread's guest-memory access (DS: ~2x
+		// frame time). The cache sits in front of the host region query on every OS (Win32
+		// VirtualQuery on Windows, the tracked-region table on Linux and macOS), so a hit takes
+		// no lock anywhere. SHARPEMU_TRANSFER_RIP_PROBE_LOCKFREE=0 restores the old probe.
+		if (_lockFreeTransferRipProbe && IsExecutableAddress(target.Rip))
+		{
+			error = null;
+			return true;
 		}
 
 		Span<byte> ripProbe = stackalloc byte[1];
@@ -7347,7 +7561,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				MapGuestThreadPriority(thread.Priority));
 		}
 		ProfileGuestThreadScheduled(thread);
-		runner.Schedule(() => RunGuestThread(thread, reason));
+		runner.Schedule(() =>
+		{
+			SharpEmu.HLE.Host.GuestThreadQosPolicy.ApplyPendingForCurrentThread(thread.ThreadHandle);
+			RunGuestThread(thread, reason);
+		});
 	}
 
 	// Caller must hold _guestThreadGate. A guest wait can be satisfied before

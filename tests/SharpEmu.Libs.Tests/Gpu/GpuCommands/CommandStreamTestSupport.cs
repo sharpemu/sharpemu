@@ -35,6 +35,9 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public Action<ulong>? BeforeGuestRead { get; set; }
 
+    // Runs before every packet, as the guest CPU would between two of them.
+    public Action? BeforePacket { get; set; }
+
     public List<DrawIndexedArguments> IndexedDraws { get; } = new();
 
     public List<DrawAutoArguments> AutoDraws { get; } = new();
@@ -68,6 +71,7 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public void RunPendingCommands()
     {
+        BeforePacket?.Invoke();
         PendingCommandRuns++;
         while (PendingCommands.Count != 0)
         {

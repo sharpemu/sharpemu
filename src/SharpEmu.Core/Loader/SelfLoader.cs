@@ -300,6 +300,15 @@ public sealed class SelfLoader : ISelfLoader
             out var initializerFunctions);
         var procParamAddress = ResolveProcParamAddress(programHeaders, imageBase);
 
+        ApplyUnrealBackBufferDefault(virtualMemory, programHeaders, imageBase);
+
+        // Main executable only (clearVirtualMemory). After segments, relocations and import binding; before the red-zone scan so it sees patched code.
+        if (clearVirtualMemory)
+        {
+            GuestBytePatcher.ApplyFromEnvironment(virtualMemory, programHeaders, imageBase);
+            ApplyTitleDisplayPatch(virtualMemory, programHeaders, imageBase, applicationInfo.TitleId);
+        }
+
         if (virtualMemory is PhysicalVirtualMemory patchableMemory)
         {
             _ = GuestRedZonePatcher.Patch(
@@ -529,6 +538,51 @@ public sealed class SelfLoader : ISelfLoader
                 sourceOffset,
                 fileData,
                 header.Flags);
+        }
+    }
+
+    /// <summary>Sizes an Unreal title's compiled back-buffer default to the host's display
+    /// patch resolution; see <see cref="UnrealBackBufferPatch"/>.</summary>
+    private static void ApplyUnrealBackBufferDefault(
+        IVirtualMemory virtualMemory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase)
+    {
+        if (SharpEmu.Libs.VideoOut.HostVideoHost.CurrentOptions.DisplayPatchSize is not { } size)
+        {
+            return;
+        }
+
+        try
+        {
+            UnrealBackBufferPatch.Apply(virtualMemory, programHeaders, imageBase, size.Width, size.Height);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] Unreal back-buffer patch failed: {exception.Message}");
+        }
+    }
+
+    /// <summary>Rewrites a title's compiled display sizes to the host's display patch
+    /// resolution; see <see cref="TitleDisplayPatches"/>.</summary>
+    private static void ApplyTitleDisplayPatch(
+        IVirtualMemory virtualMemory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase,
+        string? titleId)
+    {
+        if (SharpEmu.Libs.VideoOut.HostVideoHost.CurrentOptions.DisplayPatchSize is not { } size)
+        {
+            return;
+        }
+
+        try
+        {
+            TitleDisplayPatches.Apply(virtualMemory, programHeaders, imageBase, titleId, size.Width, size.Height);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] title display size patch failed: {exception.Message}");
         }
     }
 
@@ -1420,15 +1474,34 @@ public sealed class SelfLoader : ISelfLoader
     }
 
     private static IReadOnlyList<ImportedSymbolRelocation> BuildImportedRelocations(
-        IReadOnlyList<RelocationDescriptor> descriptors)
+        List<RelocationDescriptor> descriptors)
     {
         if (descriptors.Count == 0)
         {
             return Array.Empty<ImportedSymbolRelocation>();
         }
 
-        var importedRelocations = new List<ImportedSymbolRelocation>(descriptors.Count);
-        foreach (var descriptor in descriptors)
+        // This private method receives the locally built list; neither scan mutates
+        // it or invokes callbacks. Keep that ownership invariant while using its span.
+        // Relative relocations can dominate it; reserve only records retained
+        // in the imported-symbol table rather than every relocation descriptor.
+        var descriptorSpan = CollectionsMarshal.AsSpan(descriptors);
+        var importedCount = 0;
+        foreach (ref readonly var descriptor in descriptorSpan)
+        {
+            if (descriptor.ImportNid is not null && descriptor.ValueKind == RelocationValueKind.Pointer)
+            {
+                importedCount++;
+            }
+        }
+
+        if (importedCount == 0)
+        {
+            return Array.Empty<ImportedSymbolRelocation>();
+        }
+
+        var importedRelocations = new List<ImportedSymbolRelocation>(importedCount);
+        foreach (ref readonly var descriptor in descriptorSpan)
         {
             if (descriptor.ImportNid is null || descriptor.ValueKind != RelocationValueKind.Pointer)
             {

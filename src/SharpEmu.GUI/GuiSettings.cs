@@ -84,6 +84,12 @@ public sealed class GuiSettings
 
     public string HdrMode { get; set; } = "Auto";
 
+    // The size title display patches rewrite a game's compiled 4K display sizes to; "Native"
+    // leaves them alone. Not the window size, and not what the game is told.
+    public string DisplayPatchResolution { get; set; } = "1080p";
+
+    internal static readonly string[] DisplayPatchResolutionChoices = ["1080p", "720p", "Native"];
+
     public bool OverlayEnabled { get; set; } = true;
     public string OverlayCorner { get; set; } = "TopRight";
     public string OverlayMode { get; set; } = "TitleBar";
@@ -193,6 +199,8 @@ public sealed class GuiSettings
         settings.Resolution = NormalizeResolution(settings.Resolution);
         settings.ScalingMode = NormalizeChoice(settings.ScalingMode, "Fit", "Cover", "Stretch", "Integer");
         settings.HdrMode = NormalizeChoice(settings.HdrMode, "Auto", "On", "Off");
+        settings.DisplayPatchResolution = NormalizeChoice(
+            settings.DisplayPatchResolution, "1080p", DisplayPatchResolutionChoices);
         settings.BinkPlaybackMode = NormalizeChoice(settings.BinkPlaybackMode, "Guest", "Host", "Skip");
         settings.OverlayCorner = NormalizeChoice(settings.OverlayCorner, "TopRight", "TopLeft", "BottomRight", "BottomLeft");
         settings.OverlayMode = NormalizeChoice(settings.OverlayMode, "TitleBar", "Full", "Minimal");

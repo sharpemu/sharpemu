@@ -56,6 +56,72 @@ public sealed class CpuContext(ICpuMemory memory, Generation generation)
         }
     }
 
+    /// <summary>
+    /// Publishes one import's whole argument-register pack, leaving the
+    /// Rax-written flag alone (none of these is Rax).
+    /// </summary>
+    /// <remarks>
+    /// The import gateway runs for every guest HLE call and used to set these
+    /// one at a time through the indexer: thirteen bounds-checked stores, each
+    /// followed by a test for whether the register was Rax. Writing the span
+    /// directly lets the bounds check be hoisted once and drops the tests.
+    /// </remarks>
+    public void LoadImportRegisters(
+        ulong rdi,
+        ulong rsi,
+        ulong rdx,
+        ulong rcx,
+        ulong r8,
+        ulong r9,
+        ulong rbx,
+        ulong rbp,
+        ulong r12,
+        ulong r13,
+        ulong r14,
+        ulong r15,
+        ulong rsp)
+    {
+        var registers = _registers;
+        registers[(int)CpuRegister.Rdi] = rdi;
+        registers[(int)CpuRegister.Rsi] = rsi;
+        registers[(int)CpuRegister.Rdx] = rdx;
+        registers[(int)CpuRegister.Rcx] = rcx;
+        registers[(int)CpuRegister.R8] = r8;
+        registers[(int)CpuRegister.R9] = r9;
+        registers[(int)CpuRegister.Rbx] = rbx;
+        registers[(int)CpuRegister.Rbp] = rbp;
+        registers[(int)CpuRegister.R12] = r12;
+        registers[(int)CpuRegister.R13] = r13;
+        registers[(int)CpuRegister.R14] = r14;
+        registers[(int)CpuRegister.R15] = r15;
+        registers[(int)CpuRegister.Rsp] = rsp;
+    }
+
+    /// <summary>
+    /// Restores the registers the guest expects an import to preserve, after
+    /// the export has run. Same reasoning as <see cref="LoadImportRegisters"/>.
+    /// </summary>
+    public void RestoreImportCallerRegisters(
+        ulong rbx,
+        ulong rbp,
+        ulong r12,
+        ulong r13,
+        ulong r14,
+        ulong r15,
+        ulong rdi,
+        ulong rsi)
+    {
+        var registers = _registers;
+        registers[(int)CpuRegister.Rbx] = rbx;
+        registers[(int)CpuRegister.Rbp] = rbp;
+        registers[(int)CpuRegister.R12] = r12;
+        registers[(int)CpuRegister.R13] = r13;
+        registers[(int)CpuRegister.R14] = r14;
+        registers[(int)CpuRegister.R15] = r15;
+        registers[(int)CpuRegister.Rdi] = rdi;
+        registers[(int)CpuRegister.Rsi] = rsi;
+    }
+
     public void ClearRaxWriteFlag()
     {
         _raxWritten = false;

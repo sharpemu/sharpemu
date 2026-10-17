@@ -240,6 +240,8 @@
   "Options.VSync.Desc": "ティアリングのない表示のためFIFOプレゼンテーションを使用します。",
   "Options.Hdr.Label": "HDR出力",
   "Options.Hdr.Desc": "選択したディスプレイとグラフィックスバックエンドが対応している場合にHDRを使用します。自動ではSDRにフォールバックします。",
+  "Options.DisplayPatch.Label": "表示パッチの解像度",
+  "Options.DisplayPatch.Desc": "一部のゲームに組み込まれた4Kの描画サイズ（Demon's SoulsやUnreal Engineのタイトルなど）をこのサイズに書き換えます。オフにするとゲーム本来のサイズのままになります。ゲームに通知されるディスプレイ情報は変わりません。",
   "Options.Hdr.Auto": "自動",
   "Options.Env.BinkPlayback.Label": "Bink 動画再生",
   "Options.Env.BinkPlayback.Desc": "Host は FFmpeg ブリッジ経由で Bink 動画を再生しますが、一部のゲームで問題が発生する場合があります。\nGuest はゲームエンジン独自のデコーダーを使用します。\nSkip は Bink 動画をスキップし、開発を容易にする場合があります。",

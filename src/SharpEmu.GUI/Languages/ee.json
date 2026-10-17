@@ -106,6 +106,8 @@
   "Options.VSync.Desc": "Kasuta FIFO-esitust pildi rebimise vältimiseks.",
   "Options.Hdr.Label": "HDR-väljund",
   "Options.Hdr.Desc": "Kasuta HDR-i, kui valitud kuvar ja graafikaliides seda toetavad. Automaatrežiim lülitub tagasi SDR-ile.",
+  "Options.DisplayPatch.Label": "Kuvaplaastri eraldusvõime",
+  "Options.DisplayPatch.Desc": "Kirjutab mõnesse mängu sisse ehitatud 4K renderdussuurused (nt Demon's Souls ja Unreal Engine'i mängud) selle suuruse peale ümber. Väljalülitatuna säilitab mäng oma suurused. Mängule ekraani kohta teatatav teave ei muutu.",
   "Options.Hdr.Auto": "Automaatne",
   "Options.Env.BinkPlayback.Label": "Bink-video taasesitus",
   "Options.Env.BinkPlayback.Desc": "Host esitab Bink-videoid FFmpegi silla kaudu, kuid mõnes mängus võib esineda probleeme.\nGuest kasutab mängumootori enda dekoodrit.\nSkip jätab Bink-videod vahele, mis võib arendust lihtsustada.",

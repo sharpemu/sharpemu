@@ -127,6 +127,14 @@ internal static partial class Program
             HostMainThread.Enable();
             var emulation = new Thread(() =>
             {
+                // This thread runs the guest's main thread: it drives the ELF
+                // entry point and everything the title does before it spawns a
+                // pthread of its own. Frame deadlines live here, so it asks for
+                // the same class as the presenter. Guest pthreads are
+                // deliberately left alone — a title with thirty worker threads
+                // must not have all of them outranking the presenter.
+                SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+                    SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
                 try
                 {
                     exitCode = RunEmulator(args, isMitigatedChild);
@@ -145,6 +153,9 @@ internal static partial class Program
             return exitCode;
         }
 
+        // Windows runs the emulation, and so the guest's main thread, right here.
+        SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+            SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
         return RunEmulator(args, isMitigatedChild);
     }
 
@@ -1013,7 +1024,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
+        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--display-resolution=<720p|1080p|native>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1084,6 +1095,13 @@ internal static partial class Program
         int? refreshRateOverride = null;
         bool? vsyncOverride = null;
         HostHdrMode? hdrModeOverride = null;
+        // SHARPEMU_DISPLAY_RESOLUTION overrides the settings; --display-resolution wins over it.
+        var displayResolutionOverride =
+            TryParseDisplayResolution(
+                Environment.GetEnvironmentVariable("SHARPEMU_DISPLAY_RESOLUTION") ?? string.Empty,
+                out var environmentDisplayResolution)
+                ? environmentDisplayResolution
+                : (DisplayPatchResolution?)null;
         bool? overlayEnabledOverride = null;
         PerformanceOverlayMode? overlayModeOverride = null;
         PerformanceOverlayCorner? overlayCornerOverride = null;
@@ -1225,6 +1243,17 @@ internal static partial class Program
                     return false;
                 }
                 hdrModeOverride = hdrMode;
+                continue;
+            }
+            if (TrySplitOption(argument, "--display-resolution", out var displayResolutionText))
+            {
+                if (!TryParseDisplayResolution(displayResolutionText, out var displayResolution))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                displayResolutionOverride = displayResolution;
                 continue;
             }
             if (string.Equals(argument, "--strict", StringComparison.OrdinalIgnoreCase))
@@ -1400,6 +1429,7 @@ internal static partial class Program
             RefreshRate = refreshRateOverride ?? configuredVideoOptions.RefreshRate,
             VSync = vsyncOverride ?? configuredVideoOptions.VSync,
             HdrMode = hdrModeOverride ?? configuredVideoOptions.HdrMode,
+            DisplayResolution = displayResolutionOverride ?? configuredVideoOptions.DisplayResolution,
             OverlayEnabled = overlayEnabledOverride ?? configuredVideoOptions.OverlayEnabled,
             OverlayMode = overlayModeOverride ?? configuredVideoOptions.OverlayMode,
             OverlayCorner = overlayCornerOverride ?? configuredVideoOptions.OverlayCorner,
@@ -1429,6 +1459,10 @@ internal static partial class Program
             var hdrMode = TryParseHdrMode(effective.HdrMode, out var parsedHdrMode)
                 ? parsedHdrMode
                 : defaults.HdrMode;
+            var displayResolution =
+                TryParseDisplayResolution(effective.DisplayPatchResolution, out var parsedDisplayResolution)
+                    ? parsedDisplayResolution
+                    : defaults.DisplayResolution;
 
             return new HostVideoOptions
             {
@@ -1440,6 +1474,7 @@ internal static partial class Program
                 RefreshRate = effective.RefreshRate,
                 VSync = effective.VSync,
                 HdrMode = hdrMode,
+                DisplayResolution = displayResolution,
                 OverlayEnabled = effective.OverlayEnabled,
                 OverlayCorner = Enum.TryParse<PerformanceOverlayCorner>(effective.OverlayCorner, true, out var corner)
                     ? corner : defaults.OverlayCorner,
@@ -1543,6 +1578,20 @@ internal static partial class Program
             _ => (HostHdrMode)(-1),
         };
         return Enum.IsDefined(mode);
+    }
+
+    /// <summary>The target of the title display patches: 720p, 1080p, or native to keep a title's
+    /// own compiled sizes.</summary>
+    private static bool TryParseDisplayResolution(string value, out DisplayPatchResolution resolution)
+    {
+        resolution = value.Trim().ToLowerInvariant() switch
+        {
+            "720p" or "720" or "hd720" or "1280x720" => DisplayPatchResolution.Hd720,
+            "1080p" or "1080" or "fhd" or "1920x1080" => DisplayPatchResolution.Hd,
+            "native" or "off" => DisplayPatchResolution.Native,
+            _ => (DisplayPatchResolution)(-1),
+        };
+        return Enum.IsDefined(resolution);
     }
 
     private static bool TryParseResolution(string value, out int width, out int height)

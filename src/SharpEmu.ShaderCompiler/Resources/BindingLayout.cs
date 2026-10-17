@@ -675,17 +675,66 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     }
 
     // The allocation cursor is context, not layout: two spills from different cursors are equal.
-    public bool Equals(BindingLayout? other) =>
-        other is not null &&
-        PushDataStartDword == other.PushDataStartDword &&
-        ShaderBaseDword == other.ShaderBaseDword &&
-        MemoryOffsetDword == other.MemoryOffsetDword &&
-        MemoryOffsetCount == other.MemoryOffsetCount &&
-        UsesDispatchThreadLimits == other.UsesDispatchThreadLimits &&
-        MipStatisticsCount == other.MipStatisticsCount &&
-        UserDataRegisters.SequenceEqual(other.UserDataRegisters) &&
-        Descriptors.Count == other.Descriptors.Count &&
-        Descriptors.Zip(other.Descriptors).All(pair => pair.First.Kind == pair.Second.Kind && pair.First.Resources.SequenceEqual(pair.Second.Resources));
+    public bool Equals(BindingLayout? other)
+    {
+        if (ReferenceEquals(this, other))
+        {
+            return true;
+        }
+
+        if (other is null ||
+            PushDataStartDword != other.PushDataStartDword ||
+            ShaderBaseDword != other.ShaderBaseDword ||
+            MemoryOffsetDword != other.MemoryOffsetDword ||
+            MemoryOffsetCount != other.MemoryOffsetCount ||
+            UsesDispatchThreadLimits != other.UsesDispatchThreadLimits ||
+            MipStatisticsCount != other.MipStatisticsCount ||
+            !SameValues(UserDataRegisters, other.UserDataRegisters))
+        {
+            return false;
+        }
+
+        var descriptors = Descriptors;
+        var otherDescriptors = other.Descriptors;
+        if (descriptors.Count != otherDescriptors.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < descriptors.Count; index++)
+        {
+            if (descriptors[index].Kind != otherDescriptors[index].Kind ||
+                !SameValues(descriptors[index].Resources, otherDescriptors[index].Resources))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool SameValues(IReadOnlyList<uint> left, IReadOnlyList<uint> right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < left.Count; index++)
+        {
+            if (left[index] != right[index])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     public override bool Equals(object? obj) => Equals(obj as BindingLayout);
 

@@ -2,13 +2,18 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Ampr;
+using SharpEmu.Libs.Tests.Kernel;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Ampr;
 
 // AmprFileRegistry is process-global static state, so the classes that index
 // or clear it must not run concurrently with each other.
-[Collection("AmprFileRegistry")]
+// Shares the kernel path state an AMPR command buffer reads through
+// (TryPreindexApp0 -> ResolveGuestPath consults the global app0 root and mount
+// table) with the kernel tests that rewrite it, so both run in one collection
+// instead of racing in parallel.
+[Collection(KernelMemoryCompatStateCollection.Name)]
 public class AmprFileRegistryTests
 {
     [Theory]
@@ -102,6 +107,32 @@ public class AmprFileRegistryTests
         Assert.Equal(id, AmprFileRegistry.RegisterAprResolvedPath(guestPath, host));
         Assert.True(AmprFileRegistry.TryGetHostPath(id, out var result));
         Assert.Equal(host, result);
+    }
+
+    // Resolving a path the app0 index already knows returns the guest-path hash
+    // and leaves every other spelling of the file pointing at it; resolving one
+    // the index never saw still publishes those spellings itself.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AprResolve_LeavesEveryApp0SpellingResolvable(bool indexedFirst)
+    {
+        AmprFileRegistry.ClearForTests();
+        const string relative = "levels/m01/terrain.cmsh";
+        var host = Path.Combine(Path.GetTempPath(), "apr-spellings.bin");
+        if (indexedFirst)
+        {
+            AmprFileRegistry.RegisterApp0RelativeForTests(relative, host);
+        }
+
+        var id = AmprFileRegistry.RegisterAprResolvedPath("/app0/" + relative, host);
+
+        Assert.Equal(AmprFileRegistry.ComputeFileId("/app0/" + relative), id);
+        foreach (var spelling in new[] { "$/" + relative, "/app0/" + relative, "app0/" + relative, relative })
+        {
+            Assert.True(AmprFileRegistry.TryGetHostPath(AmprFileRegistry.ComputeFileId(spelling), out var result));
+            Assert.Equal(host, result);
+        }
     }
 
     [Theory]

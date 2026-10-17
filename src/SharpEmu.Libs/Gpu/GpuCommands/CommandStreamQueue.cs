@@ -131,7 +131,18 @@ public sealed class CommandStreamQueue
 
         lock (_gate)
         {
-            return _interpreters[queueId] ??= new GpuCommandInterpreter(_host, queueId, queueId == 0 ? 0 : GpuCommandInterpreter.ComputeQueueBase + queueId - 1);
+            if (_interpreters[queueId] is { } existing)
+            {
+                return existing;
+            }
+
+            var created = new GpuCommandInterpreter(
+                _host, queueId, queueId == 0 ? 0 : GpuCommandInterpreter.ComputeQueueBase + queueId - 1)
+            {
+                GuestMemoryWritten = NotifyGuestMemoryWritten,
+            };
+            _interpreters[queueId] = created;
+            return created;
         }
     }
 
@@ -357,7 +368,8 @@ public sealed class CommandStreamQueue
         Monitor.PulseAll(_gate);
     }
 
-    // A completed GPU tick can make a blocked memory wait ready.
+    // A completed GPU tick can make a blocked memory wait ready. A flip slot or a
+    // presented flip is not something a tick decides, so those heads stay asleep.
     public void NotifyCompletedGpuTick(ulong completedTick)
     {
         lock (_gate)
@@ -368,10 +380,16 @@ public sealed class CommandStreamQueue
             }
 
             _lastCompletedGpuTick = completedTick;
-            RetryBlocked();
+            WakeMatchingLocked(wait => wait.Kind is CommandWaitKind.GuestMemory or
+                CommandWaitKind.EngineCounter or CommandWaitKind.Unknown);
         }
     }
 
+    /// <summary>
+    /// Wakes every blocked head. This is the fallback: it is what a timer does when
+    /// nothing told us which wait could have changed, and what a guest CPU write we
+    /// cannot observe is eventually caught by.
+    /// </summary>
     public void RetryBlocked()
     {
         lock (_gate)
@@ -389,11 +407,97 @@ public sealed class CommandStreamQueue
         }
     }
 
+    /// <summary>How many heads a targeted wake has unblocked since startup.</summary>
+    public ulong TargetedWakes { get; private set; }
+
+    /// <summary>How many blocked heads a targeted wake has left alone.</summary>
+    public ulong TargetedWakesSkipped { get; private set; }
+
+    // Every wake event, whether or not a parked head matched it. A slice running at the
+    // time has not recorded what it waits for yet, so the event cannot reach it; the park
+    // compares this instead and keeps the head runnable.
+    private ulong _wakeGeneration;
+
+    /// <summary>Wake events that have been delivered; a slice compares it at its park.</summary>
+    public ulong WakeGeneration
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _wakeGeneration;
+            }
+        }
+    }
+
+    /// <summary>Heads kept runnable because their wake arrived while they still ran.</summary>
+    public ulong WakesRacedWithSlice { get; private set; }
+
+    // Caller holds the gate. Wakes the heads a condition predicate selects.
+    private void WakeMatchingLocked(Func<CommandWaitCondition, bool> matches)
+    {
+        _wakeGeneration++;
+        var woke = false;
+        foreach (var queue in _queues)
+        {
+            if (queue.First is not { } head || !head.Value.Blocked)
+            {
+                continue;
+            }
+
+            if (matches(head.Value.Wait))
+            {
+                head.Value.Blocked = false;
+                TargetedWakes++;
+                woke = true;
+            }
+            else
+            {
+                TargetedWakesSkipped++;
+            }
+        }
+
+        if (woke)
+        {
+            Monitor.PulseAll(_gate);
+        }
+    }
+
+    /// <summary>
+    /// These guest bytes changed, so a compare against them may pass now. Everything
+    /// that writes guest memory on the command-stream thread reports through here:
+    /// the interpreter's own label stores, end-of-pipe values included, and the memory
+    /// operations it executes.
+    /// </summary>
+    public void NotifyGuestMemoryWritten(ulong address, ulong size)
+    {
+        if (size == 0 || _submissionCount == 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            WakeMatchingLocked(wait => wait.Kind == CommandWaitKind.Unknown || wait.TouchedBy(address, size));
+        }
+    }
+
+    /// <summary>The presenter freed a flip slot.</summary>
+    public void NotifyFlipSlotAvailable()
+    {
+        lock (_gate)
+        {
+            WakeMatchingLocked(wait =>
+                wait.Kind is CommandWaitKind.FlipSlot or CommandWaitKind.FlipDone or CommandWaitKind.Unknown);
+        }
+    }
+
     // Runs one slice of the next unblocked submission on the calling thread.
     public SliceResult ProcessOne()
     {
         CommandSubmission? submission = null;
         ControlBarrier? control = null;
+        var sliceWakeGeneration = 0UL;
         lock (_gate)
         {
             if (_processing)
@@ -422,6 +526,10 @@ public sealed class CommandStreamQueue
 
             _processing = true;
             _processingThread = Thread.CurrentThread;
+            // What this slice is about to wait for may change while it runs, and the wake
+            // for it arrives at a head that is not parked yet. The generation it starts
+            // from decides, at the park below, whether it missed one.
+            sliceWakeGeneration = _wakeGeneration;
             if (submission is { Started: false } &&
                 submission.Kind is not (CommandSubmissionKind.FlipPreparation or CommandSubmissionKind.FrameBoundary))
                 SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.ProcessingStarted, submission.QueueId,
@@ -483,9 +591,27 @@ public sealed class CommandStreamQueue
             SliceResult result;
             if (!complete)
             {
-                submission!.Blocked = true;
+                // A wake that arrived while this slice ran was delivered to a head that was
+                // not parked yet, so parking now would sleep until the retry timer: the
+                // slice re-runs instead and reads what changed. Polling a label the GPU is
+                // about to write is exactly this race, and the timer is a hundred
+                // milliseconds against a submission that completes in one.
+                var wokeDuringSlice = _wakeGeneration != sliceWakeGeneration;
+                // One more run for the wakes that raced this slice, and only one: a re-run that is
+                // raced again without moving its cursor parks, otherwise a queue told of a completion
+                // every millisecond would never park. Progress resets the allowance.
+                var raced = wokeDuringSlice &&
+                    (!submission!.RerunForRacedWake || submission.Commands.MadeProgress);
+                submission!.RerunForRacedWake = raced;
+                submission.Blocked = !raced;
+                if (raced)
+                {
+                    WakesRacedWithSlice++;
+                }
+
                 submission.BlockedSinceTicks = System.Diagnostics.Stopwatch.GetTimestamp();
                 submission.BlockedPacketAddress = submission.Commands.CurrentPacketAddress;
+                submission.Wait = submission.Commands.SuspendCondition;
                 _queues[submission.QueueId].AddFirst(submission);
                 _submissionCount++;
                 result = submission.Commands.MadeProgress ? SliceResult.Progressed : SliceResult.BlockedWithoutProgress;
@@ -498,14 +624,12 @@ public sealed class CommandStreamQueue
                     _doneCount++;
                 }
 
-                foreach (var queue in _queues)
-                {
-                    if (queue.First is { } head)
-                    {
-                        head.Value.Blocked = false;
-                    }
-                }
-
+                // A finished submission frees a flip slot and advances the engine
+                // counters of its own queue, and anything it wrote into guest memory
+                // has already been reported through NotifyGuestMemoryWritten. Waking
+                // every head here instead made each one re-run a slice, re-read its
+                // label and suspend again.
+                WakeMatchingLocked(wait => wait.Kind is not CommandWaitKind.GuestMemory);
                 result = SliceResult.Completed;
             }
 

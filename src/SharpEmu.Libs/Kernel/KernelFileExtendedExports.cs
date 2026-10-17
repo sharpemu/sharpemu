@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.HLE.FileSystem;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Threading;
@@ -102,25 +103,94 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        var buffer = GC.AllocateUninitializedArray<byte>(requested);
-        int read;
+        // Titles that stream from .pak archives pread in chunks well past the
+        // 85 KiB large-object threshold, so a fresh array per call put every
+        // read's staging buffer on the LOH.
+        var buffer = ArrayPool<byte>.Shared.Rent(requested);
         try
         {
-            read = ReadOpenFileAt(stream, buffer, offset);
-        }
-        catch (IOException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
+            int read;
+            try
+            {
+                read = ReadOpenFileAt(stream, buffer.AsSpan(0, requested), offset);
+            }
+            catch (IOException)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            }
 
-        if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
+            if (read > 0 && stream is FileStream file)
+            {
+                // pread never advances the file offset, so the kernel's own
+                // read-ahead cannot see that a chunked archive read is
+                // sequential; say so explicitly.
+                AdvisePreadReadAhead(fd, file, offset, read);
+            }
 
-        ctx[CpuRegister.Rax] = unchecked((ulong)read);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            if (read > 0 && !ctx.Memory.TryWrite(bufferAddress, buffer.AsSpan(0, read)))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)read);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
+
+    // Per guest descriptor: where the next read would have to start to count as
+    // continuing, plus the file length, so deciding whether to hint costs no
+    // syscall of its own. Dropped when the descriptor closes.
+    private readonly record struct PreadStream(long NextOffset, long Length);
+
+    private static readonly ConcurrentDictionary<int, PreadStream> _preadStreams = new();
+
+    private static void AdvisePreadReadAhead(int fd, FileStream stream, long offset, int read)
+    {
+        if (!HostReadAhead.Enabled)
+        {
+            return;
+        }
+
+        var completed = offset + read;
+        long length;
+        bool continuesPreviousRead;
+        if (_preadStreams.TryGetValue(fd, out var tracked))
+        {
+            length = tracked.Length;
+            continuesPreviousRead = tracked.NextOffset == offset;
+        }
+        else
+        {
+            try
+            {
+                length = RandomAccess.GetLength(stream.SafeFileHandle);
+            }
+            catch (Exception exception) when (
+                exception is IOException or ObjectDisposedException)
+            {
+                return;
+            }
+
+            continuesPreviousRead = false;
+        }
+
+        _preadStreams[fd] = new PreadStream(completed, length);
+        if (!continuesPreviousRead || completed >= length)
+        {
+            return;
+        }
+
+        HostReadAhead.Advise(
+            stream.SafeFileHandle,
+            completed,
+            (int)Math.Min(HostReadAhead.WindowBytes, length - completed));
+    }
+
+    internal static void ForgetPreadStream(int fd) => _preadStreams.TryRemove(fd, out _);
 
     [SysAbiExport(Nid = "C2kJ-byS5rM", ExportName = "pwrite",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
@@ -153,23 +223,30 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        var payload = GC.AllocateUninitializedArray<byte>(requested);
-        if (!ctx.Memory.TryRead(bufferAddress, payload))
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
-        }
-
+        var payload = ArrayPool<byte>.Shared.Rent(requested);
         try
         {
-            WriteOpenFileAt(stream, payload, offset);
-        }
-        catch (IOException)
-        {
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
-        }
+            if (!ctx.Memory.TryRead(bufferAddress, payload.AsSpan(0, requested)))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
 
-        ctx[CpuRegister.Rax] = unchecked((ulong)requested);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+            try
+            {
+                WriteOpenFileAt(stream, payload.AsSpan(0, requested), offset);
+            }
+            catch (IOException)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            }
+
+            ctx[CpuRegister.Rax] = unchecked((ulong)requested);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(payload);
+        }
     }
 
     // ---- Synchronization ----

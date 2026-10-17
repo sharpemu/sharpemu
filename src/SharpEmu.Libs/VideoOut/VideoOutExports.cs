@@ -1691,6 +1691,14 @@ public static partial class VideoOutExports
 
     private static void VblankTickLoop()
     {
+        // This loop *is* the guest's frame clock: titles that park their main or
+        // render loop on a vblank equeue advance only when it fires. Timer
+        // coalescing or a late wakeup on this thread would smear those ticks
+        // across tens of milliseconds and show up directly as judder, so it asks
+        // for the frame-deadline class (on macOS, the one class exempt from
+        // coalescing).
+        SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+            SharpEmu.HLE.Host.HostThreadQos.UserInteractive);
         var pending = new List<(ulong Equeue, ulong DataHint, ulong UserData)>();
         while (Volatile.Read(ref _vblankStopRequested) == 0)
         {

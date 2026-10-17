@@ -534,11 +534,35 @@ public sealed partial class DirectExecutionBackend
 		return IsExecutableAddress(address);
 	}
 
+	// Front cache for the executable-page set, direct-mapped by page number.
+	// Every import dispatch sanity-checks its return address through here, so
+	// the cost of the ConcurrentDictionary probe behind it was being paid about
+	// a million times a second in Quake. A slot only ever holds a page that was
+	// verified executable, and a ulong store is atomic on both architectures
+	// the emulator targets, so a racing write can publish a different verified
+	// page but never a half-written address.
+	private const int ExecutablePageCacheMask = 4095;
+	private static readonly ulong[] _executablePageCache = new ulong[ExecutablePageCacheMask + 1];
+
 	private unsafe static bool IsExecutableAddress(ulong address)
 	{
 		var pageAddress = address & ~0xFFFUL;
+		if (pageAddress == 0)
+		{
+			// 0 is the empty-slot sentinel, so the null page can never be served
+			// from the cache. The only caller rejects it earlier anyway.
+			return false;
+		}
+
+		var slot = (int)((pageAddress >> 12) & ExecutablePageCacheMask);
+		if (_executablePageCache[slot] == pageAddress)
+		{
+			return true;
+		}
+
 		if (_knownExecutablePages.ContainsKey(pageAddress))
 		{
+			_executablePageCache[slot] = pageAddress;
 			return true;
 		}
 
@@ -551,6 +575,7 @@ public sealed partial class DirectExecutionBackend
 		if (executable)
 		{
 			_knownExecutablePages.TryAdd(pageAddress, 0);
+			_executablePageCache[slot] = pageAddress;
 		}
 
 		return executable;

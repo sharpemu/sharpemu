@@ -37,8 +37,43 @@ SPDX-License-Identifier: GPL-2.0-or-later
          that collision and keeps the emulator's required mappings available. -->
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <!-- Precompile the managed assemblies at publish time so the JIT does not
+         have to produce them during startup. The emulator's startup path is
+         unusually large (the HLE import surface, the ELF loader and the shader
+         translators are all jitted before the first guest frame), and under
+         Rosetta 2 on Apple silicon the JIT's own code emission is translated on
+         top of that. ReadyToRun code is a tier-0 substitute only: tiered
+         compilation and TieredPGO still re-jit whatever stays hot, so
+         steady-state throughput is unaffected. crossgen2 cross-compiles, so any
+         host can publish any RID; -p:PublishReadyToRun=false bisects a
+         suspected ReadyToRun codegen problem. -->
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <!-- Tiered PGO stays on: guest dispatch, the command-stream loop and the HLE
+         import thunks are all megamorphic call sites that only get devirtualised
+         once tier-1 has the profile. It costs a little extra tier-0 bookkeeping
+         at startup, which ReadyToRun more than pays back. -->
     <TieredPGO>true</TieredPGO>
+    <!-- Already the default since .NET 7; pinned because it is the opposite of
+         what a reader would assume for an emulator. Leaving loop-containing
+         methods out of quick JIT means every one of them is fully optimised on
+         first call, and the emulator's startup path is full of enormous
+         loop-bearing methods (ELF relocation, the shader translators) that are
+         called once. Quick-jitting them and letting the ones that stay hot be
+         re-jitted at tier 1 is the cheaper trade for time-to-first-frame. -->
+    <TieredCompilationQuickJitForLoops>true</TieredCompilationQuickJitForLoops>
   </PropertyGroup>
+
+  <!-- W^X double-maps every JIT code page: the runtime writes through an RW
+       alias and executes through a separate RX one, which costs startup and
+       every tier-1 re-jit (and is pure overhead under Rosetta 2). It buys
+       nothing here, because the emulator maps guest-supplied pages writable and
+       executable by design. Set as a host config property rather than
+       DOTNET_EnableWriteXorExecute so it applies on every launch path; the
+       environment variable still wins when set. Not on osx-arm64, where the
+       runtime keeps W^X on unconditionally and the option has no effect. -->
+  <ItemGroup Condition="'$(RuntimeIdentifier)' != 'osx-arm64'">
+    <RuntimeHostConfigurationOption Include="System.Runtime.EnableWriteXorExecute" Value="false" />
+  </ItemGroup>
 
   <!-- Background GC's write-watch revisit calls FlushProcessWriteBuffers,
        which on macOS uses thread_get_register_pointer_values; under Rosetta 2

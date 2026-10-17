@@ -22,6 +22,41 @@ public sealed class FlexibleBackingPoolTests
         Assert.Equal(Page, pool.Available);
     }
 
+    /// <summary>
+    /// A mapping that fits in one free range takes one run of backing bytes. A host
+    /// that maps the backing no-copy can only bind or write back a buffer or image
+    /// whose bytes are contiguous there, so splitting a mapping that need not be split
+    /// costs a staged copy per submission for everything that crosses the seam.
+    /// </summary>
+    [Fact]
+    public void AMappingThatFitsInOneFreeRangeIsNotSplit()
+    {
+        var pool = new FlexibleBackingPool(0, Page * 8);
+        var space = new RecordingSpace();
+        Assert.True(pool.TryMap(space, Page, Page, GuestPageProtection.Write, out _));
+        Assert.True(pool.TryMap(space, 2 * Page, Page, GuestPageProtection.Write, out _));
+        // A hole of one page, then everything above it is still free.
+        pool.Release(Page, Page);
+        Assert.True(pool.TryMap(space, 8 * Page, 3 * Page, GuestPageProtection.Write, out var blocks));
+        Assert.Single(blocks);
+        Assert.Equal(3 * Page, blocks[0].Size);
+    }
+
+    /// <summary>The smallest range that fits is used, so the big ones stay whole.</summary>
+    [Fact]
+    public void TheSmallestFreeRangeThatFitsIsChosen()
+    {
+        var pool = new FlexibleBackingPool(0, Page * 16);
+        var space = new RecordingSpace();
+        Assert.True(pool.TryMap(space, Page, 2 * Page, GuestPageProtection.Write, out _));
+        Assert.True(pool.TryMap(space, 4 * Page, Page, GuestPageProtection.Write, out _));
+        pool.Release(Page, 2 * Page);
+        Assert.True(pool.TryMap(space, 16 * Page, Page, GuestPageProtection.Write, out var blocks));
+        Assert.Single(blocks);
+        // The two-page hole at offset zero, not the big range above the used pages.
+        Assert.Equal(0UL, blocks[0].Offset);
+    }
+
     [Fact]
     public void FragmentedFreeRangesProduceSeparateZeroedViews()
     {

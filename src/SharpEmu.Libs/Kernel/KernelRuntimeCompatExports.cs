@@ -65,6 +65,10 @@ public static class KernelRuntimeCompatExports
     private static readonly (ulong Base, ulong Size)[] _prtApertures = new (ulong Base, ulong Size)[3];
     private static int _stackChkFailCount;
     private static long _usleepTraceCount;
+    // SHARPEMU_USLEEP_SHORT_PUMP=1 restores the old behaviour of pumping the guest
+    // scheduler on every sceKernelUsleep, including sub-millisecond ones.
+    private static readonly bool _usleepShortPump =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_USLEEP_SHORT_PUMP"), "1", StringComparison.Ordinal);
     private static readonly bool _traceUsleep =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_USLEEP"), "1", StringComparison.Ordinal);
     private static readonly bool _traceGuestThreads =
@@ -102,7 +106,16 @@ public static class KernelRuntimeCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelUsleep");
+        // Sub-millisecond usleep is a worker polling backoff. Pump takes the global
+        // guest-thread gate and scans every thread, so many workers spinning on
+        // usleep(1) contend on it; the 1 ms dispatcher still pumps. The yield below
+        // is kept. SHARPEMU_USLEEP_SHORT_PUMP=1 restores the old always-Pump path.
+        // Millisecond-scale sleeps (audio producers pacing grains, frame loops) still
+        // pump before their precise sleep.
+        if (micros >= 1000 || _usleepShortPump)
+        {
+            GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelUsleep");
+        }
 
         if (micros < 1000)
         {

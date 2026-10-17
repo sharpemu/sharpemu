@@ -18,6 +18,14 @@ public interface IHostViewMemory
 
     IReadOnlyList<HostAddressRange> ReserveFreeAddressRanges(ulong start, ulong end, ulong minimumSize) => [];
 
+    // Lowest address at or above <paramref name="address"/> where no host
+    // mapping covers <paramref name="size"/> bytes, or 0 when this host cannot
+    // enumerate mappings it did not make. Scanning callers use the answer only
+    // to skip an occupied span in one step; a reservation attempt still decides
+    // whether the address can be taken, because another thread may claim it
+    // first.
+    ulong FindUnmappedRange(ulong address, ulong size, ulong searchEnd) => 0;
+
     bool SplitHole(ulong address, ulong size);
 
     bool JoinHoles(ulong address, ulong size);

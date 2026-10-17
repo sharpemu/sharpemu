@@ -69,6 +69,9 @@ public sealed class GuestSpaceOwner : IDisposable
 
     public bool TryWriteSingleView(ulong address, ReadOnlySpan<byte> data) => _views.TryWriteSingleView(address, data);
 
+    public bool TryFillSingleView<TState>(ulong address, int length, TState state, GuestSpanFill<TState> fill, out int filled) =>
+        _views.TryFillSingleView(address, length, state, fill, out filled);
+
     public object AliasSnapshot => _views.AliasSnapshot;
 
     public bool TryEnterAliasAccess() => _views.TryEnterAliasAccess();
@@ -213,6 +216,14 @@ public sealed class GuestSpaceOwner : IDisposable
             return FindAlignedFreeAddress(searchStart, searchEnd, size, alignment);
         }
     }
+
+    // Hint for callers that scan for a free guest address: the lowest address at
+    // or above <paramref name="address"/> that carries no host mapping for
+    // <paramref name="size"/> bytes, or 0 when the host cannot say. Reserving
+    // the result still has to be attempted, so a stale answer only costs a
+    // retry.
+    public ulong FindUnmappedHostRange(ulong address, ulong size, ulong searchEnd) =>
+        _host.FindUnmappedRange(address, size, searchEnd);
 
     public bool SetAccess(ulong address, ulong size, HostPageProtection protection)
     {

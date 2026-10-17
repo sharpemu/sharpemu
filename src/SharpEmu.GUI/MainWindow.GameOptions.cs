@@ -46,6 +46,7 @@ public partial class MainWindow
         GameWindowModeBox.ItemsSource = _windowModeChoices;
         GameScalingModeBox.ItemsSource = _scalingModeChoices;
         GameHdrModeBox.ItemsSource = _hdrModeChoices;
+        GameDisplayPatchBox.ItemsSource = _displayPatchChoices;
         GameOverlayModeBox.ItemsSource = _overlayModeChoices;
         GameOverlayCornerBox.ItemsSource = _overlayCornerChoices;
 
@@ -116,6 +117,7 @@ public partial class MainWindow
         GameScalingModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameVSyncToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
         GameHdrModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
+        GameDisplayPatchBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameOverlayEnabledToggle.IsCheckedChanged += (_, _) => PersistOpenGameSettings();
         GameOverlayModeBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
         GameOverlayCornerBox.SelectionChanged += (_, _) => PersistOpenGameSettings();
@@ -224,6 +226,10 @@ public partial class MainWindow
                 _hdrModeChoices,
                 effective.HdrMode,
                 "Auto");
+            GameDisplayPatchBox.SelectedItem = FindChoice(
+                _displayPatchChoices,
+                effective.DisplayPatchResolution,
+                "1080p");
 
             _gameHostDisplays = HostDisplayOptions.BuildDisplays(
                 HostDisplayCatalog.Query(),
@@ -284,6 +290,7 @@ public partial class MainWindow
             ScalingMode = SelectedComboText(GameScalingModeBox, "Fit"),
             VSync = GameVSyncToggle.IsChecked == true,
             HdrMode = SelectedComboText(GameHdrModeBox, "Auto"),
+            DisplayPatchResolution = SelectedComboText(GameDisplayPatchBox, "1080p"),
             OverlayEnabled = GameOverlayEnabledToggle.IsChecked == true,
             OverlayMode = SelectedComboText(GameOverlayModeBox, "TitleBar"),
             OverlayCorner = SelectedComboText(GameOverlayCornerBox, "TopRight"),

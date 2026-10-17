@@ -46,7 +46,7 @@ public static partial class AgcExports
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
     public static int SetCxRegIndirectPatchSetAddress(CpuContext ctx) =>
-        SetIndirectPatchAddress(ctx, "cx");
+        SetIndirectPatchAddress(ctx, IndirectRegisterSpace.Cx);
 
     [SysAbiExport(
         Nid = "whb1RL7K4Ss",
@@ -54,7 +54,7 @@ public static partial class AgcExports
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
     public static int SetCxRegIndirectPatchSetNumRegisters(CpuContext ctx) =>
-        SetIndirectPatchRegisterCount(ctx, "cx");
+        SetIndirectPatchRegisterCount(ctx, IndirectRegisterSpace.Cx);
 
     [SysAbiExport(
         Nid = "Qrj4c+61z4A",
@@ -62,7 +62,7 @@ public static partial class AgcExports
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
     public static int SetShRegIndirectPatchSetAddress(CpuContext ctx) =>
-        SetIndirectPatchAddress(ctx, "sh");
+        SetIndirectPatchAddress(ctx, IndirectRegisterSpace.Sh);
 
     [SysAbiExport(
         Nid = "6lNcCp+fxi4",
@@ -70,7 +70,7 @@ public static partial class AgcExports
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
     public static int SetUcRegIndirectPatchSetAddress(CpuContext ctx) =>
-        SetIndirectPatchAddress(ctx, "uc");
+        SetIndirectPatchAddress(ctx, IndirectRegisterSpace.Uc);
 
     [SysAbiExport(
         Nid = "d-6uF9sZDIU",
@@ -78,7 +78,7 @@ public static partial class AgcExports
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
     public static int SetCxRegIndirectPatchAddRegisters(CpuContext ctx) =>
-        AddIndirectPatchRegisters(ctx, "cx");
+        AddIndirectPatchRegisters(ctx, IndirectRegisterSpace.Cx);
 
     [SysAbiExport(
         Nid = "z2duB-hHQSM",
@@ -86,7 +86,7 @@ public static partial class AgcExports
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
     public static int SetShRegIndirectPatchAddRegisters(CpuContext ctx) =>
-        AddIndirectPatchRegisters(ctx, "sh");
+        AddIndirectPatchRegisters(ctx, IndirectRegisterSpace.Sh);
 
     [SysAbiExport(
         Nid = "vRoArM9zaIk",
@@ -94,7 +94,7 @@ public static partial class AgcExports
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
     public static int SetUcRegIndirectPatchAddRegisters(CpuContext ctx) =>
-        AddIndirectPatchRegisters(ctx, "uc");
+        AddIndirectPatchRegisters(ctx, IndirectRegisterSpace.Uc);
 
     [SysAbiExport(
         Nid = "IxYiarKlXxM",
@@ -453,7 +453,7 @@ public static partial class AgcExports
     private static uint PatchUInt32Bits(uint current, uint mask, uint value) =>
         (current & ~mask) | (value & mask);
 
-    private static int SetIndirectPatchAddress(CpuContext ctx, string registerSpace)
+    private static int SetIndirectPatchAddress(CpuContext ctx, IndirectRegisterSpace registerSpace)
     {
         var commandAddress = ctx[CpuRegister.Rdi];
         var registersAddress = ctx[CpuRegister.Rsi];
@@ -462,15 +462,14 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!TryReadUInt32(ctx, commandAddress, out _))
+        if (!TryReadUInt32(ctx, commandAddress, out var header))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (!TryGetIndirectPatchLayout(
-                ctx,
-                commandAddress,
                 registerSpace,
+                header,
                 out var addressOffset,
                 out _,
                 out _) ||
@@ -484,12 +483,12 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        TraceAgc($"agc.patch_{registerSpace}_addr cmd=0x{commandAddress:X16} regs=0x{registersAddress:X16}");
+        TraceAgc($"agc.patch_{RegisterSpaceName(registerSpace)}_addr cmd=0x{commandAddress:X16} regs=0x{registersAddress:X16}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    private static int SetIndirectPatchRegisterCount(CpuContext ctx, string registerSpace)
+    private static int SetIndirectPatchRegisterCount(CpuContext ctx, IndirectRegisterSpace registerSpace)
     {
         var commandAddress = ctx[CpuRegister.Rdi];
         var registerCount = (uint)ctx[CpuRegister.Rsi];
@@ -498,15 +497,14 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!TryReadUInt32(ctx, commandAddress, out _))
+        if (!TryReadUInt32(ctx, commandAddress, out var header))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (!TryGetIndirectPatchLayout(
-                ctx,
-                commandAddress,
                 registerSpace,
+                header,
                 out _,
                 out var countOffset,
                 out var countMask) ||
@@ -519,7 +517,7 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        TraceAgc($"agc.patch_{registerSpace}_count cmd=0x{commandAddress:X16} count={registerCount}");
+        TraceAgc($"agc.patch_{RegisterSpaceName(registerSpace)}_count cmd=0x{commandAddress:X16} count={registerCount}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -580,7 +578,7 @@ public static partial class AgcExports
         return op == ItWriteData || (op == ItNop && register == RWriteData);
     }
 
-    private static int AddIndirectPatchRegisters(CpuContext ctx, string registerSpace)
+    private static int AddIndirectPatchRegisters(CpuContext ctx, IndirectRegisterSpace registerSpace)
     {
         var commandAddress = ctx[CpuRegister.Rdi];
         var registerCount = (uint)ctx[CpuRegister.Rsi];
@@ -589,15 +587,14 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        if (!TryReadUInt32(ctx, commandAddress, out _))
+        if (!TryReadUInt32(ctx, commandAddress, out var header))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
         if (!TryGetIndirectPatchLayout(
-                ctx,
-                commandAddress,
                 registerSpace,
+                header,
                 out _,
                 out var countOffset,
                 out var countMask) ||
@@ -615,15 +612,50 @@ public static partial class AgcExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        TraceAgc($"agc.patch_{registerSpace}_add cmd=0x{commandAddress:X16} add={registerCount} total={newCount}");
+        TraceAgc($"agc.patch_{RegisterSpaceName(registerSpace)}_add cmd=0x{commandAddress:X16} add={registerCount} total={newCount}");
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    /// <summary>
+    /// Which register file an indirect-register packet patcher is addressing.
+    /// </summary>
+    /// <remarks>
+    /// This was the string "cx"/"sh"/"uc", switched over twice per call.
+    /// sceAgcSetCxRegIndirectPatchAddRegisters alone runs 8.6 million times in a
+    /// two-minute Quake run, so the space is an enum and the two switches below
+    /// are integer selects.
+    /// </remarks>
+    private enum IndirectRegisterSpace : byte
+    {
+        Cx,
+        Sh,
+        Uc,
+    }
+
+    /// <summary>The space's name, spelled as the trace output spells it.</summary>
+    private static string RegisterSpaceName(IndirectRegisterSpace space) => space switch
+    {
+        IndirectRegisterSpace.Cx => "cx",
+        IndirectRegisterSpace.Sh => "sh",
+        _ => "uc",
+    };
+
+    /// <summary>
+    /// Decides a packet's field offsets from its already-read header.
+    /// </summary>
+    /// <remarks>
+    /// The header is a parameter rather than something this reads for itself.
+    /// Each caller had already read it once as a readability probe, and this
+    /// then read it twice more - once through TryGetPacketIdentity and once for
+    /// the length - so patching one register count cost three reads of a single
+    /// dword through the guest memory interface, each one a pair of interface
+    /// dispatches and a mapping lookup. The opcode and the sub-register are both
+    /// bitfields of that dword, so one read answers every question.
+    /// </remarks>
     private static bool TryGetIndirectPatchLayout(
-        CpuContext ctx,
-        ulong commandAddress,
-        string registerSpace,
+        IndirectRegisterSpace registerSpace,
+        uint header,
         out ulong addressOffset,
         out ulong countOffset,
         out uint countMask)
@@ -631,20 +663,17 @@ public static partial class AgcExports
         addressOffset = 0;
         countOffset = 0;
         countMask = 0;
-        if (!TryGetPacketIdentity(ctx, commandAddress, out var op, out var register) ||
-            !TryReadUInt32(ctx, commandAddress, out var header))
-        {
-            return false;
-        }
+        var op = (header >> 8) & 0xFFu;
+        var register = (header >> 2) & 0x3Fu;
+        var length = Pm4Length(header);
 
         var expectedOp = registerSpace switch
         {
-            "cx" => ItSetContextRegIndirect,
-            "sh" => ItSetShRegIndirect,
-            "uc" => ItSetUconfigRegIndirect,
-            _ => 0u,
+            IndirectRegisterSpace.Cx => ItSetContextRegIndirect,
+            IndirectRegisterSpace.Sh => ItSetShRegIndirect,
+            _ => ItSetUconfigRegIndirect,
         };
-        if (op == expectedOp && Pm4Length(header) == 5)
+        if (op == expectedOp && length == 5)
         {
             addressOffset = 4;
             countOffset = 16;
@@ -654,12 +683,11 @@ public static partial class AgcExports
 
         var expectedLegacyRegister = registerSpace switch
         {
-            "cx" => RCxRegsIndirect,
-            "sh" => RShRegsIndirect,
-            "uc" => RUcRegsIndirect,
-            _ => uint.MaxValue,
+            IndirectRegisterSpace.Cx => RCxRegsIndirect,
+            IndirectRegisterSpace.Sh => RShRegsIndirect,
+            _ => RUcRegsIndirect,
         };
-        if (op == ItNop && register == expectedLegacyRegister && Pm4Length(header) == 4)
+        if (op == ItNop && register == expectedLegacyRegister && length == 4)
         {
             addressOffset = 8;
             countOffset = 4;

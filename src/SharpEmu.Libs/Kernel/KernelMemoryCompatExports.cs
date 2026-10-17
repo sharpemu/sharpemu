@@ -111,11 +111,8 @@ public static partial class KernelMemoryCompatExports
     private static readonly object _guestMountGate = new();
     private static readonly DirectMemoryAllocationMap _directAllocations = new(GuestMemoryLayout.DirectBytes);
     private static readonly Dictionary<ulong, LibcHeapAllocation> _libcAllocations = new();
-    // Keyed by (and kept sorted on) region base address so VirtualQuery can find a
-    // containing/next region with a binary search instead of an O(n) scan. Every
-    // write uses the region's own Address as the key (see AddMappedRegionSliceLocked
-    // and the mmap sites), so Values enumerate in ascending address order.
-    private static readonly SortedList<ulong, MappedRegion> _mappedRegions = new();
+    // Keep mappings in address order for range and virtual-memory queries.
+    private static readonly MappedRegionTable _mappedRegions = new();
     private static readonly Dictionary<ulong, string> _mappedRegionNames = new();
     private static readonly Dictionary<string, string> _guestMounts = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> _tracedStatResults = new(StringComparer.Ordinal);
@@ -1466,7 +1463,10 @@ public static partial class KernelMemoryCompatExports
                 _randomDeviceDescriptors.Add(randomFd);
             }
 
-            LogOpenTrace($"_open random-device path='{guestPath}' flags=0x{flags:X8} fd={randomFd}");
+            if (_logOpen)
+            {
+                LogOpenTrace($"_open random-device path='{guestPath}' flags=0x{flags:X8} fd={randomFd}");
+            }
             ctx[CpuRegister.Rax] = unchecked((ulong)randomFd);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -1478,7 +1478,10 @@ public static partial class KernelMemoryCompatExports
         // throw an ArgumentException the catch below does not cover.
         if (string.IsNullOrEmpty(hostPath))
         {
-            LogOpenTrace($"_open denied path='{guestPath}' flags=0x{flags:X8}");
+            if (_logOpen)
+            {
+                LogOpenTrace($"_open denied path='{guestPath}' flags=0x{flags:X8}");
+            }
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
         try
@@ -1490,9 +1493,12 @@ public static partial class KernelMemoryCompatExports
 
             if (HostMovieBridge.ShouldSkipGuestMovie(hostPath))
             {
-                LogOpenTrace(
-                    "_open bink-skip path='" + guestPath + "' host='" + hostPath +
-                    "' flags=0x" + flags.ToString("X8"));
+                if (_logOpen)
+                {
+                    LogOpenTrace(
+                        "_open bink-skip path='" + guestPath + "' host='" + hostPath +
+                        "' flags=0x" + flags.ToString("X8"));
+                }
                 Console.Error.WriteLine(
                     "[LOADER][INFO] Skipping Bink movie without a decoder: " +
                     Path.GetFileName(hostPath));
@@ -1509,7 +1515,10 @@ public static partial class KernelMemoryCompatExports
 
             if (IsMutatingOpen(flags) && IsReadOnlyGuestMutationPath(guestPath))
             {
-                LogOpenTrace($"_open readonly path='{guestPath}' host='{hostPath}' flags=0x{flags:X8}");
+                if (_logOpen)
+                {
+                    LogOpenTrace($"_open readonly path='{guestPath}' host='{hostPath}' flags=0x{flags:X8}");
+                }
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
             }
 
@@ -1518,13 +1527,19 @@ public static partial class KernelMemoryCompatExports
             {
                 if (!HostDirectoryExists(hostPath))
                 {
-                    LogOpenTrace($"_open miss path='{guestPath}' host='{hostPath}' flags=0x{flags:X8} directory=1");
+                    if (_logOpen)
+                    {
+                        LogOpenTrace($"_open miss path='{guestPath}' host='{hostPath}' flags=0x{flags:X8} directory=1");
+                    }
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
                 }
 
                 if (access != FileAccess.Read || (flags & (O_CREAT | O_TRUNC | O_APPEND)) != 0)
                 {
-                    LogOpenTrace($"_open invalid-dir path='{guestPath}' host='{hostPath}' flags=0x{flags:X8}");
+                    if (_logOpen)
+                    {
+                        LogOpenTrace($"_open invalid-dir path='{guestPath}' host='{hostPath}' flags=0x{flags:X8}");
+                    }
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
                 }
 
@@ -1539,7 +1554,10 @@ public static partial class KernelMemoryCompatExports
                     };
                 }
 
-                LogOpenTrace($"_open dir path='{guestPath}' host='{hostPath}' flags=0x{flags:X8} fd={directoryFd}");
+                if (_logOpen)
+                {
+                    LogOpenTrace($"_open dir path='{guestPath}' host='{hostPath}' flags=0x{flags:X8} fd={directoryFd}");
+                }
                 ctx[CpuRegister.Rax] = unchecked((ulong)directoryFd);
                 return (int)OrbisGen2Result.ORBIS_GEN2_OK;
             }
@@ -1577,9 +1595,12 @@ public static partial class KernelMemoryCompatExports
 
             if (useBinkCompletionShim)
             {
-                LogOpenTrace(
-                    "_open bink-host-shim path='" + guestPath + "' host='" + hostPath +
-                    "' flags=0x" + flags.ToString("X8") + " fd=" + fd);
+                if (_logOpen)
+                {
+                    LogOpenTrace(
+                        "_open bink-host-shim path='" + guestPath + "' host='" + hostPath +
+                        "' flags=0x" + flags.ToString("X8") + " fd=" + fd);
+                }
             }
 
             if (IsMutatingOpen(flags))
@@ -1588,13 +1609,19 @@ public static partial class KernelMemoryCompatExports
                 InvalidateAprFileSizeCache(hostPath);
             }
 
-            LogOpenTrace($"_open file path='{guestPath}' host='{hostPath}' flags=0x{flags:X8} fd={fd}");
+            if (_logOpen)
+            {
+                LogOpenTrace($"_open file path='{guestPath}' host='{hostPath}' flags=0x{flags:X8} fd={fd}");
+            }
             ctx[CpuRegister.Rax] = unchecked((ulong)fd);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            LogOpenTrace($"_open fail path='{guestPath}' host='{hostPath}' flags=0x{flags:X8} ex={ex.GetType().Name}: {ex.Message}");
+            if (_logOpen)
+            {
+                LogOpenTrace($"_open fail path='{guestPath}' host='{hostPath}' flags=0x{flags:X8} ex={ex.GetType().Name}: {ex.Message}");
+            }
             return ex is UnauthorizedAccessException
                 ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT
                 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
@@ -1750,6 +1777,7 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var roots = RootConfigurationToken();
         for (ulong i = 0; i < count; i++)
         {
             if (idsAddress != 0 &&
@@ -1765,7 +1793,7 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            var hostPath = ResolveGuestPath(guestPath);
+            var hostPath = ResolveGuestPath(guestPath, roots);
             if (!TryGetAprFileSize(hostPath, out var fileSize))
             {
                 // Stop at the first miss and report its index.
@@ -1794,7 +1822,10 @@ public static partial class KernelMemoryCompatExports
             var fileId = AmprFileRegistry.RegisterAprResolvedPath(guestPath, hostPath);
             if (_logIo)
             {
-                LogIoTrace("apr_resolve", guestPath, $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8} size={fileSize}");
+                if (_logIo)
+                {
+                    LogIoTrace("apr_resolve", guestPath, $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8} size={fileSize}");
+                }
             }
 
             if (idsAddress != 0 &&
@@ -1848,6 +1879,7 @@ public static partial class KernelMemoryCompatExports
             _ = TryReadNullTerminatedUtf8(ctx, prefixAddress, MaxGuestStringLength, out prefix);
         }
 
+        var roots = RootConfigurationToken();
         for (ulong i = 0; i < count; i++)
         {
             if (idsAddress != 0 &&
@@ -1864,10 +1896,13 @@ public static partial class KernelMemoryCompatExports
             }
 
             var guestPath = CombineAprPrefixedPath(prefix, relativePath);
-            var hostPath = ResolveGuestPath(guestPath);
+            var hostPath = ResolveGuestPath(guestPath, roots);
             if (!TryGetAprFileSize(hostPath, out var fileSize))
             {
-                LogIoTrace("apr_resolve_with_prefix", guestPath, $"host='{hostPath}' index={i} count={count} result=not_found");
+                if (_logIo)
+                {
+                    LogIoTrace("apr_resolve_with_prefix", guestPath, $"host='{hostPath}' index={i} count={count} result=not_found");
+                }
                 if (sizesAddress != 0 &&
                     !TryWriteUInt64Compat(ctx, sizesAddress + (i * sizeof(ulong)), 0))
                 {
@@ -1888,7 +1923,10 @@ public static partial class KernelMemoryCompatExports
             }
 
             var fileId = AmprFileRegistry.RegisterAprResolvedPath(guestPath, hostPath);
-            LogIoTrace("apr_resolve_with_prefix", guestPath, $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8} size={fileSize}");
+            if (_logIo)
+            {
+                LogIoTrace("apr_resolve_with_prefix", guestPath, $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8} size={fileSize}");
+            }
 
             if (idsAddress != 0 &&
                 !TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), fileId))
@@ -1947,6 +1985,7 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        var roots = RootConfigurationToken();
         for (ulong i = 0; i < count; i++)
         {
             if (!TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), uint.MaxValue))
@@ -1961,10 +2000,13 @@ public static partial class KernelMemoryCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
 
-            var hostPath = ResolveGuestPath(guestPath);
+            var hostPath = ResolveGuestPath(guestPath, roots);
             if (!TryGetAprFileSize(hostPath, out _))
             {
-                LogIoTrace("apr_resolve_ids", guestPath, $"host='{hostPath}' index={i} count={count} result=not_found");
+                if (_logIo)
+                {
+                    LogIoTrace("apr_resolve_ids", guestPath, $"host='{hostPath}' index={i} count={count} result=not_found");
+                }
                 if (errorIndexAddress != 0 &&
                     !TryWriteUInt32Compat(ctx, errorIndexAddress, (uint)i))
                 {
@@ -1978,7 +2020,10 @@ public static partial class KernelMemoryCompatExports
             }
 
             var fileId = AmprFileRegistry.RegisterAprResolvedPath(guestPath, hostPath);
-            LogIoTrace("apr_resolve_ids", guestPath, $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8}");
+            if (_logIo)
+            {
+                LogIoTrace("apr_resolve_ids", guestPath, $"host='{hostPath}' index={i} count={count} id=0x{fileId:X8}");
+            }
 
             if (!TryWriteUInt32Compat(ctx, idsAddress + (i * sizeof(uint)), fileId))
             {
@@ -2013,19 +2058,28 @@ public static partial class KernelMemoryCompatExports
 
         if (!AmprFileRegistry.TryGetHostPath(fileId, out var hostPath))
         {
-            LogIoTrace("apr_get_file_stat", $"id=0x{fileId:X8}", "result=id_not_registered");
+            if (_logIo)
+            {
+                LogIoTrace("apr_get_file_stat", $"id=0x{fileId:X8}", "result=id_not_registered");
+            }
             KernelRuntimeCompatExports.TrySetErrno(ctx, 2);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
         if (!TryWriteHostPathStat(ctx, statAddress, hostPath))
         {
-            LogIoTrace("apr_get_file_stat", hostPath, $"id=0x{fileId:X8} result=not_found");
+            if (_logIo)
+            {
+                LogIoTrace("apr_get_file_stat", hostPath, $"id=0x{fileId:X8} result=not_found");
+            }
             KernelRuntimeCompatExports.TrySetErrno(ctx, 2);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
-        LogIoTrace("apr_get_file_stat", hostPath, $"id=0x{fileId:X8}");
+        if (_logIo)
+        {
+            LogIoTrace("apr_get_file_stat", hostPath, $"id=0x{fileId:X8}");
+        }
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -2049,14 +2103,20 @@ public static partial class KernelMemoryCompatExports
 
         if (!AmprFileRegistry.TryGetHostPath(fileId, out var hostPath))
         {
-            LogIoTrace("apr_get_file_size", $"id=0x{fileId:X8}", "result=id_not_registered");
+            if (_logIo)
+            {
+                LogIoTrace("apr_get_file_size", $"id=0x{fileId:X8}", "result=id_not_registered");
+            }
             KernelRuntimeCompatExports.TrySetErrno(ctx, 2);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
         if (!TryGetAprFileSize(hostPath, out var size))
         {
-            LogIoTrace("apr_get_file_size", hostPath, $"id=0x{fileId:X8} result=not_found");
+            if (_logIo)
+            {
+                LogIoTrace("apr_get_file_size", hostPath, $"id=0x{fileId:X8} result=not_found");
+            }
             KernelRuntimeCompatExports.TrySetErrno(ctx, 2);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
@@ -2067,7 +2127,10 @@ public static partial class KernelMemoryCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
         }
 
-        LogIoTrace("apr_get_file_size", hostPath, $"id=0x{fileId:X8} size={size}");
+        if (_logIo)
+        {
+            LogIoTrace("apr_get_file_size", hostPath, $"id=0x{fileId:X8} size={size}");
+        }
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
@@ -2116,7 +2179,10 @@ public static partial class KernelMemoryCompatExports
         var hostPath = ResolveGuestPath(guestPath);
         if (IsReadOnlyGuestMutationPath(guestPath))
         {
-            LogOpenTrace($"unlink readonly path='{guestPath}' host='{hostPath}'");
+            if (_logOpen)
+            {
+                LogOpenTrace($"unlink readonly path='{guestPath}' host='{hostPath}'");
+            }
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }
 
@@ -2137,7 +2203,10 @@ public static partial class KernelMemoryCompatExports
             InvalidateNegativeStatCacheForPathAndAncestors(guestPath);
             InvalidateAprFileSizeCache(hostPath);
             AddNegativeStatCacheForGuestPath(guestPath);
-            LogOpenTrace($"unlink path='{guestPath}' host='{hostPath}'");
+            if (_logOpen)
+            {
+                LogOpenTrace($"unlink path='{guestPath}' host='{hostPath}'");
+            }
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -2184,7 +2253,10 @@ public static partial class KernelMemoryCompatExports
         var hostPath = ResolveGuestPath(guestPath);
         if (IsReadOnlyGuestMutationPath(guestPath))
         {
-            LogOpenTrace($"mkdir readonly path='{guestPath}' host='{hostPath}'");
+            if (_logOpen)
+            {
+                LogOpenTrace($"mkdir readonly path='{guestPath}' host='{hostPath}'");
+            }
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }
 
@@ -2208,7 +2280,10 @@ public static partial class KernelMemoryCompatExports
             }
 
             InvalidateNegativeStatCacheForPathAndAncestors(guestPath);
-            LogOpenTrace($"mkdir path='{guestPath}' host='{hostPath}'");
+            if (_logOpen)
+            {
+                LogOpenTrace($"mkdir path='{guestPath}' host='{hostPath}'");
+            }
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -2243,7 +2318,10 @@ public static partial class KernelMemoryCompatExports
         var hostPath = ResolveGuestPath(guestPath);
         if (IsReadOnlyGuestMutationPath(guestPath))
         {
-            LogOpenTrace($"rmdir readonly path='{guestPath}' host='{hostPath}'");
+            if (_logOpen)
+            {
+                LogOpenTrace($"rmdir readonly path='{guestPath}' host='{hostPath}'");
+            }
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }
 
@@ -2258,7 +2336,10 @@ public static partial class KernelMemoryCompatExports
             Directory.Delete(hostPath, recursive: false);
             InvalidateNegativeStatCacheForPathAndAncestors(guestPath);
             AddNegativeStatCacheForGuestPath(guestPath);
-            LogOpenTrace($"rmdir path='{guestPath}' host='{hostPath}'");
+            if (_logOpen)
+            {
+                LogOpenTrace($"rmdir path='{guestPath}' host='{hostPath}'");
+            }
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -2323,6 +2404,10 @@ public static partial class KernelMemoryCompatExports
         {
             HostMovieBridge.NotifyGuestMovieClosed(observedBinkPath!);
         }
+
+        // The read-ahead tracker is keyed by guest fd, which is handed out
+        // again after a close; a stale entry would hint on an unrelated file.
+        ForgetPreadStream(fd);
         stream.Dispose();
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -2447,10 +2532,13 @@ public static partial class KernelMemoryCompatExports
             positionAfter = -1;
         }
 
-        LogIoTrace(
-            "read",
-            OpenFileName(stream),
-            $"fd={fd} req={requested} read={read} pos={positionBefore}->{positionAfter} preview='{PreviewIoBytes(buffer, read, 64)}' hex={PreviewIoHex(buffer, read, 32)} guest_tail={PreviewGuestHex(ctx, bufferAddress + (ulong)Math.Max(read, 0), 32)}");
+        if (_logIo)
+        {
+            LogIoTrace(
+                "read",
+                OpenFileName(stream),
+                $"fd={fd} req={requested} read={read} pos={positionBefore}->{positionAfter} preview='{PreviewIoBytes(buffer, read, 64)}' hex={PreviewIoHex(buffer, read, 32)} guest_tail={PreviewGuestHex(ctx, bufferAddress + (ulong)Math.Max(read, 0), 32)}");
+        }
 
         ctx[CpuRegister.Rax] = unchecked((ulong)read);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -2565,7 +2653,10 @@ public static partial class KernelMemoryCompatExports
 
         if (stream is null)
         {
-            LogIoTrace("lseek", $"fd:{fd}", $"offset={offset} whence={whence} result=badfd");
+            if (_logIo)
+            {
+                LogIoTrace("lseek", $"fd:{fd}", $"offset={offset} whence={whence} result=badfd");
+            }
             return OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
 
@@ -2582,7 +2673,10 @@ public static partial class KernelMemoryCompatExports
                 origin = SeekOrigin.End;
                 break;
             default:
-                LogIoTrace("lseek", OpenFileName(stream), $"fd={fd} offset={offset} whence={whence} result=invalid_whence");
+                if (_logIo)
+                {
+                    LogIoTrace("lseek", OpenFileName(stream), $"fd={fd} offset={offset} whence={whence} result=invalid_whence");
+                }
                 return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
@@ -2592,16 +2686,25 @@ public static partial class KernelMemoryCompatExports
         }
         catch (IOException ex)
         {
-            LogIoTrace("lseek", OpenFileName(stream), $"fd={fd} offset={offset} whence={whence} result=io_error ex={ex.Message}");
+            if (_logIo)
+            {
+                LogIoTrace("lseek", OpenFileName(stream), $"fd={fd} offset={offset} whence={whence} result=io_error ex={ex.Message}");
+            }
             return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
         catch (ArgumentException ex)
         {
-            LogIoTrace("lseek", OpenFileName(stream), $"fd={fd} offset={offset} whence={whence} result=invalid ex={ex.Message}");
+            if (_logIo)
+            {
+                LogIoTrace("lseek", OpenFileName(stream), $"fd={fd} offset={offset} whence={whence} result=invalid ex={ex.Message}");
+            }
             return OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        LogIoTrace("lseek", OpenFileName(stream), $"fd={fd} offset={offset} whence={whence} pos={position}");
+        if (_logIo)
+        {
+            LogIoTrace("lseek", OpenFileName(stream), $"fd={fd} offset={offset} whence={whence} pos={position}");
+        }
         return OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -3830,6 +3933,17 @@ public static partial class KernelMemoryCompatExports
         var bufferSize = ctx[CpuRegister.Rsi];
         var formatAddress = ctx[CpuRegister.Rdx];
 
+        if (TryFastSnprintf(
+                ctx,
+                destination,
+                bufferSize,
+                formatAddress,
+                new RegisterPrintfArgumentSource(ctx, 3),
+                out var fastResult))
+        {
+            return fastResult;
+        }
+
         if (!TryReadCString(ctx, formatAddress, 1_048_576, out var formatBytes))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -3847,6 +3961,12 @@ public static partial class KernelMemoryCompatExports
         var bufferSize = ctx[CpuRegister.Rsi];
         var formatAddress = ctx[CpuRegister.Rdx];
         var vaListAddress = ctx[CpuRegister.Rcx];
+
+        if (TryCreateVaListCursor(ctx, vaListAddress, out var fastCursor)
+            && TryFastSnprintf(ctx, destination, bufferSize, formatAddress, fastCursor, out var fastResult))
+        {
+            return fastResult;
+        }
 
         if (!TryReadCString(ctx, formatAddress, 1_048_576, out var formatBytes))
         {
@@ -4460,7 +4580,15 @@ public static partial class KernelMemoryCompatExports
                         else if (spaceForSign && value >= 0)
                             formatted = " " + formatted;
 
-                        sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign));
+                        if (padWithZero && !leftAlign && width > formatted.Length && formatted[0] is '-' or '+' or ' ')
+                        {
+                            // C99: zero padding goes between the sign and the digits.
+                            sb.Append(formatted[0]).Append('0', width - formatted.Length).Append(formatted, 1, formatted.Length - 1);
+                        }
+                        else
+                        {
+                            sb.Append(PadString(formatted, width, leftAlign, padWithZero && !leftAlign));
+                        }
                     }
                     break;
 
@@ -4882,14 +5010,28 @@ public static partial class KernelMemoryCompatExports
             Environment.GetEnvironmentVariable("SHARPEMU_DOWNLOAD0_DIR"), "|",
             Environment.GetEnvironmentVariable("SHARPEMU_SAVEDATA_DIR"));
 
-    public static string ResolveGuestPath(string guestPath)
+    public static string ResolveGuestPath(string guestPath) =>
+        string.IsNullOrWhiteSpace(guestPath)
+            ? guestPath
+            : ResolveGuestPath(guestPath, RootConfigurationToken());
+
+    /// <summary>
+    /// <see cref="ResolveGuestPath(string)"/> under a root configuration the
+    /// caller read once for a whole batch.
+    /// </summary>
+    /// <remarks>
+    /// The token is six environment reads and a concatenation, which is most of
+    /// what a memoized resolve costs. An APR batch resolves up to 1024 paths in
+    /// one guest call, during which the host configuration cannot meaningfully
+    /// change, so reading it per path only multiplied that cost by the batch size.
+    /// </remarks>
+    internal static string ResolveGuestPath(string guestPath, string roots)
     {
         if (string.IsNullOrWhiteSpace(guestPath))
         {
             return guestPath;
         }
 
-        var roots = RootConfigurationToken();
         if (_resolvedGuestPaths.TryGetValue(guestPath, out var memoized) &&
             string.Equals(memoized.Root, roots, StringComparison.Ordinal))
         {
@@ -5245,6 +5387,10 @@ public static partial class KernelMemoryCompatExports
     // that do not yet exist (e.g. an O_CREAT target and its parents) carry no
     // link to follow and are simply skipped. Mirrors the reparse rejection in
     // AvPlayerExports.TryResolveSandboxedFile.
+    // NAME_MAX on every filesystem the host can mount here (APFS, HFS+, ext4,
+    // NTFS all stop at 255).
+    private const int MaxHostPathComponentLength = 255;
+
     private static bool EscapesMountViaReparsePoint(string mountRoot, string candidate)
     {
         var rootTrimmed = Path.TrimEndingDirectorySeparator(mountRoot);
@@ -5277,14 +5423,44 @@ public static partial class KernelMemoryCompatExports
                      Path.DirectorySeparatorChar,
                      StringSplitOptions.RemoveEmptyEntries))
         {
+            // A component past NAME_MAX cannot name a host file at all. The
+            // per-component stat used to surface that as ENAMETOOLONG, which
+            // this guard treated as an unverifiable component and denied; a
+            // directory listing instead reports the name as simply absent, so
+            // the limit has to be checked here to keep failing closed.
+            if (segment.Length > MaxHostPathComponentLength)
+            {
+                return true;
+            }
+
             current = Path.Combine(current, segment);
-            // Each component is checked once with its own lstat. Listing the parent instead
-            // stats every entry of that directory (.NET fills attributes per entry), so a game
-            // image with large directories paid for files it never opens: Demon's Souls spent
-            // ~9 s of its load in those stats.
             if (_verifiedMountComponents.ContainsKey(current))
             {
                 continue;
+            }
+
+            // One listing of the component's parent answers this question for
+            // every sibling, which is what makes resolving a 223k-file image
+            // affordable: a cold random lstat on the game volume costs ~180 us
+            // against ~37 us per entry listed in directory order, and the
+            // listing is paid once per directory instead of once per asset.
+            var indexed = HostDirectoryIndex.Describe(current);
+            switch (indexed.Verdict)
+            {
+                case HostDirectoryIndex.Verdict.Absent:
+                    // Component does not exist yet (create path); nothing to follow.
+                    return false;
+                case HostDirectoryIndex.Verdict.Symlink:
+                    return true;
+                case HostDirectoryIndex.Verdict.File:
+                    _aprFileSizeCache.TryAdd(
+                        current,
+                        indexed.Length < 0 ? 0UL : unchecked((ulong)indexed.Length));
+                    _verifiedMountComponents.TryAdd(current, 0);
+                    continue;
+                case HostDirectoryIndex.Verdict.Directory:
+                    _verifiedMountComponents.TryAdd(current, 0);
+                    continue;
             }
 
             try
@@ -5461,6 +5637,10 @@ public static partial class KernelMemoryCompatExports
         if (!string.IsNullOrWhiteSpace(parentDirectory))
         {
             Directory.CreateDirectory(parentDirectory);
+            // A directory that did not exist when its own parent was listed is
+            // recorded there as absent, which would deny every later path
+            // through it.
+            HostDirectoryIndex.Invalidate(parentDirectory);
         }
     }
 
@@ -5472,6 +5652,8 @@ public static partial class KernelMemoryCompatExports
     // to allow those writes so such dumps can boot; defaults off to keep retail semantics.
     private static readonly bool _writableApp0 =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_WRITABLE_APP0"), "1", StringComparison.Ordinal);
+
+    internal static bool IsApp0Writable => _writableApp0;
 
     public static bool IsReadOnlyGuestMutationPath(string guestPath)
     {
@@ -6123,8 +6305,7 @@ public static partial class KernelMemoryCompatExports
 
         var affected = new List<MappedRegion>();
         var cursor = address;
-        // _mappedRegions is a SortedList keyed by address, so Values already
-        // enumerate in ascending address order.
+        // Visit mappings in address order to check for gaps before any change.
         foreach (var region in _mappedRegions.Values)
         {
             if (!TryAddU64(region.Address, region.Length, out var regionEnd) || regionEnd <= cursor)
@@ -6210,9 +6391,17 @@ public static partial class KernelMemoryCompatExports
         }
 
         var start = replacement.Address;
-        List<MappedRegion>? overlapping = null;
-        foreach (var region in _mappedRegions.Values)
+        if (_mappedRegions.TryGetValue(start, out var existing) && existing.Length == replacement.Length)
         {
+            _mappedRegions[start] = replacement;
+            return;
+        }
+
+        List<MappedRegion>? overlapping = null;
+        foreach (var region in _mappedRegions.FromAddress(start))
+        {
+            if (region.Address >= replacementEnd)
+                break;
             if (region.Length == 0 ||
                 !TryAddU64(region.Address, region.Length, out var regionEnd))
             {
@@ -6389,33 +6578,8 @@ public static partial class KernelMemoryCompatExports
     private static bool TryFindVirtualQueryRegionLocked(ulong queryAddress, bool findNext, out MappedRegion region)
     {
         region = default;
-        var keys = _mappedRegions.Keys;
-        var values = _mappedRegions.Values;
-        var count = keys.Count;
-
-        // First index whose region address is >= queryAddress.
-        var lo = 0;
-        var hi = count;
-        while (lo < hi)
+        if (_mappedRegions.TryFindAtOrBelow(queryAddress, out var candidate))
         {
-            var mid = (int)(((uint)lo + (uint)hi) >> 1);
-            if (keys[mid] < queryAddress)
-            {
-                lo = mid + 1;
-            }
-            else
-            {
-                hi = mid;
-            }
-        }
-
-        // Regions do not overlap, so only the one with the greatest base address
-        // <= queryAddress can contain it — index lo when it starts exactly at
-        // queryAddress, otherwise lo - 1.
-        var floorIndex = (lo < count && keys[lo] == queryAddress) ? lo : lo - 1;
-        if (floorIndex >= 0)
-        {
-            var candidate = values[floorIndex];
             if (TryAddU64(candidate.Address, candidate.Length, out var candidateEnd) &&
                 queryAddress >= candidate.Address &&
                 queryAddress < candidateEnd)
@@ -6425,14 +6589,7 @@ public static partial class KernelMemoryCompatExports
             }
         }
 
-        // findNext: the region with the smallest base address >= queryAddress.
-        if (findNext && lo < count)
-        {
-            region = values[lo];
-            return true;
-        }
-
-        return false;
+        return findNext && _mappedRegions.TryFindAtOrAbove(queryAddress, out region);
     }
 
     private static void TraceDirectMemoryCall(
@@ -6964,7 +7121,10 @@ public static partial class KernelMemoryCompatExports
         if (fd is 0 or 1 or 2)
         {
             var now = DateTime.UtcNow;
-            LogIoTrace("fstat", $"stdio:{fd}", $"fd={fd} size=0 dir=0");
+            if (_logIo)
+            {
+                LogIoTrace("fstat", $"stdio:{fd}", $"fd={fd} size=0 dir=0");
+            }
             return TryWriteKernelStat(ctx, statAddress, isDirectory: false, size: 0, now, now, now, $"stdio:{fd}");
         }
 
@@ -6991,7 +7151,10 @@ public static partial class KernelMemoryCompatExports
         if (isRandomDevice)
         {
             var now = DateTime.UtcNow;
-            LogIoTrace("fstat", "/dev/urandom", $"fd={fd} size=0 device=random");
+            if (_logIo)
+            {
+                LogIoTrace("fstat", "/dev/urandom", $"fd={fd} size=0 device=random");
+            }
             return TryWriteKernelStat(ctx, statAddress, isDirectory: false, size: 0,
                 now, now, now, "/dev/urandom");
         }
@@ -7013,7 +7176,10 @@ public static partial class KernelMemoryCompatExports
                 }
             }
 
-            LogIoTrace("fstat", hostPath!, $"fd={fd} size={size} dir={(isDirectory ? 1 : 0)}");
+            if (_logIo)
+            {
+                LogIoTrace("fstat", hostPath!, $"fd={fd} size={size} dir={(isDirectory ? 1 : 0)}");
+            }
         }
 
         return !string.IsNullOrWhiteSpace(hostPath) && TryWriteHostPathStat(ctx, statAddress, hostPath!, isDirectory);
@@ -7025,6 +7191,21 @@ public static partial class KernelMemoryCompatExports
 
     private static bool TryWriteHostPathStat(CpuContext ctx, ulong statAddress, string hostPath)
     {
+        // The parent's listing already knows which of the two this is, so the
+        // common case costs no syscall at all. Directory.Exists followed by
+        // File.Exists is two stats before the five TryWriteHostPathStat needs.
+        switch (HostDirectoryIndex.Describe(hostPath).Verdict)
+        {
+            case HostDirectoryIndex.Verdict.Directory:
+                return TryWriteHostPathStat(ctx, statAddress, hostPath, isDirectory: true);
+            case HostDirectoryIndex.Verdict.File:
+                return TryWriteHostPathStat(ctx, statAddress, hostPath, isDirectory: false);
+            case HostDirectoryIndex.Verdict.Symlink:
+                return false;
+            case HostDirectoryIndex.Verdict.Absent when TrustsIndexAbsence(hostPath):
+                return false;
+        }
+
         var isDirectory = HostDirectoryExists(hostPath);
         if (!isDirectory && !HostFileExists(hostPath))
         {
@@ -7039,6 +7220,53 @@ public static partial class KernelMemoryCompatExports
     // on the (slow, external) game volume into a dictionary probe; Demon's Souls
     // resolves tens of thousands of paths per boot and misses are the common case.
     private static readonly ConcurrentDictionary<string, byte> _aprMissingImagePaths = new(HostFsPath.Comparer);
+
+    // A listing's "this name is absent" answer is authoritative only where
+    // nothing creates files behind the kernel exports' back. /app0 is the
+    // read-only game image, and it is also where the 223k paths that make the
+    // index worth having live. Everywhere else (temp0, savedata, hostapp) the
+    // emulator's own libc/save-data layers write files directly, so a stale
+    // absence there would deny a file that exists: those paths fall back to a
+    // fresh probe.
+    private static bool TrustsIndexAbsence(string hostPath) =>
+        !_writableApp0 && !App0Archive.IsMounted && IsUnderApp0(hostPath);
+
+    /// <summary>
+    /// The length of a read-only game-image file that path resolution has
+    /// already measured, without asking the host again.
+    /// </summary>
+    /// <remarks>
+    /// Opening an asset for AMPR streaming needs its length to bound the read.
+    /// RandomAccess.GetLength is an fstat of an inode that resolving the very
+    /// same path just stat'ed, which on the external game volume is a second
+    /// cold metadata read; Demon's Souls pays it 10.6k times per boot. The
+    /// answer is only served for the read-only /app0 image, where it cannot go
+    /// stale under us - anywhere a guest or the emulator can write, the caller
+    /// must measure the file itself.
+    /// </remarks>
+    internal static bool TryGetReadOnlyImageLength(string hostPath, out long length)
+    {
+        length = -1;
+        if (string.IsNullOrEmpty(hostPath) || !TrustsIndexAbsence(hostPath))
+        {
+            return false;
+        }
+
+        if (_aprFileSizeCache.TryGetValue(hostPath, out var cached))
+        {
+            length = unchecked((long)cached);
+            return length >= 0;
+        }
+
+        var indexed = HostDirectoryIndex.Describe(hostPath);
+        if (indexed.Verdict != HostDirectoryIndex.Verdict.File || indexed.Length < 0)
+        {
+            return false;
+        }
+
+        length = indexed.Length;
+        return true;
+    }
 
     private static bool IsUnderApp0(string cachePath)
     {
@@ -7069,6 +7297,24 @@ public static partial class KernelMemoryCompatExports
         if (_aprMissingImagePaths.ContainsKey(cachePath))
         {
             return false;
+        }
+
+        // The listing that verified containment also carries the length, so an
+        // asset whose path was just resolved needs no stat of its own.
+        var indexed = HostDirectoryIndex.Describe(cachePath);
+        switch (indexed.Verdict)
+        {
+            case HostDirectoryIndex.Verdict.File:
+                size = indexed.Length < 0 ? 0UL : unchecked((ulong)indexed.Length);
+                _aprFileSizeCache.TryAdd(cachePath, size);
+                return true;
+            case HostDirectoryIndex.Verdict.Directory:
+                size = 65536;
+                _aprFileSizeCache.TryAdd(cachePath, size);
+                return true;
+            case HostDirectoryIndex.Verdict.Absent when TrustsIndexAbsence(cachePath):
+                _aprMissingImagePaths.TryAdd(cachePath, 0);
+                return false;
         }
 
         try
@@ -7110,18 +7356,31 @@ public static partial class KernelMemoryCompatExports
 
     private static bool TryWriteHostPathStat(CpuContext ctx, ulong statAddress, string hostPath, bool isDirectory)
     {
-        if (isDirectory ? !Directory.Exists(hostPath) : !File.Exists(hostPath))
-        {
-            return TryWriteArchivePathStat(ctx, statAddress, hostPath, isDirectory);
-        }
-
         try
         {
-            var lastAccessUtc = File.GetLastAccessTimeUtc(hostPath);
-            var lastWriteUtc = File.GetLastWriteTimeUtc(hostPath);
-            var creationUtc = File.GetCreationTimeUtc(hostPath);
-            var size = isDirectory ? 65536L : new FileInfo(hostPath).Length;
-            return TryWriteKernelStat(ctx, statAddress, isDirectory, size, lastAccessUtc, lastWriteUtc, creationUtc, hostPath);
+            // One FileSystemInfo caches one stat, and every field below reads out
+            // of it. Asking File.GetLastAccessTimeUtc/GetLastWriteTimeUtc/
+            // GetCreationTimeUtc/FileInfo.Length separately — on top of the
+            // Exists probe — cost five stats of the same inode, which on the
+            // external game volume is five cold metadata reads.
+            FileSystemInfo info = isDirectory
+                ? new DirectoryInfo(hostPath)
+                : new FileInfo(hostPath);
+            if (!info.Exists)
+            {
+                return TryWriteArchivePathStat(ctx, statAddress, hostPath, isDirectory);
+            }
+
+            var size = isDirectory ? 65536L : ((FileInfo)info).Length;
+            return TryWriteKernelStat(
+                ctx,
+                statAddress,
+                isDirectory,
+                size,
+                info.LastAccessTimeUtc,
+                info.LastWriteTimeUtc,
+                info.CreationTimeUtc,
+                hostPath);
         }
         catch
         {
@@ -7223,7 +7482,10 @@ public static partial class KernelMemoryCompatExports
             var error = isOpenFile
                 ? OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT
                 : OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
-            LogIoTrace("getdents", $"fd:{fd}", $"result={(isOpenFile ? "not_directory" : "badfd")}");
+            if (_logIo)
+            {
+                LogIoTrace("getdents", $"fd:{fd}", $"result={(isOpenFile ? "not_directory" : "badfd")}");
+            }
             ctx[CpuRegister.Rax] = unchecked((ulong)(int)error);
             return (int)error;
         }
@@ -7237,7 +7499,10 @@ public static partial class KernelMemoryCompatExports
 
         if (currentIndex >= directory.Entries.Length)
         {
-            LogIoTrace("getdents", directory.Path, $"fd={fd} result=eof entries={directory.Entries.Length}");
+            if (_logIo)
+            {
+                LogIoTrace("getdents", directory.Path, $"fd={fd} result=eof entries={directory.Entries.Length}");
+            }
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
@@ -7314,9 +7579,17 @@ public static partial class KernelMemoryCompatExports
         return hash;
     }
 
+    // Read once: these guard statements sit on the per-call file-I/O paths, and
+    // every call site is wrapped in the matching flag so a disabled trace never
+    // builds its interpolated message. Reading an environment variable (and
+    // formatting a path preview) per read cost more than the read itself for
+    // titles that stream through pread.
+    private static readonly bool _logOpen =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_OPEN"), "1", StringComparison.Ordinal);
+
     private static void LogOpenTrace(string message)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_OPEN"), "1", StringComparison.Ordinal))
+        if (!_logOpen)
         {
             return;
         }
@@ -7324,9 +7597,11 @@ public static partial class KernelMemoryCompatExports
         Console.Error.WriteLine($"[LOADER][TRACE] {message}");
     }
 
-    // Read once: file-heavy titles call LogIoTrace for every resolved path.
     private static readonly bool _logIo =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO"), "1", StringComparison.Ordinal);
+
+    private static readonly string? _logIoFilter =
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO_FILTER");
 
     private static void LogIoTrace(string operation, string path, string detail)
     {
@@ -7335,9 +7610,8 @@ public static partial class KernelMemoryCompatExports
             return;
         }
 
-        var filter = Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO_FILTER");
-        if (!string.IsNullOrWhiteSpace(filter) &&
-            path.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0)
+        if (!string.IsNullOrWhiteSpace(_logIoFilter) &&
+            path.IndexOf(_logIoFilter, StringComparison.OrdinalIgnoreCase) < 0)
         {
             return;
         }
@@ -7347,7 +7621,7 @@ public static partial class KernelMemoryCompatExports
 
     private static void LogUniqueStatTrace(string guestPath, string hostPath, bool found)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IO"), "1", StringComparison.Ordinal))
+        if (!_logIo)
         {
             return;
         }
@@ -7361,7 +7635,10 @@ public static partial class KernelMemoryCompatExports
             }
         }
 
-        LogIoTrace("stat", guestPath, $"host='{hostPath}' result={result}");
+        if (_logIo)
+        {
+            LogIoTrace("stat", guestPath, $"host='{hostPath}' result={result}");
+        }
     }
 
     private static string? GetNegativeStatCacheKey(string guestPath)
@@ -7457,6 +7734,17 @@ public static partial class KernelMemoryCompatExports
 
             _negativeStatCache.Remove("/");
         }
+
+        // Whatever the guest just created, deleted or renamed, the host
+        // directory listing that described it (and recorded whether it existed)
+        // is now stale. Mutations are rare next to resolution, so paying one
+        // resolve here keeps every mutating export covered by a single hook.
+        var hostPath = ResolveGuestPath(guestPath);
+        if (!string.IsNullOrEmpty(hostPath))
+        {
+            _verifiedMountComponents.TryRemove(hostPath, out _);
+            HostDirectoryIndex.Invalidate(hostPath);
+        }
     }
 
     private static void InvalidateAprFileSizeCache(string hostPath)
@@ -7471,6 +7759,12 @@ public static partial class KernelMemoryCompatExports
         }
 
         _aprFileSizeCache.TryRemove(hostPath, out _);
+        _aprMissingImagePaths.TryRemove(hostPath, out _);
+        // The directory listing that described this path recorded its length and
+        // whether it existed at all; a create, delete, rename or truncate makes
+        // both stale, as does the component having been verified.
+        _verifiedMountComponents.TryRemove(hostPath, out _);
+        HostDirectoryIndex.Invalidate(hostPath);
     }
 
     private static string PreviewIoBytes(byte[] buffer, int count, int maxBytes)
@@ -7989,7 +8283,10 @@ public static partial class KernelMemoryCompatExports
         var hostPath = ResolveGuestPath(guestPath);
         if (IsReadOnlyGuestMutationPath(guestPath))
         {
-            LogOpenTrace($"chmod readonly path='{guestPath}' host='{hostPath}' mode=0x{mode:X}");
+            if (_logOpen)
+            {
+                LogOpenTrace($"chmod readonly path='{guestPath}' host='{hostPath}' mode=0x{mode:X}");
+            }
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }
 
@@ -8001,7 +8298,10 @@ public static partial class KernelMemoryCompatExports
 
         // POSIX permission bits have no host equivalent on Windows; accept the call
         // so guests that chmod their freshly created files/directories can proceed.
-        LogOpenTrace($"chmod path='{guestPath}' host='{hostPath}' mode=0x{mode:X}");
+        if (_logOpen)
+        {
+            LogOpenTrace($"chmod path='{guestPath}' host='{hostPath}' mode=0x{mode:X}");
+        }
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }

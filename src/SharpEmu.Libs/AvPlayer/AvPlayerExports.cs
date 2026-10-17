@@ -43,7 +43,11 @@ public static class AvPlayerExports
     private const int ReplacementFileReadBufferSize = 1024 * 1024;
     private const int VideoPitchAlignment = 256;
     private static readonly object StateGate = new();
-    private static readonly HashSet<string> TracedOnce = new();
+    // Keyed by trace key, not a HashSet under a lock: the handler below has to
+    // peek at whether a key has already been reported before it decides to
+    // format anything, and that peek sits on per-frame export paths.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte>
+        TracedOnce = new(StringComparer.Ordinal);
     private static readonly Dictionary<ulong, PlayerState> Players = new();
     private static readonly ConcurrentDictionary<ulong, ulong> VideoBufferRanges = new();
     private static readonly bool TraceVideoImages = string.Equals(
@@ -2999,25 +3003,153 @@ public static class AvPlayerExports
         return result;
     }
 
-    private static void Trace(string message)
+    /// <summary>
+    /// Decides whether this rate-limited trace will be written before building
+    /// its message.
+    /// </summary>
+    /// <remarks>
+    /// The sampling rule - the first 32 calls and every 300th after that - is
+    /// evaluated here rather than in <see cref="Trace(ref AvPlayerTraceHandler)"/>
+    /// so the 299 calls in between skip every AppendFormatted and allocate
+    /// nothing. sceAvPlayerGetVideoDataEx reaches this 2.5 million times in a
+    /// two-minute Quake run.
+    ///
+    /// The counter advances in the constructor, which runs whatever the rule
+    /// decides, so the sequence of messages that gets written is exactly the
+    /// one the eager version wrote.
+    /// </remarks>
+    [System.Runtime.CompilerServices.InterpolatedStringHandler]
+    private ref struct AvPlayerTraceHandler
+    {
+        private System.Runtime.CompilerServices.DefaultInterpolatedStringHandler _inner;
+
+        public AvPlayerTraceHandler(int literalLength, int formattedCount, out bool shouldAppend)
+        {
+            ShouldWrite = ShouldWriteTrace();
+            shouldAppend = ShouldWrite;
+            _inner = ShouldWrite
+                ? new System.Runtime.CompilerServices.DefaultInterpolatedStringHandler(literalLength, formattedCount)
+                : default;
+        }
+
+        public bool ShouldWrite { get; }
+
+        public void AppendLiteral(string value) => _inner.AppendLiteral(value);
+
+        public void AppendFormatted<T>(T value) => _inner.AppendFormatted(value);
+
+        public void AppendFormatted<T>(T value, string? format) => _inner.AppendFormatted(value, format);
+
+        public string ToStringAndClear() => ShouldWrite ? _inner.ToStringAndClear() : string.Empty;
+    }
+
+    private static bool ShouldWriteTrace()
     {
         var count = Interlocked.Increment(ref _traceCount);
-        if (count <= 32 || count % 300 == 0)
+        return count <= 32 || count % 300 == 0;
+    }
+
+    private static void Trace(
+        [System.Runtime.CompilerServices.InterpolatedStringHandlerArgument]
+        ref AvPlayerTraceHandler message)
+    {
+        if (message.ShouldWrite)
+        {
+            Console.Error.WriteLine($"[AVPLAYER][INFO] {message.ToStringAndClear()}");
+        }
+    }
+
+    private static void Trace(string message)
+    {
+        if (ShouldWriteTrace())
         {
             Console.Error.WriteLine($"[AVPLAYER][INFO] {message}");
         }
     }
 
+    /// <summary>Test hook: restart the trace sampling sequence.</summary>
+    internal static void ResetTraceCountForTests() => Volatile.Write(ref _traceCount, 0);
+
+    /// <summary>Test hook: the rate-limited trace, taking a prebuilt string.</summary>
+    internal static void TraceStringForTests(string message) => Trace(message);
+
+    /// <summary>Test hook: the rate-limited trace, taking an interpolated string.</summary>
+    internal static void TraceInterpolatedForTests(int probe) => Trace($"probe v={probe}");
+
+    /// <summary>
+    /// Builds a once-per-key trace message only if that key has not been
+    /// reported yet.
+    /// </summary>
+    /// <remarks>
+    /// These messages describe why an export refused a request, so they are
+    /// written at the point of refusal - which for a title polling playback
+    /// state is every frame. sceAvPlayerIsActive alone formatted one 5 million
+    /// times in a two-minute Quake run and threw all but the first away. The
+    /// handler asks TraceOnce's own table first, so an already-reported key
+    /// skips every AppendFormatted call and never allocates.
+    /// </remarks>
+    [System.Runtime.CompilerServices.InterpolatedStringHandler]
+    private ref struct TraceOnceHandler
+    {
+        private System.Runtime.CompilerServices.DefaultInterpolatedStringHandler _inner;
+        private readonly bool _enabled;
+
+        public TraceOnceHandler(int literalLength, int formattedCount, string key, out bool shouldAppend)
+        {
+            // A peek, not a claim: TraceOnce still decides who prints. Two
+            // threads racing a first occurrence may both format, and one of the
+            // two strings is dropped - which costs one wasted format, once per
+            // key, against a formatted string on every call.
+            _enabled = !TracedOnce.ContainsKey(key);
+            shouldAppend = _enabled;
+            _inner = _enabled
+                ? new System.Runtime.CompilerServices.DefaultInterpolatedStringHandler(literalLength, formattedCount)
+                : default;
+        }
+
+        public void AppendLiteral(string value) => _inner.AppendLiteral(value);
+
+        public void AppendFormatted<T>(T value) => _inner.AppendFormatted(value);
+
+        public void AppendFormatted<T>(T value, string? format) => _inner.AppendFormatted(value, format);
+
+        public string ToStringAndClear() => _enabled ? _inner.ToStringAndClear() : string.Empty;
+    }
+
+    private static void TraceOnce(
+        string key,
+        [System.Runtime.CompilerServices.InterpolatedStringHandlerArgument(nameof(key))]
+        ref TraceOnceHandler message)
+    {
+        if (!TracedOnce.TryAdd(key, 0))
+        {
+            return;
+        }
+
+        Console.Error.WriteLine($"[AVPLAYER][INFO] {message.ToStringAndClear()}");
+    }
+
     private static void TraceOnce(string key, string message)
     {
-        lock (TracedOnce)
+        if (!TracedOnce.TryAdd(key, 0))
         {
-            if (!TracedOnce.Add(key))
-            {
-                return;
-            }
+            return;
         }
 
         Console.Error.WriteLine($"[AVPLAYER][INFO] {message}");
     }
+
+    /// <summary>Test hook: whether a key has already been reported.</summary>
+    internal static bool HasTracedOnceForTests(string key) => TracedOnce.ContainsKey(key);
+
+    /// <summary>Test hook: the once-per-key trace, taking an interpolated string.</summary>
+    internal static void TraceOnceInterpolatedForTests(string key, int probe) =>
+        TraceOnce(key, $"once v={probe}");
+
+    /// <summary>Test hook: the once-per-key trace, taking a prebuilt string.</summary>
+    internal static void TraceOnceStringForTests(string key, string message) =>
+        TraceOnce(key, message);
+
+    /// <summary>Test hook: forget every reported key.</summary>
+    internal static void ClearTracedOnceForTests() => TracedOnce.Clear();
 }

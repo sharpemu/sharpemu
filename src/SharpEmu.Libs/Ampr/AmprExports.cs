@@ -106,6 +106,7 @@ public static class AmprExports
     {
         private readonly SafeFileHandle? _handle;
         private readonly ZArchiveFileStream? _archived;
+        private long _nextSequentialOffset = -1;
 
         public CachedHostFile(string path)
         {
@@ -122,7 +123,12 @@ public static class AmprExports
                 FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete,
                 FileOptions.RandomAccess);
-            Length = RandomAccess.GetLength(_handle);
+            // Resolving this path already measured the file. Asking the host
+            // again is a second cold metadata read of the same inode on the
+            // external game volume, and an asset storm pays it per open.
+            Length = KernelMemoryCompatExports.TryGetReadOnlyImageLength(path, out var known)
+                ? known
+                : RandomAccess.GetLength(_handle);
         }
 
         public long Length { get; }
@@ -135,6 +141,45 @@ public static class AmprExports
             _handle?.Dispose();
             _archived?.Dispose();
         }
+
+        /// <summary>
+        /// Asks the kernel to start pulling in the bytes after a read that
+        /// continues where the previous one stopped.
+        /// </summary>
+        /// <remarks>
+        /// Unreal titles drain a .pak in 64 KiB positional reads - Octopath
+        /// Traveler II issues 12,236 of them for 784 MiB - and each one is a
+        /// separate syscall that waits for the device. That reaches ~21 MB/s on
+        /// the external game volume against ~41 MB/s of raw sequential
+        /// throughput, because nothing tells the kernel the next 64 KiB is
+        /// wanted until the guest asks for it. The hint (F_RDADVISE on macOS,
+        /// POSIX_FADV_WILLNEED on Linux) queues that read asynchronously, so
+        /// the following call can be served from the buffer cache.
+        ///
+        /// Only a continuing offset is advised: hinting ahead of a genuinely
+        /// random read would evict pages a different stream still wants, and
+        /// the handle cache is shared by all of a title's AMPR reads.
+        /// </remarks>
+        public void AdviseSequentialReadAhead(long offset, int length)
+        {
+            // An archived file is served from the archive's own stream; only a
+            // host handle has a kernel read-ahead to inform.
+            if (!HostReadAhead.Enabled || length <= 0 || _handle is null)
+            {
+                return;
+            }
+
+            var completed = offset + length;
+            var continuesPreviousRead = offset == Volatile.Read(ref _nextSequentialOffset);
+            Volatile.Write(ref _nextSequentialOffset, completed);
+            if (!continuesPreviousRead || completed >= Length)
+            {
+                return;
+            }
+
+            var window = (int)Math.Min(HostReadAhead.WindowBytes, Length - completed);
+            HostReadAhead.Advise(_handle, completed, window);
+        }
     }
 
     private sealed class CachedHostFileEntry
@@ -144,10 +189,53 @@ public static class AmprExports
     }
 
     // Keep a bounded LRU of open host files. An unbounded cache exhausts the
-    // process FD limit (~10k on macOS) during large asset storms, after
-    // which every new open throws IOException and surfaces as NOT_FOUND — the
-    // guest then reports InvalidFileFourCC on empty buffers.
-    private const int MaxCachedHostFiles = 1536;
+    // process FD limit during large asset storms, after which every new open
+    // throws IOException and surfaces as NOT_FOUND — the guest then reports
+    // InvalidFileFourCC on empty buffers.
+    //
+    // The cap is sized against the real limit rather than a guess: macOS allows
+    // 92160 descriptors per process (kern.maxfilesperproc) and this process is
+    // launched with a soft RLIMIT_NOFILE of 1048576, so 1536 was leaving most
+    // of a title's working set to be reopened. Demon's Souls touches ~10k
+    // distinct assets per boot and was reopening ~9k of them, each one a cold
+    // open on the external volume. An eighth of the soft limit keeps a wide
+    // margin for the guest's own descriptors, the GPU and the audio stack.
+    private static readonly int MaxCachedHostFiles = ResolveHostFileCacheLimit();
+
+    private const int MinimumHostFileCacheLimit = 512;
+    private const int MaximumHostFileCacheLimit = 16384;
+
+    // Windows has no descriptor rlimit to size against: a .NET file handle is a
+    // kernel handle, bounded by the per-process handle table (~16M) rather than
+    // the CRT's descriptor table, so a fixed cap above a title's working set
+    // (Demon's Souls touches ~10k assets) is safe there.
+    private const int WindowsHostFileCacheLimit = 12288;
+
+    private static int ResolveHostFileCacheLimit()
+    {
+        var configured = Environment.GetEnvironmentVariable("SHARPEMU_AMPR_FILE_CACHE");
+        if (int.TryParse(configured, out var requested) &&
+            requested is >= MinimumHostFileCacheLimit and <= MaximumHostFileCacheLimit)
+        {
+            return requested;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return WindowsHostFileCacheLimit;
+        }
+
+        var descriptors = HostDescriptorLimit.SoftLimit;
+        if (descriptors <= 0)
+        {
+            return MinimumHostFileCacheLimit * 3;
+        }
+
+        return (int)Math.Clamp(
+            descriptors / 8,
+            MinimumHostFileCacheLimit,
+            MaximumHostFileCacheLimit);
+    }
     private static readonly object _hostFileCacheGate = new();
     private static readonly Dictionary<string, LinkedListNode<CachedHostFileEntry>> _hostFileByPath =
         new(HostFsPath.Comparer);
@@ -1242,7 +1330,8 @@ public static class AmprExports
         // 4 MiB chunks cut syscall/Rosetta round-trips on DeS' large sequential
         // APR reads without blowing the ArrayPool for small probes.
         const int ChunkSize = 4 * 1024 * 1024;
-        var buffer = ArrayPool<byte>.Shared.Rent((int)Math.Min((ulong)ChunkSize, size));
+        // Rented only for a chunk that cannot be read in place.
+        byte[]? buffer = null;
 
         try
         {
@@ -1269,7 +1358,30 @@ public static class AmprExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
                 }
 
-                var request = (int)Math.Min((ulong)buffer.Length, size - bytesRead);
+                var request = (int)Math.Min((ulong)ChunkSize, size - bytesRead);
+                var chunkDestination = destination + bytesRead;
+
+                // A backed destination with a single host view takes the pread
+                // directly, with the write tracking TryWrite would have issued;
+                // anything else stages through the bounce buffer as before.
+                if (ctx.Memory.TryFillInPlace(
+                        chunkDestination,
+                        request,
+                        (File: cachedFile, Offset: unchecked((long)absoluteOffset)),
+                        static (state, span) => state.File.Read(span, state.Offset),
+                        out var filled))
+                {
+                    if (filled <= 0)
+                    {
+                        break;
+                    }
+
+                    cachedFile.AdviseSequentialReadAhead(unchecked((long)absoluteOffset), filled);
+                    bytesRead += (ulong)filled;
+                    continue;
+                }
+
+                buffer ??= ArrayPool<byte>.Shared.Rent((int)Math.Min((ulong)ChunkSize, size));
                 var read = cachedFile.Read(
                     buffer.AsSpan(0, request),
                     unchecked((long)absoluteOffset));
@@ -1279,7 +1391,9 @@ public static class AmprExports
                     break;
                 }
 
-                if (!ctx.Memory.TryWrite(destination + bytesRead, buffer.AsSpan(0, read)))
+                cachedFile.AdviseSequentialReadAhead(unchecked((long)absoluteOffset), read);
+
+                if (!ctx.Memory.TryWrite(chunkDestination, buffer.AsSpan(0, read)))
                 {
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
                 }
@@ -1297,7 +1411,10 @@ public static class AmprExports
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(buffer);
+            if (buffer is not null)
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
         }
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -1308,14 +1425,20 @@ public static class AmprExports
         file = null!;
         result = (int)OrbisGen2Result.ORBIS_GEN2_OK;
 
-        string cachePath;
-        try
+        // Registry paths come out of GetFullPath (ResolveGuestPath, or a
+        // normalized app0 root joined with an indexed relative path), so a
+        // rooted one is already the cache key; only a relative one is resolved.
+        string cachePath = hostPath;
+        if (!Path.IsPathFullyQualified(hostPath))
         {
-            cachePath = Path.GetFullPath(hostPath);
-        }
-        catch
-        {
-            cachePath = hostPath;
+            try
+            {
+                cachePath = Path.GetFullPath(hostPath);
+            }
+            catch
+            {
+                cachePath = hostPath;
+            }
         }
 
         lock (_hostFileCacheGate)

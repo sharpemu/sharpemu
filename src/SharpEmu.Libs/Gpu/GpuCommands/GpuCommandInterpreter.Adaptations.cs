@@ -31,6 +31,13 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The atomic address cannot be accessed: address=0x{atomic.Address:X16} size={atomic.ByteCount}.");
         }
 
+        // A failed try of a compare-swap loop writes nothing; reporting it would wake every
+        // other loop parked on the address, and two such loops would wake each other forever.
+        if (atomic.Command != 1 || comparePassed)
+        {
+            GuestMemoryWritten?.Invoke(atomic.Address, sizeof(ulong));
+        }
+
         if (atomic.ReturnsData)
         {
             if (!IsComputeQueue && atomic.EngineSelection == 1)
@@ -47,7 +54,7 @@ public sealed partial class GpuCommandInterpreter
 
         if (atomic.Command == 1 && !comparePassed)
         {
-            Suspend();
+            SuspendOn(CommandWaitCondition.Memory(atomic.Address, sizeof(ulong)));
         }
 
         return 8;
@@ -73,6 +80,8 @@ public sealed partial class GpuCommandInterpreter
                 throw _host.Fatal($"The semaphore cannot be signaled: address=0x{semaphore.Address:X16}.");
             }
 
+            GuestMemoryWritten?.Invoke(semaphore.Address, sizeof(ulong));
+
             return 3;
         }
 
@@ -82,9 +91,16 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The semaphore cannot be read: address=0x{semaphore.Address:X16}.");
         }
 
+        // Only a taken token is a write. Reporting the empty poll too woke every other
+        // head waiting on this semaphore, which polled, reported and woke this one back:
+        // two waiters on one semaphore spun against each other until a signal came.
         if (priorValue == 0)
         {
-            Suspend();
+            SuspendOn(CommandWaitCondition.Memory(semaphore.Address, sizeof(ulong)));
+        }
+        else
+        {
+            GuestMemoryWritten?.Invoke(semaphore.Address, sizeof(ulong));
         }
 
         return 3;

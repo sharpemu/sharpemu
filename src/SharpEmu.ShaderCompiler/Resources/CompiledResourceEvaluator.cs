@@ -59,6 +59,14 @@ internal sealed class CompiledResourceEvaluator
 
     private static void CompilePending()
     {
+        // A guest waiting on its first draw is waiting on this queue, so the
+        // thread is not background work — but it has no frame deadline and must
+        // not compete with the presenter, hence UserInitiated rather than
+        // UserInteractive. (The BelowNormal Thread.Priority set at construction
+        // is a no-op on Unix hosts, and this replaces it on Windows; this is what
+        // actually classifies the thread.)
+        SharpEmu.HLE.Host.HostThreadQualityOfService.TryApplyToCurrentThread(
+            SharpEmu.HLE.Host.HostThreadQos.UserInitiated);
         while (true)
         {
             PendingSignal.Wait();

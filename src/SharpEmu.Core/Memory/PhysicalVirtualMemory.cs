@@ -1163,6 +1163,17 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
     public bool TryReadBacking(ulong address, Span<byte> data)
     {
+        // The same lock-free single-view read TryRead takes first. The resource cache
+        // validates every reused materialization through here, a few dozen ranges per
+        // draw, and taking the gate for each one queued it behind every writer waiting
+        // on the gate (a protection change, a mapping) for no reason: one view covering
+        // the range is read through its alias with no lock either way.
+        if (!data.IsEmpty && _backedSpace is { } backed && !_disposed &&
+            backed.TryReadSingleView(address, data))
+        {
+            return true;
+        }
+
         _gate.EnterReadLock();
         try
         {
@@ -1271,6 +1282,13 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     }
 
     public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address)
+        => TrySelectBackingRange(searchStart, size, alignment, false, out address);
+
+    public bool TryHoldAvailableRange(ulong searchStart, ulong size, ulong alignment, out ulong address)
+        => TrySelectBackingRange(searchStart, size, alignment, true, out address);
+
+    private bool TrySelectBackingRange(ulong searchStart, ulong size, ulong alignment,
+        bool preferOwnedReservation, out ulong address)
     {
         address = 0;
         const ulong limit = 0x0000_00FC_0000_0000;
@@ -1295,6 +1313,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
 
             var start = Math.Max(searchStart, GuestMemoryLayout.GuestPage);
             var reservedCandidate = _backedSpace!.FindFreeAddress(start, limit, size, alignment);
+            if (preferOwnedReservation && reservedCandidate != 0)
+            {
+                address = reservedCandidate;
+                return true;
+            }
 
             while (start < limit && size <= limit - start)
             {
@@ -1322,8 +1345,9 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                     return true;
                 }
 
-                // POSIX cannot query foreign host mappings. The free ranges were
-                // reserved at startup, so a failed candidate means the gap is taken.
+                // When the host cannot be asked about foreign mappings, the free
+                // ranges reserved at startup are all we know, so a failed
+                // candidate means the gap is taken.
                 if (!OperatingSystem.IsWindows() && reservedCandidate != 0)
                 {
                     address = reservedCandidate;
@@ -1331,6 +1355,20 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 }
 
                 start = candidate + GuestMemoryLayout.GuestPage;
+
+                // Stepping one guest page per failure is hopeless on hosts that
+                // keep a very large span of the low address space to themselves:
+                // Apple Silicon refuses fixed placement for every address below
+                // the kernel's own allocation base, hundreds of gigabytes up, so
+                // a page-by-page walk needs tens of millions of iterations to
+                // reach the first address it can take. Ask the host where its
+                // mappings end and jump there when it knows.
+                var unmapped = _backedSpace!.FindUnmappedHostRange(start, size, limit);
+                if (unmapped > start)
+                {
+                    start = unmapped;
+                }
+
                 if (OperatingSystem.IsWindows() && _hostMemory.Query(candidate, out var info) &&
                     info.BaseAddress <= candidate && info.BaseAddress < limit &&
                     info.RegionSize <= limit - info.BaseAddress)
@@ -1399,17 +1437,36 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
 
             var end = address + size;
-            foreach (var region in _regions.Where(r => r.IsBackedView && r.VirtualAddress < end &&
-                         address < r.VirtualAddress + r.Size).ToArray())
+            var searchStart = 0;
+            var searchEnd = _regions.Count;
+            while (searchStart < searchEnd)
             {
+                var middle = searchStart + (searchEnd - searchStart) / 2;
+                if (_regions[middle].VirtualAddress < end)
+                    searchStart = middle + 1;
+                else
+                    searchEnd = middle;
+            }
+
+            // Reverse order keeps earlier indices valid when a region is split.
+            for (var index = searchStart - 1; index >= 0; index--)
+            {
+                var region = _regions[index];
                 var oldEnd = region.VirtualAddress + region.Size;
-                _regions.Remove(region);
+                if (oldEnd <= address)
+                    break;
+                if (!region.IsBackedView)
+                    continue;
+                _regions.RemoveAt(index);
                 if (region.VirtualAddress < address)
                 {
                     InsertRegionSorted(new MemoryRegion
                     {
-                        VirtualAddress = region.VirtualAddress, Size = address - region.VirtualAddress,
-                        IsBackedView = true, IsExecutable = region.IsExecutable, Protection = region.Protection,
+                        VirtualAddress = region.VirtualAddress,
+                        Size = address - region.VirtualAddress,
+                        IsBackedView = true,
+                        IsExecutable = region.IsExecutable,
+                        Protection = region.Protection,
                     });
                 }
 
@@ -1417,8 +1474,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 {
                     InsertRegionSorted(new MemoryRegion
                     {
-                        VirtualAddress = end, Size = oldEnd - end, IsBackedView = true,
-                        IsExecutable = region.IsExecutable, Protection = region.Protection,
+                        VirtualAddress = end,
+                        Size = oldEnd - end,
+                        IsBackedView = true,
+                        IsExecutable = region.IsExecutable,
+                        Protection = region.Protection,
                     });
                 }
             }
@@ -1464,8 +1524,21 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
 
             var end = address + size;
-            foreach (var region in _regions)
+            var searchStart = 0;
+            var searchEnd = _regions.Count;
+            while (searchStart < searchEnd)
             {
+                var middle = searchStart + (searchEnd - searchStart) / 2;
+                if (_regions[middle].VirtualAddress <= address)
+                    searchStart = middle + 1;
+                else
+                    searchEnd = middle;
+            }
+
+            // Regions do not overlap. Only the preceding region can contain the start.
+            for (var index = Math.Max(0, searchStart - 1); index < _regions.Count; index++)
+            {
+                var region = _regions[index];
                 if (region.VirtualAddress >= end)
                 {
                     break;
@@ -1636,6 +1709,11 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
                 AllocateAt(mapStart, mapSize, isExecutable, allowAlternative: false);
             }
 
+            // Memory AllocateAt just obtained from the host is already zero (it commits
+            // only pages that were free or reserved). Clearing it again touched every page
+            // of each guest thread stack and .bss, committing memory the guest may never use.
+            var alreadyZero = existingRegion == null;
+
             var stageProtection = (protection & ProgramHeaderFlags.Execute) != 0
                 ? ProgramHeaderFlags.Read | ProgramHeaderFlags.Write | ProgramHeaderFlags.Execute
                 : ProgramHeaderFlags.Read | ProgramHeaderFlags.Write;
@@ -1651,7 +1729,7 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             }
 
             var zeroFillSize = memorySize - (ulong)fileData.Length;
-            if (zeroFillSize != 0)
+            if (zeroFillSize != 0 && !alreadyZero)
             {
                 NativeMemory.Clear((void*)(virtualAddress + (ulong)fileData.Length), (nuint)zeroFillSize);
             }
@@ -2056,6 +2134,28 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         {
             _gate.ExitReadLock();
         }
+    }
+
+    // In-place counterpart of TryWrite's lock-free single-view path: fill writes the
+    // canonical alias of a backed range directly. The alias is not the guest-visible
+    // mapping, so guest page guards cannot fault the fill (exactly as for the memcpy
+    // there). Anything else - a range without a single view, or an armed
+    // GuestWriteWatch, whose check needs the written bytes after the alias pin is
+    // gone - declines so the caller stages through TryWrite.
+    public bool TryFillInPlace<TState>(ulong virtualAddress, int length, TState state, GuestSpanFill<TState> fill, out int filled)
+    {
+        filled = 0;
+        if (length <= 0 || GuestWriteWatch.Armed || _disposed || _backedSpace is not { } backed ||
+            !backed.TryResolveAlias(virtualAddress, (ulong)length, out _))
+        {
+            return false;
+        }
+
+        // TryWrite's pre-visit, issued only once the range has a single view so a
+        // declined fill seldom repeats it in the caller's TryWrite.
+        GuestImageWriteTracker.NotifyManagedWrite(virtualAddress, (ulong)length);
+        GuestGpuMemoryHook.MarkCpuWrite(virtualAddress, (ulong)length);
+        return backed.TryFillSingleView(virtualAddress, length, state, fill, out filled);
     }
 
     public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source)

@@ -215,6 +215,10 @@ internal static class GuestRedZonePatcher
         var unrelocatableSites = 0;
         var refusalCounts = new int[6];
         var shaInstructionCount = 0;
+        // One list and set serve every function of the module: growing fresh ones per function
+        // dominated the loader's garbage, with large functions landing on the large object heap.
+        var decoded = new List<DecodedInstruction>();
+        var branchTargets = new HashSet<ulong>();
 
         foreach (var header in programHeaders)
         {
@@ -256,7 +260,7 @@ internal static class GuestRedZonePatcher
                     continue;
                 }
 
-                var decoded = DecodeFunction(segmentBytes, segmentStart, functionStart, functionEnd);
+                DecodeFunction(segmentBytes, segmentStart, functionStart, functionEnd, decoded);
                 if (decoded.Count == 0)
                 {
                     continue;
@@ -278,7 +282,7 @@ internal static class GuestRedZonePatcher
                 {
                     redZoneFunctionCount++;
                 }
-                var branchTargets = CollectBranchTargets(decoded);
+                CollectBranchTargets(decoded, branchTargets);
                 var canBorrowFollowingInstructions = TryCollectJumpTableTargets(
                     memory,
                     programHeaders,
@@ -370,12 +374,24 @@ internal static class GuestRedZonePatcher
         ulong functionStart,
         ulong functionEnd)
     {
+        var decoded = new List<DecodedInstruction>();
+        DecodeFunction(segmentBytes, segmentStart, functionStart, functionEnd, decoded);
+        return decoded;
+    }
+
+    private static void DecodeFunction(
+        byte[] segmentBytes,
+        ulong segmentStart,
+        ulong functionStart,
+        ulong functionEnd,
+        List<DecodedInstruction> decoded)
+    {
+        decoded.Clear();
         var offset = checked((int)(functionStart - segmentStart));
         var length = checked((int)(functionEnd - functionStart));
         var reader = new ArraySliceCodeReader(segmentBytes, offset, length);
         var decoder = Decoder.Create(64, reader, DecoderOptions.None);
         decoder.IP = functionStart;
-        var decoded = new List<DecodedInstruction>();
         while (decoder.IP < functionEnd && reader.CanRead)
         {
             decoder.Decode(out var instruction);
@@ -386,13 +402,18 @@ internal static class GuestRedZonePatcher
 
             decoded.Add(new DecodedInstruction(instruction));
         }
-
-        return decoded;
     }
 
     private static HashSet<ulong> CollectBranchTargets(IReadOnlyList<DecodedInstruction> instructions)
     {
         var targets = new HashSet<ulong>();
+        CollectBranchTargets(instructions, targets);
+        return targets;
+    }
+
+    private static void CollectBranchTargets(IReadOnlyList<DecodedInstruction> instructions, HashSet<ulong> targets)
+    {
+        targets.Clear();
         foreach (var decoded in instructions)
         {
             var instruction = decoded.Instruction;
@@ -412,8 +433,6 @@ internal static class GuestRedZonePatcher
                 }
             }
         }
-
-        return targets;
     }
 
     private static bool TryCollectJumpTableTargets(

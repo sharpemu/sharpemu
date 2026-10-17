@@ -22,6 +22,10 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
     private static readonly int MAP_NORESERVE = OperatingSystem.IsMacOS() ? 0 : 0x4000;
     private static readonly int O_CREAT = OperatingSystem.IsMacOS() ? 0x200 : 0x40;
     private static readonly int O_EXCL = OperatingSystem.IsMacOS() ? 0x800 : 0x80;
+    private const int KERN_SUCCESS = 0;
+
+    // sizeof(vm_region_submap_short_info_data_64_t) / sizeof(natural_t).
+    private const int VM_REGION_SUBMAP_SHORT_INFO_COUNT_64 = 12;
     private static readonly nint MAP_FAILED = -1;
     private static int _sharedObjectCounter;
 
@@ -96,9 +100,10 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
         return address;
     }
 
-    // POSIX has no VirtualQuery for foreign host mappings, so find the free
-    // ranges by reserving halves until each attempt fits or falls below the
-    // minimum. Occupied host ranges are few, so this needs few attempts.
+    // Find the free ranges by reserving halves until each attempt fits or falls
+    // below the minimum. Occupied host ranges are few, so this needs few
+    // attempts. Portable POSIX has no VirtualQuery for foreign host mappings;
+    // where one exists, FindUnmappedRange below answers directly.
     public IReadOnlyList<HostAddressRange> ReserveFreeAddressRanges(ulong start, ulong end, ulong minimumSize)
     {
         var reserved = new List<HostAddressRange>();
@@ -142,6 +147,61 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
 
         ReserveFreeAddressRangesLocked(address, half, minimumSize, reserved);
         ReserveFreeAddressRangesLocked(address + half, size - half, minimumSize, reserved);
+    }
+
+    // Darwin does have a VirtualQuery equivalent. mach_vm_region_recurse walks
+    // the task's own map including mappings this process never made, and asking
+    // at nesting depth 0 collapses a whole submap into one entry. That matters
+    // on Apple Silicon, where the kernel refuses fixed placement everywhere
+    // below its own allocation base: the span from the dyld shared region up to
+    // that base is hundreds of gigabytes, and a caller stepping one guest page
+    // at a time needs tens of millions of probes to cross it. At depth 0 the
+    // same crossing is a couple of dozen calls. Other POSIX hosts keep the
+    // default answer of "cannot tell".
+    public ulong FindUnmappedRange(ulong address, ulong size, ulong searchEnd)
+    {
+        if (!OperatingSystem.IsMacOS() || size == 0 || address >= searchEnd || size > searchEnd - address)
+        {
+            return 0;
+        }
+
+        var task = mach_task_self();
+        var info = stackalloc uint[VM_REGION_SUBMAP_SHORT_INFO_COUNT_64];
+        var cursor = address;
+        while (cursor < searchEnd && size <= searchEnd - cursor)
+        {
+            var regionAddress = cursor;
+            ulong regionSize = 0;
+            uint depth = 0;
+            var count = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
+            if (mach_vm_region_recurse(task, ref regionAddress, ref regionSize, ref depth, info, ref count) != KERN_SUCCESS)
+            {
+                // Nothing is mapped between the cursor and the end of the map.
+                return cursor;
+            }
+
+            // A region starting above the cursor leaves a hole in front of it.
+            if (regionAddress > cursor && regionAddress - cursor >= size)
+            {
+                return cursor;
+            }
+
+            if (regionSize == 0 || regionSize > ulong.MaxValue - regionAddress)
+            {
+                return 0;
+            }
+
+            var regionEnd = regionAddress + regionSize;
+            if (regionEnd <= cursor)
+            {
+                // The map did not move forward, so stop instead of spinning.
+                return 0;
+            }
+
+            cursor = regionEnd;
+        }
+
+        return 0;
     }
 
     private static ulong AlignUp(ulong value, ulong alignment)
@@ -311,4 +371,11 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
 
     [LibraryImport("libc", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int shm_unlink(string name);
+
+    [LibraryImport("libSystem.B.dylib")]
+    private static partial uint mach_task_self();
+
+    [LibraryImport("libSystem.B.dylib")]
+    private static partial int mach_vm_region_recurse(
+        uint task, ref ulong address, ref ulong size, ref uint nestingDepth, uint* info, ref int infoCount);
 }

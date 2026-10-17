@@ -95,6 +95,8 @@
   "Options.VSync.Desc": "Təsvirin parçalanmadan göstərilməsi üçün FIFO təqdimatından istifadə edin.",
   "Options.Hdr.Label": "HDR çıxışı",
   "Options.Hdr.Desc": "Seçilmiş ekran və qrafik alt sistem dəstəklədikdə HDR istifadə edin. Avtomatik rejimdə dəstək yoxdursa, SDR istifadə olunur.",
+  "Options.DisplayPatch.Label": "Ekran yamasının çözünürlüyü",
+  "Options.DisplayPatch.Desc": "Bəzi oyunlara daxil edilmiş 4K render ölçülərini (məsələn, Demon's Souls və Unreal Engine oyunları) bu ölçüyə dəyişir. Deaktiv olduqda oyun öz ölçülərini saxlayır. Oyuna ekran haqqında bildirilən məlumat dəyişmir.",
   "Options.Hdr.Auto": "Avtomatik",
   "Options.Env.BinkPlayback.Label": "Bink video oynadılması",
   "Options.Env.BinkPlayback.Desc": "Host Bink videolarını FFmpeg körpüsü vasitəsilə oynadır, lakin bəzi oyunlarda problemlər yarana bilər.\nGuest oyunun öz dekoderindən istifadə edir.\nSkip Bink videolarını ötürür və bu, inkişaf prosesini asanlaşdıra bilər.",

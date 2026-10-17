@@ -32,7 +32,17 @@ internal static class KernelPthreadState
         // thread is bound causes mutex owner mismatches (unlock PERM → hang).
         if (guestThreadHandle != 0)
         {
-            EnsureGuestThreadIdentity(guestThreadHandle);
+            // Registration is idempotent and nothing ever removes a handle from
+            // Threads, so once this thread has registered its current handle
+            // the dictionary probe has no effect but its cost - and the pthread
+            // exports ask for the handle on every lock and unlock, 35 million
+            // times in a two-minute Quake run.
+            if (_identityEnsuredForHandle != guestThreadHandle)
+            {
+                EnsureGuestThreadIdentity(guestThreadHandle);
+                _identityEnsuredForHandle = guestThreadHandle;
+            }
+
             return guestThreadHandle;
         }
 
@@ -94,6 +104,11 @@ internal static class KernelPthreadState
         identity = default;
         return false;
     }
+
+    // The guest handle this host thread has already registered. A host thread
+    // reused for a different guest thread sees a different handle and registers
+    // again.
+    [ThreadStatic] private static ulong _identityEnsuredForHandle;
 
     private static ThreadIdentity EnsureGuestThreadIdentity(ulong guestThreadHandle)
     {

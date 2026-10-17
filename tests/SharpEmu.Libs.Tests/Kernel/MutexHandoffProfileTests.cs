@@ -45,6 +45,7 @@ public sealed class MutexHandoffProfileTests
         var exports = typeof(KernelPthreadCompatExports);
         var stateType = exports.GetNestedType("PthreadMutexState", BindingFlags.NonPublic)!;
         var state = Activator.CreateInstance(stateType, nonPublic: true)!;
+        stateType.GetProperty("FifoHandoff")!.SetValue(state, true);
         var owner = stateType.GetProperty("OwnerThreadId")!;
         var enqueue = exports.GetMethod("EnqueueMutexWaiterLocked", BindingFlags.Static | BindingFlags.NonPublic)!;
         var grant = exports.GetMethod("TryGrantMutexWaiterLocked", BindingFlags.Static | BindingFlags.NonPublic)!;
