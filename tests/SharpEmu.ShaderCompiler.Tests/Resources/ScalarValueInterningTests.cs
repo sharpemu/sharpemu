@@ -1,12 +1,14 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime;
 using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
 namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
+[Collection("ScalarValueAllocation")]
 public sealed class ScalarValueInterningTests
 {
     private static ScalarValueGraph Graph() => ScalarValueGraph.Build(Program(EndProgram(0)), 0, 0);
@@ -67,9 +69,24 @@ public sealed class ScalarValueInterningTests
             _ = graph.Operation(ScalarOperation.And32, ScalarValueType.U32, sum, graph.Constant(0u));
         }
         for (var i = 0; i < 1000; i++) Lookup();
-        var bytes = GC.GetAllocatedBytesForCurrentThread();
-        for (var i = 0; i < 10000; i++) Lookup();
-        bytes = GC.GetAllocatedBytesForCurrentThread() - bytes;
-        Assert.Equal(0, bytes);
+        // Collection can charge unused thread allocation space to the byte counter.
+        Assert.True(GC.TryStartNoGCRegion(64 * 1024 * 1024), "The allocation measurement could not start.");
+        try
+        {
+            var bytes = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < 10000; i++) Lookup();
+            bytes = GC.GetAllocatedBytesForCurrentThread() - bytes;
+            Assert.True(GCSettings.LatencyMode == GCLatencyMode.NoGCRegion,
+                "Collection invalidated the allocation measurement.");
+            Assert.Equal(0, bytes);
+        }
+        finally
+        {
+            if (GCSettings.LatencyMode == GCLatencyMode.NoGCRegion)
+                GC.EndNoGCRegion();
+        }
     }
 }
+
+[CollectionDefinition("ScalarValueAllocation", DisableParallelization = true)]
+public sealed class ScalarValueAllocationCollection;
