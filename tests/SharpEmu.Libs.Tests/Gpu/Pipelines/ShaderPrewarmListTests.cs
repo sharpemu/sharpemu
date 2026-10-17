@@ -192,6 +192,48 @@ public sealed class ShaderPrewarmListTests : IDisposable
     }
 
     [Fact]
+    public void Coverage_UsesLoadedRecordsAndDoesNotCertifyConcurrentAppends()
+    {
+        using (var list = Open())
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+
+        string coverage;
+        using (var list = Open())
+        {
+            coverage = list.CoverageStamp("build");
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+            Assert.Equal(coverage, list.CoverageStamp("build"));
+        }
+        using (var list = Open())
+        {
+            Assert.Equal(coverage, list.CoverageStamp("build"));
+            CompileAtRuntime(list, BufferDescriptorWords.Format32x4UInt);
+            Assert.Equal(coverage, list.CoverageStamp("build"));
+            list.WriteStamp(ShaderPrewarmList.CacheStamp(coverage, new byte[] { 1, 2, 3 }));
+        }
+        using var reloaded = Open();
+        Assert.NotEqual(coverage, reloaded.CoverageStamp("build"));
+        Assert.False(reloaded.IsStampCurrent(ShaderPrewarmList.CacheStamp(
+            reloaded.CoverageStamp("build"), new byte[] { 1, 2, 3 })));
+    }
+
+    [Fact]
+    public void Coverage_RejectsAReplacedRecordingWithTheSameRecordCount()
+    {
+        using (var list = Open())
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+        string coverage;
+        using (var list = Open())
+            coverage = list.CoverageStamp("build");
+        File.Delete(Path.Combine(_directory, ShaderPrewarmList.FileName));
+        using (var list = Open())
+            CompileAtRuntime(list, BufferDescriptorWords.Format32x4UInt);
+        using var reloaded = Open();
+        Assert.Equal(1, reloaded.LoadedComputeCount);
+        Assert.NotEqual(coverage, reloaded.CoverageStamp("build"));
+    }
+
+    [Fact]
     public void ProgressResumesUnderTheSameStampAndClears()
     {
         using (var list = Open())

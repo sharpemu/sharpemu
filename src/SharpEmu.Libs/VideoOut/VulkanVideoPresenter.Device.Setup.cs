@@ -1315,6 +1315,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void CreatePipelineCache()
         {
+            _loadedPrewarmCache = [];
             var cacheMode = Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE");
             // MoltenVK imports compile every cached MSL library. Load shader
             // groups on demand on macOS so a mature cache cannot hold startup
@@ -1366,6 +1367,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 Console.Error.WriteLine(
                     $"[LOADER][WARN] Vulkan pipeline cache rejected ({result}); rebuilding it.");
+                initialData = [];
                 result = TryCreatePipelineCache([], out _pipelineCache);
             }
 
@@ -1378,6 +1380,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            _loadedPrewarmCache = initialData;
             if (initialData.Length != 0 && QueryPipelineCacheSize(_pipelineCache) is { } loadedBytes)
             {
                 _pipelineCacheSavedBytes = loadedBytes;
@@ -1535,7 +1538,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
-            if (QueryPipelineCacheSize(_pipelineCache) is { } size && size == _pipelineCacheSavedBytes)
+            if (Volatile.Read(ref _shaderPrewarmCompletion) is null &&
+                QueryPipelineCacheSize(_pipelineCache) is { } size && size == _pipelineCacheSavedBytes)
             {
                 _pipelineCacheDirty = false;
                 return;
@@ -1558,6 +1562,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private bool SaveDriverPipelineCache(PipelineCache cache, string path, ulong byteLimit, out nuint savedBytes)
         {
+            // Only certify work that completed before this cache export began.
+            var completion = path == _pipelineCachePath ? Volatile.Read(ref _shaderPrewarmCompletion) : null;
             savedBytes = 0;
             try
             {
@@ -1610,6 +1616,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 WritePipelineCacheFile(path, data);
+                if (completion is not null && data.Length != 0)
+                {
+                    ShaderPrewarmList.WriteStamp(completion.StampPath,
+                        ShaderPrewarmList.CacheStamp(completion.CoverageStamp, data));
+                }
                 savedBytes = size;
                 return true;
             }

@@ -3,6 +3,7 @@
 
 using System.Globalization;
 using System.IO.Hashing;
+using System.Security.Cryptography;
 using System.Text;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -171,7 +172,15 @@ internal sealed class ShaderPrewarmList : IDisposable
         _progressPath = progressPath;
     }
 
+    private string _loadedCoverage = string.Empty;
+
     public int LoadedComputeCount => _loadedComputes.Count;
+    public string StampPath => _stampPath;
+
+    public string CoverageStamp(string stamp) => $"{stamp}|coverage-v1|{_loadedCoverage}";
+
+    public static string CacheStamp(string coverageStamp, ReadOnlySpan<byte> cache) =>
+        $"{coverageStamp}|cache-v1|{Convert.ToHexString(SHA256.HashData(cache))}";
 
     public static ShaderPrewarmList? Open(string directory)
     {
@@ -227,10 +236,15 @@ internal sealed class ShaderPrewarmList : IDisposable
     }
 
     public void WriteStamp(string stamp)
+        => WriteStamp(_stampPath, stamp);
+
+    public static void WriteStamp(string path, string stamp)
     {
         try
         {
-            File.WriteAllText(_stampPath, stamp);
+            var temporaryPath = path + $".{Environment.ProcessId}.tmp";
+            File.WriteAllText(temporaryPath, stamp);
+            File.Move(temporaryPath, path, overwrite: true);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -407,6 +421,7 @@ internal sealed class ShaderPrewarmList : IDisposable
             }
         }
 
+        _loadedCoverage = Convert.ToHexString(SHA256.HashData(content.AsSpan(0, checked((int)validEnd))));
         if (validEnd == 0)
         {
             _file.SetLength(0);
