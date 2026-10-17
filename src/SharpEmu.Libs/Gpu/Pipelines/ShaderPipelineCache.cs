@@ -195,7 +195,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                     $"user_data=[{string.Join(",", pixelSource.UserData.Select(word => $"{word:X8}"))}]");
             using var pixelProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PixelInputResolution);
             var pixelProgram = _programs.Decode(pixelSource);
-            attributeCount = InterpolatedAttributeCount(pixelProgram);
+            var attributes = GetPixelAttributes(pixelProgram);
+            attributeCount = attributes.Length == 0 ? 0 : attributes[^1] + 1;
             var inputCount = shaderInterface.PixelInputControl & 0x3Fu;
             if (inputCount == 0)
             {
@@ -214,7 +215,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount);
             // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
             // the vertex program must declare every location the pixel program reads.
-            attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(pixelProgram, pixelInfo));
+            attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(attributes, pixelInfo));
             pixelInfo.IeeeMode = pixel.Resource1.IeeeMode;
         }
 
@@ -339,7 +340,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // was rebuilt with LINQ on every draw.
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Gen5ShaderProgram, uint[]> InterpolatedAttributeCache = new();
 
-    private static uint[] InterpolatedAttributesOf(Gen5ShaderProgram program) =>
+    internal uint[] GetPixelAttributes(Gen5ShaderProgram program) =>
         InterpolatedAttributeCache.GetValue(program, static program => program.Instructions
             .Select(static instruction => instruction.Control)
             .OfType<Gen5InterpolationControl>()
@@ -349,9 +350,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             .ToArray());
 
     // One past the highest parameter location the pixel program reads, resolved as its translator does.
-    private static uint ReadVertexOutputCount(Gen5ShaderProgram pixelProgram, PixelInputInfo info)
+    internal static uint ReadVertexOutputCount(ReadOnlySpan<uint> attributes, PixelInputInfo info)
     {
-        var attributes = InterpolatedAttributesOf(pixelProgram);
         if (attributes.Length == 0)
         {
             return 0;
@@ -362,7 +362,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         {
             controls[(int)index] = index < info.InputCount && index < (uint)info.InterpolatorSettings.Length
                 ? info.InterpolatorSettings[index]
-                : index;
+                : (uint)index;
         }
 
         // Attributes are distinct and below 32, so a program never has more than 32 of them.
@@ -377,12 +377,6 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return highest + 1;
     }
 
-    // The attribute list is ascending, so its last entry is the highest.
-    private static uint InterpolatedAttributeCount(Gen5ShaderProgram program)
-    {
-        var attributes = InterpolatedAttributesOf(program);
-        return attributes.Length == 0 ? 0 : attributes[^1] + 1;
-    }
 
     // The bound colour slots in order; each output mode names the kind the pixel program exports.
     // With a depth target bound, a slot the draw never writes is dropped here and from the

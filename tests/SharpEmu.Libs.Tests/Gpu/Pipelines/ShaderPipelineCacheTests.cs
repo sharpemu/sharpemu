@@ -7,6 +7,7 @@ using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler;
 using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Rendering.RenderExecutorFixtures;
@@ -22,6 +23,27 @@ public sealed class ShaderPipelineCacheTests : IDisposable
     private readonly FatalScope _fatal = new();
 
     public void Dispose() => _fatal.Dispose();
+
+    [Fact]
+    public void PixelAttributesReuseDecodedProgramButKeepDrawMappingsLive()
+    {
+        var guest = new PipelineTestGuest();
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        Gen5ShaderInstruction Move(uint pc, uint attribute) =>
+            new(pc, Gen5ShaderEncoding.Vintrp, "VInterpMovF32",
+                [1], [Gen5Operand.Vector(1)], [Gen5Operand.Vector(0)], new Gen5InterpolationControl(attribute, 0));
+        var program = new Gen5ShaderProgram(0x1000, [Move(0, 2), Move(4, 1), Move(8, 2)]);
+        var attributes = cache.GetPixelAttributes(program);
+
+        Assert.Equal(new uint[] { 1, 2 }, attributes);
+        Assert.Same(attributes, cache.GetPixelAttributes(program));
+        Assert.Equal(3u, ShaderPipelineCache.ReadVertexOutputCount(attributes, new PixelInputInfo()));
+        Assert.Equal(8u, ShaderPipelineCache.ReadVertexOutputCount(attributes,
+            new PixelInputInfo { InputCount = 3, InterpolatorSettings = [0, 5, 7] }));
+        Assert.Equal(new uint[] { 4 }, cache.GetPixelAttributes(new Gen5ShaderProgram(0x1000, [Move(0, 4)])));
+        Assert.Empty(cache.GetPixelAttributes(new Gen5ShaderProgram(0x2000, [])));
+        Assert.Equal(0u, ShaderPipelineCache.ReadVertexOutputCount([], new PixelInputInfo()));
+    }
 
     [Fact]
     public void IeeeModeChangesEveryStageKey()
