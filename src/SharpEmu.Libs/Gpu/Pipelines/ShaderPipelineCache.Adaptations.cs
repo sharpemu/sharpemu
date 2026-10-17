@@ -18,6 +18,11 @@ internal sealed partial class ShaderPipelineCache
     private const uint ColorExportTarget = 0;
     private const int WorkGroupRegisterOfCopyKernel = 12;
     private const uint MaxCopyKernelSourceBytes = 16 * 1024 * 1024;
+    private static readonly string[] MaskedCopyOpcodes =
+    [
+        "SMovB32", "STtraceData", "SInstPrefetch", "VLshlAddU32", "SBufferLoadDword", "SWaitcnt", "VCmpxGtU32", "SCbranchExecz",
+        "SBufferLoadDword", "SWaitcnt", "VAndB32", "BufferLoadFormatX", "SWaitcnt", "BufferStoreFormatX", "SEndpgm",
+    ];
 
     private static readonly bool _premultipliedFillClearEnabled =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_FILL_CLEAR"), "1", StringComparison.Ordinal);
@@ -147,17 +152,21 @@ internal sealed partial class ShaderPipelineCache
     {
         description = string.Empty;
         var instructions = program.Instructions;
-        string[] expectedOpcodes =
-        [
-            "SMovB32", "STtraceData", "SInstPrefetch", "VLshlAddU32", "SBufferLoadDword", "SWaitcnt", "VCmpxGtU32", "SCbranchExecz",
-            "SBufferLoadDword", "SWaitcnt", "VAndB32", "BufferLoadFormatX", "SWaitcnt", "BufferStoreFormatX", "SEndpgm",
-        ];
+        if (instructions.Count != MaskedCopyOpcodes.Length)
+        {
+            return false;
+        }
+        for (var index = 0; index < MaskedCopyOpcodes.Length; index++)
+        {
+            if (instructions[index].Opcode != MaskedCopyOpcodes[index])
+            {
+                return false;
+            }
+        }
         var groupsX = input.DispatchThreadDimensions ? RenderExecutor.GroupsFromThreads(input.DispatchThreadsX, input.ThreadsX) : input.DispatchThreadsX;
         var groupsY = input.DispatchThreadDimensions ? RenderExecutor.GroupsFromThreads(input.DispatchThreadsY, input.ThreadsY) : input.DispatchThreadsY;
         var groupsZ = input.DispatchThreadDimensions ? RenderExecutor.GroupsFromThreads(input.DispatchThreadsZ, input.ThreadsZ) : input.DispatchThreadsZ;
-        if (instructions.Count != expectedOpcodes.Length ||
-            !instructions.Select(static instruction => instruction.Opcode).SequenceEqual(expectedOpcodes) ||
-            !IsExactMaskedDwordCopyInstructionShape(instructions) ||
+        if (!IsExactMaskedDwordCopyInstructionShape(instructions) ||
             groupsY != 1 || groupsZ != 1 ||
             input.ThreadsX != 64 || input.ThreadsY != 1 || input.ThreadsZ != 1 ||
             systemRegisters.WorkGroupXRegister != WorkGroupRegisterOfCopyKernel)
