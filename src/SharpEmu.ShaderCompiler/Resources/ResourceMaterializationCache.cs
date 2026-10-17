@@ -800,7 +800,7 @@ public sealed partial class ResourceMaterializationCache
         KeyAbsent, KeyMismatch, OldPromotion, GenerationRotation, GenerationEntriesDropped,
         Variant1, Variant2, Variant3, Variant4, Variant5, Variant6, Variant7, Variant8, BytesChanged, Unreadable,
         RefreshLayout, RefreshUnreadable, RefreshDescriptorChanged, RefreshUnchanged,
-        RefreshEvaluation, RefreshReadChanged, RefreshDescriptorSkipped, RefreshOlderVariant, Count,
+        RefreshEvaluation, RefreshReadChanged, RefreshDescriptorSkipped, RefreshOlderVariant, RejectionPrecheck, Count,
     }
     private static readonly bool DiagnosticsEnabled =
         Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE") == "1";
@@ -986,14 +986,21 @@ public sealed partial class ResourceMaterializationCache
             Entry? previous = null;
             var variantIndex = 0;
             var refreshCandidates = 0;
+            var rejection = default(RejectionSample);
             for (var variant = cached; variant is not null; previous = variant, variant = variant.Next)
             {
                 CountDiagnostic((Diagnostic)((int)Diagnostic.Variant1 + Math.Min(variantIndex++, MaxVariants - 1)));
                 if (!variant.Matches(plan, inputs, rebase.Active) || !rebase.AppliesTo(variant))
                     continue;
                 stale ??= variant;
+                if (rebase.Active.Length == 0 && !rebase.HasLearnableMemoryBases && rejection.Rejects(variant))
+                {
+                    CountDiagnostic(Diagnostic.RejectionPrecheck);
+                    CountDiagnostic(Diagnostic.RefreshDescriptorSkipped);
+                    continue;
+                }
                 if (Validate(variant, residentReader, rebase, inputs.UserData,
-                    out var variantUnreadable, out var descriptorChanged))
+                    out var variantUnreadable, out var descriptorChanged, out rejection))
                 {
                     if (previous is not null)
                     {
@@ -1840,15 +1847,30 @@ public sealed partial class ResourceMaterializationCache
         return true;
     }
 
+    private readonly record struct RejectionSample(int Range, ulong Address, int Length, bool Clean, int WordOffset, uint Word)
+    {
+        public bool Rejects(Entry entry)
+        {
+            if (Length == 0 || Range >= entry.RangeAddresses.Length || entry.RangeAddresses[Range] != Address ||
+                entry.RangeLengths[Range] != Length || entry.RangeClean[Range] != Clean)
+                return false;
+            var offset = entry.RangeOffsets[Range] + WordOffset;
+            // This sample can reject a variant. It cannot prove that a variant is current.
+            return !entry.WordTableOnly[offset / sizeof(uint)] &&
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(entry.Bytes.AsSpan(offset, sizeof(uint))) != Word;
+        }
+    }
+
     private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, AddressRebase rebase,
         IReadOnlyList<uint> userData, out bool unreadable) =>
-        Validate(entry, residentReader, rebase, userData, out unreadable, out _);
+        Validate(entry, residentReader, rebase, userData, out unreadable, out _, out _);
 
     private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, AddressRebase rebase, IReadOnlyList<uint> userData,
-        out bool unreadable, out bool descriptorChanged)
+        out bool unreadable, out bool descriptorChanged, out RejectionSample rejection)
     {
         unreadable = false;
         descriptorChanged = false;
+        rejection = default;
         // A memory-loaded base usually moved when anything did: its few bytes are checked before
         // ranges that can span kilobytes. The full comparison below still decides a match.
         if (entry.BaseWordBuffers is not null)
@@ -1889,6 +1911,8 @@ public sealed partial class ResourceMaterializationCache
                         !current.Slice(offset, sizeof(uint)).SequenceEqual(previous.Slice(offset, sizeof(uint))))
                     {
                         descriptorChanged = true;
+                        rejection = new RejectionSample(index, entry.RangeAddresses[index], length, entry.RangeClean[index],
+                            offset, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current[offset..]));
                         break;
                     }
                 }
