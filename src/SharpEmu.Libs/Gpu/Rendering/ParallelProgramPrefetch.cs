@@ -170,6 +170,11 @@ public sealed class ParallelProgramPrefetch : IProgramPrefetch, IDisposable
 
     private void WaitFor(Job job)
     {
+        if (job.State != 0)
+        {
+            return;
+        }
+
         using var profile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPrefetchWait);
         var spinner = new SpinWait();
         for (var spin = 0; spin < 64 && job.State == 0; spin++)
