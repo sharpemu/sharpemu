@@ -10,14 +10,8 @@ namespace SharpEmu.ShaderCompiler.Resources;
 // returns false so the caller falls back to a full materialization.
 public delegate bool ResidentGuestBytesReader(ulong address, Span<byte> destination, bool clean);
 
-// Materialization is a pure function of the plan, the user data words the evaluator
-// reads, the shader base, the compute state and the guest words it reads. This cache
-// records exactly those words and reuses the result while every one of them is
-// unchanged, so a draw that re-binds the same resources skips the descriptor walk. A user
-// data word the evaluator never read (a per-draw constant for the shader's own ALU, say)
-// does not distinguish two draws; the snapshot a hit returns carries the current user
-// data. Any failed read, any GPU-owned range and any byte difference make the entry
-// miss; nothing is guessed.
+// Cache hits require current dependency bytes and the current draw's address mapping.
+// Failed resident reads fall back to full evaluation without changing GPU ownership.
 public sealed partial class ResourceMaterializationCache
 {
     // Two generations approximate LRU: a full young generation becomes the old one,
@@ -26,6 +20,7 @@ public sealed partial class ResourceMaterializationCache
     private Dictionary<ulong, Entry> _young = new();
     private Dictionary<ulong, Entry> _old = new();
     private byte[] _scratch = new byte[256];
+    private byte[] _refreshScratch = [];
     private ReadRecorder? _spareRecorder;
     // The user data words each (plan, base, compute state) has read so far. They only index the
     // entries; Entry.Matches is what decides a hit.
@@ -804,8 +799,8 @@ public sealed partial class ResourceMaterializationCache
     {
         KeyAbsent, KeyMismatch, OldPromotion, GenerationRotation, GenerationEntriesDropped,
         Variant1, Variant2, Variant3, Variant4, Variant5, Variant6, Variant7, Variant8, BytesChanged, Unreadable,
-        RefreshLayout, RefreshDescriptorChanged, RefreshEvaluation,
-        Count,
+        RefreshLayout, RefreshUnreadable, RefreshDescriptorChanged, RefreshUnchanged,
+        RefreshEvaluation, RefreshReadChanged, RefreshDescriptorSkipped, RefreshOlderVariant, Count,
     }
     private static readonly bool DiagnosticsEnabled =
         Environment.GetEnvironmentVariable("SHARPEMU_PROFILE_PERFORMANCE") == "1";
@@ -821,7 +816,6 @@ public sealed partial class ResourceMaterializationCache
         CountDiagnostic(reason);
         return false;
     }
-
 
     [ThreadStatic]
     private static bool _readingTable;
@@ -991,13 +985,15 @@ public sealed partial class ResourceMaterializationCache
             var unreadable = false;
             Entry? previous = null;
             var variantIndex = 0;
+            var refreshCandidates = 0;
             for (var variant = cached; variant is not null; previous = variant, variant = variant.Next)
             {
                 CountDiagnostic((Diagnostic)((int)Diagnostic.Variant1 + Math.Min(variantIndex++, MaxVariants - 1)));
                 if (!variant.Matches(plan, inputs, rebase.Active) || !rebase.AppliesTo(variant))
                     continue;
                 stale ??= variant;
-                if (Validate(variant, residentReader, rebase, inputs.UserData, out var variantUnreadable))
+                if (Validate(variant, residentReader, rebase, inputs.UserData,
+                    out var variantUnreadable, out var descriptorChanged))
                 {
                     if (previous is not null)
                     {
@@ -1015,6 +1011,11 @@ public sealed partial class ResourceMaterializationCache
                 }
 
                 unreadable |= variantUnreadable;
+                // A rejected candidate can fall back to a full walk, but cannot accept stale bytes.
+                if (!variantUnreadable && !descriptorChanged && variant.TableRefreshable)
+                    refreshCandidates |= 1 << (variantIndex - 1);
+                else if (descriptorChanged)
+                    CountDiagnostic(Diagnostic.RefreshDescriptorSkipped);
             }
 
             timing.ChangePhase(MaterializationPhase.TableRefresh);
@@ -1063,14 +1064,33 @@ public sealed partial class ResourceMaterializationCache
 
                 learning = (patches, rebased, refreshedFrom);
             }
-            else if (rebase.AppliesTo(cached) && TryRefreshTable(key, cached, plan, inputs, residentReader, rebase, out var refreshed))
+            if (refreshedFrom is null)
             {
-                TableRefreshes++;
-                Interlocked.Increment(ref _totalRefreshes);
-                snapshot = rebase.Apply(WithCurrentUserData(refreshed.Snapshot, inputs.UserData), inputs.UserData);
-                specialization = refreshed.Specialization;
-                failure = default;
-                return true;
+                previous = null;
+                variantIndex = 0;
+                for (var variant = cached; variant is not null; previous = variant, variant = variant.Next, variantIndex++)
+                {
+                    var fixedAddresses = rebase.Active.Length == 0 && !rebase.HasLearnableMemoryBases;
+                    if (!variant.Matches(plan, inputs, rebase.Active) || !rebase.AppliesTo(variant) ||
+                        (fixedAddresses ? (refreshCandidates & (1 << variantIndex)) == 0 : !ReferenceEquals(variant, cached)) ||
+                        !TryRefreshTable(key, variant, plan, inputs, residentReader, rebase, out var refreshed))
+                        continue;
+
+                    if (previous is not null)
+                    {
+                        previous.Next = variant.Next;
+                        refreshed.Next = cached;
+                        CountDiagnostic(Diagnostic.RefreshOlderVariant);
+                    }
+                    Store(key, refreshed);
+                    TableRefreshes++;
+                    Interlocked.Increment(ref _totalRefreshes);
+                    snapshot = rebase.Apply(WithCurrentUserData(refreshed.Snapshot, inputs.UserData), inputs.UserData);
+                    specialization = refreshed.Specialization;
+                    failure = default;
+                    return true;
+                }
+
             }
 
             Interlocked.Increment(ref _totalStale);
@@ -1137,7 +1157,7 @@ public sealed partial class ResourceMaterializationCache
                 var depth = 1;
                 for (var variant = built; variant.Next is not null; variant = variant.Next)
                 {
-                    if (++depth >= MaxVariants)
+                    if (depth++ >= MaxVariants)
                     {
                         variant.Next = null;
                         break;
@@ -1154,16 +1174,7 @@ public sealed partial class ResourceMaterializationCache
         }
     }
 
-    // Most stale entries in Demon's Souls differ only in words the shader reads through scalar
-    // loads (inline constants rewritten every frame); the descriptors, device ranges and
-    // specialization are unchanged. When every changed word was read only while evaluating the
-    // flattened table, only the table is evaluated again. It is refused when the plan's
-    // specialization reads or extends the table (indirect or candidate tables), when the table
-    // now reads a word the entry did not validate, or when a word moved between the two reads.
-    //
-    // With rebased words the entry's ranges are read where they lie for this draw. The refreshed
-    // entry keeps the entry's own addresses and base words with the bytes read there, so a later
-    // draw moves its reads the same way and compares against those bytes.
+    // Refresh only table words. Descriptor bytes and the reevaluated reads must pass fresh checks.
     private bool TryRefreshTable(ulong key, Entry cached, ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
         ResidentGuestBytesReader residentReader, AddressRebase rebase, out Entry refreshed)
     {
@@ -1172,7 +1183,11 @@ public sealed partial class ResourceMaterializationCache
         if (!cached.TableRefreshable)
             return RejectRefresh(Diagnostic.RefreshLayout);
 
-        var current = new byte[cached.Bytes.Length];
+        var moves = rebase.Moves(cached, inputs.UserData);
+        if (!moves && _refreshScratch.Length < cached.Bytes.Length)
+            _refreshScratch = new byte[cached.Bytes.Length];
+        var current = moves ? new byte[cached.Bytes.Length] : _refreshScratch;
+        var currentLength = cached.Bytes.Length;
         var moved = cached.RangeAddresses;
         if (rebase.Moves(cached, inputs.UserData))
         {
@@ -1181,6 +1196,7 @@ public sealed partial class ResourceMaterializationCache
                 moved[index] = rebase.MoveRead(cached, inputs.UserData, cached.RangeAddresses[index], cached.RangeLengths[index]);
         }
 
+        var changed = false;
         for (var index = 0; index < cached.RangeAddresses.Length; index++)
         {
             if (!ReadWithProfile(residentReader, moved[index], current.AsSpan(cached.RangeOffsets[index], cached.RangeLengths[index]), cached.RangeClean[index], CacheDetail.RefreshRead))
@@ -1188,21 +1204,19 @@ public sealed partial class ResourceMaterializationCache
                 _lastRefreshRefusal = 1;
                 return false;
             }
-        }
-
-        var changed = false;
-        using (MeasureDetail(CacheDetail.RefreshCompare))
-        for (var offset = 0; offset < current.Length; offset += sizeof(uint))
-        {
-            if (current.AsSpan(offset, sizeof(uint)).SequenceEqual(cached.Bytes.AsSpan(offset, sizeof(uint))))
-                continue;
-            if (!cached.WordTableOnly[offset / sizeof(uint)])
+            using var comparisonProfile = MeasureDetail(CacheDetail.RefreshCompare);
+            var end = cached.RangeOffsets[index] + cached.RangeLengths[index];
+            for (var offset = cached.RangeOffsets[index]; offset < end; offset += sizeof(uint))
             {
-                _lastRefreshRefusal = 2;
-                return RejectRefresh(Diagnostic.RefreshDescriptorChanged);
+                if (current.AsSpan(offset, sizeof(uint)).SequenceEqual(cached.Bytes.AsSpan(offset, sizeof(uint))))
+                    continue;
+                if (!cached.WordTableOnly[offset / sizeof(uint)])
+                {
+                    _lastRefreshRefusal = 2;
+                    return RejectRefresh(Diagnostic.RefreshDescriptorChanged);
+                }
+                changed = true;
             }
-
-            changed = true;
         }
 
         if (!changed)
@@ -1272,7 +1286,8 @@ public sealed partial class ResourceMaterializationCache
                 WordTableOnly = cached.WordTableOnly,
                 BaseWordBuffers = cached.BaseWordBuffers,
                 TableRefreshable = true,
-                Bytes = current,
+                // Published entries must not share mutable scratch storage.
+                Bytes = current.AsSpan(0, currentLength).ToArray(),
                 Snapshot = new ResourceSnapshot
                 {
                     Buffers = previous.Buffers,
@@ -1285,7 +1300,6 @@ public sealed partial class ResourceMaterializationCache
                 Specialization = cached.Specialization,
                 Next = cached.Next,
             };
-            Store(key, refreshed);
             return true;
         }
         finally
@@ -1826,10 +1840,15 @@ public sealed partial class ResourceMaterializationCache
         return true;
     }
 
+    private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, AddressRebase rebase,
+        IReadOnlyList<uint> userData, out bool unreadable) =>
+        Validate(entry, residentReader, rebase, userData, out unreadable, out _);
+
     private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, AddressRebase rebase, IReadOnlyList<uint> userData,
-        out bool unreadable)
+        out bool unreadable, out bool descriptorChanged)
     {
         unreadable = false;
+        descriptorChanged = false;
         // A memory-loaded base usually moved when anything did: its few bytes are checked before
         // ranges that can span kilobytes. The full comparison below still decides a match.
         if (entry.BaseWordBuffers is not null)
@@ -1863,6 +1882,16 @@ public sealed partial class ResourceMaterializationCache
             {
                 RecordChangedWords(entry, index, current);
                 CountDiagnostic(Diagnostic.BytesChanged);
+                var previous = entry.Bytes.AsSpan(entry.RangeOffsets[index], length);
+                for (var offset = 0; offset < length; offset += sizeof(uint))
+                {
+                    if (!entry.WordTableOnly[(entry.RangeOffsets[index] + offset) / sizeof(uint)] &&
+                        !current.Slice(offset, sizeof(uint)).SequenceEqual(previous.Slice(offset, sizeof(uint))))
+                    {
+                        descriptorChanged = true;
+                        break;
+                    }
+                }
                 return false;
             }
         }
