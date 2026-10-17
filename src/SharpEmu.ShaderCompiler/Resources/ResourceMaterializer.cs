@@ -9,7 +9,7 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 // Resolves a plan against one draw: descriptor sources, indirect image tables and the
 // specialization. Both outputs change only when the whole materialisation succeeds.
-public static class ResourceMaterializer
+public static partial class ResourceMaterializer
 {
     private const ulong AddressMask = 0x0000_FFFF_FFFF_FFFFul;
     private const ulong MaxIndirectImageProbes = 65536;
@@ -91,9 +91,32 @@ public static class ResourceMaterializer
             materialized.FlattenedTable[offset + 2] = (uint)Math.Min(range.Size, uint.MaxValue);
         }
 
-        if (!BuildSpecialization(plan, materialized, out var nextSnapshot, out var nextSpecialization, out failure, captureIndirectImageFailure))
+        var guard = Volatile.Read(ref plan.SpecializationGuard);
+        MaterializedSnapshot nextSnapshot;
+        ResourceSpecialization nextSpecialization;
+        if (guard is not null && MatchesGuard(plan, materialized, guard))
         {
-            return false;
+            using var guardProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.SpecializationGuardHit);
+            ApplyGuard(materialized, guard);
+            nextSnapshot = materialized;
+            nextSpecialization = guard.Specialization.Clone();
+        }
+        else
+        {
+            var candidate = CaptureGuard(plan, materialized);
+            var originalSamplers = materialized.Samplers;
+            if (!BuildSpecialization(plan, materialized, out nextSnapshot, out nextSpecialization, out failure, captureIndirectImageFailure))
+                return false;
+            if (candidate is not null && MatchesGuard(plan, materialized, candidate, checkSamplers: false))
+            {
+                candidate.SamplerSources = materialized.Samplers.Select(words => Array.FindIndex(originalSamplers,
+                    original => ReferenceEquals(original, words))).ToArray();
+                if (candidate.SamplerSources.All(index => index >= 0))
+                {
+                    candidate.Specialization = nextSpecialization.Clone();
+                    Volatile.Write(ref plan.SpecializationGuard, candidate);
+                }
+            }
         }
 
         using var outputProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.OutputAssembly);

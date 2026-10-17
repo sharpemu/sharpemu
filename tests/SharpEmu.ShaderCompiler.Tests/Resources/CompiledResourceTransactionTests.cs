@@ -177,6 +177,38 @@ public sealed class CompiledResourceTransactionTests
     }
 
     [Fact]
+    public void GuardReusesShapeButNotPayloadsOrCallerMutableSpecialization()
+    {
+        var plan = CreatePlan(4, false);
+        var memory = new Memory();
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, memory.Inputs(false), ref snapshot, ref specialization));
+        var guard = Assert.IsType<ResourceMaterializer.SpecializationGuard>(plan.SpecializationGuard);
+        var expected = specialization.Clone();
+        var previous = snapshot;
+        specialization.Buffers.Clear();
+        memory.DescriptorAddress += 0x1000;
+        Assert.True(ResourceMaterializer.Materialize(plan, memory.Inputs(false), ref snapshot, ref specialization));
+        Assert.Same(guard, plan.SpecializationGuard);
+        Assert.Equal(expected, specialization);
+        Assert.Equal(memory.DescriptorAddress, snapshot.Buffers[0][0]);
+        Assert.NotEqual(previous.Buffers[0][0], snapshot.Buffers[0][0]);
+        memory.DescriptorStride = 16u << 16;
+        Assert.True(ResourceMaterializer.Materialize(plan, memory.Inputs(false), ref snapshot, ref specialization));
+        Assert.NotSame(guard, plan.SpecializationGuard);
+        Assert.NotEqual(expected, specialization);
+        var saved = snapshot;
+        var savedSpecialization = specialization;
+        var savedGuard = plan.SpecializationGuard;
+        memory.FailureAddress = 0x1040;
+        Assert.False(ResourceMaterializer.Materialize(plan, memory.Inputs(false), ref snapshot, ref specialization));
+        Assert.Same(saved, snapshot);
+        Assert.Same(savedSpecialization, specialization);
+        Assert.Same(savedGuard, plan.SpecializationGuard);
+    }
+
+    [Fact]
     public void FailureDoesNotReplayTheReferenceEvaluatorAndPreservesMaterializerOutputs()
     {
         var plan = CreatePlan(4, false);
@@ -331,7 +363,7 @@ public sealed class CompiledResourceTransactionTests
     {
         public uint Salt;
         public uint DescriptorAddress = 0x8000;
-        public uint DescriptorStride = 0;
+        public uint DescriptorStride;
         public ulong FailureAddress = ulong.MaxValue;
         public ulong ThrowAddress = ulong.MaxValue;
         public bool InTable;

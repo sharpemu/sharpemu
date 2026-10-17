@@ -11,7 +11,7 @@ public static class ResourceMaterializationProfile
     {
         Total, Snapshot, DeviceAddressRanges, Specialization, OutputAssembly, GuestRead, CleanGuestRead,
         SourceEvaluation, BranchSelection, DescriptorPrefetch, DescriptorEvaluation, TablePrefetch, TableEvaluation,
-        CompiledEvaluation, CompiledTableEvaluation,
+        CompiledEvaluation, CompiledTableEvaluation, SpecializationGuardHit,
         CompiledOutputAllocation, CompiledBody, CompiledWordRead, CompiledGroupRead,
         ReadRecording, ConsumerLookup, ConsumerGraph, Count
     }

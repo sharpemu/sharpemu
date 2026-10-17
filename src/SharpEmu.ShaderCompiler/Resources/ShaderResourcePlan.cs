@@ -47,6 +47,7 @@ public sealed class ShaderResourcePlan
     private CompiledResourceEvaluator? _compiledEvaluator;
     private CompiledResourceTransaction? _compiledTransaction;
     private CompiledResourceTransaction? _compiledTableTransaction;
+    internal ResourceMaterializer.SpecializationGuard? SpecializationGuard;
     private int _compiledEvaluatorState;
 
     internal CompiledResourceEvaluator? CompiledEvaluator

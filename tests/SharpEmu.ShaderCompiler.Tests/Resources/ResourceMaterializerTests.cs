@@ -244,6 +244,15 @@ public sealed class ResourceMaterializerTests
         Assert.Equal(3, snapshot.Samplers.Length);
         Assert.Equal(snapshot.Samplers[1], snapshot.Samplers[2]);
         Assert.NotEqual(snapshot.Samplers[0], snapshot.Samplers[2]);
+        var previous = snapshot;
+        var expected = specialization.Clone();
+        var guard = Assert.IsType<ResourceMaterializer.SpecializationGuard>(plan.SpecializationGuard);
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([]), ref snapshot, ref specialization));
+        Assert.Same(guard, plan.SpecializationGuard);
+        Assert.Equal(expected, specialization);
+        Assert.Equal(3, snapshot.Samplers.Length);
+        Assert.Equal(snapshot.Samplers[1], snapshot.Samplers[2]);
+        Assert.NotSame(previous.Samplers[1], snapshot.Samplers[2]);
     }
 
     [Fact]
