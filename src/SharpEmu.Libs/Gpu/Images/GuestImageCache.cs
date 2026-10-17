@@ -427,6 +427,27 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         return found != null;
     }
 
+    // The registered depth image that owns the stencil plane starting at this span, with the
+    // newest GPU write when several do (a copied depth buffer shares its source's plane).
+    public bool TryFindStencilOwner(GuestSpan plane, out ResourceSlotIdentifier owner)
+    {
+        using var held = _lock.Hold();
+        var best = ResourceSlotIdentifier.Invalid;
+        long bestWrite = -1;
+        _slots.ForEach((identifier, image) =>
+        {
+            if (image.Registered && !image.DepthOwner.IsValid && image.Description.IsDepth && image.Description.HasStencil &&
+                image.Description.Stencil.Address == plane.Address && image.Description.Stencil.Size >= plane.Size &&
+                image.GpuWriteSequence > bestWrite)
+            {
+                best = identifier;
+                bestWrite = image.GpuWriteSequence;
+            }
+        });
+        owner = best;
+        return best.IsValid;
+    }
+
     public CachedImage GetImage(ResourceSlotIdentifier imageIdentifier)
     {
         var image = _slots[imageIdentifier];

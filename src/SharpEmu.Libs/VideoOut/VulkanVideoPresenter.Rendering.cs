@@ -672,7 +672,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (binding.IsHostMovie || binding.CachedImage is not { } image ||
                     !ReferenceEquals(image, depthImage) || !ViewFormatRules.IsStencilViewFormat(binding.Request.View.Format) ||
-                    !ViewsOverlap(binding.Request.View, attachmentView))
+                    !ViewsOverlap(binding.Request.View, attachmentView) || !FitsStencilPlane(binding.Request.Description, image))
                 {
                     continue;
                 }

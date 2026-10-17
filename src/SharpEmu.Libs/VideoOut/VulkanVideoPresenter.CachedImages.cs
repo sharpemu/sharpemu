@@ -717,6 +717,9 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        private static bool FitsStencilPlane(in ImageDescription request, CachedImage attachment) =>
+            request.Data.Address == attachment.Description.Stencil.Address && request.Data.Size <= attachment.Description.Stencil.Size;
+
         private CachedImage AcquireStencilStorage(TextureResource binding, CachedImage attachment, bool writeBack = true)
         {
             if (_worker)
@@ -725,6 +728,16 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var description = binding.Request.Description;
+            var attachmentIdentifier = binding.ImageIdentifier;
+            if (!FitsStencilPlane(description, attachment) &&
+                _imageCache.TryFindStencilOwner(description.Data, out var owner))
+            {
+                // The shader's view is the stencil plane of another depth surface, not the one the
+                // lookup returned: the owner of that plane carries the stencil.
+                attachmentIdentifier = owner;
+                attachment = _imageCache.GetImage(owner);
+            }
+
             if (description.Data.Address != attachment.Description.Stencil.Address || description.Data.Size > attachment.Description.Stencil.Size ||
                 description.Extent.Width != attachment.Backing.Extent.Width || description.Extent.Height != attachment.Backing.Extent.Height ||
                 description.Resources.Levels != 1 || description.Resources.Layers != attachment.Backing.Layers)
@@ -732,7 +745,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal("The stencil storage request does not cover its attachment's stencil layout.");
             }
 
-            if (writeBack && _hasBoundDepth && _boundDepth.Image == binding.ImageIdentifier &&
+            if (writeBack && _hasBoundDepth && _boundDepth.Image == attachmentIdentifier &&
                 (_boundDepthLoadState.StencilTestEnabled || _boundDepthLoadState.StencilClearEnabled))
             {
                 throw SubmissionScheduler.Fatal("A stencil storage write cannot share an active stencil attachment.");
@@ -757,10 +770,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 Role = ImageRole.Texture,
                 View = binding.Request.View with { Usage = ImageUsageFlags.SampledBit },
             };
-            _imageCache.AcquireTextureView(binding.ImageIdentifier, sampledRequest);
+            _imageCache.AcquireTextureView(attachmentIdentifier, sampledRequest);
             if (writeBack)
             {
-                _imageCache.MarkGpuWritten(binding.ImageIdentifier);
+                _imageCache.MarkGpuWritten(attachmentIdentifier);
             }
 
             storage = attachment.CreateStencilStorageImage();
@@ -772,7 +785,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 preparation.StencilStorageWriteBackImages.Add(attachment);
             }
             attachment.CopyStencilStorage(storage, _bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: false);
-            if (_hasBoundDepth && _boundDepth.Image == binding.ImageIdentifier)
+            if (_hasBoundDepth && _boundDepth.Image == attachmentIdentifier)
             {
                 var writes = _boundDepthLoadState.AttachmentWriteAspects(attachment.Backing.Format);
                 TransitionImage(attachment,
