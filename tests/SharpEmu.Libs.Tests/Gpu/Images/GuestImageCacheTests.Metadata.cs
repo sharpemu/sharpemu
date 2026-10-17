@@ -14,6 +14,28 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 // Surface metadata registration, the pending DCC state and compressed surfaces.
 public sealed partial class GuestImageCacheTests
 {
+    [Fact]
+    public void MetadataLookBackFindsLongRangesAcrossLaterEntriesAndGrowth()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x200000, ReadWrite);
+        var metadata = address + 0x10000;
+        harness.Images.RegisterDccMetadataForTest(metadata, 0x10000);
+        for (ulong offset = 0x100; offset < 0x10000; offset += 0x100)
+            harness.Images.RegisterHtileMetadataForTest(metadata + offset);
+        Assert.True(harness.Images.OverlapsDccMetadata(metadata + 0xffff, 1));
+        Assert.False(harness.Images.OverlapsDccMetadata(metadata + 0x10000, 1));
+        harness.ImageStore.MarkCpuWrite(metadata + 0xfff8, 8);
+        Assert.False(harness.Images.IsMetadata(metadata));
+        Assert.True(harness.Images.IsMetadata(metadata + 0xff00));
+        harness.Images.RegisterDccMetadataForTest(metadata, 0x20000);
+        Assert.True(harness.Images.OverlapsDccMetadata(metadata + 0x1ffff, 1));
+        harness.ImageStore.MarkCpuWrite(metadata + 0x1ffff, 1);
+        Assert.False(harness.Images.IsMetadata(metadata));
+        harness.Shutdown();
+    }
+
     [Theory]
     [InlineData(0x10000ul)]
     [InlineData(0x200000ul)]

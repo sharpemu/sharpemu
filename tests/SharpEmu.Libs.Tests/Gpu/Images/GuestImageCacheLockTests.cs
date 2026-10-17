@@ -31,6 +31,7 @@ public sealed class GuestImageCacheLockTests : IClassFixture<HeadlessVulkanFixtu
         var metadataAddress = address + 0x200000;
         if (registerMetadata)
         {
+            harness.Images.RegisterHtileMetadataForTest(address);
             harness.Images.RegisterHtileMetadataForTest(metadataAddress);
             Assert.True(harness.Images.ClearMetadata(metadataAddress));
         }
@@ -46,7 +47,7 @@ public sealed class GuestImageCacheLockTests : IClassFixture<HeadlessVulkanFixtu
         try
         {
             Assert.True(locked.Wait(5000));
-            write = Task.Run(() => harness.ImageStore.MarkCpuWrite(address, 4));
+            write = Task.Run(() => harness.ImageStore.MarkCpuWrite(address + 0x100000, 4));
             Assert.False(await write.WaitAsync(TimeSpan.FromSeconds(5)));
         }
         finally

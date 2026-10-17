@@ -33,7 +33,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
     private readonly Dictionary<Format, ResourceSlotIdentifier> _nullImages = new();
     private RecencyQueue<ResourceSlotIdentifier> _recencyQueue = new();
     private readonly HashSet<ResourceSlotIdentifier> _scheduledReadbacks = new();
-    private readonly SortedDictionary<ulong, SurfaceMetadata> _surfaceMetadata = new();
+    private readonly SortedList<ulong, SurfaceMetadata> _surfaceMetadata = new();
     private ulong _totalUsedMemory;
     private ulong _collectionStartBytes = 1536 * MiB;
     private ulong _memoryPressureBytes = 1536 * MiB;

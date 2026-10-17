@@ -279,36 +279,46 @@ public sealed partial class GuestImageCache
         TakeGpuOwnership(image);
     }
 
-    private sealed record MetadataWriteBounds(ulong First, ulong Last);
-    private MetadataWriteBounds? _metadataWriteBounds;
+    private readonly MetadataWriteRanges _metadataWriteRanges = new();
+    private ulong _maximumMetadataSize = 1;
 
-    // Publish under the image lock. Retain old bounds so removal cannot hide a concurrent write.
+    // Publish coverage under the image lock before a registration grows.
     private void IncludeMetadataWriteRange(ulong address, ulong size)
     {
-        var last = address + Math.Min(Math.Max(1UL, size) - 1, ulong.MaxValue - address);
-        var previous = _metadataWriteBounds;
-        if (previous is not null)
+        _maximumMetadataSize = Math.Max(_maximumMetadataSize, size);
+        _metadataWriteRanges.Include(address, size);
+    }
+
+    // Keep the bound after removals and shrinking fills. All growth passes through IncludeMetadataWriteRange.
+    private int FirstPossibleMetadataOverlap(ulong address)
+    {
+        if (address < _maximumMetadataSize) return 0;
+        var earliestExcluded = address - _maximumMetadataSize;
+        var low = 0;
+        var high = _surfaceMetadata.Count;
+        while (low < high)
         {
-            if (address >= previous.First && last <= previous.Last) return;
-            address = Math.Min(address, previous.First);
-            last = Math.Max(last, previous.Last);
+            var middle = low + (high - low) / 2;
+            if (_surfaceMetadata.GetKeyAtIndex(middle) <= earliestExcluded) low = middle + 1;
+            else high = middle;
         }
-        System.Threading.Volatile.Write(ref _metadataWriteBounds, new MetadataWriteBounds(address, last));
+        return low;
     }
 
     private bool MayOverlapMetadata(ulong address, ulong size)
     {
-        var bounds = System.Threading.Volatile.Read(ref _metadataWriteBounds);
-        return bounds is not null && address <= bounds.Last && address + size > bounds.First;
+        return _metadataWriteRanges.Overlaps(address, size);
     }
 
     private void InvalidateMetadataForCpuWrite(ulong address, ulong size)
     {
-        if (_surfaceMetadata.Count == 0) return;
+        if (_surfaceMetadata.Count == 0 || !MayOverlapMetadata(address, size)) return;
         var end = address + size;
-        foreach (var (metadataAddress, metadata) in _surfaceMetadata)
+        for (var index = FirstPossibleMetadataOverlap(address); index < _surfaceMetadata.Count; index++)
         {
+            var metadataAddress = _surfaceMetadata.GetKeyAtIndex(index);
             if (metadataAddress >= end) break;
+            var metadata = _surfaceMetadata.GetValueAtIndex(index);
             var metadataSize = Math.Max(1UL, Math.Max(metadata.Size, Math.Max(metadata.RangeSize, metadata.FillSize)));
             if (metadataAddress >= address || address - metadataAddress < metadataSize)
             {
@@ -397,8 +407,12 @@ public sealed partial class GuestImageCache
     public bool OverlapsDccMetadata(ulong address, ulong size)
     {
         using var held = _lock.Hold();
-        foreach (var (start, metadata) in _surfaceMetadata)
+        var end = address + size;
+        for (var index = FirstPossibleMetadataOverlap(address); index < _surfaceMetadata.Count; index++)
         {
+            var start = _surfaceMetadata.GetKeyAtIndex(index);
+            if (start >= end) break;
+            var metadata = _surfaceMetadata.GetValueAtIndex(index);
             var extent = metadata.Kind switch
             {
                 SurfaceMetadataKind.Dcc => metadata.Size,
