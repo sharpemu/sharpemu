@@ -45,6 +45,45 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
 
     public PresenterImageBindingTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
 
+    [Fact]
+    public void SamplerClassesFollowCurrentViewsAndClearPreviousResults()
+    {
+        var info = new ShaderResourceInfo
+        {
+            Samplers = Enumerable.Range(0, 5).Select(_ => new SamplerResource()).ToList(),
+            SampledPairs =
+            [
+                new() { Sampler = 0, Image = 0 },
+                new() { Sampler = 0, Image = 0 },
+                new() { Sampler = 1, Image = 0 },
+                new() { Sampler = 1, Image = 1 },
+                new() { Sampler = 2, Image = 2 },
+                new() { Sampler = 3, Image = 99 },
+                new() { Sampler = 99, Image = 0 },
+            ],
+        };
+        var images = Array.CreateInstance(TextureResourceType, 3);
+        for (var index = 0; index < 3; index++)
+        {
+            var texture = Activator.CreateInstance(TextureResourceType, true)!;
+            TextureResourceType.GetField("Request")!.SetValue(texture,
+                new ImageRequest { View = default(ImageViewDescription) with { Format = index == 1 ? Format.R32Sfloat : Format.R32Uint } });
+            TextureResourceType.GetField("IsHostMovie")!.SetValue(texture, index == 2);
+            images.SetValue(texture, index);
+        }
+        var classes = new byte[5];
+        var method = PresenterType.GetMethod("ClassifySamplerViews", BindingFlags.Static | BindingFlags.NonPublic)!;
+        method.Invoke(null, [info, images, classes]);
+        Assert.Equal(new byte[] { 1, 3, 0, 0, 0 }, classes);
+        TextureResourceType.GetField("Request")!.SetValue(images.GetValue(0),
+            new ImageRequest { View = default(ImageViewDescription) with { Format = Format.R32Sfloat } });
+        method.Invoke(null, [info, images, classes]);
+        Assert.Equal(new byte[] { 2, 2, 0, 0, 0 }, classes);
+        info.SampledPairs.Clear();
+        method.Invoke(null, [info, images, classes]);
+        Assert.All(classes, value => Assert.Equal(0, value));
+    }
+
     [Theory]
     [InlineData(GuestPixelFormat.Bits16UNorm, Format.D16Unorm)]
     [InlineData(GuestPixelFormat.Bits32Float, Format.D32Sfloat)]

@@ -33,6 +33,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             public readonly RenderScratchPool<TextureResource> Images = new();
             public readonly RenderScratchPool<Sampler> Samplers = new();
+            public readonly RenderScratchPool<byte> SamplerClasses = new();
             public readonly RenderScratchPool<uint> ShaderData = new();
             public readonly RenderScratchPool<BufferView> Buffers = new();
             public readonly RenderScratchPool<(BufferDescriptorWords Descriptor, ResourceSlotIdentifier Buffer)> Sources = new();
@@ -303,28 +304,21 @@ internal static unsafe partial class VulkanVideoPresenter
             _texturePool.Push(texture);
         }
 
-        // Compare bits stay only on depth-compare samplers; a forced point sampler drops its filters.
-        // A sampler takes the numeric class of the views it samples; integer only when every
-        // paired view is integer, since a float view needs a float border and filtering.
-        private static bool SamplesIntegerViews(ShaderResourceInfo info, TextureResource[] images, int sampler)
+        // A float view overrides integer views. Unpaired and movie-only samplers stay unclassified.
+        private static void ClassifySamplerViews(ShaderResourceInfo info, TextureResource[] images, byte[] classes)
         {
-            var paired = false;
+            Array.Clear(classes);
+            if (classes.Length == 0) return;
             foreach (var pair in info.SampledPairs)
             {
-                if (pair.Sampler != sampler || pair.Image >= images.Length || images[pair.Image].IsHostMovie)
+                if (pair.Sampler >= info.Samplers.Count || pair.Image >= images.Length || images[pair.Image].IsHostMovie)
                 {
                     continue;
                 }
 
-                if (!ViewFormatRules.IsIntegerFormat(images[pair.Image].Request.View.Format))
-                {
-                    return false;
-                }
-
-                paired = true;
+                classes[pair.Sampler] |= ViewFormatRules.IsIntegerFormat(images[pair.Image].Request.View.Format)
+                    ? (byte)1 : (byte)2;
             }
-
-            return paired;
         }
 
         private Sampler ResolveSampler(SamplerResource sampler, uint[] words, ShaderProgramInfo program, int index, ShaderStageResources stage,
@@ -419,11 +413,20 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             descriptors.Samplers = Scratch.Samplers.Rent(info.Samplers.Count);
-            using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.ResolveSamplers, program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
-            for (var index = 0; index < info.Samplers.Count; index++)
+            var samplerClasses = Scratch.SamplerClasses.Rent(info.Samplers.Count);
+            try
             {
-                descriptors.Samplers[index] = ResolveSampler(info.Samplers[index], snapshot.Samplers[index], program, index, stage,
-                    SamplesIntegerViews(info, descriptors.Images, index));
+                using var samplerProfile = DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.ResolveSamplers, program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count);
+                ClassifySamplerViews(info, descriptors.Images, samplerClasses);
+                for (var index = 0; index < info.Samplers.Count; index++)
+                {
+                    descriptors.Samplers[index] = ResolveSampler(info.Samplers[index], snapshot.Samplers[index], program, index, stage,
+                        samplerClasses[index] == 1);
+                }
+            }
+            finally
+            {
+                Scratch.SamplerClasses.Return(samplerClasses);
             }
 
             var shaderData = Scratch.ShaderData.Rent(checked((int)layout.ShaderDataDwordCount));
