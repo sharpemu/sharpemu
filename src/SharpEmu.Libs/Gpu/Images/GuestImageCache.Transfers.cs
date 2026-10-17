@@ -261,7 +261,7 @@ public sealed unsafe partial class GuestImageCache
         UploadRegions(destination, copies.ToList(), linear);
     }
 
-    private void UploadFromBuffer(CachedImage image, in ImageRequest request, GpuBuffer source, ulong sourceOffset, byte[]? backingBytes = null)
+    private void UploadFromBuffer(CachedImage image, in ImageRequest request, GpuBuffer source, ulong sourceOffset, byte[]? backingBytes = null, uint firstLayer = 0)
     {
         if (image.DepthOwner.IsValid)
         {
@@ -287,6 +287,16 @@ public sealed unsafe partial class GuestImageCache
                 throw SubmissionScheduler.Fatal(
                     $"The color upload is invalid: role={request.Role} address=0x{info.Data.Address:X16} size=0x{info.Data.Size:X16} format={(uint)info.GuestFormat} tile={(uint)info.TileMode} " +
                     $"kind={(uint)plan.Layout.Surface.Texture.Block.Kind} extent={info.Extent.Width}x{info.Extent.Height}x{info.Extent.Depth} pitch={info.Pitch} levels={info.Resources.Levels} layers={info.Resources.Layers} samples={info.Samples}.");
+            }
+
+            if (firstLayer != 0)
+            {
+                if (info.Resources.Levels != 1 || firstLayer >= info.Resources.Layers ||
+                    plan.Regions.Count != info.Resources.Layers || (plan.Tiled && plan.Tiles.Count != plan.Regions.Count))
+                    throw SubmissionScheduler.Fatal("The partial array upload layout is invalid.");
+                // Keep the original offsets and slice indices for the tiling equations.
+                plan.Regions.RemoveRange(0, checked((int)firstLayer));
+                if (plan.Tiled) plan.Tiles.RemoveRange(0, checked((int)firstLayer));
             }
 
             var linear = new TilerBufferSpan(source.Handle, sourceOffset, info.Data.Size);
@@ -360,7 +370,7 @@ public sealed unsafe partial class GuestImageCache
     }
 
     // Uploads the guest bytes when the guest or a buffer owns them; watches the image first.
-    private void PopulateFromGuest(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, string uploadPath)
+    private void PopulateFromGuest(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, string uploadPath, uint firstLayer = 0)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageUpload);
         var image = _slots[imageIdentifier];
@@ -400,21 +410,21 @@ public sealed unsafe partial class GuestImageCache
             var sourceStarted = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             dataImported = true;
             long sourceFinished;
-            if (TryUploadChangedPieces(image, request))
+            if (firstLayer == 0 && TryUploadChangedPieces(image, request))
             {
                 sourceFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             }
             else
             {
                 // Hash before staging: a write racing the copy then shows up as a changed piece next time.
-                var piecePlan = !image.IsBufferModified && !_bufferCache.HasGpuDirtyBytes(image.Description.Data.Address, image.Description.Data.Size)
+                var piecePlan = firstLayer == 0 && !image.IsBufferModified && !_bufferCache.HasGpuDirtyBytes(image.Description.Data.Address, image.Description.Data.Size)
                     ? PieceHashPlan(image, request)
                     : null;
                 var pieceHashes = piecePlan != null ? HashGuestPieces(image.Description.Data, piecePlan.Tiles) : null;
                 var backingBytes = SnapshotVolumeBacking(image);
                 var (source, sourceOffset) = _bufferCache.ObtainBufferForImage(image.Description.Data.Address, image.Description.Data.Size);
                 sourceFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-                UploadFromBuffer(image, request, source, sourceOffset, backingBytes);
+                UploadFromBuffer(image, request, source, sourceOffset, backingBytes, firstLayer);
                 image.SetGuestPieceHashes(pieceHashes);
             }
 
