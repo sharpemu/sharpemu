@@ -239,6 +239,9 @@ public sealed record IndirectImageSelector(
     uint KeyArgument)
 {
     public IndirectSelectorValues? SelectorValues { get; init; }
+
+    // An inclusive upper bound the shader's own clamps prove for the selector, when one exists.
+    public uint? SelectorBound { get; init; }
     public IReadOnlyList<DirectImageCandidate>? DirectCandidates { get; init; }
     public bool Dense { get; init; }
     public uint TableOffset { get; init; }

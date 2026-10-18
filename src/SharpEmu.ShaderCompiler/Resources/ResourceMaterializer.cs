@@ -1388,19 +1388,56 @@ public static partial class ResourceMaterializer
             }
         }
         var records = (ulong)material.Dwords[2];
-        if (provenOffsets is null && (indirect.SharedSelector ? records : probeCount) > MaxIndirectImageProbes)
+        // A selector the shader clamps or masks reaches exactly selector * stride + offset for
+        // selector in [0, bound]; that set is proven, so it replaces the exhaustive enumeration
+        // of every residue + k * step (the product wraps modulo 2^32 for an unbounded selector).
+        IEnumerable<ulong> offsets;
+        if (provenOffsets is not null)
         {
+            offsets = provenOffsets.Select(offset => (ulong)offset);
+        }
+        else if (indirect.SelectorBound is { } bound)
+        {
+            var last = (ulong)bound;
+            if (last * indirect.SelectorStride + indirect.SelectorOffset <= uint.MaxValue)
+            {
+                last = indirect.SelectorOffset > limit ? 0 : Math.Min(last, (limit - indirect.SelectorOffset) / indirect.SelectorStride);
+            }
+
+            if (last + 1 > MaxIndirectImageProbes)
+            {
+                failure = ResourceMaterializationFailure.ImageCapacityExceeded;
+                return false;
+            }
+
+            if (diagnostic is not null)
+            {
+                diagnostic.SelectionMode = "clamp_bounded";
+            }
+
+            offsets = Enumerable.Range(0, (int)last + 1)
+                .Select(selector => unchecked((ulong)((uint)selector * indirect.SelectorStride + indirect.SelectorOffset)))
+                .Distinct();
+        }
+        // A loop counter walks the table record by record: the keys are the ones its records hold, not every dword
+        // the stride lattice reaches. Anything past the last record reads as zero, which is key 0.
+        else if (indirect.SharedSelector && records <= MaxIndirectImageProbes)
+        {
+            offsets = Enumerable.Range(0, (int)records).Select(index => (ulong)unchecked(indirect.SelectorOffset + (uint)index * materialStride));
+        }
+        else if (!indirect.SharedSelector && probeCount <= MaxIndirectImageProbes)
+        {
+            offsets = Enumerable.Range(0, (int)probeCount).Select(index => residue + (ulong)index * step);
+        }
+        else
+        {
+            // A table this large cannot be enumerated into bindings.
+            failure = ResourceMaterializationFailure.ImageCapacityExceeded;
             return false;
         }
 
         var keys = new List<uint> { 0 };
         var seen = new HashSet<uint> { 0 };
-        // A loop counter walks the table record by record: the keys are the ones its records hold, not every dword
-        // the stride lattice reaches. Anything past the last record reads as zero, which is key 0.
-        var offsets = provenOffsets is not null ? provenOffsets.Select(offset => (ulong)offset) :
-            indirect.SharedSelector ?
-                Enumerable.Range(0, (int)records).Select(index => (ulong)unchecked(indirect.SelectorOffset + (uint)index * materialStride)) :
-                Enumerable.Range(0, (int)probeCount).Select(index => residue + (ulong)index * step);
         foreach (var offset in offsets)
         {
             if (!ReadScalarBufferWord(material.Dwords, (uint)offset, indirect.MaterialImmediate, inputs, out var key))

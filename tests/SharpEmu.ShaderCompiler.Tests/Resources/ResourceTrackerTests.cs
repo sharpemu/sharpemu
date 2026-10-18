@@ -611,7 +611,7 @@ public sealed class ResourceTrackerTests
 
     // The material table s[0:3], the heap s[4:7], the key selector in s8; the image words
     // come from the heap record the key selects.
-    internal static Gen5ShaderProgram IndirectImageProgram(bool malformed, int materialImmediate = 0, bool memoryBackedMaterial = false)
+    internal static Gen5ShaderProgram IndirectImageProgram(bool malformed, int materialImmediate = 0, bool memoryBackedMaterial = false, bool laneKey = false, (string Opcode, uint Value)? selectorClamp = null)
     {
         var instructions = new List<Gen5ShaderInstruction>();
         uint pc = 0x1000;
@@ -625,7 +625,14 @@ public sealed class ResourceTrackerTests
             Add(At(current => ScalarLoad(current, 28, destination: 0)));
         }
 
-        Add(At(current => Vop1(current, "VMovB32", 1, Gen5Operand.Scalar(8))));
+        Add(At(current => Vop1(current, "VMovB32", 1, laneKey ? Gen5Operand.Vector(0) : Gen5Operand.Scalar(8))));
+        if (selectorClamp is { } clamp)
+        {
+            Add(At(current => clamp.Opcode == "VMed3U32" ?
+                Vop3(current, "VMed3U32", 1, Operand(0), Operand(clamp.Value), Gen5Operand.Vector(1)) :
+                Vop2(current, clamp.Opcode, 1, Operand(clamp.Value), Gen5Operand.Vector(1))));
+        }
+
         Add(At(current => ReadFirstLane(current, 9, 1)));
         Add(At(current => Sop2(current, "SMulI32", 10, Gen5Operand.Scalar(9), Operand(224))));
         Add(At(current => Sop2(current, "SAddU32", 11, Gen5Operand.Scalar(10), Operand(4))));
