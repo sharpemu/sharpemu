@@ -397,9 +397,26 @@ public static partial class Gen5SpirvTranslator
         {
             var mesh = _request.Mesh!.Value;
             var parameterBase = _request.Bindings.MeshDrawParametersDword;
-            var drawCount = LoadShaderDataDword(UInt(parameterBase));
-            var firstVertex = LoadShaderDataDword(UInt(parameterBase + 1));
-            var firstInstance = LoadShaderDataDword(UInt(parameterBase + 2));
+            var parameters = new uint[6];
+            for (var index = 0; index < parameters.Length; index++)
+            {
+                parameters[index] = DeclarePrivateValue(_uintType);
+                Store(parameters[index], LoadShaderDataDword(UInt(parameterBase + (uint)index)));
+            }
+            // The reserved index-size tag selects a submission-owned parameter block.
+            // Both modes keep the same six-word shader-data layout.
+            var dynamicParameters = _module.AddInstruction(SpirvOp.IEqual, _boolType,
+                Load(_uintType, parameters[3]), UInt(uint.MaxValue));
+            EmitConditional(dynamicParameters, () =>
+            {
+                var address = Pair64(Load(_uintType, parameters[4]), Load(_uintType, parameters[5]));
+                for (var index = 0; index < parameters.Length; index++)
+                    Store(parameters[index], _module.AddInstruction(SpirvOp.Load, _uintType,
+                        DeviceWordPointer(IAdd64(address, ULong((ulong)index * 4))), 2u, 4u));
+            });
+            var drawCount = Load(_uintType, parameters[0]);
+            var firstVertex = Load(_uintType, parameters[1]);
+            var firstInstance = Load(_uintType, parameters[2]);
             var lane = MeshInvocationIndex();
             var group = Load(_uvec3Type, _workGroupIdInput);
             var groupX = _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, group, 0);
@@ -444,12 +461,11 @@ public static partial class Gen5SpirvTranslator
             var vertexOrdinal = IAdd(vertexStart, lane);
             var vertexIndex = DeclarePrivateValue(_uintType);
             Store(vertexIndex, IAdd(firstVertex, vertexOrdinal));
-            var indexed = IsNotZero(LoadShaderDataDword(UInt(parameterBase + 3)));
+            var indexed = IsNotZero(Load(_uintType, parameters[3]));
             var inputActive = _module.AddInstruction(SpirvOp.ULessThan, _boolType, lane, vertices);
             EmitConditional(LogicalAnd(indexed, inputActive), () =>
             {
-                var address = Pair64(LoadShaderDataDword(UInt(parameterBase + 4)),
-                    LoadShaderDataDword(UInt(parameterBase + 5)));
+                var address = Pair64(Load(_uintType, parameters[4]), Load(_uintType, parameters[5]));
                 var offset = _module.AddInstruction(SpirvOp.IMul, _ulongType, Widen(vertexOrdinal), ULong(4));
                 Store(vertexIndex, _module.AddInstruction(SpirvOp.Load, _uintType,
                     DeviceWordPointer(IAdd64(address, offset)), 2u, 4u));

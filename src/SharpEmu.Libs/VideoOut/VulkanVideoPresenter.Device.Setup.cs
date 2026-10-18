@@ -1267,6 +1267,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     _cmdDrawMeshTasks = (delegate* unmanaged<CommandBuffer, uint, uint, uint, void>)
                         _vk.GetDeviceProcAddr(_device, "vkCmdDrawMeshTasksEXT").Handle;
+                    _cmdDrawMeshTasksIndirect = (delegate* unmanaged<CommandBuffer, Silk.NET.Vulkan.Buffer, ulong, uint, uint, void>)
+                        _vk.GetDeviceProcAddr(_device, "vkCmdDrawMeshTasksIndirectEXT").Handle;
                     if (_cmdDrawMeshTasks is null)
                     {
                         throw SubmissionScheduler.Fatal("The mesh shader command is unavailable after enabling VK_EXT_mesh_shader.");

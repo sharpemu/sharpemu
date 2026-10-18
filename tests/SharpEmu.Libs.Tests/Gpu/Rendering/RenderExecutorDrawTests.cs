@@ -230,8 +230,15 @@ public sealed class RenderExecutorDrawTests : IDisposable
     [InlineData(0x00402000u, false)]
     [InlineData(0x2030u, false, true)]
     [InlineData(0x2030u, true, true)]
-    public void IndexedMeshDrawUploadsIndicesWithinPreparation(uint stages, bool strip, bool indirect = false)
+    [InlineData(0x2030u, false, true, true)]
+    [InlineData(0x2030u, true, true, true)]
+    [InlineData(0x2030u, false, true, true, true)]
+    [InlineData(0x2030u, false, true, true, true, true)]
+    [InlineData(0x2030u, false, true, false, false, true)]
+    public void IndexedMeshDrawUploadsIndicesWithinPreparation(uint stages, bool strip, bool indirect = false,
+        bool gpuIndirect = false, bool unbounded = false, bool restartBit = false)
     {
+        _host.SupportsIndirectMeshDraw = gpuIndirect;
         _pipelines.MeshShadersSupported = true;
         _pipelines.Graphics = new GraphicsPrograms
         {
@@ -256,6 +263,8 @@ public sealed class RenderExecutorDrawTests : IDisposable
         var banks = Banks(withDepth: indirect);
         banks.Context.ShaderStages = stages;
         banks.UserConfig.PrimitiveType = strip ? 6u : 4u;
+        // Restart has no effect on a list, so the enable bit must not change the path or the indices.
+        if (restartBit) banks.UserConfig.PrimitiveResetControl = 1;
         _host.WriteGuest(IndexBase + (indirect ? 8ul : 0), [7, 0, 2, 0, 7, 0, 9, 0, 4, 0, 2, 0]);
         var arguments = Indexed(6, instances: 2, baseVertex: -1);
         if (indirect)
@@ -264,9 +273,21 @@ public sealed class RenderExecutorDrawTests : IDisposable
             arguments = Indexed(40, source: DrawOffsetSource.IndirectArguments) with
             {
                 IndirectArgumentsAddress = IndirectArguments,
+                UnboundedIndexBuffer = unbounded,
             };
         }
         _executor.DrawIndexed(1, banks, arguments);
+        if (gpuIndirect && !strip)
+        {
+            Assert.Equal(0, _host.GuestReads);
+            Assert.Null(_host.MeshIndices);
+            Assert.Equal(new MeshDrawParameters(0, 0, 0, uint.MaxValue, 0x9000), parameters);
+            Assert.Equal(40u, _host.IndirectMeshRequest!.Value.IndexCapacity);
+            AssertOrder("preparation_begin", "acquire_indirect_mesh", "prepare_bindings",
+                "prepare_indirect_mesh", "draw_indirect_mesh", "dispose_indirect_mesh", "preparation_end");
+            return;
+        }
+        Assert.Null(_host.IndirectMeshRequest);
         Assert.Equal(strip ? new uint[] { 6, 1, 6, 1, 8, 6, 6, 8, 3, 8, 1, 3 }
             : [6, 1, 6, 8, 3, 1], _host.MeshIndices);
         Assert.Equal(new MeshDrawParameters(strip ? 12u : 6u, 0, indirect ? 5u : 0u, 4, 0x8000), parameters);

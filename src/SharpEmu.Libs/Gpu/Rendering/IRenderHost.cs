@@ -136,6 +136,11 @@ public interface IRenderHost
     ulong UploadMeshVertexIndices(ReadOnlySpan<uint> indices) =>
         throw new NotSupportedException("The renderer does not support indexed mesh inputs.");
 
+    bool SupportsIndirectMeshDraw => false;
+
+    IIndirectMeshDraw PrepareIndirectMeshDraw(in IndirectMeshDrawRequest request) =>
+        throw new NotSupportedException("The renderer does not support indirect mesh inputs.");
+
     void BindVertexBuffers(ReadOnlySpan<BufferBinding> bindings, VertexInputInfo input);
 
     void BindIndexBuffer(BufferBinding binding, IndexType type);

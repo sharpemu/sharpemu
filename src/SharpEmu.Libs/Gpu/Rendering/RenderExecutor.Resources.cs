@@ -242,6 +242,11 @@ public sealed partial class RenderExecutor
         var pixelInput = state.Programs.PixelInput;
         var meshInput = state.Programs.MeshInput;
         using var preparation = _host.BeginPreparation();
+        using var indirectMesh = meshInput is not null && emission.IndirectArgumentsAddress != 0
+            ? _host.PrepareIndirectMeshDraw(new IndirectMeshDrawRequest(emission.IndirectArgumentsAddress,
+                indexSource.Address, draw.Count, indexSource.Type == IndexType.Uint16 ? 2u : 4u,
+                topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution))
+            : null;
         var meshVertexCount = draw.Count;
         if (MeshDrawTrace.Active)
             MeshDrawTrace.Write("programs", $"mesh={meshInput is not null} vertexHash=0x{vertexInput.Stage.Program?.Hash:X16} pixelHash=0x{pixelInput.Stage.Program?.Hash:X16} pixelActive={state.PixelActive}");
@@ -253,7 +258,7 @@ public sealed partial class RenderExecutor
             }
 
             ulong indexAddress = 0;
-            if (emission.Indexed)
+            if (emission.Indexed && indirectMesh is null)
             {
                 var byteCount = checked((int)indexSource.Size);
                 var elementSize = indexSource.Type == IndexType.Uint16 ? 2u : 4u;
@@ -289,8 +294,10 @@ public sealed partial class RenderExecutor
             }
             vertexInput.Stage = vertexInput.Stage with
             {
-                MeshDraw = new MeshDrawParameters(meshVertexCount, emission.Indexed ? 0 : emission.FirstVertex,
-                    emission.FirstInstance, emission.Indexed ? 4u : 0u, indexAddress),
+                MeshDraw = indirectMesh is null
+                    ? new MeshDrawParameters(meshVertexCount, emission.Indexed ? 0 : emission.FirstVertex,
+                        emission.FirstInstance, emission.Indexed ? 4u : 0u, indexAddress)
+                    : new MeshDrawParameters(0, 0, 0, uint.MaxValue, indirectMesh.ParametersAddress),
             };
         }
         IPreparedBindings vertexBindings;
@@ -332,7 +339,7 @@ public sealed partial class RenderExecutor
 
         var vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : [];
         var indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
-        var indirectArguments = emission.IndirectArgumentsAddress != 0
+        var indirectArguments = meshInput is null && emission.IndirectArgumentsAddress != 0
             ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, IndexedIndirectArgumentsSize, isWritten: false)
             : default;
         DropUnwrittenColorTargets(context, ref state, pixelProgram);
@@ -389,6 +396,7 @@ public sealed partial class RenderExecutor
         }
 
         var imageSnapshot = _host.BeginImageSnapshot(pixelBindings);
+        indirectMesh?.Prepare();
         _host.BeginRendering(in state.Rendering);
         if (MeshDrawTrace.Active) MeshDrawTrace.Write("rendering", $"width={state.Rendering.Width} height={state.Rendering.Height} layers={state.Rendering.Layers} colors={state.ColorCount}");
         _host.BindPipeline(PipelineBindPoint.Graphics, in pipeline);
@@ -400,7 +408,12 @@ public sealed partial class RenderExecutor
         if (indexedTrace is { } trace)
             _host.InsertDrawTraceMarker(IndexedDrawTrace.CreateLabel(trace, submitId, packetAddress));
 
-        if (meshInput is { } mesh)
+        if (indirectMesh is not null)
+        {
+            indirectMesh.Draw();
+            if (MeshDrawTrace.Active) MeshDrawTrace.Recorded();
+        }
+        else if (meshInput is { } mesh)
         {
             var primitiveCount = mesh.Geometry.InputPointList ? meshVertexCount
                 : mesh.Geometry.InputTriangleStrip ? (meshVertexCount >= 3 ? meshVertexCount - 2 : 0) : meshVertexCount / 3;

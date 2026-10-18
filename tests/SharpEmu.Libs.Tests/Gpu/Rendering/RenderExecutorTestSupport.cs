@@ -97,6 +97,26 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public bool SupportsNativeRectangles { get; set; }
 
+    public bool SupportsIndirectMeshDraw { get; set; }
+
+    public IndirectMeshDrawRequest? IndirectMeshRequest { get; private set; }
+
+    public IIndirectMeshDraw PrepareIndirectMeshDraw(in IndirectMeshDrawRequest request)
+    {
+        Assert.True(PreparationDepth > 0);
+        IndirectMeshRequest = request;
+        Calls.Add("acquire_indirect_mesh");
+        return new IndirectMesh(this);
+    }
+
+    private sealed class IndirectMesh(RecordingRenderHost owner) : IIndirectMeshDraw
+    {
+        public ulong ParametersAddress => 0x9000;
+        public void Prepare() => owner.Calls.Add("prepare_indirect_mesh");
+        public void Draw() => owner.Calls.Add("draw_indirect_mesh");
+        public void Dispose() => owner.Calls.Add("dispose_indirect_mesh");
+    }
+
     public IImageFormatSupport FormatSupport { get; } = new AcceptingFormatSupport();
 
     public bool IsRecording => Recording;

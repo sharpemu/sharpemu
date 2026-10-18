@@ -100,9 +100,8 @@ public sealed partial class RenderExecutor
         using var meshTrace = MeshDrawTrace.Begin(submitId, banks.Shader.Vertex.ExportAddress, banks.Context.ShaderStages);
         try
         {
-            // Mesh index assembly needs the resolved counts and offsets on the CPU.
             if (arguments.IndirectArgumentsAddress != 0 &&
-                (UsesMeshExecution(banks) || !CanDrawIndirectOnGpu(banks, in arguments)))
+                (UsesMeshExecution(banks) ? !CanDrawMeshIndirectOnGpu(banks, in arguments) : !CanDrawIndirectOnGpu(banks, in arguments)))
             {
                 DrawIndexedWithCpuArguments(submitId, banks, in arguments);
                 return;
@@ -156,6 +155,25 @@ public sealed partial class RenderExecutor
     }
 
     private const ulong MaxIndirectIndexBufferBytes = 64ul << 20;
+
+    // List inputs ignore restart and use the learned index extent as their capacity.
+    // Other mesh inputs keep the CPU path.
+    private bool CanDrawMeshIndirectOnGpu(RegisterBanks banks, in DrawIndexedArguments arguments)
+    {
+        if (!_host.SupportsIndirectMeshDraw ||
+            arguments.IndexCount is 0 or > IndirectMeshDrawRequest.MaximumIndexCapacity ||
+            (GuestPrimitiveType)banks.UserConfig.PrimitiveType is not (GuestPrimitiveType.PointList or GuestPrimitiveType.TriangleList) ||
+            (GuestIndexType)arguments.IndexTypeAndSize is not (GuestIndexType.Index16 or GuestIndexType.Index32))
+            return false;
+        var elementSize = (GuestIndexType)arguments.IndexTypeAndSize == GuestIndexType.Index16 ? 2ul : 4ul;
+        var start = arguments.IndexAddress & ~3ul;
+        var size = ((arguments.IndexAddress - start + arguments.IndexCount * elementSize) + 3) & ~3ul;
+        if ((arguments.IndirectArgumentsAddress & 3) != 0 || (arguments.IndexAddress & (elementSize - 1)) != 0 ||
+            start > ulong.MaxValue - size || arguments.IndirectArgumentsAddress > ulong.MaxValue - IndexedIndirectArgumentsSize)
+            return false;
+        return _host.ClampMappedSize(start, size) == size &&
+            _host.ClampMappedSize(arguments.IndirectArgumentsAddress, IndexedIndirectArgumentsSize) == IndexedIndirectArgumentsSize;
+    }
 
     // Reads the indirect arguments now and draws from them, as the interpreter would have.
     private void DrawIndexedWithCpuArguments(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)

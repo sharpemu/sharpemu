@@ -1366,6 +1366,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void DestroyRenderPipelines()
         {
+            _meshIndirectPipeline?.Dispose();
+            _meshIndirectPipeline = null;
             foreach (var entry in _pipelineEntries.Values)
             {
                 foreach (var pipeline in new[] { entry.Pipeline, entry.StripVariant, entry.ListVariant, entry.RectangleVariant })

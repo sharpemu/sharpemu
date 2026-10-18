@@ -29,7 +29,16 @@ public sealed unsafe partial class RenderHostDeviceTests
     public void MeshDrawRendersGuestInputsAndRetainsUploadedIndices(uint waveSize, bool indexed)
         => RenderMeshDraw(waveSize, indexed);
 
-    private void RenderMeshDraw(uint waveSize, bool indexed, ulong? traceShaderAddress = null)
+    [Theory]
+    [InlineData(32u, false)]
+    [InlineData(64u, false)]
+    [InlineData(32u, true)]
+    [InlineData(64u, true)]
+    public void IndirectMeshDrawRendersGuestInputs(uint waveSize, bool wideIndices)
+        => RenderMeshDraw(waveSize, true, indirect: true, wideIndices: wideIndices);
+
+    private void RenderMeshDraw(uint waveSize, bool indexed, ulong? traceShaderAddress = null,
+        bool indirect = false, bool wideIndices = false)
     {
         if (!GatePrerequisites.Ready(_vulkan, shaderInt64: true)) return;
         if (!_vulkan.SupportsMeshShaders || !_vulkan.SupportsDynamicRendering || _vulkan.SubgroupSize != 32)
@@ -43,6 +52,12 @@ public sealed unsafe partial class RenderHostDeviceTests
         var command = (IntPtr)(void*)_vulkan.Vk.GetDeviceProcAddr(_vulkan.Device, "vkCmdDrawMeshTasksEXT");
         Assert.NotEqual(IntPtr.Zero, command);
         presenter.SetField("_cmdDrawMeshTasks", command);
+        if (indirect)
+        {
+            var indirectCommand = (IntPtr)(void*)_vulkan.Vk.GetDeviceProcAddr(_vulkan.Device, "vkCmdDrawMeshTasksIndirectEXT");
+            Assert.NotEqual(IntPtr.Zero, indirectCommand);
+            presenter.SetField("_cmdDrawMeshTasksIndirect", indirectCommand);
+        }
         var harness = presenter.Harness;
         var target = harness.MapBacked(0x10000, ReadWrite);
         var words = RegisterWords.Color(target, Size, Size);
@@ -54,10 +69,27 @@ public sealed unsafe partial class RenderHostDeviceTests
         if (indexed)
         {
             var indices = harness.MapBacked(0x10000, ReadWrite);
-            harness.Write(indices, [1, 0, 2, 0, 3, 0]);
-            presenter.Run(() => executor.DrawIndexed(1, banks,
-                new DrawIndexedArguments(0, 0, 3, indices, 0, 1, -1, 0, DrawOffsetSource.Packet)));
-            Assert.Equal(0UL, presenter.HostBuffers.CachedBytes);
+            if (indirect)
+            {
+                harness.Write(indices, wideIndices
+                    ? [99, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0]
+                    : [99, 0, 1, 0, 2, 0, 3, 0]);
+                var arguments = harness.MapBacked(0x10000, ReadWrite);
+                var sourceArguments = harness.MapBacked(0x10000, ReadWrite);
+                harness.Write(sourceArguments, [3, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0,
+                    255, 255, 255, 255, 0, 0, 0, 0]);
+                presenter.Run(() => harness.Cache.CopyBuffer(arguments, sourceArguments, 20, false, false));
+                presenter.Run(() => executor.DrawIndexed(1, banks,
+                    new DrawIndexedArguments(0, 0, 4, indices, wideIndices ? 1u : 0u, 1, 0, 0,
+                        DrawOffsetSource.Packet) with { IndirectArgumentsAddress = arguments }));
+            }
+            else
+            {
+                harness.Write(indices, [1, 0, 2, 0, 3, 0]);
+                presenter.Run(() => executor.DrawIndexed(1, banks,
+                    new DrawIndexedArguments(0, 0, 3, indices, 0, 1, -1, 0, DrawOffsetSource.Packet)));
+                Assert.Equal(0UL, presenter.HostBuffers.CachedBytes);
+            }
         }
         else
         {
@@ -66,7 +98,7 @@ public sealed unsafe partial class RenderHostDeviceTests
         presenter.Run(() => presenter.InvokeMethod("FlushBatchedGuestCommands"));
         harness.Finish();
         presenter.Run(() => presenter.InvokeMethod("WaitForAllGuestSubmissions"));
-        if (indexed) Assert.Equal(16UL, presenter.HostBuffers.CachedBytes);
+        if (indexed && !indirect) Assert.Equal(16UL, presenter.HostBuffers.CachedBytes);
         var pixels = harness.ReadImageBytes(TargetImage(presenter, words));
         Assert.All(Enumerable.Range(0, (int)(Size * Size)), index =>
             Assert.Equal(Red, BitConverter.ToUInt32(pixels, index * 4)));
