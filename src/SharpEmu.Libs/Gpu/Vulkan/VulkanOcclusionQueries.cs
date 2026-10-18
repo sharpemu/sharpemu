@@ -7,21 +7,33 @@ using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Vulkan;
 
-internal sealed unsafe class VulkanOcclusionQueries(Vk vulkan, Device device) : IDisposable
+internal sealed unsafe partial class VulkanOcclusionQueries(Vk vulkan, Device device) : IDisposable
 {
     private const uint Capacity = 256;
+    private sealed class Group
+    {
+        public ulong Sum;
+        public long Recorded;
+        public long Completed;
+        public ulong SubmittedTick;
+        public readonly Queue<(long Needed, Action<ulong> Publish)> Dumps = new();
+    }
+
     private sealed class Block(QueryPool pool)
     {
         public readonly QueryPool Pool = pool;
         public readonly int[] Queues = new int[Capacity];
+        public readonly Group?[] Groups = new Group?[Capacity];
         public readonly long[] TraceIds = VisibilityResultTrace.Enabled ? new long[Capacity] : [];
         public uint Count;
+        public uint ReducedCount;
     }
 
     private readonly List<Block> _blocks = new();
     private readonly Stack<Block> _available = new();
     private readonly List<Block> _recorded = new();
     private readonly Dictionary<int, ulong> _samples = new();
+    private readonly Dictionary<int, Group> _groups = new();
     private Block? _current;
     private bool _active;
     private long _traceId;
@@ -29,6 +41,40 @@ internal sealed unsafe class VulkanOcclusionQueries(Vk vulkan, Device device) : 
     private int _traceSelectedDraws;
 
     public ulong Read(int queueId) => _samples.GetValueOrDefault(queueId);
+
+    public bool HasUnsubmitted => _recorded.Count != 0;
+
+    internal ulong SubmittedTick(int queueId) => GroupOf(queueId).SubmittedTick;
+
+    private Group GroupOf(int queueId)
+    {
+        if (!_groups.TryGetValue(queueId, out var group))
+            _groups[queueId] = group = new Group();
+        return group;
+    }
+
+    public void Reset(int queueId)
+    {
+        if (_active)
+            throw SubmissionScheduler.Fatal("An occlusion query must end before the counter resets.");
+        ResetGpuCounter(queueId);
+        _groups[queueId] = new Group();
+    }
+
+    public bool Dump(int queueId, Action<ulong> publish)
+    {
+        if (_active)
+            throw SubmissionScheduler.Fatal("An occlusion query must end before the counter is dumped.");
+        var group = GroupOf(queueId);
+        if (group.Completed == group.Recorded && group.Dumps.Count == 0)
+        {
+            publish(group.Sum);
+            return true;
+        }
+
+        group.Dumps.Enqueue((group.Recorded, publish));
+        return false;
+    }
 
     public void Begin(CommandBuffer command, int queueId, uint depthCountControl = 0)
     {
@@ -53,11 +99,15 @@ internal sealed unsafe class VulkanOcclusionQueries(Vk vulkan, Device device) : 
             }
 
             _current.Count = 0;
+            _current.ReducedCount = 0;
             _recorded.Add(_current);
             vulkan.CmdResetQueryPool(command, _current.Pool, 0, Capacity);
         }
 
         _current.Queues[_current.Count] = queueId;
+        var group = GroupOf(queueId);
+        group.Recorded++;
+        _current.Groups[_current.Count] = group;
         vulkan.CmdBeginQuery(command, _current.Pool, _current.Count, QueryControlFlags.PreciseBit);
         _active = true;
         if (VisibilityResultTrace.Enabled)
@@ -90,8 +140,11 @@ internal sealed unsafe class VulkanOcclusionQueries(Vk vulkan, Device device) : 
         if (_active)
             throw SubmissionScheduler.Fatal("An occlusion query must end before submission.");
 
+        ReduceRecordedQueries();
         foreach (var block in _recorded)
         {
+            for (var index = 0; index < block.Count; index++)
+                if (block.Groups[index] is { } group) group.SubmittedTick = scheduler.CurrentTick;
             var submitted = block;
             scheduler.QueueCompletionAction(() => Complete(submitted));
         }
@@ -114,6 +167,17 @@ internal sealed unsafe class VulkanOcclusionQueries(Vk vulkan, Device device) : 
         {
             var queueId = block.Queues[index];
             _samples[queueId] = unchecked(_samples.GetValueOrDefault(queueId) + results[index]);
+            if (block.Groups[index] is { } group)
+            {
+                block.Groups[index] = null;
+                group.Sum = unchecked(group.Sum + results[index]);
+                group.Completed++;
+                while (group.Dumps.TryPeek(out var dump) && dump.Needed <= group.Completed)
+                {
+                    group.Dumps.Dequeue();
+                    dump.Publish(group.Sum);
+                }
+            }
             if (VisibilityResultTrace.Enabled)
                 VisibilityResultTrace.Occlusion($"complete query={block.TraceIds[index]} queue={queueId} samples={results[index]} cumulative={_samples[queueId]}");
         }
@@ -123,6 +187,7 @@ internal sealed unsafe class VulkanOcclusionQueries(Vk vulkan, Device device) : 
 
     public void Dispose()
     {
+        DisposeGpuResults();
         foreach (var block in _blocks)
             vulkan.DestroyQueryPool(device, block.Pool, null);
         _blocks.Clear();

@@ -58,6 +58,12 @@ internal sealed class PresenterUnderTest : IDisposable
         SetField("_supportsShaderClipDistance", vulkan.SupportsClipDistance);
         SetField("_deviceInfo", vulkan.DeviceInfo);
         SetField("_scheduler", Harness.Scheduler);
+        SetField("_guestPublications", new PendingGuestPublications());
+        Harness.Cache.CompleteGuestPublications = (address, size, access) =>
+            InvokeMethod("CompleteOverlappingPublications", address, size, access == GuestBufferCache.PublicationAccess.Write,
+                access == GuestBufferCache.PublicationAccess.OverlaidRead);
+        Harness.Cache.OverlayGuestPublications = (buffer, offset, address, size) =>
+            InvokeMethod("OverlayPendingDumps", buffer, offset, address, size);
         SetField("_relay", Harness.Worker.Relay);
         SetField("_bufferCache", Harness.Cache);
         SetField("_imageCache", Harness.Images);
@@ -144,6 +150,7 @@ internal sealed class PresenterUnderTest : IDisposable
                 }
 
                 InvokeMethod("WaitForAllGuestSubmissions");
+                GetField<SharpEmu.Libs.Gpu.Vulkan.VulkanOcclusionQueries?>("_occlusionQueries")?.Dispose();
                 DestroyPipelineResources();
                 Samplers.Dispose();
                 HostBuffers.Dispose();

@@ -189,6 +189,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 ? memo.OriginalResolution
                 : ImageRequestBuilders.Texture(words, ShapeOf(image), program.Hash, index);
             TraceImageLookup(image, words, program, index, originalResolution.Request);
+            CompleteOverlappingPublications(originalResolution.Request.Description.Data.Address,
+                originalResolution.Request.Description.Data.Size, includeLabels: false);
             _imageCache.SynchronizeColorMetadata(originalResolution.Request);
             _ = BeginBatchedGuestCommands();
             TextureRequestResolution resolution;

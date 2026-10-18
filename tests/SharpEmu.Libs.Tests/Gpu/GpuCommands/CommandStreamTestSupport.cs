@@ -29,6 +29,30 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public Func<int, ulong>? ReadOcclusionSamples { get; set; }
 
+    public Func<int, bool>? PendingPublications { get; set; }
+
+    public Func<int, EndOfPipeWrite, bool>? DeferredEndOfPipe { get; set; }
+    public Func<ulong, ulong, bool>? PendingMemoryPublication { get; set; }
+    public bool TryDeferEndOfPipe(int queueId, in EndOfPipeWrite write) => DeferredEndOfPipe?.Invoke(queueId, write) == true;
+    public bool HasPendingMemoryPublication(ulong address, ulong size) => PendingMemoryPublication?.Invoke(address, size) == true;
+    public DeferredLabelReader? DeferredLabelRead { get; set; }
+    public delegate bool OrderedWriteDeferrer(int queueId, ulong address, ReadOnlySpan<byte> source);
+    public OrderedWriteDeferrer? OrderedWrite { get; set; }
+    public Func<int, bool>? CrossQueueHold { get; set; }
+    public bool TryDeferOrderedWrite(int queueId, ulong address, ReadOnlySpan<byte> source) =>
+        OrderedWrite?.Invoke(queueId, address, source) == true;
+    public bool MustHoldForCrossQueueOrder(int queueId) => CrossQueueHold?.Invoke(queueId) == true;
+    public delegate bool DeferredLabelReader(int queueId, ulong address, ulong size, out bool deferred, out ulong value);
+    public bool TryReadDeferredLabel(int queueId, ulong address, ulong size, out bool deferred, out ulong value)
+    {
+        if (DeferredLabelRead is { } read) return read(queueId, address, size, out deferred, out value);
+        deferred = false;
+        value = 0;
+        return !HasPendingMemoryPublication(address, size);
+    }
+
+    public bool HasPendingPublications(int queueId) => PendingPublications?.Invoke(queueId) == true;
+
     public bool TryReadOcclusionCounter(int queueId, out ulong value)
     {
         value = ReadOcclusionSamples?.Invoke(queueId) ?? 0;
@@ -47,6 +71,7 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
     }
 
     public List<EndOfPipeWrite> EndOfPipeWrites { get; } = new();
+    public Action<EndOfPipeWrite>? EndOfPipeRecorded { get; set; }
 
     public List<ulong> GuestReads { get; } = new();
 
@@ -163,6 +188,7 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
     {
         EndOfPipeWrites.Add(write);
         Calls.Add($"eop {write.Kind}");
+        EndOfPipeRecorded?.Invoke(write);
     }
 
     public void TriggerInterrupt(int eventId, uint contextId) => Calls.Add($"interrupt {eventId} {contextId}");
@@ -248,9 +274,9 @@ internal sealed class StreamRunner
     public const ulong TableAddress = RecordingCommandStreamHost.MemoryBase + 0x9000;
     public const ulong DataAddress = RecordingCommandStreamHost.MemoryBase + 0xA000;
 
-    public StreamRunner(int queueId = 0)
+    public StreamRunner(int queueId = 0, RecordingCommandStreamHost? host = null)
     {
-        Host = new RecordingCommandStreamHost();
+        Host = host ?? new RecordingCommandStreamHost();
         Interpreter = new GpuCommandInterpreter(Host, queueId, queueId == 0 ? 0 : GpuCommandInterpreter.ComputeQueueBase + queueId - 1);
     }
 

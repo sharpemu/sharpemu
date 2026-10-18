@@ -106,6 +106,10 @@ internal static unsafe partial class VulkanVideoPresenter
             var (memory, guest, backing) = RequireGuestMemory("buffer store");
             _guestBacking = backing;
             _bufferCache = new GuestBufferCache(_deviceInfo, _scheduler, _relay, memory.Pages, guest, backing);
+            _bufferCache.CompleteGuestPublications = (address, size, access) => CompleteOverlappingPublications(address, size,
+                includeLabels: access == GuestBufferCache.PublicationAccess.Write,
+                skipGpuSlots: access == GuestBufferCache.PublicationAccess.OverlaidRead);
+            _bufferCache.OverlayGuestPublications = OverlayPendingDumps;
             _bufferCache.StreamOffsetAlignment = Math.Max(_bufferCache.StreamOffsetAlignment, GuestStorageBufferOffsetAlignment);
             if (_readbackQueueFamilyIndex is { } readbackFamily)
             {

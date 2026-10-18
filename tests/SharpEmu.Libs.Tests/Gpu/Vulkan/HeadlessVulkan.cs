@@ -355,6 +355,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         var enabledFeatures = new PhysicalDeviceFeatures
         {
             GeometryShader = baseFeatures.GeometryShader,
+            OcclusionQueryPrecise = baseFeatures.OcclusionQueryPrecise,
             SampleRateShading = baseFeatures.SampleRateShading,
             SamplerAnisotropy = baseFeatures.SamplerAnisotropy,
             ShaderStorageImageExtendedFormats = baseFeatures.ShaderStorageImageExtendedFormats,

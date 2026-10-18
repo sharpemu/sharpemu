@@ -532,6 +532,11 @@ public sealed partial class GpuCommandInterpreter
     // The caller name labels the packet handler in the image-clear trace.
     internal void WriteBytes(ulong address, ReadOnlySpan<byte> source, [CallerMemberName] string caller = "")
     {
+        if (_host.TryDeferOrderedWrite(QueueId, address, source))
+        {
+            _lastWriteLength = 0;
+            return;
+        }
         if (!_host.Memory.TryWrite(address, source))
         {
             throw _host.Fatal($"The command stream cannot write guest memory: address=0x{address:X16} size={source.Length}.");

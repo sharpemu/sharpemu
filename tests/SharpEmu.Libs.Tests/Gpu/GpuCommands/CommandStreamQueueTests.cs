@@ -120,6 +120,17 @@ public sealed class CommandStreamQueueTests
     }
 
     [Fact]
+    public void CpuFlipCapturesInOrderWithoutWaitingForPublication()
+    {
+        var (host, queue) = NewQueue();
+        var pending = true;
+        host.PendingPublications = _ => pending;
+        Assert.True(queue.TryEnqueueFlipPreparation(1, 2, 77));
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Contains("cpu_flip 1 2 77", host.Calls);
+    }
+
+    [Fact]
     public void SubmitIds_AreSharedAcrossQueuesAndEventIdsFollowTheQueue()
     {
         var (host, queue) = NewQueue();

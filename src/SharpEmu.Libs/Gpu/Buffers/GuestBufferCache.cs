@@ -94,6 +94,14 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public IGuestImageCache? ImageCache { get; set; }
 
+    // An overlaid read gets pending dump values copied in by OverlayGuestPublications instead of waiting.
+    internal enum PublicationAccess { Read, OverlaidRead, Write }
+
+    internal Action<ulong, ulong, PublicationAccess>? CompleteGuestPublications { get; set; }
+
+    // Arguments: buffer, offset of the guest address in that buffer, guest address, size.
+    internal Action<GpuBuffer, ulong, ulong, ulong>? OverlayGuestPublications { get; set; }
+
     public GpuBuffer GdsBuffer => _gds;
 
     public GpuBuffer BdaPageTableBuffer => _bdaPageTable;
@@ -203,6 +211,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     public (GpuBuffer Buffer, ulong Offset) ObtainBuffer(ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer = false,
         ResourceSlotIdentifier bufferIdentifier = default, ulong traceShaderHash = 0)
     {
+        CompleteGuestPublications?.Invoke(guestAddress, size, isWritten ? PublicationAccess.Write : PublicationAccess.OverlaidRead);
         if (isWritten && ImageClearTrace.Enabled) ImageCache?.TraceGuestWrite("shader-buffer-write", guestAddress, size, shaderHash: traceShaderHash);
         if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-obtain", guestAddress, size, $"written={isWritten} texel={isTexelBuffer} hash=0x{traceShaderHash:X16}", remember: true);
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferAcquisitionChecks);
@@ -223,6 +232,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
             {
                 _stream.Commit();
                 if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-stream-upload", guestAddress, size, $"offset=0x{streamOffset:X}");
+                OverlayGuestPublications?.Invoke(_stream, streamOffset, guestAddress, size);
                 return (_stream, streamOffset);
             }
         }
@@ -261,12 +271,14 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
             NoteHotWindowWrite(guestAddress, size);
         }
+        else OverlayGuestPublications?.Invoke(buffer, buffer.Offset(guestAddress), guestAddress, size);
 
         return (buffer, buffer.Offset(guestAddress));
     }
 
     public (GpuBuffer Buffer, ulong Offset) ObtainBufferForImage(ulong guestAddress, ulong size)
     {
+        CompleteGuestPublications?.Invoke(guestAddress, size, PublicationAccess.Read);
         if (!IsValidRange(guestAddress, size))
         {
             throw SubmissionScheduler.Fatal("The image source range is invalid.");
@@ -335,6 +347,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public void WriteHostMemory(ulong guestAddress, ReadOnlySpan<byte> data)
     {
+        CompleteGuestPublications?.Invoke(guestAddress, (ulong)data.Length, PublicationAccess.Write);
         if (guestAddress == 0 || data.IsEmpty || (ulong)data.Length > ulong.MaxValue - guestAddress)
         {
             throw SubmissionScheduler.Fatal("The host DMA write range is invalid.");
@@ -372,6 +385,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     private void FillBuffer(ulong guestAddress, ulong size, uint value, bool isGds, bool publishFill)
     {
+        if (!isGds) CompleteGuestPublications?.Invoke(guestAddress, size, PublicationAccess.Write);
         if ((guestAddress & 3) != 0 || size == 0 || (size & 3) != 0 || size > ulong.MaxValue - guestAddress)
         {
             throw SubmissionScheduler.Fatal("The fill range must be aligned to four bytes.");
@@ -601,6 +615,8 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
 
     public void CopyBuffer(ulong dstVaddr, ulong srcVaddr, ulong size, bool dstGds, bool srcGds)
     {
+        if (!dstGds) CompleteGuestPublications?.Invoke(dstVaddr, size, PublicationAccess.Write);
+        if (!srcGds) CompleteGuestPublications?.Invoke(srcVaddr, size, PublicationAccess.Read);
         var dstMemory = !dstGds;
         var srcMemory = !srcGds;
         if ((dstMemory && dstVaddr == 0) || (srcMemory && srcVaddr == 0) || size == 0 ||

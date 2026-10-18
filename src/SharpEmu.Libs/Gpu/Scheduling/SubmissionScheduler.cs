@@ -21,7 +21,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         Closed,
     }
 
-    private readonly record struct TickWork(Action Callback, ulong Tick);
+    private readonly record struct TickWork(Action Callback, ulong Tick, bool MemoryPublication = false);
     private readonly record struct SubmissionTraceEntry(ulong Tick, uint Op, ulong SubmitId,
         uint Arg0, uint Arg1, uint Arg2, uint Arg3, ulong Arg4);
     private readonly SubmissionTraceEntry[] _submissionHistory = new SubmissionTraceEntry[32];
@@ -48,6 +48,9 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
     private SubmissionContext? _context;
     private readonly IRenderingState _rendering;
     private ulong _lastMemoryDrainTick;
+    private bool _publishingMemory;
+    private ulong _pendingTailTick;
+    private ulong _enqueueSequence;
 
     public SubmissionScheduler(
         IGpuTickDevice device,
@@ -325,11 +328,22 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
                     return;
                 }
 
+                if (_publishingMemory && _pending.Peek().MemoryPublication) return;
+
                 operation = _pending.Dequeue();
             }
 
             WaitForPriorityOperations(operation.Tick);
-            RunDeferredCallback(operation.Callback);
+            if (operation.MemoryPublication)
+            {
+                if (InsideTickCallback)
+                    throw Fatal("Cannot publish guest memory inside a completion callback.");
+                _publishingMemory = true;
+                try { operation.Callback(); }
+                finally { _publishingMemory = false; }
+            }
+            else
+                RunDeferredCallback(operation.Callback);
         }
     }
 
@@ -341,6 +355,8 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             if (_state == OperationState.Open)
             {
                 _pending.Enqueue(new TickWork(operation, CurrentTick));
+                _pendingTailTick = CurrentTick;
+                _enqueueSequence++;
                 return;
             }
 
@@ -354,6 +370,41 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         }
 
         operation();
+    }
+
+    // Publication runs on the queue owner, outside callback scope, so memory ownership can drain.
+    // Dependent guest signals must not become visible before publication succeeds.
+    internal void QueueMemoryPublication(Action operation) => QueueMemoryPublication(operation, CurrentTick);
+
+    internal ulong QueueMemoryPublication(Action operation, ulong dependencyTick) =>
+        QueueMemoryPublication(operation, dependencyTick, out _);
+
+    // True while the publication with this sequence is still queued, nothing was queued after it,
+    // and a new publication with this dependency would take the same tick, so it may join it.
+    internal bool IsLastQueuedPublication(ulong sequence, ulong dependencyTick, ulong tick)
+    {
+        lock (_operationLock)
+            return _enqueueSequence == sequence && _pending.Count != 0 && Math.Max(dependencyTick, _pendingTailTick) == tick;
+    }
+
+    internal ulong QueueMemoryPublication(Action operation, ulong dependencyTick, out ulong sequence)
+    {
+        RequireActiveScheduler();
+        if (InsideTickCallback)
+            throw Fatal("Cannot queue a memory publication from a completion callback.");
+        lock (_operationLock)
+        {
+            if (_state != OperationState.Open)
+                throw Fatal("Cannot queue a memory publication after shutdown starts.");
+            if (dependencyTick > CurrentTick)
+                throw Fatal("Cannot publish memory for an unknown submission tick.");
+            // Keep ready results behind earlier work without attaching them to an unused future tick.
+            var tick = _pending.Count == 0 ? dependencyTick : Math.Max(dependencyTick, _pendingTailTick);
+            _pending.Enqueue(new TickWork(operation, tick, MemoryPublication: true));
+            _pendingTailTick = tick;
+            sequence = ++_enqueueSequence;
+            return tick;
+        }
     }
 
     public void QueuePriorityCompletionAction(Action operation)
@@ -412,6 +463,9 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             }
         }
     }
+
+    // Uses the last completed tick read from the device; it does not query the device.
+    internal bool IsTickKnownComplete(ulong tick) => _timeline.IsTickComplete(tick);
 
     public bool IsTickComplete(ulong tick)
     {

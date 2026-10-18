@@ -472,7 +472,8 @@ internal static unsafe partial class VulkanVideoPresenter
             GuestDrawKind.None,
             IsSplash: false,
             RequiredTick: presentation.RequiredTick,
-            FlipRequestId: presentation.FlipRequestId);
+            FlipRequestId: presentation.FlipRequestId,
+            Publication: presentation.Publication);
     }
 
     /// <summary>
@@ -557,5 +558,6 @@ internal static unsafe partial class VulkanVideoPresenter
         long GuestImageVersion = 0,
         bool IsHdr = false,
         ulong RequiredTick = 0,
-        ulong FlipRequestId = 0);
+        ulong FlipRequestId = 0,
+        SharpEmu.Libs.Gpu.Scheduling.PendingGuestPublications.Entry? Publication = null);
 }

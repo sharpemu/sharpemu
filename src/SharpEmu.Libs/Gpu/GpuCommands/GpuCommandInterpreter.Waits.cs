@@ -28,7 +28,13 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        var value = ReadWaitOperand(address, is64Bit);
+        // A deferred label is visible here at once; guest CPU threads see it after the dump before it.
+        if (!_host.TryReadDeferredLabel(QueueId, address, is64Bit ? 8UL : 4UL, out var deferred, out var value))
+        {
+            Suspend();
+            return;
+        }
+        if (!deferred) value = ReadWaitOperand(address, is64Bit);
         if (!WaitOperation.TryCompare(value, reference, mask, compareFunction, out var satisfied))
         {
             throw _host.Fatal($"The wait compare function is unknown: function={compareFunction} address=0x{address:X16}.");
