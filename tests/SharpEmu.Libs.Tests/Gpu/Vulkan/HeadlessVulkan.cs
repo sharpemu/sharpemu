@@ -47,6 +47,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     public bool SupportsFragmentShaderBarycentric { get; private init; }
     public bool SupportsFillRectangle { get; private init; }
     public bool SupportsMeshShaders { get; private init; }
+    public bool CanRequireComputeSubgroup32 { get; private init; }
     public uint SubgroupSize
     {
         get
@@ -352,6 +353,15 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
 
         vk.GetPhysicalDeviceFeatures(physical, out var baseFeatures);
         var meshShaders = meshFeatures.MeshShader && vulkan13Features.ComputeFullSubgroups && dynamicRendering;
+        var sizeControlProperties = new PhysicalDeviceSubgroupSizeControlProperties
+        {
+            SType = StructureType.PhysicalDeviceSubgroupSizeControlProperties,
+        };
+        var sizeControlQuery = new PhysicalDeviceProperties2 { SType = StructureType.PhysicalDeviceProperties2, PNext = &sizeControlProperties };
+        vk.GetPhysicalDeviceProperties2(physical, &sizeControlQuery);
+        var computeSubgroup32 = vulkan13Features.SubgroupSizeControl &&
+            (sizeControlProperties.RequiredSubgroupSizeStages & ShaderStageFlags.ComputeBit) != 0 &&
+            sizeControlProperties.MinSubgroupSize <= 32 && sizeControlProperties.MaxSubgroupSize >= 32;
         var enabledFeatures = new PhysicalDeviceFeatures
         {
             GeometryShader = baseFeatures.GeometryShader,
@@ -380,6 +390,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             DynamicRendering = dynamicRendering,
             Synchronization2 = true,
             ComputeFullSubgroups = meshShaders,
+            SubgroupSizeControl = computeSubgroup32,
         };
         addressFeatures = new PhysicalDeviceBufferDeviceAddressFeatures
         {
@@ -439,6 +450,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             SupportsFragmentShaderBarycentric = barycentric,
             SupportsFillRectangle = fillRectangle,
             SupportsMeshShaders = meshShaders,
+            CanRequireComputeSubgroup32 = computeSubgroup32,
         };
         if (validation)
         {

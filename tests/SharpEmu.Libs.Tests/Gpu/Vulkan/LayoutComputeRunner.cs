@@ -93,9 +93,16 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         var entry = (byte*)Marshal.StringToHGlobalAnsi("main");
         try
         {
+            var requiredSubgroupSize = new PipelineShaderStageRequiredSubgroupSizeCreateInfo
+            {
+                SType = StructureType.PipelineShaderStageRequiredSubgroupSizeCreateInfo,
+                RequiredSubgroupSize = 32,
+            };
+            var pinSubgroup32 = !IsMesh && request.HostComputeSubgroup32 && harness.Vulkan.CanRequireComputeSubgroup32;
             var stage = new PipelineShaderStageCreateInfo
             {
                 SType = StructureType.PipelineShaderStageCreateInfo,
+                PNext = pinSubgroup32 ? &requiredSubgroupSize : null,
                 Stage = StageFlags,
                 Module = module,
                 PName = entry,
