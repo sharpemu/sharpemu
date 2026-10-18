@@ -12,6 +12,10 @@ namespace SharpEmu.ShaderCompiler.Tests;
 
 public sealed class Gen5MeshShaderTests
 {
+    [Fact]
+    public void IndirectMeshPreparationValidates()
+        => ValidateWithInstalledSdk(SpirvMeshIndirect.Create());
+
     [Theory]
     [InlineData(null, 11, 41984ul)]
     [InlineData(1501u, 8, 32768ul)]
