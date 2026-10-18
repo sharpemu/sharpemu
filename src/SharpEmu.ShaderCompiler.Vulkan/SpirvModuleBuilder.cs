@@ -788,10 +788,10 @@ public sealed class SpirvModuleBuilder
         return id;
     }
 
-    public uint BeginFunction(uint returnType, uint functionType)
+    public uint BeginFunction(uint returnType, uint functionType, uint? functionId = null, bool dontInline = false)
     {
-        var id = AllocateId();
-        Emit(_functions, SpirvOp.Function, returnType, id, 0, functionType);
+        var id = functionId ?? AllocateId();
+        Emit(_functions, SpirvOp.Function, returnType, id, dontInline ? 2u : 0u, functionType);
         return id;
     }
 

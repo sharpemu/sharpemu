@@ -343,9 +343,83 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
 
     private const int DescriptorOffset = 48;
 
+    [Theory]
+    [InlineData(1u, Format32x4Float, "raw")]
+    [InlineData(2u, Format32x4Float, "raw")]
+    [InlineData(3u, Format32x4Float, "raw")]
+    [InlineData(4u, Format32x4Float, "raw")]
+    [InlineData(4u, Format8x4Uint, "uint8")]
+    public void RepeatedRuntimeFormattedLoads_KeepIndependentResults(uint components, uint format, string expectedKind)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var shader = CompileDescriptorFollowingShader(repeat: true, forceDevice: true, components);
+        var initial = CreateInput();
+        for (var component = 0; component < 5; component++)
+            WriteWord(initial, UnormOffset + component * 4, 0x3F800000u + (uint)component);
+        WriteWord(initial, DescriptorOffset, (uint)(BufferAddress & uint.MaxValue));
+        WriteWord(initial, DescriptorOffset + 4, (uint)(BufferAddress >> 32));
+        WriteWord(initial, DescriptorOffset + 8, BufferBytes);
+        WriteWord(initial, DescriptorOffset + 12, (format << 12) | IdentitySwizzle);
+        var expected = ExpectedTypedResult(initial, expectedKind, UnormOffset, components);
+        var second = ExpectedTypedResult(initial, expectedKind, UnormOffset + 4, components);
+        second.AsSpan(RegisterOutputOffset + (int)(DestinationRegister - SourceRegister) * 4, (int)components * 4)
+            .CopyTo(expected.AsSpan(RegisterOutputOffset, (int)components * 4));
+        Assert.Equal(expected, RunOnce(vulkan, shader, initial));
+    }
+
+    [Theory]
+    [InlineData(1u, IdentitySwizzle, true)]
+    [InlineData(2u, IdentitySwizzle, true)]
+    [InlineData(3u, IdentitySwizzle, false)]
+    [InlineData(4u, IdentitySwizzle, false)]
+    [InlineData(4u, 4u | (5u << 3) | (1u << 9), true)]
+    public void RuntimeFormattedLoads_CheckOnlySelectedComponents(uint components, uint selectors, bool inBounds)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var shader = CompileDescriptorFollowingShader(forceDevice: true, components: components);
+        var initial = CreateInput();
+        WriteWord(initial, UnormOffset, 0x3F800000);
+        WriteWord(initial, UnormOffset + 4, 0x40000000);
+        WriteWord(initial, DescriptorOffset, (uint)(BufferAddress & uint.MaxValue));
+        WriteWord(initial, DescriptorOffset + 4, (uint)(BufferAddress >> 32));
+        WriteWord(initial, DescriptorOffset + 8, UnormOffset + 8);
+        WriteWord(initial, DescriptorOffset + 12, (Format32x4Float << 12) | selectors);
+        var expected = (byte[])initial.Clone();
+        initial.AsSpan(0, 64).CopyTo(expected.AsSpan(RegisterOutputOffset, 64));
+        for (uint component = 0; component < components; component++)
+        {
+            var selector = (selectors >> (int)(component * 3)) & 7;
+            var value = selector == 1 ? 0x3F800000u : inBounds && selector >= 4
+                ? ReadWord(initial, UnormOffset + (int)(selector - 4) * 4) : 0u;
+            WriteWord(expected, RegisterOutputOffset + (int)(DestinationRegister - SourceRegister + component) * 4, value);
+        }
+
+        Assert.Equal(expected, RunOnce(vulkan, shader, initial));
+    }
+
+    [Fact]
+    public void RuntimeFormattedLoad_UnmappedPageReportsTheCallerPc()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var shader = CompileDescriptorFollowingShader(forceDevice: true);
+        var initial = CreateInput();
+        var address = BufferAddress + Gen5SpirvTranslator.DeviceAddressPageSize;
+        WriteWord(initial, DescriptorOffset, (uint)address);
+        WriteWord(initial, DescriptorOffset + 4, (uint)(address >> 32));
+        WriteWord(initial, DescriptorOffset + 8, BufferBytes);
+        WriteWord(initial, DescriptorOffset + 12, BoundDescriptor);
+        var expected = (byte[])initial.Clone();
+        initial.AsSpan(0, 64).CopyTo(expected.AsSpan(RegisterOutputOffset, 64));
+        expected.AsSpan(RegisterOutputOffset + (int)(DestinationRegister - SourceRegister) * 4, 16).Clear();
+        Assert.Equal(expected, RunOnce(vulkan, shader, initial, traceFormattedFault: true));
+    }
+
     private sealed record ShaderFixture(ShaderResourcePlan Plan, uint[] UserData, uint LocalSizeX);
 
-    private static byte[] RunOnce(HeadlessVulkan vulkan, ShaderFixture fixture, byte[] initial, uint threadCount = 1, bool traceMissingPage = false, bool expectFault = true)
+    private static byte[] RunOnce(HeadlessVulkan vulkan, ShaderFixture fixture, byte[] initial, uint threadCount = 1, bool traceMissingPage = false, bool expectFault = true, bool traceFormattedFault = false)
     {
         bool ReadWordFromFixture(ulong address, out uint value)
         {
@@ -366,7 +440,7 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
-            TraceDeviceAddressFaults = traceMissingPage,
+            TraceDeviceAddressFaults = traceMissingPage || traceFormattedFault,
             LocalSizeX = fixture.LocalSizeX,
             ThreadCountX = threadCount,
             ThreadCountY = 1,
@@ -382,10 +456,10 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
         };
         if (resources.Info.UsesDeviceAddresses)
         {
-            var pageCount = (BufferAddress >> Gen5SpirvTranslator.DeviceAddressPageBits) + 1;
+            var pageCount = (BufferAddress >> Gen5SpirvTranslator.DeviceAddressPageBits) + (traceFormattedFault ? 2u : 1u);
             bindings[DescriptorBindingKind.DeviceAddressPageTable] =
                 [runner.CreatePageTable(pageCount, traceMissingPage ? [] : [(BufferAddress, records, 0ul)])];
-            bindings[DescriptorBindingKind.FaultBuffer] = [runner.CreateBuffer(((pageCount + 31) / 32) * sizeof(uint) + (traceMissingPage ? 32UL : 0UL))];
+            bindings[DescriptorBindingKind.FaultBuffer] = [runner.CreateBuffer(((pageCount + 31) / 32) * sizeof(uint) + (traceMissingPage || traceFormattedFault ? 32UL : 0UL))];
         }
 
         var flattenedTable = snapshot.FlattenedResourceTable.ToArray();
@@ -397,7 +471,7 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
         }
         harness.Run(() => runner.Dispatch(fixture.UserData, bindings, 1, flattenedTable: flattenedTable));
         var result = harness.ReadBack(records.Handle, 0, BufferBytes);
-        if (traceMissingPage)
+        if (traceMissingPage || traceFormattedFault)
         {
             var faults = bindings[DescriptorBindingKind.FaultBuffer][0];
             var diagnostic = harness.ReadBack(faults.Handle, faults.Size - 32, 32);
@@ -405,9 +479,12 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
             if (expectFault)
             {
                 Assert.Equal(plan.Hash, (ulong)ReadWord(diagnostic, 4) | ((ulong)ReadWord(diagnostic, 8) << 32));
-                var access = Assert.Single(plan.Graph.Program.Instructions, instruction => instruction.Control is Gen5GlobalMemoryControl);
+                var access = Assert.Single(plan.Graph.Program.Instructions, instruction => traceFormattedFault
+                    ? instruction.Opcode == "BufferLoadFormatXyzw"
+                    : instruction.Control is Gen5GlobalMemoryControl);
                 Assert.Equal(access.Pc, ReadWord(diagnostic, 12));
-                Assert.Equal(BufferAddress + MemoryOffset, (ulong)ReadWord(diagnostic, 16) | ((ulong)ReadWord(diagnostic, 20) << 32));
+                var address = traceFormattedFault ? BufferAddress + Gen5SpirvTranslator.DeviceAddressPageSize + UnormOffset : BufferAddress + MemoryOffset;
+                Assert.Equal(address, (ulong)ReadWord(diagnostic, 16) | ((ulong)ReadWord(diagnostic, 20) << 32));
                 Assert.Equal((uint)plan.Stage, ReadWord(diagnostic, 24));
             }
             else
@@ -420,7 +497,7 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
         return result;
     }
 
-    private static byte[] ExpectedTypedResult(byte[] initial, string expectedKind, int loadOffset)
+    private static byte[] ExpectedTypedResult(byte[] initial, string expectedKind, int loadOffset, uint components = 4)
     {
         var expected = (byte[])initial.Clone();
         initial.AsSpan(0, 64).CopyTo(expected.AsSpan(RegisterOutputOffset, 64));
@@ -449,7 +526,7 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
                 throw new InvalidOperationException("Unexpected typed load expectation.");
         }
 
-        for (var component = 0; component < 4; component++)
+        for (var component = 0; component < components; component++)
             WriteWord(expected, outputOffset + component * 4, loaded[component]);
         return expected;
     }
@@ -537,7 +614,7 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
         return CompileProgram(program, scalars, threadCount);
     }
 
-    private static ShaderFixture CompileDescriptorFollowingShader()
+    private static ShaderFixture CompileDescriptorFollowingShader(bool repeat = false, bool forceDevice = false, uint components = 4)
     {
         var words = new List<uint>();
         for (uint group = 0; group < 4; group++)
@@ -545,14 +622,28 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
             words.Add(0xE038_0000 | (group * 16));
             words.Add(0x8000_0000 | ((SourceRegister + group * 4) << 8));
         }
+        if (forceDevice)
+        {
+            // A runtime buffer descriptor based on the local ID (zero here).
+            words.Add(0x7E00_0400 | (20u << 17) | 256u); // v_readfirstlane_b32 s20, v0
+            words.Add(0xBE95_0301); // s_mov_b32 s21, s1
+            words.Add(0xBE96_03FF); // s_mov_b32 s22, 192
+            words.Add(BufferBytes);
+            words.Add(0xBE97_0380); // s_mov_b32 s23, 0
+        }
         var loadDescriptorPc = checked((uint)words.Count * 4);
-        // s_load_dwordx4 s[16:19], s[0:1], 0x30
-        words.Add(0xF400_0000u | (2u << 18) | (16u << 6));
+        // Load the descriptor through s[20:23] on the device or s[0:1] on the host.
+        words.Add(0xF400_0000u | ((forceDevice ? 10u : 2u) << 18) | (16u << 6) | (forceDevice ? 10u : 0u));
         words.Add(0xFA00_0000u | DescriptorOffset);
         var accessPc = checked((uint)words.Count * 4);
-        // buffer_load_format_xyzw v[12:15], off, s[16:19], 0 offset:96
-        words.Add(0xE000_0000u | (3u << 18) | UnormOffset);
+        // buffer_load_format with the requested width, s[16:19], offset:96.
+        words.Add(0xE000_0000u | ((components - 1) << 18) | UnormOffset);
         words.Add((0x80u << 24) | (4u << 16) | (DestinationRegister << 8));
+        if (repeat)
+        {
+            words.Add(0xE000_0000u | ((components - 1) << 18) | (UnormOffset + 4));
+            words.Add((0x80u << 24) | (4u << 16) | (SourceRegister << 8));
+        }
         for (uint group = 0; group < 4; group++)
         {
             words.Add(0xE078_0000 | (RegisterOutputOffset + group * 16));
@@ -562,7 +653,7 @@ public sealed class GlobalMemoryShaderTests(HeadlessVulkanFixture fixture, ITest
 
         var program = DecodeProgram(words);
         var loadDescriptor = Assert.Single(program.Instructions, instruction => instruction.Pc == loadDescriptorPc);
-        Assert.Equal("SLoadDwordx4", loadDescriptor.Opcode);
+        Assert.Equal(forceDevice ? "SBufferLoadDwordx4" : "SLoadDwordx4", loadDescriptor.Opcode);
         var access = Assert.Single(program.Instructions, instruction => instruction.Pc == accessPc);
         var control = Assert.IsType<Gen5BufferMemoryControl>(access.Control);
         Assert.False(control.Typed);
