@@ -1173,6 +1173,9 @@ public static partial class Gen5SpirvTranslator
             // do not exist to clear their bits (Astro Bot intro_next froze the GPU this way).
             if (_stage == Gen5SpirvStage.Vertex && _request.UserDataBase > 3)
             {
+                // Capacity must include high lane ordinals when only some lanes are active.
+                StoreS(2, UInt(_waveLaneCount << 12));
+
                 uint laneCount;
                 if (_subgroupInvocationIdInput == 0)
                 {
