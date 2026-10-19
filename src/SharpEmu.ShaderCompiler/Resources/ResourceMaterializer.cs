@@ -94,7 +94,7 @@ public static partial class ResourceMaterializer
         var guard = Volatile.Read(ref plan.SpecializationGuard);
         MaterializedSnapshot nextSnapshot;
         ResourceSpecialization nextSpecialization;
-        if (guard is not null && MatchesGuard(plan, materialized, guard))
+        if (guard is not null && guard.PortableBuffers == inputs.PortableBuffers && MatchesGuard(plan, materialized, guard))
         {
             using var guardProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.SpecializationGuardHit);
             ApplyGuard(materialized, guard);
@@ -105,7 +105,7 @@ public static partial class ResourceMaterializer
         {
             var candidate = CaptureGuard(plan, materialized);
             var originalSamplers = materialized.Samplers;
-            if (!BuildSpecialization(plan, materialized, out nextSnapshot, out nextSpecialization, out failure, captureIndirectImageFailure))
+            if (!BuildSpecialization(plan, materialized, inputs.PortableBuffers, out nextSnapshot, out nextSpecialization, out failure, captureIndirectImageFailure))
                 return false;
             if (candidate is not null && MatchesGuard(plan, materialized, candidate, checkSamplers: false))
             {
@@ -114,6 +114,7 @@ public static partial class ResourceMaterializer
                 if (candidate.SamplerSources.All(index => index >= 0))
                 {
                     candidate.Specialization = nextSpecialization.Clone();
+                    candidate.PortableBuffers = inputs.PortableBuffers;
                     Volatile.Write(ref plan.SpecializationGuard, candidate);
                 }
             }
@@ -910,6 +911,7 @@ public static partial class ResourceMaterializer
     private static bool BuildSpecialization(
         ShaderResourcePlan plan,
         MaterializedSnapshot snapshot,
+        bool portableBuffers,
         out MaterializedSnapshot specializedSnapshot,
         out ResourceSpecialization specialization,
         out ResourceMaterializationFailure failure,
@@ -1012,10 +1014,11 @@ public static partial class ResourceMaterializer
             }
 
             var formatted = info.Buffers[index].Formatted;
+            var runtimeFormat = portableBuffers && PortableBufferWord.ReadsFormatAtRuntime(info.Buffers[index]);
             buffers.Add(new BufferSpecialization(
-                packedStride,
-                formatted ? (words[3] >> 12) & 0x7F : DescriptorConstants.InvalidFormat,
-                formatted ? words[3] & 0xFFF : DescriptorConstants.IdentityDestinationSelect));
+                portableBuffers ? 0 : packedStride,
+                formatted && !runtimeFormat ? (words[3] >> 12) & 0x7F : DescriptorConstants.InvalidFormat,
+                formatted && !runtimeFormat ? words[3] & 0xFFF : DescriptorConstants.IdentityDestinationSelect));
         }
 
         for (var index = 0; index < images.Count; index++)
@@ -1300,7 +1303,7 @@ public static partial class ResourceMaterializer
                     packedStride &= ~(3u << 16);
                 }
 
-                buffers.Add(new BufferSpecialization(packedStride, (words[3] >> 12) & 0x7F, words[3] & 0xFFF));
+                buffers.Add(new BufferSpecialization(portableBuffers ? 0 : packedStride, (words[3] >> 12) & 0x7F, words[3] & 0xFFF));
             }
 
             var mappingOffset = (uint)mappingCursor;

@@ -253,7 +253,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private const ulong SwapchainAcquireTimeoutNs = 250_000_000;
 
-        public Presenter(uint width, uint height)
+        public Presenter(uint width, uint height, bool hidden = false)
         {
             _commandStream = new CommandStreamQueue(this);
             _relay = new GpuWorkerRelay(WakeRenderThread, _commandStream.TryEnqueueControlBarrier);
@@ -263,7 +263,8 @@ internal static unsafe partial class VulkanVideoPresenter
             _window = new SdlHostWindow(
                 VideoOutExports.GetWindowTitle(),
                 _videoOptions,
-                SdlGraphicsApi.Vulkan);
+                SdlGraphicsApi.Vulkan,
+                hidden: hidden);
         }
 
         public void Run()

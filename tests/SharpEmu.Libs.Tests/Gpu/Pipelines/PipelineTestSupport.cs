@@ -52,7 +52,9 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     public MeshShaderLimits MeshLimits { get; set; }
     public uint MeshSubgroupSize { get; set; } = 32;
 
-    public ShaderPrewarmList? ShaderPrewarm { get; set; }
+    public bool ShaderSignedZeroInfNanPreserveFloat32Supported { get; set; }
+
+    public SharpEmu.Libs.Gpu.ShaderCache.ShaderCacheFile? ShaderCache { get; set; }
 
     public RenderHostLimits Limits => new(16384, 16384, 16384, 16384);
 

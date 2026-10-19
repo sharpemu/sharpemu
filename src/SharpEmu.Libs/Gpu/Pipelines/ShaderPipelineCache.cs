@@ -6,6 +6,7 @@ using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.ShaderCache;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
@@ -341,7 +342,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     // was rebuilt with LINQ on every draw.
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Gen5ShaderProgram, uint[]> InterpolatedAttributeCache = new();
 
-    internal uint[] GetPixelAttributes(Gen5ShaderProgram program) =>
+    internal uint[] GetPixelAttributes(Gen5ShaderProgram program) => PixelAttributes(program);
+
+    internal static uint[] PixelAttributes(Gen5ShaderProgram program) =>
         InterpolatedAttributeCache.GetValue(program, static program => program.Instructions
             .Select(static instruction => instruction.Control)
             .OfType<Gen5InterpolationControl>()
@@ -818,8 +821,46 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             }
 
             ShaderCacheCounters.CountGraphicsPipeline();
+            RecordGraphicsPipeline(description);
             return created;
         }
+    }
+
+    private void RecordGraphicsPipeline(GraphicsPipelineDescription description)
+    {
+        if (_host.ShaderCache is not { } cache ||
+            !_programs.TryGetStageRecord(description.VertexProgram.Id, out var vertex, out var vertexCode))
+        {
+            return;
+        }
+
+        StageRecord? pixel = null;
+        ShaderCodeCapture? pixelCode = null;
+        if (description.PixelStage is not null &&
+            !_programs.TryGetStageRecord(description.PixelProgram.Id, out pixel, out pixelCode))
+        {
+            return;
+        }
+
+        var attributes = new VertexAttributeFormat[description.VertexInput.AttributeCount];
+        for (var index = 0; index < attributes.Length; index++)
+        {
+            var attribute = description.VertexInfo.Attributes[index];
+            attributes[index] = new VertexAttributeFormat(attribute.Descriptor, attribute.RegisterCount);
+        }
+
+        cache.RecordGraphics(
+            new GraphicsPipelineRecord
+            {
+                Vertex = vertex,
+                Pixel = pixel,
+                Rendering = description.Rendering,
+                VertexInput = description.VertexInput,
+                StaticParameters = description.StaticParameters,
+                Attributes = attributes,
+            },
+            vertexCode,
+            pixelCode);
     }
 
     [ThreadStatic]

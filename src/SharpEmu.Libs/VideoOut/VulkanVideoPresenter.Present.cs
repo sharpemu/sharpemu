@@ -102,12 +102,12 @@ internal static unsafe partial class VulkanVideoPresenter
                     GuestDrawKind.None,
                     IsSplash: true)
                 : new Presentation(
-                    null,
+                    CreateBlackFrame(width, height),
                     width,
                     height,
-                    0,
+                    1,
                     GuestDrawKind.None,
-                    IsSplash: false);
+                    IsSplash: true);
             StartPresenterLocked();
         }
     }
@@ -157,59 +157,45 @@ internal static unsafe partial class VulkanVideoPresenter
         _guestFlipVersionSequence = 0;
     }
 
-    private static readonly bool _shaderPrewarmWaitDisabled =
-        Environment.GetEnvironmentVariable("SHARPEMU_SHADER_PREWARM_WAIT") == "0";
-    private static bool _shaderPrewarmDecided;
-    private static bool _shaderPrewarmRunning;
-    private static bool _shaderPrewarmReleased;
-    private static int _shaderPrewarmHoldReported;
-    private static int _shaderPrewarmProgress;
-    private static int _shaderPrewarmTotal;
+    private static bool _shaderCacheDecided;
+    private static bool _shaderCacheRunning;
+    private static bool _shaderCacheReleased;
+    private static int _shaderCacheHoldReported;
 
-    private static void SetShaderPrewarmState(bool running)
+    private static void SetShaderCacheState(bool running)
     {
         lock (_gate)
         {
-            _shaderPrewarmDecided = true;
-            _shaderPrewarmRunning = running;
-            Volatile.Write(ref _shaderPrewarmReleased, !running);
+            _shaderCacheDecided = true;
+            _shaderCacheRunning = running;
+            Volatile.Write(ref _shaderCacheReleased, !running);
             System.Threading.Monitor.PulseAll(_gate);
         }
     }
 
-    internal static void WaitForShaderPrewarm(string holder)
+    internal static void WaitForShaderCache(string holder)
     {
-        if (_shaderPrewarmWaitDisabled || Volatile.Read(ref _shaderPrewarmReleased))
+        if (!Gpu.ShaderCache.ShaderCacheSettings.HoldsGuestUntilReady || Volatile.Read(ref _shaderCacheReleased))
         {
             return;
         }
 
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var reported = started;
         var reporter = false;
         lock (_gate)
         {
-            while (_thread is not null && (!_shaderPrewarmDecided || _shaderPrewarmRunning) &&
+            while (_thread is not null && (!_shaderCacheDecided || _shaderCacheRunning) &&
                    !_closed && _presenterStartupFailure is null &&
                    !HostSessionControl.IsShutdownRequested && !Volatile.Read(ref _presenterCloseRequested))
             {
-                if (!reporter && _shaderPrewarmRunning &&
-                    Interlocked.Exchange(ref _shaderPrewarmHoldReported, 1) == 0)
+                if (!reporter && _shaderCacheRunning &&
+                    Interlocked.Exchange(ref _shaderCacheHoldReported, 1) == 0)
                 {
                     reporter = true;
-                    Console.Error.WriteLine(
-                        $"[LOADER][INFO] Shader prewarm: holding the game at its {holder} until it finishes.");
+                    Console.Error.WriteLine($"[SHADER CACHE] Holding the game at its {holder} until the shader precompile finishes.");
                 }
 
                 System.Threading.Monitor.Wait(_gate, 1000);
-                if (reporter && System.Diagnostics.Stopwatch.GetElapsedTime(reported) >= TimeSpan.FromSeconds(5))
-                {
-                    reported = System.Diagnostics.Stopwatch.GetTimestamp();
-                    var total = Volatile.Read(ref _shaderPrewarmTotal);
-                    var done = Volatile.Read(ref _shaderPrewarmProgress);
-                    Console.Error.WriteLine(
-                        $"[LOADER][INFO] Shader prewarm: {done}/{total} ({(total == 0 ? 0 : done * 100 / total)}%)");
-                }
             }
         }
 
@@ -217,13 +203,13 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             Console.Error.WriteLine(string.Create(
                 System.Globalization.CultureInfo.InvariantCulture,
-                $"[LOADER][INFO] Shader prewarm: game released after {System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds:F1}s."));
+                $"[SHADER CACHE] Game released after {System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds:F1} s."));
         }
     }
 
     public static void HideSplashScreen()
     {
-        WaitForShaderPrewarm("splash screen");
+        WaitForShaderCache("splash screen");
         lock (_gate)
         {
             _splashHidden = true;

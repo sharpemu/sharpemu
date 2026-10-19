@@ -65,9 +65,10 @@ internal interface IShaderPipelineHost
     bool SharedInt64AtomicsEnabled { get; }
     bool ShaderSignedZeroInfNanPreserveFloat32Supported => false;
     bool ExecGuardElisionEnabled => true;
-    ShaderPrewarmList? ShaderPrewarm => null;
+    ShaderCache.ShaderCacheFile? ShaderCache => null;
     bool PerVertexPixelInputsSupported => true;
     bool ClipDistanceEnabled => false;
+    bool PortableBufferDescriptors => false;
 
     bool MeshShadersSupported => false;
 

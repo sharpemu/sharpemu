@@ -186,10 +186,12 @@ public static class App0Archive
 
     // Files under a host directory and all its subdirectories whose names match a pattern: those on
     // disk and, when the directory is under the mount, those in the archive.
-    public static IEnumerable<string> EnumerateFilesRecursive(string hostDirectory, string pattern)
+    public static IEnumerable<string> EnumerateFilesRecursive(string hostDirectory, string pattern, EnumerationOptions? options = null)
     {
         var found = Directory.Exists(hostDirectory)
-            ? Directory.EnumerateFiles(hostDirectory, pattern, SearchOption.AllDirectories).ToList()
+            ? (options is null
+                ? Directory.EnumerateFiles(hostDirectory, pattern, SearchOption.AllDirectories)
+                : Directory.EnumerateFiles(hostDirectory, pattern, options)).ToList()
             : [];
         var root = Root;
         if (root is null || !TryResolve(hostDirectory, out var archive, out var node) || !archive.IsDirectory(node))

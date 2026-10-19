@@ -152,6 +152,40 @@ public sealed class PerGameSettingsTests
     }
 
     [Fact]
+    public void ShaderCache_FollowsTheGlobalChoiceUnlessTheGameOverridesIt()
+    {
+        var global = new GuiSettings { ShaderCache = true };
+        var inherited = new PerGameSettings { ShaderCache = true };
+        inherited.RemoveInheritedValues(global);
+        Assert.Null(inherited.ShaderCache);
+        Assert.True(inherited.IsEmpty);
+        Assert.True(EffectiveLaunchSettings.Resolve(global, inherited).ShaderCache);
+
+        var disabled = new PerGameSettings { ShaderCache = false };
+        disabled.RemoveInheritedValues(global);
+        Assert.False(disabled.ShaderCache);
+        Assert.False(EffectiveLaunchSettings.Resolve(global, disabled).ShaderCache);
+        Assert.False(EffectiveLaunchSettings.Resolve(new GuiSettings { ShaderCache = false }, null).ShaderCache);
+    }
+
+    [Fact]
+    public void ShaderLearn_IsOffByDefaultAndFollowsTheGameOverride()
+    {
+        var global = new GuiSettings();
+        Assert.False(EffectiveLaunchSettings.Resolve(global, null).ShaderLearn);
+
+        var inherited = new PerGameSettings { ShaderLearn = false };
+        inherited.RemoveInheritedValues(global);
+        Assert.Null(inherited.ShaderLearn);
+        Assert.True(inherited.IsEmpty);
+
+        var enabled = new PerGameSettings { ShaderLearn = true };
+        enabled.RemoveInheritedValues(global);
+        Assert.True(enabled.ShaderLearn);
+        Assert.True(EffectiveLaunchSettings.Resolve(global, enabled).ShaderLearn);
+    }
+
+    [Fact]
     public void RemoveInheritedValues_DisabledEnvironmentEntry_MatchesMissingEntry()
     {
         var global = new GuiSettings

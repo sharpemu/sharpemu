@@ -1127,6 +1127,7 @@ public sealed partial class ResourceMaterializationCache
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
                 TablePhase = recorder.TablePhase,
+                PortableBuffers = inputs.PortableBuffers,
             };
             if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
                 return false;
@@ -1246,6 +1247,7 @@ public sealed partial class ResourceMaterializationCache
                 ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
+                PortableBuffers = inputs.PortableBuffers,
             };
             var cachedTable = cached.Snapshot.FlattenedResourceTable;
             ReadingTable = true;
@@ -1286,6 +1288,7 @@ public sealed partial class ResourceMaterializationCache
                 UsedUserData = cached.UsedUserData,
                 ShaderBase = cached.ShaderBase,
                 ComputeState = cached.ComputeState,
+                PortableBuffers = cached.PortableBuffers,
                 RangeAddresses = cached.RangeAddresses,
                 RangeOffsets = cached.RangeOffsets,
                 RangeLengths = cached.RangeLengths,
@@ -1383,6 +1386,7 @@ public sealed partial class ResourceMaterializationCache
         hash.Add(RuntimeHelpers.GetHashCode(plan));
         hash.Add(inputs.ShaderBase);
         hash.Add(inputs.ComputeState);
+        hash.Add(inputs.PortableBuffers);
         hash.Add(inputs.UserData.Count);
         return (ulong)(uint)hash.ToHashCode() | ((ulong)(uint)RuntimeHelpers.GetHashCode(plan) << 32);
     }
@@ -1931,6 +1935,7 @@ public sealed partial class ResourceMaterializationCache
         public required ulong[] UsedUserData { get; init; }
         public required ulong ShaderBase { get; init; }
         public required ComputeSelectorState? ComputeState { get; init; }
+        public required bool PortableBuffers { get; init; }
         public required ulong[] RangeAddresses { get; init; }
         public required int[] RangeOffsets { get; init; }
         public required int[] RangeLengths { get; init; }
@@ -1954,7 +1959,8 @@ public sealed partial class ResourceMaterializationCache
         public bool Matches(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ulong[] rebased)
         {
             if (!ReferenceEquals(Plan, plan) || ShaderBase != inputs.ShaderBase ||
-                !Nullable.Equals(ComputeState, inputs.ComputeState) || UserData.Length != inputs.UserData.Count)
+                !Nullable.Equals(ComputeState, inputs.ComputeState) || PortableBuffers != inputs.PortableBuffers ||
+                UserData.Length != inputs.UserData.Count)
                 return false;
             for (var index = 0; index < UserData.Length; index++)
                 if (IsUsed(UsedUserData, index) && !IsUsed(rebased, index) && UserData[index] != inputs.UserData[index])
@@ -2173,6 +2179,7 @@ public sealed partial class ResourceMaterializationCache
                 UsedUserData = _userData.TakeUsed(),
                 ShaderBase = inputs.ShaderBase,
                 ComputeState = inputs.ComputeState,
+                PortableBuffers = inputs.PortableBuffers,
                 RangeAddresses = addresses,
                 RangeOffsets = offsets,
                 RangeLengths = lengths,

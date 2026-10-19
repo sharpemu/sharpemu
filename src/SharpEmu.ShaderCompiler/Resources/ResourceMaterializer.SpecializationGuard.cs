@@ -13,6 +13,7 @@ public static partial class ResourceMaterializer
         internal uint[][] Samplers = [];
         internal int[] SamplerSources = [];
         internal ResourceSpecialization Specialization = new();
+        internal bool PortableBuffers;
     }
 
     private static uint BufferGuardFlags(ShaderResourcePlan plan, int index) =>

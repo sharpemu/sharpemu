@@ -9,6 +9,7 @@ using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.ShaderCache;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
@@ -124,6 +125,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         MeshShaderLimits IShaderPipelineHost.MeshLimits => _meshShaderLimits;
         uint IShaderPipelineHost.MeshSubgroupSize => checked((uint)Volatile.Read(ref _nativeSubgroupSize));
+        bool IShaderPipelineHost.PortableBufferDescriptors => true;
 
         RenderHostLimits IShaderPipelineHost.Limits => _renderHostLimits;
 
@@ -352,12 +354,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _shaderModuleSpirvBytes[module.Handle] = shader.Payload.Length;
             if (stage is ShaderStage.Vertex or ShaderStage.Pixel)
                 _rectangleStageCode[module.Handle] = shader.Payload;
-            var identity = VulkanPipelineCacheStorage.CompiledShaderIdentity(shader.Payload);
-            _shaderModuleCacheIdentities[module.Handle] = identity;
-            if (stage == ShaderStage.Compute)
-            {
-                NoteRuntimeComputeModule(identity);
-            }
+            _shaderModuleCacheIdentities[module.Handle] = VulkanPipelineCacheStorage.CompiledShaderIdentity(shader.Payload);
 
             return module.Handle;
         }
@@ -370,7 +367,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private int SpirvBytesOf(ulong moduleHandle) =>
             _shaderModuleSpirvBytes.TryGetValue(moduleHandle, out var bytes) ? bytes : -1;
 
-        private void ReportPipelineCreation(long elapsedMilliseconds, string kind, string stages, string spirv)
+        private void ReportPipelineCreation(long elapsedMilliseconds, string kind, string stages, string spirv, bool unoptimized = false)
         {
             Interlocked.Add(ref _pipelineCreationMilliseconds, elapsedMilliseconds);
             if (elapsedMilliseconds < SlowPipelineCreationMilliseconds)
@@ -380,7 +377,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
             Console.Error.WriteLine(
                 $"[GPU][WARN] Slow pipeline creation: kind={kind} {stages} spirv_bytes={spirv} " +
-                $"ms={elapsedMilliseconds} total_s={Interlocked.Read(ref _pipelineCreationMilliseconds) / 1000.0:F1}");
+                $"ms={elapsedMilliseconds}{(unoptimized ? " unoptimized" : string.Empty)} " +
+                $"total_s={Interlocked.Read(ref _pipelineCreationMilliseconds) / 1000.0:F1}");
         }
 
         private void CreateBarycentricPipeline()
@@ -813,7 +811,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // One graphics pipeline for dynamic rendering: the attachment formats travel in the create info.
         private Pipeline CreateRenderPipeline(GraphicsPipelineDescription description, PrimitiveTopology topology, PipelineLayout layout,
-            PolygonMode polygonMode = PolygonMode.Fill, bool expandRectangles = false)
+            PolygonMode polygonMode = PolygonMode.Fill, bool expandRectangles = false, bool precompile = false, bool optimize = false)
         {
             var parameters = description.StaticParameters;
             var rendering = description.Rendering;
@@ -1040,15 +1038,31 @@ internal static unsafe partial class VulkanVideoPresenter
                         PDynamicState = &dynamicState,
                         Layout = layout,
                     };
+                    if (precompile || optimize)
+                    {
+                        if (precompile && HasStoredPipeline(&pipelineInfo))
+                        {
+                            return default;
+                        }
+
+                        Check(CreateCachedPipelineObject(true, &pipelineInfo, out var prepared, out _, fast: false),
+                            $"vkCreateGraphicsPipelines(precompile vs=0x{description.VertexStage.Hash:X16} ps=0x{description.PixelStage?.Hash ?? 0:X16})");
+                        return prepared;
+                    }
+
                     var reportStart = Stopwatch.GetTimestamp();
-                    var cache = GetGuestPipelineCache(GraphicsCacheKey(description.VertexStage.Hash,
+                    var cachedCreation = UsesPipelineStore || FastPipelineBuildEnabled;
+                    var cache = cachedCreation ? default : GetGuestPipelineCache(GraphicsCacheKey(description.VertexStage.Hash,
                         description.PixelStage?.Hash ?? 0, vertexModule.Handle, pixelModule.Handle));
                     var creationStart = RenderPhaseProfile.Enabled ? Stopwatch.GetTimestamp() : 0;
                     Result creationResult;
                     Pipeline pipeline;
+                    var unoptimized = false;
                     using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsPipelineDriver))
                     {
-                        creationResult = _vk.CreateGraphicsPipelines(_device, cache, 1, &pipelineInfo, null, out pipeline);
+                        creationResult = cachedCreation
+                            ? CreateCachedPipelineObject(true, &pipelineInfo, out pipeline, out unoptimized, FastPipelineBuildEnabled)
+                            : _vk.CreateGraphicsPipelines(_device, cache, 1, &pipelineInfo, null, out pipeline);
                     }
                     if (RenderPhaseProfile.Enabled)
                     {
@@ -1057,6 +1071,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
                     Check(creationResult,
                         $"vkCreateGraphicsPipelines(rendering vs=0x{description.VertexStage.Hash:X16} ps=0x{description.PixelStage?.Hash ?? 0:X16})");
+                    if (unoptimized)
+                    {
+                        QueuePipelineOptimization(pipeline, () => CreateRenderPipeline(description, topology, layout, polygonMode, expandRectangles, optimize: true));
+                    }
+
                     ReportPipelineCreation(
                         (long)Stopwatch.GetElapsedTime(reportStart).TotalMilliseconds,
                         "graphics",
@@ -1065,7 +1084,8 @@ internal static unsafe partial class VulkanVideoPresenter
                             '/',
                             Enumerable
                                 .Range(0, (int)stageCount)
-                                .Select(index => SpirvBytesOf(shaderStages[index].Module.Handle))));
+                                .Select(index => SpirvBytesOf(shaderStages[index].Module.Handle))),
+                        unoptimized);
                     MarkPipelineCacheDirty();
                     Interlocked.Increment(ref _perfPipelineCreations);
                     SetDebugName(
@@ -1102,32 +1122,19 @@ internal static unsafe partial class VulkanVideoPresenter
             try
             {
                 var pin = ComputeRequiredSubgroupSize(description.Input);
-                var requiredSubgroupSize = new PipelineShaderStageRequiredSubgroupSizeCreateInfo
-                {
-                    SType = StructureType.PipelineShaderStageRequiredSubgroupSizeCreateInfo,
-                    RequiredSubgroupSize = pin,
-                };
-                var stageInfo = new PipelineShaderStageCreateInfo
-                {
-                    SType = StructureType.PipelineShaderStageCreateInfo,
-                    PNext = pin != 0 ? &requiredSubgroupSize : null,
-                    Stage = ShaderStageFlags.ComputeBit,
-                    Module = computeModule,
-                    PName = entryPoint,
-                };
-                var pipelineInfo = new ComputePipelineCreateInfo
-                {
-                    SType = StructureType.ComputePipelineCreateInfo,
-                    Stage = stageInfo,
-                    Layout = layout,
-                };
+                var requiredSubgroupSize = RequiredSubgroupSize(pin);
+                var pipelineInfo = ComputeCreateInfo(computeModule, layout, entryPoint, pin != 0 ? &requiredSubgroupSize : null);
                 var reportStart = Stopwatch.GetTimestamp();
-                var cache = GetGuestPipelineCache(ComputeCacheKey(description.Stage.Hash, computeModule.Handle));
+                var cachedCreation = UsesPipelineStore || FastPipelineBuildEnabled;
+                var cache = cachedCreation ? default : GetGuestPipelineCache(ComputeCacheKey(description.Stage.Hash, computeModule.Handle));
                 var creationStart = RenderPhaseProfile.Enabled ? Stopwatch.GetTimestamp() : 0;
                 Result creationResult;
+                var unoptimized = false;
                 using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputePipelineDriver))
                 {
-                    creationResult = _vk.CreateComputePipelines(_device, cache, 1, &pipelineInfo, null, out pipeline);
+                    creationResult = cachedCreation
+                        ? CreateCachedPipelineObject(false, &pipelineInfo, out pipeline, out unoptimized, FastPipelineBuildEnabled)
+                        : _vk.CreateComputePipelines(_device, cache, 1, &pipelineInfo, null, out pipeline);
                 }
                 if (RenderPhaseProfile.Enabled)
                 {
@@ -1135,11 +1142,17 @@ internal static unsafe partial class VulkanVideoPresenter
                     Console.Error.WriteLine($"[PERF][PIPELINE_DRIVER] kind=compute compute=0x{description.Stage.Hash:X16} driver_ms={creationMilliseconds:F3} result={creationResult}");
                 }
                 Check(creationResult, $"vkCreateComputePipelines(rendering) hash=0x{description.Stage.Hash:X16}");
+                if (unoptimized)
+                {
+                    QueuePipelineOptimization(pipeline, () => CompileStoredComputePipeline(computeModule, layout, pin));
+                }
+
                 ReportPipelineCreation(
                     (long)Stopwatch.GetElapsedTime(reportStart).TotalMilliseconds,
                     "compute",
                     $"cs=0x{description.Stage.Hash:X16}",
-                    SpirvBytesOf(computeModule.Handle).ToString());
+                    SpirvBytesOf(computeModule.Handle).ToString(),
+                    unoptimized);
                 MarkPipelineCacheDirty();
                 Interlocked.Increment(ref _perfPipelineCreations);
                 SetDebugName(ObjectType.Pipeline, pipeline.Handle, $"SharpEmu compute cs=0x{description.Stage.Hash:X16}");
@@ -1246,6 +1259,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"The compute pipeline has no module: hash=0x{description.Stage.Hash:X16}.");
             }
 
+            var usesStore = UsesPipelineStore;
             var device = _device;
             var cacheSource = GetGuestPipelineCacheSource(ComputeCacheKey(description.Stage.Hash, computeModule.Handle));
             var vk = _vk;
@@ -1275,6 +1289,13 @@ internal static unsafe partial class VulkanVideoPresenter
                     {
                         // Importing a MoltenVK cache compiles its MSL libraries.
                         // Keep that work inside the same bounded compiler slot.
+                        if (usesStore || FastPipelineBuildEnabled)
+                        {
+                            var storedStart = ComputeCompileProfile.Start();
+                            try { return CompileStoredComputePipeline(computeModule, layout, requiredSubgroupSize, FastPipelineBuildEnabled); }
+                            finally { ComputeCompileProfile.Record(ComputeCompileProfile.Part.DriverCompile, storedStart); }
+                        }
+
                         PipelineCache cache;
                         var cacheStart = ComputeCompileProfile.Start();
                         try { cache = ResolveGuestPipelineCache(cacheSource); }
@@ -1337,6 +1358,28 @@ internal static unsafe partial class VulkanVideoPresenter
                     throw SubmissionScheduler.Fatal($"vkCreateComputePipelines(async) failed: {result}.");
                 }
 
+                return pipeline;
+            }
+            finally
+            {
+                SilkMarshal.Free((nint)entryPoint);
+            }
+        }
+
+        private Pipeline CompileStoredComputePipeline(ShaderModule module, PipelineLayout layout, uint requiredSubgroupSize, bool fast = false)
+        {
+            var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
+            try
+            {
+                var subgroup = RequiredSubgroupSize(requiredSubgroupSize);
+                var pipelineInfo = ComputeCreateInfo(module, layout, entryPoint, requiredSubgroupSize != 0 ? &subgroup : null);
+                var result = CreateCachedPipelineObject(false, &pipelineInfo, out var pipeline, out var unoptimized, fast);
+                Check(result, "vkCreateComputePipelines(async)");
+
+                if (unoptimized)
+                {
+                    QueuePipelineOptimization(pipeline, () => CompileStoredComputePipeline(module, layout, requiredSubgroupSize));
+                }
                 return pipeline;
             }
             finally

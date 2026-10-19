@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Avalonia;
+using Avalonia.Platform;
+using SharpEmu.Libs.VideoOut;
 
 namespace SharpEmu.GUI;
 
@@ -30,6 +32,13 @@ public static class GuiLauncher
             .UsePlatformDetect()
             .WithInterFont()
             .LogToTrace();
+
+    public static void ConfigureSplashFont()
+    {
+        // Read the bundled face without starting Avalonia in the SDL game process.
+        using var font = new StandardAssetLoader().Open(new Uri("avares://Avalonia.Fonts.Inter/Assets/Inter-Regular.ttf"));
+        HostVideoHost.ConfigureSplashFont(font);
+    }
 
     private static void WriteCrashLog(Exception ex)
     {

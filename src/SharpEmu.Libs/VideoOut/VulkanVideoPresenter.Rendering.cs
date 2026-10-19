@@ -1051,13 +1051,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 _boundGraphicsPipeline = entry;
                 if (!entry.RectangleList)
                 {
-                    BindPipelineShadowed(command, bindPoint, entry.Pipeline);
+                    BindPipelineShadowed(command, bindPoint, ResolveOptimizedPipeline(entry.Pipeline));
                 }
 
                 return;
             }
 
-            BindPipelineShadowed(command, bindPoint, entry.Pipeline);
+            BindPipelineShadowed(command, bindPoint, ResolveOptimizedPipeline(entry.Pipeline));
             _profileComputePipeline = entry.Id;
         }
 
@@ -1081,7 +1081,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 variant = CreateRenderPipeline(entry.Description!, strip ? PrimitiveTopology.TriangleStrip : PrimitiveTopology.TriangleList, entry.Layout);
             }
 
-            BindPipelineShadowed(command, PipelineBindPoint.Graphics, variant);
+            BindPipelineShadowed(command, PipelineBindPoint.Graphics, ResolveOptimizedPipeline(variant));
         }
 
         private void BindNativeRectangleList(RenderPipelineEntry entry, CommandBuffer command)
@@ -1093,7 +1093,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     expandRectangles: !_supportsFillRectangle);
             }
 
-            BindPipelineShadowed(command, PipelineBindPoint.Graphics, entry.RectangleVariant);
+            BindPipelineShadowed(command, PipelineBindPoint.Graphics, ResolveOptimizedPipeline(entry.RectangleVariant));
         }
 
         // Rectangle assembly consumes groups of three and discards incomplete trailing groups.

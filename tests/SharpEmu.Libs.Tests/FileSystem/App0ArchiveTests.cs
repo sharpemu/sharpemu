@@ -6,6 +6,10 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.FileSystem;
 
+[CollectionDefinition("App0Archive", DisableParallelization = true)]
+public sealed class App0ArchiveCollection;
+
+[Collection("App0Archive")]
 public sealed class App0ArchiveTests : IDisposable
 {
     private readonly string _directory = Directory.CreateTempSubdirectory("sharpemu-app0-").FullName;
