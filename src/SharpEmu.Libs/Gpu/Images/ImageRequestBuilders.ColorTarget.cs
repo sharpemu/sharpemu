@@ -413,8 +413,14 @@ public static partial class ImageRequestBuilders
 
             var span = mipSpans[level];
             var levelOffset = span.SourceSize != 0 ? span.SourceOffset : span.Offset;
-            var levelSize = (ulong)(span.SourceSize != 0 ? span.SourceSize : span.Size) * view.ImageLayers;
+            var levelSize = (ulong)(span.SourceSize != 0 ? span.SourceSize : span.Size);
             description.MipLayout[level] = new MipLevelLayout { Offset = levelOffset, Size = levelSize, Pitch = mipPadded[level].Width, Height = mipPadded[level].Height };
+        }
+
+        if (!volume)
+        {
+            // Each layer is a whole mip chain; the levels above describe one layer.
+            description.SliceStride = size;
         }
 
         var viewType = is1D

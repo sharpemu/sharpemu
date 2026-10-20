@@ -373,6 +373,359 @@ public sealed class GuestRedZonePatcherTests
         Assert.Equal(1, image.Result.PatchedSites);
     }
 
+    // Ghost of Tsushima 0x80067A7B9: a 16-bit compare, movzx after the bound and a table
+    // register defined before the loop that contains the dispatch.
+    [Fact]
+    public void ResolvesNarrowCompareWithZeroExtensionAndTableDefinedBeforeTheLoop()
+    {
+        var function = new JumpTableFunction();
+        var a = function.Assembler;
+        var cases = function.Cases(6);
+        var table = function.Table(cases);
+        var loop = a.CreateLabel();
+        var next = a.CreateLabel();
+        a.lea(r15, __[table]);
+        a.Label(ref loop);
+        a.mov(edx, __dword_ptr[rdi]);
+        a.add(edx, r11d);
+        a.cmp(dx, 5);
+        a.ja(next);
+        a.movzx(edx, dx);
+        a.movsxd(rdx, __dword_ptr[r15 + rdx * 4]);
+        a.add(rdx, r15);
+        a.jmp(rdx);
+        a.Label(ref next);
+        a.add(rdi, 4);
+        a.jmp(loop);
+        function.EmitCases(cases, loop);
+
+        function.AssertResolves(cases);
+    }
+
+    // Ghost of Tsushima 0x80067A824: a load from the stack between the table lea and the load.
+    [Fact]
+    public void ResolvesTableWithUnrelatedInstructionsBeforeTheLoad()
+    {
+        var function = new JumpTableFunction();
+        var a = function.Assembler;
+        var cases = function.Cases(4);
+        var table = function.Table(cases);
+        var done = a.CreateLabel();
+        a.mov(r9d, __dword_ptr[rdi]);
+        a.dec(r9d);
+        a.cmp(r9d, 3);
+        a.ja(done);
+        a.lea(rax, __[table]);
+        a.mov(rcx, __qword_ptr[rsp - 0x68]);
+        a.movsxd(rdx, __dword_ptr[rax + r9 * 4]);
+        a.add(rdx, rax);
+        a.jmp(rdx);
+        a.Label(ref done);
+        a.ret();
+        function.EmitCases(cases, done);
+
+        function.AssertResolves(cases);
+    }
+
+    // Ghost of Tsushima 0x80067A988 and 0x80067AA6D: the first dispatch redefines its table
+    // register after the add, the second reuses that register from every path into it.
+    [Fact]
+    public void ResolvesTableRegisterDefinedOnEveryPathIncludingJumpTableEdges()
+    {
+        var function = new JumpTableFunction();
+        var a = function.Assembler;
+        var first = function.Cases(4);
+        var second = function.Cases(6);
+        var table = function.Table(first);
+        var secondTable = function.Table(second);
+        var outOfRange = a.CreateLabel();
+        var join = a.CreateLabel();
+        var done = a.CreateLabel();
+        a.mov(r9d, __dword_ptr[rdi]);
+        a.cmp(r9d, 3);
+        a.ja(outOfRange);
+        a.lea(rcx, __[table]);
+        a.lea(r11, __[rbx + rdx]);
+        a.movsxd(rax, __dword_ptr[rcx + r9 * 4]);
+        a.add(rax, rcx);
+        a.lea(rcx, __[secondTable]);
+        a.jmp(rax);
+        a.Label(ref outOfRange);
+        a.lea(rcx, __[secondTable]);
+        a.jmp(join);
+        function.EmitCases(first, join);
+        a.Label(ref join);
+        a.mov(edx, __dword_ptr[rsi]);
+        a.lea(eax, __[rdx + 0x1000]);
+        a.cmp(ax, 5);
+        a.ja(done);
+        a.movzx(eax, ax);
+        a.movsxd(rax, __dword_ptr[rcx + rax * 4]);
+        a.add(rax, rcx);
+        a.jmp(rax);
+        a.Label(ref done);
+        a.ret();
+        function.EmitCases(second, done);
+
+        function.AssertResolves([.. first, .. second]);
+    }
+
+    // Ghost of Tsushima 0x80067AB85: the selector is copied through a narrower register and
+    // the table register is reused for a byte store before its lea.
+    [Fact]
+    public void ResolvesSelectorThroughZeroExtensionWithTableRegisterReused()
+    {
+        var function = new JumpTableFunction();
+        var a = function.Assembler;
+        var cases = function.Cases(0x1E);
+        var table = function.Table(cases);
+        var done = a.CreateLabel();
+        a.mov(edx, __dword_ptr[rdi]);
+        a.lea(ebx, __[rdx - 0xE31]);
+        a.cmp(bx, 0x1D);
+        a.ja(done);
+        a.mov(al, 1);
+        a.movzx(ebx, bx);
+        a.mov(__dword_ptr[rsp - 0x78], eax);
+        a.lea(rax, __[table]);
+        a.movsxd(rbx, __dword_ptr[rax + rbx * 4]);
+        a.add(rbx, rax);
+        a.jmp(rbx);
+        a.Label(ref done);
+        a.ret();
+        function.EmitCases(cases, done);
+
+        function.AssertResolves(cases);
+    }
+
+    [Fact]
+    public void RefusesUnboundedSelector()
+    {
+        var function = new JumpTableFunction();
+        var a = function.Assembler;
+        var cases = function.Cases(2);
+        var table = function.Table(cases);
+        var done = a.CreateLabel();
+        a.lea(r15, __[table]);
+        a.mov(edx, __dword_ptr[rdi]);
+        a.movsxd(rax, __dword_ptr[r15 + rdx * 4]);
+        a.add(rax, r15);
+        a.jmp(rax);
+        a.Label(ref done);
+        a.ret();
+        function.EmitCases(cases, done);
+
+        function.AssertRefuses();
+    }
+
+    [Fact]
+    public void RefusesNarrowCompareWithoutZeroExtension()
+    {
+        var function = new JumpTableFunction();
+        var a = function.Assembler;
+        var cases = function.Cases(6);
+        var table = function.Table(cases);
+        var done = a.CreateLabel();
+        a.lea(r15, __[table]);
+        a.mov(rdx, __qword_ptr[rdi]);
+        a.cmp(dx, 5);
+        a.ja(done);
+        a.movsxd(rax, __dword_ptr[r15 + rdx * 4]);
+        a.add(rax, r15);
+        a.jmp(rax);
+        a.Label(ref done);
+        a.ret();
+        function.EmitCases(cases, done);
+
+        function.AssertRefuses();
+    }
+
+    [Fact]
+    public void RefusesCompareOfAnotherRegister()
+    {
+        var function = new JumpTableFunction();
+        var a = function.Assembler;
+        var cases = function.Cases(4);
+        var table = function.Table(cases);
+        var done = a.CreateLabel();
+        a.mov(r9d, __dword_ptr[rdi]);
+        a.cmp(r8d, 3);
+        a.ja(done);
+        a.lea(rcx, __[table]);
+        a.movsxd(rax, __dword_ptr[rcx + r9 * 4]);
+        a.add(rax, rcx);
+        a.jmp(rax);
+        a.Label(ref done);
+        a.ret();
+        function.EmitCases(cases, done);
+
+        function.AssertRefuses();
+    }
+
+    [Fact]
+    public void RefusesSelectorRedefinedAfterTheBound()
+    {
+        var function = new JumpTableFunction();
+        var a = function.Assembler;
+        var cases = function.Cases(4);
+        var table = function.Table(cases);
+        var done = a.CreateLabel();
+        a.mov(r9d, __dword_ptr[rdi]);
+        a.cmp(r9d, 3);
+        a.ja(done);
+        a.inc(r9d);
+        a.lea(rcx, __[table]);
+        a.movsxd(rax, __dword_ptr[rcx + r9 * 4]);
+        a.add(rax, rcx);
+        a.jmp(rax);
+        a.Label(ref done);
+        a.ret();
+        function.EmitCases(cases, done);
+
+        function.AssertRefuses();
+    }
+
+    [Fact]
+    public void RefusesTwoDifferentTablesInTheSameRegister()
+    {
+        var function = new JumpTableFunction();
+        var a = function.Assembler;
+        var cases = function.Cases(2);
+        var table = function.Table(cases);
+        var otherTable = function.Table(cases);
+        var other = a.CreateLabel();
+        var join = a.CreateLabel();
+        var done = a.CreateLabel();
+        a.mov(r9d, __dword_ptr[rdi]);
+        a.test(esi, esi);
+        a.je(other);
+        a.lea(rcx, __[table]);
+        a.jmp(join);
+        a.Label(ref other);
+        a.lea(rcx, __[otherTable]);
+        a.Label(ref join);
+        a.cmp(r9d, 1);
+        a.ja(done);
+        a.movsxd(rax, __dword_ptr[rcx + r9 * 4]);
+        a.add(rax, rcx);
+        a.jmp(rax);
+        a.Label(ref done);
+        a.ret();
+        function.EmitCases(cases, done);
+
+        function.AssertRefuses();
+    }
+
+    [Fact]
+    public void RefusesTableRegisterLoadedFromMemoryOnOnePath()
+    {
+        var function = new JumpTableFunction();
+        var a = function.Assembler;
+        var cases = function.Cases(2);
+        var table = function.Table(cases);
+        var other = a.CreateLabel();
+        var join = a.CreateLabel();
+        var done = a.CreateLabel();
+        a.mov(r9d, __dword_ptr[rdi]);
+        a.test(esi, esi);
+        a.je(other);
+        a.lea(rcx, __[table]);
+        a.jmp(join);
+        a.Label(ref other);
+        a.mov(rcx, __qword_ptr[rdx]);
+        a.Label(ref join);
+        a.cmp(r9d, 1);
+        a.ja(done);
+        a.movsxd(rax, __dword_ptr[rcx + r9 * 4]);
+        a.add(rax, rcx);
+        a.jmp(rax);
+        a.Label(ref done);
+        a.ret();
+        function.EmitCases(cases, done);
+
+        function.AssertRefuses();
+    }
+
+    private sealed class JumpTableFunction
+    {
+        private const ulong BaseAddress = 0x8_0000_0000;
+        private readonly List<(Label Table, Label[] Entries)> _tables = [];
+
+        public Assembler Assembler { get; } = new(64);
+
+        public Label[] Cases(int count)
+        {
+            var cases = new Label[count];
+            for (var index = 0; index < count; index++)
+            {
+                cases[index] = Assembler.CreateLabel();
+            }
+
+            return cases;
+        }
+
+        public Label Table(Label[] entries)
+        {
+            var table = Assembler.CreateLabel();
+            _tables.Add((table, entries));
+            return table;
+        }
+
+        public void EmitCases(Label[] cases, Label exit)
+        {
+            for (var index = 0; index < cases.Length; index++)
+            {
+                Assembler.Label(ref cases[index]);
+                Assembler.mov(eax, index);
+                Assembler.jmp(exit);
+            }
+        }
+
+        public void AssertResolves(Label[] cases)
+        {
+            var (image, codeLength, result) = Assemble();
+            Assert.True(GuestRedZonePatcher.TryResolveJumpTableTargets(image, BaseAddress, codeLength, out var targets));
+            Assert.Equal(cases.Select(label => result.GetLabelRIP(label)).Distinct().Order(), targets);
+        }
+
+        public void AssertRefuses()
+        {
+            var (image, codeLength, _) = Assemble();
+            Assert.False(GuestRedZonePatcher.TryResolveJumpTableTargets(image, BaseAddress, codeLength, out _));
+        }
+
+        private (byte[] Image, int CodeLength, AssemblerResult Result) Assemble()
+        {
+            var codeEnd = Assembler.CreateLabel();
+            Assembler.Label(ref codeEnd);
+            Assembler.int3();
+            for (var index = 0; index < _tables.Count; index++)
+            {
+                var (table, entries) = _tables[index];
+                Assembler.Label(ref table);
+                Assembler.db(new byte[entries.Length * sizeof(int)]);
+                _tables[index] = (table, entries);
+            }
+
+            using var stream = new MemoryStream();
+            var result = Assembler.Assemble(
+                new StreamCodeWriter(stream), BaseAddress, BlockEncoderOptions.ReturnNewInstructionOffsets);
+            var image = stream.ToArray();
+            foreach (var (table, entries) in _tables)
+            {
+                var tableAddress = result.GetLabelRIP(table);
+                for (var index = 0; index < entries.Length; index++)
+                {
+                    BinaryPrimitives.WriteInt32LittleEndian(
+                        image.AsSpan((int)(tableAddress - BaseAddress) + index * sizeof(int)),
+                        (int)(result.GetLabelRIP(entries[index]) - tableAddress));
+                }
+            }
+
+            return (image, (int)(result.GetLabelRIP(codeEnd) - BaseAddress), result);
+        }
+    }
+
     private sealed unsafe class PatchedImage : IDisposable
     {
         private const ulong ImageSize = 0x10000;

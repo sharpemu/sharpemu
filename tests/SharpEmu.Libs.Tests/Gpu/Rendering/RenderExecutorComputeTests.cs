@@ -164,6 +164,25 @@ public sealed class RenderExecutorComputeTests : IDisposable
         Assert.StartsWith("debug DispatchDirect", _host.Calls[1]);
         Assert.DoesNotContain("end_rendering", _host.Calls);
         Assert.DoesNotContain("reset_bindings", _host.Calls);
+        // No shader is looked up, materialized or compiled for work that never runs.
+        Assert.Empty(_pipelines.Calls);
+    }
+
+    [Fact]
+    public void ZeroSizedThreadDimensionDispatch_IsSkippedBeforeTheProgramLookup()
+    {
+        _executor.Dispatch(1, Banks(), 0, 4, 1, 0x41 | (1u << 5), indirectArgumentsAddress: RecordingRenderHost.MemoryBase + 0x400);
+
+        AssertNotDispatched();
+        Assert.Empty(_pipelines.Calls);
+    }
+
+    [Fact]
+    public void IndirectDispatchResolvedOnTheGpu_IsNotSkippedByItsZeroPlaceholderCounts()
+    {
+        _executor.Dispatch(1, Banks(), 0, 0, 0, 0x41, indirectArgumentsAddress: RecordingRenderHost.MemoryBase + 0x400);
+
+        Assert.NotEmpty(_pipelines.Calls);
     }
 
     [Fact]
@@ -261,19 +280,90 @@ public sealed class RenderExecutorComputeTests : IDisposable
     }
 
     // AGC's fill kernel: s_buffer_load_dword the value from a one-record buffer, store it per thread.
-    private void ConfigureLoadedValueFill(uint records, ulong valueAddress, uint value)
+    private void ConfigureLoadedValueFill(uint records, ulong valueAddress, uint value, bool recognized = true, bool matchingUserData = true)
     {
         Span<byte> bytes = stackalloc byte[sizeof(uint)];
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
         Assert.True(_host.GuestMemory.TryWrite(valueAddress, bytes));
         var target = BufferDescriptor(MetadataAddress, 4, records, format: BufferDescriptorWords.Format32UInt);
         var source = BufferDescriptor(valueAddress, 0, 1);
-        var program = Program(ShaderStageKind.Compute, buffers:
-        [
-            new BufferResourceInfo(Read: true, Written: false, Atomic: false, Formatted: false, Scalar: true, MaxByteExtent: 4, PackedStride: 0),
-            ClearResource(maxByteExtent: 4, packedStride: 4),
-        ]);
-        _pipelines.Compute = ComputeProgram(Stage(program, buffers: [source, target], userData: [.. target, .. source]));
+        var program = new ShaderProgramInfo
+        {
+            Stage = ShaderStageKind.Compute,
+            ConstantFill = recognized ? new SharpEmu.Libs.Gpu.Pipelines.ConstantFill(0, 0, 4) : null,
+            Buffers =
+            [
+                new BufferResourceInfo(Read: true, Written: false, Atomic: false, Formatted: false, Scalar: true, MaxByteExtent: 4, PackedStride: 0),
+                ClearResource(maxByteExtent: 4, packedStride: 4),
+            ],
+        };
+        uint[] userData = matchingUserData ? [.. target, .. source] : new uint[8];
+        _pipelines.Compute = ComputeProgram(Stage(program, buffers: [source, target], userData: userData));
+    }
+
+    // AGC's constant fill kernel: one formatted dword buffer stored at the thread index with a constant.
+    private void ConfigureImmediateFill(bool recognized, bool matchingUserData)
+    {
+        var descriptor = BufferDescriptor(MetadataAddress, 4, 128 * 64, format: BufferDescriptorWords.Format32UInt);
+        var program = new ShaderProgramInfo
+        {
+            Stage = ShaderStageKind.Compute,
+            ConstantStoreValue = 0x1234_5678,
+            ImmediateConstantFill = recognized ? new SharpEmu.Libs.Gpu.Pipelines.ImmediateConstantFill(0, 0) : null,
+            Buffers = [ClearResource(maxByteExtent: 4, packedStride: 4)],
+        };
+        uint[] userData = matchingUserData ? [.. descriptor] : [0, 0, 0, 0];
+        _pipelines.Compute = ComputeProgram(Stage(program, buffers: [descriptor], userData: userData));
+    }
+
+    [Fact]
+    public void ImmediateConstantFill_DecodesWhenItsDescriptorComesFromItsUserData()
+    {
+        ConfigureImmediateFill(recognized: true, matchingUserData: true);
+
+        var clear = _executor.TryDecodeImageClear(_pipelines.Compute.Input, 128, 1, 1, 0x41);
+
+        Assert.NotNull(clear);
+        Assert.Equal((MetadataAddress, 0x1234_5678u), (clear.Value.Descriptor.Address, clear.Value.PackedClear));
+    }
+
+    [Theory]
+    [InlineData(false, true)] // a program that only stores a constant is no fill
+    [InlineData(true, false)] // the stored buffer is not the one the user data names
+    public void ImmediateConstantFill_IsRefusedWithoutProofOfTheKernelAndItsBuffer(bool recognized, bool matchingUserData)
+    {
+        ConfigureImmediateFill(recognized, matchingUserData);
+
+        Assert.Null(_executor.TryDecodeImageClear(_pipelines.Compute.Input, 128, 1, 1, 0x41));
+    }
+
+    [Fact]
+    public void LoadedValueFill_IsRefusedWhenItsUserDataNamesOtherBuffers()
+    {
+        ConfigureLoadedValueFill(128 * 64, RecordingRenderHost.MemoryBase + 0x70_0000, 0x4040_4040, matchingUserData: false);
+
+        Assert.Null(_executor.TryDecodeImageClear(_pipelines.Compute.Input, 128, 1, 1, 0x41));
+    }
+
+    [Fact]
+    public void BufferUsageAlone_DoesNotProveAConstantFill()
+    {
+        ConfigureLoadedValueFill(128 * 64, RecordingRenderHost.MemoryBase + 0x70_0000, 0x4040_4040, recognized: false);
+        Assert.Null(_executor.TryDecodeImageClear(_pipelines.Compute.Input, 128, 1, 1, 0x41));
+    }
+
+    [Fact]
+    public void ConstantStoreValueAlone_DoesNotProveEveryRecordIsWritten()
+    {
+        var descriptor = BufferDescriptor(MetadataAddress, 4, 128 * 64, format: BufferDescriptorWords.Format32UInt);
+        var program = new ShaderProgramInfo
+        {
+            Stage = ShaderStageKind.Compute,
+            ConstantStoreValue = 0,
+            Buffers = [ClearResource(maxByteExtent: 4, packedStride: 4)],
+        };
+        var input = ComputeProgram(Stage(program, buffers: [descriptor])).Input;
+        Assert.Null(_executor.TryDecodeImageClear(input, 128, 1, 1, 0x41));
     }
 
     [Fact]
@@ -392,7 +482,23 @@ public sealed class RenderExecutorComputeTests : IDisposable
     }
 
     [Fact]
-    public void MetadataClear_RefusesAReadModifyWriteKernelOverMetadata()
+    public void MetadataClear_MarksAnHtileRewrittenInPlaceWithoutAssumingAClear()
+    {
+        _host.MetadataAddresses.Add(MetadataAddress);
+        _host.HtileAddresses.Add(MetadataAddress);
+        _host.ClearableMetadata.Add(MetadataAddress);
+        var readWrite = new BufferResourceInfo(true, true, false, false, false, 4, 0);
+        _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [readWrite]), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        // The words it writes decide the clear later; the dispatch itself proves nothing.
+        Assert.Contains($"htile_rewritten {MetadataAddress:X}", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("clear_metadata", StringComparison.Ordinal));
+        AssertDispatched(4, 1, 1);
+    }
+
+    [Fact]
+    public void MetadataClear_LeavesARewriteOfNonHtileMetadataAlone()
     {
         _host.MetadataAddresses.Add(MetadataAddress);
         _host.ClearableMetadata.Add(MetadataAddress);
@@ -400,8 +506,99 @@ public sealed class RenderExecutorComputeTests : IDisposable
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [readWrite]), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
         _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
 
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("htile_rewritten", StringComparison.Ordinal));
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("clear_metadata", StringComparison.Ordinal));
         AssertDispatched(4, 1, 1);
+    }
+
+    [Fact]
+    public void MetadataClear_RefusesARewriteOverSeveralMetadataBuffers()
+    {
+        _host.MetadataAddresses.Add(MetadataAddress);
+        _host.MetadataAddresses.Add(MetadataAddress + 0x100);
+        _host.ClearableMetadata.Add(MetadataAddress);
+        _host.ClearableMetadata.Add(MetadataAddress + 0x100);
+        var readWrite = new BufferResourceInfo(true, true, false, false, false, 4, 0);
+        _pipelines.Compute = ComputeProgram(Stage(
+            Program(ShaderStageKind.Compute, buffers: [readWrite, readWrite]),
+            buffers: [BufferDescriptor(MetadataAddress, 4, 16), BufferDescriptor(MetadataAddress + 0x100, 4, 16)]));
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("clear_metadata", StringComparison.Ordinal));
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("htile_rewritten", StringComparison.Ordinal));
+        AssertDispatched(4, 1, 1);
+    }
+
+    [Fact]
+    public void MetadataClear_RefusesARewriteWithBitwiseExclusiveOr()
+    {
+        _host.MetadataAddresses.Add(MetadataAddress);
+        _host.ClearableMetadata.Add(MetadataAddress);
+        var readWrite = new BufferResourceInfo(true, true, false, false, false, 4, 0);
+        _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [readWrite], exclusiveOr: true), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("clear_metadata", StringComparison.Ordinal));
+        AssertDispatched(4, 1, 1);
+    }
+
+    [Fact]
+    public void MetadataClear_DropsAnExpandedHtileFill()
+    {
+        _host.MetadataAddresses.Add(MetadataAddress);
+        _host.HtileAddresses.Add(MetadataAddress);
+        _host.ClearableMetadata.Add(MetadataAddress);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var program = new ShaderProgramInfo
+        {
+            Stage = ShaderStageKind.Compute,
+            Hash = 0xF222,
+            ConstantStoreValue = 0xFFFF_FFFF,
+            Buffers = [written],
+        };
+        _pipelines.Compute = ComputeProgram(Stage(program, buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.Contains($"expand_metadata {MetadataAddress:X}", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("clear_metadata", StringComparison.Ordinal));
+        AssertDispatched(4, 1, 1);
+    }
+
+    [Fact]
+    public void MetadataClear_KeepsAnHtileFillWhoseZmaskIsCleared()
+    {
+        _host.MetadataAddresses.Add(MetadataAddress);
+        _host.HtileAddresses.Add(MetadataAddress);
+        _host.ClearableMetadata.Add(MetadataAddress);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var program = new ShaderProgramInfo
+        {
+            Stage = ShaderStageKind.Compute,
+            Hash = 0xF222,
+            ConstantStoreValue = 0xFFFF_FF00,
+            Buffers = [written],
+        };
+        _pipelines.Compute = ComputeProgram(Stage(program, buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.Contains($"clear_metadata {MetadataAddress:X}", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("expand_metadata", StringComparison.Ordinal));
+        AssertNotDispatched();
+    }
+
+    [Fact]
+    public void MetadataClear_AcceptsAnHtileFillWithoutAKnownValue()
+    {
+        _host.MetadataAddresses.Add(MetadataAddress);
+        _host.HtileAddresses.Add(MetadataAddress);
+        _host.ClearableMetadata.Add(MetadataAddress);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [written]), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.Contains($"clear_metadata {MetadataAddress:X}", _host.Calls);
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("expand_metadata", StringComparison.Ordinal));
+        AssertNotDispatched();
     }
 
     [Fact]

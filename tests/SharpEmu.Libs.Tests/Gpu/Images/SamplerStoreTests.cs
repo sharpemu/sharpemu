@@ -4,6 +4,7 @@
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
+using Silk.NET.Vulkan;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Images;
@@ -28,6 +29,21 @@ public sealed class SamplerStoreTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Equal((0x123u, 0xABCu), (words.MinLod, words.MaxLod));
         Assert.Equal((0x1FFFu, 3u, 2u, 1u), (words.LodBias, words.MagnifyFilter, words.MinifyFilter, words.MipFilter));
         Assert.Equal((7u, 2u), (words.BorderColorIndex, words.BorderColorType));
+    }
+
+    [Theory]
+    [InlineData(0u, null)]
+    [InlineData(1u, SamplerReductionMode.Min)]
+    [InlineData(2u, SamplerReductionMode.Max)]
+    [InlineData(3u, null)]
+    public void FilterMode_DecodesFromWord0AndSelectsTheReductionMode(uint filterMode, SamplerReductionMode? expected)
+    {
+        // Bits 29..30 of word 0, clear of the clamp, anisotropy and compare fields below them.
+        var words = Words((filterMode << 29) | 0x1FFF);
+        Assert.Equal(filterMode, words.FilterMode);
+        Assert.Equal(expected, SamplerStore.ReductionModeFor(words.FilterMode, minmaxSupported: true));
+        Assert.Null(SamplerStore.ReductionModeFor(words.FilterMode, minmaxSupported: false));
+        Assert.Equal(0u, Words(0x1FFF).FilterMode);
     }
 
     [Fact]

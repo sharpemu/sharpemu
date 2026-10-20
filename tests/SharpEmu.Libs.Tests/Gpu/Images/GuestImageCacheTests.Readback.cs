@@ -197,6 +197,45 @@ public sealed partial class GuestImageCacheTests
         harness.Shutdown();
     }
 
+    // Images collection keeps (here: GPU-written ones that are not under pressure) must not use up
+    // the budget of one pass: an older reclaimable image behind more of them than the pass retires
+    // would never be collected.
+    [Fact]
+    public void GarbageCollector_ProtectedImagesDoNotHideReclaimableOnes()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x400000, ReadWrite);
+        const int protectedCount = 12;
+        var images = new ResourceSlotIdentifier[protectedCount + 1];
+        for (var index = 0; index < images.Length; index++)
+        {
+            var request = Color32(address + 0x330000 + (ulong)index * 0x2000);
+            images[index] = harness.Acquire(ref request);
+        }
+
+        for (var index = 0; index < protectedCount; index++)
+        {
+            harness.MarkGpuWritten(images[index]);
+        }
+
+        // The protected images are the oldest; the clean one is the newest candidate.
+        harness.Worker.Run(() =>
+        {
+            harness.Images.SetCollectionThresholds(0, ulong.MaxValue, ulong.MaxValue, 17);
+            harness.Images.ResetRecency(images, 17);
+            harness.Images.RunGarbageCollector(endsFrame: false);
+        });
+
+        Assert.False(harness.Images.Contains(images[protectedCount]));
+        for (var index = 0; index < protectedCount; index++)
+        {
+            Assert.True(harness.Images.Contains(images[index]));
+        }
+
+        harness.Shutdown();
+    }
+
     // A title submits many command buffers per frame; collection after each of them must not age
     // the textures it samples once a frame, or they are deleted and uploaded again every frame.
     [Fact]
@@ -404,6 +443,32 @@ public sealed partial class GuestImageCacheTests
     }
 
     [Fact]
+    public void DepthTiledTextureReadback_WritesItsGuestBytes()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const uint width = 3, height = 2, pitch = 4;
+        const ulong size = 0x10000;
+        const uint clear = 0x3f200000u;
+        const uint stale = 0xdeadbeefu;
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Write(address, Bytes(Enumerable.Repeat(stale, (int)(size / 4)).ToArray()));
+        // A single-channel float texture laid out in the depth tiling, as a depth copy sampled later.
+        var request = LinearRequest(address, size, Format.R32Sfloat, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(width, height, 1), 1, 4, 1);
+        request.Description.Pitch = pitch;
+        request.Description.TileMode = GuestTileMode.Depth;
+        request.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = pitch, Height = height };
+        var imageIdentifier = harness.Find(ref request);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, size, clear)));
+
+        Assert.True(harness.Worker.Run(() => harness.Images.TryDownloadForTest(imageIdentifier)));
+        harness.Finish();
+        var after = harness.Read(address, (int)size).Chunk(4).Select(chunk => BitConverter.ToUInt32(chunk)).ToArray();
+        Assert.Equal((int)(width * height), after.Count(value => value == clear));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void TiledD16Readback_ConvertsAndPreservesStencil()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
@@ -566,6 +631,120 @@ public sealed partial class GuestImageCacheTests
             Assert.Same(download, harness.Cache.GetUtilityBuffer(GpuBufferUsage.Download));
         }
 
+        harness.Shutdown();
+    }
+
+
+    // A tiled array holds each layer as a whole mip chain, a layer stride apart. Reading it back
+    // sized the copy from a layout that packed the layers per level, stopped short of the last
+    // layers and aborted the tiler (Ghost of Yotei, a 96-layer 64x64 array of 16-byte texels).
+    [Fact]
+    public void TiledArrayReadback_PlacesTheLastLayerAtItsLayerStride()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var fatal = new SharpEmu.Libs.Tests.Gpu.Scheduling.FatalScope();
+        const uint width = 64, height = 64, layers = 4, levels = 4;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x200000, ReadWrite);
+        var words = RegisterWords.Texture(address, GuestPixelFormat.Bits32_32_32_32Float, width, height,
+            GuestImageType.Color2DArray, GuestTileMode.Standard4KB, lastLevel: levels - 1, maxMip: levels - 1, layers: layers);
+        var shape = new ShaderImageShape(false, false, false, false, TextureNumericClass.Float);
+        var request = ImageRequestBuilders.Texture(words, shape).Request;
+        var description = request.Description;
+        Assert.Equal(new SubresourceCount(levels, layers), description.Resources);
+        var stride = description.SliceStride;
+        Assert.Equal(description.Data.Size / layers, stride);
+        var mip0 = description.MipLayout[0];
+        var size = description.Data.Size;
+
+        var input = new byte[size];
+        new System.Random(1234).NextBytes(input);
+        harness.Write(address, input);
+        var identifier = harness.Acquire(ref request);
+        harness.MarkGpuWritten(identifier);
+
+        var result = harness.Worker.Run(() =>
+        {
+            using var output = new GpuBuffer(harness.Vulkan.DeviceInfo, harness.Scheduler,
+                GpuBufferUsage.DeviceLocal, address, GpuBuffer.AllFlags, size);
+            output.Fill(0, size, 0x5a5a5a5a);
+            Assert.True(harness.Images.TrySynchronizeBufferFromImage(output, address, size));
+            return harness.CopyFromDevice(output.Handle, 0, size);
+        });
+
+        var start = (layers - 1) * stride + mip0.Offset;
+        Assert.Equal(input.AsSpan((int)start, (int)mip0.Size).ToArray(), result.AsSpan((int)start, (int)mip0.Size).ToArray());
+        harness.Finish();
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void UnsynchronizedGpuImageTest_MatchesItsRangesWithoutAllocating()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        const ulong size = 0x1000;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var request = LinearRequest(address, size, Format.R8G8B8A8Unorm, GuestPixelFormat.Bits8_8_8_8UNorm,
+            GuestImageType.Color2D, new Extent3D(32, 32, 1), 1, 4, 1);
+        var image = harness.Acquire(ref request);
+
+        bool Agrees(ulong probe) => harness.Worker.Run(() =>
+            harness.Images.HasUnsynchronizedGpuImage(probe, 4) == (harness.Images.UnsynchronizedGpuImageRanges(probe, 4).Count != 0));
+        Assert.True(Agrees(address + 0x40));
+        Assert.False(harness.Worker.Run(() => harness.Images.HasUnsynchronizedGpuImage(address + 0x40, 4)));
+
+        harness.Image(image).MarkGpuModified();
+        Assert.True(harness.Worker.Run(() => harness.Images.HasUnsynchronizedGpuImage(address + 0x40, 4)));
+        Assert.True(Agrees(address + 0x40));
+        Assert.True(Agrees(address + size + 0x40));
+
+        // Resource reads ask this for every guest word; it must not allocate.
+        var allocated = harness.Worker.Run(() =>
+        {
+            _ = harness.Images.HasUnsynchronizedGpuImage(address + size + 0x40, 4);
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var index = 0; index < 1000; index++)
+            {
+                _ = harness.Images.HasUnsynchronizedGpuImage(address + 0x40, 4);
+                _ = harness.Images.HasUnsynchronizedGpuImage(address + size + 0x40, 4);
+            }
+
+            return GC.GetAllocatedBytesForCurrentThread() - before;
+        });
+        Assert.Equal(0, allocated);
+        harness.Shutdown();
+    }
+
+    // A buffer view over several images hands the shader their bytes; every covered image
+    // whose GPU contents are still only in the image publishes them, not just the first.
+    [Fact]
+    public void BufferSynchronization_PublishesEveryCoveredGpuImage()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        const ulong size = 0x1000;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Bytes(0x01020304u));
+        harness.Write(address + 0x4000, Bytes(0x05060708u));
+        var first = LinearRequest(address, size, Format.R32Uint, GuestPixelFormat.Bits32UInt,
+            GuestImageType.Color2D, new Extent3D(1024, 1, 1), 1, 4, 1);
+        var second = LinearRequest(address + 0x4000, size, Format.R32Uint, GuestPixelFormat.Bits32UInt,
+            GuestImageType.Color2D, new Extent3D(1024, 1, 1), 1, 4, 1);
+        var firstId = harness.Acquire(ref first);
+        var secondId = harness.Acquire(ref second);
+        harness.MarkGpuWritten(firstId);
+        harness.MarkGpuWritten(secondId);
+
+        harness.Worker.Run(() =>
+        {
+            using var buffer = new GpuBuffer(harness.Vulkan.DeviceInfo, harness.Scheduler, GpuBufferUsage.DeviceLocal, address, GpuBuffer.AllFlags, 0x8000);
+            Assert.True(harness.Images.TrySynchronizeBufferFromImage(buffer, address, 0x8000));
+            harness.Scheduler.Finish();
+        });
+
+        Assert.True(harness.Image(firstId).BufferHoldsGpuContents);
+        Assert.True(harness.Image(secondId).BufferHoldsGpuContents);
         harness.Shutdown();
     }
 }

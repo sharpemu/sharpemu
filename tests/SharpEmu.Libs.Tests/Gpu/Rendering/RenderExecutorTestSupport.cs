@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
@@ -259,9 +260,8 @@ internal sealed class RecordingRenderHost : IRenderHost
         Calls.Add($"cpu_write {address:X} {data.Length:X}");
     }
 
-    public BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten)
+    private Allocation ResolveAllocation(ulong address, ulong size)
     {
-        TryWrapRing("obtain");
         var end = address + size;
         var owner = _allocations.Find(a => !a.Deleted && a.Start <= address && end <= a.End);
         if (owner is null)
@@ -284,6 +284,27 @@ internal sealed class RecordingRenderHost : IRenderHost
             _allocations.Add(owner);
         }
 
+        return owner;
+    }
+
+    public void PrepareBufferAllocations(ReadOnlySpan<GuestSpan> ranges)
+    {
+        for (var index = 0; index < ranges.Length; index++)
+        {
+            var range = ranges[index];
+            var overlaps = _allocations.Any(allocation => !allocation.Deleted &&
+                allocation.Start < range.End && range.Address < allocation.End);
+            for (var other = 0; !overlaps && other < ranges.Length; other++)
+                overlaps = other != index && ranges[other].Address < range.End && range.Address < ranges[other].End;
+            if (overlaps) _ = ResolveAllocation(range.Address, range.Size);
+        }
+    }
+
+    public BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten)
+    {
+        TryWrapRing("obtain");
+        var owner = ResolveAllocation(address, size);
+        var end = address + size;
         for (var page = address & ~(PageSize - 1); page < end; page += PageSize)
         {
             if (_dirtyPages.Remove(page))
@@ -365,6 +386,9 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void DrawIndexedIndirect(BufferBinding arguments) =>
         Calls.Add($"draw_indexed_indirect {arguments.Handle:X}:{arguments.Offset:X}");
 
+    public void DrawIndirect(BufferBinding arguments) =>
+        Calls.Add($"draw_indirect {arguments.Handle:X}:{arguments.Offset:X}");
+
     public void DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ) =>
         Calls.Add($"draw_mesh {groupCountX} {groupCountY} {groupCountZ}");
 
@@ -413,10 +437,33 @@ internal sealed class RecordingRenderHost : IRenderHost
         return MetadataAddresses.Contains(address);
     }
 
+    public HashSet<ulong> HtileAddresses { get; } = new();
+
+    public List<ulong> ExpandedMetadata { get; } = new();
+
+    public bool IsHtile(ulong address)
+    {
+        Calls.Add($"is_htile {address:X}");
+        return HtileAddresses.Contains(address);
+    }
+
     public bool ClearMetadata(ulong address)
     {
         Calls.Add($"clear_metadata {address:X}");
         return ClearableMetadata.Contains(address);
+    }
+
+    public bool MarkHtileRewritten(ulong address)
+    {
+        Calls.Add($"htile_rewritten {address:X}");
+        return HtileAddresses.Contains(address);
+    }
+
+    public bool ExpandMetadata(ulong address)
+    {
+        Calls.Add($"expand_metadata {address:X}");
+        ExpandedMetadata.Add(address);
+        return true;
     }
 
     public bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear)
@@ -455,10 +502,20 @@ internal sealed class InputsCheckingPrefetch(IRenderHost host) : IProgramPrefetc
 
     public int Checks { get; private set; }
 
+    // A targetless draw whose pixel stage only stores to memory resolves its programs with the pixel
+    // stage active, which the registers alone do not say; a prefetch ahead of it resolves the draw
+    // without a pixel stage, and the draw then takes no prefetched result.
+    public bool AllowsStorageOnlyPixelStage { get; set; }
+
     public bool TryTakeGraphics(RegisterBanks banks, in GraphicsProgramInputs inputs, out GraphicsPrograms programs)
     {
         Checks++;
         var expected = RenderExecutor.ProgramInputsOf(banks, host.FormatSupport, host.Fatal, inputs.Indexed);
+        if (AllowsStorageOnlyPixelStage && inputs.PixelActive && !expected.PixelActive)
+        {
+            expected.PixelActive = true;
+        }
+
         if (!expected.Equals(inputs))
         {
             Mismatches.Add(
@@ -611,6 +668,7 @@ internal static class RenderExecutorFixtures
     public const ulong ComputeShader = 0x2_0002_0000;
     public const uint PrimitiveTriangleList = 4;
     public const uint PrimitiveTriangleStrip = 6;
+    public const uint PrimitiveRectangleList = 7;
 
     private static Exception Fatal(string message) => new RenderExecutorFatalException(message);
 

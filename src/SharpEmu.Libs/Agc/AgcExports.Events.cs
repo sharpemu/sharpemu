@@ -69,6 +69,7 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
+        // Counter selection and counter dumps carry a payload in the address fields.
         var hasAddress = eventType is 0x38 or 0x39;
         var packetDwords = hasAddress ? 4u : 2u;
         var eventIndex = hasAddress ? 1u : eventType is 0x07 or 0x0F or 0x10 ? 4u : 0u;
@@ -82,7 +83,7 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        TraceAgc($"agc.dcb_event_write buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} type={eventType}");
+        TraceAgc($"agc.dcb_event_write buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} type={eventType} address=0x{eventAddress:X16}");
         return ReturnPointer(ctx, commandAddress);
     }
 

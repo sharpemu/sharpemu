@@ -50,6 +50,33 @@ public sealed partial class GuestImageCacheTests
         Assert.Equal(baseline.Hits + 2, harness.Images.LookupMemoCounters.Hits);
     }
 
+    // The memo is direct-mapped: it pays off only if a frame's distinct textures mostly fit.
+    [Fact]
+    public void FindImage_RemembersTheLookupsOfAFrameWithManyTextures()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const int Textures = 512;
+        var address = harness.MapBacked(Textures * 0x1000UL, ReadWrite);
+        for (var pass = 0; pass < 2; pass++)
+        {
+            for (var index = 0; index < Textures; index++)
+            {
+                var request = Sampled(address + (ulong)index * 0x1000);
+                harness.Find(ref request);
+            }
+        }
+
+        var baseline = harness.Images.LookupMemoCounters;
+        for (var index = 0; index < Textures; index++)
+        {
+            var request = Sampled(address + (ulong)index * 0x1000);
+            harness.Find(ref request);
+        }
+
+        Assert.True(harness.Images.LookupMemoCounters.Hits - baseline.Hits >= Textures * 4 / 5);
+    }
+
     [Fact]
     public void FindImage_ADifferentViewIsNotReused()
     {

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
@@ -52,6 +53,9 @@ public sealed partial class RenderExecutor
         }
 
         var useThreadDimensions = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0;
+        // A zero dimension executes no work, so nothing needs the shader: skip before it is
+        // materialized and compiled. The counts are real unless the host resolves an indirect
+        // dispatch on the GPU, which leaves them zero and the arguments in guest memory.
         if ((indirectArgumentsAddress == 0 || useThreadDimensions) && (groupsX == 0 || groupsY == 0 || groupsZ == 0))
         {
             if (RenderTrace.Enabled && RenderTrace.ZeroDispatch())
@@ -60,6 +64,26 @@ public sealed partial class RenderExecutor
             }
 
             return;
+        }
+
+        if (TraceZeroIndirect && indirectArgumentsAddress != 0 && !useThreadDimensions)
+        {
+            Span<byte> arguments = stackalloc byte[3 * sizeof(uint)];
+            if (_host.TryReadCleanGuestBytes(indirectArgumentsAddress, arguments))
+            {
+                var x = BinaryPrimitives.ReadUInt32LittleEndian(arguments);
+                var y = BinaryPrimitives.ReadUInt32LittleEndian(arguments[sizeof(uint)..]);
+                var z = BinaryPrimitives.ReadUInt32LittleEndian(arguments[(2 * sizeof(uint))..]);
+                if (x == 0 || y == 0 || z == 0)
+                {
+                    var count = ++_zeroIndirectCount;
+                    if (count <= 32 || count % 1000 == 0)
+                    {
+                        Console.Error.WriteLine(
+                            $"[GPU][INFO][ZERO_INDIRECT] count={count} address=0x{indirectArgumentsAddress:X} groups={x},{y},{z} shader=0x{compute.Address:X}");
+                    }
+                }
+            }
         }
 
         var computeProgram = _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator, groupsX, groupsY, groupsZ);
@@ -95,10 +119,18 @@ public sealed partial class RenderExecutor
                 $"buffers={program.Buffers.Length} images={program.Images.Length} samplers={program.SamplerCount}");
         }
 
-        if (indirectArgumentsAddress == 0 && TryConsumeMetadataClear(input))
+        if (indirectArgumentsAddress == 0)
         {
-            _host.ResetBindings();
-            return;
+            // A dispatch that reads and rewrites HTile in place runs as written; the depth
+            // target's clear state is then read from the words it wrote. Titles clear each
+            // shadow map's HTile this way, and a target never seen cleared fails every
+            // caster's reverse-Z test.
+            RecordHtileRewrite(input);
+            if (TryConsumeMetadataClear(input))
+            {
+                _host.ResetBindings();
+                return;
+            }
         }
 
         if (indirectArgumentsAddress == 0 && TryConsumeConstantFill(input, groupsX, groupsY, groupsZ))
@@ -241,6 +273,52 @@ public sealed partial class RenderExecutor
         return BufferDescriptorWords.From(words);
     }
 
+    // A dispatch that reads and rewrites one HTile surface in place (a shadow-map HTile clear
+    // written by reading every word and storing it back) marks that HTile rewritten. Whether
+    // it cleared the target is decided from the words it wrote, as the hardware decides from
+    // ZMask, not from the shape of the program. Several metadata surfaces or a write-only
+    // clear leave the decision to the consumption paths.
+    private void RecordHtileRewrite(ComputeInputInfo input)
+    {
+        var program = input.Stage.Program!;
+        var resources = input.Stage.Resources;
+        if (program.HasBitwiseExclusiveOr || resources.Buffers.Length != program.Buffers.Length)
+        {
+            return;
+        }
+
+        ulong metadataAddress = 0;
+        for (var i = 0; i < program.Buffers.Length; i++)
+        {
+            if (!program.Buffers[i].Written)
+            {
+                continue;
+            }
+
+            var descriptor = DecodeBufferDescriptor(resources, i);
+            if (!_host.IsMetadata(descriptor.Address))
+            {
+                continue;
+            }
+
+            if (metadataAddress != 0 || !program.Buffers[i].Read)
+            {
+                return;
+            }
+
+            metadataAddress = descriptor.Address;
+        }
+
+        if (metadataAddress != 0 && _host.IsHtile(metadataAddress) && _host.MarkHtileRewritten(metadataAddress))
+        {
+            if (RenderTrace.Enabled && RenderTrace.MetadataClear())
+            {
+                RenderTrace.Write(
+                    $"Marked an HTile rewritten in place: shader=0x{program.Hash:X16} address=0x{metadataAddress:X16}");
+            }
+        }
+    }
+
     // A full overwrite of registered metadata by a compute shader becomes a tracked clear.
     private bool TryConsumeMetadataClear(ComputeInputInfo input)
     {
@@ -275,8 +353,54 @@ public sealed partial class RenderExecutor
             }
 
             var descriptor = DecodeBufferDescriptor(resources, i);
+            // A uniform fill over HTile memory is a clear only when the HTile words say
+            // "cleared" (ZMask, bits 0-3, zero). A fill whose words mean expanded proves the
+            // depth lives in memory: recording a clear would wipe that target's depth at
+            // every next bind. The fill is left to the image-clear paths below.
+            if (_host.IsHtile(descriptor.Address) &&
+                TryResolveFillValue(input, out var fillValue) &&
+                (fillValue & 0xFu) != 0)
+            {
+                _host.ExpandMetadata(descriptor.Address);
+                if (RenderTrace.Enabled && RenderTrace.MetadataClear())
+                {
+                    RenderTrace.Write(
+                        $"Dropped an expanded HTile fill as a clear: shader=0x{program.Hash:X16} address=0x{descriptor.Address:X16} value=0x{fillValue:X8}");
+                }
+
+                return false;
+            }
+
             if (_host.ClearMetadata(descriptor.Address))
             {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // The uniform value a metadata fill writes, when the program proves one at dispatch time.
+    private bool TryResolveFillValue(ComputeInputInfo input, out uint value)
+    {
+        value = 0;
+        var program = input.Stage.Program!;
+        var resources = input.Stage.Resources;
+        if (program.ConstantStoreValue is { } constant)
+        {
+            value = constant;
+            return true;
+        }
+
+        if (program.ConstantFill is { } fill &&
+            fill.DestinationScalarResource + 4 <= resources.UserData.Length &&
+            fill.SourceScalarResource + 4 <= resources.UserData.Length)
+        {
+            var source = BufferDescriptorWords.From(resources.UserData.AsSpan((int)fill.SourceScalarResource, 4).ToArray());
+            Span<byte> bytes = stackalloc byte[sizeof(uint)];
+            if (source.Address != 0 && _host.TryReadGuest(source.Address, bytes))
+            {
+                value = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
                 return true;
             }
         }
@@ -296,7 +420,11 @@ public sealed partial class RenderExecutor
     {
         var program = input.Stage.Program ?? throw _host.Fatal("The compute stage has no program.");
         var resources = input.Stage.Resources;
-        if (program.ConstantStoreValue is not { } value ||
+        // The recognized four-instruction kernel stores at group * 64 + thread through a V# read
+        // from its own user data; any other program that merely stores a constant is no fill.
+        if (program.ConstantStoreValue is not { } value || program.ImmediateConstantFill is not { } fill ||
+            program.UserDataBase != 0 || fill.GroupScalarRegister != (uint)input.WorkgroupRegister ||
+            fill.DestinationScalarResource + 4 > resources.UserData.Length ||
             program.Buffers.Length != 1 || resources.Buffers.Length != 1 || resources.Buffers[0].Length != 4 ||
             program.Images.Length != 0 || program.SamplerCount != 0 || program.UsesDeviceAddresses)
         {
@@ -305,6 +433,11 @@ public sealed partial class RenderExecutor
 
         var info = program.Buffers[0];
         var descriptor = BufferDescriptorWords.From(resources.Buffers[0]);
+        if (!resources.UserData.AsSpan((int)fill.DestinationScalarResource, 4).SequenceEqual(resources.Buffers[0]))
+        {
+            return null;
+        }
+
         var threads = (ulong)groupsX * input.ThreadsX;
         if (!info.Formatted || !info.Written || info.Read || info.Atomic || info.Scalar || info.MaxByteExtent != sizeof(uint) ||
             descriptor.Stride != sizeof(uint) || descriptor.Format != BufferDescriptorWords.Format32UInt || descriptor.SwizzleEnabled ||
@@ -327,7 +460,10 @@ public sealed partial class RenderExecutor
     {
         var program = input.Stage.Program ?? throw _host.Fatal("The compute stage has no program.");
         var resources = input.Stage.Resources;
-        if (program.Buffers.Length != 2 || resources.Buffers.Length != 2 || program.Images.Length != 0 || program.SamplerCount != 0 ||
+        if (program.ConstantFill is not { } fill || program.UserDataBase != 0 ||
+            fill.GroupScalarRegister != (uint)input.WorkgroupRegister ||
+            fill.DestinationScalarResource + 4 > resources.UserData.Length || fill.SourceScalarResource + 4 > resources.UserData.Length ||
+            program.Buffers.Length != 2 || resources.Buffers.Length != 2 || program.Images.Length != 0 || program.SamplerCount != 0 ||
             program.UsesDeviceAddresses || resources.Images.Length != 0 || resources.Samplers.Length != 0 ||
             resources.Buffers[0].Length != 4 || resources.Buffers[1].Length != 4)
         {
@@ -355,6 +491,12 @@ public sealed partial class RenderExecutor
 
         var descriptor = BufferDescriptorWords.From(resources.Buffers[target]);
         var valueDescriptor = BufferDescriptorWords.From(resources.Buffers[source]);
+        if (!resources.UserData.AsSpan((int)fill.DestinationScalarResource, 4).SequenceEqual(resources.Buffers[target]) ||
+            !resources.UserData.AsSpan((int)fill.SourceScalarResource, 4).SequenceEqual(resources.Buffers[source]))
+        {
+            return null;
+        }
+
         var threads = (ulong)groupsX * input.ThreadsX;
         if (descriptor.Stride != sizeof(uint) || descriptor.Format != BufferDescriptorWords.Format32UInt || descriptor.SwizzleEnabled ||
             descriptor.IndexStride != 0 || descriptor.AddThreadId || descriptor.RecordCount == 0 ||
@@ -631,6 +773,8 @@ public sealed partial class RenderExecutor
         return consumed || RefuseBoundedFill(program, $"copy refused by the host dst=0x{destination.Address:X} words={words} modulus={modulus}");
     }
 
+    private static readonly bool TraceZeroIndirect = Environment.GetEnvironmentVariable("SHARPEMU_TRACE_ZERO_INDIRECT") == "1";
+    private long _zeroIndirectCount;
     private static readonly bool BoundedCopyEnabled = Environment.GetEnvironmentVariable("SHARPEMU_HOST_BOUNDED_COPY") != "0";
 
     private static bool IsPlainWordBuffer(BufferDescriptorWords descriptor) =>

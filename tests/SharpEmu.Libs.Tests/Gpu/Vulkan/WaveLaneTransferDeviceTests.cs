@@ -117,8 +117,10 @@ public sealed class WaveLaneTransferDeviceTests(HeadlessVulkanFixture fixture) :
             if ((word & 0xffff) == 224) barriers++;
             offset += checked((int)(word >> 16) * 4);
         }
-        // A partial mask write needs a second exact-mask exchange.
-        Assert.Equal(partialWrite ? 2 : 1, barriers);
+        // A partial mask write needs a second exact-mask exchange. The program's LDS write and read
+        // are ordered by two more shared-memory phase barriers: a guest wave spans two host subgroups,
+        // and the half-mask plan's exchanges do not order the program's own LDS traffic.
+        Assert.Equal(partialWrite ? 4 : 3, barriers);
         using var harness = new ImageTestHarness(vulkan);
         using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
         var output = runner.CreateBuffer(768);

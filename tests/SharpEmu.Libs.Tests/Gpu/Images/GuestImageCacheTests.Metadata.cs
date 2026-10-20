@@ -154,11 +154,79 @@ public sealed partial class GuestImageCacheTests
         Assert.True(harness.Images.IsMetadataCleared(entries[2], 0, out var fill));
         Assert.Equal(0xffffffffu, fill);
         Assert.False(harness.Images.IsMetadataCleared(entries[0], 0));
-        Assert.False(harness.Images.IsMetadataCleared(entries[2], 32));
-        Assert.False(harness.Images.SetMetadataSlice(entries[2], 32, true));
+        Assert.True(harness.Images.IsMetadataCleared(entries[2], 32));
+        Assert.False(harness.Images.IsMetadataCleared(entries[0], 32));
+        Assert.False(harness.Images.IsMetadataCleared(entries[2], SurfaceMetadata.MaxSlices));
+        Assert.False(harness.Images.SetMetadataSlice(entries[2], SurfaceMetadata.MaxSlices, true));
         Assert.False(harness.Images.IsMetadata(address + 0x3000));
         Assert.False(harness.Images.ClearMetadata(address + 0x3000));
         harness.Shutdown();
+    }
+
+    // A dispatch that rewrites HTile in place clears exactly the slices whose every tile
+    // ends with ZMask 0, read from the words it wrote, as the hardware reads them.
+    [Fact]
+    public void RewrittenHtile_ClearStateFollowsTheWrittenZmask()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var htile = address + 0x4000;
+        const ulong sliceSize = 0x100;
+        harness.Images.RegisterHtileMetadataForTest(htile, sliceSize * 2, 2);
+        var words = new byte[sliceSize * 2];
+        for (var offset = 0; offset < words.Length; offset += 4)
+        {
+            // Slice 0: every tile cleared (ZMask 0, other bits set). Slice 1: one tile expanded.
+            var word = offset < (int)sliceSize ? 0xFFFF_FFF0u : offset == (int)sliceSize + 8 ? 0x0000_000Fu : 0u;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(words.AsSpan(offset), word);
+        }
+
+        harness.Write(htile, words);
+        Assert.True(harness.Images.MarkHtileRewritten(htile));
+        Assert.True(harness.Images.IsMetadataCleared(htile, 0));
+        Assert.False(harness.Images.IsMetadataCleared(htile, 1));
+
+        // Without a rewrite, the recorded state stays as it is.
+        Assert.True(harness.Images.SetMetadataSlice(htile, 1, true));
+        Assert.True(harness.Images.IsMetadataCleared(htile, 1));
+        Assert.False(harness.Images.MarkHtileRewritten(address + 0x8000));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void HtileTracksClearStateBeyond32Slices()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var htile = address + 0x4000;
+        harness.Images.RegisterHtileMetadataForTest(htile, 0x100 * 121, 121);
+        Assert.True(harness.Images.ClearMetadata(htile));
+        for (uint slice = 0; slice < 121; slice++)
+        {
+            Assert.True(harness.Images.IsMetadataCleared(htile, slice));
+        }
+
+        Assert.True(harness.Images.SetMetadataSlice(htile, 100, false));
+        Assert.True(harness.Images.IsMetadataCleared(htile, 99));
+        Assert.False(harness.Images.IsMetadataCleared(htile, 100));
+        Assert.True(harness.Images.IsMetadataCleared(htile, 101));
+        Assert.True(harness.Images.SetMetadataSlice(htile, 100, true));
+        Assert.True(harness.Images.IsMetadataCleared(htile, 100));
+        harness.Shutdown();
+    }
+
+    [Theory]
+    [InlineData(new uint[] { 0, 0xFFF0, 0x1230 }, true)]
+    [InlineData(new uint[] { 0, 0x1, 0 }, false)]
+    [InlineData(new uint[] { 0xF }, false)]
+    public void HtileWordsCleared_ReadsOnlyTheZmask(uint[] words, bool cleared)
+    {
+        var bytes = new byte[words.Length * 4];
+        for (var index = 0; index < words.Length; index++)
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(index * 4), words[index]);
+        Assert.Equal(cleared, GuestImageCache.HtileWordsCleared(bytes));
     }
 
     [Fact]

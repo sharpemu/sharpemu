@@ -36,7 +36,12 @@ internal static unsafe partial class VulkanVideoPresenter
             DestroyFeedbackSnapshotPool();
             DestroyRenderPipelines();
             _descriptorHeap.Dispose();
+            DestroyRuntimeDescriptors();
             _imageCache.Dispose();
+            // The cache retires its images' views into the heap while it disposes, so the heap goes after it.
+            _imageCache.ViewsRetired = null;
+            _runtimeDescriptorHeap?.Dispose();
+            _runtimeDescriptorHeap = null;
             _samplerStore.Dispose();
             _bufferCache.AsyncReadback?.Dispose();
             _bufferCache.AsyncReadback = null;

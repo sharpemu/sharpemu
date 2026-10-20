@@ -38,6 +38,10 @@ internal static unsafe partial class VulkanVideoPresenter
             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.BufferCollect))
             {
                 _bufferCache.RunGarbageCollector();
+                if (endsFrame)
+                {
+                    _bufferCache.DecayCpuWriteHeat();
+                }
             }
         }
 

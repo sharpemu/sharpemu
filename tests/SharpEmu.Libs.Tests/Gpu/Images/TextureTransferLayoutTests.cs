@@ -129,6 +129,84 @@ public sealed class TextureTransferLayoutTests
         Assert.Contains(fatal.Messages, message => message.Contains("upload format is unknown"));
     }
 
+    private static SharpEmu.ShaderCompiler.Gen5PixelOutputKind KindOf(Format host)
+    {
+        var name = host.ToString();
+        return name.EndsWith("Uint", StringComparison.Ordinal) ? SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Uint
+            : name.EndsWith("Sint", StringComparison.Ordinal) ? SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Sint
+            : SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float;
+    }
+
+    // The host image of a render target and the pixel output decoding of the presenter must agree
+    // on the numeric class: an integer attachment needs an integer output, a normalized one a float.
+    [Theory]
+    [InlineData(ChannelLayout.Bits8, ChannelType.SNorm, Format.R8SNorm)]
+    [InlineData(ChannelLayout.Bits8, ChannelType.SInt, Format.R8Sint)]
+    [InlineData(ChannelLayout.Bits8_8, ChannelType.SNorm, Format.R8G8SNorm)]
+    [InlineData(ChannelLayout.Bits8_8, ChannelType.UInt, Format.R8G8Uint)]
+    [InlineData(ChannelLayout.Bits8_8, ChannelType.SInt, Format.R8G8Sint)]
+    [InlineData(ChannelLayout.Bits16_16, ChannelType.SNorm, Format.R16G16SNorm)]
+    [InlineData(ChannelLayout.Bits8_8_8_8, ChannelType.SNorm, Format.R8G8B8A8SNorm)]
+    [InlineData(ChannelLayout.Bits16_16_16_16, ChannelType.SNorm, Format.R16G16B16A16SNorm)]
+    [InlineData(ChannelLayout.Bits11_11_10, ChannelType.UNorm, Format.B10G11R11UfloatPack32)]
+    public void RenderTargetFormats_HaveAHostFormatAndAMatchingPixelOutput(ChannelLayout layout, ChannelType type, Format host)
+    {
+        var target = TextureTransferLayout.RenderTargetFormat(layout, type, ChannelOrder.Standard);
+        Assert.Equal(host, target.HostFormat);
+
+        Assert.True(SharpEmu.Libs.VideoOut.VulkanVideoPresenter.TryDecodeRenderTargetFormat((uint)layout, (uint)type, 0, out var output));
+        Assert.Equal(KindOf(host), output.OutputKind);
+    }
+
+    // The narrow sRGB targets use the native format when the device offers it and a same-width
+    // UNORM stand-in otherwise; either way the pixel output stays a float.
+    [Theory]
+    [InlineData(ChannelLayout.Bits8, ChannelType.Srgb, Format.R8Srgb, Format.R8Unorm)]
+    [InlineData(ChannelLayout.Bits8_8, ChannelType.Srgb, Format.R8G8Srgb, Format.R8G8Unorm)]
+    public void NarrowSrgbRenderTargets_UseTheNativeFormatOrItsUnormStandIn(ChannelLayout layout, ChannelType type, Format native, Format standIn)
+    {
+        var target = TextureTransferLayout.RenderTargetFormat(layout, type, ChannelOrder.Standard);
+        Assert.Contains(target.HostFormat, new[] { native, standIn });
+
+        Assert.True(SharpEmu.Libs.VideoOut.VulkanVideoPresenter.TryDecodeRenderTargetFormat((uint)layout, (uint)type, 0, out var output));
+        Assert.Equal(SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float, output.OutputKind);
+    }
+
+    // Every combination that both tables accept must agree on the numeric class of the attachment.
+    [Fact]
+    public void RenderTargetTables_AgreeOnTheNumericClassOfEveryCommonFormat()
+    {
+        using var fatal = new FatalScope();
+        var checkedCount = 0;
+        foreach (var layout in Enum.GetValues<ChannelLayout>())
+        {
+            for (var type = 0u; type < 8; type++)
+            {
+                if (!SharpEmu.Libs.VideoOut.VulkanVideoPresenter.TryDecodeRenderTargetFormat((uint)layout, type, 0, out var output))
+                {
+                    continue;
+                }
+
+                RenderTargetFormatInfo target;
+                try
+                {
+                    target = TextureTransferLayout.RenderTargetFormat(layout, (ChannelType)type, ChannelOrder.Standard);
+                }
+                catch (SchedulerFatalException)
+                {
+                    continue;
+                }
+
+                Assert.True(
+                    KindOf(target.HostFormat) == output.OutputKind,
+                    $"layout={layout} type={type} host={target.HostFormat} output={output.OutputKind}");
+                checkedCount++;
+            }
+        }
+
+        Assert.True(checkedCount > 30);
+    }
+
     [Fact]
     public void RenderTargetFormats_CombineHostSwizzleAndOrder()
     {
@@ -156,5 +234,23 @@ public sealed class TextureTransferLayoutTests
         using var fatal = new FatalScope();
         Assert.Throws<SchedulerFatalException>(() => TextureTransferLayout.SurfaceFormat(GuestPixelFormat.Invalid));
         Assert.Contains(fatal.Messages, message => message.Contains("has no host format"));
+    }
+
+    [Fact]
+    public void CopyFootprint_EndsAtTheLastTexelOfThePaddedRows()
+    {
+        var region = new BufferImageCopy
+        {
+            BufferOffset = 16,
+            BufferRowLength = 8,
+            ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
+            ImageExtent = new Extent3D(3, 2, 1),
+        };
+        // Row 0 starts at 16, row 1 at 16 + 8 * 4; its third texel ends at 16 + 44.
+        Assert.Equal(60UL, TextureTransferLayout.CopyFootprint([region], new TileElementLayout(4, 1, 1)));
+
+        var compressed = region with { BufferOffset = 0, BufferRowLength = 0, ImageExtent = new Extent3D(8, 8, 1) };
+        // An 8x8 BC block image is two block rows of two 8-byte blocks.
+        Assert.Equal(32UL, TextureTransferLayout.CopyFootprint([compressed], new TileElementLayout(8, 4, 4)));
     }
 }

@@ -78,7 +78,9 @@ public sealed class RecencyQueue<TSlotIdentifier> where TSlotIdentifier : struct
     }
 
     // Continue a bounded collection walk without changing the order or last-use ticks.
-    public void CollectNextAtOrBeforeTick(ulong tick, int limit, List<TSlotIdentifier> results)
+    // Returns whether the walk can continue; false once it reached the end of the eligible items,
+    // after which the next call starts over from the oldest.
+    public bool CollectNextAtOrBeforeTick(ulong tick, int limit, List<TSlotIdentifier> results)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
         var item = _scanNext ?? _first;
@@ -87,12 +89,13 @@ public sealed class RecencyQueue<TSlotIdentifier> where TSlotIdentifier : struct
             if (item.Tick > tick)
             {
                 _scanNext = null;
-                return;
+                return false;
             }
             results.Add(item.Slot);
             item = item.Next;
         }
         _scanNext = item;
+        return item != null;
     }
 
     private int AllocateItem()

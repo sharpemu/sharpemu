@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 
@@ -127,6 +128,7 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
+        NoteDrawModifier("sceAgcDcbDrawIndex", modifier);
         var drawInitiator = (modifier & (1UL << 32)) != 0
             ? 0u
             : ((uint)modifier >> 3) & 0x20u;
@@ -218,6 +220,8 @@ public static partial class AgcExports
         {
             return ReturnPointer(ctx, 0);
         }
+
+        NoteDrawModifier("sceAgcDcbDrawIndexAuto", modifier);
 
         if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(7, ItNop, RDrawIndexAuto), indexCount, 0, 0, 0, 0, 0))
         {
@@ -415,4 +419,19 @@ public static partial class AgcExports
     #pragma warning restore SHEM006
 
     private static long _indirectDrawEmitRejectCount;
+
+    private static readonly ConcurrentDictionary<(string, ulong), byte> _reportedDrawModifiers = new();
+
+    // The modifier names the shader stage that receives the draw and the user registers the
+    // command processor fills for indirect draws. A direct draw emits the same packet for every
+    // modifier; rejecting the unfamiliar ones dropped whole passes, such as Unreal's volume
+    // rasterization through the geometry stage, without a trace.
+    private static void NoteDrawModifier(string export, ulong modifier)
+    {
+        if (modifier != 0x4000_0000 && _reportedDrawModifiers.TryAdd((export, modifier), 0))
+        {
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] agc.draw_modifier {export} modifier=0x{modifier:X} stage={(uint)modifier >> 29} flags=0x{(uint)modifier & 7u:X}");
+        }
+    }
 }

@@ -248,6 +248,38 @@ public sealed class GpuTilerTests : IClassFixture<HeadlessVulkanFixture>
         harness.AssertNoValidationMessages();
     }
 
+    // A 4 KiB tiled view may start half a block into an allocation (a T# is only 256-byte aligned);
+    // the swizzle is relative to the view base, so the bytes match the aligned CPU twin.
+    [Fact]
+    public void Standard4KB_TilesAndDetilesAtAnOffsetInsideTheBuffer()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        const ulong viewOffset = 0x800;
+        var tilerCase = TilerCases.Create(TileBlockKind.Standard4KB, 8, TilerCases.Shape.Blocks, 123)!;
+        var transfer = tilerCase.Transfer with { TiledOffset = viewOffset };
+        var capacity = viewOffset + transfer.TiledSize;
+        var linear = harness.Upload(tilerCase.Linear);
+        var tiled = harness.CreateDeviceLocalBuffer(capacity);
+        harness.Run(() =>
+        {
+            tiled.Fill(0, tiled.Size, 0);
+            harness.Tiler.Tile(linear.Handle, 0, linear.Size, tiled.Handle, 0, capacity, [transfer]);
+        });
+
+        var all = harness.ReadBack(tiled.Handle, 0, capacity);
+        Assert.True(all.AsSpan(0, (int)viewOffset).IndexOfAnyExcept((byte)0) < 0);
+        Assert.True(all.AsSpan((int)viewOffset).SequenceEqual(tilerCase.Tiled));
+
+        var detiled = harness.Run(() => harness.Tiler.Detile(tiled.Handle, 0, capacity, transfer.LinearSize, [transfer]));
+        var actual = harness.ReadBack(detiled.Buffer, detiled.Offset, transfer.LinearSize);
+        var expected = tilerCase.Linear.ToArray();
+        MaskPadding(actual, transfer);
+        MaskPadding(expected, transfer);
+        Assert.Equal(expected, actual);
+        harness.AssertNoValidationMessages();
+    }
+
     // Bytes between the row width and the pitch are never transferred.
     private static void MaskPadding(byte[] bytes, in TileTransfer transfer)
     {

@@ -45,12 +45,13 @@ public sealed class Gen5TypedBufferLoadSpirvTests
     }
 
     [Fact]
-    public void TypedD16Load_IsRejected()
+    public void TypedD16Load_PacksHalvesAndCompiles()
     {
-        var request = CreateCompileRequest("TBufferLoadFormatD16Xy", typed: true, typedFormat: 64, dwordCount: 1);
+        // tbuffer_load_format_d16_xy v4, format 16_16 float: two components share one register.
+        var request = CreateCompileRequest(
+            "TBufferLoadFormatD16Xy", typed: true, typedFormat: 64, dwordCount: 1, packedD16: true, componentCount: 2);
 
-        Assert.False(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error));
-        Assert.Contains("TBufferLoadFormatD16Xy", error, StringComparison.Ordinal);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
     }
 
     [Fact]
@@ -112,7 +113,9 @@ public sealed class Gen5TypedBufferLoadSpirvTests
         string opcode,
         bool typed,
         uint typedFormat,
-        uint dwordCount)
+        uint dwordCount,
+        bool packedD16 = false,
+        uint componentCount = 0)
     {
         var load = new Gen5ShaderInstruction(
             0,
@@ -132,7 +135,9 @@ public sealed class Gen5TypedBufferLoadSpirvTests
                 Glc: false,
                 Slc: false,
                 Typed: typed,
-                TypedFormat: typedFormat));
+                TypedFormat: typedFormat,
+                PackedD16: packedD16,
+                FormatComponentCount: componentCount));
         var end = new Gen5ShaderInstruction(8, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null);
         var program = new Gen5ShaderProgram(0, [load, end]);
         var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, 1, 0, 12);

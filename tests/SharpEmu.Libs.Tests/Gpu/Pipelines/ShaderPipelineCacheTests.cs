@@ -524,6 +524,36 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.Equal(2, cache.GraphicsPipelineCount);
     }
 
+    [Fact]
+    public void GraphicsPipelines_DoNotKeyOnTheDepthBounds()
+    {
+        // Light volumes move the bounds every draw; keying on them created a pipeline per draw.
+        var guest = new PipelineTestGuest();
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var host = new RecordingRenderHost();
+        var executor = new RenderExecutor(host, new CachingProvider(cache));
+        RegisterBanks Bounded(float min, float max)
+        {
+            var banks = Banks(withDepth: true);
+            banks.Context.DepthTarget = banks.Context.DepthTarget with { DepthControl = banks.Context.DepthTarget.DepthControl | 0x8 };
+            banks.Context.DepthBoundsMin = min;
+            banks.Context.DepthBoundsMax = max;
+            return banks;
+        }
+
+        executor.DrawAuto(1, Bounded(0.1f, 0.2f), Auto(3));
+        executor.DrawAuto(2, Bounded(0.3f, 0.9f), Auto(3));
+        executor.DrawAuto(3, Bounded(0f, 1f), Auto(3));
+
+        var description = Assert.Single(guest.Host.GraphicsPipelines);
+        Assert.True(description.StaticParameters.DepthBoundsTestEnable);
+        Assert.Equal(3, host.DynamicStates.Count);
+        Assert.All(host.DynamicStates, state => Assert.True(state.DepthBoundsTestEnabled));
+        Assert.Equal((0.1f, 0.2f), (host.DynamicStates[0].DepthMinBounds, host.DynamicStates[0].DepthMaxBounds));
+        Assert.Equal((0.3f, 0.9f), (host.DynamicStates[1].DepthMinBounds, host.DynamicStates[1].DepthMaxBounds));
+        Assert.Equal((0f, 1f), (host.DynamicStates[2].DepthMinBounds, host.DynamicStates[2].DepthMaxBounds));
+    }
+
     // Programs from the fixtures, pipelines from the real cache over the fake host.
     private sealed class CachingProvider(ShaderPipelineCache cache) : IShaderPipelineProvider
     {

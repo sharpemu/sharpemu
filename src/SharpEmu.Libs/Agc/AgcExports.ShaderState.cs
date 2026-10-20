@@ -212,8 +212,15 @@ public static partial class AgcExports
                     descriptor[(int)ShaderCodeOffset..]);
                 var continuationSize = BinaryPrimitives.ReadUInt32LittleEndian(
                     descriptor[(int)ShaderSizeOffset..]);
-                if (continuationCodeAddress <= entryCodeAddress ||
-                    continuationCodeAddress - entryCodeAddress > uint.MaxValue ||
+                // A merged LS/HS object can place its HS continuation before the LS entry.
+                // Geometry pairs keep the continuation after the entry.
+                var continuationBefore = continuationCodeAddress < entryCodeAddress;
+                var separation = continuationBefore
+                    ? entryCodeAddress - continuationCodeAddress
+                    : continuationCodeAddress - entryCodeAddress;
+                if (continuationCodeAddress == entryCodeAddress ||
+                    (continuationBefore && entryType != HsFrontShaderType) ||
+                    separation > uint.MaxValue ||
                     !IsValidDeclaredShaderSize(continuationSize) ||
                     !CanReadShaderRange(ctx, continuationCodeAddress, continuationSize))
                 {
@@ -238,7 +245,7 @@ public static partial class AgcExports
                     }
                 }
 
-                var distance = continuationCodeAddress - entryCodeAddress;
+                var distance = separation;
                 if (distance >= bestDistance)
                 {
                     continue;

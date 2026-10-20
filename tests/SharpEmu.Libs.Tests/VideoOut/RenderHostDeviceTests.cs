@@ -144,17 +144,19 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     // One float2 position program and one solid red pixel program over empty resource plans.
     private sealed class FixedProgramProvider(IShaderPipelineHost host, ulong vertexAddress, bool pushData = false,
         byte[]? interpolationShader = null, uint vertexCount = VertexCount,
-        byte[]? vertexShader = null, uint vertexComponents = 2, uint vertexStride = VertexStride) : IShaderPipelineProvider
+        byte[]? vertexShader = null, uint vertexComponents = 2, uint vertexStride = VertexStride,
+        BindingLayout? pixelBindings = null) : IShaderPipelineProvider
     {
         private const uint Float2Format = 64;
         private static readonly uint[] UserRegisters = [0, 1];
         private readonly ShaderProgramInfo _vertex = EmptyProgram(ShaderStageKind.Vertex, 1, fetchComponents: vertexComponents, userDataRegisters: pushData ? UserRegisters : null, pushDataStart: 2);
-        private readonly ShaderProgramInfo _pixel = EmptyProgram(ShaderStageKind.Pixel, 2, userDataRegisters: pushData ? UserRegisters : null);
+        private readonly ShaderProgramInfo _pixel = EmptyProgram(ShaderStageKind.Pixel, 2, userDataRegisters: pushData ? UserRegisters : null, bindings: pixelBindings);
         private readonly ResourceSnapshot _snapshot = new() { UserData = pushData ? [0x11, 0x22] : [] };
         private ShaderProgram _vertexProgram;
         private ShaderProgram _pixelProgram;
 
-        internal static ShaderProgramInfo EmptyProgram(ShaderStageKind stage, ulong hash, ShaderResourceInfo? info = null, uint fetchComponents = 0, uint[]? userDataRegisters = null, uint pushDataStart = 0)
+        internal static ShaderProgramInfo EmptyProgram(ShaderStageKind stage, ulong hash, ShaderResourceInfo? info = null, uint fetchComponents = 0, uint[]? userDataRegisters = null, uint pushDataStart = 0,
+            BindingLayout? bindings = null)
         {
             info ??= new ShaderResourceInfo();
             var program = new ShaderProgramInfo
@@ -163,7 +165,7 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
                 Hash = hash,
                 UserDataCount = (uint)(userDataRegisters?.Length ?? 0),
                 Resources = new SpecializedResourceInfo { Info = info },
-                Bindings = BindingLayout.Allocate(info, userDataRegisters ?? [], usesGlobalDataShare: false, usesFlattenedTable: false, usesShaderBase: false, pushDataStart),
+                Bindings = bindings ?? BindingLayout.Allocate(info, userDataRegisters ?? [], usesGlobalDataShare: false, usesFlattenedTable: false, usesShaderBase: false, pushDataStart),
             };
             program.VertexFetchComponents[0] = (byte)fetchComponents;
             return program;

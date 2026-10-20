@@ -85,7 +85,7 @@ public sealed class Float16ArithmeticDeviceTests(HeadlessVulkanFixture fixture) 
         ]));
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
-            LocalSizeX = 1, ThreadCountX = 1, WaveSize = 32,
+            ExactFloat16ConversionSupported = vulkan.ExactFloat16Conversion, LocalSizeX = 1, ThreadCountX = 1, WaveSize = 32,
             IeeeMode = ieeeMode,
         };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);

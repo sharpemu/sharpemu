@@ -186,6 +186,8 @@ public sealed class TrackedRegion
         }
     }
 
+    public bool HasCpuWriteHeat => _hotCpuWrites.Any;
+
     public void ResetCpuWriteHeat(ulong address, ulong size)
     {
         var (start, end) = GetPageRange(address, size);

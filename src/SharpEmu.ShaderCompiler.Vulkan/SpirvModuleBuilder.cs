@@ -193,6 +193,7 @@ public enum SpirvCapability : uint
     FragmentBarycentricKhr = 5284,
     ClipDistance = 32,
     CullDistance = 33,
+    Tessellation = 3,
     SampledImageArrayDynamicIndexing = 29,
     StorageImageArrayDynamicIndexing = 31,
     SampleRateShading = 35,
@@ -215,10 +216,24 @@ public enum SpirvCapability : uint
     GroupNonUniformShuffle = 65,
     ShaderViewportIndex = 70,
     ShaderViewportIndexLayerExt = 5254,
+    ShaderNonUniform = 5301,
     RuntimeDescriptorArray = 5302,
+    SampledImageArrayNonUniformIndexing = 5307,
     PhysicalStorageBufferAddresses = 5347,
+    DenormPreserve = 4464,
     SignedZeroInfNanPreserve = 4466,
+    RoundingModeRte = 4467,
     MeshShadingExt = 5283,
+}
+
+// The function-control mask of OpFunction. NVIDIA miscompiles repeated calls of one DontInline
+// function whose result indexes a descriptor array (every call returns the first call's result when
+// the calls sit in a uniform loop), so a lookup function must not ask for it. DontInline is only for
+// functions that return loaded data, such as the runtime-format device buffer load.
+public enum SpirvFunctionControl : uint
+{
+    None = 0,
+    DontInline = 2,
 }
 
 public enum SpirvStorageClass : uint
@@ -239,6 +254,8 @@ public enum SpirvStorageClass : uint
 public enum SpirvExecutionModel : uint
 {
     Vertex = 0,
+    TessellationControl = 1,
+    TessellationEvaluation = 2,
     Fragment = 4,
     GLCompute = 5,
     MeshExt = 5365,
@@ -246,10 +263,21 @@ public enum SpirvExecutionModel : uint
 
 public enum SpirvExecutionMode : uint
 {
+    SpacingEqual = 1,
+    SpacingFractionalEven = 2,
+    SpacingFractionalOdd = 3,
+    VertexOrderCw = 4,
+    VertexOrderCcw = 5,
+    PointMode = 10,
+    Triangles = 22,
+    Quads = 24,
+    Isolines = 25,
     OriginUpperLeft = 7,
     DepthReplacing = 12,
     LocalSize = 17,
+    DenormPreserve = 4459,
     SignedZeroInfNanPreserve = 4461,
+    RoundingModeRte = 4462,
     OutputVertices = 26,
     OutputPrimitivesExt = 5270,
     OutputTrianglesExt = 5298,
@@ -263,6 +291,7 @@ public enum SpirvDecoration : uint
     NoPerspective = 13,
     Flat = 14,
     PerVertexKhr = 5285,
+    Patch = 15,
     Location = 30,
     Index = 32,
     Binding = 33,
@@ -271,6 +300,7 @@ public enum SpirvDecoration : uint
     NoContraction = 42,
     NonWritable = 24,
     PerPrimitiveExt = 5271,
+    NonUniform = 5300,
 }
 
 public enum SpirvBuiltIn : uint
@@ -281,6 +311,11 @@ public enum SpirvBuiltIn : uint
     CullDistance = 4,
     Layer = 9,
     ViewportIndex = 10,
+    InvocationId = 8,
+    TessLevelOuter = 11,
+    TessLevelInner = 12,
+    TessCoord = 13,
+    PatchVertices = 14,
     VertexIndex = 42,
     InstanceIndex = 43,
     FragCoord = 15,
@@ -300,6 +335,7 @@ public enum SpirvBuiltIn : uint
     FragDepth = 22,
     PrimitiveTriangleIndicesExt = 5296,
     CullPrimitiveExt = 5299,
+    PrimitiveId = 7,
 }
 
 public enum SpirvImageDim : uint
@@ -394,6 +430,7 @@ public sealed class SpirvModuleBuilder
     // The value of every 32-bit integer and boolean constant, for folding instructions over them.
     private readonly Dictionary<uint, uint> _scalarConstantValues = [];
     private readonly HashSet<SpirvCapability> _declaredCapabilities = [];
+    private readonly HashSet<string> _declaredExtensions = [];
     private readonly Dictionary<string, uint> _extInstImports = [];
     private uint _nextId = 1;
     private uint? _voidType;
@@ -410,8 +447,13 @@ public sealed class SpirvModuleBuilder
         }
     }
 
-    public void AddExtension(string extension) =>
-        EmitWithString(_extensions, SpirvOp.Extension, [], extension);
+    public void AddExtension(string extension)
+    {
+        if (_declaredExtensions.Add(extension))
+        {
+            EmitWithString(_extensions, SpirvOp.Extension, [], extension);
+        }
+    }
 
     public uint ImportExtInst(string name)
     {
@@ -814,6 +856,10 @@ public sealed class SpirvModuleBuilder
         Emit(_functions, SpirvOp.Function, returnType, id, functionControl, functionType);
         return id;
     }
+
+    // Defines a function whose id callers already used (a call can precede the definition).
+    public void BeginFunction(uint returnType, uint functionType, uint id, SpirvFunctionControl control = SpirvFunctionControl.None) =>
+        Emit(_functions, SpirvOp.Function, returnType, id, (uint)control, functionType);
 
     public uint AddFunctionParameter(uint type) =>
         EmitResult(_functions, SpirvOp.FunctionParameter, type);

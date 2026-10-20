@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -64,7 +65,10 @@ public readonly record struct DynamicDrawState(
     StencilMasks BackStencil,
     uint ColorWriteCount,
     byte ColorWriteEnableMask,
-    uint DepthCountControl = 0);
+    uint DepthCountControl = 0,
+    bool DepthBoundsTestEnabled = false,
+    float DepthMinBounds = 0f,
+    float DepthMaxBounds = 1f);
 
 // The host-side descriptors of one shader stage, prepared before the draw or dispatch records.
 public interface IPreparedBindings
@@ -106,6 +110,9 @@ public interface IRenderHost
 
     bool TryReadGuest(ulong address, Span<byte> destination);
 
+    // Reads guest bytes only when no pending GPU write can change them. False means not known final.
+    bool TryReadCleanGuestBytes(ulong address, Span<byte> destination) => false;
+
     // The part of the range that is mapped from its start; zero when the start is unmapped.
     ulong ClampMappedSize(ulong address, ulong size);
 
@@ -125,7 +132,14 @@ public interface IRenderHost
 
     BufferBinding NullBuffer { get; }
 
+    // Finishes the buffer allocation merges these ranges can trigger, before any of them is obtained.
+    void PrepareBufferAllocations(ReadOnlySpan<GuestSpan> ranges);
+
     BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten);
+
+    // The device address of a guest range's cached buffer, for shaders that read it through a physical pointer.
+    ulong ObtainBufferDeviceAddress(ulong address, ulong size, bool isWritten) =>
+        throw new NotSupportedException("The render host does not expose buffer addresses for tessellation.");
 
     void TraceVertexBuffer(ulong shaderHash, VertexAttributeResource attribute, VertexInputBuffer input,
         BufferBinding binding, ulong requestedBytes, ulong acquiredBytes) { }
@@ -149,6 +163,9 @@ public interface IRenderHost
     IResourcePreparation BeginPreparation();
 
     IPreparedBindings PrepareBindings(ShaderStageResources stage);
+
+    void UpdateTessellationData(IPreparedBindings prepared, uint[] data) =>
+        throw new NotSupportedException("The render host does not support tessellation runtime data.");
 
     void PrepareDeviceAddresses();
 
@@ -176,6 +193,10 @@ public interface IRenderHost
 
     // One indexed draw whose counts the GPU reads from the buffer (VkDrawIndexedIndirectCommand layout).
     void DrawIndexedIndirect(BufferBinding arguments) =>
+        throw new NotSupportedException("The render host does not draw from indirect arguments.");
+
+    // One draw whose counts the GPU reads from the buffer (VkDrawIndirectCommand layout).
+    void DrawIndirect(BufferBinding arguments) =>
         throw new NotSupportedException("The render host does not draw from indirect arguments.");
 
     void InsertDrawTraceMarker(string label) { }
@@ -210,7 +231,15 @@ public interface IRenderHost
 
     bool IsMetadata(ulong address);
 
+    bool IsHtile(ulong address);
+
     bool ClearMetadata(ulong address);
+
+    // A dispatch rewrote this HTile in place; its clear state is read from the words later.
+    bool MarkHtileRewritten(ulong address);
+
+    // Drops the pending clear of metadata a fill proved expanded (its words no longer say cleared).
+    bool ExpandMetadata(ulong address);
 
     bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear);
 

@@ -34,7 +34,7 @@ public static class GuestImageFormat
     // is unsupported for sampling.
     private static readonly (uint Format, ImageNumericClass Class)[] SampledFormats =
     [
-        (1, ImageNumericClass.Float), (Format8Uscaled, ImageNumericClass.Float), (5, ImageNumericClass.Uint), (7, ImageNumericClass.Float), (8, ImageNumericClass.Float),
+        (1, ImageNumericClass.Float), (Format8Uscaled, ImageNumericClass.Float), (5, ImageNumericClass.Uint), (6, ImageNumericClass.Sint), (7, ImageNumericClass.Float), (8, ImageNumericClass.Float),
         (11, ImageNumericClass.Uint), (12, ImageNumericClass.Sint), (13, ImageNumericClass.Float), (14, ImageNumericClass.Float),
         (15, ImageNumericClass.Float), (16, ImageNumericClass.Float), (18, ImageNumericClass.Uint), (19, ImageNumericClass.Sint), (20, ImageNumericClass.Uint),
         (21, ImageNumericClass.Sint), (22, ImageNumericClass.Float), (23, ImageNumericClass.Float), (24, ImageNumericClass.Float),

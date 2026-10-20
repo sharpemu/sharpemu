@@ -149,6 +149,70 @@ public sealed class ResourceMaterializerTests
         Assert.Equal(1u, Assert.Single(reads, read => read.ComponentIndex == 1).Value);
     }
 
+    // A 224-byte-stride material table of 10000 records: the exhaustive probe count (step 32)
+    // is over the cap, so only a selector the shader clamps can be materialized. Key 1 sits at
+    // the record the clamped selector reaches (4 + 224 * 3); key 2, whose descriptor is of
+    // another dimension, sits at a record the clamp excludes (4 + 224 * 2000).
+    private static (ShaderResourcePlan Plan, ResourceRuntimeInputs Inputs, uint[] Reachable) ClampedTable((string Opcode, uint Value)? clamp)
+    {
+        var plan = Extract(ResourceTrackerTests.IndirectImageProgram(false, selectorClamp: clamp));
+        uint[] userData = [0x1000, 224 << 16, 10000, 0, 0x90000, 16 << 16, 16, 0, 7];
+        var memory = new TestWordMemory { Words = new uint[0x100000 / 4] };
+        var reachable = ResourceTrackerTests.ImageDescriptor();
+        var excluded = reachable.ToArray();
+        excluded[3] = (excluded[3] & 0x0FFFFFFF) | (10u << 28);
+        memory.At(0x1000 + 4 + 224 * 3) = 1;
+        memory.At(0x1000 + 4 + 224 * 2000) = 2;
+        ResourceTrackerTests.WriteImage(memory, 0x90000 + 32, reachable);
+        ResourceTrackerTests.WriteImage(memory, 0x90000 + 64, excluded);
+        return (plan, Inputs(userData, readCleanMemory: memory.Read), reachable);
+    }
+
+    [Theory]
+    [InlineData("VMinU32", 5u)]
+    [InlineData("VMed3U32", 5u)]
+    [InlineData("VAndB32", 7u)]
+    public void ClampedSelectorProbesOnlyTheClampedRecords(string opcode, uint value)
+    {
+        var (plan, inputs, reachable) = ClampedTable((opcode, value));
+        var selector = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!;
+        Assert.Equal(value, selector.SelectorBound);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.Equal(2, snapshot.Images.Length);
+        Assert.Contains(snapshot.Images, image => image.SequenceEqual(reachable));
+    }
+
+    [Fact]
+    public void UnclampedSelectorOverTheProbeCapStillFails()
+    {
+        var (plan, inputs, _) = ClampedTable(null);
+        Assert.Null(plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!.SelectorBound);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out var failureKind));
+        Assert.Equal(ResourceMaterializationFailure.ImageCapacityExceeded, failureKind);
+    }
+
+    [Fact]
+    public void ClampedSelectorReportsTheClampBoundedMode()
+    {
+        var (plan, inputs, _) = ClampedTable(("VMinU32", 2000u));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var captures = new List<IndirectImageFailure>();
+
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization,
+            out var failureKind, captures.Add));
+        Assert.Equal(ResourceMaterializationFailure.IncompatibleImageCandidates, failureKind);
+        var diagnostic = Assert.IsType<IndirectSelectorDiagnostic>(Assert.Single(captures).SelectorDiagnostic);
+        Assert.Equal("clamp_bounded", diagnostic.SelectionMode);
+        Assert.Equal([new SelectorKeyProbe(4 + 224 * 3, 1), new SelectorKeyProbe(4 + 224 * 2000, 2)], diagnostic.KeyProbes);
+    }
+
     private static IEnumerable<Gen5ShaderInstruction> ImageWords(ref uint pc, uint register, uint address, uint format)
     {
         uint[] words = [address, format << 20, 3 | (3 << 14), 0xFAC | (ImageType2D << 28), 0, 0, 0, 0];
@@ -309,5 +373,35 @@ public sealed class ResourceMaterializerTests
         Assert.True(plan.Memory.TryGetIndex(floatPc, 0, out var floatIndex));
         Assert.False(applied.SamplerByMemoryIndex.ContainsKey(floatIndex));
         Assert.Equal(2, snapshot.Samplers.Length);
+    }
+
+    // Signed-integer storage images keep their signed class; only a write-only 32-bit sint
+    // image is compiled as raw uint bits.
+    [Theory]
+    [InlineData(6u, true, ImageNumericClass.Sint)]
+    [InlineData(12u, true, ImageNumericClass.Sint)]
+    [InlineData(12u, false, ImageNumericClass.Sint)]
+    [InlineData(Format32Sint, true, ImageNumericClass.Uint)]
+    [InlineData(Format32Sint, false, ImageNumericClass.Uint)]
+    public void SignedStorageImage_SpecializesWithItsNumericClass(uint format, bool alsoLoaded, ImageNumericClass expected)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, 16, 0x1000, format));
+        instructions.Add(Image(pc, "ImageStore", 16, dmask: 1)); pc += 8;
+        if (alsoLoaded)
+        {
+            instructions.Add(Image(pc, "ImageLoad", 16, dmask: 1)); pc += 8;
+        }
+
+        instructions.Add(EndProgram(pc));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([]), ref snapshot, ref specialization, out var failure), failure.ToString());
+        // A load of the same descriptor can add a separate sampled-class resource.
+        var image = Assert.Single(ResourceMaterializer.ApplyTo(plan, specialization).Info.Images, resource => resource.ResourceClass == ImageResourceClass.Storage);
+        Assert.Equal(expected, image.NumericClass);
     }
 }

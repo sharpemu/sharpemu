@@ -13,6 +13,7 @@ public enum ShaderStage : byte
     Pixel,
     Compute,
     Mesh,
+    TessellationEvaluation,
 }
 
 public enum ImageNumericClass : byte
@@ -36,6 +37,10 @@ public static class DescriptorConstants
     public const uint IdentityImageSwizzle = 0xFAC;
     public const uint InvalidFormat = 0;
     public const uint NoIndex = uint.MaxValue;
+
+    // GFX10 S# dword 3 bits 12-29 are reserved. The adjusted sample forms carry their
+    // adjustment there; the sampler itself ignores them.
+    public const uint SamplerDword3ReservedMask = 0x3FFF_F000u;
 }
 
 // One buffer resource of a program and how the program uses it.
@@ -53,6 +58,13 @@ public sealed class BufferResource
     public bool Atomic { get; set; }
     public bool Formatted { get; set; }
     public bool Scalar { get; set; }
+
+    // Some access reads or writes whole dwords through the bound words (dword loads and stores,
+    // atomics, scalar buffer loads). The host must then bind the buffer at a dword-aligned
+    // base: those paths address a word by the byte address shifted right by two. Buffers
+    // reached only through byte, short or formatted accesses assemble elements from bytes and
+    // accept any base.
+    public bool DwordAddressed { get; set; }
 
     public BufferResource Clone() => (BufferResource)MemberwiseClone();
 }
@@ -180,6 +192,10 @@ public sealed class ShaderResourceInfo
     public bool HasBitwiseExclusiveOr { get; set; }
     public bool UsesDeviceAddresses { get; set; }
 
+    // Some image access reads its T# and S# from the shader registers at run time and resolves
+    // them through the host's runtime descriptor table (RuntimeDescriptorTable).
+    public bool UsesRuntimeDescriptors { get; set; }
+
     public ShaderResourceInfo Clone() => new()
     {
         Buffers = Buffers.Select(buffer => buffer.Clone()).ToList(),
@@ -196,6 +212,7 @@ public sealed class ShaderResourceInfo
         InstanceOffsetScalarRegister = InstanceOffsetScalarRegister,
         HasBitwiseExclusiveOr = HasBitwiseExclusiveOr,
         UsesDeviceAddresses = UsesDeviceAddresses,
+        UsesRuntimeDescriptors = UsesRuntimeDescriptors,
     };
 }
 
@@ -208,6 +225,9 @@ public sealed record IndirectImageSelector(
     uint KeyArgument)
 {
     public IndirectSelectorValues? SelectorValues { get; init; }
+
+    // An inclusive upper bound the shader's own clamps prove for the selector, when one exists.
+    public uint? SelectorBound { get; init; }
     public IReadOnlyList<DirectImageCandidate>? DirectCandidates { get; init; }
     public bool Dense { get; init; }
     public uint TableOffset { get; init; }

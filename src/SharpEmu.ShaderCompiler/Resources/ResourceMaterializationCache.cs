@@ -2021,9 +2021,10 @@ public sealed partial class ResourceMaterializationCache
         public void Reset()
         {
             _reads.Clear();
-            // Retain ordinary descriptor walks without keeping unusually large
-            // tables alive for the lifetime of the renderer.
-            if (_reads.Capacity > 16384)
+            // Retain ordinary descriptor walks without keeping unusually large tables alive for the
+            // lifetime of the renderer. Walks of tens of thousands of words are ordinary in some games;
+            // dropping them at 16K entries regrew the list on every such walk.
+            if (_reads.Capacity > 1 << 18)
                 _reads.Capacity = 0;
             _reader = null;
             _cleanReader = null;

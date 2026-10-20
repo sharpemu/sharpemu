@@ -144,7 +144,7 @@ public static class KernelSyncOnAddressCompatExports
                 {
                     if (Volatile.Read(ref _wakeRequested) == 0)
                     {
-                        Monitor.Wait(_hostGate, waitSlice);
+                        Monitor.Wait(_hostGate, KernelHostWait.RoundUpMilliseconds(waitSlice));
                     }
                 }
 

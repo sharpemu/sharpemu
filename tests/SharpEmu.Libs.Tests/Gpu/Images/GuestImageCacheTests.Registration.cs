@@ -226,6 +226,41 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
     }
 
     [Fact]
+    public void ResizeSiblings_KeepBothSizesAndSyncTheSharedRectangle()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x30000, ReadWrite);
+
+        // A 4x1 render target, written by the GPU.
+        var large = LinearRequest(address, 0x10, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new Extent3D(4, 1, 1), 1, 4, 1);
+        large = AsColorTarget(large);
+        var largeId = harness.Acquire(ref large);
+        harness.MarkGpuWritten(largeId);
+
+        // The same surface at 2x1 (a dynamic-resolution switch): its own image, both alive.
+        var small = large;
+        small.Description.Data = new GuestSpan(address, 0x8);
+        small.Description.Extent = new Extent3D(2, 1, 1);
+        small.Description.Pitch = 2;
+        small.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 0x8, Pitch = 2, Height = 1 };
+        var smallId = harness.Acquire(ref small);
+
+        Assert.NotEqual(largeId, smallId);
+        Assert.True(harness.Images.Contains(largeId));
+        Assert.True(harness.Images.Contains(smallId));
+        Assert.Equal(2u, harness.Image(smallId).Description.Extent.Width);
+        // The shared rectangle came from the newer sibling.
+        Assert.True(harness.Image(smallId).IsGpuModified);
+
+        // Switching back reuses the existing larger image instead of creating a new one.
+        var largeAgain = large;
+        var largeAgainId = harness.Find(ref largeAgain);
+        Assert.Equal(largeId, largeAgainId);
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void ArrayToVolumeOverlap_ExpandsAndKeepsGpuOwnership()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

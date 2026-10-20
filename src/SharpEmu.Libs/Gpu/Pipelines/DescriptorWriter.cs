@@ -29,7 +29,8 @@ public static class DescriptorWriter
             DescriptorBindingKind.Samplers => Silk.NET.Vulkan.DescriptorType.Sampler,
             DescriptorBindingKind.Buffers or DescriptorBindingKind.GlobalDataShare or DescriptorBindingKind.DeviceAddressPageTable or
                 DescriptorBindingKind.FaultBuffer or DescriptorBindingKind.FlattenedResourceTable or DescriptorBindingKind.ShaderData or
-                DescriptorBindingKind.MipStatistics =>
+                DescriptorBindingKind.MipStatistics or DescriptorBindingKind.RuntimeDescriptorTable or
+                DescriptorBindingKind.RuntimeDescriptorMisses =>
                 Silk.NET.Vulkan.DescriptorType.StorageBuffer,
             _ => throw SubmissionScheduler.Fatal($"The descriptor binding kind is invalid: kind={kind}."),
         };
@@ -42,6 +43,7 @@ public static class DescriptorWriter
         ShaderStage.Vertex => ShaderStageFlags.VertexBit,
         ShaderStage.Pixel => ShaderStageFlags.FragmentBit,
         ShaderStage.Compute => ShaderStageFlags.ComputeBit,
+        ShaderStage.TessellationEvaluation => ShaderStageFlags.TessellationEvaluationBit,
         ShaderStage.Mesh => ShaderStageFlags.MeshBitExt,
         _ => throw SubmissionScheduler.Fatal($"The shader stage is unknown: stage={stage}."),
     };
@@ -49,6 +51,16 @@ public static class DescriptorWriter
     public static PipelineStageFlags PipelineStageFlag(ShaderStageFlags stages)
     {
         var result = PipelineStageFlags.None;
+        if ((stages & ShaderStageFlags.TessellationControlBit) != 0)
+        {
+            result |= PipelineStageFlags.TessellationControlShaderBit;
+        }
+
+        if ((stages & ShaderStageFlags.TessellationEvaluationBit) != 0)
+        {
+            result |= PipelineStageFlags.TessellationEvaluationShaderBit;
+        }
+
         if ((stages & ShaderStageFlags.VertexBit) != 0)
         {
             result |= PipelineStageFlags.VertexShaderBit;

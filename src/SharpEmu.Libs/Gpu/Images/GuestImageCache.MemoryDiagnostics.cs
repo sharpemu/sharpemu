@@ -90,7 +90,7 @@ public sealed partial class GuestImageCache
             $"gpu_modified_bytes={modified} tiled_gpu_modified_bytes={tiledModified} " +
             $"device_allocations={_device.LiveAllocations} device_allocation_limit={_device.MaxMemoryAllocationCount} " +
             $"collection_start_bytes={_collectionStartBytes} collection_enabled={_totalUsedMemory >= _collectionStartBytes} " +
-            $"pressure_bytes={_memoryPressureBytes} critical_bytes={_criticalMemoryBytes}");
+            $"pressure_bytes={_memoryPressureBytes} critical_bytes={_criticalMemoryBytes} hard_limit_bytes={_hardLimitBytes}");
         Console.Error.WriteLine($"[GPU][INFO] ImageMemoryPaths exact_matches={_exactImageMatches} overlap_matches={_overlapImageMatches} " +
             $"empty_searches={_emptyImageSearches} unmatched_overlaps={_unmatchedImageOverlaps} candidates={_collectionCandidates} " +
             $"association_skips={_collectionAssociations} tiled_retentions={_collectionTiledRetentions} buffer_overlap_retentions={_collectionBufferOverlapRetentions} " +

@@ -138,6 +138,10 @@ internal sealed class ComputePrewarmRecord
     public Gen5ComputeSystemRegisters? SystemRegisters { get; init; }
     public required ResourceSpecialization Specialization { get; init; }
 
+    // How the runtime planned the program's image descriptors. Prewarm plans the same way, or the
+    // layout (and so the compiled module) would differ from the one a draw looks up.
+    public RuntimeDescriptorMode RuntimeDescriptors { get; init; }
+
     public (ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset) CodeKey =>
         (Hash, CodeSize, Address, ContinuationAddressOffset);
 }
@@ -149,7 +153,7 @@ internal sealed class ShaderPrewarmList : IDisposable
     public const string ProgressFileName = "shader-prewarm.progress";
 
     private const uint Magic = 0x57504553;
-    private const uint FormatVersion = 3;
+    private const uint FormatVersion = 4;
     private const byte CodeKind = 1;
     private const byte ComputeKind = 2;
     private const int RecordHeaderBytes = sizeof(uint) + sizeof(ulong);
@@ -623,6 +627,8 @@ internal sealed class ShaderPrewarmList : IDisposable
             writer.Write(table.SearchIterations);
         }
 
+        writer.Write((byte)record.RuntimeDescriptors);
+
         writer.Flush();
         return stream.ToArray();
     }
@@ -687,6 +693,8 @@ internal sealed class ShaderPrewarmList : IDisposable
                 reader.ReadUInt32(), reader.ReadUInt32(), reader.ReadUInt32(), reader.ReadUInt32()));
         }
 
+        var runtimeDescriptors = (RuntimeDescriptorMode)reader.ReadByte();
+
         return new ComputePrewarmRecord
         {
             Hash = hash,
@@ -699,6 +707,7 @@ internal sealed class ShaderPrewarmList : IDisposable
             Info = info,
             SystemRegisters = registers,
             Specialization = specialization,
+            RuntimeDescriptors = runtimeDescriptors,
         };
     }
 

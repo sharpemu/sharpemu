@@ -238,6 +238,32 @@ public class Wave64HalfMaskDeviceTests(HeadlessVulkanFixture fixture) : IClassFi
         }
     }
 
+    // A butterfly through LDS between the two halves of the wave, in two write/read rounds: a
+    // round's reads must finish before the next round's writes, and its writes before its reads.
+    // The half-mask plan's own barriers do not order this program traffic.
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(64u)]
+    public void SharedMemoryButterflyRounds_StayOrderedBetweenTheHalves(uint localDataShareDwords)
+    {
+        if (!Ready()) return;
+        Lane();
+        Add(Vop2(0, "VLshlrevB32", 6, Operand(2), Gen5Operand.Vector(2)));
+        Add(Vop2(0, "VXorB32", 7, Operand(32), Gen5Operand.Vector(2)));
+        Add(Vop2(0, "VLshlrevB32", 7, Operand(2), Gen5Operand.Vector(7)));
+        Add(DataShare(0, "DsWriteB32", false, [Gen5Operand.Vector(6), Gen5Operand.Vector(2)], []));
+        Add(DataShare(0, "DsReadB32", false, [Gen5Operand.Vector(7)], [3]));
+        Add(Vop2(0, "VAddU32", 3, Operand(100), Gen5Operand.Vector(3)));
+        Add(DataShare(0, "DsWriteB32", false, [Gen5Operand.Vector(6), Gen5Operand.Vector(3)], []));
+        Add(DataShare(0, "DsReadB32", false, [Gen5Operand.Vector(7)], [4]));
+
+        var lanes = Run(localDataShareDwords);
+        for (uint lane = 0; lane < 64; lane++)
+        {
+            Assert.Equal(lane + 100, lanes[lane]);
+        }
+    }
+
     [Fact]
     public void AnExecLoop_RunsEveryLaneItsOwnCount()
     {

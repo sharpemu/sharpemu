@@ -175,6 +175,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 ((IShaderPipelineHost)this).SharedInt64AtomicsEnabled,
                 ((IShaderPipelineHost)this).ExecGuardElisionEnabled,
                 _supportsShaderSignedZeroInfNanPreserveFloat32,
+                _supportsExactFloat16Conversion,
                 SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
                 Volatile.Read(ref _nativeSubgroupSize),
                 _canRequireComputeSubgroup32,
@@ -201,7 +202,9 @@ internal static unsafe partial class VulkanVideoPresenter
                     record, code, compiler, sharedInt64Atomics, execGuardElision,
                     _supportsShaderSignedZeroInfNanPreserveFloat32, out var compiled, out var layout, out var error,
                     ((IShaderPipelineHost)this).ComputeWave64SubgroupNative,
-                    ((IShaderPipelineHost)this).ComputeRunsOn32LaneSubgroups(record.Info)))
+                    ((IShaderPipelineHost)this).ComputeRunsOn32LaneSubgroups(record.Info),
+                    ((IShaderPipelineHost)this).RuntimeImageDescriptorsSupported,
+                    _supportsExactFloat16Conversion))
             {
                 NoteShaderPrewarmFailure(record, error);
                 return false;

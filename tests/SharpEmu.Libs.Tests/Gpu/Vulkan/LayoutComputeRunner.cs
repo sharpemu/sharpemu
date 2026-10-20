@@ -36,7 +36,8 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         : ImageDescriptorBinding.ResourceClass(kind) == ImageResourceClass.Storage ? DescriptorType.StorageImage
         : DescriptorType.StorageBuffer;
 
-    public LayoutComputeRunner(ImageTestHarness harness, ShaderCompileRequest request, byte[] spirv)
+    // heapLayout, when the request reads runtime descriptors, is set 1 of the pipeline layout.
+    public LayoutComputeRunner(ImageTestHarness harness, ShaderCompileRequest request, byte[] spirv, DescriptorSetLayout heapLayout = default)
     {
         _harness = harness;
         _request = request;
@@ -62,13 +63,15 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         };
         Require(vk.CreateDescriptorSetLayout(device, &layoutInfo, null, out _setLayout), "vkCreateDescriptorSetLayout");
         var push = new PushConstantRange(StageFlags, 0, PushData.ByteSize);
-        fixed (DescriptorSetLayout* layout = &_setLayout)
+        var setLayouts = stackalloc DescriptorSetLayout[2];
+        setLayouts[0] = _setLayout;
+        setLayouts[1] = heapLayout;
         {
             var pipelineLayoutInfo = new PipelineLayoutCreateInfo
             {
                 SType = StructureType.PipelineLayoutCreateInfo,
-                SetLayoutCount = 1,
-                PSetLayouts = layout,
+                SetLayoutCount = heapLayout.Handle != 0 ? 2u : 1u,
+                PSetLayouts = setLayouts,
                 PushConstantRangeCount = request.Bindings.UsesPushData ? 1u : 0u,
                 PPushConstantRanges = &push,
             };
@@ -214,12 +217,24 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         IReadOnlyDictionary<DescriptorBindingKind, DescriptorImageInfo[]>? boundImages = null,
         ulong shaderBase = 0,
         uint[]? dispatchThreadLimits = null,
-        uint[]? meshDrawParameters = null)
+        uint[]? memoryOffsets = null,
+        DescriptorSet heapSet = default,
+        uint[]? meshDrawParameters = null,
+        uint[]? tessellationData = null)
     {
         var vk = _harness.Vk;
         var device = _harness.Device.Device;
         var layout = _request.Bindings;
         var shaderData = new uint[layout.ShaderDataDwordCount];
+        if (layout.UsesTessellationData)
+        {
+            if (tessellationData is not { Length: (int)Gen5TessellationData.DwordCount })
+            {
+                throw new InvalidOperationException("The tessellation kernel requires its runtime data.");
+            }
+
+            tessellationData.CopyTo(shaderData, (int)layout.TessellationDataDword);
+        }
         for (var index = 0; index < layout.UserDataRegisters.Count; index++)
         {
             var register = layout.UserDataRegisters[index];
@@ -230,6 +245,12 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         {
             shaderData[layout.ShaderBaseDword] = (uint)shaderBase;
             shaderData[layout.ShaderBaseDword + 1] = (uint)(shaderBase >> 32);
+        }
+
+        // The byte offset of each buffer's real base inside its aligned view, one byte per buffer.
+        for (var index = 0; memoryOffsets is not null && index < memoryOffsets.Length; index++)
+        {
+            shaderData[layout.MemoryOffsetDword + (uint)index / 4] |= (memoryOffsets[index] & 0xFF) << ((index % 4) * 8);
         }
 
         if (layout.UsesDispatchThreadLimits)
@@ -337,6 +358,11 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         var bindPoint = IsMesh ? PipelineBindPoint.Graphics : PipelineBindPoint.Compute;
         vk.CmdBindPipeline(command, bindPoint, _pipeline);
         vk.CmdBindDescriptorSets(command, bindPoint, _pipelineLayout, 0, 1, &set, 0, null);
+        if (heapSet.Handle != 0)
+        {
+            vk.CmdBindDescriptorSets(command, bindPoint, _pipelineLayout, RuntimeDescriptorTable.HeapDescriptorSet, 1, &heapSet, 0, null);
+        }
+
         if (layout.UsesPushData)
         {
             fixed (uint* pointer = pushData)

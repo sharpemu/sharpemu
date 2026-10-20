@@ -530,9 +530,14 @@ public static class AudioOut2Exports
         }
         else
         {
-            // Push is the blocking point of a grain: it waits for the grain an Advance claimed, or
-            // claims one itself when the title does not advance separately.
-            ContextState.SleepUntil(context.QueueSlotFree(advancedGrain != 0 ? advancedGrain : context.ReserveGrain()));
+            // Push queues the grain an Advance claimed, or claims one itself when the title does not
+            // advance separately. A blocking push waits for its slot; a nonblocking one returns at
+            // once, as on the hardware, and the grain still counts in the queue level.
+            var grain = advancedGrain != 0 ? advancedGrain : context.ReserveGrain();
+            if (blocking != 0)
+            {
+                ContextState.SleepUntil(context.QueueSlotFree(grain));
+            }
         }
 
         return SetReturn(ctx, 0);

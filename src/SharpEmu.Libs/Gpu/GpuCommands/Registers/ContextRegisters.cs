@@ -375,6 +375,8 @@ public sealed class ContextRegisters
     public ColorTargetWords[] ColorTargets = new ColorTargetWords[ColorTargetCount];
     public uint[] ColorClearWord1 = new uint[ColorTargetCount];
     public uint RenderTargetMask;
+    // PA_CL_OBJPRIM_ID_CNTL: selects the object/primitive ID the hardware writes to an ID target.
+    public uint ObjectPrimitiveIdControl;
     public ScreenViewportRegisters ScreenViewport = new();
     public ClipControlRegisters Clip;
     public ColorControlRegisters ColorControl = new();

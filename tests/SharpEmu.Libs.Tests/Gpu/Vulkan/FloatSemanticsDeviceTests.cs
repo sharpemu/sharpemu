@@ -18,6 +18,58 @@ public sealed class FloatSemanticsDeviceTests(HeadlessVulkanFixture fixture) : I
     private const uint ThreadCount = 32;
     private const uint RowBytes = 32;
 
+    [Theory]
+    [InlineData("VAddF32", 0xBF800000u)]
+    [InlineData("VSubF32", 0x3F800000u)]
+    [InlineData("VSubrevF32", 0x3F800000u)]
+    public void SeparateFloatInstructionsPreserveIntermediateRounding(string operation, uint addend)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        // (1 + 2^-23) * (1 - 2^-23) rounds to 1 in f32. A separate add/sub
+        // must see that rounded product, while FMA retains the -2^-46 residual.
+        // Load inputs from runtime registers so constant folding cannot hide contraction.
+        var program = Program(
+            Vop1(0, "VMovB32", 4, Gen5Operand.Scalar(9)),
+            Vop1(4, "VMovB32", 5, Gen5Operand.Scalar(10)),
+            Vop1(8, "VMovB32", 6, Gen5Operand.Scalar(11)),
+            Vop2(12, "VMulF32", 1, Gen5Operand.Scalar(8), Gen5Operand.Vector(4)),
+            Vop2(16, operation, 2, Gen5Operand.Vector(1), Gen5Operand.Vector(5)),
+            Vop3(20, "VFmaF32", 3, Gen5Operand.Scalar(8), Gen5Operand.Vector(4), Gen5Operand.Vector(6)),
+            Vop2(28, "VLshlrevB32", 7, Operand(5), Gen5Operand.Vector(0)),
+            BufferAccess(32, "BufferStoreDword", 4, vectorData: 2, offsetEnabled: true, vectorAddress: 7),
+            BufferAccess(40, "BufferStoreDword", 4, offset: 4, vectorData: 3, offsetEnabled: true, vectorAddress: 7),
+            EndProgram(48));
+        var (plan, resources, layout) = Prepare(program);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = ThreadCount, ThreadCountX = ThreadCount, WaveSize = 32,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var result = runner.CreateBuffer(ThreadCount * RowBytes);
+        var registers = new uint[256];
+        registers[6] = ThreadCount * RowBytes;
+        registers[8] = 0x3F800001;
+        registers[9] = 0x3F7FFFFE;
+        registers[10] = addend;
+        registers[11] = Bits(-1f);
+        harness.Run(() => runner.Dispatch(registers,
+            new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [result] }, 1));
+        var actual = runner.ReadBack(result, 0, ThreadCount * RowBytes);
+        var fused = Bits(MathF.FusedMultiplyAdd(BitConverter.UInt32BitsToSingle(registers[8]),
+            BitConverter.UInt32BitsToSingle(registers[9]), -1f));
+        Assert.NotEqual(0u, fused);
+        for (var lane = 0u; lane < ThreadCount; lane++)
+        {
+            var row = actual.AsSpan((int)(lane * RowBytes));
+            Assert.Equal(0u, BinaryPrimitives.ReadUInt32LittleEndian(row));
+            Assert.Equal(fused, BinaryPrimitives.ReadUInt32LittleEndian(row[4..]));
+        }
+        harness.AssertNoValidationMessages();
+    }
+
     [Fact]
     public void ConversionsAndNanOperandsMatchTheHardwareRules()
     {

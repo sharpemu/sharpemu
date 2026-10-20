@@ -568,8 +568,10 @@ public static class PlayGoExports
 
         TracePlayGo($"get_progress entries={numberOfEntries}");
         Span<byte> progress = stackalloc byte[sizeof(ulong) * 2];
-        BinaryPrimitives.WriteUInt64LittleEndian(progress, 0);
-        BinaryPrimitives.WriteUInt64LittleEndian(progress[sizeof(ulong)..], 0);
+        // Every chunk is installed, so installed size equals total size. Report a
+        // non-zero pair so a title computing progress / total sees 100%, not 0/0.
+        BinaryPrimitives.WriteUInt64LittleEndian(progress, 1);
+        BinaryPrimitives.WriteUInt64LittleEndian(progress[sizeof(ulong)..], 1);
         return ctx.Memory.TryWrite(outProgress, progress)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -765,7 +767,7 @@ public static class PlayGoExports
     {
         lock (_stateGate)
         {
-            return _metadata.ChunkIdKnowledge == PlayGoChunkIdKnowledge.Unknown ||
+            return _metadata.ChunkIdKnowledge != PlayGoChunkIdKnowledge.Authoritative ||
                 Array.BinarySearch(_metadata.ChunkIds, chunkId) >= 0;
         }
     }
@@ -790,10 +792,23 @@ public static class PlayGoExports
             return CreateBaseChunkMetadata(PlayGoChunkIdKnowledge.Authoritative);
         }
 
+        var playGoPgm = Path.Combine(app0Root, "cache_ps5", "playgo.pgm");
         var playGoDat = Path.Combine(app0Root, "sce_sys", "playgo-chunk.dat");
         var scenarioJson = Path.Combine(app0Root, "sce_sys", "playgo-scenario.json");
         var chunkDefsXml = Path.Combine(app0Root, "playgo-chunkdefs.xml");
         App0Archive.Extract(chunkDefsXml);
+        App0Archive.Extract(playGoPgm);
+
+        // PS5 titles ship cache_ps5/playgo.pgm. It carries the chunk count, which
+        // beats guessing from pak files: Ghost of Yotei has no sidecar and no
+        // pakchunk files, so the fallback reported chunk 0 only and the title
+        // exited on the resulting PlayGo errors.
+        var pgmChunkIds = LoadPlayGoPgmChunkIds(playGoPgm);
+        if (pgmChunkIds.Length > 0)
+        {
+            TracePlayGo($"metadata_pgm chunks={pgmChunkIds.Length}");
+            return new PlayGoMetadata(true, pgmChunkIds, PlayGoChunkIdKnowledge.Assumed);
+        }
 
         var hasMetadata = File.Exists(playGoDat) || File.Exists(scenarioJson) || File.Exists(chunkDefsXml);
         if (!hasMetadata)
@@ -837,6 +852,50 @@ public static class PlayGoExports
             true,
             chunkIds,
             PlayGoChunkIdKnowledge.Authoritative);
+    }
+
+    // playgo.pgm header: "DMGP" magic at 0x00, little-endian chunk count at 0x10,
+    // header size 0x14. Chunk ids are 0..count-1.
+    private static ushort[] LoadPlayGoPgmChunkIds(string playGoPgm)
+    {
+        Span<byte> header = stackalloc byte[0x14];
+        try
+        {
+            using var stream = File.OpenRead(playGoPgm);
+            if (stream.Length < header.Length)
+            {
+                return Array.Empty<ushort>();
+            }
+
+            stream.ReadExactly(header);
+        }
+        catch (IOException)
+        {
+            return Array.Empty<ushort>();
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Array.Empty<ushort>();
+        }
+
+        if (!header[..4].SequenceEqual("DMGP"u8))
+        {
+            return Array.Empty<ushort>();
+        }
+
+        var count = BinaryPrimitives.ReadUInt32LittleEndian(header[0x10..]);
+        if (count == 0 || count > (uint)ushort.MaxValue + 1u)
+        {
+            return Array.Empty<ushort>();
+        }
+
+        var chunkIds = new ushort[checked((int)count)];
+        for (var index = 0; index < chunkIds.Length; index++)
+        {
+            chunkIds[index] = (ushort)index;
+        }
+
+        return chunkIds;
     }
 
     private static PlayGoMetadata CreateBaseChunkMetadata(PlayGoChunkIdKnowledge knowledge) =>
@@ -971,6 +1030,9 @@ public static class PlayGoExports
     {
         Unknown,
         Authoritative,
+        // The list is derived rather than read (playgo.pgm gives only a count), so it is
+        // reported but an ID outside it is not rejected.
+        Assumed,
     }
 
     private sealed record PlayGoMetadata(

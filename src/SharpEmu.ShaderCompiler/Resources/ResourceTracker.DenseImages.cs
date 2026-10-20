@@ -25,7 +25,9 @@ public sealed partial class ResourceTracker
 
         for (var dword = 0; dword < 8; dword++)
         {
-            var read = handle.Operands[dword];
+            // A descriptor kept in its registers across a loop reaches the handle through phis that only carry the
+            // loaded value.
+            var read = _graph.ResolveInvariantPhi(handle.Operands[dword]) ?? handle.Operands[dword];
             if (read.Kind != ScalarValueKind.ScalarAddressWord || read.MemoryIndex < 0 ||
                 read.MemoryIndex >= _plan.Memory.Count || !MemoryIndexBelongsTo(read.MemoryIndex, read))
                 return false;
@@ -34,7 +36,7 @@ public sealed partial class ResourceTracker
             if (memory.Kind != MemoryResourceKind.ScalarAddress || memory.DataBits != 32 || memory.DataDwords != 1)
                 return false;
 
-            var offset = read.Operands[1];
+            var offset = _graph.ResolveInvariantPhi(read.Operands[1]) ?? read.Operands[1];
             uint extra = 0;
             if (based is null)
             {
@@ -113,7 +115,8 @@ public sealed partial class ResourceTracker
             scaled.Operands[1].ConstantU32 != DenseIndirectImageShift)
             return false;
 
-        var key = scaled.Operands[0];
+        // A key carried unchanged around a loop is bounded by the value it carries.
+        var key = _graph.ResolveInvariantPhi(scaled.Operands[0]) ?? scaled.Operands[0];
         var bound = BoundBySamplerLoads(DenseKeyBound(key), heapHandle, tableOffset);
         var waveIndexed = TryCreateWaveIndexedImageSelector(key, reads);
         if (bound == 0 && waveIndexed is null)
@@ -121,8 +124,10 @@ public sealed partial class ResourceTracker
             return false;
         }
 
+        // Several image instructions may sample the same loaded descriptor; each builds its own handle over these
+        // reads and gets the same plan.
         foreach (var read in reads)
-            if (!UsesOnly(read, [handle]))
+            if (!UsedOnlyByImageHandlesOver(read, reads))
                 return false;
 
         if (!MakeRuntimeAddressSource(heapHandle, pc, out var heapSourceIndex, out var heapSource))
@@ -158,6 +163,39 @@ public sealed partial class ResourceTracker
         return true;
     }
 
+    private bool UsedOnlyByImageHandlesOver(ScalarValue read, IReadOnlyList<ScalarValue> reads)
+    {
+        var pending = new Stack<ScalarValue>();
+        var visited = new HashSet<ScalarValue>();
+        pending.Push(read);
+        while (pending.TryPop(out var value))
+        {
+            if (!visited.Add(value) || !_uses.TryGetValue(value, out var uses) || uses.Count == 0)
+                continue;
+
+            foreach (var user in uses)
+            {
+                if (user.Kind == ScalarValueKind.Phi && ReferenceEquals(_graph.ResolveInvariantPhi(user), read))
+                {
+                    pending.Push(user);
+                    continue;
+                }
+
+                if (user.Kind != ScalarValueKind.ImageHandle || user.Operands.Length != reads.Count)
+                    return false;
+
+                for (var index = 0; index < reads.Count; index++)
+                {
+                    var operand = _graph.ResolveInvariantPhi(user.Operands[index]) ?? user.Operands[index];
+                    if (!ReferenceEquals(operand, reads[index]))
+                        return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
     private uint BoundBySamplerLoads(uint bound, ScalarValue heapHandle, uint tableOffset)
     {
         foreach (var access in _plan.Accesses)
@@ -188,6 +226,18 @@ public sealed partial class ResourceTracker
         if (key.Kind == ScalarValueKind.Operation && key.Operation == ScalarOperation.FindLowestBit32 &&
             _graph.HasNonZeroBitScanInput(key))
             return 32;
+
+        // A constant-width bitfield, or a value masked to its low bits, has 2^width values.
+        if (key.Kind == ScalarValueKind.Operation && key.Operation == ScalarOperation.BitFieldUExtract &&
+            key.Operands.Length == 3 && key.Operands[2].IsConstant && key.Operands[2].ConstantU32 is > 0 and <= 12)
+            return 1u << (int)key.Operands[2].ConstantU32;
+
+        if (key.Kind == ScalarValueKind.Operation && key.Operation == ScalarOperation.And32 && key.Operands.Length == 2)
+        {
+            var mask = key.Operands[1].IsConstant ? key.Operands[1] : key.Operands[0].IsConstant ? key.Operands[0] : null;
+            if (mask is not null && mask.ConstantU32 < MaxDenseIndirectImageEntries && (mask.ConstantU32 & (mask.ConstantU32 + 1)) == 0)
+                return mask.ConstantU32 + 1;
+        }
 
         if (!_uses.TryGetValue(key, out var uses))
             return 0;

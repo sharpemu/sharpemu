@@ -19,6 +19,11 @@ public enum DescriptorBindingKind : uint
     FlattenedResourceTable,
     ShaderData,
     MipStatistics,
+
+    // The runtime descriptor table the host fills and the buffer a shader records its misses in
+    // (RuntimeDescriptorTable). The heap they index is a second descriptor set, not a binding here.
+    RuntimeDescriptorTable,
+    RuntimeDescriptorMisses,
     Count,
 }
 
@@ -56,6 +61,9 @@ public static class ImageDescriptorBinding
     private const uint SampledCompare2DBinding = 43;
     private const uint SampledCompare2DArrayBinding = 44;
     private const uint SampledCompareCubeBinding = 45;
+    // Signed-integer storage images (write-only; loads go through the sampled arrays).
+    private const uint StorageSintBinding = 46;
+    private const uint StorageCubeSintBinding = 51;
 
     public static DescriptorBindingKind? ForImage(ImageResource image)
     {
@@ -116,6 +124,7 @@ public static class ImageDescriptorBinding
                 {
                     ImageNumericClass.Float => (DescriptorBindingKind)StorageCubeFloatBinding,
                     ImageNumericClass.Uint => (DescriptorBindingKind)StorageCubeUintBinding,
+                    ImageNumericClass.Sint => (DescriptorBindingKind)StorageCubeSintBinding,
                     _ => null,
                 };
             }
@@ -168,6 +177,9 @@ public static class ImageDescriptorBinding
                         break;
                     case ImageNumericClass.Uint:
                         baseBinding = StorageUintBinding;
+                        break;
+                    case ImageNumericClass.Sint:
+                        baseBinding = StorageSintBinding;
                         break;
                     default:
                         return null;
@@ -250,7 +262,7 @@ public static class ImageDescriptorBinding
     public static uint ArrayIndex(DescriptorBindingKind kind) => (uint)kind - BindingLayout.FirstImageBinding;
 
     public static bool IsCube(DescriptorBindingKind kind) =>
-        (uint)kind is >= SampledCubeFloatBinding and <= AtomicCubeUintBinding or SampledCompareCubeBinding;
+        (uint)kind is >= SampledCubeFloatBinding and <= AtomicCubeUintBinding or SampledCompareCubeBinding or StorageCubeSintBinding;
 
     private static readonly ImageDimension[] SampledDimensions =
     [
@@ -312,7 +324,17 @@ public static class ImageDescriptorBinding
             return (ImageResourceClass.Storage, offset / 5 == 0 ? ImageNumericClass.Float : ImageNumericClass.Uint, StorageDimensions[offset % 5], false);
         }
 
-        if (index >= AtomicUintBinding && index < (uint)DescriptorBindingKind.Samplers)
+        if (index >= StorageSintBinding && index < StorageCubeSintBinding)
+        {
+            return (ImageResourceClass.Storage, ImageNumericClass.Sint, StorageDimensions[index - StorageSintBinding], false);
+        }
+
+        if (index == StorageCubeSintBinding)
+        {
+            return (ImageResourceClass.Storage, ImageNumericClass.Sint, ImageDimension.Dim2DArray, false);
+        }
+
+        if (index >= AtomicUintBinding && index < SampledCubeFloatBinding)
         {
             return (ImageResourceClass.Storage, ImageNumericClass.Uint, StorageDimensions[index - AtomicUintBinding], true);
         }
@@ -327,7 +349,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 {
     public const uint FirstImageBinding = 1;
     public const uint FirstStorageImageBinding = 22;
-    public const uint ImageBindingCount = 45;
+    public const uint ImageBindingCount = 51;
     public const uint NoShaderBase = uint.MaxValue;
     public const uint ShaderBaseDwordCount = 2;
     private const int ScalarRegisterCount = 256;
@@ -338,6 +360,11 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public uint MemoryOffsetDword { get; init; }
     public uint MemoryOffsetCount { get; init; }
     public bool UsesDispatchThreadLimits { get; init; }
+    public bool UsesTessellationData { get; init; }
+
+    // The pixel module writes an object/primitive ID target and reads the draw's object ID.
+    public bool UsesObjectId { get; init; }
+
     public bool UsesMeshDrawParameters { get; init; }
     public IReadOnlyList<uint> UserDataRegisters { get; init; } = [];
     public IReadOnlyList<DescriptorBinding> Descriptors { get; init; } = [];
@@ -346,9 +373,13 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public uint MipStatisticsCount { get; init; }
 
-    public uint MipStatisticsDword => DispatchThreadLimitsDword + (UsesDispatchThreadLimits ? 3u : 0u);
+    public uint TessellationDataDword => DispatchThreadLimitsDword + (UsesDispatchThreadLimits ? 3u : 0u);
 
-    public uint MeshDrawParametersDword => MipStatisticsDword + MipStatisticsCount;
+    public uint MipStatisticsDword => TessellationDataDword + (UsesTessellationData ? Gen5TessellationData.DwordCount : 0u);
+
+    public uint ObjectIdDword => MipStatisticsDword + MipStatisticsCount;
+
+    public uint MeshDrawParametersDword => ObjectIdDword + (UsesObjectId ? 1u : 0u);
 
     public uint ShaderDataDwordCount => MeshDrawParametersDword + (UsesMeshDrawParameters ? 6u : 0u);
 
@@ -585,15 +616,19 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         bool usesShaderBase,
         uint pushDataStartDword = 0,
         bool usesDispatchThreadLimits = false,
-        bool usesMeshDrawParameters = false)
+        bool usesObjectId = false,
+        bool usesMeshDrawParameters = false,
+        bool usesTessellationData = false)
     {
         var shaderBaseDword = usesShaderBase ? (uint)userDataRegisters.Count : NoShaderBase;
         var memoryOffsetDword = (uint)userDataRegisters.Count + (usesShaderBase ? ShaderBaseDwordCount : 0);
         var memoryOffsetCount = (uint)info.Buffers.Count;
         var mipStatisticsCount = info.Images.Any(static image => image.MipStatistics) ? (uint)info.Images.Count : 0u;
-        var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 +
-            (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesMeshDrawParameters ? 6u : 0u);
-        var pushStart = PushData.StartFor(pushDataStartDword, shaderDataDwords);
+        var shaderDataDwords = memoryOffsetDword + (memoryOffsetCount + 3) / 4 + (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesObjectId ? 1u : 0u) +
+            (usesMeshDrawParameters ? 6u : 0u) + (usesTessellationData ? Gen5TessellationData.DwordCount : 0u);
+        // The fixed-function control bridge shares the domain stage's runtime buffer.
+        // Keep that ABI independent of per-stage push-data packing.
+        var pushStart = usesTessellationData ? PushData.NoStart : PushData.StartFor(pushDataStartDword, shaderDataDwords);
         var descriptors = new List<DescriptorBinding>();
         if (info.Buffers.Count != 0)
         {
@@ -647,6 +682,12 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             descriptors.Add(new DescriptorBinding(DescriptorBindingKind.GlobalDataShare, []));
         }
 
+        if (info.UsesRuntimeDescriptors)
+        {
+            descriptors.Add(new DescriptorBinding(DescriptorBindingKind.RuntimeDescriptorTable, []));
+            descriptors.Add(new DescriptorBinding(DescriptorBindingKind.RuntimeDescriptorMisses, []));
+        }
+
         if (info.UsesDeviceAddresses)
         {
             descriptors.Add(new DescriptorBinding(DescriptorBindingKind.DeviceAddressPageTable, []));
@@ -677,7 +718,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             MemoryOffsetDword = memoryOffsetDword,
             MemoryOffsetCount = memoryOffsetCount,
             UsesDispatchThreadLimits = usesDispatchThreadLimits,
+            UsesTessellationData = usesTessellationData,
             MipStatisticsCount = mipStatisticsCount,
+            UsesObjectId = usesObjectId,
             UsesMeshDrawParameters = usesMeshDrawParameters,
             UserDataRegisters = userDataRegisters,
             Descriptors = descriptors,
@@ -692,7 +735,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         MemoryOffsetDword == other.MemoryOffsetDword &&
         MemoryOffsetCount == other.MemoryOffsetCount &&
         UsesDispatchThreadLimits == other.UsesDispatchThreadLimits &&
+        UsesTessellationData == other.UsesTessellationData &&
         MipStatisticsCount == other.MipStatisticsCount &&
+        UsesObjectId == other.UsesObjectId &&
         UsesMeshDrawParameters == other.UsesMeshDrawParameters &&
         UserDataRegisters.SequenceEqual(other.UserDataRegisters) &&
         Descriptors.Count == other.Descriptors.Count &&
@@ -728,9 +773,8 @@ public static class BindingLayoutValidator
             throw new ResourcePlanException("Only a mesh shader can use mesh draw parameters.");
         }
 
-        var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare,
-            usesFlattenedTable, usesShaderBase, layout.AllocationCursor,
-            layout.UsesDispatchThreadLimits, layout.UsesMeshDrawParameters);
+        var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare, usesFlattenedTable, usesShaderBase, layout.AllocationCursor,
+            layout.UsesDispatchThreadLimits, layout.UsesObjectId, layout.UsesMeshDrawParameters, layout.UsesTessellationData);
         if (!expected.Equals(layout))
         {
             throw new ResourcePlanException(

@@ -6399,6 +6399,25 @@ public static partial class KernelMemoryCompatExports
                 : HostPageNoAccess;
     }
 
+    // The guest mapping containing the address, for the GPU caches: a device-address fault
+    // inside it registers part of that mapping rather than a single page.
+    internal static bool TryGetMappedRange(ulong address, out ulong start, out ulong length)
+    {
+        lock (_memoryGate)
+        {
+            if (TryFindVirtualQueryRegionLocked(address, findNext: false, out var region) && !region.IsReserved)
+            {
+                start = region.Address;
+                length = region.Length;
+                return true;
+            }
+        }
+
+        start = 0;
+        length = 0;
+        return false;
+    }
+
     private static bool TryFindVirtualQueryRegionLocked(ulong queryAddress, bool findNext, out MappedRegion region)
     {
         region = default;

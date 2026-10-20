@@ -42,6 +42,52 @@ public sealed unsafe partial class RenderHostDeviceTests
     }
 
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void FrontFace_DrawPreservesBothEncodingsAndOrientations(bool allBits, bool clockwise)
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var target = harness.MapBacked(0x10000, ReadWrite);
+        var vertices = harness.MapBacked(0x10000, ReadWrite);
+        var words = RegisterWords.Color(target, Size, Size);
+        harness.Write(vertices, Triangle(-1f, -1f, 3f, -1f, -1f, 3f));
+        var expected = allBits ? (clockwise ? 1u : 0u) : (clockwise ? 0x3F800000u : 0xBF800000u);
+        var program = Program(
+            MoveVector(0, 1, expected),
+            Vopc(4, "VCmpEqU32", Gen5Operand.Vector(0), 1),
+            Vop2(8, "VCndmaskB32", 2, Operand(0), Operand(0x3F800000)),
+            MoveVector(12, 3, 0x3F800000),
+            new Gen5ShaderInstruction(16, Gen5ShaderEncoding.Exp, "Exp", [],
+                [Gen5Operand.Vector(2), Gen5Operand.Vector(2), Gen5Operand.Vector(2), Gen5Operand.Vector(3)],
+                [], new Gen5ExportControl(0, 15, false, true, true)),
+            EndProgram(20));
+        var (plan, resources, layout) = Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelInputAddress = 0x1000, PixelInputEnable = 0x1000, PixelFrontFaceAllBits = allBits,
+            PixelOutputs = [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)],
+            EnableGraphicsSubgroupOperations = false,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var provider = new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices,
+            interpolationShader: shader.Spirv);
+        var banks = Banks(words);
+        banks.Context.RasterMode.FrontFaceClockwise = clockwise;
+        var executor = new RenderExecutor(presenter.RenderHost, provider);
+        presenter.Run(() => executor.DrawAuto(1, banks, Draw()));
+        presenter.Run(() => presenter.InvokeMethod("FlushBatchedGuestCommands"));
+        harness.Finish();
+        Assert.Equal(uint.MaxValue, Pixel(harness.ReadImageBytes(TargetImage(presenter, words)), Size / 2, Size / 2));
+        harness.Shutdown();
+        _vulkan.AssertNoValidationMessages();
+    }
+
+    [Theory]
     [InlineData(0u, true, 191)]
     [InlineData(1u, true, 64)]
     [InlineData(2u, true, 64)]

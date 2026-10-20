@@ -6,14 +6,31 @@ using System.Linq;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
+// Whether an image access that cannot be bound ahead of time may read its descriptors at run time
+// (RuntimeDescriptorTable). The host that compiles the plan must be able to serve the table.
+public enum RuntimeDescriptorMode : byte
+{
+    // Never: a descriptor without a plan-time source keeps the historical null fallback or plan error.
+    Disabled,
+
+    // An access with no plan-time source reads its descriptors at run time. A descriptor table that
+    // the planner can bind statically still is.
+    OnDemand,
+
+    // As OnDemand, and an access the run-time table can read also skips the indirect-table plans
+    // (material tables, bit-scan candidate sets), which bind every record the table holds. Used
+    // when materializing such a table exceeded the image capacity.
+    Preferred,
+}
+
 // Interns descriptor sources, builds the dense buffer, image, sampler and pair tables
 // and patches each access with its index. A failure names hash, stage and pc.
 public sealed partial class ResourceTracker
 {
     private const uint SamplerBorderClampMask = (1u << 2) | (1u << 5) | (1u << 8);
-    private const uint SamplerDword3ReservedMask = 0x3FFF_F000u;
 
     private readonly ShaderResourcePlan _plan;
+    private readonly RuntimeDescriptorMode _runtimeDescriptors;
     private readonly ScalarValueGraph _graph;
     private readonly ShaderResourceInfo _info = new();
     private readonly List<DescriptorSource> _sources = [];
@@ -42,9 +59,10 @@ public sealed partial class ResourceTracker
         IReadOnlySet<ScalarValue> IndirectReads,
         IReadOnlyList<BufferCandidateTablePlan> BufferCandidateTables);
 
-    private ResourceTracker(ShaderResourcePlan plan)
+    private ResourceTracker(ShaderResourcePlan plan, RuntimeDescriptorMode runtimeDescriptors)
     {
         _plan = plan;
+        _runtimeDescriptors = runtimeDescriptors;
         _graph = plan.Graph;
         var roots = new List<ScalarValue>();
         foreach (var access in plan.Accesses)
@@ -86,7 +104,8 @@ public sealed partial class ResourceTracker
         }
     }
 
-    public static Result Track(ShaderResourcePlan plan) => new ResourceTracker(plan).Run();
+    public static Result Track(ShaderResourcePlan plan, RuntimeDescriptorMode runtimeDescriptors = RuntimeDescriptorMode.Disabled) =>
+        new ResourceTracker(plan, runtimeDescriptors).Run();
 
     private Result Run()
     {
@@ -295,8 +314,8 @@ public sealed partial class ResourceTracker
 
             var left = value.Operands[0];
             var right = value.Operands[1];
-            var leftReserved = (PossibleBits(left) & ~SamplerDword3ReservedMask) == 0;
-            var rightReserved = (PossibleBits(right) & ~SamplerDword3ReservedMask) == 0;
+            var leftReserved = (PossibleBits(left) & ~DescriptorConstants.SamplerDword3ReservedMask) == 0;
+            var rightReserved = (PossibleBits(right) & ~DescriptorConstants.SamplerDword3ReservedMask) == 0;
             if (leftReserved && rightReserved)
             {
                 return _graph.Constant(0u);
@@ -382,6 +401,7 @@ public sealed partial class ResourceTracker
         {
             var current = _bufferCandidateTables[existing];
             if (!_graph.Equivalent(current.SrtHandle, table.SrtHandle) ||
+                current.BaseOffset != table.BaseOffset ||
                 !_graph.Equivalent(current.OffsetExpression, table.OffsetExpression))
             {
                 continue;
@@ -405,7 +425,8 @@ public sealed partial class ResourceTracker
 
     private bool IsHostBufferHandle(ScalarValue? handle) =>
         handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
-        handle.Operands.All(dword => dword.Type == ScalarValueType.U32 && _plan.ValidateRuntimeValue(dword));
+        handle.Operands.All(dword => dword.Type == ScalarValueType.U32 && _plan.ValidateRuntimeValue(dword) &&
+            !DependsOnLoopCarriedRead(dword));
 
     private bool IsDeviceLoadedBufferHandle(ScalarValue? handle) =>
         handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
@@ -494,6 +515,56 @@ public sealed partial class ResourceTracker
         return false;
     }
 
+    // A value that a loop recomputes from memory it read on the previous iteration (a
+    // pointer walk) differs per iteration even when its phis look structurally invariant.
+    private bool DependsOnLoopCarriedRead(ScalarValue value)
+    {
+        var phis = new HashSet<ScalarValue>();
+        var pending = new Stack<ScalarValue>();
+        var visited = new HashSet<ScalarValue>();
+        pending.Push(value);
+        while (pending.TryPop(out var current))
+        {
+            if (!visited.Add(current))
+                continue;
+            if (current.Kind == ScalarValueKind.Phi)
+                phis.Add(current);
+            foreach (var operand in Dependencies(current))
+                pending.Push(operand);
+        }
+
+        foreach (var phi in phis)
+        {
+            // Look for the phi again below a memory read reached from its own operands.
+            var stack = new Stack<(ScalarValue Value, bool ThroughRead)>();
+            var seen = new HashSet<(ScalarValue, bool)>();
+            foreach (var operand in phi.Operands)
+                stack.Push((operand, false));
+            while (stack.TryPop(out var entry))
+            {
+                if (!seen.Add(entry))
+                    continue;
+                if (ReferenceEquals(entry.Value, phi) && entry.ThroughRead)
+                    return true;
+                if (ReferenceEquals(entry.Value, phi))
+                    continue;
+                var throughRead = entry.ThroughRead ||
+                    entry.Value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord or
+                        ScalarValueKind.ResourceTableWord;
+                foreach (var operand in Dependencies(entry.Value))
+                    stack.Push((operand, throughRead));
+            }
+        }
+
+        return false;
+    }
+
+    // A resource-table word stands for the flattened read it names.
+    private IEnumerable<ScalarValue> Dependencies(ScalarValue value) =>
+        value.Kind == ScalarValueKind.ResourceTableWord && value.Payload < (ulong)_plan.TableReads.Count
+            ? [_plan.TableReads[(int)value.Payload].Value]
+            : value.Operands;
+
     private uint GetHandleSource(
         ScalarValue? handle,
         ScalarValueKind expected,
@@ -502,7 +573,8 @@ public sealed partial class ResourceTracker
         bool sampler = false,
         bool sampleAdjust = false,
         string? memoryOpcode = null,
-        MemoryAccess memoryAccess = MemoryAccess.Read)
+        MemoryAccess memoryAccess = MemoryAccess.Read,
+        bool allowNullFallback = true)
     {
         if (handle is null || handle.Kind != expected)
         {
@@ -532,7 +604,9 @@ public sealed partial class ResourceTracker
             // mirroring KytyPS5's fallback for the same case (feat/shader-control-dependent-
             // descriptor). Buffer/sampler-adjacent handles or any other validation failure
             // still hard-fail, since those aren't safe to silently zero.
-            var dynamicImageFallback = expected is (ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle) &&
+            // An access the run-time descriptor table can serve does not take this fallback: it fails
+            // here and the caller reads the descriptors from the shader registers instead.
+            var dynamicImageFallback = allowNullFallback && expected is (ScalarValueKind.ImageHandle or ScalarValueKind.SamplerHandle) &&
                 (controlDependent || HasUndefinedOrigin(source.Dwords[badDword], "BufferLoadFormat") ||
                  (nonContiguousImage && source.Dwords.Any(dword => HasUndefinedOrigin(dword, "SAndB32"))));
             if (dynamicImageFallback)
@@ -582,7 +656,7 @@ public sealed partial class ResourceTracker
         return $"{value.Kind}#{value.Id}";
     }
 
-    // An image descriptor read from a scalar buffer must be one contiguous record.
+    // An image descriptor read from a scalar buffer must be made of contiguous four-dword runs.
     private bool IsContiguousScalarBufferRecord(DescriptorSource source)
     {
         if (!source.Dwords.Any(dword => dword.Kind == ScalarValueKind.ScalarBufferWord))
@@ -590,15 +664,17 @@ public sealed partial class ResourceTracker
             return true;
         }
 
-        var first = ScalarReadMemory(source.Dwords[0], out _);
+        // Each dword is evaluated on its own, so a record may be assembled from several
+        // four-dword loads of the same buffer (an 8-dword T# built by two s_buffer_load_x4).
         for (var dword = 0; dword < source.Dwords.Length; dword++)
         {
             var read = source.Dwords[dword];
+            var first = ScalarReadMemory(source.Dwords[dword & ~3], out _);
             var memory = ScalarReadMemory(read, out _);
             if (first is null || memory is null ||
-                memory.Offset != first.Offset + (uint)dword * sizeof(uint) ||
-                !_graph.Equivalent(read.Operands[0], source.Dwords[0].Operands[0]) ||
-                !_graph.Equivalent(read.Operands[1], source.Dwords[0].Operands[1]))
+                memory.Offset != first.Offset + (uint)(dword & 3) * sizeof(uint) ||
+                !_graph.Equivalent(read.Operands[0], source.Dwords[dword & ~3].Operands[0]) ||
+                !_graph.Equivalent(read.Operands[1], source.Dwords[dword & ~3].Operands[1]))
             {
                 return false;
             }
@@ -715,43 +791,27 @@ public sealed partial class ResourceTracker
 
     private static bool HasRuntimeReadKind(ScalarValue value, ScalarValueKind kind) => HasRuntimeReadKind(value, kind, []);
 
-    private static bool HasRuntimeReadKind(ScalarValue value, ScalarValueKind kind, HashSet<ScalarValue> visiting)
+    // Reachability: a node already explored cannot add a new answer, so the visited set is
+    // kept for the whole walk (removing it on return re-walks shared subgraphs exponentially).
+    private static bool HasRuntimeReadKind(ScalarValue value, ScalarValueKind kind, HashSet<ScalarValue> visited)
     {
-        if (!visiting.Add(value))
+        if (!visited.Add(value))
         {
             return false;
         }
 
-        try
-        {
-            return value.Kind == kind || value.Operands.Any(operand => HasRuntimeReadKind(operand, kind, visiting));
-        }
-        finally
-        {
-            visiting.Remove(value);
-        }
+        return value.Kind == kind || value.Operands.Any(operand => HasRuntimeReadKind(operand, kind, visited));
     }
 
-    private static bool HasRuntimeRead(ScalarValue value, HashSet<ScalarValue> visiting)
+    private static bool HasRuntimeRead(ScalarValue value, HashSet<ScalarValue> visited)
     {
-        if (!visiting.Add(value))
+        if (!visited.Add(value))
         {
             return false;
         }
 
-        try
-        {
-            if (value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord)
-            {
-                return true;
-            }
-
-            return value.Operands.Any(operand => HasRuntimeRead(operand, visiting));
-        }
-        finally
-        {
-            visiting.Remove(value);
-        }
+        return value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord ||
+            value.Operands.Any(operand => HasRuntimeRead(operand, visited));
     }
 
     // ---- dense tables ----
@@ -797,7 +857,18 @@ public sealed partial class ResourceTracker
         resource.Atomic |= atomic;
         resource.Formatted |= memory.Formatted;
         resource.Scalar |= memory.Kind == MemoryResourceKind.ScalarBuffer;
+        resource.DwordAddressed |= IsDwordAddressed(memory);
     }
+
+    // Raw dword accesses, atomics, scalar loads and typed stores of whole-dword formats index
+    // the bound words directly. Byte, short, other typed and formatted accesses go through the
+    // byte address, and so do untyped formatted stores, whose format is known only at
+    // specialization: the emitter gives them the byte-granular store.
+    internal static bool IsDwordAddressed(MemoryAccessInfo memory) =>
+        memory.Access == MemoryAccess.Atomic ||
+        memory.Kind == MemoryResourceKind.ScalarBuffer ||
+        (!memory.Formatted && !memory.Typed && memory.DataBits >= 32) ||
+        (memory.Typed && memory.Access == MemoryAccess.Write && Gfx10UnifiedFormat.HasWholeDwordComponents(memory.DataFormat));
 
     private uint AddImage(uint source, MemoryAccessInfo memory, uint pc)
     {
@@ -1034,6 +1105,22 @@ public sealed partial class ResourceTracker
                 return;
             }
 
+            // A V# chosen by control flow (a phi over several descriptors) has no single source
+            // to bind. Its SGPRs hold the selected descriptor when the access runs, so the
+            // access reads it there, as the hardware does, through the device-address table.
+            // A typed (tbuffer) access has no device lowering and keeps the plan error.
+            if (memory.Kind == MemoryResourceKind.Buffer &&
+                access.Handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
+                !memory.Opcode.StartsWith("TBuffer", StringComparison.Ordinal) &&
+                ((!ValidateSource(MakeSource(access.Handle, 4, false, false, memory.Pc), out _, out var controlDependent) &&
+                  controlDependent) ||
+                 access.Handle.Operands.Any(DependsOnLoopCarriedRead)))
+            {
+                memory.DeviceDescriptor = true;
+                _info.UsesDeviceAddresses = true;
+                return;
+            }
+
             var source = GetHandleSource(
                 access.Handle,
                 ScalarValueKind.BufferHandle,
@@ -1112,32 +1199,58 @@ public sealed partial class ResourceTracker
         }
 
         uint imageSource;
-        var indirect = _indirectImages.FirstOrDefault(plan => ReferenceEquals(plan.Handle, access.Handle));
-        if (indirect is not null)
+        uint samplerSource = 0;
+        // The hardware reads both descriptors from memory into registers when the access runs.
+        // An access the run-time descriptor table can serve does the same when no plan-time source
+        // exists, instead of reading the null descriptor.
+        var runtimeReadable = _runtimeDescriptors != RuntimeDescriptorMode.Disabled && CanReadDescriptorsAtRuntime(memory, access);
+        try
         {
-            imageSource = indirect.Source;
+            var indirect = _indirectImages.FirstOrDefault(plan => ReferenceEquals(plan.Handle, access.Handle));
+            if (indirect is not null)
+            {
+                imageSource = indirect.Source;
+            }
+            else
+            {
+                imageSource = GetHandleSource(access.Handle, ScalarValueKind.ImageHandle, 8, memory.Pc, allowNullFallback: !runtimeReadable);
+            }
+
+            if (memory.NeedsSampler)
+            {
+                if (access.SamplerHandle is null)
+                {
+                    throw Failure(memory.Pc, "sampled image operation has no sampler handle");
+                }
+
+                var sampleAdjust = (memory.ImageSampleFlags & ImageSampleFlags.Adjust) != 0;
+                samplerSource = GetHandleSource(access.SamplerHandle, ScalarValueKind.SamplerHandle, 4, memory.Pc, sampler: true, sampleAdjust,
+                    allowNullFallback: !runtimeReadable);
+            }
         }
-        else
+        catch (ResourcePlanException) when (runtimeReadable)
         {
-            imageSource = GetHandleSource(access.Handle, ScalarValueKind.ImageHandle, 8, memory.Pc);
+            // No plan-time source: the shader reads both descriptors from its registers.
+            UseRuntimeDescriptors(memory);
+            return;
         }
 
         var image = AddImage(imageSource, memory, memory.Pc);
         if (image == DescriptorConstants.NoIndex)
         {
+            // Past the image binding budget the access reads its descriptors from its registers.
+            if (runtimeReadable)
+            {
+                UseRuntimeDescriptors(memory);
+                return;
+            }
+
             throw Failure(memory.Pc, "image resource limit exceeded");
         }
 
         uint sampler = 0;
         if (memory.NeedsSampler)
         {
-            if (access.SamplerHandle is null)
-            {
-                throw Failure(memory.Pc, "sampled image operation has no sampler handle");
-            }
-
-            var sampleAdjust = (memory.ImageSampleFlags & ImageSampleFlags.Adjust) != 0;
-            var samplerSource = GetHandleSource(access.SamplerHandle, ScalarValueKind.SamplerHandle, 4, memory.Pc, sampler: true, sampleAdjust);
             sampler = AddSampler(samplerSource, memory.Pc);
             if (sampler == DescriptorConstants.NoIndex)
             {
@@ -1148,6 +1261,43 @@ public sealed partial class ResourceTracker
         }
 
         AddMemoryPatch(index, image, sampler, memory.NeedsSampler, memory.Pc);
+    }
+
+    // A sampled access or an image load that the host can create from descriptor words alone.
+    // An adjusted sample keys its sampler without the reserved bits its adjustment uses. These
+    // stay on their planned path: depth compares (the view and sampler must agree on the compare
+    // state, which the host derives from the planned pair), cube views (the face selection is a
+    // property of the planned view), storage writes and atomics (they need storage images and
+    // write tracking), queries (they read the descriptor, not a view).
+    private bool CanReadDescriptorsAtRuntime(MemoryAccessInfo memory, MemoryAccessBinding access) =>
+        memory.ImageClass == ImageResourceClass.Sampled &&
+        ((memory.NeedsSampler && access.SamplerHandle is not null &&
+            (memory.ImageSampleFlags & ImageSampleFlags.Compare) == 0) ||
+            (!memory.NeedsSampler && memory.Opcode is "ImageLoad" or "ImageLoadMip")) &&
+        RuntimeDescriptorTable.SupportsRuntimeView(memory.ImageDimension) &&
+        _graph.Program.Instructions.FirstOrDefault(instruction => instruction.Pc == memory.Pc)?.Control is Gen5ImageControl { Dimension: not CubeDimension };
+
+    private const uint CubeDimension = 3;
+
+    // Whether some access through this handle would read its descriptors at run time.
+    private bool ReadsDescriptorsAtRuntime(ScalarValue handle)
+    {
+        for (var index = 0; index < _plan.Memory.Count; index++)
+        {
+            if (_plan.Memory[index] is { Kind: MemoryResourceKind.Image } memory && _plan.Accesses[index] is { } access &&
+                ReferenceEquals(access.Handle, handle) && CanReadDescriptorsAtRuntime(memory, access))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void UseRuntimeDescriptors(MemoryAccessInfo memory)
+    {
+        memory.RuntimeDescriptor = true;
+        _info.UsesRuntimeDescriptors = true;
     }
 
     private void LinkImageAliases()
@@ -1224,6 +1374,13 @@ public sealed partial class ResourceTracker
             var memory = _plan.Memory[index];
             if (memory.Kind != MemoryResourceKind.Image || _plan.Accesses[index]?.Handle is not { } handle ||
                 _indirectImages.Any(plan => ReferenceEquals(plan.Handle, handle)))
+            {
+                continue;
+            }
+
+            // A table plan binds every image the table can select and suppresses the loads that fed
+            // the descriptor, which the run-time lookup needs in its registers.
+            if (_runtimeDescriptors == RuntimeDescriptorMode.Preferred && ReadsDescriptorsAtRuntime(handle))
             {
                 continue;
             }
@@ -1430,6 +1587,7 @@ public sealed partial class ResourceTracker
             IndirectImage = new IndirectImageSelector(materialSourceIndex, heapSourceIndex, selectorStride, selectorOffset, 0)
             {
                 SelectorValues = IndirectSelectorValues.Create(_plan, selector),
+                SelectorBound = IndirectSelectorBound.TryCreate(_plan, selector),
                 MaterialImmediate = materialMemory.Offset,
             },
         };

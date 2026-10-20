@@ -22,7 +22,8 @@ public sealed class BufferCandidateTablePlannerTests
         string guard = "SCmpLtU32",
         uint guardRegister = 10,
         uint limit = 4,
-        bool runtimeLimit = false)
+        bool runtimeLimit = false,
+        int descriptorOffset = 0)
     {
         var instructions = new List<Gen5ShaderInstruction>();
         uint pc = 0;
@@ -41,7 +42,7 @@ public sealed class BufferCandidateTablePlannerTests
         var headerPc = pc;
 
         Add(Sop2(pc, "SMulI32", 12, Gen5Operand.Scalar(10), Operand(stride)));
-        Add(ScalarBufferLoad(pc, 0, destination: 16, count: 4, dynamicOffsetRegister: 12));
+        Add(ScalarBufferLoad(pc, 0, destination: 16, count: 4, immediateOffset: descriptorOffset, dynamicOffsetRegister: 12));
         Add(BufferLoad(pc, 16, formatted: true));
         Add(Sop2(pc, "SAddU32", 10, Gen5Operand.Scalar(10), Operand(1)));
         var bound = runtimeLimit ? Gen5Operand.Scalar(7) : Operand(limit);
@@ -81,6 +82,26 @@ public sealed class BufferCandidateTablePlannerTests
         Assert.Equal(64u, table.SrtByteExtent);
         Assert.Equal(BufferDescriptorProvenance.Runtime, BufferAccessOf(plan).BufferDescriptor!.Provenance);
         Assert.False(plan.Info.UsesDeviceAddresses);
+    }
+
+    [Fact]
+    public void DescriptorImmediateOffset_BecomesTheTableBase()
+    {
+        // The dwordx4 read starts 16 bytes into each record: the table spans bytes 16..80.
+        var plan = Extract(CandidateProgram(records: 5, descriptorOffset: 16));
+
+        var table = Assert.Single(plan.BufferCandidateTables);
+        Assert.Equal(16u, table.BaseOffset);
+        Assert.Equal(16u, table.MinOffset);
+        Assert.Equal(80u, table.MaxOffset);
+    }
+
+    [Fact]
+    public void DescriptorImmediateOffset_BeyondTheSrt_IsRejected()
+    {
+        var plan = Extract(CandidateProgram(records: 4, descriptorOffset: 16));
+
+        Assert.Empty(plan.BufferCandidateTables);
     }
 
     [Fact]

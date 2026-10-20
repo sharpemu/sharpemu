@@ -157,7 +157,7 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
 
             // A removed image is not served again: the binding looks the descriptor up afresh.
             var generation = harness.Images.LookupGeneration;
-            typeof(GuestImageCache).GetMethod("DeleteImage", InstanceMembers)!.Invoke(harness.Images, [first]);
+            typeof(GuestImageCache).GetMethod("DeleteImage", InstanceMembers)!.Invoke(harness.Images, [first, true]);
             Assert.NotEqual(generation, harness.Images.LookupGeneration);
             var third = (ResourceSlotIdentifier)GetFieldValue(presenter.InvokeMethod("ResolveImageBinding", resource, words, program, 0)!, "ImageIdentifier");
             Assert.True(harness.Images.TryGetImage(third, out var image) && image.Registered);
@@ -220,10 +220,11 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
     }
 
     [Theory]
-    [InlineData(true, 1u, false)]
-    [InlineData(true, 2u, true)]
-    [InlineData(false, 1u, false)]
-    public unsafe void StencilStorage_PublishesRecordedWritesWithoutChangingDepth(bool recordDispatch, uint layers, bool sampledAlias)
+    [InlineData(true, 1u, false, 64u)]
+    [InlineData(true, 2u, true, 64u)]
+    [InlineData(false, 1u, false, 64u)]
+    [InlineData(true, 1u, false, 32u)]
+    public unsafe void StencilStorage_PublishesRecordedWritesWithoutChangingDepth(bool recordDispatch, uint layers, bool sampledAlias, uint viewSize)
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
         if (!_vulkan.StorageImageExtendedFormats || !_vulkan.SupportsDynamicRendering)
@@ -242,8 +243,8 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
         presenter.Run(() =>
         {
             var shape = new ShaderImageShape(false, true, true, false, TextureNumericClass.Uint);
-            var texture = new GuestDrawTexture(stencilAddress, 64, 64, 0, 0, [], false, true,
-                Descriptor: RegisterWords.Texture(stencilAddress, GuestPixelFormat.Bits8UInt, 64, 64,
+            var texture = new GuestDrawTexture(stencilAddress, viewSize, viewSize, 0, 0, [], false, true,
+                Descriptor: RegisterWords.Texture(stencilAddress, GuestPixelFormat.Bits8UInt, viewSize, viewSize,
                     type: GuestImageType.Color2DArray, tile: GuestTileMode.Depth, layers: layers, baseArray: layers - 1), Shape: shape);
             // The stencil range was a color image before the depth target took ownership.
             presenter.InvokeMethod("ResolveTexture", texture);
@@ -290,6 +291,9 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
                     workingImages.Add(working);
                     Assert.NotSame(attachment, working);
                     Assert.Equal(Format.R8Uint, working.Backing.Format);
+                    // A view smaller than the attachment (dynamic resolution) gets a storage image of the view's size.
+                    Assert.Equal(viewSize, working.Backing.Extent.Width);
+                    Assert.Equal(viewSize, working.Backing.Extent.Height);
                     Assert.NotEqual(0, (int)(working.Backing.Usage & ImageUsageFlags.StorageBit));
                     Assert.Equal(0, (int)(attachment.Backing.Usage & ImageUsageFlags.StorageBit));
                     var invalidStorage = ImageViewDescription.Default with
@@ -305,7 +309,7 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
                         if (sampledAlias)
                             Assert.Same(working, GetFieldValue(textures.GetValue(0)!, "CachedImage"));
                         presenter.RenderHost.BindPipeline(PipelineBindPoint.Compute, pipeline);
-                        presenter.RenderHost.Dispatch(32, 64, 1);
+                        presenter.RenderHost.Dispatch(viewSize / 2, viewSize, 1);
                         presenter.RenderHost.ShaderAccessBarrier();
                     }
                     else
@@ -326,18 +330,149 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
         });
 
         harness.Finish();
-        Assert.All(workingImages, image => Assert.False(image.Backing.Exists));
+        // The attachment owns its stencil storage images and keeps them for the next draw.
+        Assert.All(workingImages, image => Assert.True(image.Backing.Exists));
         var stencil = harness.ReadImageBytes(attachment, ImageAspectFlags.StencilBit);
         for (var layer = 0; layer < layers; layer++)
             for (var row = 0; row < 64; row++)
                 for (var column = 0; column < 64; column++)
-                    Assert.Equal((byte)(recordDispatch && layer == layers - 1 && column < 32 ? 0x39 : 0x37), stencil[layer * 64 * 64 + row * 64 + column]);
+                    Assert.Equal((byte)(recordDispatch && layer == layers - 1 && column < viewSize / 2 && row < viewSize ? 0x39 : 0x37), stencil[layer * 64 * 64 + row * 64 + column]);
         var depthBytes = harness.ReadImageBytes(attachment, ImageAspectFlags.DepthBit);
         for (var offset = 0; offset < depthBytes.Length; offset += sizeof(float))
             Assert.Equal(0.25f, BitConverter.ToSingle(depthBytes, offset));
         Assert.True(attachment.IsGpuModified);
         Assert.True(harness.ProxyAt(stencilAddress, attachment.Description.Stencil.Size).IsValid);
         harness.Shutdown();
+    }
+
+    [Fact]
+    public void StencilStorage_OfAnotherDepthSurface_ResolvesToTheOwnerOfThatPlane()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        if (!_vulkan.StorageImageExtendedFormats || !_vulkan.SupportsDynamicRendering)
+        {
+            Assert.False(ReferenceShaders.Required, "Stencil storage tests need extended storage formats and dynamic rendering.");
+            return;
+        }
+        using var fatal = new FatalScope();
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var region = harness.MapBacked(0x200000, ReadWrite);
+        var depthAddressB = region + 0x100000;
+        var stencilAddressB = region + 0x180000;
+        CachedImage imageA = null!, imageB = null!;
+        CachedImage? storage = null;
+        presenter.Run(() =>
+        {
+            object Depth(ulong depthAddress, ulong stencilAddress)
+            {
+                var target = new GuestDepthTarget(depthAddress, depthAddress, 64, 64, 3, 0, 1f, false,
+                    Registers: RegisterWords.Depth(depthAddress, 64, 64, stencilBase: stencilAddress));
+                var depth = presenter.InvokeMethod("DiscoverDepthTarget", target)!;
+                presenter.InvokeMethod("AcquireDepthAttachment", depth, GuestDepthState.Default);
+                return depth;
+            }
+
+            // The surface that owns the plane is bound first; the other one is the current target.
+            var depthB = Depth(depthAddressB, stencilAddressB);
+            imageB = (CachedImage)GetFieldValue(depthB, "Image");
+            var depthA = Depth(region, region + 0x80000);
+            imageA = (CachedImage)GetFieldValue(depthA, "Image");
+            presenter.RenderHost.ResetBindings();
+
+            var shape = new ShaderImageShape(false, true, true, false, TextureNumericClass.Uint);
+            var texture = new GuestDrawTexture(stencilAddressB, 64, 64, 0, 0, [], false, true,
+                Descriptor: RegisterWords.Texture(stencilAddressB, GuestPixelFormat.Bits8UInt, 64, 64,
+                    type: GuestImageType.Color2DArray, tile: GuestTileMode.Depth, layers: 1, baseArray: 0), Shape: shape);
+            var binding = presenter.InvokeMethod("ResolveTexture", texture)!;
+            // The lookup handed back the bound surface, not the one owning the plane.
+            binding.GetType().GetField("ImageIdentifier")!.SetValue(binding, GetFieldValue(depthA, "ImageIdentifier"));
+            using (presenter.RenderHost.BeginPreparation())
+            {
+                storage = (CachedImage)presenter.InvokeMethod("AcquireStencilStorage", binding, imageA, true)!;
+            }
+
+            presenter.RenderHost.ResetBindings();
+        });
+
+        Assert.NotNull(storage);
+        Assert.Equal(Format.R8Uint, storage!.Backing.Format);
+        Assert.NotSame(imageA, imageB);
+        Assert.Empty(fatal.Messages);
+        harness.Finish();
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void StencilStorage_IsCachedPerSizeOnTheAttachmentAndCounted()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        if (!_vulkan.StorageImageExtendedFormats || !_vulkan.SupportsDynamicRendering)
+        {
+            Assert.False(ReferenceShaders.Required, "Stencil storage tests need extended storage formats and dynamic rendering.");
+            return;
+        }
+        using var fatal = new FatalScope();
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var region = harness.MapBacked(0x200000, ReadWrite);
+        CachedImage attachment = null!, first = null!, again = null!, smaller = null!;
+        ulong accountedBefore = 0, accountedAfterFirst = 0, accountedAfterSecond = 0, usedBefore = 0, usedAfter = 0;
+        presenter.Run(() =>
+        {
+            var target = new GuestDepthTarget(region, region, 64, 64, 3, 0, 1f, false,
+                Registers: RegisterWords.Depth(region, 64, 64, stencilBase: region + 0x80000));
+            var depth = presenter.InvokeMethod("DiscoverDepthTarget", target)!;
+            presenter.InvokeMethod("AcquireDepthAttachment", depth, GuestDepthState.Default);
+            var identifier = (ResourceSlotIdentifier)GetFieldValue(depth, "ImageIdentifier");
+            attachment = (CachedImage)GetFieldValue(depth, "Image");
+            presenter.RenderHost.ResetBindings();
+
+            accountedBefore = attachment.AccountedSize;
+            usedBefore = harness.Images.CollectionMemoryBytes;
+            first = harness.Images.AcquireStencilStorageImage(identifier, 64, 64);
+            accountedAfterFirst = attachment.AccountedSize;
+            again = harness.Images.AcquireStencilStorageImage(identifier, 64, 64);
+            smaller = harness.Images.AcquireStencilStorageImage(identifier, 32, 32);
+            accountedAfterSecond = attachment.AccountedSize;
+            usedAfter = harness.Images.CollectionMemoryBytes;
+        });
+
+        Assert.Same(first, again);
+        Assert.NotSame(first, smaller);
+        Assert.Equal(2, attachment.StencilStorageImageCount);
+        Assert.True(accountedAfterFirst > accountedBefore);
+        Assert.True(accountedAfterSecond > accountedAfterFirst);
+        Assert.Equal(accountedAfterSecond - accountedBefore, usedAfter - usedBefore);
+        Assert.Empty(fatal.Messages);
+        harness.Finish();
+        harness.Shutdown();
+        // Both storage images went with the attachment.
+        Assert.False(first.Backing.Exists);
+        Assert.False(smaller.Backing.Exists);
+    }
+
+    [Theory]
+    [InlineData((byte)0x00, true, 0f, 0f, 0f, 0f)]
+    [InlineData((byte)0x40, true, 0f, 0f, 0f, 1f)]
+    [InlineData((byte)0x80, true, 1f, 1f, 1f, 0f)]
+    [InlineData((byte)0xc0, true, 1f, 1f, 1f, 1f)]
+    [InlineData((byte)0x40, false, 0f, 0f, 0f, 0f)]
+    [InlineData((byte)0x20, true, 0f, 0f, 0f, 0f)]
+    public void SampledDccClear_FixedCodesCarryTheirOwnColour(byte code, bool fixedSupported, float r, float g, float b, float a)
+    {
+        // A surface fast-cleared and only sampled has no CB clear word: the register code (0x20)
+        // never decodes there, every fixed code decodes to its own colour.
+        var decode = PresenterUnderTest.PresenterType.GetMethod("TryDecodeDccClear", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var arguments = new object?[] { code, false, fixedSupported, default(ClearColorValue), default(ClearColorValue) };
+        var decoded = (bool)decode.Invoke(null, arguments)!;
+        var value = (ClearColorValue)arguments[4]!;
+        var expected = code != 0x20 && (code == 0x00 || fixedSupported);
+        Assert.Equal(expected, decoded);
+        if (expected)
+            Assert.Equal((r, g, b, a), (value.Float32_0, value.Float32_1, value.Float32_2, value.Float32_3));
     }
 
     private static byte[] CreateStencilIncrementShader(uint imageBinding)
@@ -580,6 +715,29 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
         Assert.NotEqual(0UL, ((ImageView)GetFieldValue(resource, "View")).Handle);
         var request = (ImageRequest)GetFieldValue(resource, "Request");
         Assert.Equal(Format.D32Sfloat, request.View.Format);
+        presenter.Run(() => presenter.InvokeMethod("ResetImageBindings"));
+        presenter.Harness.Finish();
+        presenter.Harness.Shutdown();
+    }
+
+    [Fact]
+    public void NullTexture_OfDifferentShapes_GetsSeparateImagesOfThatShape()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var flat = new GuestDrawTexture(0, 1, 1, 0, 0, [], false, false,
+            Descriptor: [], Shape: new ShaderImageShape(false, false, false, false, TextureNumericClass.Float));
+        var cube = new GuestDrawTexture(0, 1, 1, 0, 0, [], false, false,
+            Descriptor: [], Shape: new ShaderImageShape(false, false, false, false, TextureNumericClass.Float) with { Cube = true });
+
+        var flatResource = presenter.Run(() => AcquireTexture(presenter, flat));
+        var cubeResource = presenter.Run(() => AcquireTexture(presenter, cube));
+        var flatRequest = (ImageRequest)GetFieldValue(flatResource, "Request");
+        var cubeRequest = (ImageRequest)GetFieldValue(cubeResource, "Request");
+        Assert.Equal(ImageViewType.Type2D, flatRequest.View.Type);
+        Assert.Equal(ImageViewType.TypeCube, cubeRequest.View.Type);
+        Assert.Equal(6u, cubeRequest.Description.Resources.Layers);
+        Assert.Equal(2, presenter.Harness.Images.NullImageCount);
         presenter.Run(() => presenter.InvokeMethod("ResetImageBindings"));
         presenter.Harness.Finish();
         presenter.Harness.Shutdown();

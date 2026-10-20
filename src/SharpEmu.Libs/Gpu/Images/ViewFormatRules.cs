@@ -269,6 +269,8 @@ public static class ViewFormatRules
     public static Format SrgbStorageFormat(Format imageFormat) => imageFormat switch
     {
         Format.R8G8B8A8Srgb or Format.B8G8R8A8Srgb => Format.R8G8B8A8Unorm,
+        Format.R8Srgb => Format.R8Unorm,
+        Format.R8G8Srgb => Format.R8G8Unorm,
         _ => Format.Undefined,
     };
 

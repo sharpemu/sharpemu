@@ -236,6 +236,134 @@ public sealed partial class GuestImageCache
         destination.ClearBufferModified();
     }
 
+    // Two formats of one surface with the same layout are separate images over the same guest
+    // bytes, which the GPU writes through either of them. Before one is used, it copies the
+    // newest GPU contents among them, as unified guest memory would show them (the alias
+    // synchronization of other unified-memory emulators). Depth keeps its reinterpretation path.
+    private void SynchronizeAliases(ResourceSlotIdentifier imageIdentifier)
+    {
+        var image = _slots[imageIdentifier];
+        if (image.Description.IsDepth || ImageDescription.IsEmptyRange(image.Description.Data))
+        {
+            return;
+        }
+
+        var newest = ResourceSlotIdentifier.Invalid;
+        var newestContents = image.ContentSequence;
+        var newestStencil = ResourceSlotIdentifier.Invalid;
+        var newestStencilContents = newestContents;
+        foreach (var aliasIdentifier in FindImagesInRange(image.Description.Data.Address, image.Description.Data.Size, pageOverlap: false))
+        {
+            // A depth image's stencil plane of exactly this span, which the GPU wrote after this
+            // image last changed, is newer than the image (the guest memory under both is stale).
+            if (aliasIdentifier != imageIdentifier && _slots.TryGet(aliasIdentifier) is { DepthOwner.IsValid: true, IsGpuModified: true } plane &&
+                plane.Description.Data == image.Description.Data && plane.ContentSequence > newestStencilContents)
+            {
+                newestStencil = aliasIdentifier;
+                newestStencilContents = plane.ContentSequence;
+            }
+
+            if (aliasIdentifier == imageIdentifier || _slots.TryGet(aliasIdentifier) is not { } alias || !alias.Registered ||
+                alias.DepthOwner.IsValid || !alias.SafeToDownload || alias.ContentSequence <= newestContents ||
+                !IsSameLayoutAlias(image.Description, alias.Description))
+            {
+                continue;
+            }
+
+            newest = aliasIdentifier;
+            newestContents = alias.ContentSequence;
+        }
+
+        if (newestStencil.IsValid && newestStencilContents > newestContents)
+        {
+            // Only an 8-bit single-level image can show the plane; its values come from the owner.
+            var owner = _slots[_slots[newestStencil].DepthOwner];
+            if (image.Backing.Exists && image.Backing.Format == Format.R8Uint && CanWriteBackStencilPlane(owner) &&
+                image.Backing.MipLevels == 1 && image.Backing.Layers == owner.Backing.Layers &&
+                image.Backing.Extent.Width <= owner.Backing.Extent.Width && image.Backing.Extent.Height <= owner.Backing.Extent.Height)
+            {
+                owner.CopyStencilStorage(image, _bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: false);
+                // The copy is newer than guest memory, which a refresh must not paint over it.
+                TakeGpuOwnership(image);
+                image.ContentSequence = newestStencilContents;
+                return;
+            }
+        }
+
+        if (!newest.IsValid)
+        {
+            return;
+        }
+
+        CopyWholeImage(imageIdentifier, newest);
+        image.ContentSequence = newestContents;
+    }
+
+    private static bool IsSameLayoutAlias(in ImageDescription image, in ImageDescription alias) =>
+        !alias.IsDepth && alias.Data == image.Data && SameExtent(alias.Extent, image.Extent) && alias.Type == image.Type &&
+        alias.Samples == image.Samples && alias.BytesPerBlock == image.BytesPerBlock && alias.TileMode == image.TileMode &&
+        alias.Resources == image.Resources && alias.FirstLevel == image.FirstLevel && SameMipLayout(alias, image);
+
+    // Two sizes of one surface, as a dynamic-resolution title alternates between them.
+    private static bool IsResizeSibling(in ImageDescription image, in ImageDescription candidate) =>
+        !candidate.IsDepth && candidate.Data.Address == image.Data.Address && candidate.Data.Size != image.Data.Size &&
+        !SameExtent(candidate.Extent, image.Extent) && candidate.Type == image.Type &&
+        candidate.Samples == image.Samples && candidate.BytesPerBlock == image.BytesPerBlock &&
+        candidate.TileMode == image.TileMode && candidate.Resources == image.Resources &&
+        candidate.FirstLevel == 0 && image.FirstLevel == 0 && candidate.PixelFormat == image.PixelFormat;
+
+    // A freshly created size of a surface copies the shared rectangle of the newest
+    // GPU-written sibling, so switching the render resolution keeps the previous
+    // frame's content instead of starting from stale guest bytes.
+    private void SyncResizedSibling(ResourceSlotIdentifier imageIdentifier)
+    {
+        var image = _slots[imageIdentifier];
+        if (image.Description.IsDepth || ImageDescription.IsEmptyRange(image.Description.Data) ||
+            image.Description.Resources.Layers != 1 || image.Backing.Samples != 1)
+        {
+            return;
+        }
+
+        var newest = ResourceSlotIdentifier.Invalid;
+        var newestWrite = image.GpuWriteSequence;
+        foreach (var candidateIdentifier in FindImagesInRange(image.Description.Data.Address, image.Description.Data.Size, pageOverlap: false))
+        {
+            if (candidateIdentifier == imageIdentifier || _slots.TryGet(candidateIdentifier) is not { } candidate || !candidate.Registered ||
+                candidate.DepthOwner.IsValid || candidate.GpuWriteSequence <= newestWrite || !candidate.IsGpuModified ||
+                !IsResizeSibling(image.Description, candidate.Description))
+            {
+                continue;
+            }
+
+            newest = candidateIdentifier;
+            newestWrite = candidate.GpuWriteSequence;
+        }
+
+        if (!newest.IsValid)
+        {
+            return;
+        }
+
+        var source = _slots[newest];
+        // Newer guest bytes reach the image through its own refresh; copying the sibling
+        // would paint stale GPU contents over them.
+        if (source.Backing.Format != image.Backing.Format || source.IsBufferModified || source.IsCpuDirty || image.IsBufferModified)
+        {
+            return;
+        }
+
+        var width = Math.Min(source.Description.Extent.Width, image.Description.Extent.Width);
+        var height = Math.Min(source.Description.Extent.Height, image.Description.Extent.Height);
+        if (width == 0 || height == 0)
+        {
+            return;
+        }
+
+        WatchImage(imageIdentifier);
+        image.CopyRegionFrom(source, 0, 0, 0, width, height);
+        image.MarkGpuModified();
+    }
+
     private void CopyIntoMip(ResourceSlotIdentifier destinationImageIdentifier, ResourceSlotIdentifier sourceImageIdentifier, uint mip, uint layer)
     {
         RefreshCopySource(sourceImageIdentifier);
@@ -258,7 +386,7 @@ public sealed partial class GuestImageCache
     {
         var current = info.Resources.Layers;
         if (info.Resources.Levels != 1 || current == 0 || layers <= current ||
-            info.MipLayout[0].Offset != 0 || info.MipLayout[0].Size != info.Data.Size)
+            info.MipLayout[0].Offset != 0 || info.LevelBytes(0) != info.Data.Size)
         {
             return false;
         }
@@ -287,7 +415,10 @@ public sealed partial class GuestImageCache
             return false;
         }
 
-        grown.MipLayout[0].Size = grown.Data.Size;
+        if (grown.SliceStride == 0)
+        {
+            grown.MipLayout[0].Size = grown.Data.Size;
+        }
         grown.Resources = grown.Resources with { Layers = layers };
         info = grown;
         return true;
@@ -299,7 +430,7 @@ public sealed partial class GuestImageCache
         {
             var a = left.MipLayout[level];
             var b = right.MipLayout[level];
-            if (a.Offset != b.Offset || a.Size != b.Size || a.Pitch != b.Pitch || a.Height != b.Height)
+            if (left.SliceStride != right.SliceStride || a.Offset != b.Offset || a.Size != b.Size || a.Pitch != b.Pitch || a.Height != b.Height)
             {
                 return false;
             }
@@ -339,7 +470,7 @@ public sealed partial class GuestImageCache
             requested.Resources.Layers < cachedInfo.Resources.Layers &&
             requested.Type == cachedInfo.Type && requested.Pitch == cachedInfo.Pitch && requested.TileMode == cachedInfo.TileMode &&
             requested.MipLayout[0].Offset == 0 && cachedInfo.MipLayout[0].Offset == 0 &&
-            requested.MipLayout[0].Size == requested.Data.Size && cachedInfo.MipLayout[0].Size == cachedInfo.Data.Size &&
+            requested.LevelBytes(0) == requested.Data.Size && cachedInfo.LevelBytes(0) == cachedInfo.Data.Size &&
             requested.Data.Size % requested.Resources.Layers == 0 && cachedInfo.Data.Size % cachedInfo.Resources.Layers == 0 &&
             requested.Data.Size / requested.Resources.Layers == cachedInfo.Data.Size / cachedInfo.Resources.Layers &&
             !requested.HasStencil && !cachedInfo.HasStencil && (!requested.HasMetadata || separateDepthMetadata) && !cachedInfo.HasMetadata;
@@ -378,6 +509,7 @@ public sealed partial class GuestImageCache
             replacementInfo.Data = cachedInfo.Data;
             replacementInfo.Resources = cachedInfo.Resources;
             replacementInfo.MipLayout = cachedInfo.MipLayout;
+            replacementInfo.SliceStride = cachedInfo.SliceStride;
         }
         else
         {
@@ -433,6 +565,29 @@ public sealed partial class GuestImageCache
         return replacementImageIdentifier;
     }
 
+    // Memory keeps its bytes when another image or a buffer write reuses part of it. An image
+    // whose GPU contents never reached guest memory moves them into the buffer over its range
+    // before it is dropped, so a later image over those bytes starts from them, not from stale
+    // guest memory. False when the contents cannot be copied; they are lost as before.
+    private bool PublishBeforeDrop(ResourceSlotIdentifier imageIdentifier)
+    {
+        var image = _slots[imageIdentifier];
+        if (!image.IsGpuModified || image.DepthOwner.IsValid || !image.SafeToDownload)
+        {
+            return false;
+        }
+
+        var range = image.Description.Data;
+        if (_bufferCache.ObtainBufferForImageWriteBack(range.Address, range.Size) is not { } buffer ||
+            !TryDownloadImageToBuffer(image, buffer))
+        {
+            return false;
+        }
+
+        image.ClearGpuModified();
+        return true;
+    }
+
     private OverlapResolution ResolveOverlap(in ImageDescription requested, ImageRole role, ResourceSlotIdentifier cachedImageIdentifier, ResourceSlotIdentifier mergedImageIdentifier)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageOverlap);
@@ -442,9 +597,29 @@ public sealed partial class GuestImageCache
             return new OverlapResolution(mergedImageIdentifier);
         }
 
+        // Resolving can allocate a replacement, and an allocation under memory pressure collects
+        // images not used this tick. The image being resolved is the copy source of that
+        // replacement; touching it keeps it out of the collection.
+        TouchImage(cached);
+
         ref var cachedInfo = ref cached.Description;
         var currentTick = _scheduler.CurrentTick;
         var safeToDelete = currentTick - Math.Min(currentTick, cached.LastAccessTick) > TicksBeforeRemoval;
+        if (requested.FirstLevel != 0 || cachedInfo.FirstLevel != 0)
+        {
+            // An image of a streamed chain's resident levels shares only an identical chain (the
+            // same-backing match). It is a copy of guest memory that a lookup recreates cheaply, so
+            // another resource over its range replaces it; a request for resident levels over
+            // another image is a separate texture (the lookup took the whole chain when that image
+            // holds GPU contents).
+            if (cachedInfo.FirstLevel != 0 && !cached.IsGpuModified)
+            {
+                cached.Binding.NeedsRebind |= cached.Binding.IsBound || cached.Binding.IsTarget;
+                ReleaseImage(cachedImageIdentifier);
+            }
+
+            return new OverlapResolution(mergedImageIdentifier);
+        }
         var requestedBlock = requested.BytesPerBlock * requested.Samples;
         var cachedBlock = cachedInfo.BytesPerBlock * cachedInfo.Samples;
         var requestedBlockExtent = requested.BlockExtent;
@@ -475,6 +650,7 @@ public sealed partial class GuestImageCache
             {
                 if (safeToDelete)
                 {
+                    PublishBeforeDrop(cachedImageIdentifier);
                     ReleaseImage(cachedImageIdentifier);
                 }
 
@@ -486,6 +662,20 @@ public sealed partial class GuestImageCache
                 requested.Extent.Depth >= cachedInfo.Extent.Depth && ViewFormatRules.AreCompatible(cachedInfo.PixelFormat, requested.PixelFormat))
             {
                 return new OverlapResolution(GrowImage(requested, cachedImageIdentifier));
+            }
+
+            // Dynamic resolution: the same surface at another size. Both sizes stay alive,
+            // and the lookup syncs the requested one from the most recently written sibling,
+            // so a size switch neither drops the other image nor reuses it with the wrong
+            // extent (which would paint the target at a mismatched resolution). An equal
+            // allocation re-described with another extent is the growth case above, not a
+            // resolution switch.
+            if (requested.Data.Size != cachedInfo.Data.Size && requested.PixelFormat == cachedInfo.PixelFormat &&
+                requested.Type == cachedInfo.Type && requested.Samples == cachedInfo.Samples &&
+                requested.TileMode == cachedInfo.TileMode && requested.Resources == cachedInfo.Resources &&
+                !SameExtent(requested.Extent, cachedInfo.Extent))
+            {
+                return new OverlapResolution(ResourceSlotIdentifier.Invalid);
             }
 
             if (requested.PixelFormat != cachedInfo.PixelFormat || requested.Data.Size <= cachedInfo.Data.Size)
@@ -541,6 +731,7 @@ public sealed partial class GuestImageCache
 
         if (requested.Data.Address >= cachedInfo.Data.Address && safeToDelete)
         {
+            PublishBeforeDrop(cachedImageIdentifier);
             ReleaseImage(cachedImageIdentifier);
         }
 
@@ -636,9 +827,14 @@ public sealed partial class GuestImageCache
         var association = ResourceSlotIdentifier.Invalid;
         foreach (var imageIdentifier in FindImagesInRange(stencil.Address, stencil.Size, pageOverlap: false))
         {
+            // Only an image of exactly this span can stand for the plane: the stencil upload detiles the
+            // whole depth extent from it. A proxy of another span or extent belongs to another surface
+            // and stays; a standalone image of the span (a dynamic-resolution view of the plane may be
+            // smaller than the depth image) becomes the proxy, and an image of another size (a texture
+            // reading part of the plane) is a separate resource.
             var owner = _slots.TryGet(imageIdentifier);
             if (owner != null && owner.Description.Data == stencil &&
-                owner.Description.Extent.Equals(depth.Description.Extent))
+                (!owner.DepthOwner.IsValid || owner.Description.Extent.Equals(depth.Description.Extent)))
             {
                 association = imageIdentifier;
             }
@@ -653,6 +849,30 @@ public sealed partial class GuestImageCache
         }
 
         var record = _slots[association];
+
+        // A proxy another depth image owns holds that image's writes, not this one's (Ghost of Yotei
+        // copies its depth buffer into a second depth image that shares the stencil plane). What the GPU
+        // wrote reaches guest memory before the plane changes owner, and the new owner loads it from there.
+        if (record.DepthOwner.IsValid && record.DepthOwner != depthImageIdentifier)
+        {
+            if (record.IsGpuModified)
+            {
+                if (_slots.TryGet(record.DepthOwner) is { } previousOwner && CanWriteBackStencilPlane(previousOwner))
+                {
+                    WriteBackStencilPlane(previousOwner, record.Description.Data);
+                }
+
+                record.ClearGpuModified();
+            }
+
+            record.InvalidateCpuWrite(record.Description.Data.Address, record.Description.Data.Size);
+        }
+
+        // An image a shader wrote through a color view before this depth target took the plane
+        // (Ghost of Yotei builds the stencil its lighting reads that way) is the association now,
+        // and holds the plane's newest values: they move into the depth image's stencil aspect.
+        var takeContents = record.Backing.Exists && !record.DepthOwner.IsValid && record.IsGpuModified &&
+                           TakeStandaloneStencilPlane(depth, association);
         TouchImage(record);
         // A current ordinary image becomes an S8 proxy below. Preserve its native
         // bytes before changing the owner; clean flags alone cannot refresh S8.
@@ -675,6 +895,35 @@ public sealed partial class GuestImageCache
             UnwatchImage(association);
         }
         record.AssociateDepth(depthImageIdentifier);
+        if (takeContents)
+        {
+            // The depth image now holds values newer than guest memory.
+            TakeGpuOwnership(record);
+        }
+
         return association;
+    }
+
+    // Copies a GPU-written single-level 8-bit image of the stencil plane into the depth image's
+    // stencil aspect; true when the depth image holds its values.
+    private bool TakeStandaloneStencilPlane(CachedImage depth, ResourceSlotIdentifier standaloneIdentifier)
+    {
+        var standalone = _slots[standaloneIdentifier];
+        if (standalone.Binding.IsBound || standalone.Binding.IsTarget)
+        {
+            standalone.Binding.NeedsRebind = true;
+        }
+
+        if (standalone.Backing.Format == Format.R8Uint && CanWriteBackStencilPlane(depth) &&
+            standalone.Backing.MipLevels == 1 && standalone.Backing.Layers == depth.Backing.Layers &&
+            standalone.Backing.Extent.Width <= depth.Backing.Extent.Width && standalone.Backing.Extent.Height <= depth.Backing.Extent.Height)
+        {
+            depth.CopyStencilStorage(standalone, _bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: true);
+            return true;
+        }
+
+        // Nothing can carry the values over; the association reads guest memory as before.
+        Console.Error.WriteLine($"[GPU][WARN] A GPU-written image of a stencil plane cannot reach its depth image: address=0x{standalone.Description.Data.Address:X16} format={(int)standalone.Backing.Format}.");
+        return false;
     }
 }

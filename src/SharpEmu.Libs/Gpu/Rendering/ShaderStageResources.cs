@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
@@ -15,6 +16,7 @@ public enum ShaderStageKind
     Pixel,
     Compute,
     Mesh,
+    TessellationEvaluation,
 }
 
 public enum ImageResourceClass : byte
@@ -43,6 +45,7 @@ public class ShaderProgramInfo
     public const int NoScalarRegister = -1;
 
     public ShaderStageKind Stage { get; init; }
+    public int TessellationFactorBuffer { get; init; } = -1;
     public ulong Hash { get; init; }
     public uint UserDataBase { get; init; }
     public uint UserDataCount { get; init; }
@@ -59,6 +62,7 @@ public class ShaderProgramInfo
     public uint? ConstantStoreValue { get; init; }
     public bool HasBitwiseExclusiveOr { get; init; }
     public Pipelines.ConstantFill? ConstantFill { get; init; }
+    public Pipelines.ImmediateConstantFill? ImmediateConstantFill { get; init; }
     public Pipelines.BoundedFill? BoundedFill { get; init; }
     public Pipelines.BoundedCopy? BoundedCopy { get; init; }
     public BufferResourceInfo[] Buffers { get; init; } = [];
@@ -82,7 +86,35 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
 
     public DispatchThreadLimits? ThreadLimits { get; init; }
 
+    // VGT_OBJECT_ID of the draw, for a pixel program that writes an object/primitive ID target.
+    public uint ObjectId { get; init; }
+
+    public void WriteObjectId(Span<uint> shaderData)
+    {
+        if (Program?.Bindings is not { UsesObjectId: true } layout) return;
+        if (shaderData.Length != layout.ShaderDataDwordCount)
+        {
+            throw SubmissionScheduler.Fatal("The draw has invalid shader data for its object ID dword.");
+        }
+
+        shaderData[(int)layout.ObjectIdDword] = ObjectId;
+    }
+
     public MeshDrawParameters? MeshDraw { get; init; }
+
+    public uint[]? TessellationData { get; init; }
+
+    public void WriteTessellationData(Span<uint> shaderData)
+    {
+        if (Program?.Bindings is not { UsesTessellationData: true } layout) return;
+        if (TessellationData is not { Length: (int)Gen5TessellationData.DwordCount } data ||
+            shaderData.Length != layout.ShaderDataDwordCount)
+        {
+            throw SubmissionScheduler.Fatal("The tessellation stage has missing runtime data or invalid shader data.");
+        }
+
+        data.CopyTo(shaderData[(int)layout.TessellationDataDword..]);
+    }
 
     public void WriteDispatchThreadLimits(Span<uint> shaderData)
     {
@@ -153,6 +185,7 @@ public readonly record struct ClipSpaceTransform(
 
 public sealed class VertexInputInfo
 {
+    public Pipelines.TessellationPipelineStages? Tessellation { get; init; }
     public const int MaxBuffers = 32;
 
     public VertexInputBuffer[] Buffers { get; init; } = [];
@@ -212,6 +245,9 @@ public sealed class PixelInputInfo
     public uint PerspectiveCenterRegister { get; init; } = NoPerspectiveCenterRegister;
     public uint[] InterpolatorSettings { get; init; } = new uint[InterpolatorCount];
     public byte[] TargetOutputModes { get; init; } = new byte[TargetCount];
+
+    // The SPI_SHADER_COL_FORMAT nibble of each export target: how its compressed exports pack halves.
+    public byte[] TargetExportFormats { get; init; } = new byte[TargetCount];
     public ColorComponentMap[] TargetExportMappings { get; init; } = new ColorComponentMap[TargetCount];
     public bool IeeeMode { get; set; }
     public uint ScratchDwords { get; init; }
@@ -220,6 +256,7 @@ public sealed class PixelInputInfo
     public bool PositionZ { get; init; }
     public bool PositionW { get; init; }
     public bool FrontFace { get; init; }
+    public bool FrontFaceAllBits { get; init; }
     public bool NoPerspective { get; init; }
     public bool KillEnable { get; init; }
     public bool DepthExportEnable { get; init; }

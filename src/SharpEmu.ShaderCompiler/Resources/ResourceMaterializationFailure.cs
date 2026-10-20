@@ -9,4 +9,6 @@ public enum ResourceMaterializationFailure
     Other,
     IncompatibleImageCandidates,
     ImageCapacityExceeded,
+    // An indirect image table names descriptors in guest memory that is not mapped.
+    UnreadableImageCandidates,
 }

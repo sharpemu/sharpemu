@@ -3,6 +3,7 @@
 
 using System.Buffers;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
@@ -28,6 +29,49 @@ public sealed partial class RenderExecutor
 
     private readonly record struct PreparedIndexBuffer(BufferBinding Binding, ulong Size, IndexType Type);
 
+    // The byte extent each vertex slot needs: its buffer, widened to the format extent of constant attributes.
+    private static void VertexBufferSizes(VertexInputInfo vertexInput, Span<ulong> sizes)
+    {
+        var buffers = vertexInput.Buffers;
+        for (var slot = 0; slot < buffers.Length; slot++) sizes[slot] = buffers[slot].Size;
+        foreach (var attribute in vertexInput.Attributes)
+        {
+            var slot = attribute.BufferIndex;
+            var descriptor = attribute.Descriptor;
+            if (buffers[slot].Stride != 0 || descriptor.RecordCount == 0 || descriptor.OutOfBounds != 2) continue;
+            // This bounds mode tests only whether the record count is nonzero.
+            // Constant attributes still need the full format extent.
+            sizes[slot] = Math.Max(sizes[slot], (ulong)attribute.OffsetBytes + VertexAttributeFormats.StorageByteSize(descriptor));
+        }
+    }
+
+    // Lets the buffer cache finish every allocation merge the geometry acquisitions below can
+    // trigger, so no shader descriptor holds a buffer that one of them replaces.
+    private void PrepareDrawBufferAllocations(VertexInputInfo vertexInput, in IndexSource index, ulong indirectAddress, ulong indirectSize)
+    {
+        var buffers = vertexInput.Buffers;
+        if (buffers.Length > VertexInputInfo.MaxBuffers)
+            throw _host.Fatal($"The vertex input has too many buffers: count={buffers.Length} max={VertexInputInfo.MaxBuffers}.");
+        Span<ulong> sizes = stackalloc ulong[buffers.Length];
+        VertexBufferSizes(vertexInput, sizes);
+        Span<GuestSpan> ranges = stackalloc GuestSpan[VertexInputInfo.MaxBuffers + 2];
+        var count = 0;
+        for (var slot = 0; slot < buffers.Length; slot++)
+        {
+            var address = buffers[slot].Address;
+            var size = sizes[slot];
+            if (size == 0) continue;
+            if (address == 0 || size > ulong.MaxValue - address)
+                throw _host.Fatal($"The vertex buffer range is invalid: address=0x{address:X16} size=0x{size:X16}.");
+            ranges[count++] = new GuestSpan(address, _host.ClampMappedSize(address, size));
+        }
+        if (index.Enabled && index.HostData is null)
+            ranges[count++] = new GuestSpan(index.Address, index.Size);
+        if (indirectAddress != 0)
+            ranges[count++] = new GuestSpan(indirectAddress, indirectSize);
+        _host.PrepareBufferAllocations(ranges[..count]);
+    }
+
     // Merges the vertex ranges, obtains one host buffer per merged range and offsets every slot into it.
     private BufferBinding[] AcquireVertexBuffers(VertexInputInfo vertexInput)
     {
@@ -41,16 +85,7 @@ public sealed partial class RenderExecutor
         // Sized to this draw's buffers: a MaxBuffers span is over a kilobyte, zeroed on every draw.
         Span<VertexBufferRange> ranges = stackalloc VertexBufferRange[buffers.Length];
         Span<ulong> sizes = stackalloc ulong[buffers.Length];
-        for (var slot = 0; slot < buffers.Length; slot++) sizes[slot] = buffers[slot].Size;
-        foreach (var attribute in vertexInput.Attributes)
-        {
-            var slot = attribute.BufferIndex;
-            var descriptor = attribute.Descriptor;
-            if (buffers[slot].Stride != 0 || descriptor.RecordCount == 0 || descriptor.OutOfBounds != 2) continue;
-            // This bounds mode tests only whether the record count is nonzero.
-            // Constant attributes still need the full format extent.
-            sizes[slot] = Math.Max(sizes[slot], (ulong)attribute.OffsetBytes + VertexAttributeFormats.StorageByteSize(descriptor));
-        }
+        VertexBufferSizes(vertexInput, sizes);
         var rangeCount = 0;
         for (var slot = 0; slot < buffers.Length; slot++)
         {
@@ -241,6 +276,7 @@ public sealed partial class RenderExecutor
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
         var meshInput = state.Programs.MeshInput;
+        var indirectSize = emission.Indexed ? IndexedIndirectArgumentsSize : AutoIndirectArgumentsSize;
         using var preparation = _host.BeginPreparation();
         using var indirectMesh = meshInput is not null && emission.IndirectArgumentsAddress != 0
             ? _host.PrepareIndirectMeshDraw(new IndirectMeshDrawRequest(emission.IndirectArgumentsAddress,
@@ -307,7 +343,9 @@ public sealed partial class RenderExecutor
         try
         {
             vertexBindings = PrepareBindings(vertexInput.Stage);
-            pixelBindings = state.PixelActive ? PrepareBindings(pixelInput.Stage) : null;
+            pixelBindings = state.PixelActive
+                ? PrepareBindings(pixelInput.Stage with { ObjectId = banks.UserConfig.ObjectId })
+                : null;
         }
         catch (DrawImageTypeMismatchException rejection)
         {
@@ -328,6 +366,15 @@ public sealed partial class RenderExecutor
         }
         var vertexProgram = vertexInput.Stage.Program ?? throw _host.Fatal("The vertex stage has no program.");
         var pixelProgram = pixelBindings is null ? null : pixelInput.Stage.Program ?? throw _host.Fatal("The pixel stage has no program.");
+        DropUnwrittenColorTargets(context, ref state, pixelProgram);
+        state.Rendering = AcquireAttachments(ref state);
+        // Attachment uploads can submit work. Finish every allocation merge before any
+        // shader descriptor, vertex binding or index binding takes a buffer handle.
+        if (meshInput is null)
+        {
+            PrepareDrawBufferAllocations(vertexInput, in indexSource, emission.IndirectArgumentsAddress, indirectSize);
+        }
+
         if (vertexProgram.UsesDeviceAddresses || (pixelProgram?.UsesDeviceAddresses ?? false))
         {
             _host.PrepareDeviceAddresses();
@@ -342,10 +389,8 @@ public sealed partial class RenderExecutor
         var vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : [];
         var indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
         var indirectArguments = meshInput is null && emission.IndirectArgumentsAddress != 0
-            ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, IndexedIndirectArgumentsSize, isWritten: false)
+            ? _host.ObtainBuffer(emission.IndirectArgumentsAddress, indirectSize, isWritten: false)
             : default;
-        DropUnwrittenColorTargets(context, ref state, pixelProgram);
-        state.Rendering = AcquireAttachments(ref state);
         // Nothing after the pipeline touches guest memory.
         var pipeline = _pipelines.CreateGraphicsPipeline(
             BoundColors(ref state),
@@ -442,11 +487,23 @@ public sealed partial class RenderExecutor
                 MeshDrawTrace.Recorded();
             }
         }
+        else if (state.Programs.Tessellation is not null)
+        {
+            // A batch of whole patches: the control points come from the guest rings, not from vertex buffers.
+            _host.Draw(draw.Count, 1, 0, 0);
+        }
         else if (emission.IndirectArgumentsAddress != 0)
         {
             // Uploads and shader writes end with barriers to all commands, so the
             // indirect read sees them.
-            _host.DrawIndexedIndirect(indirectArguments);
+            if (emission.Indexed)
+            {
+                _host.DrawIndexedIndirect(indirectArguments);
+            }
+            else
+            {
+                _host.DrawIndirect(indirectArguments);
+            }
         }
         else
         {
@@ -462,7 +519,8 @@ public sealed partial class RenderExecutor
         var writeStages = PipelineStageFlags.None;
         if (HasBufferWrites(vertexInput.Stage))
         {
-            writeStages |= meshInput is null ? PipelineStageFlags.VertexShaderBit : PipelineStageFlags.MeshShaderBitExt;
+            writeStages |= meshInput is not null ? PipelineStageFlags.MeshShaderBitExt
+                : vertexInput.Tessellation is null ? PipelineStageFlags.VertexShaderBit : PipelineStageFlags.TessellationEvaluationShaderBit;
         }
 
         if (state.PixelActive && HasBufferWrites(pixelInput.Stage))
@@ -515,7 +573,7 @@ public sealed partial class RenderExecutor
                     throw _host.Fatal($"The primitive type is unknown for an indexed draw: primitiveType={userConfig.PrimitiveType}.");
                 }
 
-                if (_host.SupportsNativeRectangles)
+                if (_host.SupportsNativeRectangles || IsLegacyRectangleBatch(draw.Count))
                 {
                     // Keep guest vertex IDs unchanged; the host fills each three-vertex rectangle.
                     _host.Draw(draw.Count, draw.InstanceCount, emission.FirstVertex, emission.FirstInstance);

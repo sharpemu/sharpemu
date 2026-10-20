@@ -7,6 +7,7 @@ using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
+using SharpEmu.ShaderCompiler;
 using Silk.NET.Vulkan;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
 
@@ -49,6 +50,7 @@ public sealed partial class RenderExecutor
         (stages & ~VgtShaderStagesWaveSizeBits) is 0x02002000 or 0x00002000 or 0x00002030;
     private const uint MaxOutputPerSubgroupLimit = 0x40;
     private static int _geometryWarningShown;
+    private static int _tessellationWarningShown;
 
     private readonly IRenderHost _host;
     private readonly IShaderPipelineProvider _pipelines;
@@ -69,7 +71,7 @@ public sealed partial class RenderExecutor
 
     private readonly record struct DrawCall(string Name, RecordedOperation Operation, uint Count, uint InstanceCount, uint FirstInstance);
 
-    // IndirectArgumentsAddress: the GPU reads the indexed draw's counts from guest memory there.
+    // IndirectArgumentsAddress: the GPU reads the draw's counts from guest memory there.
     private readonly record struct DrawEmission(bool Indexed, int VertexOffset, uint FirstVertex, uint FirstInstance, ulong IndirectArgumentsAddress = 0);
 
     private readonly record struct IndexSource(bool Enabled, ulong Address, byte[]? HostData, ulong Size, IndexType Type);
@@ -251,6 +253,17 @@ public sealed partial class RenderExecutor
             return;
         }
 
+        if (Pipelines.ShaderPipelineCache.IsMergedTessellationMask(banks.Context.ShaderStages))
+        {
+            if (IsSupportedTessellation(banks))
+            {
+                DrawTessellationIndexed(submitId, banks, arguments);
+            }
+
+            TraceDisposition("tessellation");
+            return;
+        }
+
         if (!HasValidVertexShader(shader))
         {
             TraceDisposition("missing-vertex-shader");
@@ -368,6 +381,12 @@ public sealed partial class RenderExecutor
         using var meshTrace = MeshDrawTrace.Begin(submitId, banks.Shader.Vertex.ExportAddress, banks.Context.ShaderStages);
         try
         {
+            if (arguments.IndirectArgumentsAddress != 0 && !CanDrawAutoIndirectOnGpu(banks))
+            {
+                DrawAutoWithCpuArguments(submitId, banks, in arguments);
+                return;
+            }
+
             DrawAutoCore(submitId, banks, arguments);
         }
         catch (Exception exception) when (meshTrace is not null)
@@ -376,6 +395,48 @@ public sealed partial class RenderExecutor
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("failure", $"type={exception.GetType().Name} message={exception.Message}");
             throw;
         }
+    }
+
+    // The GPU reads the arguments of a non-indexed indirect draw unless the draw is emulated
+    // from its vertex count: fans, polygons, legacy primitives, strips (metadata clear quads),
+    // mesh and merged tessellation draws, and rectangle lists without native rectangles.
+    private bool CanDrawAutoIndirectOnGpu(RegisterBanks banks)
+    {
+        if (UsesMeshExecution(banks) || Pipelines.ShaderPipelineCache.IsMergedTessellationMask(banks.Context.ShaderStages))
+        {
+            return false;
+        }
+
+        return (GuestPrimitiveType)banks.UserConfig.PrimitiveType switch
+        {
+            GuestPrimitiveType.PointList or GuestPrimitiveType.LineList or GuestPrimitiveType.LineStrip or
+                GuestPrimitiveType.TriangleList => true,
+            GuestPrimitiveType.RectangleList => _host.SupportsNativeRectangles,
+            _ => false,
+        };
+    }
+
+    private const ulong AutoIndirectArgumentsSize = 16;
+
+    // Reads the indirect arguments now and draws from them, as the interpreter would have.
+    private void DrawAutoWithCpuArguments(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
+    {
+        Span<byte> bytes = stackalloc byte[(int)AutoIndirectArgumentsSize];
+        if (!_host.TryReadGuest(arguments.IndirectArgumentsAddress, bytes))
+        {
+            throw _host.Fatal($"The indirect draw arguments are unreadable: address=0x{arguments.IndirectArgumentsAddress:X16}.");
+        }
+
+        var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes);
+        var resolved = arguments with
+        {
+            VertexCount = words[0],
+            InstanceCount = words[1],
+            FirstVertex = words[2],
+            FirstInstance = words[3],
+            IndirectArgumentsAddress = 0,
+        };
+        DrawAutoCore(submitId, banks, in resolved);
     }
 
     private void DrawAutoCore(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
@@ -410,6 +471,19 @@ public sealed partial class RenderExecutor
             return;
         }
 
+        if (Pipelines.ShaderPipelineCache.IsMergedTessellationMask(banks.Context.ShaderStages))
+        {
+            var tessellationVertexOffset = unchecked((int)arguments.FirstVertex +
+                (arguments.OffsetSource == DrawOffsetSource.IndirectArguments ? 0 : (int)userConfig.IndexOffset));
+            if (IsSupportedTessellation(banks))
+            {
+                DrawTessellation(submitId, banks, arguments.VertexCount, arguments.InstanceCount, 0, 0, tessellationVertexOffset, arguments.FirstInstance);
+            }
+
+            TraceDrawTargets(banks, "tessellation");
+            return;
+        }
+
         if (!HasValidVertexShader(shader))
         {
             TraceDrawTargets(banks, "missing-vertex-shader");
@@ -439,7 +513,7 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        if (!ResolveTopology(userConfig, autoDraw: true, out var topology))
+        if (!ResolveTopology(userConfig, autoDraw: true, out var topology, arguments.VertexCount))
         {
             TraceDrawDisposition(banks, in draw, "no-primitive-topology");
             TraceDrawTargets(banks, "no-topology");
@@ -447,10 +521,20 @@ public sealed partial class RenderExecutor
             return;
         }
 
+        if (arguments.IndirectArgumentsAddress != 0 && state.ColorCount == 0 && !state.Depth.HasTarget)
+        {
+            // A targetless draw may be retained and replayed later; it needs its counts.
+            DrawAutoWithCpuArguments(submitId, banks, in arguments);
+            return;
+        }
+
         ResolveShaderPrograms(banks, ref state);
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
-        var rectangleList = topology == PrimitiveTopology.PatchList;
+        // A legacy rectangle batch also draws as a patch list but keeps its draws: its pixel
+        // inputs may come from fixed-function interpolation of the three vertices.
+        var rectangleList = topology == PrimitiveTopology.PatchList &&
+            userConfig.PrimitiveType != (uint)GuestPrimitiveType.RectangleListLegacy;
         if (rectangleList && vertexInput.Buffers.Length == 0 && vertexInput.Stage.Program?.ParameterExportMask == 0 && pixelInput.InputCount != 0)
         {
             if (RenderTrace.Enabled)
@@ -481,7 +565,8 @@ public sealed partial class RenderExecutor
             false,
             0,
             (uint)vertexOffset,
-            indirect ? arguments.FirstInstance : ResolveInstanceOffset(vertexInput));
+            indirect ? arguments.FirstInstance : ResolveInstanceOffset(vertexInput),
+            arguments.IndirectArgumentsAddress);
         var disposition = RecordDraw(submitId, banks, in draw, ref state, topology, in emission, default, primitiveRestart: false, setBindDebug: false, setAutoDebug: true);
         TraceDrawTargets(banks, disposition);
         _host.ResetBindings();
@@ -595,6 +680,40 @@ public sealed partial class RenderExecutor
 
     private static bool IsKnownGeometryOutputPrimitiveType(uint value) => value <= 4;
 
+    // A tessellation configuration the bridge cannot express skips the draw, as an
+    // unsupported geometry stage does, instead of stopping the emulator.
+    private static bool IsSupportedTessellation(RegisterBanks banks)
+    {
+        var shaderInterface = banks.Context.ShaderInterface;
+        string? error = null;
+        if (!Gen5TessellationInfo.TryDecode(shaderInterface.TessellationFactorParameter, out var tessellation, out var factorError))
+        {
+            error = factorError;
+        }
+        else if (tessellation.Spacing == Gen5TessellationSpacing.PowerOfTwo)
+        {
+            error = "power-of-two partitioning needs factor conversion";
+        }
+        else if (!Gen5TessellationHullInfo.TryDecode(shaderInterface.LocalHullConfiguration, 0, out _, out var hullError))
+        {
+            error = hullError;
+        }
+
+        if (error is null)
+        {
+            return true;
+        }
+
+        if (Interlocked.Exchange(ref _tessellationWarningShown, 1) == 0)
+        {
+            Console.Error.WriteLine(
+                $"Warning: the title uses an unsupported tessellation configuration; those draw calls are skipped. {error} " +
+                $"tf_param=0x{shaderInterface.TessellationFactorParameter:X8} ls_hs_config=0x{shaderInterface.LocalHullConfiguration:X8}");
+        }
+
+        return false;
+    }
+
     private bool IsUnsupportedGeometryStage(RegisterBanks banks, bool autoDraw)
     {
         var context = banks.Context;
@@ -680,7 +799,11 @@ public sealed partial class RenderExecutor
         return mode is ColorModeEliminateFastClear or ColorModeFmaskDecompress or ColorModeDccDecompress;
     }
 
-    public bool ResolveTopology(UserConfigRegisters userConfig, bool autoDraw, out PrimitiveTopology topology)
+    // Several legacy rectangles in one draw: three vertices each, as the hardware takes them.
+    // One rectangle keeps the four-vertex strip, which needs no rectangle pipeline.
+    private static bool IsLegacyRectangleBatch(uint vertexCount) => vertexCount > 3 && vertexCount % 3 == 0;
+
+    public bool ResolveTopology(UserConfigRegisters userConfig, bool autoDraw, out PrimitiveTopology topology, uint vertexCount = 3)
     {
         topology = PrimitiveTopology.PointList;
         switch ((GuestPrimitiveType)userConfig.PrimitiveType)
@@ -715,7 +838,9 @@ public sealed partial class RenderExecutor
                     throw _host.Fatal($"The primitive type is unknown for an indexed draw: primitiveType={userConfig.PrimitiveType}.");
                 }
 
-                topology = _host.SupportsNativeRectangles ? PrimitiveTopology.PatchList : PrimitiveTopology.TriangleStrip;
+                // Several rectangles take the rectangle-list path, which fills each one from its
+                // three vertices instead of rasterizing a made-up fourth vertex.
+                topology = _host.SupportsNativeRectangles || IsLegacyRectangleBatch(vertexCount) ? PrimitiveTopology.PatchList : PrimitiveTopology.TriangleStrip;
                 break;
             case GuestPrimitiveType.QuadListLegacy:
                 topology = PrimitiveTopology.TriangleFan;

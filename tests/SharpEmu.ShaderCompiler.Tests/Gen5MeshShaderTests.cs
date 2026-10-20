@@ -318,7 +318,8 @@ public sealed class Gen5MeshShaderTests
             Assert.Equal(expectedMask, laneMasks[words[offset + 5]]);
             shuffleCount++;
         }
-        Assert.True(shuffleCount >= 2);
+        // The value is shuffled; the partner's EXEC state comes from a subgroup ballot.
+        Assert.True(shuffleCount >= 1);
         ValidateWithInstalledSdk(shader.Spirv);
     }
 

@@ -100,6 +100,37 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Equal(0u, state.FrontMasks.WriteMask);
     }
 
+    // Vulkan keeps one reference per face for the comparison and the replacement: an equal test
+    // that replaces bits by a different value toggles the differing bits instead.
+    [Theory]
+    [InlineData(0xF0, 0x20, 0x10, 0x30, true, false)]
+    [InlineData(0xF0, 0x20, 0x10, 0x30, false, true)]
+    [InlineData(0xFF, 0x7F, 0x03, 0x7C, true, true)]
+    public void DepthState_EqualTestReplacementThatDiffersFromTheReferenceInverts(
+        byte writeMask, byte operationValue, byte reference, byte inverted, bool pass, bool depthFail)
+    {
+        var context = StencilContext(pass: (byte)(pass ? 4 : 0), writeMask, operationValue, DepthControl(CompareOp.Less, CompareOp.Equal));
+        context.StencilControl.DepthFail = (byte)(depthFail ? 4 : 0);
+        context.StencilMask.TestValue = reference;
+
+        var state = DepthTargetResolver.ResolveState(context, true, Fatal);
+
+        Assert.Equal(
+            new StencilOperations(StencilOp.Keep, pass ? StencilOp.Invert : StencilOp.Keep, depthFail ? StencilOp.Invert : StencilOp.Keep, CompareOp.Equal),
+            state.FrontOperations);
+        Assert.Equal(new StencilMasks(0xFF, inverted, reference), state.FrontMasks);
+        // For every stored value the equal test lets through, inverting the masked bits lands on the replacement.
+        for (uint stored = 0; stored <= 0xFF; stored++)
+        {
+            if ((stored & 0xFF) != reference)
+            {
+                continue;
+            }
+
+            Assert.Equal((stored & ~(uint)writeMask) | (operationValue & (uint)writeMask), stored ^ state.FrontMasks.WriteMask);
+        }
+    }
+
     [Fact]
     public void DepthState_PlayroomReplacementClearsOnlyTheWrittenBit()
     {

@@ -24,6 +24,7 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
 {
     private const uint Format32Uint = 20;
     private const uint Format32Sint = 21;
+    private const uint Format16Sint = 12;
     private const uint Format32Float = 22;
     private const uint ImageType2D = 9;
     private const uint ResultRegister = 8;
@@ -88,6 +89,42 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         instructions.Add(Vop1(pc, "VMovB32", 3, Gen5Operand.Vector(0))); pc += 8;
         instructions.Add(Vop1(pc, "VMovB32", 4, Gen5Operand.Vector(0))); pc += 8;
         instructions.Add(Image(pc, "ImageStoreMip", FirstImageRegister, vectorAddress: 1, dmask: 1)); pc += 8;
+        instructions.Add(EndProgram(pc));
+        return Program([.. instructions]);
+    }
+
+    // Texels (x, 0) of a 16-bit sint image written with the given 32-bit register values.
+    private static Gen5ShaderProgram StoreSint16Program(uint[] values)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, FirstImageRegister, FirstImageAddress, Format16Sint));
+        instructions.Add(MoveVector(pc, 2, 0)); pc += 8;
+        for (var x = 0u; x < values.Length; x++)
+        {
+            instructions.Add(MoveVector(pc, 1, x)); pc += 8;
+            instructions.Add(MoveVector(pc, 4, values[x])); pc += 8;
+            instructions.Add(Image(pc, "ImageStore", FirstImageRegister, vectorAddress: 1, dmask: 1)); pc += 8;
+        }
+
+        instructions.Add(EndProgram(pc));
+        return Program([.. instructions]);
+    }
+
+    // Texels (x, 0) of a 16-bit sint image loaded into the result buffer, one dword each.
+    private static Gen5ShaderProgram LoadSint16Program(int count)
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, FirstImageRegister, FirstImageAddress, Format16Sint));
+        instructions.Add(MoveVector(pc, 2, 0)); pc += 8;
+        for (var x = 0u; x < count; x++)
+        {
+            instructions.Add(MoveVector(pc, 1, x)); pc += 8;
+            instructions.Add(Image(pc, "ImageLoad", FirstImageRegister, vectorAddress: 1, dmask: 1)); pc += 8;
+            instructions.Add(BufferAccess(pc, "BufferStoreDword", ResultRegister, (int)(x * 4), 1, vectorData: 4)); pc += 8;
+        }
+
         instructions.Add(EndProgram(pc));
         return Program([.. instructions]);
     }
@@ -552,5 +589,77 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         Assert.Equal(1u, texels[4]);
         run.Harness.AssertNoValidationMessages();
         output.WriteLine($"Verified per-mip storage descriptors on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
+    }
+
+    [Fact]
+    public void SignedStorageImage_StoresTheLowSixteenBitsOfNegativeAndPositiveValues()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan))
+        {
+            return;
+        }
+
+        // -5, +0x1234 and the minimum 16-bit value; a float conversion would turn them into 0 or 0x7FFF.
+        uint[] values = [0xFFFF_FFFBu, 0x1234u, 0xFFFF_8000u];
+        using var run = new Run(vulkan, StoreSint16Program(values), UserData(), 1);
+        var image = Assert.Single(run.Resources.Info.Images);
+        Assert.Equal(ImageResourceClass.Storage, image.ResourceClass);
+        Assert.Equal(ImageNumericClass.Sint, image.NumericClass);
+
+        var description = Describe(0, Format.R16Sint, GuestPixelFormat.Bits16SInt, 4, 4, 1);
+        description.BytesPerBlock = 2;
+        var target = run.Harness.CreateImage(description);
+        var copies = ImageTestHarness.WholeImageCopies(description, 0);
+        var byteCount = ImageTestHarness.WholeImageBytes(description);
+        var sentinel = Enumerable.Repeat((short)0x5A5A, (int)(byteCount / 2)).ToArray();
+        run.Harness.UploadImage(target, MemoryMarshal.AsBytes<short>(sentinel), copies);
+        var views = new Dictionary<int, DescriptorImageInfo[]>
+        {
+            [0] = [new DescriptorImageInfo
+            {
+                ImageView = target.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R16Sint, Usage = ImageUsageFlags.StorageBit }),
+                ImageLayout = ImageLayout.General,
+            }],
+        };
+        run.Dispatch(run.BindImages(views), command => target.Transition(ImageLayout.General, AccessFlags.ShaderWriteBit, null, command));
+
+        var texels = MemoryMarshal.Cast<byte, short>(run.Harness.ReadImage(target, copies, byteCount)).ToArray();
+        Assert.Equal(unchecked((short)0xFFFB), texels[0]);
+        Assert.Equal((short)0x1234, texels[1]);
+        Assert.Equal(unchecked((short)0x8000), texels[2]);
+        Assert.Equal((short)0x5A5A, texels[3]);
+        run.Harness.AssertNoValidationMessages();
+        output.WriteLine($"Verified 16-bit sint storage stores on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
+    }
+
+    [Fact]
+    public void SignedImage_LoadsSignExtendedSixteenBitTexels()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan))
+        {
+            return;
+        }
+
+        using var run = new Run(vulkan, LoadSint16Program(4), UserData(), 1);
+        var description = Describe(0, Format.R16Sint, GuestPixelFormat.Bits16SInt, 4, 4, 1);
+        description.BytesPerBlock = 2;
+        var source = run.Harness.CreateImage(description);
+        var copies = ImageTestHarness.WholeImageCopies(description, 0);
+        var texels = new short[ImageTestHarness.WholeImageBytes(description) / 2];
+        short[] expected = [-5, 0x1234, short.MinValue, 7];
+        expected.CopyTo(texels, 0);
+        run.Harness.UploadImage(source, MemoryMarshal.AsBytes<short>(texels), copies);
+        var views = new Dictionary<int, DescriptorImageInfo[]> { [run.ResourceAt(FirstImageAddress)] = [SampledView(source)] };
+        run.Dispatch(run.BindImages(views), command => source.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, command));
+
+        for (var index = 0; index < expected.Length; index++)
+        {
+            Assert.Equal(unchecked((uint)(int)expected[index]), run.ResultWord(index));
+        }
+
+        run.Harness.AssertNoValidationMessages();
+        output.WriteLine($"Verified 16-bit sint loads on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
     }
 }

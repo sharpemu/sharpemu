@@ -118,6 +118,9 @@ public readonly struct SamplerDescriptorWords
 
     public bool ForceUnnormalizedCoordinates => ((Fields[0] >> 15) & 0x1) == 1;
 
+    // 0 blend, 1 min, 2 max: how the filter combines the texels it covers.
+    public uint FilterMode => (Fields[0] >> 29) & 0x3;
+
     public uint MinLod => (Fields[1] >> 0) & 0xFFF;
 
     public uint MaxLod => (Fields[1] >> 12) & 0xFFF;

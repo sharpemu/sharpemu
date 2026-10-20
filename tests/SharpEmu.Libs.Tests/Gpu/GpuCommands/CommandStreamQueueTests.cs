@@ -364,6 +364,54 @@ public sealed class CommandStreamQueueTests
     }
 
     [Fact]
+    public void DrainForShutdown_DropsTheRemainingWorkOnceAbandoned()
+    {
+        var (host, queue) = NewQueue();
+        Enqueue(host, queue, Graphics, 1, CreateInstanceCountPacket(9));
+        Enqueue(host, queue, Graphics + 0x100, 2, CreateInstanceCountPacket(4));
+        EnqueueCompute(host, queue, 0x20, Compute, 3, CreateInstanceCountPacket(5));
+        queue.StopAccepting();
+
+        var outcome = queue.DrainForShutdown(cancelBlockedOnNoProgress: true, abandon: () => true);
+
+        Assert.Equal(IdleOutcome.Cancelled, outcome);
+        Assert.False(queue.HasPending);
+        Assert.Equal(0, queue.PendingSubmissionCount);
+        Assert.Equal(IdleOutcome.Cancelled, queue.WaitForIdle());
+        Assert.Equal(1u, queue.GetInterpreter(0).InstanceCount); // untouched default
+        Assert.Equal(1u, queue.GetInterpreter(1).InstanceCount);
+    }
+
+    [Fact]
+    public void DrainForShutdown_StopsAtTheFirstCheckThatReportsAbandoned()
+    {
+        var (host, queue) = NewQueue();
+        Enqueue(host, queue, Graphics, 1, CreateInstanceCountPacket(9));
+        Enqueue(host, queue, Graphics + 0x100, 2, CreateInstanceCountPacket(4));
+        queue.StopAccepting();
+        var checks = 0;
+
+        var outcome = queue.DrainForShutdown(cancelBlockedOnNoProgress: true, abandon: () => ++checks > 1);
+
+        Assert.Equal(IdleOutcome.Cancelled, outcome);
+        Assert.False(queue.HasPending);
+        Assert.Equal(2, checks);
+    }
+
+    [Fact]
+    public void DrainForShutdown_RunsEverythingWhileNotAbandoned()
+    {
+        var (host, queue) = NewQueue();
+        Enqueue(host, queue, Graphics, 1, CreateInstanceCountPacket(9));
+        queue.StopAccepting();
+
+        var outcome = queue.DrainForShutdown(cancelBlockedOnNoProgress: true, abandon: () => false);
+
+        Assert.Equal(IdleOutcome.Completed, outcome);
+        Assert.Equal(9u, queue.GetInterpreter(0).InstanceCount);
+    }
+
+    [Fact]
     public async Task DrainForShutdown_WithoutCancellationKeepsRetrying()
     {
         var (host, queue) = NewQueue();

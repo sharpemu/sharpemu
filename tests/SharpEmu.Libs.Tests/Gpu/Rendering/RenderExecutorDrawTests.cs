@@ -77,11 +77,11 @@ public sealed class RenderExecutorDrawTests : IDisposable
             "bind_target 1",
             "prepare_bindings Vertex -> 1",
             "prepare_bindings Pixel -> 2",
+            "acquire_color 0 100000000 image=1",
             "bind_resources 1",
             "bind_resources 2",
             "obtain 100400000 40 written=False -> 100:0",
             "obtain 100500000 C written=False",
-            "acquire_color 0 100000000 image=1",
             "debug DrawIndex 7 100 6 0 2 0",
             "bind_vertex 100:0",
             "commit Graphics A1 [1,2]",
@@ -137,6 +137,45 @@ public sealed class RenderExecutorDrawTests : IDisposable
 
         AssertOrder("obtain 100500008 C written=False", "draw_indexed 6 2 0 3 1", "reset_bindings");
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indexed_indirect", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void IndirectAutoDraw_LetsTheGpuReadTheArguments()
+    {
+        var arguments = Auto(1, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, Banks(), arguments);
+
+        AssertOrder(
+            "obtain 100600000 10 written=False",
+            "begin_rendering",
+            "bind_pipeline Graphics A1",
+            "draw_indirect",
+            "reset_bindings");
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw ", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(PrimitiveTriangleStrip, false)]
+    [InlineData(PrimitiveRectangleList, false)]
+    public void IndirectAutoDraw_EmulatedFromItsCount_ReadsTheArgumentsOnTheCpu(uint primitiveType, bool nativeRectangles)
+    {
+        _host.SupportsNativeRectangles = nativeRectangles;
+        WriteIndirectArguments(6, 2, 4, 1);
+        var arguments = Auto(1, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, Banks(primitiveType), arguments);
+
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indirect", StringComparison.Ordinal));
+        Assert.Contains(_host.Calls, c => c.StartsWith("draw ", StringComparison.Ordinal) && c.EndsWith(" 2 4 1", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void IndirectAutoRectangles_WithNativeRectangles_LetTheGpuReadTheArguments()
+    {
+        _host.SupportsNativeRectangles = true;
+        var arguments = Auto(1, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, Banks(PrimitiveRectangleList), arguments);
+
+        Assert.Contains(_host.Calls, c => c.StartsWith("draw_indirect", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -471,6 +510,9 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.False(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 0 }, autoDraw: false, out _));
         Assert.True(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: true, out var topology));
         Assert.Equal(PrimitiveTopology.TriangleStrip, topology);
+        // Several legacy rectangles take the rectangle-list path.
+        Assert.True(_executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: true, out topology, vertexCount: 63));
+        Assert.Equal(PrimitiveTopology.PatchList, topology);
         var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 17 }, autoDraw: false, out _));
         Assert.Contains("primitiveType=17", fatal.Message);
         fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.ResolveTopology(new UserConfigRegisters { PrimitiveType = 9 }, autoDraw: true, out _));
@@ -772,13 +814,18 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
-    public void LegacyRectangleList_DrawsFourVerticesAndRejectsOtherShapes()
+    public void LegacyRectangleList_DrawsFourVerticesOrABatchAndRejectsOtherShapes()
     {
         _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(3, instances: 2));
         Assert.Contains("draw 4 2 0 0", _host.Calls);
+        Assert.Equal(PrimitiveTopology.TriangleStrip, _pipelines.PipelineRequests[0].Topology);
 
-        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(6)));
-        Assert.Contains("count=6 buffers=0", fatal.Message);
+        _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(63));
+        Assert.Contains("draw 63 1 0 0", _host.Calls);
+        Assert.Equal(PrimitiveTopology.PatchList, _pipelines.PipelineRequests[1].Topology);
+
+        var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(5)));
+        Assert.Contains("count=5 buffers=0", fatal.Message);
 
         fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, Banks(primitiveType: 17), Indexed(3)));
         Assert.Contains("primitiveType=17", fatal.Message);
@@ -843,6 +890,15 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
+    public void LegacyRectangleBatchWithoutParameterExports_IsNotSkippedLikeAnAgcRectangleList()
+    {
+        _pipelines.Graphics = Programs(vertexStage: Stage(Program(ShaderStageKind.Vertex, parameterExportMask: 0)), pixelInputs: 2);
+        _executor.DrawAuto(1, Banks(primitiveType: 17), Auto(6));
+
+        Assert.Contains("draw 6 1 0 0", _host.Calls);
+    }
+
+    [Fact]
     public void DrawWithoutTargetsOrAnActivePixelShader_IsSkipped()
     {
         var banks = Banks(withPixel: false);
@@ -853,6 +909,40 @@ public sealed class RenderExecutorDrawTests : IDisposable
         // The vertex stage is resolved to see whether it stores to memory, but nothing is drawn.
         Assert.Empty(_pipelines.PipelineRequests);
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("begin_rendering", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TargetlessPixelStorageWrite_IsExecutedEvenWhenColorExportsAreInactive()
+    {
+        var banks = Banks();
+        banks.Context.RenderTargetMask = 0;
+        banks.Context.ShaderInterface.ColorShaderMask = 0;
+        var storage = new ImageResourceInfo(ImageResourceClass.Storage, true);
+        _pipelines.Graphics = Programs(pixelStage: Stage(Program(ShaderStageKind.Pixel, images: [storage])));
+        _prefetch.AllowsStorageOnlyPixelStage = true;
+
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.Contains("begin_rendering 16384x8192x1 colors=0 samples=1", _host.Calls);
+        Assert.Contains(_host.Calls, c => c.StartsWith("prepare_bindings Pixel", StringComparison.Ordinal));
+        Assert.True(Assert.Single(_pipelines.PipelineRequests).PixelActive);
+        Assert.Contains(_host.Calls, c => c.StartsWith("draw_indexed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TargetlessPixelStageThatOnlyReads_IsSkipped()
+    {
+        var banks = Banks();
+        banks.Context.RenderTargetMask = 0;
+        banks.Context.ShaderInterface.ColorShaderMask = 0;
+        var storage = new ImageResourceInfo(ImageResourceClass.Storage, false);
+        _pipelines.Graphics = Programs(pixelStage: Stage(Program(ShaderStageKind.Pixel, images: [storage])));
+        _prefetch.AllowsStorageOnlyPixelStage = true;
+
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("begin_rendering", StringComparison.Ordinal));
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indexed", StringComparison.Ordinal));
     }
 
     [Fact]

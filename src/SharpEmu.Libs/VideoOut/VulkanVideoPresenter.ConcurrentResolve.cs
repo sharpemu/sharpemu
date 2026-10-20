@@ -102,10 +102,11 @@ internal static unsafe partial class VulkanVideoPresenter
             return true;
         }
 
+        // What the render thread's clean word read would first bring back to guest memory.
         private bool IsGpuOwnedForCleanRead(ulong address, ulong size) =>
             (_bufferCache.MayHaveGpuDirtyPages(address, size) && _bufferCache.HasGpuDirtyPages(address, size)) ||
             _bufferCache.HasGpuDirtyBytes(address, size) ||
-            _imageCache.HasGpuModifiedImageBytes(address, size);
+            _imageCache.HasUnsynchronizedGpuImage(address, size);
 
         private bool IsGpuOwnedForResidentRead(ulong address, ulong size, bool clean) =>
             _bufferCache.HasGpuDirtyBytes(address, size) ||

@@ -8,12 +8,14 @@ using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Buffers;
 
+internal delegate bool GuestBufferSourceReader(ulong address, Span<byte> destination);
+
 // The cache owns the staging ring; temporary sources retire after their submission.
 internal sealed class GuestBufferUploader(
     GpuDeviceInfo device, SubmissionScheduler scheduler, ICpuMemory guest, GpuRingBuffer staging)
 {
     public GpuBuffer? PrepareSource(ulong bufferAddress, Span<BufferCopy> regions,
-        ulong totalSize, ulong requestedAddress, ulong requestedSize)
+        ulong totalSize, ulong requestedAddress, ulong requestedSize, GuestBufferSourceReader? readSource = null)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferStagingUpload);
         if (regions.IsEmpty)
@@ -26,7 +28,7 @@ internal sealed class GuestBufferUploader(
             foreach (ref var copy in regions)
             {
                 ReadGuestBytes(bufferAddress + copy.DstOffset,
-                    staging.Mapped.Slice((int)(baseOffset + copy.SrcOffset), (int)copy.Size), requestedAddress, requestedSize);
+                    staging.Mapped.Slice((int)(baseOffset + copy.SrcOffset), (int)copy.Size), requestedAddress, requestedSize, readSource);
                 copy.SrcOffset += baseOffset;
             }
 
@@ -38,7 +40,7 @@ internal sealed class GuestBufferUploader(
         foreach (ref readonly var copy in regions)
         {
             ReadGuestBytes(bufferAddress + copy.DstOffset,
-                temporary.Mapped.Slice((int)copy.SrcOffset, (int)copy.Size), requestedAddress, requestedSize);
+                temporary.Mapped.Slice((int)copy.SrcOffset, (int)copy.Size), requestedAddress, requestedSize, readSource);
         }
 
         temporary.Flush(0, totalSize);
@@ -46,9 +48,9 @@ internal sealed class GuestBufferUploader(
         return temporary;
     }
 
-    private void ReadGuestBytes(ulong address, Span<byte> destination, ulong requestedAddress, ulong requestedSize)
+    private void ReadGuestBytes(ulong address, Span<byte> destination, ulong requestedAddress, ulong requestedSize, GuestBufferSourceReader? readSource)
     {
-        if (!guest.TryRead(address, destination))
+        if (!(readSource is null ? guest.TryRead(address, destination) : readSource(address, destination)))
         {
             Console.Error.WriteLine($"[GPU][READ_FAILURE] addr=0x{address:X16} size=0x{destination.Length:X}");
             Console.Error.WriteLine($"[GPU][READ_FAILURE] binding=0x{requestedAddress:X16} size=0x{requestedSize:X}");

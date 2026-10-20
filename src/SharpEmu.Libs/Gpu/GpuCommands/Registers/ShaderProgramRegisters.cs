@@ -182,6 +182,7 @@ public sealed class VertexStageRegisters
     public ulong ExportAddress;
     public ulong LocalAddress;
     public ulong HullAddress;
+    public ulong HullUserDataAddress;
     public HullResource1 HullResource1;
     public HullResource2 HullResource2;
     public ulong GeometryAddress;

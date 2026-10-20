@@ -13,6 +13,9 @@ public static partial class Gen5SpirvTranslator
         private readonly HashSet<uint> _flatParameterAttributes = [];
         // Slots that share a per-vertex input with a V_INTERP_MOV slot; true for a flat slot.
         private readonly Dictionary<uint, bool> _perVertexSourcedAttributes = [];
+        // Per-vertex owners that no V_INTERP_MOV reads: their group mixes flat and smooth slots.
+        // The input is per-vertex, but the owner itself is rebuilt like its aliases.
+        private readonly HashSet<uint> _promotedPerVertexAttributes = [];
         private uint _perspectiveBarycentric;
         private readonly Dictionary<int, uint> _barycentricInputs = [];
         private uint _interpolationSampleId;
@@ -31,6 +34,38 @@ public static partial class Gen5SpirvTranslator
                     instruction.Control is Gen5InterpolationControl interpolation)
                 {
                     _perVertexAttributes.Add(interpolation.Attribute);
+                }
+            }
+
+            if (_request.SupportsPerVertexPixelInputs && (_pixelInputAddress & _pixelInputEnable & (1u << 3)) == 0)
+            {
+                // A flat slot and a smooth slot reading one VS parameter cannot be two host inputs:
+                // the second would move to a location no vertex program writes and read zero. One
+                // per-vertex input serves both (vertex 0 for the flat slot, the barycentrics for the
+                // smooth one), as when a V_INTERP_MOV slot is among them.
+                var slotsByLocation = _request.Program.Instructions
+                    .Select(instruction => instruction.Control)
+                    .OfType<Gen5InterpolationControl>()
+                    .Select(control => control.Attribute)
+                    .Distinct()
+                    .Order()
+                    .GroupBy(attribute =>
+                        (attribute < (uint)_pixelInputCntl.Length ? _pixelInputCntl[attribute] : attribute) & 0x1Fu);
+                foreach (var group in slotsByLocation)
+                {
+                    if (group.Any(_perVertexAttributes.Contains))
+                    {
+                        continue;
+                    }
+
+                    var flatSlots = group.Count(attribute =>
+                        attribute < (uint)_pixelInputCntl.Length && (_pixelInputCntl[attribute] & 0x400u) != 0);
+                    if (flatSlots != 0 && flatSlots != group.Count())
+                    {
+                        var owner = group.First();
+                        _perVertexAttributes.Add(owner);
+                        _promotedPerVertexAttributes.Add(owner);
+                    }
                 }
             }
 
@@ -139,10 +174,11 @@ public static partial class Gen5SpirvTranslator
             }
         }
 
-        // Front facing reads as 1.0f and back facing as 0, which satisfies both the float greater-than
-        // and the integer not-equal tests compilers emit for it.
+        // SPI_BARYC_CNTL selects sign encoding (+1/-1) or whole-register integer encoding (1/0).
         private uint LoadFrontFaceInput() => _module.AddInstruction(
-            SpirvOp.Select, _uintType, Load(_boolType, _frontFacingInput), UInt(0x3F800000u), UInt(0));
+            SpirvOp.Select, _uintType, Load(_boolType, _frontFacingInput),
+            UInt(_request.PixelFrontFaceAllBits ? 1u : 0x3F800000u),
+            UInt(_request.PixelFrontFaceAllBits ? 0u : 0xBF800000u));
 
         // ANCILLARY stores the render-target layer in bits 16 through 26.
         private uint LoadAncillaryInput() =>
@@ -183,10 +219,13 @@ public static partial class Gen5SpirvTranslator
             vgpr++;
         }
 
-        // The perspective barycentrics a smooth slot sharing a per-vertex input is rebuilt with.
+        // The barycentrics a smooth slot sharing a per-vertex input is rebuilt with: the enabled
+        // perspective ones, or the no-perspective ones when those are the only modes enabled.
         private void DeclarePerspectiveBarycentric()
         {
-            foreach (var bit in new[] { 0, 1, 2 })
+            var modes = _pixelInputEnable & _pixelInputAddress & 0x7Fu;
+            var linear = (modes & 0x70u) != 0 && (modes & 0x7u) == 0;
+            foreach (var bit in linear ? new[] { 4, 5, 6 } : new[] { 0, 1, 2 })
             {
                 if (_barycentricInputs.TryGetValue(bit, out var existing))
                 {
@@ -197,7 +236,8 @@ public static partial class Gen5SpirvTranslator
 
             _perspectiveBarycentric = _module.AddGlobalVariable(
                 _module.TypePointer(SpirvStorageClass.Input, _vec3Type), SpirvStorageClass.Input);
-            _module.AddDecoration(_perspectiveBarycentric, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.BaryCoordKhr);
+            _module.AddDecoration(_perspectiveBarycentric, SpirvDecoration.BuiltIn,
+                (uint)(linear ? SpirvBuiltIn.BaryCoordNoPerspKhr : SpirvBuiltIn.BaryCoordKhr));
             _interfaces.Add(_perspectiveBarycentric);
         }
 
@@ -216,7 +256,12 @@ public static partial class Gen5SpirvTranslator
             var value = LoadVertex(0);
             if (!flat)
             {
-                var barycentric = Load(_vec3Type, _perspectiveBarycentric);
+                // With one mode enabled the slot is rebuilt with that mode's own coordinates
+                // (sample, center or centroid), as the hardware's I/J registers hold.
+                var modes = _pixelInputEnable & _pixelInputAddress & 0x7Fu;
+                var bit = modes switch { 1u => 0, 2u => 1, 4u => 2, 16u => 4, 32u => 5, 64u => 6, _ => -1 };
+                var barycentric = bit >= 0 ? LoadBarycentricCoordinates(bit, _perspectiveBarycentric)
+                    : Load(_vec3Type, _perspectiveBarycentric);
                 value = _module.AddInstruction(SpirvOp.FMul, _floatType, value,
                     _module.AddInstruction(SpirvOp.CompositeExtract, _floatType, barycentric, 0));
                 for (uint vertex = 1; vertex < 3; vertex++)

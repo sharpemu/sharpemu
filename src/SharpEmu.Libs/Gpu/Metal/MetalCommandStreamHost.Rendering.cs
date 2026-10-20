@@ -312,6 +312,8 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
 
     BufferBinding IRenderHost.NullBuffer => new(0, 0);
 
+    void IRenderHost.PrepareBufferAllocations(ReadOnlySpan<SharpEmu.HLE.GpuMemory.GuestSpan> ranges) { }
+
     BufferBinding IRenderHost.ObtainBuffer(ulong address, ulong size, bool isWritten)
     {
         _ = isWritten;
@@ -1169,7 +1171,25 @@ internal sealed partial class MetalCommandStreamHost : IRenderHost, IShaderPipel
         return false;
     }
 
+    bool IRenderHost.IsHtile(ulong address)
+    {
+        _ = address;
+        return false;
+    }
+
     bool IRenderHost.ClearMetadata(ulong address)
+    {
+        _ = address;
+        return false;
+    }
+
+    bool IRenderHost.MarkHtileRewritten(ulong address)
+    {
+        _ = address;
+        return false;
+    }
+
+    bool IRenderHost.ExpandMetadata(ulong address)
     {
         _ = address;
         return false;

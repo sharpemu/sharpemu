@@ -74,6 +74,7 @@ public sealed class ShaderPrewarmCompletionTests
 
     [Theory]
     [InlineData("_supportsShaderSignedZeroInfNanPreserveFloat32", true)]
+    [InlineData("_supportsExactFloat16Conversion", true)]
     [InlineData("_canRequireComputeSubgroup32", true)]
     [InlineData("_canRequireComputeSubgroup64", true)]
     [InlineData("_maxComputeWorkgroupSubgroups", 4u)]

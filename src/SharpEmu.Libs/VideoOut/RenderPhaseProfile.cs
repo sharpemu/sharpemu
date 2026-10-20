@@ -489,8 +489,13 @@ internal static class RenderPhaseProfile
         SharpEmu.ShaderCompiler.Vulkan.ShaderTranslationProfile.Report();
         ReportImageUploads();
         BufferUploadProfile.Report();
+        if (SharpEmu.Libs.Gpu.Rendering.TessellationProfile.TakeReport() is { } tessellationReport)
+        {
+            Console.Error.WriteLine(tessellationReport);
+        }
         Console.Error.WriteLine(SharpEmu.ShaderCompiler.Resources.ResourceMaterializationCache.TakeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Buffers.GuestBufferCache.TakeAsyncReadbackReport());
+        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Buffers.GuestBufferCache.TakeSharedMergeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Vulkan.GpuSyncProfile.TakeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Images.GuestImageCache.TakeLookupReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Images.GuestImageCache.TakeDccReport());

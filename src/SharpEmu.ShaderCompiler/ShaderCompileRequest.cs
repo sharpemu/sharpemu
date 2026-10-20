@@ -167,6 +167,11 @@ public sealed class ShaderCompileRequest
 
     public Gen5ShaderProgram Program { get; }
     public ShaderStage Stage { get; }
+    public Gen5TessellationInfo? Tessellation { get; init; }
+    // Merged LS/HS workgroups can contain several independently branching waves.
+    // The Vulkan lowering rendezvous all waves before an LDS phase transition.
+    public Gen5TessellationHullInfo? TessellationHull { get; init; }
+    public bool CooperativeWave64Workgroup { get; init; }
     public ulong Hash { get; }
     public MemoryAccessTable Memory { get; }
     public SpecializedResourceInfo Resources { get; }
@@ -216,6 +221,10 @@ public sealed class ShaderCompileRequest
     // 32-bit ones, which is not atomic as a pair.
     public bool SupportsSharedInt64Atomics { get; init; }
     public bool ShaderSignedZeroInfNanPreserveFloat32Supported { get; init; }
+
+    // The device enables shaderFloat16 and guarantees round-to-nearest-even and denormal
+    // preservation for 16-bit floats, so f16<->f32 conversions are emitted as OpFConvert.
+    public bool ExactFloat16ConversionSupported { get; init; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
 
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];
@@ -227,6 +236,8 @@ public sealed class ShaderCompileRequest
     // MoltenVK advertises fragment shader barycentrics but cannot translate PerVertexKHR to MSL.
     public bool SupportsPerVertexPixelInputs { get; init; } = true;
     public uint PixelInputAddress { get; init; }
+    // SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS selects integer 1/0 instead of float +1/-1.
+    public bool PixelFrontFaceAllBits { get; init; }
     public IReadOnlyList<uint>? PixelInputCntl { get; init; }
 
     public int RequiredVertexOutputCount { get; init; }

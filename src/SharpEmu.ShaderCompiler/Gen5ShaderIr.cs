@@ -119,6 +119,16 @@ public readonly record struct Gen5ColorComponentMapping
     }
 }
 
+// SPI_SHADER_COL_FORMAT selects the representation carried by a compressed EXP.
+public enum Gen5PixelExportFormat : byte
+{
+    Float16 = 4,
+    Unorm16 = 5,
+    Snorm16 = 6,
+    Uint16 = 7,
+    Sint16 = 8,
+}
+
 public readonly record struct Gen5PixelOutputBinding(
     uint GuestSlot,
     uint HostLocation,
@@ -150,6 +160,12 @@ public readonly record struct Gen5PixelOutputBinding(
     // The fragment output index: 1 is the second source of dual-source blending, which
     // shares its location with the first and is not a render target.
     public uint Index { get; init; }
+
+    // How a compressed export of this target packs its halves.
+    public Gen5PixelExportFormat ExportFormat { get; init; } = Gen5PixelExportFormat.Float16;
+
+    // The slot receives the object ID plus the primitive ID instead of an export.
+    public bool ObjectPrimitiveId { get; init; }
 }
 
 public readonly record struct Gen5ComputeSystemRegisters(
@@ -262,7 +278,14 @@ public sealed record Gen5BufferMemoryControl(
     bool Glc,
     bool Slc,
     bool Typed = false,
-    uint TypedFormat = 0) : Gen5InstructionControl;
+    uint TypedFormat = 0,
+    bool PackedD16 = false,
+    uint FormatComponentCount = 0) : Gen5InstructionControl
+{
+    // Memory components a formatted access transfers. Packed D16 pairs two of them per
+    // register, so it differs from DwordCount; every other access has one per register.
+    public uint ComponentCount => FormatComponentCount == 0 ? DwordCount : FormatComponentCount;
+}
 
 public sealed record Gen5ExportControl(
     uint Target,
@@ -358,6 +381,8 @@ public sealed record Gen5ShaderProgram(
 {
     public IReadOnlySet<uint> FunctionBufferAccesses { get; init; } = new HashSet<uint>();
     public bool IsFusedProgram { get; init; }
+    // First pc of the continuation half of a fused program (the HS of a merged LS/HS).
+    public uint? FusedContinuationPc { get; init; }
 
     private const uint PixelColorTargetCount = 8;
     private const int PixelColorMaskBits = 4;

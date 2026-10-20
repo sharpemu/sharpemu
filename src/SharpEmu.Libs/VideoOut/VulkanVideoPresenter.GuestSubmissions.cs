@@ -96,6 +96,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             _ = bundle;
             EndRendering();
+            RecordRuntimeMissCopies();
             _occlusionQueries?.Submit(_scheduler);
             if (!_batchOpen)
             {

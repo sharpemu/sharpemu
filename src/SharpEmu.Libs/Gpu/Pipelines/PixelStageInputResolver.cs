@@ -110,6 +110,7 @@ public static class PixelStageInputResolver
                 : PixelInputInfo.NoPerspectiveCenterRegister,
             InterpolatorSettings = interpolators,
             TargetOutputModes = outputModes,
+            TargetExportFormats = (byte[])shaderInterface.TargetOutputModes.Clone(),
             TargetExportMappings = mappings,
             ScratchDwords = shader.ScratchDwords,
             PositionX = (activeInputs & InputPositionX) != 0,
@@ -117,6 +118,8 @@ public static class PixelStageInputResolver
             PositionZ = (activeInputs & InputPositionZ) != 0,
             PositionW = (activeInputs & InputPositionW) != 0,
             FrontFace = (activeInputs & InputFrontFace) != 0,
+            FrontFaceAllBits = (activeInputs & InputFrontFace) != 0 &&
+                (shaderInterface.BarycentricControl & (1u << 24)) != 0,
             SampleShading = (activeInputs & (InputPerspectiveSample | InputLinearSample)) != 0,
             NoPerspective = (activeInputs & InputLinearCenter) != 0,
             KillEnable = control.KillEnable,

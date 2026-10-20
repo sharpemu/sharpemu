@@ -178,7 +178,7 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
         var expected = segment == 0 ? 0x12345678u : 0u;
         Assert.Equal(expected, run.PageWord(GuestBase, 0));
         Assert.Equal(expected, run.ResultWord(0));
-        Assert.All(run.FaultWords(), word => Assert.Equal(0u, word));
+        Assert.All(run.FaultWords().Take((int)(TableEntries / 32)), word => Assert.Equal(0u, word));
         run.Finish(output, nameof(FlatSegments_DoNotAliasGlobalMemory));
     }
 
@@ -329,6 +329,35 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
     }
 
     [Fact]
+    public void ManyPageWalks_PublishTheirMissingPagesWithOneAtomic()
+    {
+        // Four loads walk the page table; the missing pages merge into per-invocation state and
+        // the one AtomicOr on the fault buffer sits at the end of the program.
+        var program = Program(
+            MoveVector(0, OffsetRegister, 0),
+            GlobalMemory(4, "GlobalLoadDword", AddressLow, OffsetRegister, 1, 1, 0),
+            GlobalMemory(12, "GlobalLoadDword", AddressLow, OffsetRegister, 1, 1, 4),
+            GlobalMemory(20, "GlobalLoadDword", AddressLow, OffsetRegister, 1, 1, 8),
+            GlobalMemory(28, "GlobalLoadDword", AddressLow, OffsetRegister, 1, 1, 12),
+            BufferAccess(36, "BufferStoreDword", ResultRegister, 0, 1, vectorData: 1),
+            EndProgram(44));
+        var (plan, resources, layout) = Prepare(program);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1, ScratchDwords = 32 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        const uint OpAtomicOr = 241;
+        var atomics = 0;
+        for (var index = 5; index < shader.Spirv.Length / 4;)
+        {
+            var head = BinaryPrimitives.ReadUInt32LittleEndian(shader.Spirv.AsSpan(index * 4));
+            atomics += (head & 0xFFFF) == OpAtomicOr ? 1 : 0;
+            index += (int)(head >> 16);
+        }
+
+        output.WriteLine($"SPIR-V words: {shader.Spirv.Length / 4}, fault AtomicOr: {atomics}");
+        Assert.Equal(1, atomics);
+    }
+
+    [Fact]
     public void MissingPage_RecordsAFaultAndReadsZero()
     {
         var vulkan = fixture.Vulkan;
@@ -472,6 +501,36 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
         run.Dispatch(GuestBase, writtenRange: (GuestBase, 64));
         Assert.Equal(0xCAFE_F00Du, run.PageWord(GuestBase, 8));
         run.Finish(output, nameof(GlobalStoreThroughThePageTable_Lands));
+    }
+
+    [Fact]
+    public void StoreAndAtomic_MarkTheirPageInTheWrittenBitmap()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true))
+        {
+            return;
+        }
+
+        var bit = 1u << (int)((GuestBase >> Gen5SpirvTranslator.DeviceAddressPageBits) & 31);
+        var store = new Run(vulkan, StoreProgram("GlobalStoreDword", offset: 8, value: 0xCAFE_F00D));
+        store.MapPage(GuestBase, new byte[64]);
+        store.Dispatch(GuestBase, writtenRange: (GuestBase, 64));
+        Assert.Equal(bit, store.WrittenWord(GuestBase));
+        Assert.Equal(0u, store.FaultWord(GuestBase));
+        store.Finish(output, nameof(StoreAndAtomic_MarkTheirPageInTheWrittenBitmap) + "_store");
+
+        var atomic = new Run(vulkan, AtomicProgram(offset: 8, value: 1));
+        atomic.MapPage(GuestBase, new byte[64]);
+        atomic.Dispatch(GuestBase, writtenRange: (GuestBase, 64));
+        Assert.Equal(bit, atomic.WrittenWord(GuestBase));
+        atomic.Finish(output, nameof(StoreAndAtomic_MarkTheirPageInTheWrittenBitmap) + "_atomic");
+
+        var load = new Run(vulkan, LoadProgram("GlobalLoadDword", offset: 8));
+        load.MapPage(GuestBase, new byte[64]);
+        load.Dispatch(GuestBase);
+        Assert.Equal(0u, load.WrittenWord(GuestBase));
+        load.Finish(output, nameof(StoreAndAtomic_MarkTheirPageInTheWrittenBitmap) + "_load");
     }
 
     [Fact]
@@ -635,7 +694,7 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
             _harness = new ImageTestHarness(vulkan);
             _runner = new LayoutComputeRunner(_harness, Request, shader.Spirv);
             _result = _runner.CreateBuffer(ResultBytes);
-            _fault = _runner.CreateBuffer(tableEntries / 8 + 64);
+            _fault = _runner.CreateBuffer(tableEntries / 4 + 64);
             _tableEntries = tableEntries;
         }
 
@@ -687,6 +746,12 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
         {
             var pageIndex = guestAddress >> Gen5SpirvTranslator.DeviceAddressPageBits;
             return ReadWord(_runner.ReadBack(_fault, 0, _fault.Size), (int)(pageIndex / 32) * 4);
+        }
+
+        public uint WrittenWord(ulong guestAddress)
+        {
+            var pageIndex = guestAddress >> Gen5SpirvTranslator.DeviceAddressPageBits;
+            return ReadWord(_runner.ReadBack(_fault, 0, _fault.Size), (int)(_tableEntries / 32 + pageIndex / 32) * 4);
         }
 
         public uint[] FaultWords()

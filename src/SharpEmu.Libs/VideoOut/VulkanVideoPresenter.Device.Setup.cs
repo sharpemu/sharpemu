@@ -48,6 +48,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _supportsDualSourceBlend;
         private bool _supportsDepthBiasClamp;
         private bool _supportsShaderSignedZeroInfNanPreserveFloat32;
+        private bool _floatControlsExactFloat16Conversion;
+        private bool _supportsExactFloat16Conversion;
         private uint _maxColorAttachments;
         private Device _device;
         private PipelineCache _pipelineCache;
@@ -624,18 +626,37 @@ internal static unsafe partial class VulkanVideoPresenter
                 SType = StructureType.PhysicalDeviceSubgroupProperties,
                 PNext = &subgroupSizeControl,
             };
+            var descriptorIndexingProperties = new PhysicalDeviceDescriptorIndexingProperties
+            {
+                SType = StructureType.PhysicalDeviceDescriptorIndexingProperties,
+                PNext = &subgroup,
+            };
             var properties2 = new PhysicalDeviceProperties2
             {
                 SType = StructureType.PhysicalDeviceProperties2,
-                PNext = &subgroup,
+                PNext = &descriptorIndexingProperties,
             };
             if (IsDeviceExtensionAvailable(MeshShaderExtensionName))
             {
                 pushDescriptorProperties.PNext = &meshProperties;
             }
             _vk.GetPhysicalDeviceProperties2(_physicalDevice, &properties2);
+            _runtimeDescriptorLimits = new RuntimeDescriptorHeap.Limits(
+                properties.Limits.MaxPerStageDescriptorSampledImages,
+                properties.Limits.MaxPerStageDescriptorSamplers,
+                descriptorIndexingProperties.MaxPerStageDescriptorUpdateAfterBindSampledImages,
+                descriptorIndexingProperties.MaxPerStageDescriptorUpdateAfterBindSamplers,
+                descriptorIndexingProperties.MaxDescriptorSetUpdateAfterBindSampledImages,
+                descriptorIndexingProperties.MaxDescriptorSetUpdateAfterBindSamplers,
+                descriptorIndexingProperties.MaxUpdateAfterBindDescriptorsInAllPools);
             _supportsShaderSignedZeroInfNanPreserveFloat32 =
                 floatControls.ShaderSignedZeroInfNanPreserveFloat32;
+            // 16-bit modes are set without touching the 32/64-bit ones, which needs full independence.
+            _floatControlsExactFloat16Conversion =
+                floatControls.ShaderRoundingModeRtefloat16 &&
+                floatControls.ShaderDenormPreserveFloat16 &&
+                floatControls.RoundingModeIndependence == ShaderFloatControlsIndependence.IndependenceAll &&
+                floatControls.DenormBehaviorIndependence == ShaderFloatControlsIndependence.IndependenceAll;
             if (pushDescriptorProperties.PNext != null)
             {
                 var ignoreMeshGranularity = _physicalDeviceVendorId == AmdVendorId;
@@ -722,6 +743,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 $"[LOADER][INFO] Vulkan shaderSignedZeroInfNanPreserveFloat32 " +
                 $"enabled={_supportsShaderSignedZeroInfNanPreserveFloat32}");
             Console.Error.WriteLine(
+                $"[LOADER][INFO] Vulkan exact float16 conversion enabled={_supportsExactFloat16Conversion}");
+            Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan graphics subgroup operations " +
                 $"enabled={GraphicsSubgroupOperationsEnabled} " +
                 $"mode={graphicsSubgroupMode} compute_subgroups=unchanged");
@@ -780,8 +803,11 @@ internal static unsafe partial class VulkanVideoPresenter
         private const string FragmentShaderBarycentricExtensionName = "VK_KHR_fragment_shader_barycentric";
         private const string Maintenance5ExtensionName = "VK_KHR_maintenance5";
         private const string ImageViewMinLodExtensionName = "VK_EXT_image_view_min_lod";
+        private const string MemoryBudgetExtensionName = "VK_EXT_memory_budget";
+        private bool _memoryBudgetEnabled;
         private const string FillRectangleExtensionName = "VK_NV_fill_rectangle";
         private bool _supportsImageViewMinLod;
+        private bool _supportsSamplerFilterMinmax;
         private const string MeshShaderExtensionName = "VK_EXT_mesh_shader";
 
         private void CreateDevice()
@@ -819,11 +845,14 @@ internal static unsafe partial class VulkanVideoPresenter
             _supportsDepthBiasClamp = supportedFeatures.DepthBiasClamp;
             _supportsDepthBounds = supportedFeatures.DepthBounds;
             _supportsShaderClipDistance = supportedFeatures.ShaderClipDistance;
+            // A fragment program reads the primitive ID through the tessellation capability.
+            Gpu.Pipelines.ObjectPrimitiveIdTarget.Supported = supportedFeatures.TessellationShader;
             _supportsFillRectangle = IsDeviceExtensionAvailable(FillRectangleExtensionName);
             _supportsRectangleGeometry = supportedFeatures.GeometryShader;
             _supportsPreciseOcclusion = supportedFeatures.OcclusionQueryPrecise;
             var enabledFeatures = new PhysicalDeviceFeatures
             {
+                TessellationShader = supportedFeatures.TessellationShader,
                 DepthBounds = supportedFeatures.DepthBounds,
                 GeometryShader = supportedFeatures.GeometryShader,
                 OcclusionQueryPrecise = supportedFeatures.OcclusionQueryPrecise,
@@ -1012,6 +1041,9 @@ internal static unsafe partial class VulkanVideoPresenter
             _supportsMeshShader = meshExtensionAvailable && meshFeatures.MeshShader &&
                 vulkan13Features.ComputeFullSubgroups &&
                 ((ShaderStageFlags)Volatile.Read(ref _nativeSubgroupShaderStages) & ShaderStageFlags.MeshBitExt) != 0;
+            // Shaders convert f16 natively only when the device rounds to nearest even and keeps
+            // denormals at 16 bits, so the conversion is exact; otherwise they emulate it in integers.
+            _supportsExactFloat16Conversion = _floatControlsExactFloat16Conversion && vulkan12Features.ShaderFloat16;
             var supportsTimelineSemaphore = vulkan12Features.TimelineSemaphore;
             var supportsBufferDeviceAddress = vulkan12Features.BufferDeviceAddress;
             var supportsSharedInt64Atomics = vulkan12Features.ShaderSharedInt64Atomics;
@@ -1023,6 +1055,24 @@ internal static unsafe partial class VulkanVideoPresenter
             var supportsRobustImageAccess2 = robustness2Features.RobustImageAccess2;
             var supportsNullDescriptor = robustness2Features.NullDescriptor;
             var supportsRobustness2 = supportsRobustImageAccess2 || supportsNullDescriptor;
+            // Shaders that read their image descriptors at run time index a persistent, partially bound,
+            // update-after-bind heap by a value that differs between invocations, and a missed lookup
+            // reads its null image. Without these the host plans such accesses as it always did (the
+            // null fallback); the plan is only made when the host reports support.
+            _supportsRuntimeDescriptors = vulkan12Features.RuntimeDescriptorArray &&
+                vulkan12Features.ShaderSampledImageArrayNonUniformIndexing &&
+                vulkan12Features.DescriptorBindingSampledImageUpdateAfterBind &&
+                vulkan12Features.DescriptorBindingUpdateUnusedWhilePending &&
+                vulkan12Features.DescriptorBindingPartiallyBound &&
+                supportsNullDescriptor &&
+                RuntimeDescriptorHeap.Capacities(_runtimeDescriptorLimits).Images != 0;
+            if (!_supportsRuntimeDescriptors)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] GPU lacks descriptor indexing (runtimeDescriptorArray, non-uniform sampled image indexing, " +
+                    "partially bound update-after-bind sampled images) or robustness2 nullDescriptor: image descriptors " +
+                    "a shader reads at run time fall back to the null texture.");
+            }
             _canRequireComputeSubgroup32 &= vulkan13Features.SubgroupSizeControl;
             _canRequireComputeSubgroup64 &= vulkan13Features.SubgroupSizeControl;
             SetSharedInt64AtomicsCapability(supportsSharedInt64Atomics);
@@ -1071,11 +1121,14 @@ internal static unsafe partial class VulkanVideoPresenter
             var viewportIndexLayerExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_shader_viewport_index_layer");
             var maintenance5Extension = (byte*)SilkMarshal.StringToPtr(Maintenance5ExtensionName);
             var imageViewMinLodExtension = (byte*)SilkMarshal.StringToPtr(ImageViewMinLodExtensionName);
+            var memoryBudgetExtension = (byte*)SilkMarshal.StringToPtr(MemoryBudgetExtensionName);
+            _memoryBudgetEnabled = IsDeviceExtensionAvailable(MemoryBudgetExtensionName);
             var fillRectangleExtension = (byte*)SilkMarshal.StringToPtr(FillRectangleExtensionName);
+            var samplerFilterMinmaxExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_sampler_filter_minmax");
             var meshExtension = (byte*)SilkMarshal.StringToPtr(MeshShaderExtensionName);
             try
             {
-                var extensions = stackalloc byte*[15];
+                var extensions = stackalloc byte*[24];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
@@ -1121,6 +1174,20 @@ internal static unsafe partial class VulkanVideoPresenter
                     extensions[extensionCount++] = imageViewMinLodExtension;
                 }
 
+                if (_memoryBudgetEnabled)
+                {
+                    extensions[extensionCount++] = memoryBudgetExtension;
+                }
+
+                // The extension form is used because the promoted Vulkan12Features struct cannot
+                // be chained next to the individual 1.2 feature structs this chain already uses.
+                // It has no feature bit of its own, so enabling it is what permits min/max reduction.
+                _supportsSamplerFilterMinmax = IsDeviceExtensionAvailable("VK_EXT_sampler_filter_minmax");
+                if (_supportsSamplerFilterMinmax)
+                {
+                    extensions[extensionCount++] = samplerFilterMinmaxExtension;
+                }
+
                 if (_supportsFillRectangle)
                 {
                     extensions[extensionCount++] = fillRectangleExtension;
@@ -1163,8 +1230,14 @@ internal static unsafe partial class VulkanVideoPresenter
                     TimelineSemaphore = true,
                     BufferDeviceAddress = true,
                     ShaderSharedInt64Atomics = supportsSharedInt64Atomics,
+                    ShaderFloat16 = _supportsExactFloat16Conversion,
                     ShaderOutputLayer = _supportsShaderLayer,
                     ShaderOutputViewportIndex = supportsViewportIndexLayer,
+                    RuntimeDescriptorArray = _supportsRuntimeDescriptors,
+                    ShaderSampledImageArrayNonUniformIndexing = _supportsRuntimeDescriptors,
+                    DescriptorBindingSampledImageUpdateAfterBind = _supportsRuntimeDescriptors,
+                    DescriptorBindingUpdateUnusedWhilePending = _supportsRuntimeDescriptors,
+                    DescriptorBindingPartiallyBound = _supportsRuntimeDescriptors,
                     PNext = supportsRobustness2
                         ? &robustness2Features
                         : (supportsMaintenance8 ? &maintenance8Features : null),
@@ -1278,10 +1351,12 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             finally
             {
+                SilkMarshal.Free((nint)samplerFilterMinmaxExtension);
                 SilkMarshal.Free((nint)swapchainExtension);
                 SilkMarshal.Free((nint)maintenance8Extension);
                 SilkMarshal.Free((nint)maintenance5Extension);
                 SilkMarshal.Free((nint)imageViewMinLodExtension);
+                SilkMarshal.Free((nint)memoryBudgetExtension);
                 SilkMarshal.Free((nint)fillRectangleExtension);
                 SilkMarshal.Free((nint)robustness2Extension);
                 SilkMarshal.Free((nint)portabilitySubsetExtension);
@@ -1295,7 +1370,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
-            _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device) { ImageViewMinLodSupported = _supportsImageViewMinLod };
+            _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device, _memoryBudgetEnabled) { ImageViewMinLodSupported = _supportsImageViewMinLod, SamplerFilterMinmaxSupported = _supportsSamplerFilterMinmax };
             if (_readbackQueueFamilyIndex is { } readbackQueueFamily)
             {
                 _vk.GetDeviceQueue(_device, readbackQueueFamily, 0, out _readbackQueue);
@@ -1306,6 +1381,10 @@ internal static unsafe partial class VulkanVideoPresenter
             CreateBufferCache();
             CreateImageCache();
             _descriptorHeap = new DescriptorHeap(_deviceInfo, _scheduler);
+            if (_supportsRuntimeDescriptors)
+            {
+                CreateRuntimeDescriptorHeap();
+            }
             CreateCommandStream();
             LoadDebugUtilsCommands();
             if (!_vk.TryGetDeviceExtension(_instance, _device, out _swapchainApi))

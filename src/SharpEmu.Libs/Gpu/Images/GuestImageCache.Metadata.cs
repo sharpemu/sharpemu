@@ -386,12 +386,19 @@ public sealed partial class GuestImageCache
         return _surfaceMetadata.TryGetValue(address, out var found) && !found.Invalidated && found.Kind != SurfaceMetadataKind.PendingDcc;
     }
 
+    public bool IsHtile(ulong address)
+    {
+        using var held = _lock.Hold();
+        return _surfaceMetadata.TryGetValue(address, out var found) && found.Kind == SurfaceMetadataKind.HTile;
+    }
+
     public bool IsMetadataCleared(ulong address, uint slice, out uint fillValue)
     {
         fillValue = 0;
+        ResolveRewrittenHtile(address);
         using var held = _lock.Hold();
         if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc ||
-            slice >= (found.Kind == SurfaceMetadataKind.Dcc ? found.DccSliceCount : 32))
+            !found.TracksSlice(slice))
         {
             return false;
         }
@@ -439,7 +446,121 @@ public sealed partial class GuestImageCache
             return false;
         }
 
-        found.ClearMask = uint.MaxValue;
+        found.SetFromMask(uint.MaxValue);
+        return true;
+    }
+
+    // A dispatch read and rewrote these HTile words in place. What it wrote is only known
+    // once it ran, so the clear state is read from the words at the next depth bind.
+    public bool MarkHtileRewritten(ulong address)
+    {
+        using var held = _lock.Hold();
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Kind != SurfaceMetadataKind.HTile)
+        {
+            return false;
+        }
+
+        found.RewrittenByGpu = true;
+        return true;
+    }
+
+    // The hardware reads a depth tile as cleared when its HTile ZMask (bits 0-3) is 0. A slice
+    // whose every tile says so is cleared; any other slice keeps the depth in memory.
+    private void ResolveRewrittenHtile(ulong address)
+    {
+        ulong size;
+        uint layers;
+        using (var held = _lock.Hold())
+        {
+            if (!_surfaceMetadata.TryGetValue(address, out var found) || !found.RewrittenByGpu)
+            {
+                return;
+            }
+
+            found.RewrittenByGpu = false;
+            size = found.Size;
+            layers = found.Layers;
+        }
+
+        if (size == 0 || layers == 0 || size % layers != 0 || (size / layers) % sizeof(uint) != 0 || !IsValidRange(address, size))
+        {
+            return;
+        }
+
+        // Reading waits for the dispatch; it must not run under the region lock.
+        if (_bufferCache.HasGpuDirtyBytes(address, size))
+        {
+            _bufferCache.ReadMemory(address, size, isWrite: false);
+        }
+
+        var sliceSize = size / layers;
+        var cleared = new bool[layers];
+        var chunk = System.Buffers.ArrayPool<byte>.Shared.Rent((int)Math.Min(sliceSize, 64 * 1024));
+        try
+        {
+            for (uint slice = 0; slice < layers; slice++)
+            {
+                var sliceAddress = address + sliceSize * slice;
+                var allCleared = true;
+                for (ulong position = 0; position < sliceSize && allCleared;)
+                {
+                    var length = (int)Math.Min(sliceSize - position, (ulong)chunk.Length);
+                    var bytes = chunk.AsSpan(0, length);
+                    if (!_backing.TryReadBacking(sliceAddress + position, bytes))
+                    {
+                        return;
+                    }
+
+                    allCleared = HtileWordsCleared(bytes);
+                    position += (ulong)length;
+                }
+
+                cleared[slice] = allCleared;
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(chunk);
+        }
+
+        using (var held = _lock.Hold())
+        {
+            if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Kind != SurfaceMetadataKind.HTile)
+            {
+                return;
+            }
+
+            for (uint slice = 0; slice < layers; slice++)
+            {
+                found.SetSlice(slice, cleared[slice]);
+            }
+        }
+    }
+
+    public static bool HtileWordsCleared(ReadOnlySpan<byte> words)
+    {
+        foreach (var word in System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(words))
+        {
+            if ((word & 0xFu) != 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // An HTile fill whose words say "expanded" proves the depth target is not cleared:
+    // the pending clear is dropped before it turns a later bind into a load-op clear.
+    public bool ExpandMetadata(ulong address)
+    {
+        using var held = _lock.Hold();
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Kind == SurfaceMetadataKind.PendingDcc)
+        {
+            return false;
+        }
+
+        found.SetFromMask(0);
         return true;
     }
 
@@ -563,7 +684,7 @@ public sealed partial class GuestImageCache
     {
         using var held = _lock.Hold();
         if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc ||
-            slice >= (found.Kind == SurfaceMetadataKind.Dcc ? found.DccSliceCount : 32))
+            !found.TracksSlice(slice))
         {
             return false;
         }

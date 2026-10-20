@@ -252,4 +252,36 @@ public sealed class AudioOut2PortGetStateExportsTests
         ctx[CpuRegister.Rdi] = handle;
         AudioOut2Exports.AudioOut2ContextDestroy(ctx);
     }
+
+    [Fact]
+    public void NonblockingPushReturnsAtOnceEvenWhenTheQueueIsFull()
+    {
+        var ctx = CreateContext(out var memory);
+        var param = new byte[0x40];
+        BinaryPrimitives.WriteUInt32LittleEndian(param.AsSpan(0x0C), 4);
+        BinaryPrimitives.WriteUInt32LittleEndian(param.AsSpan(0x10), 0x4000);
+        Assert.True(memory.TryWrite(StateAddress, param));
+        ctx[CpuRegister.Rdi] = StateAddress;
+        ctx[CpuRegister.Rsi] = StateAddress + 0x100;
+        ctx[CpuRegister.Rdx] = 0x1000;
+        ctx[CpuRegister.Rcx] = StateAddress + 0x200;
+        Assert.Equal(0, AudioOut2Exports.AudioOut2ContextCreate(ctx));
+        Span<byte> handleBytes = stackalloc byte[8];
+        Assert.True(memory.TryRead(StateAddress + 0x200, handleBytes));
+        var handle = BinaryPrimitives.ReadUInt64LittleEndian(handleBytes);
+
+        // Six 341 ms grains into a four-grain queue: a push that waited for its slot would
+        // sleep for the fifth and sixth.
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        for (var grain = 0; grain < 6; grain++)
+        {
+            ctx[CpuRegister.Rdi] = handle;
+            ctx[CpuRegister.Rsi] = 0;
+            Assert.Equal(0, AudioOut2Exports.AudioOut2ContextPush(ctx));
+        }
+
+        Assert.True(System.Diagnostics.Stopwatch.GetElapsedTime(started) < TimeSpan.FromMilliseconds(250));
+        ctx[CpuRegister.Rdi] = handle;
+        AudioOut2Exports.AudioOut2ContextDestroy(ctx);
+    }
 }

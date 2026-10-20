@@ -562,13 +562,26 @@ public static partial class Gen5MslTranslator
                 if (export.Compressed)
                 {
                     var packed = $"v[{instruction.Sources[component >> 1].Value}]";
-                    var half = $"(float)as_type<half2>({packed})[{component & 1}]";
-                    values[component] = binding.Value.Kind switch
+                    var bits = $"(({packed} >> {(component & 1) * 16}) & 0xffffu)";
+                    // An integer target whose export format was left at the half-float default carries its
+                    // integers as 16-bit fields: a half-float to integer conversion is never what it means.
+                    var exportFormat = binding.Value.ExportFormat == Gen5PixelExportFormat.Float16
+                        ? binding.Value.Kind switch
+                        {
+                            Gen5PixelOutputKind.Uint => Gen5PixelExportFormat.Uint16,
+                            Gen5PixelOutputKind.Sint => Gen5PixelExportFormat.Sint16,
+                            _ => binding.Value.ExportFormat,
+                        }
+                        : binding.Value.ExportFormat;
+                    var decoded = exportFormat switch
                     {
-                        Gen5PixelOutputKind.Uint => $"uint(as_type<ushort2>({packed})[{component & 1}])",
-                        Gen5PixelOutputKind.Sint => $"int(as_type<short2>({packed})[{component & 1}])",
-                        _ => half,
+                        Gen5PixelExportFormat.Unorm16 => $"(float({bits}) / 65535.0f)",
+                        Gen5PixelExportFormat.Snorm16 => $"max(float(as_type<short>(ushort({bits}))) / 32767.0f, -1.0f)",
+                        Gen5PixelExportFormat.Uint16 => $"as_type<ushort2>({packed})[{component & 1}]",
+                        Gen5PixelExportFormat.Sint16 => $"as_type<short2>({packed})[{component & 1}]",
+                        _ => $"(float)as_type<half2>({packed})[{component & 1}]",
                     };
+                    values[component] = $"{componentType}({decoded})";
                     continue;
                 }
 

@@ -39,7 +39,7 @@ public static partial class ImageRequestBuilders
             ? GuestImageType.Color3D
             : shape.OneDimensional ? GuestImageType.Color1D : GuestImageType.Color2D;
         description.Extent = new Extent3D(1, 1, 1);
-        description.Resources = SubresourceCount.Single;
+        description.Resources = new SubresourceCount(1, shape.Cube ? 6u : 1u);
         description.BytesPerBlock = 4;
         description.Samples = shape.Multisampled ? 4u : 1u;
         description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 0, Pitch = 1, Height = 1 };
@@ -48,10 +48,13 @@ public static partial class ImageRequestBuilders
             Format = format,
             Type = shape.Volume
                 ? ImageViewType.Type3D
+                : shape.Cube
+                    ? ImageViewType.TypeCube
                 : shape.OneDimensional
                     ? shape.Arrayed ? ImageViewType.Type1DArray : ImageViewType.Type1D
                     : shape.Arrayed ? ImageViewType.Type2DArray : ImageViewType.Type2D,
             Aspect = depthCompare ? ImageAspectFlags.DepthBit : ImageAspectFlags.ColorBit,
+            LayerCount = shape.Cube ? 6u : 1u,
             Usage = storage ? ImageUsageFlags.StorageBit : ImageUsageFlags.SampledBit,
         };
         return new ImageRequest(description, view, storage ? ImageRole.StorageImage : ImageRole.Texture);
@@ -92,13 +95,18 @@ public static partial class ImageRequestBuilders
         var (spans, padded) = MipLayoutScratch.Rent();
         TileGeometry.TryGetTextureSize(
             description.GuestFormat, description.Extent.Width, description.Extent.Height, description.Resources.Levels, description.TileMode,
-            out _, spans, padded);
+            out var sliceSize, spans, padded);
+        // Each layer is a whole mip chain, so a level is described once and repeats every slice.
+        description.SliceStride = sliceSize.Size;
         for (var level = 0; level < description.Resources.Levels; level++)
         {
             var span = spans[level];
             var offset = span.SourceSize != 0 ? span.SourceOffset : span.Offset;
             ulong size = span.SourceSize != 0 ? span.SourceSize : span.Size;
-            size *= description.IsVolume ? Math.Max(description.Extent.Depth >> level, 1) : description.Resources.Layers;
+            if (description.IsVolume)
+            {
+                size *= Math.Max(description.Extent.Depth >> level, 1);
+            }
             description.MipLayout[level] = new MipLevelLayout
             {
                 Offset = offset,
@@ -112,13 +120,15 @@ public static partial class ImageRequestBuilders
     // The view follows the compiled module: a volume, a layer window to the last layer, or one layer.
     private static ImageViewDescription TextureView(
         in TextureDescriptorWords descriptor, in ShaderImageShape shape, Format format, bool shaderConversion, uint viewLevels, uint imageLayers,
-        ulong shaderHash, int imageIndex)
+        ulong shaderHash, int imageIndex, uint firstLevel)
     {
+        // The image's levels count from its first resident guest level.
+        var baseLevel = descriptor.BaseLevel - firstLevel;
         var mapping = shape.Storage || shaderConversion ? default : ViewFormatRules.ComponentMapping(DestinationSwizzle(descriptor));
         var usage = shape.Storage ? ImageUsageFlags.StorageBit : ImageUsageFlags.SampledBit;
         if (shape.Volume)
         {
-            return WithMinLod(new ImageViewDescription(format, ImageViewType.Type3D, ImageAspectFlags.ColorBit, descriptor.BaseLevel, viewLevels, 0, 1, mapping, usage), descriptor, shape);
+            return WithMinLod(new ImageViewDescription(format, ImageViewType.Type3D, ImageAspectFlags.ColorBit, baseLevel, viewLevels, 0, 1, mapping, usage), descriptor, shape, firstLevel);
         }
 
         var baseLayer = descriptor.BaseArray;
@@ -135,15 +145,16 @@ public static partial class ImageRequestBuilders
         var type = shape.OneDimensional
             ? shape.Arrayed ? ImageViewType.Type1DArray : ImageViewType.Type1D
             : shape.Arrayed ? ImageViewType.Type2DArray : ImageViewType.Type2D;
-        return WithMinLod(new ImageViewDescription(format, type, ImageAspectFlags.ColorBit, descriptor.BaseLevel, viewLevels, baseLayer, layerCount, mapping, usage), descriptor, shape);
+        return WithMinLod(new ImageViewDescription(format, type, ImageAspectFlags.ColorBit, baseLevel, viewLevels, baseLayer, layerCount, mapping, usage), descriptor, shape, firstLevel);
     }
 
     // MIN_LOD (4.8 fixed point, absolute mip levels) keeps sampling off mips a streamed texture has not
     // loaded yet; ignoring it sampled the unloaded mip 0 of Astro Bot's stadium sky and bloom spread its
     // garbage HDR values over the screen. Storage views address levels explicitly and are not clamped.
-    private static ImageViewDescription WithMinLod(ImageViewDescription view, in TextureDescriptorWords descriptor, in ShaderImageShape shape)
+    private static ImageViewDescription WithMinLod(ImageViewDescription view, in TextureDescriptorWords descriptor, in ShaderImageShape shape, uint firstLevel)
     {
-        var minLod = descriptor.MinLod / 256f;
+        // The view's levels are host levels, which start at the image's first guest level.
+        var minLod = descriptor.MinLod / 256f - firstLevel;
         if (shape.Storage || minLod <= view.BaseLevel)
         {
             return view;
@@ -151,6 +162,31 @@ public static partial class ImageRequestBuilders
 
         return view with { MinLod = Math.Min(minLod, view.BaseLevel + view.LevelCount - 1) };
     }
+
+    // The same texture as an image of the whole guest mip chain, viewed from the descriptor's base
+    // level: the request a texture gets when its larger mips are mapped or another image holds them.
+    public static ImageRequest WithWholeMipChain(in ImageRequest request)
+    {
+        var firstLevel = request.Description.FirstLevel;
+        if (firstLevel == 0)
+        {
+            return request;
+        }
+
+        var whole = request;
+        whole.Description.Resources = new SubresourceCount(request.Description.Resources.Levels + firstLevel, request.Description.Resources.Layers);
+        whole.Description.FirstLevel = 0;
+        whole.View = RebaseView(request.View, firstLevel);
+        return whole;
+    }
+
+    // A view of an image whose first level is `levels` guest levels lower than the view was built for.
+    public static ImageViewDescription RebaseView(in ImageViewDescription view, uint levels) =>
+        levels == 0 ? view : view with
+        {
+            BaseLevel = view.BaseLevel + levels,
+            MinLod = view.MinLod == 0 ? 0 : view.MinLod + levels,
+        };
 
     public static uint DestinationSwizzle(in TextureDescriptorWords descriptor) =>
         ViewFormatRules.PackDestinationSelect(descriptor.DestinationSelectX, descriptor.DestinationSelectY, descriptor.DestinationSelectZ, descriptor.DestinationSelectW);
@@ -190,7 +226,7 @@ public static partial class ImageRequestBuilders
             return cached;
         }
 
-        var resolution = BuildTexture(key, shape, shaderHash, imageIndex);
+        var resolution = BuildTexture(key, shape, tolerateInvalid: false, out _, shaderHash, imageIndex);
         if (cache.Count >= TextureCacheLimit)
         {
             cache.Clear();
@@ -200,9 +236,64 @@ public static partial class ImageRequestBuilders
         return resolution;
     }
 
-    private static TextureRequestResolution BuildTexture(ReadOnlySpan<uint> words, in ShaderImageShape shape,
-        ulong shaderHash, int imageIndex)
+    // A T# read at run time can hold any lane's register contents, which the hardware reads as the null
+    // texture when they describe no valid view. TryTexture reports false instead of stopping the process.
+    public static bool TryTexture(ReadOnlySpan<uint> words, in ShaderImageShape shape, out TextureRequestResolution resolution,
+        ulong shaderHash = 0, int imageIndex = -1)
     {
+        Span<uint> key = stackalloc uint[8];
+        words[..Math.Min(words.Length, 8)].CopyTo(key);
+        var cacheKey = new TextureKey(key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7], shape);
+        var cache = _textureCache ??= new Dictionary<TextureKey, TextureRequestResolution>();
+        if (cache.TryGetValue(cacheKey, out resolution))
+        {
+            return true;
+        }
+
+        resolution = BuildTexture(key, shape, tolerateInvalid: true, out var invalid, shaderHash, imageIndex);
+        if (invalid is not null)
+        {
+            return false;
+        }
+
+        if (cache.Count >= TextureCacheLimit)
+        {
+            cache.Clear();
+        }
+
+        cache[cacheKey] = resolution;
+        return true;
+    }
+
+    // Whether the T# describes a texture the host can create: a non-null base and a format with a host
+    // equivalent. The hardware reads any other descriptor as the null texture.
+    public static bool DescribesHostTexture(ReadOnlySpan<uint> words)
+    {
+        if (words.Length < 4)
+        {
+            return false;
+        }
+
+        var descriptor = new TextureDescriptorWords(words);
+        return !descriptor.IsNull &&
+            GuestPixelFormats.HostFormat(GuestPixelFormats.RemapTextureFormat(descriptor.Format)) != Format.Undefined;
+    }
+
+    private static TextureRequestResolution Reject(string message, bool tolerateInvalid, out string? invalid)
+    {
+        if (!tolerateInvalid)
+        {
+            throw SubmissionScheduler.Fatal(message);
+        }
+
+        invalid = message;
+        return default;
+    }
+
+    private static TextureRequestResolution BuildTexture(ReadOnlySpan<uint> words, in ShaderImageShape shape, bool tolerateInvalid,
+        out string? invalid, ulong shaderHash, int imageIndex)
+    {
+        invalid = null;
         Span<uint> padded = stackalloc uint[8];
         words[..Math.Min(words.Length, 8)].CopyTo(padded);
         var descriptor = new TextureDescriptorWords(padded);
@@ -219,6 +310,11 @@ public static partial class ImageRequestBuilders
         var height = descriptor.Height + 1;
         var baseLevel = descriptor.BaseLevel;
         var lastLevel = descriptor.LastLevel;
+        if (tolerateInvalid && descriptor.Type is < GuestImageType.Color1D or > GuestImageType.Color2DMsaaArray)
+        {
+            return Reject($"The texture type is not an image type: address=0x{address:X16} type={(uint)descriptor.Type}.", tolerateInvalid, out invalid);
+        }
+
         var type = TextureType(descriptor.Type);
         var multisampled = IsMultisampledTexture(type);
         var maxMip = shape.R128 ? lastLevel : descriptor.MaxMip;
@@ -240,9 +336,9 @@ public static partial class ImageRequestBuilders
              (baseLevel != 0 || lastLevel == 0 || lastLevel > 3 || maxMip != lastLevel || !msaaTile || (descriptor.MsaaDepth && !depthTile) ||
               (!msaaArray && (descriptor.Depth != 0 || descriptor.BaseArray != 0)))))
         {
-            throw SubmissionScheduler.Fatal(
+            return Reject(
                 $"The texture mip view is not supported: address=0x{address:X16} type={(uint)type} baseLevel={baseLevel} lastLevel={lastLevel} maxMip={maxMip} " +
-                $"levels={levels} tile={(uint)tile} depth={descriptor.Depth} baseArray={descriptor.BaseArray} msaaDepth={descriptor.MsaaDepth} storage={storage}.");
+                $"levels={levels} tile={(uint)tile} depth={descriptor.Depth} baseArray={descriptor.BaseArray} msaaDepth={descriptor.MsaaDepth} storage={storage}.", tolerateInvalid, out invalid);
         }
 
         var samples = multisampled ? 1u << (int)lastLevel : 1u;
@@ -258,8 +354,8 @@ public static partial class ImageRequestBuilders
             (volume || multisampled || width != height || descriptor.BaseArray > descriptor.Depth ||
              (descriptor.Depth - descriptor.BaseArray + 1) % 6 != 0))
         {
-            throw SubmissionScheduler.Fatal(
-                $"The cubemap view is invalid: address=0x{address:X16} extent={width}x{height} layers={imageLayers} baseArray={descriptor.BaseArray} samples={samples}.");
+            return Reject(
+                $"The cubemap view is invalid: address=0x{address:X16} extent={width}x{height} layers={imageLayers} baseArray={descriptor.BaseArray} samples={samples}.", tolerateInvalid, out invalid);
         }
         uint pitch;
         TileSizeAndAlignment size;
@@ -269,8 +365,8 @@ public static partial class ImageRequestBuilders
             pitch = depthTile ? TileGeometry.DepthPitch(width, bytes, lastLevel) : TileGeometry.RenderTargetPitch(width, bytes, lastLevel);
             if (pitch == 0 || !TileGeometry.TryGetRenderTargetSize(width, height, pitch, bytes, out size, lastLevel) || size.Size > uint.MaxValue / imageLayers)
             {
-                throw SubmissionScheduler.Fatal(
-                    $"The multisample texture layout is not supported: address=0x{address:X16} extent={width}x{height} bytes={bytes} pitch={pitch} samplesLog2={lastLevel} layers={imageLayers}.");
+                return Reject(
+                    $"The multisample texture layout is not supported: address=0x{address:X16} extent={width}x{height} bytes={bytes} pitch={pitch} samplesLog2={lastLevel} layers={imageLayers}.", tolerateInvalid, out invalid);
             }
 
             size = new TileSizeAndAlignment(size.Size * imageLayers, size.Align);
@@ -281,10 +377,12 @@ public static partial class ImageRequestBuilders
             size = TileGeometry.TextureTotalSize(format, width, height, volume ? depth : imageLayers, levels, tile, volume);
         }
 
-        if (size.Size == 0 || size.Align == 0 || (address & (size.Align - 1UL)) != 0)
+        // A T# encodes its byte address in 256-byte units. The layout alignment describes a new surface
+        // allocation, not an addressed view inside one, and tiled offsets are relative to this base.
+        if (size.Size == 0 || size.Align == 0 || (address & 0xFFUL) != 0)
         {
-            throw SubmissionScheduler.Fatal(
-                $"The texture footprint or alignment is invalid: address=0x{address:X16} size=0x{size.Size:X} align=0x{size.Align:X} format={(uint)format} tile={(uint)tile}.");
+            return Reject(
+                $"The texture footprint or alignment is invalid: address=0x{address:X16} size=0x{size.Size:X} align=0x{size.Align:X} format={(uint)format} tile={(uint)tile}.", tolerateInvalid, out invalid);
         }
 
         var pixelFormat = surfaceFormat.HostFormat;
@@ -293,8 +391,10 @@ public static partial class ImageRequestBuilders
         {
             pixelFormat = depthFormat.DepthAttachmentFormat;
         }
-        // Atomic storage images are declared as UINT in SPIR-V, including float atomics.
-        var storageViewFormat = storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? Format.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
+        // Atomic storage images are declared as UINT in SPIR-V, including float atomics, and a
+        // raw 32-bit sint store is compiled as uint; other sint storage keeps its *_SINT view.
+        var rawSint32 = format == GuestPixelFormat.Bits32SInt && shape.NumericClass != TextureNumericClass.Sint;
+        var storageViewFormat = storage && (shape.Atomic || rawSint32) ? Format.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
         var viewFormat = storage && storageViewFormat != Format.Undefined ? storageViewFormat : pixelFormat;
         var blockBytes = GuestPixelFormats.BlockCompressedBytes(format);
         var description = ImageDescription.Create();
@@ -321,15 +421,44 @@ public static partial class ImageRequestBuilders
 
         if (samples > 1)
         {
-            description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size.Size, Pitch = pitch, Height = height };
+            description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size.Size / imageLayers, Pitch = pitch, Height = height };
+            description.SliceStride = size.Size / imageLayers;
         }
         else
         {
+            if (tolerateInvalid && description.IsVolume && description.TileMode != GuestTileMode.Linear &&
+                !TileGeometry.TryGetTiledTextureLayout(new TiledSurfaceDescription(description.GuestFormat, description.TileMode,
+                    TileSurfaceDimension.Volume3D, width, height, depth, levels, 1), out _))
+            {
+                return Reject($"The volume texture layout is not supported: address=0x{address:X16} format={(uint)format} tile={(uint)tile} " +
+                    $"extent={width}x{height}x{depth} levels={levels}.", tolerateInvalid, out invalid);
+            }
+
             PopulateTextureMipLayout(ref description);
         }
 
+        // A sampled texture whose descriptor starts past mip 0 never reads the levels before it, and a
+        // streamed texture has not even mapped them: the request holds only the levels from there.
+        // The image cache returns it to the whole chain when that memory is mapped, so a texture view
+        // of a lower mip of a rendered or fully loaded chain stays the same image (WithWholeMipChain).
+        var firstLevel = !storage && !volume && samples == 1 && baseLevel > 0 && baseLevel < levels &&
+                         description.Metadata.Kind == MetadataKind.None && !description.IsDepth
+            ? baseLevel
+            : 0u;
+        if (firstLevel != 0)
+        {
+            description.FirstLevel = firstLevel;
+            description.Resources = new SubresourceCount(levels - firstLevel, imageLayers);
+        }
+
+        if (tolerateInvalid && !shape.Volume && descriptor.BaseArray >= description.Resources.Layers)
+        {
+            return Reject($"The texture base layer is outside the image: baseLayer={descriptor.BaseArray} layers={description.Resources.Layers} address=0x{address:X16}.",
+                tolerateInvalid, out invalid);
+        }
+
         var view = TextureView(descriptor, shape, viewFormat, shaderConversion, viewLevels, description.Resources.Layers,
-            shaderHash, imageIndex);
+            shaderHash, imageIndex, firstLevel);
         if (!shape.R128 && descriptor.MetadataCompress && !description.IsDepth && !shaderConversion &&
             tile == GuestTileMode.RenderTarget && levels == 1 && samples == 1 &&
             type is GuestImageType.Color2D or GuestImageType.Color2DArray or GuestImageType.Color3D &&

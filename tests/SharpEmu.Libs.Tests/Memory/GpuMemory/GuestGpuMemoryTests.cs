@@ -46,6 +46,25 @@ public sealed class GuestGpuMemoryTests
         public void Unregister(ulong address, ulong size) => Calls.Add($"image.unregister {address:X}+{size:X}");
     }
 
+    [Fact]
+    public void WaitForStoresDetached_ReturnsOnceTheStoresAreGone()
+    {
+        var memory = new GuestGpuMemory(new RecordingAddressSpace());
+        Assert.True(memory.WaitForStoresDetached(TimeSpan.Zero));
+
+        var stores = new RecordingStores();
+        memory.AttachStores(stores, stores);
+        Assert.False(memory.WaitForStoresDetached(TimeSpan.FromMilliseconds(30)));
+
+        var detach = Task.Run(() =>
+        {
+            Thread.Sleep(50);
+            memory.AttachStores(null, null);
+        });
+        Assert.True(memory.WaitForStoresDetached(TimeSpan.FromSeconds(5)));
+        detach.Wait();
+    }
+
     private sealed class InlineQueue : IGpuQueueRelay
     {
         public int Runs { get; private set; }

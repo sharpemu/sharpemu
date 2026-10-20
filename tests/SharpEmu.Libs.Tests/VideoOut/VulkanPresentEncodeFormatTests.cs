@@ -209,6 +209,32 @@ public sealed class VulkanPresentEncodeFormatTests
         Assert.True(decoded.ExportMapping.IsIdentity);
     }
 
+    // Narrow and signed-normalized targets: the pixel output kind must follow the number type.
+    [Theory]
+    [InlineData(1u, 1u, Format.R8SNorm, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float)]
+    [InlineData(1u, 5u, Format.R8Sint, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Sint)]
+    [InlineData(1u, 6u, Format.R8Srgb, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float)]
+    [InlineData(1u, 9u, Format.R8Srgb, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float)]
+    [InlineData(3u, 1u, Format.R8G8SNorm, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float)]
+    [InlineData(3u, 4u, Format.R8G8Uint, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Uint)]
+    [InlineData(3u, 5u, Format.R8G8Sint, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Sint)]
+    [InlineData(3u, 6u, Format.R8G8Srgb, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float)]
+    [InlineData(5u, 1u, Format.R16G16SNorm, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float)]
+    [InlineData(10u, 1u, Format.R8G8B8A8SNorm, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float)]
+    [InlineData(12u, 1u, Format.R16G16B16A16SNorm, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float)]
+    [InlineData(6u, 0u, Format.B10G11R11UfloatPack32, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float)]
+    public void TryDecodeRenderTargetFormat_DecodesNarrowAndSignedTargets(
+        uint dataFormat,
+        uint numberType,
+        Format expected,
+        SharpEmu.ShaderCompiler.Gen5PixelOutputKind expectedKind)
+    {
+        Assert.True(VulkanVideoPresenter.TryDecodeRenderTargetFormat(dataFormat, numberType, 0, out var decoded));
+
+        Assert.Equal(expected, decoded.Format);
+        Assert.Equal(expectedKind, decoded.OutputKind);
+    }
+
     [Fact]
     public void TryDecodeRenderTargetFormat_RejectsInvalidComponentSwap()
     {

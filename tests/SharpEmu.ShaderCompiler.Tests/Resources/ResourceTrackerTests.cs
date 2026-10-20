@@ -155,6 +155,45 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
+    public void ImageRecordBuiltFromTwoFourDwordScalarBufferLoads_IsPlanned()
+    {
+        var program = Program(
+            ScalarBufferLoad(0, 0, destination: 8, count: 4, dynamicOffsetRegister: 4),
+            ScalarBufferLoad(8, 0, destination: 12, count: 4, immediateOffset: 32, dynamicOffsetRegister: 4),
+            Image(0x10, "ImageLoad", 8, dimension: 1),
+            EndProgram(0x18));
+
+        var plan = Extract(program);
+
+        var image = Assert.Single(plan.Info.Images);
+        // The record is read from the buffer, not replaced by a null descriptor.
+        var source = plan.DescriptorSources[(int)image.Source];
+        Assert.All(source.Dwords, dword => Assert.False(dword.IsConstant));
+    }
+
+    [Fact]
+    public void ReachabilityWalksStayLinearOnSharedSubgraphs()
+    {
+        // Every level uses the previous one twice: 2^60 paths, 61 nodes.
+        var value = ScalarValue.UserData(0);
+        for (var level = 0; level < 60; level++)
+        {
+            value = ScalarValue.MakeOperation(ScalarOperation.IAdd32, ScalarValueType.U32, value, value);
+        }
+
+        var hasRead = typeof(ResourceTracker).GetMethod(
+            "HasRuntimeRead", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static, [typeof(ScalarValue)])!;
+        var hasReadKind = typeof(ResourceTracker).GetMethod(
+            "HasRuntimeReadKind", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static, [typeof(ScalarValue), typeof(ScalarValueKind)])!;
+
+        var walk = System.Threading.Tasks.Task.Run(() => (
+            (bool)hasRead.Invoke(null, [value])!,
+            (bool)hasReadKind.Invoke(null, [value, ScalarValueKind.ScalarAddressWord])!));
+        Assert.True(walk.Wait(TimeSpan.FromSeconds(10)), "the reachability walk re-walked shared nodes");
+        Assert.Equal((false, false), walk.Result);
+    }
+
+    [Fact]
     public void SamplerWithDivergentBits_IsRejected()
     {
         var program = Program(
@@ -333,7 +372,7 @@ public sealed class ResourceTrackerTests
 
     // The material table s[0:3], the heap s[4:7], the key selector in s8; the image words
     // come from the heap record the key selects.
-    internal static Gen5ShaderProgram IndirectImageProgram(bool malformed, int materialImmediate = 0, bool memoryBackedMaterial = false)
+    internal static Gen5ShaderProgram IndirectImageProgram(bool malformed, int materialImmediate = 0, bool memoryBackedMaterial = false, bool laneKey = false, (string Opcode, uint Value)? selectorClamp = null)
     {
         var instructions = new List<Gen5ShaderInstruction>();
         uint pc = 0x1000;
@@ -347,7 +386,14 @@ public sealed class ResourceTrackerTests
             Add(At(current => ScalarLoad(current, 28, destination: 0)));
         }
 
-        Add(At(current => Vop1(current, "VMovB32", 1, Gen5Operand.Scalar(8))));
+        Add(At(current => Vop1(current, "VMovB32", 1, laneKey ? Gen5Operand.Vector(0) : Gen5Operand.Scalar(8))));
+        if (selectorClamp is { } clamp)
+        {
+            Add(At(current => clamp.Opcode == "VMed3U32" ?
+                Vop3(current, "VMed3U32", 1, Operand(0), Operand(clamp.Value), Gen5Operand.Vector(1)) :
+                Vop2(current, clamp.Opcode, 1, Operand(clamp.Value), Gen5Operand.Vector(1))));
+        }
+
         Add(At(current => ReadFirstLane(current, 9, 1)));
         Add(At(current => Sop2(current, "SMulI32", 10, Gen5Operand.Scalar(9), Operand(224))));
         Add(At(current => Sop2(current, "SAddU32", 11, Gen5Operand.Scalar(10), Operand(4))));
@@ -671,8 +717,108 @@ public sealed class ResourceTrackerTests
             BufferLoad(32, 8),
             EndProgram(36));
 
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(program));
+        // The unevaluated branch picks the V#, so the access reads it from its registers.
+        var plan = Extract(program);
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Memory.TryGetIndex(32, 0, out var index));
+        Assert.True(plan.Memory[index].DeviceDescriptor);
+    }
+
+    // A branch the plan cannot evaluate picks the V#: a descriptor loaded from memory, or one built from a lane value.
+    private static Gen5ShaderProgram PhiSelectedDescriptor(string opcode = "BufferLoadDwordx3") => Program(
+        Branch(0, "SCbranchScc1", 3),
+        ScalarLoad(4, 2, 8, count: 4), Branch(12, "SBranch", 4),
+        ReadFirstLane(16, 8, 0), MoveScalar(20, 9, 0), MoveScalar(24, 10, 64), MoveScalar(28, 11, 0),
+        BufferAccess(32, opcode, 8, dwords: 3),
+        EndProgram(40));
+
+    [Fact]
+    public void DescriptorChosenByControlFlow_ReadsThroughRegisters()
+    {
+        var plan = Extract(PhiSelectedDescriptor());
+
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.True(plan.Memory.TryGetIndex(32, 0, out var index));
+        Assert.True(plan.Memory[index].DeviceDescriptor);
+    }
+
+    [Fact]
+    public void DescriptorWalkedByALoop_ReadsThroughRegisters()
+    {
+        // Each iteration loads the next V# through the base of the current one.
+        var plan = Extract(Program(
+            ScalarLoad(0, 2, 8, count: 4),
+            BufferLoad(8, 8, dwords: 3),
+            ScalarLoad(16, 8, 8, count: 4),
+            Branch(24, "SCbranchScc1", -5),
+            EndProgram(32)));
+
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.True(plan.Memory.TryGetIndex(8, 0, out var index));
+        // The V# words come from a scalar load whose address no host evaluation reaches, so the
+        // access reads them from its registers (the device-descriptor path).
+        Assert.True(plan.Memory[index].DeviceDescriptor);
+    }
+
+    [Fact]
+    public void DescriptorWalkedByALoopFromALaneValue_IsNeverBoundStatically()
+    {
+        var plan = Extract(Program(
+            ReadFirstLane(0, 8, 0), MoveScalar(4, 9, 0), MoveScalar(8, 10, 64), MoveScalar(12, 11, 0),
+            BufferLoad(16, 8, dwords: 3),
+            ScalarLoad(24, 8, 8, count: 4),
+            Branch(32, "SCbranchScc1", -5),
+            EndProgram(36)));
+
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Memory.TryGetIndex(16, 0, out var index));
+        Assert.True(plan.Memory[index].DeviceDescriptor ||
+            plan.Memory[index].BufferDescriptor?.Provenance == BufferDescriptorProvenance.Runtime);
+    }
+
+    [Fact]
+    public void LoadWhoseAddressALoopAdvances_IsNotAnInvariantPhi()
+    {
+        // s[8:9] is reloaded through itself every iteration: its phi merges the first load
+        // with a load whose address is the phi, so it is not one value.
+        var program = Program(
+            ScalarLoad(0, 2, 8, count: 2),
+            ScalarLoad(8, 8, 8, count: 2),
+            MoveScalar(16, 10, 256), MoveScalar(20, 11, 0),
+            Branch(24, "SCbranchScc1", -6),
+            BufferLoad(28, 8, dwords: 3),
+            EndProgram(36));
+        var graph = ScalarValueGraph.Build(program, 0, 8);
+
+        var phis = graph.Values.Where(value => value.Kind == ScalarValueKind.Phi).ToList();
+        Assert.NotEmpty(phis);
+        Assert.Contains(phis, phi => graph.ResolveInvariantPhi(phi) is null);
+        var plan = Extract(program, userDataCount: 8);
+        Assert.Empty(plan.Info.Buffers);
+    }
+
+    [Fact]
+    public void DescriptorChosenByControlFlow_KeepsTypedAccessRejected()
+    {
+        var error = Assert.ThrowsAny<ResourcePlanException>(() => Extract(PhiSelectedDescriptor("TBufferLoadFormatXyz")));
         Assert.Contains("not a valid runtime value", error.Message);
+    }
+
+    [Fact]
+    public void StaticDescriptor_StaysHostBound()
+    {
+        var plan = Extract(Program(
+            MoveScalar(0, 8, 0x1000), MoveScalar(4, 9, 0), MoveScalar(8, 10, 256), MoveScalar(12, 11, 0),
+            BufferLoad(16, 8, dwords: 3), EndProgram(24)));
+        var userDataPlan = Extract(Program(BufferLoad(0, 0, dwords: 3), EndProgram(8)));
+
+        foreach (var candidate in new[] { plan, userDataPlan })
+        {
+            Assert.Single(candidate.Info.Buffers);
+            Assert.DoesNotContain(candidate.Memory.Entries, memory => memory.DeviceDescriptor);
+        }
     }
 
     [Fact]

@@ -239,7 +239,7 @@ public sealed class Gen5Float16ArithmeticTests
             error);
     }
 
-    private static Gen5ShaderProgram Decode(IReadOnlyList<uint> words)
+    public static Gen5ShaderProgram Decode(IReadOnlyList<uint> words)
     {
         var memory = new TestCpuMemory(ShaderAddress, words.Count * sizeof(uint));
         var bytes = new byte[words.Count * sizeof(uint)];

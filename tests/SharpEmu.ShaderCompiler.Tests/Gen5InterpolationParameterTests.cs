@@ -203,6 +203,41 @@ public sealed class Gen5InterpolationParameterTests
     }
 
     [Fact]
+    public void FlatAndSmoothSlotsReadingOneParameter_ShareOnePerVertexInput()
+    {
+        // Slot 1 is flat, slot 2 is smooth, both map to VS parameter 1 and neither is a
+        // V_INTERP_MOV. Two host inputs would put the second on a location the vertex program
+        // never writes (it reads zero); one per-vertex input serves both.
+        Gen5ShaderInstruction Interpolate(uint pc, uint attribute, uint destination) =>
+            new(pc, Gen5ShaderEncoding.Vintrp, "VInterpP2F32",
+                [0], [Gen5Operand.Vector(1)], [Gen5Operand.Vector(destination)], new Gen5InterpolationControl(attribute, 0));
+        var program = ResourceTestProgram.Program(Interpolate(0, 1, 4), Interpolate(4, 2, 5), ResourceTestProgram.EndProgram(8));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelInputAddress = 2,
+            PixelInputEnable = 2,
+            PixelInputCntl = [0, 0x401, 0x1],
+            SupportsPerVertexPixelInputs = true,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var instructions = Instructions(shader.Spirv);
+        var input = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.PerVertexKhr).Operands[0];
+        var location = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[0] == input && instruction.Operands[1] == (uint)SpirvDecoration.Location);
+        Assert.Equal(1u, location.Operands[2]);
+        Assert.DoesNotContain(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.Flat && instruction.Operands[0] != input &&
+            instructions.Any(other => other.Opcode == SpirvOp.Decorate && other.Operands[0] == instruction.Operands[0] &&
+                other.Operands[1] == (uint)SpirvDecoration.Location));
+        // The flat slot reads vertex 0 (1 load); the smooth slot weights all three vertices (3 loads).
+        Assert.Equal(4, instructions.Count(instruction => instruction.Opcode == SpirvOp.AccessChain &&
+            instruction.Operands[2] == input));
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Fact]
     public void SmoothSlotSharingAPerVertexParameter_InterpolatesThePerVertexInput()
     {
         // Slot 1 is read per vertex, slot 2 interpolates the same VS parameter: one per-vertex
@@ -233,6 +268,71 @@ public sealed class Gen5InterpolationParameterTests
             instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn && instruction.Operands[2] == (uint)SpirvBuiltIn.BaryCoordKhr);
         Assert.Equal(4, instructions.Count(instruction => instruction.Opcode == SpirvOp.AccessChain &&
             instruction.Operands[2] == input));
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
+    [InlineData(0x1u, false)]
+    [InlineData(0x2u, false)]
+    [InlineData(0x4u, false)]
+    [InlineData(0x10u, true)]
+    [InlineData(0x20u, true)]
+    [InlineData(0x40u, true)]
+    public void SmoothSlotSharingAPerVertexParameter_UsesTheEnabledBarycentricMode(uint mode, bool noPerspective)
+    {
+        var move = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Vintrp, "VInterpMovF32",
+            [1], [Gen5Operand.Vector(1)], [Gen5Operand.Vector(4)], new Gen5InterpolationControl(1, 0));
+        var smooth = new Gen5ShaderInstruction(4, Gen5ShaderEncoding.Vintrp, "VInterpP2F32",
+            [0], [Gen5Operand.Vector(1)], [Gen5Operand.Vector(5)], new Gen5InterpolationControl(2, 0));
+        var program = ResourceTestProgram.Program(move, smooth, ResourceTestProgram.EndProgram(8));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelInputAddress = mode,
+            PixelInputEnable = mode,
+            PixelInputCntl = [0, 0x1, 0x1],
+            PixelCustomInterpolationMask = 2,
+            SupportsPerVertexPixelInputs = true,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var builtIns = Instructions(shader.Spirv)
+            .Where(instruction => instruction.Opcode == SpirvOp.Decorate &&
+                instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn)
+            .Select(instruction => instruction.Operands[2])
+            .ToArray();
+        // The perspective coordinates must not be invented for a shader that enables only
+        // no-perspective ones, and vice versa: the slot would be weighted by the wrong coordinates.
+        Assert.Equal(noPerspective, builtIns.Contains((uint)SpirvBuiltIn.BaryCoordNoPerspKhr));
+        Assert.Equal(!noPerspective, builtIns.Contains((uint)SpirvBuiltIn.BaryCoordKhr));
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
+    [InlineData(false, true, 0x3F800000u)]
+    [InlineData(false, false, 0xBF800000u)]
+    [InlineData(true, true, 1u)]
+    [InlineData(true, false, 0u)]
+    public void FrontFace_UsesTheSelectedEncoding(bool allBits, bool front, uint expected)
+    {
+        var program = ResourceTestProgram.Program(ResourceTestProgram.EndProgram(0));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            PixelInputAddress = 0x1000, PixelInputEnable = 0x1000,
+            PixelFrontFaceAllBits = allBits,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var instructions = Instructions(shader.Spirv);
+        var input = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
+            instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn &&
+            instruction.Operands[2] == (uint)SpirvBuiltIn.FrontFacing).Operands[0];
+        var condition = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Load &&
+            instruction.Operands[2] == input).Operands[1];
+        var select = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Select &&
+            instruction.Operands[2] == condition);
+        var constant = select.Operands[front ? 3 : 4];
+        Assert.Equal(expected, Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Constant &&
+            instruction.Operands[1] == constant).Operands[2]);
         ValidateWhenAvailable(shader.Spirv);
     }
 

@@ -40,6 +40,9 @@ public sealed class ShaderResourcePlan
     public IReadOnlyList<IndirectImageAccess> IndirectImages { get; private set; } = [];
     public IReadOnlyList<BufferCandidateTablePlan> BufferCandidateTables { get; private set; } = [];
     public bool RequiresSpecializationMemory { get; private set; }
+
+    // How this plan treats an image access with no plan-time descriptor source.
+    public RuntimeDescriptorMode RuntimeDescriptors { get; private set; }
     public ShaderResourceInfo Info { get; private set; } = new();
 
     internal RawReadPrefetchPlan? RawReadPrefetch { get; set; }
@@ -121,7 +124,8 @@ public sealed class ShaderResourcePlan
     public MemoryAccessBinding?[] Accesses { get; private set; } = [];
 
     public static ShaderResourcePlan Extract(Gen5ShaderProgram program, ShaderStage stage, ulong hash, uint userDataBase, uint userDataCount,
-        IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64)
+        IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64,
+        RuntimeDescriptorMode runtimeDescriptors = RuntimeDescriptorMode.Disabled)
     {
         // Mesh system inputs are not uniform user data, even when a GS pointer occupies s0:s1.
         var graph = ScalarGraphDiskCache.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize,
@@ -161,7 +165,8 @@ public sealed class ShaderResourcePlan
 
         // Diagnostics observe rewritten values before descriptor validation.
         beforeResourceTracking?.Invoke(plan);
-        var tracked = ResourceTracker.Track(plan);
+        var tracked = ResourceTracker.Track(plan, runtimeDescriptors);
+        plan.RuntimeDescriptors = runtimeDescriptors;
         plan.DescriptorSources = tracked.Sources;
         plan.Info = tracked.Info;
         if (program.Instructions.Any(instruction => instruction.Control is ShaderCallFaultControl))

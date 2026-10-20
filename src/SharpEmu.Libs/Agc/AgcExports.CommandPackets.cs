@@ -123,6 +123,38 @@ public static partial class AgcExports
         return (int)ctx[CpuRegister.Rax];
     }
 
+    // Turns an already-written packet into a NOP in place. The payload of a disabled
+    // executable marker is truncated so the packet is not mistaken for shader code.
+    [SysAbiExport(
+        Nid = "K2mciNVxUCE",
+        ExportName = "sceAgcSetNop",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int SetNop(CpuContext ctx)
+    {
+        var packetAddress = ctx[CpuRegister.Rdi];
+        if (packetAddress == 0 || !TryReadUInt32(ctx, packetAddress, out var header))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        // A type-0 packet has no payload beyond its header; its length bits do not exist.
+        var length = (header & 0xC000_0000u) == 0xC000_0000u ? Pm4Length(header) : 1u;
+        if (!TryWriteUInt32(ctx, packetAddress, (header & 0xFFFF_0003u) | (ItNop << 8)))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (length > 1 &&
+            TryReadUInt32(ctx, packetAddress + sizeof(uint), out var payload) &&
+            (payload & 0xFFFF_0000u) == 0x6875_0000u)
+        {
+            _ = TryWriteUInt32(ctx, packetAddress + sizeof(uint), payload & 0xFFFFu);
+        }
+
+        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
     [SysAbiExport(
         Nid = "k3GhuSNmBLU",
         ExportName = "sceAgcCbDispatch",
@@ -778,7 +810,9 @@ public static partial class AgcExports
 
         var payloadDwords = Math.Max(((uint)marker.Length + 4) / 4, 1);
         var packetDwords = payloadDwords + 1;
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
+        // A marker from a foreign DCB writer is skipped (null packet pointer) so it cannot
+        // reserve or overwrite the owner's unpublished inline packet.
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress, isMarker: true) ||
             !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItNop, RPushMarker)))
         {
             return ReturnPointer(ctx, 0);
@@ -828,7 +862,7 @@ public static partial class AgcExports
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         if (commandBufferAddress == 0 ||
-            !TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(2, ItNop, RPopMarker), 0))
+            !TryEmitMarkerCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(2, ItNop, RPopMarker), 0))
         {
             return ReturnPointer(ctx, 0);
         }

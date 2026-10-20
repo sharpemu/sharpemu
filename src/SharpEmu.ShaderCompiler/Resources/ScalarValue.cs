@@ -365,6 +365,7 @@ public static class ScalarValueEquivalence
         }
 
         ScalarValue? invariant = null;
+        var leaves = new List<ScalarValue>();
         var pending = new Stack<ScalarValue>();
         var visited = new HashSet<ScalarValue>();
         pending.Push(value);
@@ -386,6 +387,7 @@ public static class ScalarValueEquivalence
                 continue;
             }
 
+            leaves.Add(current);
             if (invariant is null)
             {
                 invariant = current;
@@ -396,6 +398,42 @@ public static class ScalarValueEquivalence
             }
         }
 
+        // A leaf computed from the phis it is merged into (a load whose address a loop
+        // advances) takes a new value on every iteration, however alike its nodes look.
+        foreach (var leaf in leaves)
+        {
+            if (DependsOnAny(leaf, visited))
+            {
+                return null;
+            }
+        }
+
         return invariant;
+    }
+
+    private static bool DependsOnAny(ScalarValue value, HashSet<ScalarValue> phis)
+    {
+        var pending = new Stack<ScalarValue>();
+        var seen = new HashSet<ScalarValue>();
+        pending.Push(value);
+        while (pending.TryPop(out var current))
+        {
+            if (!seen.Add(current))
+            {
+                continue;
+            }
+
+            if (current.Kind == ScalarValueKind.Phi && phis.Contains(current))
+            {
+                return true;
+            }
+
+            foreach (var operand in current.Operands)
+            {
+                pending.Push(operand);
+            }
+        }
+
+        return false;
     }
 }

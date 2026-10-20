@@ -144,6 +144,29 @@ public sealed class Gen5ExecFullAnalysisTests
     }
 
     [Fact]
+    public void AVop3VectorCompareIntoExec_IgnoresItsScalarDestinationField()
+    {
+        // The SDST field of a GFX10 V_CMPX is not a destination: the saved copy stays valid.
+        Scalar("SMovB64", 40, Gen5Operand.Scalar(Exec));
+        _program.Add(new Gen5ShaderInstruction(
+            _pc,
+            Gen5ShaderEncoding.Vop3,
+            "VCmpxLtF32",
+            [0u, 0u],
+            [Gen5Operand.Vector(0), Gen5Operand.Vector(1)],
+            [],
+            new Gen5Vop3Control(0, 0, 0, false, 0, 40)));
+        _pc += 8;
+        var masked = VectorAdd();
+        Scalar("SMovB64", Exec, Gen5Operand.Scalar(40));
+        var restored = VectorAdd();
+
+        var full = Analyze();
+        Assert.DoesNotContain(masked, full);
+        Assert.Contains(restored, full);
+    }
+
+    [Fact]
     public void RestoringASavedFullExec_MakesItFullAgain()
     {
         Scalar("SMovB64", 40, Gen5Operand.Scalar(Exec));

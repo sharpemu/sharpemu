@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
 
@@ -70,6 +71,16 @@ public sealed partial class RenderExecutor
             return true;
         }
 
+        if (state.ColorCount == 0 && !state.Depth.HasTarget && !state.PixelActive &&
+            PixelStageWritesMemory(banks, ref state))
+        {
+            // A pixel shader can be a rasterized producer for a later visibility or culling
+            // pass. With no attachment and no export it has no framebuffer output, but its
+            // stores are observable and the hardware runs it for every covered pixel.
+            TraceDrawDisposition(banks, in draw, "pixel-stores-only");
+            return true;
+        }
+
         if (state.ColorCount == 0 && !state.Depth.HasTarget && !state.PixelActive)
         {
             TraceDrawDisposition(banks, in draw, "no-framebuffer");
@@ -99,6 +110,28 @@ public sealed partial class RenderExecutor
         ResolveShaderPrograms(banks, ref state);
         var stage = state.Programs.VertexInput.Stage;
         return stage.Program is { } program && (WritesStorageImage(program) || HasBufferWrites(stage));
+    }
+
+    // Whether the bound pixel stage stores to a buffer, a storage image or a device address. On
+    // true the pixel stage is active for the draw; on false the state is left as it was.
+    private bool PixelStageWritesMemory(RegisterBanks banks, ref DrawState state)
+    {
+        if (banks.Shader.Pixel.Address == 0)
+        {
+            return false;
+        }
+
+        state.PixelActive = true;
+        ResolveShaderPrograms(banks, ref state);
+        var stage = state.Programs.PixelInput.Stage;
+        if (state.Programs.Available && stage.Program is { } program &&
+            (program.UsesDeviceAddresses || WritesStorageImage(program) || HasBufferWrites(stage)))
+        {
+            return true;
+        }
+
+        state.PixelActive = false;
+        return false;
     }
 
     // Color control mode 3 resolves slot 0 into slot 1 instead of drawing; true consumes the draw.
@@ -236,9 +269,17 @@ public sealed partial class RenderExecutor
         state.ColorCount = kept;
     }
 
-    internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks) =>
-        exportMapping.ApplyMask(context.RenderTargetMaskForSlot(slot)) == 0 ||
-        ((pixelColorExportMasks >> (int)(slot * 4)) & 0xFu) == 0;
+    internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks)
+    {
+        if (ObjectPrimitiveIdTarget.IsTarget(context, slot))
+        {
+            return false;
+        }
+
+        var exportTarget = PixelExportRouting.ExportForSlot(context.ShaderInterface, slot);
+        return exportMapping.ApplyMask(context.RenderTargetMaskForSlot(slot)) == 0 ||
+            exportTarget < 0 || ((pixelColorExportMasks >> (exportTarget * 4)) & 0xFu) == 0;
+    }
 
     // Acquires every attachment through the host and assembles the rendering scope.
     private RenderingState AcquireAttachments(ref DrawState state)
@@ -323,7 +364,17 @@ public sealed partial class RenderExecutor
             var layout = _host.SamplesDepthAttachment(in depth)
                 ? loadState.AttachmentLayout(target.Format)
                 : DepthStencilState.WritableAttachmentLayout(target.Format);
-            _host.TransitionDepthAttachment(in depth, layout, loadState.AttachmentWriteAspects(target.Format));
+            var writeAspects = loadState.AttachmentWriteAspects(target.Format);
+            _host.TransitionDepthAttachment(in depth, layout, writeAspects);
+
+            // The stencil the draw writes belongs to the guest stencil plane the image holds. Marking
+            // the plane makes a plane switch or a replacement of the image write it back first, so the
+            // next depth image over that plane loads these values (Ghost of Yotei classifies its
+            // lighting tiles by stencil written in the G-buffer pass, read through a new image).
+            if ((writeAspects & ImageAspectFlags.StencilBit) != 0 && target.Samples == 1)
+            {
+                _host.MarkGpuWritten(depth.Image);
+            }
             var view = target.Request.View;
             rendering.Width = Math.Min(rendering.Width, target.Width);
             rendering.Height = Math.Min(rendering.Height, target.Height);

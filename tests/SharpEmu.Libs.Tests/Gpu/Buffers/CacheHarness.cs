@@ -200,6 +200,22 @@ internal sealed class CacheHarness : IDisposable
         return address;
     }
 
+    // A held range whose first `backed` bytes are mapped and registered; the rest stays a bare hole,
+    // as a streamed texture maps only the resident start of its chain.
+    public ulong MapBackedPrefix(ulong size, ulong backed)
+    {
+        var hole = HostViewTestSupport.AlignUp(size, _views.Granularity);
+        backed = HostViewTestSupport.AlignUp(backed, _views.Granularity);
+        Assert.True(backed < hole);
+        Assert.True(Memory.TryHoldRangeAtOrAbove(GuestBase, hole, _views.Granularity, out var address));
+        Assert.True(Memory.TryMapBacked(address, backed, _nextBackingOffset, GuestPageProtection.Read | GuestPageProtection.Write, out _));
+        _nextBackingOffset += hole;
+        Gpu.Register(address, backed, GuestPageProtection.Read | GuestPageProtection.Write);
+        return address;
+    }
+
+    public ulong Granularity => _views.Granularity;
+
     // Two backed granules around one that stays a bare hole: registered, but without backing.
     public (ulong First, ulong Granule, ulong Last) MapBackedSandwich()
     {

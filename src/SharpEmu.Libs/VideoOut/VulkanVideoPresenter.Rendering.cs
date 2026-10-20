@@ -78,16 +78,10 @@ internal static unsafe partial class VulkanVideoPresenter
                     {
                         foreach (var (attachment, storage) in stencilImages)
                         {
-                            try
-                            {
-                                if (CommandsRecorded && StencilStorageWriteBackImages is not null &&
-                                    StencilStorageWriteBackImages.Contains(attachment))
-                                    attachment.CopyStencilStorage(storage, owner._bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: true);
-                            }
-                            finally
-                            {
-                                owner._scheduler.QueueCompletionAction(storage.Dispose);
-                            }
+                            // The attachment owns the storage image and releases it with itself.
+                            if (CommandsRecorded && StencilStorageWriteBackImages is not null &&
+                                StencilStorageWriteBackImages.Contains(attachment))
+                                attachment.CopyStencilStorage(storage, owner._bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: true);
                         }
                     }
 
@@ -199,14 +193,33 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        private ulong _pressureCollectionTick = ulong.MaxValue;
+
         public void RunPendingOperations()
         {
-            RunPendingCommands();
-            if (_batchOpen && _preparation is null && _bufferCache?.HotWritePending == true)
+            // Start of a draw or dispatch: nothing is bound yet, so the tick can end here.
+            if (_imageCache is { } images && _preparation is null && _scheduler.Active && !_scheduler.InsideTickCallback)
             {
-                EndRendering();
-                FlushBatchedGuestCommands();
+                // A slow frame can materialize many draws' textures before the next flip, so memory
+                // pressure is relieved here, once per submitted tick, while no new draw bindings
+                // can be invalidated.
+                if (images.MemoryUnderPressure && _pressureCollectionTick != _scheduler.CurrentTick)
+                {
+                    _pressureCollectionTick = _scheduler.CurrentTick;
+                    images.RunGarbageCollector(endsFrame: false);
+                }
+
+                if (images.RetirementOverBudget)
+                {
+                    images.ReleaseRetiredImages();
+                    if (images.MemoryUnderPressure)
+                    {
+                        images.ReleaseUnusedMemory();
+                    }
+                }
             }
+
+            RunPendingCommands();
         }
 
         public void SetDebugInformation(RecordedOperation operation, ulong submitId, uint argument0, uint argument1, uint argument2, uint argument3, ulong argument4) =>
@@ -374,6 +387,17 @@ internal static unsafe partial class VulkanVideoPresenter
             return address;
         }
 
+        public void PrepareBufferAllocations(ReadOnlySpan<SharpEmu.HLE.GpuMemory.GuestSpan> ranges) =>
+            _bufferCache.PrepareBufferAllocations(ranges);
+
+        public ulong ObtainBufferDeviceAddress(ulong address, ulong size, bool isWritten)
+        {
+            // Read-only indices normally use the transient stream fast path.
+            // Physical pointers require a cache allocation created with BDA usage.
+            var (buffer, offset) = _bufferCache.ObtainBuffer(address, size, isWritten, requiresDeviceAddress: true);
+            return checked(buffer.DeviceAddress + offset);
+        }
+
         public BufferBinding ObtainBuffer(ulong address, ulong size, bool isWritten)
         {
             var (buffer, offset) = _bufferCache.ObtainBuffer(address, size, isWritten);
@@ -488,7 +512,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (binding.IsHostMovie || binding.CachedImage is not { } image ||
                     !ReferenceEquals(image, depthImage) || !ViewFormatRules.IsStencilViewFormat(binding.Request.View.Format) ||
-                    !ViewsOverlap(binding.Request.View, attachmentView))
+                    !ViewsOverlap(binding.Request.View, attachmentView) || !FitsStencilPlane(binding.Request.Description, image))
                 {
                     continue;
                 }
@@ -636,9 +660,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 var view = binding.Request.View;
                 for (var layer = view.BaseLayer; layer < view.BaseLayer + view.LayerCount; layer++)
                 {
+                    // Every fixed clear code carries its own colour; only the register code (0x20) needs
+                    // the CB clear word, which is known when the surface binds as a target. A target
+                    // fast-cleared to (0,0,0,1) and only sampled must still read that clear, not stale zeros.
                     if (ImageClearTrace.Enabled) _imageCache.TraceVolumeClear("before-sampled-decision", binding.Request, image, $"layer={layer}");
-                    var tracked = _imageCache.IsMetadataCleared(metadataAddress, layer, out var metadataValue) && (byte)metadataValue == DccClearToZero;
                     var clearValue = default(ClearColorValue);
+                    var tracked = _imageCache.IsMetadataCleared(metadataAddress, layer, out var metadataValue) &&
+                        TryDecodeDccClear((byte)metadataValue, false, (byte)metadataValue == DccClearToZero || fixedClearSupported, default, out clearValue);
                     ulong guestSlice = 0;
                     if (!tracked &&
                         (sliceSize == 0 || !_imageCache.TryReadGuestDccClear(metadataAddress, sliceSize, layer, out guestSlice, out var code) ||
@@ -788,6 +816,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 _vk.CmdSetStencilWriteMask(command, StencilFaceFlags.FaceBackBit, state.BackStencil.WriteMask);
                 _vk.CmdSetStencilReference(command, StencilFaceFlags.FaceFrontBit, state.FrontStencil.Reference);
                 _vk.CmdSetStencilReference(command, StencilFaceFlags.FaceBackBit, state.BackStencil.Reference);
+            }
+
+            // The bounds only matter while the test is on; they are set when it turns on or they change.
+            if (_supportsDepthBounds && state.DepthBoundsTestEnabled && (!known || !last.DepthBoundsTestEnabled ||
+                state.DepthMinBounds != last.DepthMinBounds || state.DepthMaxBounds != last.DepthMaxBounds))
+            {
+                _vk.CmdSetDepthBounds(command, state.DepthMinBounds, state.DepthMaxBounds);
             }
 
             if (_colorWriteEnableApi is { } colorWriteEnable && state.ColorWriteCount != 0)
@@ -1183,6 +1218,24 @@ internal static unsafe partial class VulkanVideoPresenter
             CountDraw();
         }
 
+        void IRenderHost.DrawIndirect(BufferBinding arguments)
+        {
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
+            var command = BeginBatchedGuestCommands();
+            // The executor sends rectangle lists here only when the device fills them natively.
+            if (_boundGraphicsPipeline is { RectangleList: true } entry)
+            {
+                BindNativeRectangleList(entry, command);
+            }
+
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
+            _vk.CmdDrawIndirect(command, new VkBuffer(arguments.Handle), arguments.Offset, 1, 16);
+            _occlusionQueries?.TraceDraw();
+            _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.Draw,
+                _boundGraphicsPipeline?.Id ?? 0, 0, 0);
+            CountDraw();
+        }
+
         void IRenderHost.DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ)
         {
             if (_cmdDrawMeshTasks is null)
@@ -1354,11 +1407,17 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public bool IsMetadata(ulong address) => _imageCache.IsMetadata(address);
 
+        public bool IsHtile(ulong address) => _imageCache.IsHtile(address);
+
         public bool ClearMetadata(ulong address)
         {
             _ = BeginBatchedGuestCommands();
             return _imageCache.ClearMetadata(address);
         }
+
+        public bool ExpandMetadata(ulong address) => _imageCache.ExpandMetadata(address);
+
+        public bool MarkHtileRewritten(ulong address) => _imageCache.MarkHtileRewritten(address);
 
         public bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear)
         {

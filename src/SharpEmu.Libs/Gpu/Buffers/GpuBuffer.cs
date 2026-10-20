@@ -112,6 +112,13 @@ public unsafe class GpuBuffer : IDisposable
             }
         }
 
+        if (result is Result.ErrorOutOfDeviceMemory or Result.ErrorOutOfHostMemory)
+        {
+            vk.DestroyBuffer(device.Device, _handle, null);
+            _handle = default;
+            throw new OutOfMemoryException($"vkAllocateMemory({usage}, 0x{size:X} bytes) failed with {result}");
+        }
+
         RequireSuccess(result, $"vkAllocateMemory({usage}, 0x{size:X} bytes)");
         RequireSuccess(vk.BindBufferMemory(device.Device, _handle, _memory, _memoryOffset), "vkBindBufferMemory");
         _allocationSize = _slab?.Size ?? requirements.Size;
@@ -148,6 +155,9 @@ public unsafe class GpuBuffer : IDisposable
     public Span<byte> Mapped => _mapped == null ? Span<byte>.Empty : new Span<byte>(_mapped, checked((int)Size));
 
     public bool IsCoherent { get; }
+
+    // The host mapping of the whole buffer, or null for memory the host cannot map.
+    public byte* MappedPointer => _mapped;
 
     public GpuBufferUsage Usage { get; }
 
@@ -414,6 +424,9 @@ public unsafe class GpuBuffer : IDisposable
             Size = size,
         };
     }
+
+    // Every memory type the buffer may use is full; the owner can free memory and try again.
+    internal sealed class OutOfMemoryException(string message) : Exception(message);
 
     private static void RequireSuccess(Result result, string operation)
     {

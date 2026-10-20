@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Core.Native;
@@ -45,8 +46,12 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     public bool SupportsDynamicRendering { get; }
     public bool SupportsClipDistance { get; }
     public bool SupportsFragmentShaderBarycentric { get; private init; }
+    public bool SupportsTessellationShader { get; private init; }
     public bool SupportsFillRectangle { get; private init; }
     public bool SupportsMeshShaders { get; private init; }
+
+    // shaderFloat16 is enabled and the device rounds f16 to nearest even and preserves denormals.
+    public bool ExactFloat16Conversion { get; private init; }
     public bool CanRequireComputeSubgroup32 { get; private init; }
     public uint SubgroupSize
     {
@@ -56,6 +61,29 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             var properties = new PhysicalDeviceProperties2 { SType = StructureType.PhysicalDeviceProperties2, PNext = &subgroup };
             Vk.GetPhysicalDeviceProperties2(Physical, &properties);
             return subgroup.SubgroupSize;
+        }
+    }
+
+    // The device was created with the descriptor indexing and null descriptor features the runtime
+    // descriptor heap needs (see RuntimeDescriptorHeap).
+    public bool SupportsRuntimeDescriptors { get; private init; }
+
+    public RuntimeDescriptorHeap.Limits RuntimeDescriptorLimits
+    {
+        get
+        {
+            var indexing = new PhysicalDeviceDescriptorIndexingProperties { SType = StructureType.PhysicalDeviceDescriptorIndexingProperties };
+            var properties2 = new PhysicalDeviceProperties2 { SType = StructureType.PhysicalDeviceProperties2, PNext = &indexing };
+            Vk.GetPhysicalDeviceProperties2(Physical, &properties2);
+            var limits = properties2.Properties.Limits;
+            return new RuntimeDescriptorHeap.Limits(
+                limits.MaxPerStageDescriptorSampledImages,
+                limits.MaxPerStageDescriptorSamplers,
+                indexing.MaxPerStageDescriptorUpdateAfterBindSampledImages,
+                indexing.MaxPerStageDescriptorUpdateAfterBindSamplers,
+                indexing.MaxDescriptorSetUpdateAfterBindSampledImages,
+                indexing.MaxDescriptorSetUpdateAfterBindSamplers,
+                indexing.MaxUpdateAfterBindDescriptorsInAllPools);
         }
     }
 
@@ -326,6 +354,24 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             vk.GetPhysicalDeviceFeatures2(physical, &query);
         }
 
+        const string robustness2Extension = "VK_EXT_robustness2";
+        var indexingFeatures = new PhysicalDeviceDescriptorIndexingFeatures { SType = StructureType.PhysicalDeviceDescriptorIndexingFeatures };
+        var robustness2Features = new PhysicalDeviceRobustness2FeaturesEXT
+        {
+            SType = StructureType.PhysicalDeviceRobustness2FeaturesExt,
+            PNext = &indexingFeatures,
+        };
+        var hasRobustness2 = HasDeviceExtensions(vk, physical, [robustness2Extension]);
+        var indexingQuery = new PhysicalDeviceFeatures2
+        {
+            SType = StructureType.PhysicalDeviceFeatures2,
+            PNext = hasRobustness2 ? &robustness2Features : &indexingFeatures,
+        };
+        vk.GetPhysicalDeviceFeatures2(physical, &indexingQuery);
+        var runtimeDescriptors = hasRobustness2 && robustness2Features.NullDescriptor && indexingFeatures.RuntimeDescriptorArray &&
+            indexingFeatures.ShaderSampledImageArrayNonUniformIndexing && indexingFeatures.DescriptorBindingSampledImageUpdateAfterBind &&
+            indexingFeatures.DescriptorBindingUpdateUnusedWhilePending && indexingFeatures.DescriptorBindingPartiallyBound;
+
         var vulkan13Features = new PhysicalDeviceVulkan13Features
         {
             SType = StructureType.PhysicalDeviceVulkan13Features,
@@ -372,6 +418,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             ShaderInt64 = baseFeatures.ShaderInt64,
             ShaderClipDistance = baseFeatures.ShaderClipDistance,
             ShaderCullDistance = baseFeatures.ShaderCullDistance,
+            TessellationShader = baseFeatures.TessellationShader,
             RobustBufferAccess = baseFeatures.RobustBufferAccess,
             VertexPipelineStoresAndAtomics = baseFeatures.VertexPipelineStoresAndAtomics,
         };
@@ -404,7 +451,55 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             barycentricFeatures.PNext = vulkan13Features.PNext;
             vulkan13Features.PNext = &barycentricFeatures;
         }
+        if (runtimeDescriptors)
+        {
+            indexingFeatures = new PhysicalDeviceDescriptorIndexingFeatures
+            {
+                SType = StructureType.PhysicalDeviceDescriptorIndexingFeatures,
+                RuntimeDescriptorArray = true,
+                ShaderSampledImageArrayNonUniformIndexing = true,
+                DescriptorBindingSampledImageUpdateAfterBind = true,
+                DescriptorBindingUpdateUnusedWhilePending = true,
+                DescriptorBindingPartiallyBound = true,
+                PNext = timelineFeatures.PNext,
+            };
+            robustness2Features = new PhysicalDeviceRobustness2FeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceRobustness2FeaturesExt,
+                NullDescriptor = true,
+                PNext = &indexingFeatures,
+            };
+            timelineFeatures.PNext = &robustness2Features;
+        }
+
+        // Native f16 conversion needs shaderFloat16 and per-width RTE/denorm-preserve control (the
+        // presenter's rule for ExactFloat16ConversionSupported).
+        var float16Features = new PhysicalDeviceShaderFloat16Int8Features
+        {
+            SType = StructureType.PhysicalDeviceShaderFloat16Int8Features,
+        };
+        var float16Query = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &float16Features };
+        vk.GetPhysicalDeviceFeatures2(physical, &float16Query);
+        var floatControls = new PhysicalDeviceFloatControlsProperties { SType = StructureType.PhysicalDeviceFloatControlsProperties };
+        var floatControlsQuery = new PhysicalDeviceProperties2 { SType = StructureType.PhysicalDeviceProperties2, PNext = &floatControls };
+        vk.GetPhysicalDeviceProperties2(physical, &floatControlsQuery);
+        var exactFloat16 = float16Features.ShaderFloat16 && floatControls.ShaderRoundingModeRtefloat16 &&
+            floatControls.ShaderDenormPreserveFloat16 &&
+            floatControls.RoundingModeIndependence == ShaderFloatControlsIndependence.IndependenceAll &&
+            floatControls.DenormBehaviorIndependence == ShaderFloatControlsIndependence.IndependenceAll;
+        if (exactFloat16)
+        {
+            float16Features = new PhysicalDeviceShaderFloat16Int8Features
+            {
+                SType = StructureType.PhysicalDeviceShaderFloat16Int8Features,
+                ShaderFloat16 = true,
+                PNext = timelineFeatures.PNext,
+            };
+            timelineFeatures.PNext = &float16Features;
+        }
+
         var extensionNames = new List<string>();
+        if (runtimeDescriptors) extensionNames.Add(robustness2Extension);
         if (meshShaders)
         {
             meshFeatures = new PhysicalDeviceMeshShaderFeaturesEXT
@@ -448,8 +543,11 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         var result = new HeadlessVulkan(vk, instance, physical, device, queue, family, apiVersion, enabledFeatures, dynamicRendering)
         {
             SupportsFragmentShaderBarycentric = barycentric,
+            SupportsTessellationShader = enabledFeatures.TessellationShader,
             SupportsFillRectangle = fillRectangle,
+            SupportsRuntimeDescriptors = runtimeDescriptors,
             SupportsMeshShaders = meshShaders,
+            ExactFloat16Conversion = exactFloat16,
             CanRequireComputeSubgroup32 = computeSubgroup32,
         };
         if (validation)

@@ -118,6 +118,32 @@ public sealed unsafe class SamplerStore : IDisposable
         return 16.0f;
     }
 
+    private static int _reportedMinmaxWithoutSupport;
+
+    // The S# FILTER_MODE field: 0 blends, 1 takes the minimum, 2 the maximum (depth pyramids,
+    // shadow masks). Null keeps the default weighted average. The caller owns the format
+    // requirement (filter-minmax support for the sampled format), as the Vulkan spec states.
+    internal static SamplerReductionMode? ReductionModeFor(uint filterMode, bool minmaxSupported)
+    {
+        var mode = filterMode switch
+        {
+            1 => SamplerReductionMode.Min,
+            2 => SamplerReductionMode.Max,
+            _ => (SamplerReductionMode?)null,
+        };
+        if (mode is not null && !minmaxSupported)
+        {
+            if (Interlocked.Exchange(ref _reportedMinmaxWithoutSupport, 1) == 0)
+            {
+                Console.Error.WriteLine("[LOADER][WARN] A min/max reduction sampler is blended because VK_EXT_sampler_filter_minmax is unavailable.");
+            }
+
+            return null;
+        }
+
+        return mode;
+    }
+
     private Sampler CreateSampler(in SamplerDescriptorWords words, bool integerView)
     {
         var magnify = integerView ? (uint)SamplerFilter.Point : words.MagnifyFilter;
@@ -167,9 +193,18 @@ public sealed unsafe class SamplerStore : IDisposable
             _ => throw SubmissionScheduler.Fatal($"The border color type is unknown: type={words.BorderColorType}."),
         };
 
+        // Integer views never filter, so there is nothing to reduce.
+        var reductionMode = integerView ? null : ReductionModeFor(words.FilterMode, _device.SamplerFilterMinmaxSupported);
+        var reduction = new SamplerReductionModeCreateInfo
+        {
+            SType = StructureType.SamplerReductionModeCreateInfo,
+            ReductionMode = reductionMode ?? SamplerReductionMode.WeightedAverage,
+        };
+
         var info = new SamplerCreateInfo
         {
             SType = StructureType.SamplerCreateInfo,
+            PNext = reductionMode is null ? null : &reduction,
             MagFilter = ToFilter(magnify),
             MinFilter = ToFilter(minify),
             MipmapMode = mipFilter == SamplerMipFilter.Linear ? SamplerMipmapMode.Linear : SamplerMipmapMode.Nearest,

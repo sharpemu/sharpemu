@@ -62,6 +62,25 @@ public sealed class GuestGpuMemory : IDisposable
         Volatile.Write(ref _images, images);
     }
 
+    // The host GPU detaches its stores after its caches have released every page watch. A
+    // teardown that unmaps guest memory waits here first: until then queued GPU work may still
+    // read it. False when the stores were still attached at the deadline.
+    public bool WaitForStoresDetached(TimeSpan timeout)
+    {
+        var deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+        while (Buffers is not null || Images is not null)
+        {
+            if (Environment.TickCount64 >= deadline)
+            {
+                return false;
+            }
+
+            Thread.Sleep(10);
+        }
+
+        return true;
+    }
+
     // Retry after recovery, including a watch removed before the fault reached its store.
     public bool TryResolveFault(FaultKind kind, ulong address)
     {

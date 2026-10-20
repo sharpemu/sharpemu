@@ -152,6 +152,24 @@ public sealed class RenderExecutorStateTests : IDisposable
         Assert.Equal(state.FrontStencil, state.BackStencil);
     }
 
+    // A draw that writes stencil marks the depth image written, which carries the mark to the
+    // guest stencil plane; a draw that only tests it does not.
+    [Theory]
+    [InlineData(3, true)]
+    [InlineData(0, false)]
+    public void Attachments_AStencilWritingDrawMarksTheDepthImageWritten(int passOperation, bool marked)
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.DepthTarget = RegisterWords.Depth(DepthBase, 64, 64, stencilBase: StencilBase) with { DepthControl = 0x1 | 0x2 | 0x4 | (7u << 4) | (7u << 8) };
+        banks.Context.StencilMask = new StencilMaskRegisters { TestValue = 0x10, Mask = 0xF0, WriteMask = 0xFF, TestValueBack = 0x10, MaskBack = 0xF0, WriteMaskBack = 0xFF };
+        banks.Context.StencilControl = new StencilControlRegisters { Pass = (byte)passOperation, PassBack = (byte)passOperation };
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        var transition = Assert.Single(_host.Calls, call => call.StartsWith("transition_depth ", StringComparison.Ordinal));
+        Assert.Equal(marked, transition.Contains(nameof(ImageAspectFlags.StencilBit), StringComparison.Ordinal));
+        Assert.Equal(marked, _host.Calls.Contains("mark_written 2"));
+    }
+
     // A slot without a mask nibble is never bound, so every bound attachment writes.
     [Fact]
     public void DynamicState_ColorWriteEnableFollowsTheTargetMaskNibbleOfTheBoundSlot()
@@ -336,6 +354,96 @@ public sealed class RenderExecutorStateTests : IDisposable
 
         var rendering = _host.BegunRenderings[0];
         Assert.Equal((expectedColors, expectedExtent, expectedExtent), (rendering.ColorAttachmentCount, rendering.Width, rendering.Height));
+    }
+
+    [Theory]
+    [InlineData(0xFu, 0xF000Fu, 1u, 64u, true, false)]
+    [InlineData(0xF0u, 0xF000Fu, 1u, 32u, false, true)]
+    [InlineData(0xFFu, 0xF000Fu, 2u, 32u, true, true)]
+    [InlineData(0xF0000u, 0xF000Fu, 0u, 64u, false, false)]
+    [InlineData(0u, 0xF000Fu, 0u, 64u, false, false)]
+    [InlineData(0xF0u, 0xFu, 0u, 64u, false, false)]
+    public void Attachments_DepthPassRetainsOnlyTargetsFedByWrittenExports(
+        uint exportMasks, uint targetMask, uint expectedColors, uint expectedExtent,
+        bool expectedSlotZero, bool expectedSlotFour)
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.ColorTargets[4] = RegisterWords.Color(SecondColorBase, 32, 32);
+        banks.Context.RenderTargetMask = targetMask;
+        // Formatted MRT0/MRT1 feed enabled CB slots0/4 respectively.
+        banks.Context.ShaderInterface.ColorShaderMask = 0xF000F;
+        banks.Context.ShaderInterface.TargetOutputModes[0] = 4;
+        banks.Context.ShaderInterface.TargetOutputModes[1] = 4;
+        _pipelines.Graphics = Programs(pixelStage: Stage(new ShaderProgramInfo
+        {
+            Stage = ShaderStageKind.Pixel,
+            PixelColorExportMasks = exportMasks,
+        }));
+
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal((expectedColors, expectedExtent, expectedExtent),
+            (rendering.ColorAttachmentCount, rendering.Width, rendering.Height));
+        Assert.Equal(expectedSlotZero, _host.Calls.Any(call => call.StartsWith("acquire_color 0 ", StringComparison.Ordinal)));
+        Assert.Equal(expectedSlotFour, _host.Calls.Any(call => call.StartsWith("acquire_color 4 ", StringComparison.Ordinal)));
+        Assert.Contains($"create_graphics_pipeline colors={expectedColors} depth=True topology=TriangleList restart=False", _pipelines.Calls);
+    }
+
+    // An instance-ID pass: MRT0 feeds a 16-bit slot 0 while slots 1..7 all name one 32-bit
+    // surface no export reaches. With the object/primitive ID mode the hardware writes that
+    // surface itself, so it stays bound (once); without it the slot is unwritten and dropped.
+    [Theory]
+    [InlineData(0x2u, ChannelLayout.Bits32, ChannelType.UInt, 2u)]
+    [InlineData(0x0u, ChannelLayout.Bits32, ChannelType.UInt, 1u)]
+    [InlineData(0x2u, ChannelLayout.Bits32, ChannelType.Float, 1u)]
+    [InlineData(0x2u, ChannelLayout.Bits16, ChannelType.UInt, 1u)]
+    public void Attachments_ObjectPrimitiveIdModeRetainsTheUnexportedIdTargetOnce(
+        uint objectPrimitiveIdControl, ChannelLayout idLayout, ChannelType idType, uint expectedColors)
+    {
+        Libs.Gpu.Pipelines.ObjectPrimitiveIdTarget.Supported = true;
+        var banks = Banks(withDepth: true);
+        banks.Context.ColorTargets[0] = RegisterWords.Color(ColorBase, 64, 64, layout: ChannelLayout.Bits16, type: ChannelType.UInt);
+        for (var slot = 1; slot < 8; slot++)
+        {
+            banks.Context.ColorTargets[slot] = RegisterWords.Color(SecondColorBase, 64, 64, layout: idLayout, type: idType);
+        }
+
+        banks.Context.RenderTargetMask = 0xFFFFFFFF;
+        banks.Context.ObjectPrimitiveIdControl = objectPrimitiveIdControl;
+        banks.Context.ShaderInterface.ColorShaderMask = 0x1;
+        banks.Context.ShaderInterface.TargetOutputModes[0] = 1;
+        _pipelines.Graphics = Programs(pixelStage: Stage(new ShaderProgramInfo { Stage = ShaderStageKind.Pixel, PixelColorExportMasks = 0x1 }));
+
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal(expectedColors, rendering.ColorAttachmentCount);
+        Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color 0 ", StringComparison.Ordinal));
+        Assert.Equal(expectedColors == 2, _host.Calls.Any(call => call.StartsWith("acquire_color 1 ", StringComparison.Ordinal)));
+        for (var slot = 2; slot < 8; slot++)
+        {
+            Assert.DoesNotContain(_host.Calls, call => call.StartsWith($"acquire_color {slot} ", StringComparison.Ordinal));
+        }
+
+        Assert.Contains($"create_graphics_pipeline colors={expectedColors} depth=True topology=TriangleList restart=False", _pipelines.Calls);
+    }
+
+    [Fact]
+    public void Attachments_DepthPassDropsATargetThatNoFormattedExportReaches()
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.ColorTargets[2] = RegisterWords.Color(SecondColorBase, 32, 32);
+        banks.Context.RenderTargetMask = 0xF00;
+        banks.Context.ShaderInterface.ColorShaderMask = 0xF000F;
+        banks.Context.ShaderInterface.TargetOutputModes[0] = 4;
+        banks.Context.ShaderInterface.TargetOutputModes[1] = 4;
+
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        var rendering = Assert.Single(_host.BegunRenderings);
+        Assert.Equal((0u, 64u, 64u), (rendering.ColorAttachmentCount, rendering.Width, rendering.Height));
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("acquire_color ", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -586,10 +694,10 @@ public sealed class RenderExecutorStateTests : IDisposable
         AssertOrder(
             "preparation_begin",
             "prepare_bindings Vertex",
-            "bind_resources 2",
-            "upload_transient 6 align=16",
             "wrap_refused acquire_color",
             "acquire_color 0",
+            "bind_resources 2",
+            "upload_transient 6 align=16",
             "commit Graphics",
             "draw_indexed 3 1 0 0 0",
             "preparation_end",

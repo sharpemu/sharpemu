@@ -11,6 +11,7 @@ namespace SharpEmu.Libs.Gpu.Pipelines;
 // Everything a host pipeline creation reads for one graphics pipeline.
 public sealed class GraphicsPipelineDescription
 {
+    public TessellationPipelineStages? Tessellation { get; init; }
     public required PipelineRenderingState Rendering { get; init; }
     public required PipelineVertexInputState VertexInput { get; init; }
     public required VertexInputInfo VertexInfo { get; init; }
@@ -21,6 +22,8 @@ public sealed class GraphicsPipelineDescription
     public ShaderProgramInfo? PixelStage { get; init; }
     public required PipelineStaticParameters StaticParameters { get; init; }
 }
+
+public sealed record TessellationPipelineStages(ShaderProgram Control, ShaderProgram Evaluation, uint InputControlPoints);
 
 public sealed class ComputePipelineDescription
 {
@@ -49,6 +52,11 @@ internal interface IShaderPipelineHost
 {
     uint MaxPushDescriptors { get; }
 
+    // The host serves shaders that read their image and sampler descriptors at run time
+    // (RuntimeDescriptorTable): it keeps the persistent descriptor heap and fills the lookup table.
+    // Plans for a host without it keep the null fallback for a descriptor they cannot bind ahead of time.
+    bool RuntimeImageDescriptorsSupported => false;
+
     bool ComputeWave64Supported { get; }
 
     // True when a 64-invocation wave64 compute workgroup runs as one 64-lane host subgroup.
@@ -64,6 +72,10 @@ internal interface IShaderPipelineHost
     // emitted as real 64-bit atomics instead of a non-atomic 32-bit pair.
     bool SharedInt64AtomicsEnabled { get; }
     bool ShaderSignedZeroInfNanPreserveFloat32Supported => false;
+
+    // The device rounds f16 conversions to nearest even and preserves 16-bit denormals, so a shader
+    // converts f16 natively instead of through the integer emulation.
+    bool ExactFloat16ConversionSupported => false;
     bool ExecGuardElisionEnabled => true;
     ShaderPrewarmList? ShaderPrewarm => null;
     bool PerVertexPixelInputsSupported => true;

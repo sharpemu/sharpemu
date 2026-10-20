@@ -23,7 +23,6 @@ internal static partial class RegisterWriters
     [
         SpiShaderPaceIdPs, SpiGraphicsShaderControlPs, SpiShaderPaceIdGs, SpiShaderPgmRsrc4Gs, SpiGraphicsShaderControlGs,
         SpiShaderPgmChksumHs, SpiShaderPgmRsrc4Hs, SpiGraphicsShaderControlHs,
-        SpiShaderUserDataAddrLoHs, SpiShaderUserDataAddrHiHs,
     ];
 
     public static void FillShader(RegisterPacketWriter?[] direct, RegisterWriter?[] indirect)
@@ -78,6 +77,12 @@ internal static partial class RegisterWriters
         direct[SpiGraphicsShaderControlHs] = ForwardShaderPacket;
         direct[SpiShaderUserDataAddrLoHs] = ForwardShaderPacket;
         direct[SpiShaderUserDataAddrHiHs] = ForwardShaderPacket;
+        // Unlike program addresses, these registers contain byte-address
+        // bits 0..31 and 32..47, consumed directly by merged LS/HS s0:s1.
+        indirect[SpiShaderUserDataAddrLoHs] = static (banks, _, value) =>
+            banks.Shader.Vertex.HullUserDataAddress = (banks.Shader.Vertex.HullUserDataAddress & 0xFFFF_0000_0000ul) | value;
+        indirect[SpiShaderUserDataAddrHiHs] = static (banks, _, value) =>
+            banks.Shader.Vertex.HullUserDataAddress = (banks.Shader.Vertex.HullUserDataAddress & uint.MaxValue) | ((ulong)(value & 0xFFFFu) << 32);
 
         indirect[SpiShaderUserDataAddrLoPs] = static (banks, _, value) => banks.Shader.Pixel.UserDataAddress = (banks.Shader.Pixel.UserDataAddress & 0xFFFF_FFFF_0000_0000ul) | value;
         indirect[SpiShaderUserDataAddrHiPs] = static (banks, _, value) => banks.Shader.Pixel.UserDataAddress = (banks.Shader.Pixel.UserDataAddress & uint.MaxValue) | ((ulong)value << 32);

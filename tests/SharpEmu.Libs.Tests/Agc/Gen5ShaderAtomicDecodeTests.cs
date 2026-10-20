@@ -153,6 +153,15 @@ public sealed class Gen5ShaderAtomicDecodeTests
     }
 
     [Fact]
+    public void SSleep_Decodes()
+    {
+        // S_SLEEP 2 (SOPP op 0x0E)
+        var instruction = DecodeSingle(0xBF8E0002);
+
+        Assert.Equal("SSleep", instruction.Opcode);
+    }
+
+    [Fact]
     public void DsAddU32_HasAddressAndDataSourcesButNoDestination()
     {
         // DS_ADD_U32 v0, v1
