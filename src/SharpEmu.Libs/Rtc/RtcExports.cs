@@ -391,6 +391,14 @@ public static class RtcExports
             return validationResult;
         }
 
+        // ValidateRtcDateTime accepts years 1-9999, but the DOS field is a 7-bit offset from
+        // 1980 and only spans 1980-2107. Out-of-range years otherwise wrap into a valid-looking
+        // date (1979 packs identically to 2107) and the call still reports success.
+        if (time.Year < 1980 || time.Year > 2107)
+        {
+            return unchecked((int)0x80B50008);
+        }
+
         uint dosTime = 0;
         dosTime |= (uint)((time.Second / 2) & 0x1F);
         dosTime |= (uint)(time.Minute & 0x3F) << 5;
