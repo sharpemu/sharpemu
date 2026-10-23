@@ -238,7 +238,7 @@
   "Updater.Status.Timeout": "Güncelleme denetimi 10 saniye sonra zaman aşımına uğradı.",
   "Updater.Status.Failed": "Güncellemeler denetlenemedi.",
   "Updater.Status.ChecksumFailed": "İndirilen güncelleme SHA-256 doğrulamasını geçemedi.",
-  "Updater.Status.Unsupported": "Otomatik güncelleme Windows, Linux veya macOS x64 build'i gerektirir.",
+  "Updater.Status.Unsupported": "Otomatik güncelleme Windows veya Linux x64 build'i gerektirir.",
 
   "Library.Context.GameSettings": "Oyun ayarları…",
   "Options.Env.Tab": "Ortam",

@@ -217,7 +217,7 @@ public sealed class SelfLoader : ISelfLoader
                 if (!physicalVm.TryAllocateAtExact(imageBase, totalImageSize, executable: true, out var allocatedBase))
                 {
                     // Exact allocation failed — the host may have already claimed
-                    // part of this range (ASLR, Rosetta 2, or another process).
+                    // part of this range (ASLR or another process).
                     // Try backing the fixed range page by page to claim whatever
                     // free gaps exist. If the whole range is occupied the backfill
                     // returns false and we surface the original failure reason.

@@ -282,14 +282,6 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
             BytesPerBlock = blockBytes,
         };
         var image = harness.CreateImage(description);
-        if ((image.Backing.Flags & ImageCreateFlags.CreateBlockTexelViewCompatibleBit) == 0)
-        {
-            Assert.True(OperatingSystem.IsMacOS());
-            Assert.Equal((ImageUsageFlags)0, image.Backing.Usage & ImageUsageFlags.StorageBit);
-            image.GetOrCreateView(ImageViewDescription.Default with { Format = imageFormat });
-            harness.AssertNoValidationMessages();
-            return;
-        }
         var storageFeatures = _vulkan.DeviceInfo.GetFormatProperties(storageFormat).OptimalTilingFeatures;
         var supportsStorage = (storageFeatures & FormatFeatureFlags.StorageImageBit) != 0 &&
             _vulkan.DeviceInfo.TryGetImageFormatProperties(imageFormat, ImageType.Type2D, ImageTiling.Optimal,

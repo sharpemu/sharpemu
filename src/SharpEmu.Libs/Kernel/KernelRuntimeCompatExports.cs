@@ -1821,8 +1821,8 @@ public static class KernelRuntimeCompatExports
     // (currently 64-bit Windows); otherwise it falls back to the QPC-based Stopwatch. The
     // calibrated and CPUID frequencies both describe RDTSC, so reporting either while ReadTsc is
     // actually returning Stopwatch ticks makes sceKernelGetTscFrequency disagree with the counter,
-    // and a guest computing elapsed = readTscDelta / frequency gets the wrong time on Linux and
-    // macOS. Gate those on rdtscAvailable; otherwise report Stopwatch's own frequency so the pair
+    // and a guest computing elapsed = readTscDelta / frequency gets the wrong time on Linux. Gate
+    // those on rdtscAvailable; otherwise report Stopwatch's own frequency so the pair
     // stays consistent.
     internal static (ulong FrequencyHz, string Source) SelectKernelTscFrequency(
         bool rdtscAvailable,

@@ -178,13 +178,8 @@ public sealed class GuestMemoryAllocatorTests
     }
 
     [Fact]
-    public void AlignedAllocationDoesNotRetainOverallocatedMappingsOutsideMacOS()
+    public void AlignedAllocationDoesNotRetainOverallocatedMappings()
     {
-        if (OperatingSystem.IsMacOS())
-        {
-            return;
-        }
-
         const ulong desiredAddress = 0x00005000_0000_0123;
         const ulong alignment = 0x10000;
         const ulong alignedAddress = 0x00005000_0001_0000;
@@ -208,9 +203,6 @@ public sealed class GuestMemoryAllocatorTests
     [InlineData(HostRegionState.Reserved)]
     public void AddressSearchSkipsLargeHostView(HostRegionState state)
     {
-        if (OperatingSystem.IsMacOS())
-            return;
-
         const ulong viewStart = 0x1_0000_0000;
         const ulong viewSize = 0x4_0000_0000;
         using var memory = new PhysicalVirtualMemory(new FakeHostMemory(viewStart, viewSize, state));

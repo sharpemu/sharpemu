@@ -12,7 +12,7 @@ namespace SharpEmu.Libs.Tests.Kernel;
 // tests pin the case-sensitive-host behavior: a cached miss for one casing
 // must never shadow a differently-cased path whose probe would succeed, and
 // mount containment must not accept a case-sibling escape. On case-insensitive
-// hosts (Windows, default macOS volumes) the aliased paths genuinely are the
+// hosts (Windows) the aliased paths genuinely are the
 // same file, so the case-specific sections skip themselves.
 [Collection(KernelMemoryCompatStateCollection.Name)]
 public sealed class KernelPathCaseSensitivityTests : IDisposable

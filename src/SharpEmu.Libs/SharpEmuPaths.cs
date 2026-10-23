@@ -12,11 +12,10 @@ namespace SharpEmu.Libs;
 /// logs and dumps.
 ///
 /// The emulator is portable by default and keeps its data next to the
-/// executable. System-style installs (package managers, Program Files,
-/// /Applications) own a read-only executable directory, so there the data
-/// falls back to the platform's per-user application directory:
-/// <c>~/.local/share/SharpEmu</c> (XDG) on Linux, <c>%APPDATA%\SharpEmu</c>
-/// on Windows and <c>~/Library/Application Support/SharpEmu</c> on macOS.
+/// executable. System-style installs (package managers, Program Files) own a
+/// read-only executable directory, so there the data falls back to the
+/// platform's per-user application directory: <c>~/.local/share/SharpEmu</c>
+/// (XDG) on Linux and <c>%APPDATA%\SharpEmu</c> on Windows.
 /// The GUI's portable-data option writes a <c>portable.txt</c> marker beside
 /// the executable that forces the portable layout regardless of writability.
 /// <c>SHARPEMU_USER_DIR</c> overrides the choice on every platform.

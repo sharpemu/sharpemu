@@ -3,7 +3,6 @@
 
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
-using SharpEmu.ShaderCompiler.Metal;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
@@ -106,7 +105,6 @@ public sealed class DescriptorBindingAliasTests
             BindingLayout.CollectUserDataRegisters(plan.Graph.Program, 0, 2), false, true, false);
         var request = new ShaderCompileRequest(plan, resources, layout);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
     }
 
     // The images of an indirect table keep their own bindings, so equal words among them form no group: a table that

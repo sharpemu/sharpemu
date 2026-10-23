@@ -6,7 +6,7 @@ using SharpEmu.ShaderCompiler;
 
 namespace SharpEmu.Libs.Agc;
 
-// Descriptor helpers shared by the Vulkan bindings and Metal snapshots.
+// Descriptor helpers shared by the Vulkan bindings.
 public static partial class AgcExports
 {
     // BCn block-compressed guest formats and the bytes per 4x4 block.

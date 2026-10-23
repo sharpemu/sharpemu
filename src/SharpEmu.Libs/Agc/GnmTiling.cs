@@ -23,7 +23,7 @@ internal enum DetileEquation
 /// Backend-agnostic description of how to deswizzle one surface, produced by
 /// <see cref="GnmTiling.GetDetileParams"/>. Holds only plain integers and small
 /// int[] tables — no host graphics-API types — so it can cross the guest-GPU
-/// backend seam and drive a Vulkan (SPIR-V) or Metal (MSL) detile compute kernel
+/// backend seam and drive a Vulkan (SPIR-V) detile compute kernel
 /// identically to the CPU <see cref="GnmTiling.TryDetile"/> fallback. The single
 /// shared addressing formula both consume is:
 /// <code>
@@ -752,7 +752,7 @@ internal static unsafe class GnmTiling
 
     /// <summary>
     /// CPU deswizzle driven entirely by a resolved <see cref="DetileParams"/> — the
-    /// exact addressing the Vulkan/Metal compute kernel runs per texel, so a
+    /// exact addressing the Vulkan compute kernel runs per texel, so a
     /// backend that packaged <paramref name="parameters"/> for the GPU path can
     /// fall back to this without re-deriving the swizzle. Copies
     /// <c>ElementsWide * ElementsHigh</c> elements from <paramref name="tiled"/>

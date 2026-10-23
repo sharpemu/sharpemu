@@ -132,7 +132,7 @@ shader address, image index, first-use instruction, and source graph. It records
 the descriptor words and captured user data. Graph entries use node IDs to handle
 cycles. Related flattened-table values come from the existing snapshot, not new
 guest reads. A bounded history retains the latest record for the 512 most recently used
-shader/image/address tuples. Normal Vulkan or Metal shutdown writes this history.
+shader/image/address tuples. Normal Vulkan shutdown writes this history.
 Records include UTC times. Earlier tuples are evicted, not a reason to stop tracing.
 Each graph is limited to 256 nodes and reports truncation. A crash can lose this history.
 `ImageDescriptorTableSource` links each flattened slot to its original memory-read node.

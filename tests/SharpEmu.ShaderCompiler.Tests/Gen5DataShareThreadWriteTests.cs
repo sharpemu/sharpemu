@@ -3,7 +3,6 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
@@ -29,7 +28,6 @@ public sealed class Gen5DataShareThreadWriteTests
         Assert.False(control.Gds);
         var request = Request(CreateReadbackProgram(scalarBase, byteOffset, false));
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
     }
 
     [Fact]
@@ -40,8 +38,6 @@ public sealed class Gen5DataShareThreadWriteTests
             write with { Pc = 8 }, EndProgram(16)));
         Assert.False(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError));
         Assert.Contains("not valid on the global data share", spirvError);
-        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError));
-        Assert.Contains("not valid on the global data share", metalError);
     }
 
     public static Gen5ShaderProgram CreateReadbackProgram(uint scalarBase, uint byteOffset, bool maskOddLanes)

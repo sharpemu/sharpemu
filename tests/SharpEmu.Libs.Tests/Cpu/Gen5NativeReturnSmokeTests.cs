@@ -50,7 +50,7 @@ public sealed class Gen5NativeReturnSmokeTests
 
     private static bool IsSupportedHost =>
         RuntimeInformation.ProcessArchitecture == Architecture.X64 &&
-        (OperatingSystem.IsWindows() || OperatingSystem.IsLinux() || OperatingSystem.IsMacOS());
+        (OperatingSystem.IsWindows() || OperatingSystem.IsLinux());
 
     [Fact]
     public async Task ExtractAndBlendPreserveLivePointerThroughNativeExecution()

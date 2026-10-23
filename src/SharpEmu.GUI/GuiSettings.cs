@@ -104,7 +104,7 @@ public sealed class GuiSettings
     public string DiscordClientId { get; set; } = "1525606762248540221";
 
     // GUI settings live in the user data root (XDG data directory on Linux,
-    // next to the executable on Windows/macOS); see SharpEmuPaths.DataRoot.
+    // next to the executable on Windows); see SharpEmuPaths.DataRoot.
     public static string SettingsPath => Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "gui-settings.json");
 
     public static GuiSettings Load()

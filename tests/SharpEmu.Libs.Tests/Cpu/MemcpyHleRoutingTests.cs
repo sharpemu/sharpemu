@@ -23,7 +23,7 @@ public sealed class MemcpyHleRoutingTests
         Assert.True(
             InvokeIsHlePreferredNid(MemcpyNid),
             $"memcpy ({MemcpyNid}) must route through HLE on every platform. It was previously " +
-            "gated behind OperatingSystem.IsWindows(), which left Linux and macOS on the LLE " +
+            "gated behind OperatingSystem.IsWindows(), which left Linux on the LLE " +
             "intrinsic stub and faulted in guest code. Do not reintroduce an OS condition here.");
     }
 

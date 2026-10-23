@@ -1,7 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -325,8 +324,6 @@ public sealed class DirectImageTableTests
         Assert.Equal(344u + 31 * 32, snapshot.FlattenedResourceTable[mapping + 63]);
         Assert.Equal(2u, snapshot.FlattenedResourceTable[mapping + 64]);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
-        Assert.False(Gen5MslTranslator.TryCompileProgram(request, out _, out error));
-        Assert.Contains("not supported on Metal", error);
     }
 
     [Theory]
@@ -345,7 +342,6 @@ public sealed class DirectImageTableTests
         Assert.Contains(selector.DirectCandidates, candidate => candidate.Offset == 344 + 31 * 32);
         Assert.Equal(2, snapshot.Images.Length);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
     }
 
     [Theory]
@@ -421,7 +417,6 @@ public sealed class DirectImageTableTests
         Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: Read), ref snapshot, ref specialization));
         var (_, _, request) = PrepareDirect(split: split, guarded: true);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
     }
 
     [Theory]

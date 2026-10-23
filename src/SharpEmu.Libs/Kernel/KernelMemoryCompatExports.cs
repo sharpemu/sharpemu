@@ -160,10 +160,8 @@ public static partial class KernelMemoryCompatExports
 
     private static ulong _nextVirtualAddress;
     // Start the address search outside the host memory regions.
-    // On macOS, also exclude the graphics memory region below 0x7000000000.
     private static readonly ulong DefaultMapSearchBase =
-        OperatingSystem.IsWindows() ? 0x1_0000_0000UL :
-        OperatingSystem.IsMacOS() ? 0x70_0000_0000UL : 0x20_0000_0000UL;
+        OperatingSystem.IsWindows() ? 0x1_0000_0000UL : 0x20_0000_0000UL;
     private static ulong _threadAtexitCountCallback;
     private static ulong _threadAtexitReportCallback;
     private static ulong _threadDtorsCallback;

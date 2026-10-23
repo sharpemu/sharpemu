@@ -241,7 +241,7 @@
   "Updater.Status.Timeout": "A verificação de atualizações expirou após 10 segundos.",
   "Updater.Status.Failed": "Não foi possível verificar as atualizações.",
   "Updater.Status.ChecksumFailed": "A atualização baixada falhou na verificação SHA-256.",
-  "Updater.Status.Unsupported": "A atualização automática requer um build x64 para Windows, Linux ou macOS.",
+  "Updater.Status.Unsupported": "A atualização automática requer um build x64 para Windows ou Linux.",
   "Options.Graphics": "Gráficos",
 
   "Options.Console.Type.Label": "Console",

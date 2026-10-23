@@ -254,7 +254,7 @@ public partial class GamePatchesDialog : Window
             Directory.CreateDirectory(_repository.DirectoryPath);
             var start = new ProcessStartInfo
             {
-                FileName = OperatingSystem.IsWindows() ? "explorer.exe" : OperatingSystem.IsMacOS() ? "open" : "xdg-open",
+                FileName = OperatingSystem.IsWindows() ? "explorer.exe" : "xdg-open",
                 UseShellExecute = false,
             };
             start.ArgumentList.Add(_repository.DirectoryPath);

@@ -5,7 +5,6 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Text;
 using SharpEmu.ShaderCompiler;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
@@ -128,16 +127,6 @@ public sealed class Gen5PixelOutputMappingTests
             .Select(instruction => instruction.Operands[^1]).ToArray();
         Assert.Equal(Enumerable.Range(0, 4).Where(component => (enableMask & (1u << component)) == 0)
             .Select(component => (uint)component), preserved);
-
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out error), error);
-        var componentType = signed ? "int" : "uint";
-        var packedType = signed ? "short2" : "ushort2";
-        var components = Enumerable.Range(0, 4).Select(component =>
-            (enableMask & (1u << component)) != 0
-                ? $"{componentType}(as_type<{packedType}>(v[{component >> 1}])[{component & 1}])"
-                : $"sharpemu_out.mrt0[{component}]");
-        Assert.Contains($"vec<{componentType}, 4>({string.Join(", ", components)})", metal.Source);
-        Assert.DoesNotContain("as_type<half2>(v[", metal.Source);
     }
 
     [Fact]
@@ -148,18 +137,15 @@ public sealed class Gen5PixelOutputMappingTests
         var instructions = ReadInstructions(shader.Spirv);
         Assert.Equal(4, instructions.Count(instruction =>
             instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] == 62));
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out error), error);
-        Assert.Contains("(float)as_type<half2>(v[0])[0]", metal.Source);
-        Assert.Contains("(float)as_type<half2>(v[1])[1]", metal.Source);
     }
 
     // SPI_SHADER_COL_FORMAT decides what a compressed export carries: two halves, or two normalized
     // 16-bit values (an engine packs integer bits into a UNORM16 target this way).
     [Theory]
-    [InlineData(Gen5PixelExportFormat.Float16, 62u, "(float)as_type<half2>(v[1])[1]")]
-    [InlineData(Gen5PixelExportFormat.Unorm16, 61u, "(float(as_type<ushort2>(v[1])[1]) / 65535.0f)")]
-    [InlineData(Gen5PixelExportFormat.Snorm16, 60u, "max(float(as_type<short2>(v[1])[1]) / 32767.0f, -1.0f)")]
-    public void CompressedFloatExportUnpacksItsDeclaredFormat(Gen5PixelExportFormat format, uint unpack, string metalComponent)
+    [InlineData(Gen5PixelExportFormat.Float16, 62u)]
+    [InlineData(Gen5PixelExportFormat.Unorm16, 61u)]
+    [InlineData(Gen5PixelExportFormat.Snorm16, 60u)]
+    public void CompressedFloatExportUnpacksItsDeclaredFormat(Gen5PixelExportFormat format, uint unpack)
     {
         var request = CompressedPixelRequest(Gen5PixelOutputKind.Float, 15, format);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
@@ -167,8 +153,6 @@ public sealed class Gen5PixelOutputMappingTests
             .Where(instruction => instruction.Opcode == SpirvOp.ExtInst && instruction.Operands[3] is 60 or 61 or 62)
             .Select(instruction => instruction.Operands[3]).ToArray();
         Assert.Equal(Enumerable.Repeat(unpack, 4), unpacks);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out error), error);
-        Assert.Contains(metalComponent, metal.Source);
     }
 
     [Theory]
@@ -189,7 +173,6 @@ public sealed class Gen5PixelOutputMappingTests
                 new(1, location, Gen5PixelOutputKind.Float) { Index = blendIndex }],
         };
         Assert.Equal(valid, Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error));
-        Assert.Equal(valid, Gen5MslTranslator.TryCompileProgram(request, out var metal, out _));
         if (!valid) return;
         var instructions = ReadInstructions(shader.Spirv);
         var secondary = Assert.Single(instructions, instruction => instruction.Opcode == SpirvOp.Decorate &&
@@ -198,7 +181,6 @@ public sealed class Gen5PixelOutputMappingTests
             instruction.Operands.SequenceEqual(new uint[] { secondary, (uint)SpirvDecoration.Location, 0 }));
         Assert.True(instructions.Count(instruction => instruction.Opcode == SpirvOp.Store &&
             instruction.Operands[0] == secondary) >= 2, error);
-        Assert.Contains("mrt1 [[color(0), index(1)]]", metal.Source);
         ValidateDepthModule(shader.Spirv);
     }
 
@@ -223,7 +205,7 @@ public sealed class Gen5PixelOutputMappingTests
     [InlineData(0u, 0u, false)]
     [InlineData(1u, 0u, true)]
     [InlineData(0u, 1u, true)]
-    public void BothEmittersRequireUniqueContiguousHostLocations(uint firstLocation, uint secondLocation, bool valid)
+    public void EmitterRequiresUniqueContiguousHostLocations(uint firstLocation, uint secondLocation, bool valid)
     {
         var program = ResourceTestProgram.Program(ResourceTestProgram.EndProgram(0));
         var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
@@ -236,11 +218,9 @@ public sealed class Gen5PixelOutputMappingTests
             ],
         };
         Assert.Equal(valid, Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError));
-        Assert.Equal(valid, Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError));
         if (!valid)
         {
             Assert.Contains("host locations", spirvError);
-            Assert.Contains("host locations", metalError);
         }
     }
 

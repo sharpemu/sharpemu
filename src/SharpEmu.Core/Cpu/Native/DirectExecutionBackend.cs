@@ -151,7 +151,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 
 	// See CpuDispatcher: the 0x7FFx window is Windows-only; POSIX hosts
-	// (dyld shared cache, Rosetta 2 runtime) use 0x6FFx instead.
+	// use 0x6FFx instead.
 	private static readonly ulong GuestThreadStackBaseAddress = OperatingSystem.IsWindows() ? 0x7FFF_E000_0000UL : 0x6FFF_E000_0000UL;
 
 	private static readonly ulong GuestThreadTlsBaseAddress = OperatingSystem.IsWindows() ? 0x7FFE_0000_0000UL : 0x6FFE_0000_0000UL;
@@ -637,7 +637,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	// A guest pthread may block and resume hundreds of times per second. Creating
 	// a new host Thread for every resume is especially costly for audio workers
-	// and eventually floods macOS with short-lived FMOD threads. Keep one dormant
+	// and eventually floods the host with short-lived FMOD threads. Keep one dormant
 	// host executor per guest pthread and signal it for each runnable slice.
 	private sealed class GuestExecutionRunner : IDisposable
 	{
@@ -1271,7 +1271,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		_patchedEa020eLookupCall = false;
 		MarkExecutionProgress();
 		BindTlsBase(context);
-		RouteGuestAccessFaultsToSignals();
 		var previousGuestThreadScheduler = GuestThreadExecution.Scheduler;
 		GuestThreadExecution.Scheduler = this;
 		try
@@ -1321,7 +1320,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	{
 		Console.Error.WriteLine($"[LOADER][INFO] Setting up {importStubs.Count} import stubs...");
 		ClearImportHandlerTrampolines();
-		ConfigureGuestFastPath();
 		_importEntries = new ImportStubEntry[importStubs.Count];
 		HashSet<ulong> hashSet = new HashSet<ulong>(importStubs.Keys);
 		int num = 0;
@@ -1388,10 +1386,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				LastError = "Failed to create import trampoline for NID " + text2;
 				return false;
 			}
-			if (TryCreateGuestFastPathStub(text2, num5, out var fastPathStub))
-			{
-				num5 = fastPathStub;
-			}
 			if (_logAllImports)
 			{
 				Console.Error.WriteLine($"[LOADER][DEBUG] SetupImportStubs: Trampoline for {text2} -> 0x{num5:X16}");
@@ -1404,7 +1398,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			num2++;
 			num++;
 		}
-		Console.Error.WriteLine($"[LOADER][INFO] Setup {num2}/{importStubs.Count} import stubs (direct bridge, lle_redirects={num3}, fast_path_stubs={_guestFastPathStubCount})");
+		Console.Error.WriteLine($"[LOADER][INFO] Setup {num2}/{importStubs.Count} import stubs (direct bridge, lle_redirects={num3})");
 		return num2 == importStubs.Count;
 	}
 
@@ -1488,11 +1482,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 				var importIndex = currentEntries.Length + i;
 				var trampoline = CreateImportHandlerTrampoline(importIndex);
-				if (trampoline != 0 &&
-					TryCreateGuestFastPathStub(nid, trampoline, out var runtimeFastPathStub))
-				{
-					trampoline = runtimeFastPathStub;
-				}
 				if (trampoline == 0 || !PatchImportStub((nint)(long)address, trampoline))
 				{
 					error = $"failed to install runtime import trampoline at 0x{address:X16}";
@@ -6291,12 +6280,9 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			_activeGuestThreadYieldRequested = false;
 			_activeGuestThreadYieldReason = null;
 			BindTlsBase(context);
-			RouteGuestAccessFaultsToSignals();
 			byte* ptr2 = (byte*)ptr;
-			// Rosetta does not reliably permit a generated x86 thunk to write data
-			// in the same page from which it is currently executing, even when the
-			// mapping reports PAGE_EXECUTE_READWRITE. Keep mutable transition state
-			// in a separate writable allocation.
+			// Keep mutable transition state in a separate writable allocation so
+			// the generated thunk never writes to the page it is executing from.
 			ulong hostRspSlot = (ulong)hostRspStorage;
 			int offset = 0;
 			ptr2[offset++] = 83;
@@ -6518,7 +6504,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			_activeGuestThreadYieldRequested = false;
 			_activeGuestThreadYieldReason = null;
 			BindTlsBase(context);
-			RouteGuestAccessFaultsToSignals();
 			byte* ptr2 = (byte*)ptr;
 			ulong hostRspSlot = (ulong)hostRspStorage;
 			var emitter = new NativeCodeEmitter(ptr2);
@@ -6792,7 +6777,6 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			_activeGuestThreadYieldRequested = false;
 			_activeGuestThreadYieldReason = null;
 			BindTlsBase(context);
-			RouteGuestAccessFaultsToSignals();
 			byte* ptr2 = (byte*)ptr;
 			ulong num2 = (ulong)hostRspStorage;
 			int num3 = 0;

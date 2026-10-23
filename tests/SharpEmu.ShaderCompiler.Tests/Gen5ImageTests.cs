@@ -3,7 +3,6 @@
 
 using System.Buffers.Binary;
 using SharpEmu.ShaderCompiler;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Vulkan;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Tests.Resources;
@@ -160,19 +159,6 @@ public sealed class Gen5ImageTests
         Assert.All(samples, sample => Assert.Equal(2u, sample.Operands[4]));
         var level = Assert.Single(samples.Select(sample => sample.Operands[5]).Distinct());
         Assert.Equal(size.Operands[3], FindResult(instructions, SpirvOp.ConvertSToF, level).Operands[2]);
-    }
-
-    [Fact]
-    public void ImageGatherWithALevelOfDetailSamplesTheFourTexelsOfThatLevelOnMetal()
-    {
-        var request = ImageOperationRequest("ImageGather4L", dimension: 1, unifiedFormat: 22u);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var shader, out var error), error);
-
-        // gather() has no level argument either.
-        Assert.DoesNotContain(".gather(", shader.Source);
-        Assert.Contains(".get_num_mip_levels()", shader.Source);
-        Assert.Equal(4, shader.Source.Split(".sample(").Length - 1);
-        Assert.Equal(4, shader.Source.Split(", level((float)").Length - 1);
     }
 
     [Fact]

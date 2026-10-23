@@ -9,8 +9,7 @@ using SharpEmu.HLE;
 
 namespace SharpEmu.Core.Loader;
 
-// Protect the guest red zone from host exception writes on Windows and macOS.
-// Split unaligned vector stores when Rosetta requires smaller memory accesses.
+// Protect the guest red zone from host exception writes on Windows.
 internal static class GuestRedZonePatcher
 {
     private const int GuestRedZoneBytes = 128;
@@ -79,22 +78,21 @@ internal static class GuestRedZonePatcher
         ArgumentNullException.ThrowIfNull(physicalMemory);
         ArgumentNullException.ThrowIfNull(programHeaders);
 
-        if ((!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS() && !OperatingSystem.IsLinux()) ||
+        if ((!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) ||
             RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
             return default;
         }
 
-        var protectRedZone = (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()) &&
+        var protectRedZone = OperatingSystem.IsWindows() &&
             !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_RED_ZONE_PATCH"), "1", StringComparison.Ordinal);
-        var splitVectorStores = RosettaVectorStorePatch.IsRequired;
         var rewriteInstructions = ShaInstructionRewrite.IsRequired || Sse4aExtractRewrite.IsRequired;
-        if (!protectRedZone && !splitVectorStores && !rewriteInstructions)
+        if (!protectRedZone && !rewriteInstructions)
         {
             return default;
         }
 
-        var hostName = OperatingSystem.IsWindows() ? "Windows" : OperatingSystem.IsMacOS() ? "macOS" : "Linux";
+        var hostName = OperatingSystem.IsWindows() ? "Windows" : "Linux";
 
         if (!TryDecodeFunctionStarts(memory, programHeaders, imageBase, out var functionStarts))
         {
@@ -112,7 +110,7 @@ internal static class GuestRedZonePatcher
         }
 
         var sites = CollectPatchSites(
-            memory, programHeaders, imageBase, functionStarts, protectRedZone, splitVectorStores, rewriteInstructions, out var scan,
+            memory, programHeaders, imageBase, functionStarts, protectRedZone, rewriteInstructions, out var scan,
             large ? new Progress(hostName, "scan", functionStarts.Length) : null);
         sites.Sort(static (left, right) => left.Address.CompareTo(right.Address));
         if (sites.Count == 0)
@@ -128,7 +126,7 @@ internal static class GuestRedZonePatcher
         {
             // Reserve relocation expansion, stack guards, and alignment for each span.
             var relocatedInstructionCount = site.Instructions.Count + (site.TerminalBranch.HasValue ? 1 : 0);
-            requiredBytes = checked(requiredBytes + 32UL + (ulong)relocatedInstructionCount * (splitVectorStores ? 64UL : 32UL));
+            requiredBytes = checked(requiredBytes + 32UL + (ulong)relocatedInstructionCount * 32UL);
         }
         requiredBytes = AlignUp(checked(requiredBytes +
             (ulong)scan.ShaInstructionCount * ShaInstructionRewrite.MaximumExpansionBytes +
@@ -168,7 +166,7 @@ internal static class GuestRedZonePatcher
                 continue;
             }
 
-            if (!TryPatchSite(memory, site, ref trampolineCursor, trampolineEnd, splitVectorStores, rewriteInstructions))
+            if (!TryPatchSite(memory, site, ref trampolineCursor, trampolineEnd, rewriteInstructions))
             {
                 failed++;
                 continue;
@@ -201,7 +199,7 @@ internal static class GuestRedZonePatcher
             $"(control_flow={result.ControlFlowRefusals} branch_target_after={result.BranchTargetRefusals} " +
             $"stack_after={result.StackRefusals} too_short={result.TooShortRefusals} " +
             $"indirect_branch={result.IndirectBranchRefusals}) " +
-            $"rosetta_vector_stores={result.VectorStoreCount} sha_rewrites={result.ShaInstructionCount} " +
+            $"sha_rewrites={result.ShaInstructionCount} " +
             $"trampolines=0x{trampolineBase:X16}+0x{result.TrampolineBytes:X}.");
         if (Sse4aExtractRewrite.IsRequired)
         {
@@ -218,7 +216,6 @@ internal static class GuestRedZonePatcher
         ulong imageBase,
         IReadOnlyList<ulong> functionStarts,
         bool protectRedZone,
-        bool splitVectorStores,
         bool rewriteInstructions,
         out PatchResult result,
         Progress? progress = null)
@@ -228,7 +225,6 @@ internal static class GuestRedZonePatcher
         var functionCount = 0;
         var redZoneFunctionCount = 0;
         var instructionCount = 0;
-        var vectorStoreCount = 0;
         var unrelocatableSites = 0;
         var refusalCounts = new int[6];
         var shaInstructionCount = 0;
@@ -290,7 +286,7 @@ internal static class GuestRedZonePatcher
                      (decoded.Any(static entry => entry.Instruction.MemoryBase == Register.RBP &&
                          unchecked((long)entry.Instruction.MemoryDisplacement64) < 0) &&
                       GuestStackFrameAnalysis.UsesFrameRedZone(decoded.Select(static entry => entry.Instruction).ToArray())));
-                if (!usesRedZone && !splitVectorStores && !rewriteInstructions)
+                if (!usesRedZone && !rewriteInstructions)
                 {
                     continue;
                 }
@@ -324,8 +320,7 @@ internal static class GuestRedZonePatcher
                 var instruction = decoded[instructionIndex].Instruction;
                 var isRewriteSite = rewriteInstructions && CanRewriteInstruction(instruction);
                 if (!isRewriteSite &&
-                    ((!usesRedZone && !(splitVectorStores && RosettaVectorStorePatch.RequiresStoreSplit(instruction))) ||
-                     !IsFaultableGuestMemoryInstruction(instruction)))
+                    (!usesRedZone || !IsFaultableGuestMemoryInstruction(instruction)))
                 {
                     continue;
                 }
@@ -357,10 +352,6 @@ internal static class GuestRedZonePatcher
 
                 sites.Add(span);
                 lastSiteEnd = span.Address + (ulong)span.ByteLength;
-                if (splitVectorStores)
-                {
-                    vectorStoreCount += span.Instructions.Count(static instruction => RosettaVectorStorePatch.RequiresStoreSplit(instruction));
-                }
                 if (rewriteInstructions)
                 {
                     shaInstructionCount += span.Instructions.Count(static instruction =>
@@ -379,7 +370,6 @@ internal static class GuestRedZonePatcher
             RedZoneFunctions = redZoneFunctionCount,
             Instructions = instructionCount,
             CandidateSites = sites.Count,
-            VectorStoreCount = vectorStoreCount,
             UnrelocatableSites = unrelocatableSites,
             ControlFlowRefusals = refusalCounts[(int)SpanRefusal.ControlFlow],
             BranchTargetRefusals = refusalCounts[(int)SpanRefusal.BranchTargetAfter],
@@ -1178,7 +1168,6 @@ internal static class GuestRedZonePatcher
         PatchSite site,
         ref ulong trampolineCursor,
         ulong trampolineEnd,
-        bool splitVectorStores,
         bool rewriteInstructions)
     {
         // A span that starts before the faulting instruction may relocate an
@@ -1199,11 +1188,7 @@ internal static class GuestRedZonePatcher
         var core = prefix is null
             ? site.Instructions
             : site.Instructions.Skip(site.CoreStart).Take(site.CoreCount).ToList();
-        var instructions = splitVectorStores ? RosettaVectorStorePatch.SplitVectorStores(core) : core;
-        if (rewriteInstructions)
-        {
-            instructions = ExpandRewrites(instructions);
-        }
+        var instructions = rewriteInstructions ? ExpandRewrites(core) : core;
         var block = new InstructionBlock(writer, instructions, relocatedAddress);
         if (!BlockEncoder.TryEncode(64, block, out _, out _, BlockEncoderOptions.None))
         {
@@ -1368,8 +1353,6 @@ internal static class GuestRedZonePatcher
         public int Instructions { get; init; }
 
         public int CandidateSites { get; init; }
-
-        public int VectorStoreCount { get; init; }
 
         public int ShaInstructionCount { get; init; }
 

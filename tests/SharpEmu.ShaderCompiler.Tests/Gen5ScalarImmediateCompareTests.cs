@@ -1,7 +1,6 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
@@ -11,19 +10,19 @@ namespace SharpEmu.ShaderCompiler.Tests;
 public sealed class Gen5ScalarImmediateCompareTests
 {
     [Theory]
-    [InlineData("Eq", "==", false)]
-    [InlineData("Lg", "!=", false)]
-    [InlineData("Gt", ">", false)]
-    [InlineData("Ge", ">=", false)]
-    [InlineData("Lt", "<", false)]
-    [InlineData("Le", "<=", false)]
-    [InlineData("Eq", "==", true)]
-    [InlineData("Lg", "!=", true)]
-    [InlineData("Gt", ">", true)]
-    [InlineData("Ge", ">=", true)]
-    [InlineData("Lt", "<", true)]
-    [InlineData("Le", "<=", true)]
-    public void ImmediateExtensionMatchesComparisonType(string comparison, string operation, bool signed)
+    [InlineData("Eq", false)]
+    [InlineData("Lg", false)]
+    [InlineData("Gt", false)]
+    [InlineData("Ge", false)]
+    [InlineData("Lt", false)]
+    [InlineData("Le", false)]
+    [InlineData("Eq", true)]
+    [InlineData("Lg", true)]
+    [InlineData("Gt", true)]
+    [InlineData("Ge", true)]
+    [InlineData("Lt", true)]
+    [InlineData("Le", true)]
+    public void ImmediateExtensionMatchesComparisonType(string comparison, bool signed)
     {
         foreach (var immediate in new uint[] { 0x7FFF, 0x8000, 0xFFFF })
         {
@@ -45,13 +44,6 @@ public sealed class Gen5ScalarImmediateCompareTests
                 _ => signed ? SpirvOp.SLessThanEqual : SpirvOp.ULessThanEqual,
             };
             Assert.Equal(expected, ReadComparisonImmediate(actualShader.Spirv, comparisonOpcode));
-
-            Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metalShader, out error), error);
-            var constant = $"0x{expected:X}u";
-            var condition = signed
-                ? $"scc = as_type<int>(s[4]) {operation} as_type<int>({constant});"
-                : $"scc = (s[4]) {operation} ({constant});";
-            Assert.Contains(condition, metalShader.Source);
         }
     }
 

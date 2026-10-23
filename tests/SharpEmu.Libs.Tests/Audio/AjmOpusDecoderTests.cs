@@ -12,8 +12,7 @@ public sealed class NativeOpusFactAttribute : FactAttribute
 {
     public NativeOpusFactAttribute()
     {
-        var library = OperatingSystem.IsWindows() ? "swresample-5.dll"
-            : OperatingSystem.IsMacOS() ? "libswresample.5.dylib" : "libswresample.so.5";
+        var library = OperatingSystem.IsWindows() ? "swresample-5.dll" : "libswresample.so.5";
         if (!File.Exists(Path.Combine(AppContext.BaseDirectory, "plugins", library)))
             Skip = "Native FFmpeg libraries are not present in the test output's plugins directory.";
     }

@@ -39,7 +39,7 @@ internal static class HostTiming
             var remainingMicroseconds = remainingTicks * 1_000_000 / Stopwatch.Frequency;
             if (remainingMicroseconds > 2200)
             {
-                // Coarse sleep for the bulk; macOS overshoots ~0.5-1.5 ms.
+                // Coarse sleep for the bulk; leave a margin for wake-up overshoot.
                 Thread.Sleep((int)((remainingMicroseconds - 1200) / 1000));
             }
             else if (remainingMicroseconds > 1200)

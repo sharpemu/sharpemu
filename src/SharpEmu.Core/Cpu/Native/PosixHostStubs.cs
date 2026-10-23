@@ -44,11 +44,6 @@ internal static unsafe class PosixHostStubs
 
     public static nint CreateWorkerEvent()
     {
-        if (OperatingSystem.IsMacOS())
-        {
-            return dispatch_semaphore_create(0);
-        }
-
         var semaphore = Marshal.AllocHGlobal(64);
         if (sem_init(semaphore, 0, 0) != 0)
         {
@@ -61,28 +56,11 @@ internal static unsafe class PosixHostStubs
 
     public static bool SignalWorkerEvent(nint handle)
     {
-        if (OperatingSystem.IsMacOS())
-        {
-            _ = dispatch_semaphore_signal(handle);
-            return true;
-        }
-
         return sem_post(handle) == 0;
     }
 
     public static bool WaitWorkerEvent(nint handle, int timeoutMilliseconds)
     {
-        if (OperatingSystem.IsMacOS())
-        {
-            if (timeoutMilliseconds < 0)
-            {
-                return dispatch_semaphore_wait(handle, ulong.MaxValue) == 0;
-            }
-
-            var deadline = dispatch_time(0, timeoutMilliseconds * 1_000_000L);
-            return dispatch_semaphore_wait(handle, deadline) == 0;
-        }
-
         if (timeoutMilliseconds < 0)
         {
             while (sem_wait(handle) != 0)
@@ -113,12 +91,6 @@ internal static unsafe class PosixHostStubs
             return;
         }
 
-        if (OperatingSystem.IsMacOS())
-        {
-            dispatch_release(handle);
-            return;
-        }
-
         _ = sem_destroy(handle);
         Marshal.FreeHGlobal(handle);
     }
@@ -126,46 +98,28 @@ internal static unsafe class PosixHostStubs
     /// <summary>Allocates a pthread TLS key, mirroring kernel32!TlsAlloc.</summary>
     public static uint TlsAlloc()
     {
-        if (OperatingSystem.IsMacOS())
-        {
-            nuint key;
-            return pthread_key_create_mac(&key, 0) == 0 ? (uint)key : uint.MaxValue;
-        }
-
-        uint key32;
-        return pthread_key_create_linux(&key32, 0) == 0 ? key32 : uint.MaxValue;
+        uint key;
+        return pthread_key_create(&key, 0) == 0 ? key : uint.MaxValue;
     }
 
     public static bool TlsFree(uint key)
     {
-        return OperatingSystem.IsMacOS()
-            ? pthread_key_delete_mac((nuint)key) == 0
-            : pthread_key_delete_linux(key) == 0;
+        return pthread_key_delete(key) == 0;
     }
 
     public static bool TlsSetValue(uint key, nint value)
     {
-        return OperatingSystem.IsMacOS()
-            ? pthread_setspecific_mac((nuint)key, value) == 0
-            : pthread_setspecific_linux(key, value) == 0;
+        return pthread_setspecific(key, value) == 0;
     }
 
     public static nint TlsGetValue(uint key)
     {
-        return OperatingSystem.IsMacOS()
-            ? pthread_getspecific_mac((nuint)key)
-            : pthread_getspecific_linux(key);
+        return pthread_getspecific(key);
     }
 
     /// <summary>Stable numeric id of the calling thread (kernel32!GetCurrentThreadId).</summary>
     public static uint GetCurrentThreadId()
     {
-        if (OperatingSystem.IsMacOS())
-        {
-            ulong tid;
-            return pthread_threadid_np(0, &tid) == 0 ? unchecked((uint)tid) : 0u;
-        }
-
         return unchecked((uint)gettid());
     }
 
@@ -261,18 +215,7 @@ internal static unsafe class PosixHostStubs
     private static nint EmitTlsGetValue(byte* page, ref int offset)
     {
         var start = (nint)(page + offset);
-        if (OperatingSystem.IsMacOS())
-        {
-            // On macOS x86-64 pthread keys index the gs-based thread specific
-            // data array directly, so TlsGetValue(index in ecx) collapses to a
-            // single load that clobbers nothing but RAX.
-            Emit(page, ref offset, 0x89, 0xC8);                                     // mov eax, ecx
-            Emit(page, ref offset, 0x65, 0x48, 0x8B, 0x04, 0xC5, 0, 0, 0, 0);       // mov rax, gs:[rax*8]
-            Emit(page, ref offset, 0xC3);                                           // ret
-            return start;
-        }
-
-        // Linux: call pthread_getspecific, preserving the registers that are
+        // Call pthread_getspecific, preserving the registers that are
         // volatile in SysV but non-volatile in Win64 (rsi, rdi).
         var pthreadGetSpecific = NativeLibrary.GetExport(NativeLibrary.Load("libpthread.so.0"), "pthread_getspecific");
         Emit(page, ref offset, 0x56);                                               // push rsi
@@ -344,7 +287,7 @@ internal static unsafe class PosixHostStubs
 
     private static nint ResolveLibcExport(string name)
     {
-        var libc = NativeLibrary.Load(OperatingSystem.IsMacOS() ? "libSystem.dylib" : "libc.so.6");
+        var libc = NativeLibrary.Load("libc.so.6");
         return NativeLibrary.GetExport(libc, name);
     }
 
@@ -363,50 +306,20 @@ internal static unsafe class PosixHostStubs
         offset += sizeof(long);
     }
 
-    [DllImport("libc", EntryPoint = "pthread_key_create", SetLastError = true)]
-    private static extern int pthread_key_create_mac(nuint* key, nint destructor);
-
     [DllImport("libpthread.so.0", EntryPoint = "pthread_key_create", SetLastError = true)]
-    private static extern int pthread_key_create_linux(uint* key, nint destructor);
-
-    [DllImport("libc", EntryPoint = "pthread_key_delete")]
-    private static extern int pthread_key_delete_mac(nuint key);
+    private static extern int pthread_key_create(uint* key, nint destructor);
 
     [DllImport("libpthread.so.0", EntryPoint = "pthread_key_delete")]
-    private static extern int pthread_key_delete_linux(uint key);
-
-    [DllImport("libc", EntryPoint = "pthread_setspecific")]
-    private static extern int pthread_setspecific_mac(nuint key, nint value);
+    private static extern int pthread_key_delete(uint key);
 
     [DllImport("libpthread.so.0", EntryPoint = "pthread_setspecific")]
-    private static extern int pthread_setspecific_linux(uint key, nint value);
-
-    [DllImport("libc", EntryPoint = "pthread_getspecific")]
-    private static extern nint pthread_getspecific_mac(nuint key);
+    private static extern int pthread_setspecific(uint key, nint value);
 
     [DllImport("libpthread.so.0", EntryPoint = "pthread_getspecific")]
-    private static extern nint pthread_getspecific_linux(uint key);
-
-    [DllImport("libc")]
-    private static extern int pthread_threadid_np(nint thread, ulong* threadId);
+    private static extern nint pthread_getspecific(uint key);
 
     [DllImport("libc")]
     private static extern int gettid();
-
-    [DllImport("libc")]
-    private static extern nint dispatch_semaphore_create(long value);
-
-    [DllImport("libc")]
-    private static extern nint dispatch_semaphore_signal(nint semaphore);
-
-    [DllImport("libc")]
-    private static extern nint dispatch_semaphore_wait(nint semaphore, ulong timeout);
-
-    [DllImport("libc")]
-    private static extern ulong dispatch_time(ulong when, long deltaNanoseconds);
-
-    [DllImport("libc")]
-    private static extern void dispatch_release(nint handle);
 
     [DllImport("libc")]
     private static extern int sem_init(nint semaphore, int shared, uint value);

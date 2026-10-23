@@ -286,7 +286,7 @@
   "Updater.Status.Installing": "Установка обновления…",
   "Updater.Status.Timeout": "Проверка обновлений превысила лимит времени в 10 секунд.",
   "Updater.Status.Failed": "Не удалось проверить наличие обновлений.",
-  "Updater.Status.Unsupported": "Автоматическое обновление требует сборку Windows, Linux или macOS x64.",
+  "Updater.Status.Unsupported": "Автоматическое обновление требует сборку Windows или Linux x64.",
 
   "Updater.Status.ChecksumFailed": "Скачанное обновление не прошло проверку SHA-256."
 ,

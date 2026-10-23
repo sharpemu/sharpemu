@@ -363,8 +363,6 @@ public sealed class SpirvBindingDeclarationTests
         Assert.Equal(secondImageType, snapshot.Images[2][3] >> 28);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         Assert.Contains((ushort)SpirvOp.Select, new SpirvModuleInspector(shader.Spirv).Opcodes);
-        Assert.False(SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError));
-        Assert.False(string.IsNullOrWhiteSpace(metalError));
     }
 
     [Theory]

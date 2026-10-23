@@ -289,7 +289,7 @@
   "Updater.Status.Timeout": "Värskenduste kontroll aegus 10 sekundi järel.",
   "Updater.Status.Failed": "Värskendusi ei saanud kontrollida.",
   "Updater.Status.ChecksumFailed": "Allalaaditud värskendus ei läbinud SHA-256 kontrolli.",
-  "Updater.Status.Unsupported": "Automaatne värskendamine nõuab Windowsi, Linuxi või macOS-i x64 versiooni."
+  "Updater.Status.Unsupported": "Automaatne värskendamine nõuab Windowsi või Linuxi x64 versiooni."
 ,
   "Trophies.Title": "Trofeed",
   "Trophies.None": "Sellel mängul pole trofeesid.",

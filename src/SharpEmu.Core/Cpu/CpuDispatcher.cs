@@ -20,9 +20,9 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
     }
 
     // The top of the x86-64 user address space (0x7FFD..0x7FFF) is only
-    // freely mappable on Windows; on macOS/Linux it hosts the dyld shared
-    // cache / vdso and (under Rosetta 2) the translator runtime, so POSIX
-    // hosts use the equivalent layout one slot lower at 0x6FFx.
+    // freely mappable on Windows; on Linux it hosts the vdso and other
+    // runtime mappings, so POSIX hosts use the equivalent layout one slot
+    // lower at 0x6FFx.
     private static readonly ulong StackBaseAddress = OperatingSystem.IsWindows() ? 0x7FFF_F000_0000UL : 0x6FFF_F000_0000UL;
     private const ulong StackSize = 0x0020_0000UL;
     private static readonly ulong TlsBaseAddress = OperatingSystem.IsWindows() ? 0x7FFE_0000_0000UL : 0x6FFE_0000_0000UL;

@@ -58,8 +58,7 @@ public sealed class ImportTrampolineAbiTests
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
             // The production backend emits and initializes x86-64 callback
-            // thunks, so inspect it only in an x64 test process. Apple Silicon
-            // runs this path through the same Rosetta environment as SharpEmu.
+            // thunks, so inspect it only in an x64 test process.
             return;
         }
 

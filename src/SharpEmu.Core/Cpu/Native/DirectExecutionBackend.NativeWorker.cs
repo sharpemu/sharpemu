@@ -750,7 +750,6 @@ public sealed partial class DirectExecutionBackend
 			_activeGuestThreadYieldReason = null;
 			_activeGuestThreadState = _runState;
 			backend.BindTlsBase(_runContext!);
-			RouteGuestAccessFaultsToSignals();
 			TlsSetValue(backend._hostRspSlotTlsIndex, _runHostRspSlot);
 			if (backend._workerDoneEventTlsIndex != uint.MaxValue)
 			{

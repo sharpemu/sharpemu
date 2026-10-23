@@ -15,8 +15,8 @@ public sealed class FiberStackBoundsTests
 
         if (!OperatingSystem.IsWindows())
         {
-            // On macOS gs addresses the pthread TSD: gs:[8] is errno's address. A fiber switch
-            // must not store its stack bounds there.
+            // Off Windows gs does not address the TEB, so a fiber switch must not store its
+            // stack bounds there.
             Assert.Empty(code);
             return;
         }

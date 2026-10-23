@@ -274,8 +274,8 @@ public sealed class GnmTilingDetileTests
         Assert.Equal(expected, actual);
     }
 
-    // The production GnmTiling.DetileWithParams (the active CPU fallback used by
-    // the Metal path under default-on GPU detile) must equal TryDetile for every
+    // The production GnmTiling.DetileWithParams (the CPU fallback for GPU
+    // detile) must equal TryDetile for every
     // supported mode/bpp — same DetileParams addressing, no re-derived swizzle.
     [Theory]
     [InlineData(27u, 2, 384, 200)]
@@ -346,7 +346,7 @@ public sealed class GnmTilingDetileTests
                 mode, w, h, bpp));
         }
 
-        // Actual: the layer-major loop the Vulkan/Metal CPU fallbacks run.
+        // Actual: the layer-major loop the Vulkan CPU fallback runs.
         var actual = new byte[sliceLinearBytes * layers];
         for (var layer = 0; layer < layers; layer++)
         {
@@ -360,7 +360,7 @@ public sealed class GnmTilingDetileTests
     }
 
     // Reference detile driven entirely by DetileParams — the single shared
-    // addressing formula the Vulkan/Metal compute kernel will run per texel.
+    // addressing formula the Vulkan compute kernel will run per texel.
     private static byte[] DetileViaParams(byte[] tiled, DetileParams p, int w, int h, int bpp)
     {
         var linear = new byte[w * h * bpp];

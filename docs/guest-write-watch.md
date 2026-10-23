@@ -37,7 +37,7 @@ tag.
 Use these variables together to scan bulk writes in the
 `0x00000080xxxxxxxx` region.
 
-macOS and Linux:
+Linux:
 
 ```sh
 SHARPEMU_WATCH_BULK_TORN=1 \

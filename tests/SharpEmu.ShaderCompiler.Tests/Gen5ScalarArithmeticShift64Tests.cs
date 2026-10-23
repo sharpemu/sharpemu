@@ -3,7 +3,6 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -25,7 +24,7 @@ public sealed class Gen5ScalarArithmeticShift64Tests
     }
 
     [Fact]
-    public void CompilesOnBothBackends()
+    public void Compiles()
     {
         var program = Program(
             Sop2(0, "SAshrI64", 8, Gen5Operand.Scalar(4), Gen5Operand.Scalar(6)),
@@ -37,9 +36,6 @@ public sealed class Gen5ScalarArithmeticShift64Tests
         var inspector = new SpirvModuleInspector(spirv.Spirv);
         Assert.Contains((ushort)SpirvOp.ShiftRightArithmetic, inspector.Opcodes);
 
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out var metalError), metalError);
-        Assert.Contains("as_type<long>", metal.Source);
-        Assert.Contains("& 63u", metal.Source);
     }
 
     private static Gen5ShaderInstruction Decode(uint word)

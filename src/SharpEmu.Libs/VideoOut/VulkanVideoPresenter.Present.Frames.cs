@@ -795,9 +795,9 @@ internal static unsafe partial class VulkanVideoPresenter
             return destination;
         }
         // Captures the display surface through the store in queue order; presentation reads the copy.
-        // A flip snapshot is created and retired for every flip; on macOS that is a
-        // vkCreateImage plus a vkAllocateMemory (and a Metal texture) about twenty
-        // times a second for the same 1920x1080 target. Keep the retired ones and
+        // A flip snapshot is created and retired for every flip; that is a
+        // vkCreateImage plus a vkAllocateMemory about twenty times a second for
+        // the same 1920x1080 target. Keep the retired ones and
         // hand them back: a snapshot is fully overwritten by the copy that follows
         // (its barrier takes it from Undefined), so its old contents and layout do
         // not matter.

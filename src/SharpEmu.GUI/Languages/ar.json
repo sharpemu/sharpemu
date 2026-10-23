@@ -240,7 +240,7 @@
   "Updater.Status.Timeout": "انتهت مهلة التحقق من التحديثات بعد 10 ثوانٍ.",
   "Updater.Status.Failed": "تعذر التحقق من التحديثات.",
   "Updater.Status.ChecksumFailed": "فشل التحديث المنزَّل في اجتياز تحقق SHA-256.",
-  "Updater.Status.Unsupported": "يتطلب التحديث التلقائي إصدار x64 لنظام Windows أو Linux أو macOS.",
+  "Updater.Status.Unsupported": "يتطلب التحديث التلقائي إصدار x64 لنظام Windows أو Linux.",
   "Options.Graphics": "الرسومات",
 
   "Options.Console.Type.Label": "وحدة التحكم",

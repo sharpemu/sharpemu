@@ -377,9 +377,9 @@ internal static unsafe partial class VulkanVideoPresenter
     {
         if (HostMainThread.IsAvailable)
         {
-            // AppKit windowing traps when touched off the process
-            // main thread on macOS, so hand the whole window loop to the
-            // main-thread pump the CLI parked for us. _thread only marks the
+            // Window work belongs on the process main thread, so hand
+            // the whole window loop to the main-thread pump the CLI
+            // parked for us. _thread only marks the
             // presenter as running; Run() clears it on exit either way.
             _thread = Thread.CurrentThread;
             HostMainThread.SetShutdownRequestHandler(RequestClose);

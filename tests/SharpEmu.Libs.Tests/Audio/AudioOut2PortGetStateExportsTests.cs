@@ -57,7 +57,7 @@ public sealed class AudioOut2PortGetStateExportsTests
     {
         // The call takes one out pointer. Which host address range it lands in is
         // not a signal, and guessing per host silently changed behaviour between
-        // Windows (stacks at 0x7FFF_xxxx_xxxx) and macOS (0x6FFF_xxxx_xxxx).
+        // hosts with different stack ranges.
         var ctx = CreateContext(out var memory);
         ctx[CpuRegister.Rdi] = 0xDE1FF688004DUL;
         ctx[CpuRegister.Rsi] = StateAddress;

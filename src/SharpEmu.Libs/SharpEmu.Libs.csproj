@@ -9,7 +9,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ProjectReference Include="..\SharpEmu.HLE\SharpEmu.HLE.csproj" />
     <ProjectReference Include="..\SharpEmu.Logging\SharpEmu.Logging.csproj" />
     <ProjectReference Include="..\SharpEmu.ShaderCompiler\SharpEmu.ShaderCompiler.csproj" />
-    <ProjectReference Include="..\SharpEmu.ShaderCompiler.Metal\SharpEmu.ShaderCompiler.Metal.csproj" />
     <ProjectReference Include="..\SharpEmu.ShaderCompiler.Vulkan\SharpEmu.ShaderCompiler.Vulkan.csproj" />
     <!-- SysAbi export generator + analyzers (compile-time registry, NID validation). -->
     <ProjectReference Include="..\SharpEmu.SourceGenerators\SharpEmu.SourceGenerators.csproj"

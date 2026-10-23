@@ -241,7 +241,7 @@
   "Updater.Status.Timeout": "A frissítés-ellenőrzés 10 másodperc után túllépte az időkorlátot.",
   "Updater.Status.Failed": "Nem sikerült frissítéseket keresni.",
   "Updater.Status.ChecksumFailed": "A letöltött frissítés nem ment át az SHA-256-ellenőrzésen.",
-  "Updater.Status.Unsupported": "Az automatikus frissítéshez Windows, Linux vagy macOS x64 build szükséges.",
+  "Updater.Status.Unsupported": "Az automatikus frissítéshez Windows vagy Linux x64 build szükséges.",
   "Options.Graphics": "Grafika",
 
   "Options.Console.Type.Label": "Konzol",

@@ -3,7 +3,6 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -34,7 +33,6 @@ public sealed class Gen5ScalarConditionalMoveTests
             ThreadCountX = 1,
         };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
     }
 
     [Theory]
@@ -61,7 +59,7 @@ public sealed class Gen5ScalarConditionalMoveTests
     }
 
     [Fact]
-    public void BackendsCompileConditionalMoveAndRetainOldDestinationInput()
+    public void CompileConditionalMoveAndRetainOldDestinationInput()
     {
         var program = CreateProgram();
         var requiredRegisters = BindingLayout.CollectUserDataRegisters(program, 0, 13);
@@ -75,7 +73,6 @@ public sealed class Gen5ScalarConditionalMoveTests
             ThreadCountX = 1,
         };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
     }
 
     private static Gen5ShaderProgram CreateProgram() => Program(

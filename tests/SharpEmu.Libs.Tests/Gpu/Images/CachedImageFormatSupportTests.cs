@@ -43,88 +43,40 @@ public sealed class CachedImageFormatSupportTests
         Flags = OriginalFlags,
     };
 
-    [Theory]
-    [InlineData(Format.BC1RgbaUnormBlock)]
-    [InlineData(Format.BC7SrgbBlock)]
-    public void MacOsFallbackPreservesCompressedImageSampling(Format format)
-    {
-        var device = new TestImageFormatSupport(supportsBlockViews: false);
-        var configuration = CreateCompressedImageConfiguration(format);
-
-        Assert.True(CachedImage.TrySelectSupportedImageConfiguration(device, ref configuration, allowCompressedImageFallback: true));
-
-        Assert.Equal(3, device.FormatQueryCount);
-        Assert.Equal(OriginalFlags & ~ImageCreateFlags.CreateBlockTexelViewCompatibleBit, configuration.Flags);
-        Assert.Equal(SampledUsage, configuration.Usage);
-        Assert.Equal(format, configuration.Format);
-        Assert.Equal(512u, configuration.Extent.Width);
-        Assert.Equal(256u, configuration.Extent.Height);
-        Assert.Equal(10u, configuration.MipLevels);
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void SupportedImageConfigurationRemainsUnchanged(bool allowCompressedImageFallback)
+    [Fact]
+    public void SupportedImageConfigurationRemainsUnchanged()
     {
         var device = new TestImageFormatSupport(supportsBlockViews: true);
         var configuration = CreateCompressedImageConfiguration(Format.BC1RgbaUnormBlock);
 
-        Assert.True(CachedImage.TrySelectSupportedImageConfiguration(device, ref configuration, allowCompressedImageFallback));
+        Assert.True(CachedImage.TrySelectSupportedImageConfiguration(device, ref configuration));
         Assert.Equal(1, device.FormatQueryCount);
         Assert.Equal(OriginalFlags, configuration.Flags);
         Assert.Equal(SampledUsage | ImageUsageFlags.StorageBit, configuration.Usage);
     }
 
     [Fact]
-    public void DisabledFallbackDoesNotRetryUnsupportedImage()
+    public void UnsupportedBlockViewImageIsNotRetriedWithoutBlockViews()
     {
         var device = new TestImageFormatSupport(supportsBlockViews: false);
         var configuration = CreateCompressedImageConfiguration(Format.BC1RgbaUnormBlock);
 
-        Assert.False(CachedImage.TrySelectSupportedImageConfiguration(device, ref configuration, allowCompressedImageFallback: false));
+        Assert.False(CachedImage.TrySelectSupportedImageConfiguration(device, ref configuration));
         Assert.Equal(2, device.FormatQueryCount);
         Assert.Equal(OriginalFlags, configuration.Flags);
         Assert.Equal(SampledUsage | ImageUsageFlags.StorageBit, configuration.Usage);
     }
 
-    [Theory]
-    [InlineData(false, SampleCountFlags.Count1Bit)]
-    [InlineData(true, SampleCountFlags.Count4Bit)]
-    public void UnsupportedFallbackKeepsOriginalImageConfiguration(bool supportsSampling, SampleCountFlags supportedSampleCounts)
-    {
-        var device = new TestImageFormatSupport(supportsBlockViews: false, supportsSampling, supportedSampleCounts);
-        var configuration = CreateCompressedImageConfiguration(Format.BC7SrgbBlock);
-
-        Assert.False(CachedImage.TrySelectSupportedImageConfiguration(device, ref configuration, allowCompressedImageFallback: true));
-        Assert.Equal(OriginalFlags, configuration.Flags);
-        Assert.Equal(SampledUsage | ImageUsageFlags.StorageBit, configuration.Usage);
-    }
-
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void CompressedImageDropsOnlyStorageWhenDriverRefusesIt(bool allowCompressedImageFallback)
+    [Fact]
+    public void CompressedImageDropsOnlyStorageWhenDriverRefusesIt()
     {
         var device = new TestImageFormatSupport(supportsBlockViews: true, supportsCompressedStorage: false);
         var configuration = CreateCompressedImageConfiguration(Format.BC5UnormBlock);
 
-        Assert.True(CachedImage.TrySelectSupportedImageConfiguration(device, ref configuration, allowCompressedImageFallback));
+        Assert.True(CachedImage.TrySelectSupportedImageConfiguration(device, ref configuration));
         Assert.Equal(2, device.FormatQueryCount);
         Assert.Equal(OriginalFlags, configuration.Flags);
         Assert.Equal(SampledUsage, configuration.Usage);
-    }
-
-    [Fact]
-    public void UncompressedImageDoesNotUseCompressedFallback()
-    {
-        var device = new TestImageFormatSupport(supportsBlockViews: false);
-        var configuration = CreateCompressedImageConfiguration(Format.R8G8B8A8Unorm);
-        configuration.Flags &= ~ImageCreateFlags.CreateBlockTexelViewCompatibleBit;
-
-        Assert.False(CachedImage.TrySelectSupportedImageConfiguration(device, ref configuration, allowCompressedImageFallback: true));
-        Assert.Equal(1, device.FormatQueryCount);
-        Assert.Equal(SampledUsage | ImageUsageFlags.StorageBit, configuration.Usage);
     }
 
     [Theory]

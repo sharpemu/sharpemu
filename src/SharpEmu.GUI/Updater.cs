@@ -404,7 +404,6 @@ public static class Updater
 
         if (OperatingSystem.IsWindows()) return new("win-x64", ".zip", "SharpEmu.exe");
         if (OperatingSystem.IsLinux()) return new("linux-x64", ".tar.gz", "SharpEmu");
-        if (OperatingSystem.IsMacOS()) return new("osx-x64", ".tar.gz", "SharpEmu");
         throw new PlatformNotSupportedException();
     }
 

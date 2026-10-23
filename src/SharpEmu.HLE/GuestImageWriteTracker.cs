@@ -219,8 +219,7 @@ public static unsafe partial class GuestImageWriteTracker
 
     /// <summary>
     /// Exercises the fault-handling path once outside signal context so every
-    /// branch is JIT-compiled (and, under Rosetta 2, translated) before a real
-    /// fault arrives — a cold signal path is silently never entered there.
+    /// branch is JIT-compiled before a real fault arrives.
     /// </summary>
     public static void WarmUp()
     {

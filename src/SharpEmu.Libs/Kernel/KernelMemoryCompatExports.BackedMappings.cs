@@ -19,10 +19,7 @@ public static partial class KernelMemoryCompatExports
     // portions are ever mapped. Windows cannot always create one contiguous
     // placeholder that large after the executable and runtime are loaded.
     private const ulong SparseReservationThreshold = 0x10_0000_0000UL;
-    // macOS reserves 0x10_0000_0000..0x70_0000_0000 for graphics memory (see
-    // DefaultMapSearchBase), so sparse reservations start above that window there.
-    private static ulong SparseReservationBase =>
-        OperatingSystem.IsMacOS() ? 0x70_0000_0000UL : 0x40_0000_0000UL;
+    private const ulong SparseReservationBase = 0x40_0000_0000UL;
     private const ulong UserAddressLimit = 0xFC_0000_0000UL;
     private static FlexibleBackingPool _flexibleBacking =
         new(GuestMemoryLayout.FlexibleOffset, GuestMemoryLayout.FlexibleBytes);

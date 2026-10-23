@@ -16,11 +16,9 @@ namespace SharpEmu.Libs.Tests.Memory;
 public sealed unsafe class GuestImageWriteTrackerTests
 {
     // The tracker aligns to the guest's 4 KiB pages; the mprotect underneath
-    // operates on host pages, which are 16 KiB on Apple Silicon (the emulator
-    // itself always runs with 4 KiB host pages under Rosetta, but this test
-    // host may not). Align the allocation to the largest host page size so
-    // the kernel's rounding stays inside memory this test owns instead of
-    // spilling onto neighbouring heap pages.
+    // operates on host pages, which may be larger. Align the allocation to
+    // 16 KiB so the kernel's rounding stays inside memory this test owns
+    // instead of spilling onto neighbouring heap pages.
     private const nuint TrackedByteCount = 4096;
     private const nuint HostPageAlignment = 16384;
 
@@ -51,7 +49,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
     [NativePageProtectionFact]
     public void GenerationSurvivesDirtyConsume()
     {
-        // Page protection uses mprotect: the tracker serves only the macOS backend.
+        // Page protection uses mprotect, so the tracker runs only on POSIX hosts.
         if (OperatingSystem.IsWindows())
         {
             return;
@@ -83,7 +81,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
     [NativePageProtectionFact]
     public void GenerationIncrementsOncePerArmedLifetime()
     {
-        // Page protection uses mprotect: the tracker serves only the macOS backend.
+        // Page protection uses mprotect, so the tracker runs only on POSIX hosts.
         if (OperatingSystem.IsWindows())
         {
             return;
@@ -115,7 +113,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
     [NativePageProtectionFact]
     public void GenerationCarriesAcrossRangeReplacement()
     {
-        // Page protection uses mprotect: the tracker serves only the macOS backend.
+        // Page protection uses mprotect, so the tracker runs only on POSIX hosts.
         if (OperatingSystem.IsWindows())
         {
             return;
@@ -212,7 +210,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
     [NativePageProtectionFact]
     public void ReadSnapshotRejectsAnOverlappingWrite()
     {
-        // Page protection uses mprotect: the tracker serves only the macOS backend.
+        // Page protection uses mprotect, so the tracker runs only on POSIX hosts.
         if (OperatingSystem.IsWindows())
         {
             return;
@@ -311,7 +309,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
     [NativePageProtectionFact]
     public void ProtectedTrackArmsWriteProtection()
     {
-        // Page protection uses mprotect: the tracker serves only the macOS backend.
+        // Page protection uses mprotect, so the tracker runs only on POSIX hosts.
         if (OperatingSystem.IsWindows())
         {
             return;
@@ -339,7 +337,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
     [Fact]
     public void ManagedWriterSnapshotDoesNotArmWriteProtection()
     {
-        // Page protection uses mprotect: the tracker serves only the macOS backend.
+        // Page protection uses mprotect, so the tracker runs only on POSIX hosts.
         if (OperatingSystem.IsWindows())
         {
             return;
@@ -378,7 +376,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
     [Fact]
     public void ManagedWriterNotificationInvalidatesReadSnapshot()
     {
-        // Page protection uses mprotect: the tracker serves only the macOS backend.
+        // Page protection uses mprotect, so the tracker runs only on POSIX hosts.
         if (OperatingSystem.IsWindows())
         {
             return;
@@ -411,7 +409,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
     [NativePageProtectionFact]
     public void WriteFaultRemovesTheDirtyImagesPageWatchers()
     {
-        // Page protection uses mprotect: the tracker serves only the macOS backend.
+        // Page protection uses mprotect, so the tracker runs only on POSIX hosts.
         if (OperatingSystem.IsWindows())
         {
             return;
@@ -442,7 +440,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
     [NativePageProtectionFact]
     public void SharedPageStaysProtectedForAnotherImageOwner()
     {
-        // Page protection uses mprotect: the tracker serves only the macOS backend.
+        // Page protection uses mprotect, so the tracker runs only on POSIX hosts.
         if (OperatingSystem.IsWindows())
         {
             return;
@@ -472,7 +470,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
     [NativePageProtectionFact]
     public void BoundaryPageFaultInvalidatesEveryPageOwner()
     {
-        // Page protection uses mprotect: the tracker serves only the macOS backend.
+        // Page protection uses mprotect, so the tracker runs only on POSIX hosts.
         if (OperatingSystem.IsWindows())
         {
             return;
@@ -503,7 +501,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
     [NativePageProtectionFact]
     public void ProtectedTrackPreservesExecutePermission()
     {
-        // Page protection uses mprotect: the tracker serves only the macOS backend.
+        // Page protection uses mprotect, so the tracker runs only on POSIX hosts.
         if (OperatingSystem.IsWindows())
         {
             return;
@@ -538,7 +536,7 @@ public sealed unsafe class GuestImageWriteTrackerTests
     [NativePageProtectionFact]
     public void WatchOnlyTrackDoesNotDowngradeProtectedRange()
     {
-        // Page protection uses mprotect: the tracker serves only the macOS backend.
+        // Page protection uses mprotect, so the tracker runs only on POSIX hosts.
         if (OperatingSystem.IsWindows())
         {
             return;

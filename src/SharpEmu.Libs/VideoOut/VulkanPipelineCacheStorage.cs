@@ -34,12 +34,7 @@ internal static class VulkanPipelineCacheStorage
 
     internal static string GetLegacyPath()
     {
-        var root = OperatingSystem.IsMacOS()
-            ? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                "Library",
-                "Caches")
-            : Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         return Path.Combine(root, "SharpEmu", CacheFileName);
     }
 

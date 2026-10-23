@@ -12,7 +12,7 @@ namespace SharpEmu.GUI;
 /// <summary>
 /// Loops a game's sce_sys/snd0.at9 preview music while the game is selected
 /// in the library, like the console home screen. The ATRAC9 stream is decoded
-/// as SDL3 asks for audio (vendored LibAtrac9) on Windows, Linux and macOS.
+/// as SDL3 asks for audio (vendored LibAtrac9) on Windows and Linux.
 /// </summary>
 internal sealed class SndPreviewPlayer
 {

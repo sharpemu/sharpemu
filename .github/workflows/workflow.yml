@@ -140,8 +140,6 @@ jobs:
         include:
           - os: ubuntu-26.04
             rid: linux-x64
-          - os: macos-latest
-            rid: osx-x64
     env:
       DOTNET_NOLOGO: true
       NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
@@ -170,13 +168,12 @@ jobs:
       - name: Build solution
         run: dotnet build SharpEmu.slnx -c Release --no-restore
 
-      # Also runs on Linux/macOS: the aerolib.bin MSBuild task does platform-sensitive
+      # Also runs on Linux: the aerolib.bin MSBuild task does platform-sensitive
       # path handling, so a cross-platform generation regression surfaces here.
       - name: Run tests
         run: dotnet test SharpEmu.slnx -c Release --no-build --verbosity normal
 
       - name: Build pinned SPIRV-Tools
-        if: matrix.rid == 'linux-x64'
         run: |
           git clone --no-checkout --filter=blob:none https://github.com/KhronosGroup/SPIRV-Tools.git "$RUNNER_TEMP/spirv-tools"
           git -C "$RUNNER_TEMP/spirv-tools" checkout --detach "$SPIRV_TOOLS_COMMIT"
@@ -194,7 +191,6 @@ jobs:
           cmake --build "$RUNNER_TEMP/spirv-tools-build" --target spirv-val
 
       - name: Generate and validate synthetic SPIR-V
-        if: matrix.rid == 'linux-x64'
         run: |
           dotnet run --project tools/SharpEmu.Tools.ShaderDump/SharpEmu.Tools.ShaderDump.csproj -c Release -- artifacts/shader-dump
           scripts/validate-synthetic-spirv.sh \
@@ -205,10 +201,6 @@ jobs:
 
       - name: Publish ${{ matrix.rid }} CLI
         run: dotnet publish src/SharpEmu.CLI/SharpEmu.CLI.csproj -c Release -r ${{ matrix.rid }} --self-contained true --no-restore -p:PublishDir="$PUBLISH_DIR"
-
-      - name: Stage MoltenVK next to the build
-        if: matrix.rid == 'osx-x64'
-        run: scripts/fetch-macos-moltenvk.sh "$PUBLISH_DIR"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
@@ -251,17 +243,15 @@ jobs:
 
           win_dir="release/sharpemu-win-x64-${SHORT_SHA}"
           linux_dir="release/sharpemu-linux-x64-${SHORT_SHA}"
-          macos_dir="release/sharpemu-osx-x64-${SHORT_SHA}"
-          for package_dir in "${win_dir}" "${linux_dir}" "${macos_dir}"; do
+          for package_dir in "${win_dir}" "${linux_dir}"; do
             test -d "${package_dir}"
           done
 
           mkdir -p release-assets
           (cd "${win_dir}" && zip -q -r "../../release-assets/sharpemu-${VERSION}-win-x64.zip" .)
 
-          chmod +x "${linux_dir}/SharpEmu" "${macos_dir}/SharpEmu"
+          chmod +x "${linux_dir}/SharpEmu"
           tar -czf "release-assets/sharpemu-${VERSION}-linux-x64.tar.gz" -C "${linux_dir}" .
-          tar -czf "release-assets/sharpemu-${VERSION}-osx-x64.tar.gz" -C "${macos_dir}" .
 
       - name: Build release notes
         shell: bash
@@ -327,8 +317,8 @@ jobs:
           RELEASE_TAG: ${{ needs.init.outputs.release-tag }}
         run: |
           mapfile -t assets < <(find release-assets -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \) | sort)
-          if [ "${#assets[@]}" -ne 3 ]; then
-            echo "Expected 3 release assets, found ${#assets[@]}." >&2
+          if [ "${#assets[@]}" -ne 2 ]; then
+            echo "Expected 2 release assets, found ${#assets[@]}." >&2
             exit 1
           fi
 

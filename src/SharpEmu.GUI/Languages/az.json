@@ -284,7 +284,7 @@
   "Updater.Status.Timeout": "Yeniləmələrin yoxlanması üçün ayrılmış 10 saniyə bitdi.",
   "Updater.Status.Failed": "Yeniləmələri yoxlamaq mümkün olmadı.",
   "Updater.Status.ChecksumFailed": "Endirilmiş yeniləmə SHA-256 yoxlamasından keçmədi.",
-  "Updater.Status.Unsupported": "Avtomatik yeniləmə üçün Windows, Linux və ya macOS x64 yığımı tələb olunur."
+  "Updater.Status.Unsupported": "Avtomatik yeniləmə üçün Windows və ya Linux x64 yığımı tələb olunur."
 ,
   "Trophies.Title": "Kuboklar",
   "Trophies.None": "Bu oyunda kubok yoxdur.",

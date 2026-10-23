@@ -187,9 +187,6 @@ public static partial class AgcExports
         // another thread; draws are deferred whenever it exists.
         private readonly ParallelProgramPrefetch? _parallel;
 
-        // The context bank of the queue whose slice runs now; the Metal host rebuilds its records from it.
-        internal ContextRegisters? CurrentContextRegisters => _current?.TypedRegisters?.Context;
-
         internal SubmittedVertexData? FindSubmittedVertexData(VertexInputInfo input)
         {
             var snapshot = _current?.CurrentVertexSnapshot;

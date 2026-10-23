@@ -17,9 +17,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
          console window; CLI mode re-attaches to the parent terminal's console. -->
     <OutputType>WinExe</OutputType>
     <AssemblyName>SharpEmu</AssemblyName>
-    <!-- osx-x64 is the macOS target: the CPU backend executes guest x86-64
-         natively, so on Apple Silicon it runs under Rosetta 2. -->
-    <RuntimeIdentifiers>win-x64;linux-x64;osx-x64;osx-arm64</RuntimeIdentifiers>
+    <RuntimeIdentifiers>win-x64;linux-x64</RuntimeIdentifiers>
     <!-- A plain "dotnet publish" with no -r defaults $(RuntimeIdentifier) to
          the host's own RID; see Directory.Build.props, which is where that
          default actually has to live (PublishDir's RID suffix is decided
@@ -40,15 +38,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <TieredPGO>true</TieredPGO>
   </PropertyGroup>
 
-  <!-- Background GC's write-watch revisit calls FlushProcessWriteBuffers,
-       which on macOS uses thread_get_register_pointer_values; under Rosetta 2
-       that Mach call can stall indefinitely on threads executing translated
-       guest code, wedging the whole runtime (every allocating thread then
-       blocks behind the never-finishing GC). Non-concurrent GC never takes
-       that path. Windows and Linux keep concurrent GC. -->
-  <PropertyGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('osx'))">
-    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
-  </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
@@ -123,8 +112,6 @@ SPDX-License-Identifier: GPL-2.0-or-later
       $(BaseIntermediateOutputPath)ffmpeg-runtime/$(FfmpegRuntimeTag)/$(RuntimeIdentifier)</FfmpegRuntimeDir>
     <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'win-x64'">ffmpeg-windows-x64.zip</FfmpegRuntimePackage>
     <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'linux-x64'">ffmpeg-linux-x64.zip</FfmpegRuntimePackage>
-    <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'osx-x64'">ffmpeg-macos-x64.zip</FfmpegRuntimePackage>
-    <FfmpegRuntimePackage Condition="'$(RuntimeIdentifier)' == 'osx-arm64'">ffmpeg-macos-arm64.zip</FfmpegRuntimePackage>
     <FfmpegRuntimeArchive>$(FfmpegRuntimeDir)/$(FfmpegRuntimePackage)</FfmpegRuntimeArchive>
     <FfmpegRuntimeExtractDir>$(FfmpegRuntimeDir)/extracted</FfmpegRuntimeExtractDir>
   </PropertyGroup>
@@ -154,7 +141,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <_FfmpegRuntimeFiles Condition="$(RuntimeIdentifier.StartsWith('win'))"
         Include="$(FfmpegRuntimeExtractDir)/bin/*.dll" />
       <_FfmpegRuntimeFiles Condition="!$(RuntimeIdentifier.StartsWith('win'))"
-        Include="$(FfmpegRuntimeExtractDir)/lib/*.so;$(FfmpegRuntimeExtractDir)/lib/*.so.*;$(FfmpegRuntimeExtractDir)/lib/*.dylib" />
+        Include="$(FfmpegRuntimeExtractDir)/lib/*.so;$(FfmpegRuntimeExtractDir)/lib/*.so.*" />
     </ItemGroup>
     <Copy SourceFiles="@(_FfmpegRuntimeFiles)"
       DestinationFolder="$(PublishDir)$(NativeLibraryFolderName)"
@@ -173,7 +160,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
       <_FfmpegRuntimeFiles Condition="$(RuntimeIdentifier.StartsWith('win'))"
         Include="$(FfmpegRuntimeExtractDir)/bin/*.dll" />
       <_FfmpegRuntimeFiles Condition="!$(RuntimeIdentifier.StartsWith('win'))"
-        Include="$(FfmpegRuntimeExtractDir)/lib/*.so;$(FfmpegRuntimeExtractDir)/lib/*.so.*;$(FfmpegRuntimeExtractDir)/lib/*.dylib" />
+        Include="$(FfmpegRuntimeExtractDir)/lib/*.so;$(FfmpegRuntimeExtractDir)/lib/*.so.*" />
     </ItemGroup>
     <Copy SourceFiles="@(_FfmpegRuntimeFiles)"
       DestinationFolder="$(OutDir)$(NativeLibraryFolderName)"

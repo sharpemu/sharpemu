@@ -289,7 +289,7 @@
   "Updater.Status.Timeout": "Sprawdzanie aktualizacji przekroczyło limit 10 sekund.",
   "Updater.Status.Failed": "Nie udało się sprawdzić aktualizacji.",
   "Updater.Status.ChecksumFailed": "Pobrana aktualizacja nie przeszła weryfikacji SHA-256.",
-  "Updater.Status.Unsupported": "Automatyczna aktualizacja wymaga wersji dla Windows, Linux lub macOS x64."
+  "Updater.Status.Unsupported": "Automatyczna aktualizacja wymaga wersji dla Windows lub Linux x64."
 ,
   "Trophies.Title": "Trofea",
   "Trophies.None": "Ta gra nie ma trofeów.",

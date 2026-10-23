@@ -146,22 +146,16 @@ internal static unsafe partial class VulkanVideoPresenter
             Environment.GetEnvironmentVariable("SHARPEMU_MAX_GUEST_WORK_PER_RENDER"),
             out var guestWorkPerRender) && guestWorkPerRender > 0
             ? guestWorkPerRender
-            : OperatingSystem.IsMacOS() ? 256 : 1024;
-    // On macOS the whole window loop — including Render() and its guest-work
-    // drain — runs on the process main thread, so draining a large backlog of
-    // slow guest work (heavy compute) blocks the Cocoa event pump and marks the
-    // window "Not Responding" while starving the swapchain present. Cap the
-    // wall-clock time spent draining per Render() call; leftover work stays
-    // queued for the next frame. SHARPEMU_RENDER_WORK_BUDGET_MS overrides
-    // (0 disables the cap); default 12ms keeps the macOS window interactive at
-    // ~60Hz. Windows and Linux use a dedicated render thread, so they drain
-    // without a time budget by default.
+            : 1024;
+    // Optional cap on the wall-clock time spent draining guest work per Render()
+    // call; leftover work stays queued for the next frame.
+    // SHARPEMU_RENDER_WORK_BUDGET_MS sets the cap; 0 (the default) disables it.
     private static readonly long _renderWorkBudgetTicks =
         (long.TryParse(
              Environment.GetEnvironmentVariable("SHARPEMU_RENDER_WORK_BUDGET_MS"),
              out var renderBudgetMs) && renderBudgetMs >= 0
             ? renderBudgetMs
-            : OperatingSystem.IsMacOS() ? 12L : 0L) *
+            : 0L) *
         System.Diagnostics.Stopwatch.Frequency / 1000L;
     // Diagnostic: skip every compute dispatch (mistranslated compute shaders
     // run long / GPU-hang and starve the present). Isolates whether the
@@ -271,8 +265,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 DestroyHostBufferAllocation);
             _window = new SdlHostWindow(
                 VideoOutExports.GetWindowTitle(),
-                _videoOptions,
-                SdlGraphicsApi.Vulkan);
+                _videoOptions);
         }
 
         public void Run()

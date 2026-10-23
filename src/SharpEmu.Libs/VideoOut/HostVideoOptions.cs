@@ -3,9 +3,6 @@
 
 namespace SharpEmu.Libs.VideoOut;
 
-using SharpEmu.Libs.Gpu.Metal;
-using SharpEmu.Libs.Gpu;
-
 public enum HostWindowMode
 {
     Windowed,
@@ -67,16 +64,8 @@ public sealed record HostVideoOptions
     public PerformanceOverlayCorner OverlayCorner { get; init; } = PerformanceOverlayCorner.TopRight;
     public PerformanceOverlayMode OverlayMode { get; init; } = PerformanceOverlayMode.TitleBar;
 
-    // On macOS, Auto keeps guests on SDR output: reporting HDR moves titles onto render paths
-    // MoltenVK cannot build yet (Silent Hill's HDR switch fails a pipeline compile and then
-    // crashes inside MoltenVK on every run). --hdr=on still opts in.
-    internal static bool AutoHdrAllowed => !OperatingSystem.IsMacOS();
-
     internal bool CanUseHdr(bool displayHdrEnabled, bool surfaceSupportsHdr) =>
-        CanUseHdr(displayHdrEnabled, surfaceSupportsHdr, AutoHdrAllowed);
-
-    internal bool CanUseHdr(bool displayHdrEnabled, bool surfaceSupportsHdr, bool autoAllowed) =>
-        surfaceSupportsHdr && (HdrMode == HostHdrMode.On || HdrMode == HostHdrMode.Auto && autoAllowed && displayHdrEnabled);
+        surfaceSupportsHdr && (HdrMode == HostHdrMode.On || HdrMode == HostHdrMode.Auto && displayHdrEnabled);
 
     public HostVideoOptions Normalize() => this with
     {
@@ -99,14 +88,13 @@ public static class HostVideoHost
 
     internal static bool IsHdrOutputSupported =>
         Volatile.Read(ref _videoConfigured) && CurrentOptions.HdrMode != HostHdrMode.Off &&
-        GuestGpu.Current.BackendName == "Vulkan" && VulkanVideoPresenter.QueryHdrOutputSupport();
+        VulkanVideoPresenter.QueryHdrOutputSupport();
 
     public static bool TryConfigureVideo(HostVideoOptions options)
     {
         var normalized = options.Normalize();
         Volatile.Write(ref _currentOptions, normalized);
-        var configured = VulkanVideoPresenter.TryConfigureVideo(normalized) &
-                         MetalVideoPresenter.TryConfigureVideo(normalized);
+        var configured = VulkanVideoPresenter.TryConfigureVideo(normalized);
         if (configured)
             Volatile.Write(ref _videoConfigured, true);
         return configured;

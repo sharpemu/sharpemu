@@ -54,7 +54,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // Diagnostics toggles are read once: these run per draw / per cached
         // texture hit, and env lookups plus string parsing are far too
-        // expensive there (and non-trivially so under Rosetta 2).
+        // expensive there.
         private static readonly bool _vulkanValidationEnabled =
             string.Equals(
                 Environment.GetEnvironmentVariable("SHARPEMU_VK_VALIDATION"),

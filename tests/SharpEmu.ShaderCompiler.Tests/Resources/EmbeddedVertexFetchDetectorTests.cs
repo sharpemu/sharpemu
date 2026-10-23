@@ -3,7 +3,6 @@
 
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
@@ -111,8 +110,6 @@ public sealed class EmbeddedVertexFetchDetectorTests
         };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var spirv, out var spirvError), spirvError);
         Assert.Equal(additionalRead ? 5348u : 0u, new SpirvModuleInspector(spirv.Spirv).AddressingModel);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out var metalError), metalError);
-        Assert.DoesNotContain("s[12] = sharpemu_load_device_dword", metal.Source);
     }
 
     [Fact]

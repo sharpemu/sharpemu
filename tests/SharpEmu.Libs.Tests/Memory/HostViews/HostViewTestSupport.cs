@@ -14,7 +14,7 @@ internal static class HostViewTestSupport
     public const ulong BackingSize = 1UL << 20;
     public const ulong Marker = 0x5348_5250_5649_4557;
 
-    public static bool Supported => OperatingSystem.IsWindows() || OperatingSystem.IsLinux() || OperatingSystem.IsMacOS();
+    public static bool Supported => OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
 
     public static IHostMemory PlatformMemory => OperatingSystem.IsWindows() ? new WindowsHostMemory() : new PosixHostMemory();
 

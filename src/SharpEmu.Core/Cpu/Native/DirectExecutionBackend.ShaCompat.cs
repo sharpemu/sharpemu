@@ -9,7 +9,7 @@ using SharpEmu.Core.Cpu.Emulation;
 namespace SharpEmu.Core.Cpu.Native;
 
 // The PS5 CPU has the SHA extensions and titles use them without a CPUID check.
-// Rosetta 2 does not translate them, so they raise #UD on Apple Silicon hosts.
+// Hosts without the SHA extensions raise #UD for them.
 public sealed partial class DirectExecutionBackend
 {
     private static int _shaSoftwareFallbackAnnounced;

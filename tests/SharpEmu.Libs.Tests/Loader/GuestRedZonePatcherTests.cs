@@ -53,7 +53,7 @@ public sealed class GuestRedZonePatcherTests
     [InlineData(true)]
     public void GroupingPreservesIncomingBranchFromAnotherFunction(bool separateSegment)
     {
-        if ((!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS()) ||
+        if (!OperatingSystem.IsWindows() ||
             RuntimeInformation.ProcessArchitecture != Architecture.X64) return;
         using var memory = new PhysicalVirtualMemory();
         var imageBase = memory.AllocateAt(0, 0x10000);
@@ -136,7 +136,7 @@ public sealed class GuestRedZonePatcherTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public unsafe void PatchesWindowsAndMacOsLeafFunctionWhileLeavingLinuxUnchanged(bool framePointer)
+    public unsafe void PatchesWindowsLeafFunctionWhileLeavingLinuxUnchanged(bool framePointer)
     {
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
@@ -189,7 +189,7 @@ public sealed class GuestRedZonePatcherTests
         var result = GuestRedZonePatcher.Patch(memory, memory, headers, imageBase, imageSize);
         var patched = new byte[function.Length];
         Assert.True(memory.TryRead(imageBase, patched));
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        if (OperatingSystem.IsWindows())
         {
             Assert.Equal(1, result.RedZoneFunctions);
             Assert.Equal(1, result.PatchedSites);
@@ -248,7 +248,7 @@ public sealed class GuestRedZonePatcherTests
         ];
 
         using var image = PatchedImage.Create(function, [(0x40, value)]);
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        if (OperatingSystem.IsWindows())
         {
             Assert.Equal(1, image.Result.PatchedSites);
             Assert.Equal(0xE9, image.ReadByte(15));
@@ -277,7 +277,7 @@ public sealed class GuestRedZonePatcherTests
         ];
 
         using var image = PatchedImage.Create(function, [(0x2000, 7u)]);
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        if (OperatingSystem.IsWindows())
         {
             Assert.Equal(1, image.Result.PatchedSites);
             Assert.Equal(0xE9, image.ReadByte(22));
@@ -309,7 +309,7 @@ public sealed class GuestRedZonePatcherTests
 
         using var image = PatchedImage.Create(function, [(0x2000, 7u)]);
         Assert.Equal(0, image.Result.PatchedSites);
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        if (OperatingSystem.IsWindows())
         {
             Assert.Equal(1, image.Result.RedZoneFunctions);
             Assert.Equal(1, image.Result.UnrelocatableSites);
@@ -383,7 +383,7 @@ public sealed class GuestRedZonePatcherTests
 
         var function = BuildSwitchFunction(spill: [0x48, 0x89, 0x4C, 0x24, 0xD0]);
         using var image = PatchedImage.Create(function.Code, [(0x2100, 100u)], (SwitchTableOffset, function.Table));
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        if (OperatingSystem.IsWindows())
         {
             Assert.Equal(1, image.Result.RedZoneFunctions);
             Assert.Equal(0, image.Result.UnrelocatableSites);
@@ -413,7 +413,7 @@ public sealed class GuestRedZonePatcherTests
 
         var function = BuildSwitchFunction(spill: [0x48, 0x89, 0xD1]);
         using var image = PatchedImage.Create(function.Code, [(0x2100, 100u)], (SwitchTableOffset, function.Table));
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        if (OperatingSystem.IsWindows())
         {
             Assert.Equal(0, image.Result.PatchedSites);
             Assert.True(image.Result.IndirectBranchRefusals >= 4);
@@ -554,7 +554,7 @@ public sealed class GuestRedZonePatcherTests
             0xC3,
         ];
         using var image = PatchedImage.Create(function, [(0x40, value)]);
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+        if (OperatingSystem.IsWindows())
         {
             Assert.Equal(1, image.Result.PatchedSites);
             Assert.Equal(0, image.Result.FailedSites);
@@ -572,7 +572,7 @@ public sealed class GuestRedZonePatcherTests
     [InlineData(new byte[] { 0xEB, 0x00 }, 2)]
     public void GroupingStopsAtStackAndControlFlowBoundaries(byte[] separator, int expectedSites)
     {
-        if ((!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS()) ||
+        if (!OperatingSystem.IsWindows() ||
             RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
 
@@ -591,7 +591,7 @@ public sealed class GuestRedZonePatcherTests
     [Fact]
     public void GroupingPreservesBranchTargetsAndDisablesExpansionForIndirectJumps()
     {
-        if ((!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS()) ||
+        if (!OperatingSystem.IsWindows() ||
             RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
 
@@ -619,7 +619,7 @@ public sealed class GuestRedZonePatcherTests
     [Fact]
     public unsafe void GroupedRelocationPreservesRipRelativeDataFlagsAndRedZone()
     {
-        if ((!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS()) ||
+        if (!OperatingSystem.IsWindows() ||
             RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
 
@@ -647,7 +647,7 @@ public sealed class GuestRedZonePatcherTests
     [Fact]
     public void LargeGroupsHaveEnoughTrampolineSpace()
     {
-        if ((!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS()) ||
+        if (!OperatingSystem.IsWindows() ||
             RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
 
@@ -668,7 +668,7 @@ public sealed class GuestRedZonePatcherTests
     [Fact]
     public void BackwardSpanDoesNotOverwriteAnEarlierPatch()
     {
-        if ((!OperatingSystem.IsWindows() && !OperatingSystem.IsMacOS()) ||
+        if (!OperatingSystem.IsWindows() ||
             RuntimeInformation.ProcessArchitecture != Architecture.X64) return;
 
         using var memory = new PhysicalVirtualMemory();

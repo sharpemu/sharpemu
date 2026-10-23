@@ -43,8 +43,8 @@ public static class PerfOverlay
     // Refreshed once per second so per-frame fills never allocate.
     private static long _statsWindowStart = Stopwatch.GetTimestamp();
     // Headline FPS tracks guest VideoOut flips (RecordSubmit), not host
-    // swapchain presents. Metal's free-running present timer hits ~120 Hz on
-    // ProMotion even while the guest is stalled on GPU waits.
+    // swapchain presents, which can keep running while the guest is stalled
+    // on GPU waits.
     private static double _fps;
     private static double _presentFps;
     private static double _drawsPerSecond;

@@ -61,15 +61,6 @@ public sealed class VideoOutOutputSupportTests
     }
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void AutoHdrFollowsThePlatformPolicyButOnAlwaysOptsIn(bool autoAllowed)
-    {
-        Assert.Equal(autoAllowed, new HostVideoOptions { HdrMode = HostHdrMode.Auto }.CanUseHdr(true, true, autoAllowed));
-        Assert.True(new HostVideoOptions { HdrMode = HostHdrMode.On }.CanUseHdr(true, true, autoAllowed));
-    }
-
-    [Theory]
     [InlineData(HostHdrMode.Auto, false, true, false)]
     [InlineData(HostHdrMode.Auto, true, false, false)]
     [InlineData(HostHdrMode.Auto, true, true, true)]
@@ -80,7 +71,7 @@ public sealed class VideoOutOutputSupportTests
     public void OutputStatusReportsHdrOnlyWhenAllowedAndSupported(
         HostHdrMode mode, bool displayHdrEnabled, bool surfaceSupportsHdr, bool expectedHdr)
     {
-        var supported = new HostVideoOptions { HdrMode = mode }.CanUseHdr(displayHdrEnabled, surfaceSupportsHdr, autoAllowed: true);
+        var supported = new HostVideoOptions { HdrMode = mode }.CanUseHdr(displayHdrEnabled, surfaceSupportsHdr);
         Assert.Equal(expectedHdr, supported);
 
         var bytes = Enumerable.Repeat((byte)0xA5, 0x32).ToArray();

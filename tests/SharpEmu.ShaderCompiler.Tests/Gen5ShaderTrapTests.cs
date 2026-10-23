@@ -3,7 +3,6 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -46,7 +45,7 @@ public sealed class Gen5ShaderTrapTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void TrapWithoutHandlerMatchesNoOperationOnBothBackends(bool inactiveAtTrap)
+    public void TrapWithoutHandlerMatchesNoOperation(bool inactiveAtTrap)
     {
         var trapRequest = CreateRequest(CreateReadbackProgram(inactiveAtTrap));
         var noOperationProgram = CreateReadbackProgram(inactiveAtTrap, useNoOperation: true);
@@ -54,9 +53,6 @@ public sealed class Gen5ShaderTrapTests
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(trapRequest, out var trapShader, out var trapError), trapError);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(noOperationRequest, out var noOperationShader, out var noOperationError), noOperationError);
         Assert.Equal(noOperationShader.Spirv, trapShader.Spirv);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(trapRequest, out var trapMetal, out var trapMetalError), trapMetalError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(noOperationRequest, out var noOperationMetal, out var noOperationMetalError), noOperationMetalError);
-        Assert.Equal(noOperationMetal.Source, trapMetal.Source);
     }
 
     public static Gen5ShaderProgram CreateReadbackProgram(bool inactiveAtTrap, bool useNoOperation = false)

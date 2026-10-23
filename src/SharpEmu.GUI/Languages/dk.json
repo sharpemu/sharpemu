@@ -240,7 +240,7 @@
   "Updater.Status.Timeout": "Opdateringstjekket fik timeout efter 10 sekunder.",
   "Updater.Status.Failed": "Kunne ikke søge efter opdateringer.",
   "Updater.Status.ChecksumFailed": "Den downloadede opdatering bestod ikke SHA-256-verifikationen.",
-  "Updater.Status.Unsupported": "Automatisk opdatering kræver et x64-build til Windows, Linux eller macOS.",
+  "Updater.Status.Unsupported": "Automatisk opdatering kræver et x64-build til Windows eller Linux.",
   "Options.Graphics": "Grafik",
 
   "Options.Console.Type.Label": "Konsol",

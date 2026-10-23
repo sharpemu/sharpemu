@@ -287,7 +287,7 @@ internal static unsafe partial class VulkanVideoPresenter
             // frame does not quantize the frame rate down to 30/20 fps the
             // way FIFO does; the guest side is already paced by PaceFlip.
             // FIFO is the only mode guaranteed by the spec and remains the
-            // fallback (MoltenVK typically exposes FIFO + IMMEDIATE only).
+            // fallback.
             uint modeCount = 0;
             if (_surfaceApi.GetPhysicalDeviceSurfacePresentModes(
                     _physicalDevice,

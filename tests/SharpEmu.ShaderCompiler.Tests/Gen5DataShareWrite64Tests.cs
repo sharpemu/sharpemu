@@ -3,7 +3,6 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
@@ -48,7 +47,7 @@ public sealed class Gen5DataShareWrite64Tests
 
     [Theory]
     [MemberData(nameof(PairedWriteCases))]
-    public void PairedWriteDecodesIndependentSourcePairsAndCompilesOnBothBackends(
+    public void PairedWriteDecodesIndependentSourcePairsAndCompiles(
         bool global, uint firstOffset, uint secondOffset, bool writeEnabled, uint secondSource, bool largeStride)
     {
         var program = CreateReadbackProgram(global, firstOffset, secondOffset, writeEnabled, secondSource, largeStride);
@@ -64,7 +63,6 @@ public sealed class Gen5DataShareWrite64Tests
         var (plan, resources, layout) = Prepare(program);
         var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
     }
 
     public static Gen5ShaderProgram CreateReadbackProgram(bool global, uint firstOffset, uint secondOffset, bool writeEnabled,

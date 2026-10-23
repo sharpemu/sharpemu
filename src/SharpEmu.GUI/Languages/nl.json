@@ -240,7 +240,7 @@
   "Updater.Status.Timeout": "De updatecontrole is na 10 seconden verlopen.",
   "Updater.Status.Failed": "Kon niet controleren op updates.",
   "Updater.Status.ChecksumFailed": "De gedownloade update is niet door de SHA-256-verificatie gekomen.",
-  "Updater.Status.Unsupported": "Automatisch updaten vereist een x64-build voor Windows, Linux of macOS.",
+  "Updater.Status.Unsupported": "Automatisch updaten vereist een x64-build voor Windows of Linux.",
   "Options.Graphics": "Grafisch",
 
   "Options.Console.Type.Label": "Console",

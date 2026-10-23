@@ -176,14 +176,9 @@ public static partial class VideoOutExports
             return;
         }
 
-        // macOS can run either backend (Vulkan through MoltenVK, or Metal), so
-        // name the active one in the title to make which is in use unambiguous.
-        var backendSuffix = OperatingSystem.IsMacOS()
-            ? $" ({GuestGpu.Current.BackendName})"
-            : string.Empty;
         lock (_stateGate)
         {
-            _selectedGpuName = $"{gpuName.Trim()}{backendSuffix}";
+            _selectedGpuName = gpuName.Trim();
         }
     }
 

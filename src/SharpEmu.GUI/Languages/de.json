@@ -240,7 +240,7 @@
   "Updater.Status.Timeout": "Die Updateprüfung ist nach 10 Sekunden abgelaufen.",
   "Updater.Status.Failed": "Updates konnten nicht geprüft werden.",
   "Updater.Status.ChecksumFailed": "Das heruntergeladene Update hat die SHA-256-Prüfung nicht bestanden.",
-  "Updater.Status.Unsupported": "Automatische Updates erfordern einen x64-Build für Windows, Linux oder macOS.",
+  "Updater.Status.Unsupported": "Automatische Updates erfordern einen x64-Build für Windows oder Linux.",
   "Options.Graphics": "Grafik",
 
   "Options.Console.Type.Label": "Konsole",

@@ -144,7 +144,7 @@ public static class AmprExports
     }
 
     // Keep a bounded LRU of open host files. An unbounded cache exhausts the
-    // process FD limit (~10k on macOS) during large asset storms, after
+    // process FD limit during large asset storms, after
     // which every new open throws IOException and surfaces as NOT_FOUND — the
     // guest then reports InvalidFileFourCC on empty buffers.
     private const int MaxCachedHostFiles = 1536;
@@ -1239,7 +1239,7 @@ public static class AmprExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        // 4 MiB chunks cut syscall/Rosetta round-trips on DeS' large sequential
+        // 4 MiB chunks cut syscall round-trips on DeS' large sequential
         // APR reads without blowing the ArrayPool for small probes.
         const int ChunkSize = 4 * 1024 * 1024;
         var buffer = ArrayPool<byte>.Shared.Rent((int)Math.Min((ulong)ChunkSize, size));

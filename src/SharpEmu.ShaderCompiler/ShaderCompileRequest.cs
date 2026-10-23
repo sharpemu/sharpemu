@@ -305,7 +305,6 @@ public sealed class ShaderCompileRequest
     public uint PixelCustomInterpolationMask { get; init; }
 
     // False when the device cannot read one vertex's value of a pixel input (PerVertexKHR).
-    // MoltenVK advertises fragment shader barycentrics but cannot translate PerVertexKHR to MSL.
     public bool SupportsPerVertexPixelInputs { get; init; } = true;
     public uint PixelInputAddress { get; init; }
     public IReadOnlyList<uint>? PixelInputCntl { get; init; }
