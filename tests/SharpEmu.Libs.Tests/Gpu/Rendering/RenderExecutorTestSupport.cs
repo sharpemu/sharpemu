@@ -195,6 +195,7 @@ internal sealed class RecordingRenderHost : IRenderHost
     public bool TryReadGuest(ulong address, Span<byte> destination)
     {
         GuestReads++;
+        BeforeGuestRead?.Invoke();
         return GuestMemory.TryRead(address, destination);
     }
 
@@ -370,7 +371,11 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ) => Calls.Add($"dispatch {groupsX} {groupsY} {groupsZ}");
 
-    public bool TryDispatchIndirect(ulong argumentsAddress) => false;
+    public Action? BeforeGuestRead { get; set; }
+
+    public Func<ulong, bool>? NativeIndirectDispatch { get; set; }
+
+    public bool TryDispatchIndirect(ulong argumentsAddress) => NativeIndirectDispatch?.Invoke(argumentsAddress) ?? false;
 
     public void ShaderWriteBarrier(PipelineStageFlags sourceStages) => Calls.Add($"write_barrier {sourceStages}");
 
