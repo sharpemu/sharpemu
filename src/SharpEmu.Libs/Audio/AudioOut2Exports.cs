@@ -139,6 +139,10 @@ public static class AudioOut2Exports
         // what holds the context's queued audio.
         public volatile bool DevicePaced;
 
+        // Set by the first Push: the title pushes its grains itself, so the Push is where a grain is
+        // submitted and waited for.
+        public volatile bool PushSeen;
+
         // The host stream the context's grains were last submitted to, read without the backend lock.
         public volatile IHostAudioStream? DeviceBackend;
 
@@ -506,6 +510,7 @@ public static class AudioOut2Exports
             return SetReturn(ctx, 0);
         }
 
+        context.PushSeen = true;
         if (GuestThreadExecution.CurrentGuestThreadHandle is var producer and not 0 &&
             (!Producers.TryGetValue(producer, out var lastContext) || !ReferenceEquals(lastContext, context)))
         {
@@ -538,6 +543,11 @@ public static class AudioOut2Exports
         return SetReturn(ctx, 0);
     }
 
+    // SHARPEMU_AUDIOOUT2_ADVANCE_SLEEP=1 keeps the clock sleep in Advance even when the device paces
+    // a context its title also pushes.
+    private static readonly bool AdvanceSleepsWhenDevicePaced =
+        Environment.GetEnvironmentVariable("SHARPEMU_AUDIOOUT2_ADVANCE_SLEEP") == "1";
+
     [SysAbiExport(
         Nid = "PE2zHMqLSHs",
         ExportName = "sceAudioOut2ContextAdvance",
@@ -558,9 +568,13 @@ public static class AudioOut2Exports
             {
                 // Advance moves the context one grain on without blocking; the Push that follows waits.
                 var previous = Interlocked.Exchange(ref state.AdvancedGrainStart, state.ReserveGrain());
-                if (previous != 0)
+                if (previous != 0 && (!state.DevicePaced || !state.PushSeen || AdvanceSleepsWhenDevicePaced))
                 {
-                    // Two Advances without a Push: the earlier grain is waited for here.
+                    // Two Advances without a Push: the earlier grain is waited for here. Not once the
+                    // device paces a context its title pushes: the Push already waits for the device,
+                    // and Wwise advances from a render job its audio thread waits for while holding
+                    // its global lock, so a sleep here held that lock ~42 ms of every 43 and starved
+                    // Black Myth: Wukong's bank loading (its world load crawled for over ten minutes).
                     ContextState.SleepUntil(state.QueueSlotFree(previous));
                 }
             }

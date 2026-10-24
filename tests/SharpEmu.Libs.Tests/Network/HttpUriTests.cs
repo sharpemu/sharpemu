@@ -249,6 +249,82 @@ public sealed class HttpUriTests
         Assert.Equal(0, HttpExports.ParseHttpUri(context));
     }
 
+    [Theory]
+    [InlineData("https://user:pass@foo.com:1443/var/test.cgi?test#hoge")]
+    [InlineData("https://[2001:db8::1]:65535/a?q")]
+    [InlineData("http://user@host/")]
+    [InlineData("file:///folder/file")]
+    [InlineData("mailto:user@example.invalid?subject=test#part")]
+    [InlineData("HTTP://host/%2f/../café?q=a+b%20c#X")]
+    public void Build_RecreatesParsedUriAfterSizeQuery(string source)
+    {
+        var context = CreateContext(source);
+        Assert.Equal(0, HttpExports.ParseHttpUri(context));
+
+        const ulong BuiltAddress = MemoryBase + 0x7000;
+        var expected = Encoding.UTF8.GetBytes(source + '\0');
+        Fill(BuiltAddress, 256, 0xA5);
+        Fill(RequiredSizeAddress, 8, 0xA5);
+        context[CpuRegister.Rdi] = 0;
+        context[CpuRegister.Rsi] = RequiredSizeAddress;
+        context[CpuRegister.Rdx] = 0;
+        context[CpuRegister.Rcx] = OutputAddress;
+        context[CpuRegister.R8] = 0xFFFF;
+        Assert.Equal(0, HttpExports.BuildHttpUri(context));
+        Assert.Equal((ulong)expected.Length, ReadSize());
+
+        context[CpuRegister.Rdi] = BuiltAddress;
+        context[CpuRegister.Rdx] = ReadSize();
+        Assert.Equal(0, HttpExports.BuildHttpUri(context));
+        Assert.Equal(0UL, context[CpuRegister.Rax]);
+        Assert.Equal(expected, ReadBytes(BuiltAddress, expected.Length));
+        Assert.All(ReadBytes(BuiltAddress + (ulong)expected.Length, 8), value => Assert.Equal(0xA5, value));
+    }
+
+    [Theory]
+    [InlineData(0x01u, "https://")]
+    [InlineData(0x03u, "https://foo.com")]
+    [InlineData(0x07u, "https://foo.com:1443")]
+    [InlineData(0x0Fu, "https://foo.com:1443/var/test.cgi")]
+    [InlineData(0xCAu, "foo.com/var/test.cgi?test#hoge")]
+    [InlineData(0x1Fu, "https://user@foo.com:1443/var/test.cgi")]
+    public void Build_IncludesOnlySelectedComponents(uint options, string expected)
+    {
+        var context = CreateContext("https://user:pass@foo.com:1443/var/test.cgi?test#hoge");
+        Assert.Equal(0, HttpExports.ParseHttpUri(context));
+
+        const ulong BuiltAddress = MemoryBase + 0x7000;
+        context[CpuRegister.Rdi] = BuiltAddress;
+        context[CpuRegister.Rsi] = 0;
+        context[CpuRegister.Rdx] = 256;
+        context[CpuRegister.Rcx] = OutputAddress;
+        context[CpuRegister.R8] = options;
+        Assert.Equal(0, HttpExports.BuildHttpUri(context));
+        var expectedBytes = Encoding.Latin1.GetBytes(expected + '\0');
+        Assert.Equal(expectedBytes, ReadBytes(BuiltAddress, expectedBytes.Length));
+    }
+
+    [Fact]
+    public void Build_RejectsShortBufferButReportsRequiredSize()
+    {
+        var context = CreateContext("https://foo.com/path");
+        Assert.Equal(0, HttpExports.ParseHttpUri(context));
+
+        const ulong BuiltAddress = MemoryBase + 0x7000;
+        Fill(BuiltAddress, 32, 0xA5);
+        context[CpuRegister.Rdi] = BuiltAddress;
+        context[CpuRegister.Rsi] = RequiredSizeAddress;
+        context[CpuRegister.Rdx] = 20;
+        context[CpuRegister.Rcx] = OutputAddress;
+        context[CpuRegister.R8] = 0xFFFF;
+        Assert.Equal(OutOfMemory, HttpExports.BuildHttpUri(context));
+        Assert.Equal(21UL, ReadSize());
+        Assert.All(ReadBytes(BuiltAddress, 32), value => Assert.Equal(0xA5, value));
+
+        context[CpuRegister.Rcx] = 0;
+        Assert.Equal(unchecked((int)0x804311FE), HttpExports.BuildHttpUri(context));
+    }
+
     private CpuContext CreateContext(string source, Generation generation = Generation.Gen5)
     {
         _memory.WriteCString(SourceAddress, source);
