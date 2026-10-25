@@ -521,19 +521,36 @@ public static partial class VideoOutExports
             return OrbisVideoOutErrorInvalidHandle;
         }
 
+        var width = port.OutputWidth;
+        var height = port.OutputHeight;
+        lock (_stateGate)
+        {
+            // Titles ask before they register buffers, so the port still holds its placeholder size. A PS5
+            // reports what the display chain can take, not the buffers a title has not picked yet, and a title
+            // that reads HD here lays its viewport out for 4K while it renders into 1080p buffers.
+            if (ctx.TargetGeneration == Generation.Gen5 && Array.TrueForAll(port.Groups, group => group is null))
+            {
+                width = UhdWidth;
+                height = UhdHeight;
+            }
+        }
+
         Span<byte> status = stackalloc byte[VideoOutOutputStatusSize];
-        WriteOutputStatus(status, port.OutputWidth, port.OutputHeight, port.RefreshRate,
+        WriteOutputStatus(status, width, height, port.RefreshRate,
             HostVideoHost.IsHdrOutputSupported);
         return ctx.Memory.TryWrite(statusAddress, status)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
     }
 
+    private const uint UhdWidth = 3840;
+    private const uint UhdHeight = 2160;
+
     internal static void WriteOutputStatus(Span<byte> status, uint width, uint height, uint refreshRate,
         bool hdrOutputSupported)
     {
         status.Clear();
-        var resolutionClass = width >= 3840 || height >= 2160 ? 2 : 1;
+        var resolutionClass = width >= UhdWidth || height >= UhdHeight ? 2 : 1;
         BinaryPrimitives.WriteInt32LittleEndian(status[0x00..0x04], resolutionClass);
         BinaryPrimitives.WriteInt32LittleEndian(status[0x04..0x08], hdrOutputSupported ? 2 : 1);
         // The status uses a refresh-rate code, not the frequency used for pacing.

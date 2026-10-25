@@ -112,7 +112,8 @@ public sealed class VideoOutOutputSupportTests
             var expected = new byte[0x32];
             expected[0] = 0xA5;
             expected[^1] = 0xA5;
-            BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(1), 1);
+            // Before any buffers are registered a Gen5 port reports the UHD class, a Gen4 port the HD class.
+            BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(1), generation == Generation.Gen5 ? 2U : 1U);
             BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(5), 1);
             BinaryPrimitives.WriteUInt64LittleEndian(expected.AsSpan(9), 3);
             Assert.Equal(expected, buffer);
