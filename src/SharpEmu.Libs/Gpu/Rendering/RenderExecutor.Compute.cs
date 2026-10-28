@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut;
@@ -125,6 +126,23 @@ public sealed partial class RenderExecutor
             return;
         }
 
+        var axisOrder = Gen5SpirvTranslator.ComputeWorkgroupAxisOrder(input.ThreadsX, input.ThreadsY, input.ThreadsZ);
+        if (indirectArgumentsAddress != 0 && !useThreadDimensions &&
+            (axisOrder[0] != 0 || axisOrder[1] != 1 || axisOrder[2] != 2))
+        {
+            // Vulkan consumes indirect counts in physical axis order. Complete any GPU
+            // producer before resolving the logical counts, outside resource preparation.
+            Span<byte> arguments = stackalloc byte[3 * sizeof(uint)];
+            if (!_host.TryReadGuest(indirectArgumentsAddress, arguments))
+                throw _host.Fatal($"The remapped indirect dispatch arguments are unreadable: address=0x{indirectArgumentsAddress:X16}.");
+            groupsX = BinaryPrimitives.ReadUInt32LittleEndian(arguments);
+            groupsY = BinaryPrimitives.ReadUInt32LittleEndian(arguments[sizeof(uint)..]);
+            groupsZ = BinaryPrimitives.ReadUInt32LittleEndian(arguments[(2 * sizeof(uint))..]);
+            indirectArgumentsAddress = 0;
+            if (groupsX == 0 || groupsY == 0 || groupsZ == 0)
+                return;
+        }
+
         if (useThreadDimensions)
         {
             // The indirect buffer carries thread counts in this mode, while Vulkan indirect
@@ -201,10 +219,6 @@ public sealed partial class RenderExecutor
             // axis lands on a physical axis Vulkan actually allows it on. The dispatch group
             // counts must be permuted the same way, or vkCmdDispatch would hand group counts
             // for the wrong physical axis to the pipeline it built with the remapped sizes.
-            var axisOrder = Gen5SpirvTranslator.ComputeWorkgroupAxisOrder(
-                input.ThreadsX,
-                input.ThreadsY,
-                input.ThreadsZ);
             var logicalGroups = new[] { groupsX, groupsY, groupsZ };
             var physicalGroups = new uint[3];
             for (var logical = 0; logical < 3; logical++)
