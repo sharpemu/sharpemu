@@ -1,6 +1,6 @@
 {
   "_languageName": "Türkçe",
-  "Options.Env.SkipRt.Desc": "Skip compute shaders that use ray tracing. Off by default.\nThis can remove effects or cause incorrect graphics. Restart the game after a change.",
+  "Options.Env.SkipRt.Desc": "Ray tracing kullanan compute shader'ları atla. Varsayılan olarak kapalı.\nBu, efektleri kaldırabilir veya hatalı grafiklere yol açabilir. Değişiklikten sonra oyunu yeniden başlatın.",
   "Options.Env.StrictCompute.Desc": "Hesaplama ve çizim gölgelendiricisi retlerinde durdur (varsayılan).\nEtkilenen işlemleri atlamak için kapat. Eksik görüntüler, hatalar veya takılmalar olabilir. Değişiklikten sonra oyunu yeniden başlatın.",
   "Options.Env.PerformanceProfile.Desc": "Sonraki oyun başlangıcından itibaren performans sürelerini ve FPS değerlerini kaydet.\nBu, performansı düşürebilir.",
   "Options.Env.PerformanceFrameTrace.Desc": "Son 4.096 sunum aralığını sakla ve kapanışta günlüğe yaz.\nPerformans profillemesi gerektirir. İzi kaydetmek için oyunu normal şekilde kapat.",
@@ -315,5 +315,28 @@
   "Trophies.Sort.Progress": "İlerleme",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Oyun ara",
-  "Trophies.NoMatch": "Aramanızla eşleşen oyun yok."
+  "Trophies.NoMatch": "Aramanızla eşleşen oyun yok.",
+
+  "Library.Context.PackZar": ".zar olarak paketle…",
+  "Library.Pack.Title": ".zar olarak paketle",
+  "Library.Pack.Heading": "{0} paketleniyor",
+  "Library.Pack.Explanation": "Bu işlem oyun klasörünün tamamını sıkıştırılmış tek bir .zar dosyasında saklar. SharpEmu oyunu arşivi açmadan doğrudan bu dosyadan çalıştırır; bu nedenle genellikle daha az disk alanı kaplar ve aynı şekilde çalışır. Oyun klasörü korunur; arşiv yazılıp doğrulandıktan sonra klasörü silmeyi seçebilirsiniz.",
+  "Library.Pack.Preparing": "Oyun klasörü okunuyor…",
+  "Library.Pack.Progress": "{0} / {1} GB (%{2})",
+  "Library.Pack.Cancelling": "İptal ediliyor…",
+  "Library.Pack.Done": "Tamamlandı. Arşiv başlatılmaya hazır.",
+  "Library.Pack.Failed": "Paketleme başarısız oldu: {0}",
+  "Library.Pack.Close": "Kapat",
+  "Library.Pack.MuteMusic": "Paketleme sırasında başlık müziğini sustur",
+  "Library.Pack.DeleteSource": "Oyun klasörünü sil",
+  "Library.Pack.DeleteSourceWarning": "Arşiv doğrulandı ve oyun klasöründeki tüm dosyaları içeriyor. Klasörü silmek geri alınamaz; bu yüzden arşivin çalıştığından emin olana kadar bir yedek saklayın.",
+  "Library.Pack.Verifying": "Arşiv doğrulanıyor…",
+  "Library.Pack.Deleting": "Oyun klasörü siliniyor…",
+  "Library.Pack.DoneDeleted": "Tamamlandı. Arşiv hazır ve oyun klasörü silindi.",
+  "Library.Pack.DeleteSkipped": "Tamamlandı. Arşivin her şeyi içerdiği doğrulanamadığı için oyun klasörü korundu.",
+  "Library.Pack.DeleteFailed": "Arşiv hazır ancak oyun klasörü silinemedi: {0}",
+  "Status.PackedZar": "Paketlenmiş oyun arşivi: {0}",
+  "Dialog.SaveZar": "Oyun arşivini kaydet",
+  "Dialog.ZarFiles": "Oyun arşivleri",
+  "Library.Context.Trophies": "Kupalar…"
 }

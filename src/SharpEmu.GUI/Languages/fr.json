@@ -1,6 +1,6 @@
 {
   "_languageName": "Français",
-  "Options.Env.SkipRt.Desc": "Skip compute shaders that use ray tracing. Off by default.\nThis can remove effects or cause incorrect graphics. Restart the game after a change.",
+  "Options.Env.SkipRt.Desc": "Ignorer les shaders de calcul qui utilisent le lancer de rayons. Désactivé par défaut.\nCela peut supprimer des effets ou provoquer des erreurs d’affichage. Redémarrez le jeu après modification.",
   "Options.Env.StrictCompute.Desc": "Arrêter lors des rejets de shaders pour le calcul et le dessin (par défaut).\nDésactiver pour ignorer le travail concerné. Des images manquantes, des erreurs ou des blocages sont possibles. Redémarrer le jeu après modification.",
   "Options.Env.PerformanceProfile.Desc": "Enregistrer les temps de performance et les FPS au prochain lancement du jeu.\nCela peut réduire les performances.",
   "Options.Env.PerformanceFrameTrace.Desc": "Conserver les 4 096 derniers intervalles de présentation et les écrire dans le journal à la fermeture.\nNécessite le profilage des performances. Fermez le jeu normalement pour enregistrer la trace.",
@@ -314,5 +314,27 @@
   "Trophies.Sort.Progress": "Progression",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Rechercher un jeu",
-  "Trophies.NoMatch": "Aucun jeu ne correspond à votre recherche."
+  "Trophies.NoMatch": "Aucun jeu ne correspond à votre recherche.",
+
+  "Library.Context.PackZar": "Empaqueter en .zar…",
+  "Library.Pack.Title": "Empaqueter en .zar",
+  "Library.Pack.Heading": "Empaquetage de {0}",
+  "Library.Pack.Explanation": "Cette action stocke tout le dossier du jeu dans un seul fichier .zar compressé. SharpEmu lance le jeu directement depuis cette archive sans la décompresser ; elle occupe donc généralement moins d’espace disque et le jeu fonctionne de la même façon. Le dossier du jeu est conservé ; une fois l’archive écrite et vérifiée, vous pourrez choisir de le supprimer.",
+  "Library.Pack.Preparing": "Lecture du dossier du jeu…",
+  "Library.Pack.Progress": "{0} / {1} Go ({2} %)",
+  "Library.Pack.Cancelling": "Annulation…",
+  "Library.Pack.Done": "Terminé. L’archive est prête à être lancée.",
+  "Library.Pack.Failed": "Échec de l’empaquetage : {0}",
+  "Library.Pack.Close": "Fermer",
+  "Library.Pack.MuteMusic": "Couper la musique du titre pendant l’empaquetage",
+  "Library.Pack.DeleteSource": "Supprimer le dossier du jeu",
+  "Library.Pack.DeleteSourceWarning": "L’archive a été vérifiée et contient tous les fichiers du dossier du jeu. La suppression du dossier est irréversible ; conservez donc une sauvegarde tant que vous n’êtes pas sûr que l’archive fonctionne.",
+  "Library.Pack.Verifying": "Vérification de l’archive…",
+  "Library.Pack.Deleting": "Suppression du dossier du jeu…",
+  "Library.Pack.DoneDeleted": "Terminé. L’archive est prête et le dossier du jeu a été supprimé.",
+  "Library.Pack.DeleteSkipped": "Terminé. Le dossier du jeu est conservé, car il n’a pas été possible de confirmer que l’archive le contient en entier.",
+  "Library.Pack.DeleteFailed": "L’archive est prête, mais la suppression du dossier du jeu a échoué : {0}",
+  "Status.PackedZar": "Archive de jeu empaquetée : {0}",
+  "Dialog.SaveZar": "Enregistrer l’archive du jeu",
+  "Dialog.ZarFiles": "Archives de jeu"
 }

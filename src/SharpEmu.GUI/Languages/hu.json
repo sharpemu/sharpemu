@@ -1,6 +1,6 @@
 {
   "_languageName": "Hungarian",
-  "Options.Env.SkipRt.Desc": "Skip compute shaders that use ray tracing. Off by default.\nThis can remove effects or cause incorrect graphics. Restart the game after a change.",
+  "Options.Env.SkipRt.Desc": "A ray tracinget használó compute shaderek kihagyása. Alapértelmezés szerint ki van kapcsolva.\nEffektek tűnhetnek el, vagy hibás grafika jelenhet meg. Módosítás után indítsd újra a játékot.",
   "Options.Env.StrictCompute.Desc": "Leállás a számítási és rajzolási shaderek elutasításakor (alapértelmezett).\nKikapcsolva az érintett munka kimarad. Hiányzó képek, hibák vagy lefagyás fordulhat elő. Módosítás után indítsd újra a játékot.",
   "Options.Env.PerformanceProfile.Desc": "Teljesítményidők és FPS naplózása a játék következő indításától.\nEz csökkentheti a teljesítményt.",
   "Options.Env.PerformanceFrameTrace.Desc": "Az utolsó 4096 megjelenítési intervallum megőrzése és naplóba írása kilépéskor.\nTeljesítményprofilozást igényel. A nyomkövetés mentéséhez zárd be a játékot szabályosan.",
@@ -116,7 +116,7 @@
   "Options.LogLevel.Error": "Hiba",
   "Options.LogLevel.Critical": "Kritikus",
 
-  "Options.TraceImports.Label": "Import trace limit",
+  "Options.TraceImports.Label": "Import-nyomkövetési korlát",
   "Options.TraceImports.Desc": "Az első N darab import nyomon követése modulonként (0 = ki).",
 
   "Options.CrashDump.Label": "Összeomlási memóriaképek",
@@ -182,7 +182,7 @@
   "Exit.Ok": "OK",
   "Exit.InvalidArguments": "nemérvényes argumentumok",
   "Exit.EbootNotFound": "eboot nem található",
-  "Exit.RuntimeException": "runtime exception",
+  "Exit.RuntimeException": "futásidejű kivétel",
   "Exit.EmulationError": "emulációs hiba",
   "Exit.Unknown": "ismeretlen",
 
@@ -277,7 +277,7 @@
   "Options.Hdr.Auto": "Automatikus",
   "Options.Env.BinkPlayback.Label": "Bink videólejátszás",
   "Options.Env.BinkPlayback.Desc": "A Host az FFmpeg hídon keresztül játssza le a Bink videókat, de egyes játékoknál problémák jelentkezhetnek.\nA Guest a játékmotor saját dekóderét használja.\nA Skip kihagyja a Bink videókat, ami megkönnyítheti a fejlesztést.",
-  "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
+  "Options.Env.BinkPlayback.Host": "Gazda (FFmpeg)",
   "Options.Env.BinkPlayback.Guest": "Guest",
   "Options.Env.BinkPlayback.Skip": "Kihagyás",
   "Options.Env.Group.Trophies": "Trófeák",
@@ -312,5 +312,30 @@
   "Trophies.Sort.Progress": "Előrehaladás",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Játékok keresése",
-  "Trophies.NoMatch": "Nincs a keresésnek megfelelő játék."
+  "Trophies.NoMatch": "Nincs a keresésnek megfelelő játék.",
+
+  "Library.View.Grid": "Halmozott nézet",
+  "Library.View.Carousel": "Soros nézet",
+  "Library.Context.PackZar": "Csomagolás .zar-ba…",
+  "Library.Pack.Title": "Csomagolás .zar-ba",
+  "Library.Pack.Heading": "{0} csomagolása",
+  "Library.Pack.Explanation": "Ez a teljes játékmappát egyetlen tömörített .zar fájlban tárolja. A SharpEmu kicsomagolás nélkül, közvetlenül ebből futtatja a játékot, így általában kevesebb helyet foglal, és ugyanúgy játszható. A játékmappa megmarad; miután az archívum elkészült és ellenőrzésre került, dönthetsz a törléséről.",
+  "Library.Pack.Preparing": "A játékmappa beolvasása…",
+  "Library.Pack.Progress": "{0} / {1} GB ({2}%)",
+  "Library.Pack.Cancelling": "Megszakítás…",
+  "Library.Pack.Done": "Kész. Az archívum készen áll az indításra.",
+  "Library.Pack.Failed": "A csomagolás sikertelen: {0}",
+  "Library.Pack.Close": "Bezárás",
+  "Library.Pack.MuteMusic": "A címzene némítása csomagolás közben",
+  "Library.Pack.DeleteSource": "A játékmappa törlése",
+  "Library.Pack.DeleteSourceWarning": "Az archívum ellenőrzése megtörtént, és a játékmappa minden fájlját tartalmazza. A mappa törlése nem vonható vissza, ezért tarts biztonsági mentést, amíg meg nem bizonyosodsz arról, hogy az archívum működik.",
+  "Library.Pack.Verifying": "Az archívum ellenőrzése…",
+  "Library.Pack.Deleting": "A játékmappa törlése…",
+  "Library.Pack.DoneDeleted": "Kész. Az archívum elkészült, a játékmappát pedig töröltük.",
+  "Library.Pack.DeleteSkipped": "Kész. A játékmappa megmaradt, mert nem sikerült megerősíteni, hogy az archívum mindent tartalmaz belőle.",
+  "Library.Pack.DeleteFailed": "Az archívum elkészült, de a játékmappa törlése nem sikerült: {0}",
+  "Status.PackedZar": "Csomagolt játékarchívum: {0}",
+  "Dialog.SaveZar": "Játékarchívum mentése",
+  "Dialog.ZarFiles": "Játékarchívumok",
+  "Library.Context.Trophies": "Trófeák…"
 }

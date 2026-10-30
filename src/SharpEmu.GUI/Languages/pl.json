@@ -1,6 +1,6 @@
 {
   "_languageName": "Polski",
-  "Options.Env.SkipRt.Desc": "Skip compute shaders that use ray tracing. Off by default.\nThis can remove effects or cause incorrect graphics. Restart the game after a change.",
+  "Options.Env.SkipRt.Desc": "Pomiń compute shadery korzystające z ray tracingu. Domyślnie wyłączone.\nMoże to usunąć efekty lub spowodować nieprawidłową grafikę. Po zmianie uruchom grę ponownie.",
   "Options.Env.StrictCompute.Desc": "Zatrzymuj przy odrzuceniu shaderów obliczeń i rysowania (domyślnie).\nWyłącz, aby pomijać te operacje. Mogą wystąpić brakujące obrazy, błędy lub zawieszenia. Po zmianie uruchom grę ponownie.",
   "Options.Env.PerformanceProfile.Desc": "Zapisuj czasy wydajności i FPS od następnego uruchomienia gry.\nMoże to obniżyć wydajność.",
   "Options.Env.PerformanceFrameTrace.Desc": "Zachowaj ostatnie 4096 odstępów prezentacji i zapisz je w dzienniku przy zamykaniu.\nWymaga profilowania wydajności. Zamknij grę normalnie, aby zapisać ślad.",
@@ -316,5 +316,28 @@
   "Trophies.Sort.Progress": "Postęp",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Szukaj gier",
-  "Trophies.NoMatch": "Żadna gra nie pasuje do wyszukiwania."
+  "Trophies.NoMatch": "Żadna gra nie pasuje do wyszukiwania.",
+
+  "Library.Context.PackZar": "Spakuj jako .zar…",
+  "Library.Pack.Title": "Spakuj jako .zar",
+  "Library.Pack.Heading": "Pakowanie: {0}",
+  "Library.Pack.Explanation": "Cały folder gry zostanie zapisany w jednym skompresowanym pliku .zar. SharpEmu uruchamia grę bezpośrednio z tego pliku, bez rozpakowywania, więc zwykle zajmuje on mniej miejsca na dysku, a gra działa tak samo. Folder gry zostaje zachowany; po zapisaniu i sprawdzeniu archiwum możesz zdecydować o jego usunięciu.",
+  "Library.Pack.Preparing": "Odczytywanie folderu gry…",
+  "Library.Pack.Progress": "{0} / {1} GB ({2}%)",
+  "Library.Pack.Cancelling": "Anulowanie…",
+  "Library.Pack.Done": "Gotowe. Archiwum jest gotowe do uruchomienia.",
+  "Library.Pack.Failed": "Pakowanie nie powiodło się: {0}",
+  "Library.Pack.Close": "Zamknij",
+  "Library.Pack.MuteMusic": "Wycisz muzykę z ekranu tytułowego podczas pakowania",
+  "Library.Pack.DeleteSource": "Usuń folder gry",
+  "Library.Pack.DeleteSourceWarning": "Archiwum zostało sprawdzone i zawiera wszystkie pliki z folderu gry. Usunięcia folderu nie można cofnąć, więc zachowaj kopię zapasową, dopóki nie upewnisz się, że archiwum działa.",
+  "Library.Pack.Verifying": "Sprawdzanie archiwum…",
+  "Library.Pack.Deleting": "Usuwanie folderu gry…",
+  "Library.Pack.DoneDeleted": "Gotowe. Archiwum jest gotowe, a folder gry został usunięty.",
+  "Library.Pack.DeleteSkipped": "Gotowe. Folder gry został zachowany, ponieważ nie udało się potwierdzić, że archiwum zawiera wszystkie jego pliki.",
+  "Library.Pack.DeleteFailed": "Archiwum jest gotowe, ale nie udało się usunąć folderu gry: {0}",
+  "Status.PackedZar": "Spakowane archiwum gry: {0}",
+  "Dialog.SaveZar": "Zapisz archiwum gry",
+  "Dialog.ZarFiles": "Archiwa gier",
+  "Library.Context.Trophies": "Trofea…"
 }
