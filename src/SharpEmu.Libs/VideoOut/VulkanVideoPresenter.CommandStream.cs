@@ -593,6 +593,12 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool IsPendingOnCommandThread(ulong address, ulong size) =>
             (_translation.PendingWrites is { } pending && pending.TryGetPending(address, size, out _)) || _commandThread!.HasShadow(address, size);
 
+        public bool HasGpuWrittenCommandData(ulong address, ulong size) =>
+            HasPendingMemoryPublication(address, size) ||
+            (_translation.PendingWrites is { } pending && pending.TryGetPending(address, size, out _)) ||
+            (OnCommandThread && (_commandThread!.HasShadow(address, size) || _commandThread.HasPendingRangeAfter(address, size, 0))) ||
+            (_bufferCache.MayHaveGpuDirtyPages(address, size) && _bufferCache.HasGpuDirtyBytes(address, size));
+
         public bool TryReadGuestWaitOperand(ulong address, Span<byte> destination) =>
             OnCommandThread ? ReadOnCommandThread(address, destination, RenderReadSource.Wait) : TryReadGuestOperand(address, destination);
 

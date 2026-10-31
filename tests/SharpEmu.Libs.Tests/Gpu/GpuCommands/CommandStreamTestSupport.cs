@@ -31,6 +31,9 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public Func<int, bool>? PendingPublications { get; set; }
 
+    public Func<ulong, ulong, bool>? GpuWrittenCommandData { get; set; }
+    public bool HasGpuWrittenCommandData(ulong address, ulong size) => GpuWrittenCommandData?.Invoke(address, size) == true;
+
     public Func<int, EndOfPipeWrite, bool>? DeferredEndOfPipe { get; set; }
     public Func<ulong, ulong, bool>? PendingMemoryPublication { get; set; }
     public bool TryDeferEndOfPipe(int queueId, in EndOfPipeWrite write) => DeferredEndOfPipe?.Invoke(queueId, write) == true;

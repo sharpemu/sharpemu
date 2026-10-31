@@ -170,6 +170,8 @@ public interface ICommandStreamHost
 
     bool HasPendingPublications(int queueId) => false;
 
+    bool HasGpuWrittenCommandData(ulong address, ulong size) => true;
+
     bool HasPendingMemoryPublication(ulong address, ulong size) => false;
 
     // After a wait on another queue's unpublished label, this queue's writes must not land first.
