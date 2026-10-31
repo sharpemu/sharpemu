@@ -41,6 +41,9 @@ public sealed partial class GpuCommandInterpreter
     private PacketCursorStack? _execution;
     private bool _chainRequested;
     private ulong _packetSerial;
+    private ReadOnlyMemory<byte> _submittedCommands;
+    private IReadOnlyDictionary<ulong, byte[]>? _submittedRegisterTables;
+    private ulong _submittedCommandAddress;
     private ulong _lastWriteAddress;
     private ulong _lastWriteValue;
     private int _lastWriteLength;
@@ -194,7 +197,8 @@ public sealed partial class GpuCommandInterpreter
 
     public void SetFlip(FlipRequest flip) => PendingFlip = flip;
 
-    public SubmissionProgress Process(PacketCursorStack execution, ulong address, uint dwordCount)
+    public SubmissionProgress Process(PacketCursorStack execution, ulong address, uint dwordCount,
+        ReadOnlyMemory<byte> commandBytes = default, IReadOnlyDictionary<ulong, byte[]>? registerTables = null)
     {
         if (_execution is not null)
         {
@@ -212,6 +216,9 @@ public sealed partial class GpuCommandInterpreter
         _lastWriteLength = 0;
         _pendingCommands = _host.CommandSignal;
         _packetWindowGeneration++;
+        _submittedCommands = commandBytes;
+        _submittedRegisterTables = registerTables;
+        _submittedCommandAddress = address;
         _execution = execution;
         try
         {
@@ -220,6 +227,8 @@ public sealed partial class GpuCommandInterpreter
         finally
         {
             _execution = null;
+            _submittedCommands = default;
+            _submittedRegisterTables = null;
         }
 
         return execution.IsEmpty ? SubmissionProgress.Complete : SubmissionProgress.Blocked;
@@ -500,7 +509,7 @@ public sealed partial class GpuCommandInterpreter
         window.Generation = -1;
         var words = window.Words.AsSpan(0, (int)dwords);
         RenderPhaseProfile.RecordCommandRead(RenderPhaseProfile.CommandReadKind.Header, words.Length * sizeof(uint));
-        if (!_host.TryReadGuest(packetAddress, MemoryMarshal.AsBytes(words)))
+        if (!TryReadCommand(packetAddress, MemoryMarshal.AsBytes(words)))
         {
             return null;
         }
@@ -547,7 +556,7 @@ public sealed partial class GpuCommandInterpreter
         {
             RenderPhaseProfile.RecordCommandRead(RenderPhaseProfile.CommandReadKind.Payload, scratch.Length * sizeof(uint));
         }
-        if (payloadDwords != 0 && !_host.TryReadGuest(packetAddress + sizeof(uint), MemoryMarshal.AsBytes(scratch)))
+        if (payloadDwords != 0 && !TryReadCommand(packetAddress + sizeof(uint), MemoryMarshal.AsBytes(scratch)))
         {
             throw _host.Fatal($"The command stream cannot read a packet: address=0x{packetAddress:X16} dwords={payloadDwords + 1}.");
         }
@@ -563,11 +572,25 @@ public sealed partial class GpuCommandInterpreter
         Span<byte> word = stackalloc byte[sizeof(uint)];
         for (var index = begin; index < end; index++)
         {
-            var text = _host.TryReadGuest(cursor.Address + ((ulong)index * sizeof(uint)), word)
+            var text = TryReadCommand(cursor.Address + ((ulong)index * sizeof(uint)), word)
                 ? BinaryPrimitives.ReadUInt32LittleEndian(word).ToString("X8")
                 : "????????";
             Console.Error.WriteLine($"\t{index:X5}{(index == offset ? ":" : " ")} {text}");
         }
+    }
+
+    private bool TryReadCommand(ulong address, Span<byte> destination)
+    {
+        if (!_submittedCommands.IsEmpty && address >= _submittedCommandAddress)
+        {
+            var offset = address - _submittedCommandAddress;
+            if (offset <= (ulong)_submittedCommands.Length && (ulong)destination.Length <= (ulong)_submittedCommands.Length - offset)
+            {
+                _submittedCommands.Span.Slice((int)offset, destination.Length).CopyTo(destination);
+                return true;
+            }
+        }
+        return _host.TryReadGuest(address, destination);
     }
 
     internal uint ReadDword(ulong address, RenderPhaseProfile.CommandReadKind readKind = RenderPhaseProfile.CommandReadKind.Operand32)
@@ -577,7 +600,7 @@ public sealed partial class GpuCommandInterpreter
         // The packets themselves are command data; anything else is an operand earlier work may write.
         var read = readKind is RenderPhaseProfile.CommandReadKind.Header or RenderPhaseProfile.CommandReadKind.Payload or
             RenderPhaseProfile.CommandReadKind.RegisterTable
-            ? _host.TryReadGuest(address, bytes)
+            ? TryReadCommand(address, bytes)
             : _host.TryReadGuestOperand(address, bytes);
         if (!read)
         {

@@ -575,7 +575,8 @@ public sealed class CommandStreamQueue
         SlicesRun++;
         _host.BeginSubmission(submission.QueueId, submission.SubmissionId, submission.GeometrySnapshots);
         processor.ConstantEngineComplete = true;
-        var complete = processor.Process(submission.Commands, submission.Address, submission.DwordCount) == SubmissionProgress.Complete;
+        var complete = processor.Process(submission.Commands, submission.Address, submission.DwordCount,
+            submission.CommandBytes, submission.RegisterTables) == SubmissionProgress.Complete;
         submission.CommandsComplete = complete;
         if (submission.Commands.MadeProgress)
         {
