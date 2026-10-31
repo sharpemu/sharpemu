@@ -2218,6 +2218,75 @@ public static partial class KernelMemoryCompatExports
         }
     }
 
+    // sceKernelUtimes(path, const SceKernelTimeval times[2]): access time, then
+    // modification time, each { int64 sec; int64 usec }. A null array means "now".
+    [SysAbiExport(
+        Nid = "0Cq8ipKr9n0",
+        ExportName = "sceKernelUtimes",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelUtimes(CpuContext ctx)
+    {
+        if (!TryReadNullTerminatedUtf8(ctx, ctx[CpuRegister.Rdi], MaxGuestStringLength, out var guestPath))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        var hostPath = ResolveGuestPath(guestPath);
+        if (!File.Exists(hostPath) && !Directory.Exists(hostPath))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        if (IsReadOnlyGuestMutationPath(guestPath))
+        {
+            // The read-only mounts are the game's own files: their times stay as shipped.
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        var access = DateTime.UtcNow;
+        var modified = access;
+        var timesAddress = ctx[CpuRegister.Rsi];
+        if (timesAddress != 0)
+        {
+            Span<byte> times = stackalloc byte[32];
+            if (!ctx.Memory.TryRead(timesAddress, times))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            static DateTime FromTimeval(ReadOnlySpan<byte> value) =>
+                DateTime.UnixEpoch
+                    .AddSeconds(System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(value))
+                    .AddTicks(System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(value[8..]) * 10);
+
+            access = FromTimeval(times[..16]);
+            modified = FromTimeval(times[16..]);
+        }
+
+        try
+        {
+            if (Directory.Exists(hostPath))
+            {
+                Directory.SetLastAccessTimeUtc(hostPath, access);
+                Directory.SetLastWriteTimeUtc(hostPath, modified);
+            }
+            else
+            {
+                File.SetLastAccessTimeUtc(hostPath, access);
+                File.SetLastWriteTimeUtc(hostPath, modified);
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentOutOfRangeException)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "naInUjYt3so",
         ExportName = "sceKernelRmdir",
@@ -4026,7 +4095,13 @@ public static partial class KernelMemoryCompatExports
             }
         }
 
-        ctx[CpuRegister.Rax] = unchecked((ulong)rendered.Length);
+        // Unlike snprintf, swprintf and vswprintf answer -1 when the output does not fit in
+        // bufferSize wide characters, terminator included. Callers rely on it: UE's string
+        // formatting grows its stack buffer on -1, and a length instead tells it the
+        // truncated text was complete.
+        ctx[CpuRegister.Rax] = (ulong)rendered.Length >= bufferSize
+            ? ulong.MaxValue
+            : unchecked((ulong)rendered.Length);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
