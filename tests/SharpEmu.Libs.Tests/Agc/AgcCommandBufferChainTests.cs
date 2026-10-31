@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
@@ -36,6 +37,33 @@ public sealed class AgcCommandBufferChainTests
 
     private static SharpEmu.Libs.Gpu.GpuCommands.CommandStreamQueue StreamOf(FakeCpuMemory memory) =>
         AgcExports.GetHeadlessCommandStreamForTests(memory).Queue;
+
+    [Fact]
+    public void SubmittedRootSurvivesCallerReuseAndResumesOnALiveLabel()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        var waitDwords = WriteUnsatisfiedWait(ctx, memory, FirstLinkAddress);
+        var padding = FirstLinkAddress + waitDwords * sizeof(uint);
+        WriteUInt32(memory, padding, PacketHeader.Make(301, PacketOpcode.Nop));
+        for (var i = 1u; i < 301; i++)
+            WriteUInt32(memory, padding + i * sizeof(uint), 0);
+        var instances = padding + 301 * sizeof(uint);
+        WriteUInt32(memory, instances, PacketHeader.Make(2, PacketOpcode.NumInstances));
+        WriteUInt32(memory, instances + sizeof(uint), 19);
+        var count = waitDwords + 303;
+        SubmitDcb(ctx, memory, FirstLinkAddress, count);
+        var queue = StreamOf(memory);
+        Assert.Equal(1, queue.BlockedQueueCount);
+
+        Assert.True(memory.TryWrite(FirstLinkAddress, new byte[(int)count * sizeof(uint)]));
+        WriteUInt32(memory, WaitLabelAddress, 1);
+        queue.NotifyPublicationCompleted();
+
+        Assert.Equal(SliceResult.Completed, queue.ProcessOne());
+        Assert.Equal(19u, queue.GetInterpreter(0).InstanceCount);
+        Assert.Equal(0, queue.BlockedQueueCount);
+    }
 
     [Fact]
     public void SubmittedDcb_FollowsIndirectBufferIntoTheChainedBuffer()
