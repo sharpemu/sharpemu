@@ -131,6 +131,22 @@ public static partial class KernelRuntimeCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    [SysAbiExport(Nid = "-ZR+hG7aDHw", ExportName = "sceKernelSleep",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
+    public static int KernelSleep(CpuContext ctx)
+    {
+        var remaining = (ulong)(uint)ctx[CpuRegister.Rdi] * 1000;
+        if (remaining != 0)
+            GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelSleep");
+        while (remaining != 0)
+        {
+            var milliseconds = (int)Math.Min(remaining, int.MaxValue);
+            Thread.Sleep(milliseconds);
+            remaining -= (uint)milliseconds;
+        }
+        return ctx.SetReturn(0);
+    }
+
     private static void TraceUsleepSpin(CpuContext ctx, ulong micros)
     {
         if (!_traceUsleep)
