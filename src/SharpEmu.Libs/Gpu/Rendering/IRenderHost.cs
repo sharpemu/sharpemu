@@ -215,7 +215,7 @@ public interface IRenderHost
 
     // Executes a dispatch from three uint32 group counts in guest memory when the backend can
     // consume the guest buffer directly. Backends without native indirect dispatch return false.
-    bool TryDispatchIndirect(ulong argumentsAddress);
+    bool TryDispatchIndirect(ulong argumentsAddress, ReadOnlySpan<int> physicalAxisOfLogical);
 
     // Orders the buffer writes of the given shader stages before every later access.
     void ShaderWriteBarrier(PipelineStageFlags sourceStages);

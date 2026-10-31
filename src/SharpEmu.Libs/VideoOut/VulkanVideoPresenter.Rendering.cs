@@ -1534,26 +1534,55 @@ internal static unsafe partial class VulkanVideoPresenter
             NoteShaderMayWriteMappedMemory();
         }
 
-        public bool TryDispatchIndirect(ulong argumentsAddress)
+        public bool TryDispatchIndirect(ulong argumentsAddress, ReadOnlySpan<int> physicalAxisOfLogical)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
+            var permuted = physicalAxisOfLogical is not [0, 1, 2];
+            if (permuted && _worker)
+            {
+                throw Serial("permuted indirect dispatch");
+            }
+
             var (obtainedBuffer, offset) = _worker
                 ? ObtainBufferForSlice(argumentsAddress, 3u * sizeof(uint), isWritten: false, isTexelBuffer: false)
                 : _bufferCache.ObtainBuffer(argumentsAddress, 3u * sizeof(uint), false);
             var buffer = obtainedBuffer.Handle;
+            var permutedArguments = permuted ? UploadTransient(stackalloc byte[3 * sizeof(uint)], 16) : default;
             var command = BeginBatchedGuestCommands();
             var barrier = new BufferMemoryBarrier2
             {
                 SType = StructureType.BufferMemoryBarrier2,
                 SrcAccessMask = AccessFlags2.ShaderWriteBit | AccessFlags2.TransferWriteBit | AccessFlags2.MemoryWriteBit,
-                DstAccessMask = AccessFlags2.IndirectCommandReadBit,
+                DstAccessMask = permuted ? AccessFlags2.TransferReadBit : AccessFlags2.IndirectCommandReadBit,
                 SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
                 DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
                 Buffer = buffer,
                 Offset = offset,
                 Size = 3u * sizeof(uint),
             };
-            VulkanSynchronization.PipelineBarrier(_vk,command, PipelineStageFlags.AllCommandsBit, PipelineStageFlags.DrawIndirectBit, 0, 0, null, 1, &barrier, 0, null, BarrierSource.IndirectDispatch);
+            VulkanSynchronization.PipelineBarrier(_vk,command, PipelineStageFlags.AllCommandsBit,
+                permuted ? PipelineStageFlags.TransferBit : PipelineStageFlags.DrawIndirectBit, 0, 0, null, 1, &barrier, 0, null, BarrierSource.IndirectDispatch);
+            if (permuted)
+            {
+                var permutedBuffer = new VkBuffer(permutedArguments.Handle);
+                var regions = stackalloc BufferCopy[3];
+                for (var axis = 0; axis < 3; axis++)
+                {
+                    regions[axis] = new BufferCopy(offset + (ulong)axis * sizeof(uint),
+                        permutedArguments.Offset + (ulong)physicalAxisOfLogical[axis] * sizeof(uint), sizeof(uint));
+                }
+
+                _vk.CmdCopyBuffer(command, buffer, permutedBuffer, 3, regions);
+                barrier.SrcAccessMask = AccessFlags2.TransferWriteBit;
+                barrier.DstAccessMask = AccessFlags2.IndirectCommandReadBit;
+                barrier.Buffer = permutedBuffer;
+                barrier.Offset = permutedArguments.Offset;
+                VulkanSynchronization.PipelineBarrier(_vk, command, PipelineStageFlags.TransferBit, PipelineStageFlags.DrawIndirectBit,
+                    0, 0, null, 1, &barrier, 0, null, BarrierSource.IndirectDispatch);
+                buffer = permutedBuffer;
+                offset = permutedArguments.Offset;
+            }
+
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
             {
                 _vk.CmdDispatchIndirect(command, buffer, offset);

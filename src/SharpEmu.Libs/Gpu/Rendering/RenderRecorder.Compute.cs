@@ -133,7 +133,7 @@ internal sealed partial class RenderRecorder
             var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
             _host.BeginCheckedDispatch();
             _host.BindPipeline(PipelineBindPoint.Compute, in pipeline);
-            if (record.IndirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(record.IndirectArgumentsAddress))
+            if (record.IndirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(record.IndirectArgumentsAddress, GroupAxisOrder(input)))
             {
                 var (groupsX, groupsY, groupsZ) = PhysicalGroups(input, record);
                 _host.Dispatch(groupsX, groupsY, groupsZ);
@@ -260,9 +260,12 @@ internal sealed partial class RenderRecorder
         return false;
     }
 
+    private static int[] GroupAxisOrder(ComputeInputInfo input) =>
+        Gen5SpirvTranslator.ComputeGroupAxisOrder(input.ThreadsX, input.ThreadsY, input.ThreadsZ, input.GroupIdX, input.GroupIdY, input.GroupIdZ);
+
     private static (uint X, uint Y, uint Z) PhysicalGroups(ComputeInputInfo input, ResolvedDispatch record)
     {
-        var axisOrder = Gen5SpirvTranslator.ComputeWorkgroupAxisOrder(input.ThreadsX, input.ThreadsY, input.ThreadsZ);
+        var axisOrder = GroupAxisOrder(input);
         Span<uint> logical = [record.GroupsX, record.GroupsY, record.GroupsZ];
         Span<uint> physical = stackalloc uint[3];
         for (var axis = 0; axis < 3; axis++)
