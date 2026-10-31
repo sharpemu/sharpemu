@@ -9,6 +9,7 @@ public sealed class HostBackingObject : IDisposable
 
     internal readonly object Gate = new();
     internal nint Handle;
+    internal nint FileHandle = -1;
     internal int Descriptor = -1;
 
     internal HostBackingObject(ulong aliasBase, ulong size, Action<HostBackingObject> release)
