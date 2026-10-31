@@ -166,9 +166,9 @@ public static class TilerShaders
             Builder.AddLabel(bodyLabel);
         }
 
-        public byte[] Finish(uint main, uint localX, uint localY)
+        public byte[] Finish(uint main, uint localX, uint localY, uint localZ = 1)
         {
-            Builder.AddExecutionMode(main, SpirvExecutionMode.LocalSize, localX, localY, 1);
+            Builder.AddExecutionMode(main, SpirvExecutionMode.LocalSize, localX, localY, localZ);
             Builder.AddEntryPoint(SpirvExecutionModel.GLCompute, main, "main", [InvocationVariable, InputBufferVariable, OutputBufferVariable, ArgumentsVariable]);
             return Builder.Build();
         }
@@ -403,13 +403,35 @@ public static class TilerShaders
         shaderModule.Builder.AddInstruction(SpirvOp.AtomicOr, shaderModule.UintType, target, shaderModule.GetUnsignedConstant(1), shaderModule.GetUnsignedConstant(0), shaderModule.Builder.AddInstruction(SpirvOp.ShiftLeftLogical, shaderModule.UintType, value2, shift));
     }
 
-    // Create one module for each block shape, element size and transfer direction.
-    public static byte[] CreateBlockCopy(TilerBlockShape shape, uint elementBytes, bool toTiled)
+    // Depth8 and GCN8 interleave Y before a whole X word has been assembled.
+    public static bool SupportsPackedWords(TilerBlockShape shape, uint elementBytes) =>
+        elementBytes is 1 or 2 && !(elementBytes == 1 && shape is TilerBlockShape.Depth64KB or TilerBlockShape.GcnThin1D);
+
+    public static (uint X, uint Y, uint Z) BlockCopyWorkgroupSize(TilerBlockShape shape, uint elementBytes, bool toTiled, bool packedWords)
+    {
+        if (!packedWords) return (8, 8, 1);
+        if (!SupportsPackedWords(shape, elementBytes))
+            throw new ArgumentException("This layout does not have contiguous packed X words.", nameof(packedWords));
+
+        // Active lanes cover one contiguous 32-byte output sector. Volume tiles
+        // put Z0,Y0,Z1 just after packed X; linear output instead stays on one row.
+        if (!toTiled) return (32u / elementBytes, 1, 1);
+        if (shape is TilerBlockShape.Standard4KB3D or TilerBlockShape.Standard64KB3D or TilerBlockShape.Prt64KB3D)
+            return (4u / elementBytes, 2, 4);
+        if (shape == TilerBlockShape.RenderTarget64KBGen5 && elementBytes == 1) return (8, 4, 1);
+        if (shape is TilerBlockShape.Depth64KB or TilerBlockShape.GcnThin1D) return (4, 4, 1);
+        return (16u / elementBytes, 2, 1);
+    }
+
+    // packedWords requires aligned bases/linear strides/tail X and a whole-word row width.
+    public static byte[] CreateBlockCopy(TilerBlockShape shape, uint elementBytes, bool toTiled, bool packedWords = false)
     {
         if (elementBytes is not (1 or 2 or 4 or 8 or 16))
         {
             throw new ArgumentOutOfRangeException(nameof(elementBytes));
         }
+        if (packedWords && !SupportsPackedWords(shape, elementBytes))
+            throw new ArgumentException("This layout does not have contiguous packed X words.", nameof(packedWords));
 
         var shaderModule = new ShaderModuleContext(pushConstants: false);
         var builder = shaderModule.Builder;
@@ -431,6 +453,12 @@ public static class TilerShaders
         shaderModule.ReturnWhen(outside);
 
         var tail = builder.AddInstruction(SpirvOp.INotEqual, shaderModule.BooleanType, shaderModule.LoadArgument(12), shaderModule.GetUnsignedConstant(0));
+        if (packedWords)
+        {
+            var follower = builder.AddInstruction(SpirvOp.INotEqual, shaderModule.BooleanType,
+                shaderModule.And(px, shaderModule.GetUnsignedConstant(4 / elementBytes - 1)), shaderModule.GetUnsignedConstant(0));
+            shaderModule.ReturnWhen(follower);
+        }
         var swizzleX = builder.AddInstruction(SpirvOp.Select, shaderModule.UintType, tail, shaderModule.Add(px, shaderModule.LoadArgument(10)), px);
         var swizzleY = builder.AddInstruction(SpirvOp.Select, shaderModule.UintType, tail, shaderModule.Add(py, shaderModule.LoadArgument(11)), py);
         var blockX = builder.AddInstruction(SpirvOp.Select, shaderModule.UintType, tail, shaderModule.GetUnsignedConstant(0), shaderModule.Divide(px, shaderModule.GetUnsignedConstant(extent.Width)));
@@ -442,18 +470,21 @@ public static class TilerShaders
         var linear = shaderModule.Add(shaderModule.Add(shaderModule.Multiply(pz, shaderModule.LoadArgument(7)), shaderModule.Multiply(py, shaderModule.LoadArgument(6))), shaderModule.Multiply(px, shaderModule.GetUnsignedConstant(elementBytes)));
         var sourceBase = shaderModule.LoadArgument(0);
         var destinationBase = shaderModule.LoadArgument(1);
-        if (toTiled)
+        var source = shaderModule.Add(sourceBase, toTiled ? linear : tiled);
+        var destination = shaderModule.Add(destinationBase, toTiled ? tiled : linear);
+        if (packedWords)
         {
-            CopyElement(shaderModule, shaderModule.Add(sourceBase, linear), shaderModule.Add(destinationBase, tiled), elementBytes);
+            CopyElement(shaderModule, source, destination, 4);
         }
         else
         {
-            CopyElement(shaderModule, shaderModule.Add(sourceBase, tiled), shaderModule.Add(destinationBase, linear), elementBytes);
+            CopyElement(shaderModule, source, destination, elementBytes);
         }
 
         builder.AddStatement(SpirvOp.Return);
         builder.EndFunction();
-        return shaderModule.Finish(main, 8, 8);
+        var local = BlockCopyWorkgroupSize(shape, elementBytes, toTiled, packedWords);
+        return shaderModule.Finish(main, local.X, local.Y, local.Z);
     }
 
     private static (ShaderModuleContext ShaderModuleContext, uint Main, uint X, uint Y) BeginConversion()
