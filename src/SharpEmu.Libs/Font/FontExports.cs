@@ -33,7 +33,8 @@ public static class FontExports
         var sourceAddress = ctx[CpuRegister.Rdi];
         var textAddress = ctx[CpuRegister.Rsi];
         var textSize = (uint)ctx[CpuRegister.Rdx];
-        if (sourceAddress == 0 || textAddress > ulong.MaxValue - textSize)
+        var bounded = unchecked((int)textSize) > 0;
+        if (sourceAddress == 0 || (bounded && textAddress > ulong.MaxValue - textSize))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
@@ -41,7 +42,7 @@ public static class FontExports
         Span<byte> source = stackalloc byte[0x60];
         source.Clear();
         BinaryPrimitives.WriteUInt64LittleEndian(source[0x08..], textAddress);
-        BinaryPrimitives.WriteUInt64LittleEndian(source[0x10..], textAddress == 0 ? 0 : textAddress + textSize);
+        BinaryPrimitives.WriteUInt64LittleEndian(source[0x10..], textAddress != 0 && bounded ? textAddress + textSize : 0);
         BinaryPrimitives.WriteUInt64LittleEndian(source[0x18..], textAddress);
         BinaryPrimitives.WriteUInt64LittleEndian(source[0x20..], ctx[CpuRegister.Rcx]);
         BinaryPrimitives.WriteUInt64LittleEndian(source[0x28..], ctx[CpuRegister.R8]);
