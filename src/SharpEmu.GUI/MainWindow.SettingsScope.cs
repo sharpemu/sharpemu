@@ -32,7 +32,6 @@ public partial class MainWindow
 
     private void BuildScopedRows()
     {
-        AllGamesSettingsButton.Click += (_, _) => OpenAllGamesSettings();
         LaunchVariablesButton.Click += async (_, _) => await LaunchWithVariablesAsync();
 
         string OnOff(bool value) => Localization.Instance.Get(value ? "Common.On" : "Common.Off");
@@ -165,12 +164,48 @@ public partial class MainWindow
         }
     }
 
-    /// <summary>Opens the overlay on the settings every game starts from, from the Options page.</summary>
-    private void OpenAllGamesSettings()
+    private bool _globalGameSettingsAttached;
+
+    // Both scopes use the same controls and persistence path. Move their content into global
+    // Options while it is open, then return it to the per-game overlay on leaving Options.
+    private (ContentControl Source, ContentControl Target)[] GlobalGameSettingsHosts() =>
+    [
+        (GameOptionsGeneralPanel, GlobalGeneralSettingsHost),
+        (GameOptionsLoggingPanel, GlobalLoggingSettingsHost),
+        (GameOptionsRenderingPanel, OptionsGraphicsPanel),
+        (GameOptionsEnvironmentPanel, OptionsEnvironmentPanel),
+    ];
+
+    private void AttachGlobalGameSettings()
     {
-        _returnToOptionsOnClose = _activePageIndex == 1;
-        SetActivePage(0);
-        OpenGameSettingsOverlay(game: null);
+        if (_globalGameSettingsAttached) return;
+        foreach (var (source, target) in GlobalGameSettingsHosts())
+        {
+            var content = source.Content;
+            source.Content = null;
+            target.Content = content;
+            if (target is not ScrollViewer && content is StackPanel stack)
+                stack.Children[0].IsVisible = false; // the global section already has a heading
+        }
+        _globalGameSettingsAttached = true;
+        _editingAllGames = true;
+        GameOptionsActions.IsVisible = false;
+        LoadScopedGameSettings();
+    }
+
+    private void DetachGlobalGameSettings()
+    {
+        if (!_globalGameSettingsAttached) return;
+        foreach (var (source, target) in GlobalGameSettingsHosts())
+        {
+            var content = target.Content;
+            target.Content = null;
+            source.Content = content;
+            if (content is StackPanel stack) stack.Children[0].IsVisible = true;
+        }
+        _globalGameSettingsAttached = false;
+        _editingAllGames = false;
+        UpdateScopeBadges();
     }
 
     // The game's header, cover, facts, launch button and file actions mean nothing for every

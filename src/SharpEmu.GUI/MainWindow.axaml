@@ -1356,6 +1356,22 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                  Text="Logging" />
                     </Grid>
                   </Button>
+                  <Button x:Name="OptionsGraphicsNav" Classes="optionsNav"
+                          AutomationProperties.Name="{Binding [Options.Graphics], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                    <Grid ColumnDefinitions="36,*">
+                      <TextBlock Grid.Column="0" Classes="materialSymbol optionsNavIcon" Text="monitor" />
+                      <TextBlock Grid.Column="1" Classes="optionsNavLabel"
+                                 Text="{Binding [Options.Graphics], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    </Grid>
+                  </Button>
+                  <Button x:Name="OptionsEnvironmentNav" Classes="optionsNav"
+                          AutomationProperties.Name="{Binding [Options.Env.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                    <Grid ColumnDefinitions="36,*">
+                      <TextBlock Grid.Column="0" Classes="materialSymbol optionsNavIcon" Text="deployed_code" />
+                      <TextBlock Grid.Column="1" Classes="optionsNavLabel"
+                                 Text="{Binding [Options.Env.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    </Grid>
+                  </Button>
                   <Button x:Name="OptionsLauncherNav" Classes="optionsNav">
                     <Grid ColumnDefinitions="36,*">
                       <TextBlock Grid.Column="0"
@@ -1458,24 +1474,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     </StackPanel>
                   </Border>
 
-                  <TextBlock Classes="optionsGroupHeader"
-                             Text="{Binding [Options.Group.Games], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                  <Border Classes="optionsGroup">
-                    <StackPanel>
-                      <local:SettingRow x:Name="AllGamesSettingsRow"
-                                        Classes="optionRow"
-                                        Label="{Binding [GameSettings.AllGames.Title], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                        Description="{Binding [Options.AllGames.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
-                        <Button x:Name="AllGamesSettingsButton"
-                                Classes="optionAction">
-                          <TextBlock Text="{Binding [Options.AllGames.Open], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                     VerticalAlignment="Center" />
-                        </Button>
-                      </local:SettingRow>
-                    </StackPanel>
-                  </Border>
+                  <ContentControl x:Name="GlobalGeneralSettingsHost" HorizontalContentAlignment="Stretch" />
                 </StackPanel>
               </ScrollViewer>
+
+              <ScrollViewer x:Name="OptionsGraphicsPanel" Classes="optionsSectionPanel" />
+              <ScrollViewer x:Name="OptionsEnvironmentPanel" Classes="optionsSectionPanel" />
 
               <ScrollViewer x:Name="OptionsLoggingPanel"
                             Classes="optionsSectionPanel">
@@ -1486,6 +1490,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <TextBlock Classes="optionsSectionDesc"
                                Text="{Binding [Options.Page.Logging.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
                   </StackPanel>
+                  <ContentControl x:Name="GlobalLoggingSettingsHost" HorizontalContentAlignment="Stretch" />
                   <Border Classes="optionsGroup">
                     <StackPanel>
                       <local:SettingRow x:Name="LogsFolderRow"

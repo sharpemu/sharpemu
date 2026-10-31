@@ -35,8 +35,8 @@ or archive path. Relative paths are normalized; only Windows paths are folded to
 uppercase, so distinct files on case-sensitive Linux volumes remain distinct.
 Moving a game without a title ID changes its settings key.
 
-**Options → General → Games** opens the settings every game starts from, saved in
-`user/game_defaults.json`. A game's file stores changes from those shared settings.
+**Options → General, Logging, Graphics and Environment** edit the settings every
+game starts from, saved in `user/game_defaults.json`. A game's file stores changes from those shared settings.
 Inherited rows show **Global**; a changed row has a reset button that restores the
 shared value. Values matching the inherited value are removed from the game's file.
 
@@ -92,7 +92,7 @@ See [Import results and diagnostic logging](import-result-logging.md) for expect
 result filters, mutex warning sampling, and diagnostic selection.
 
 1. Set the variable in the shell before you start the emulator or the GUI.
-2. In the GUI, **Options → General → Variables for every game** sets variables for all games (saved in `user/custom_envs.json`), and a game's **Game settings → Environment variables** sets them for that game only. A game's own variable wins over the same name in the list for every game.
+2. In the GUI, **Options → Environment → Variables for every game** sets variables for all games (saved in `user/custom_envs.json`), and a game's **Game settings → Environment variables** sets them for that game only. A game's own variable wins over the same name in the list for every game.
 3. The per-game settings file in `user/custom_configs` also accepts a variable in its `EnvironmentToggles` list. Write `NAME` or `NAME=value`. An entry without a value gets the value `1`.
 4. The emulator reads most variables one time, when it starts. Start the game again after a change.
 5. If the **Value** column shows `1`, only the value `1` turns the function on, unless the row gives other values.

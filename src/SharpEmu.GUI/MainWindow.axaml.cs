@@ -538,6 +538,7 @@ public partial class MainWindow : Window
 
         if (_activePageIndex == 1)
         {
+            DetachGlobalGameSettings();
             _settings.Save(); // leaving the Options page
         }
 
@@ -561,6 +562,7 @@ public partial class MainWindow : Window
         if (index == 1)
         {
             OptionsBackdrop.Show(null);
+            AttachGlobalGameSettings();
         }
         OptionsPage.IsVisible = index == 1;
         AnimatePageChange(previousPage, index);
@@ -716,6 +718,8 @@ public partial class MainWindow : Window
     [
         OptionsGeneralNav,
         OptionsLoggingNav,
+        OptionsGraphicsNav,
+        OptionsEnvironmentNav,
         OptionsLauncherNav,
         OptionsGnmModeNav,
         OptionsAboutNav,
@@ -725,6 +729,8 @@ public partial class MainWindow : Window
     [
         OptionsGeneralPanel,
         OptionsLoggingPanel,
+        OptionsGraphicsPanel,
+        OptionsEnvironmentPanel,
         OptionsLauncherPanel,
         OptionsGnmModePanel,
         OptionsAboutPanel,
@@ -1242,7 +1248,7 @@ public partial class MainWindow : Window
         UpdateEmptyStateTexts();
         UpdateLibraryLayoutButton();
         UpdateTitleMusicControls();
-        if (_isGameSettingsOpen)
+        if (_isGameSettingsOpen || _globalGameSettingsAttached)
         {
             UpdateGameCustomEnvironmentSummary();
             UpdateScopeBadges();
