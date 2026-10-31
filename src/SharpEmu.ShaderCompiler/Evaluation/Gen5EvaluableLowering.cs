@@ -21,6 +21,7 @@ internal static class Gen5EvaluableLowering
     private static readonly Dictionary<string, (Gen5EvalOp Op, Form Form, int Parameter)> _opcodes = new(StringComparer.Ordinal)
     {
         ["SNop"] = (Gen5EvalOp.Nop, Form.Control, 0),
+        ["SSleep"] = (Gen5EvalOp.Nop, Form.Control, 0),
         ["SWaitcnt"] = (Gen5EvalOp.Nop, Form.Control, 0),
         ["SWaitcntDepctr"] = (Gen5EvalOp.Nop, Form.Control, 0),
         ["SInstPrefetch"] = (Gen5EvalOp.Nop, Form.Control, 0),

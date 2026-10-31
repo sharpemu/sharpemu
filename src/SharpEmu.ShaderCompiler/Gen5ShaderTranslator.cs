@@ -896,6 +896,7 @@ public static partial class Gen5ShaderTranslator
             0x09 => "SCbranchExecnz",
             0x0A => "SBarrier",
             0x0C => "SWaitcnt",
+            0x0E => "SSleep",
             0x0F => "SSetprio",
             0x10 => "SSendmsg",
             0x12 => "STrap",
