@@ -1403,6 +1403,17 @@ public static class KernelPthreadExtendedCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    [SysAbiExport(Nid = "h-OifiouBd8", ExportName = "scePthreadRwlockattrSettype",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
+    public static int PthreadRwlockattrSettype(CpuContext ctx)
+    {
+        if (ctx[CpuRegister.Rdi] == 0 || (uint)ctx[CpuRegister.Rsi] > 2)
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        if (!KernelMemoryCompatExports.TryReadUInt64Compat(ctx, ctx[CpuRegister.Rdi], out var handle))
+            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        return ctx.SetReturn(handle == 0 ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT : 0);
+    }
+
     [SysAbiExport(
         Nid = "i2ifZ3fS2fo",
         ExportName = "scePthreadRwlockattrDestroy",
