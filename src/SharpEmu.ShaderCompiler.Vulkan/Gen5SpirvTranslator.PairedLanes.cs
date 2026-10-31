@@ -251,7 +251,7 @@ public static partial class Gen5SpirvTranslator
                     SpirvOp.CompositeExtract,
                     _uintType,
                     workGroupId,
-                    (uint)_physicalAxisOfLogical[component]);
+                    (uint)_physicalGroupAxisOfLogical[component]);
             }
 
             var active = new uint[2];
@@ -291,9 +291,9 @@ public static partial class Gen5SpirvTranslator
 
             if (_request.ComputeSystemRegisters is { } registers)
             {
-                StoreComputeSystemRegister(registers.WorkGroupXRegister, workGroupId, (uint)_physicalAxisOfLogical[0]);
-                StoreComputeSystemRegister(registers.WorkGroupYRegister, workGroupId, (uint)_physicalAxisOfLogical[1]);
-                StoreComputeSystemRegister(registers.WorkGroupZRegister, workGroupId, (uint)_physicalAxisOfLogical[2]);
+                StoreComputeSystemRegister(registers.WorkGroupXRegister, workGroupId, (uint)_physicalGroupAxisOfLogical[0]);
+                StoreComputeSystemRegister(registers.WorkGroupYRegister, workGroupId, (uint)_physicalGroupAxisOfLogical[1]);
+                StoreComputeSystemRegister(registers.WorkGroupZRegister, workGroupId, (uint)_physicalGroupAxisOfLogical[2]);
                 if (registers.ThreadGroupSizeRegister is { } sizeRegister)
                 {
                     StoreS(sizeRegister, UInt(guestThreads));

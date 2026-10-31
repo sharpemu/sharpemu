@@ -226,6 +226,12 @@ public static partial class Gen5SpirvTranslator
             _localSizeY = Math.Max(request.LocalSizeY, 1);
             _localSizeZ = Math.Max(request.LocalSizeZ, 1);
             _physicalAxisOfLogical = ComputeWorkgroupAxisOrder(_localSizeX, _localSizeY, _localSizeZ);
+            var systemRegisters = request.ComputeSystemRegisters;
+            _physicalGroupAxisOfLogical = _stage == Gen5SpirvStage.Compute
+                ? ComputeGroupAxisOrder(_localSizeX, _localSizeY, _localSizeZ,
+                    systemRegisters?.WorkGroupXRegister is not null, systemRegisters?.WorkGroupYRegister is not null,
+                    systemRegisters?.WorkGroupZRegister is not null)
+                : _physicalAxisOfLogical;
             // A wave64 runs as one 64-lane host subgroup when the host pins it to one
             // (HostWave64Supported). Hosts without 64-lane subgroups bridge the two 32-lane
             // halves through workgroup memory.

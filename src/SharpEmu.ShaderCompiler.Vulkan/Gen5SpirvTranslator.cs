@@ -55,6 +55,12 @@ public static partial class Gen5SpirvTranslator
         return physicalAxisOfLogical;
     }
 
+    public static int[] ComputeGroupAxisOrder(uint sizeX, uint sizeY, uint sizeZ, bool groupX, bool groupY, bool groupZ)
+    {
+        var order = ComputeWorkgroupAxisOrder(sizeX, sizeY, sizeZ);
+        return order is [0, 1, 2] && sizeY <= 1 && sizeZ <= 1 && groupY && !groupX && !groupZ ? [1, 0, 2] : order;
+    }
+
     private sealed partial class CompilationContext
     {
         private const int ScalarRegisterCount = 128;
@@ -130,6 +136,7 @@ public static partial class Gen5SpirvTranslator
         // vkCmdDispatch group-count slot) that logical axis is remapped onto, so the largest size
         // always lands on the physical axis with the most headroom.
         private readonly int[] _physicalAxisOfLogical;
+        private readonly int[] _physicalGroupAxisOfLogical;
         private readonly uint _pixelInputEnable;
         private readonly uint _pixelInputAddress;
         private readonly uint[] _pixelInputCntl;
@@ -1374,7 +1381,7 @@ public static partial class Gen5SpirvTranslator
                         SpirvOp.CompositeExtract,
                         _uintType,
                         workGroupId,
-                        physicalComponent);
+                        (uint)_physicalGroupAxisOfLogical[component]);
                     var localSize = component switch
                     {
                         0 => _localSizeX,
@@ -1413,15 +1420,15 @@ public static partial class Gen5SpirvTranslator
                     StoreComputeSystemRegister(
                         registers.WorkGroupXRegister,
                         workGroupId,
-                        (uint)_physicalAxisOfLogical[0]);
+                        (uint)_physicalGroupAxisOfLogical[0]);
                     StoreComputeSystemRegister(
                         registers.WorkGroupYRegister,
                         workGroupId,
-                        (uint)_physicalAxisOfLogical[1]);
+                        (uint)_physicalGroupAxisOfLogical[1]);
                     StoreComputeSystemRegister(
                         registers.WorkGroupZRegister,
                         workGroupId,
-                        (uint)_physicalAxisOfLogical[2]);
+                        (uint)_physicalGroupAxisOfLogical[2]);
                     if (registers.ThreadGroupSizeRegister is { } sizeRegister)
                     {
                         StoreS(
