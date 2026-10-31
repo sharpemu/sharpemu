@@ -12,7 +12,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
   <Grid>
     <Grid Margin="0,4,0,0" RowDefinitions="Auto,Auto,Auto,*">
       <Button x:Name="BackButton"
-              Classes="ghost"
+              Classes="ghost glass"
               HorizontalAlignment="Left"
               Margin="0,0,0,14">
         <StackPanel Orientation="Horizontal" Spacing="6">
@@ -27,7 +27,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 Height="128"
                 CornerRadius="22"
                 ClipToBounds="True"
-                Background="#22FFFFFF"
+                Background="{StaticResource ElevatedBrush}"
                 BoxShadow="0 14 32 0 #A0000000">
           <Image x:Name="CoverImage" Stretch="UniformToFill" />
         </Border>
@@ -53,7 +53,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
       <StackPanel x:Name="FilterBar" Grid.Row="2" Orientation="Horizontal" Spacing="8" Margin="0,0,0,16" />
 
-      <ScrollViewer x:Name="TrophyScroll" Grid.Row="3" HorizontalScrollBarVisibility="Disabled">
+      <ScrollViewer Margin="0,0,-12,0" x:Name="TrophyScroll" Grid.Row="3" HorizontalScrollBarVisibility="Disabled">
         <StackPanel x:Name="TrophyList" Spacing="10" Margin="0,4,12,12" />
       </ScrollViewer>
     </Grid>

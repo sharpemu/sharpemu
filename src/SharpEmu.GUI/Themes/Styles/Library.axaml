@@ -2,15 +2,23 @@
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 Cover-art library item states and motion.
+
+Tile states:
+  idle      - slightly dimmed, flat
+  hover     - full brightness only (the mouse never moves selection or focus)
+  selected  - lifted, with a thin white ring: the current game
+  focused   - keyboard/D-pad navigation (Window.padNav) with the list focused: full white ring + glow, 1.04 scale
 -->
 
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- The row sits along the bottom like a console home screen, leaving the key art and the
+       selected game the room above it. -->
   <Style Selector="ListBox.tileGrid">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="VerticalAlignment" Value="Top" />
-    <Setter Property="Margin" Value="-32,0,-32,0" />
+    <Setter Property="VerticalAlignment" Value="Bottom" />
+    <Setter Property="Margin" Value="-40,0,-40,0" />
     <Setter Property="Padding" Value="0" />
     <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
     <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Disabled" />
@@ -23,8 +31,8 @@ Cover-art library item states and motion.
 
   <Style Selector="ListBox.tileGrid.gridLayout">
     <Setter Property="VerticalAlignment" Value="Stretch" />
-    <Setter Property="Margin" Value="0" />
-    <Setter Property="Padding" Value="4,0,8,0" />
+    <Setter Property="Margin" Value="-16,0,-24,0" />
+    <Setter Property="Padding" Value="0,0,8,0" />
     <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
     <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Visible" />
     <Setter Property="ItemsPanel">
@@ -34,25 +42,24 @@ Cover-art library item states and motion.
     </Setter>
   </Style>
   <Style Selector="ListBox.tileGrid ListBoxItem">
-    <Setter Property="FocusAdorner" Value="{x:Null}" />
     <Setter Property="Width" Value="{DynamicResource LibraryTileWidth}" />
     <Setter Property="Height" Value="{DynamicResource LibraryRailItemHeight}" />
     <Setter Property="Padding" Value="4" />
-    <Setter Property="Margin" Value="12,8,0,8" />
-    <Setter Property="CornerRadius" Value="9" />
+    <Setter Property="Margin" Value="12,12,0,8" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="BorderBrush" Value="Transparent" />
-    <Setter Property="Opacity" Value="0.72" />
+    <Setter Property="Opacity" Value="0.78" />
     <Setter Property="RenderTransformOrigin" Value="50%,50%" />
     <Setter Property="RenderTransform" Value="translateY(0px)" />
     <Setter Property="Transitions">
       <Transitions>
         <DoubleTransition Property="Opacity"
-                          Duration="0:0:0.11"
+                          Duration="0:0:0.12"
                           Easing="QuadraticEaseOut" />
         <TransformOperationsTransition Property="RenderTransform"
-                                       Duration="0:0:0.16"
+                                       Duration="0:0:0.15"
                                        Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
@@ -61,24 +68,32 @@ Cover-art library item states and motion.
        because the details area shows the selected game name. -->
   <Style Selector="TextBlock.libraryTileName">
     <Setter Property="IsVisible" Value="False" />
-    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeDescription}" />
     <Setter Property="FontWeight" Value="SemiBold" />
-    <Setter Property="LineHeight" Value="16" />
-    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="LineHeight" Value="20" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
   </Style>
   <Style Selector="ListBox.tileGrid.gridLayout TextBlock.libraryTileName">
     <Setter Property="IsVisible" Value="True" />
   </Style>
+  <Style Selector="ListBox.tileGrid ListBoxItem:selected TextBlock.libraryTileName">
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
   <Style Selector="ListBox.tileGrid.gridLayout ListBoxItem">
     <Setter Property="Height" Value="{DynamicResource LibraryGridItemHeight}" />
-    <Setter Property="Margin" Value="12,6,0,10" />
+    <Setter Property="Margin" Value="12,10,0,8" />
     <Setter Property="VerticalContentAlignment" Value="Top" />
   </Style>
 
-  <Style Selector="ListBox.tileGrid ListBoxItem:pointerover,
-                   ListBox.tileGrid ListBoxItem:selected">
+  <Style Selector="ListBox.tileGrid ListBoxItem:pointerover">
     <Setter Property="Opacity" Value="1" />
-    <Setter Property="RenderTransform" Value="translateY(-5px) scale(1.035)" />
+  </Style>
+  <Style Selector="ListBox.tileGrid ListBoxItem:selected">
+    <Setter Property="Opacity" Value="1" />
+  </Style>
+  <Style Selector="Window.padNav ListBox.tileGrid:focus-within ListBoxItem:selected">
+    <Setter Property="RenderTransform" Value="scale(1.04)" />
+    <Setter Property="ZIndex" Value="3" />
   </Style>
   <Style Selector="ListBox.tileGrid ListBoxItem /template/ ContentPresenter#PART_ContentPresenter,
                    ListBox.tileGrid ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter,
@@ -87,80 +102,71 @@ Cover-art library item states and motion.
     <Setter Property="BorderBrush" Value="Transparent" />
   </Style>
 
-  <Style Selector="Border.libraryGameCard">
-    <Setter Property="CornerRadius" Value="7" />
-    <Setter Property="BorderThickness" Value="2" />
-    <Setter Property="BorderBrush" Value="Transparent" />
-    <Setter Property="BoxShadow" Value="0 12 28 0 #61000000" />
+  <!-- Sizes come from styles, not the item template, so the selected tile in the row
+       can grow; tiles before it keep the stride the carousel scrolls by. -->
+  <Style Selector="ListBox.tileGrid Border.libraryGameCard, ListBox.tileGrid Border.addFolderTile">
+    <Setter Property="Width" Value="{DynamicResource LibraryCoverSize}" />
+    <Setter Property="Height" Value="{DynamicResource LibraryCoverSize}" />
     <Setter Property="Transitions">
       <Transitions>
-        <BrushTransition Property="BorderBrush"
-                         Duration="0:0:0.12"
-                         Easing="QuadraticEaseOut" />
+        <DoubleTransition Property="Width" Duration="0:0:0.18" Easing="CubicEaseOut" />
+        <DoubleTransition Property="Height" Duration="0:0:0.18" Easing="CubicEaseOut" />
       </Transitions>
     </Setter>
   </Style>
-  <Style Selector="ListBox.tileGrid ListBoxItem:selected Border.libraryGameCard">
-    <Setter Property="BorderBrush" Value="#E6FFFFFF" />
+  <Style Selector="ListBox.tileGrid:not(.gridLayout) ListBoxItem:selected Border.libraryGameCard,
+                   ListBox.tileGrid:not(.gridLayout) ListBoxItem:selected Border.addFolderTile">
+    <Setter Property="Width" Value="{DynamicResource LibraryCoverSizeSelected}" />
+    <Setter Property="Height" Value="{DynamicResource LibraryCoverSizeSelected}" />
+  </Style>
+  <Style Selector="ListBox.tileGrid:not(.gridLayout) ListBoxItem">
+    <Setter Property="VerticalAlignment" Value="Bottom" />
+  </Style>
+  <Style Selector="ListBox.tileGrid:not(.gridLayout) ListBoxItem:selected">
+    <Setter Property="Width" Value="{DynamicResource LibraryTileWidthSelected}" />
+    <Setter Property="Height" Value="{DynamicResource LibraryRailItemHeightSelected}" />
+  </Style>
+
+  <Style Selector="Border.libraryGameCard">
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+  </Style>
+  <Style Selector="ListBox.tileGrid ListBoxItem:selected Border.libraryGameCard,
+                   ListBox.tileGrid ListBoxItem:selected Border.addFolderTile">
+    <Setter Property="BoxShadow" Value="{DynamicResource SelectedRingShadow}" />
+  </Style>
+  <Style Selector="Window.padNav ListBox.tileGrid:focus-within ListBoxItem:selected Border.libraryGameCard,
+                   Window.padNav ListBox.tileGrid:focus-within ListBoxItem:selected Border.addFolderTile">
+    <Setter Property="BoxShadow" Value="{DynamicResource FocusRingShadow}" />
   </Style>
   <Style Selector="Border.libraryGameCard Border.coverClip">
-    <Setter Property="CornerRadius" Value="5" />
+    <Setter Property="CornerRadius" Value="13" />
   </Style>
 
   <Style Selector="Border.addFolderTile">
-    <Setter Property="CornerRadius" Value="7" />
-    <Setter Property="Background" Value="#0CFFFFFF" />
-    <Setter Property="BorderBrush" Value="#2EFFFFFF" />
-    <Setter Property="BorderThickness" Value="1.5" />
-    <Setter Property="BoxShadow" Value="0 12 28 0 #3A000000" />
-    <Setter Property="Transitions">
-      <Transitions>
-        <BrushTransition Property="Background"
-                         Duration="0:0:0.18"
-                         Easing="CubicEaseOut" />
-        <BrushTransition Property="BorderBrush"
-                         Duration="0:0:0.18"
-                         Easing="CubicEaseOut" />
-      </Transitions>
-    </Setter>
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+    <Setter Property="Background" Value="{StaticResource CardBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
   </Style>
   <Style Selector="Border.addFolderTileIcon">
-    <Setter Property="Width" Value="60" />
-    <Setter Property="Height" Value="60" />
-    <Setter Property="CornerRadius" Value="30" />
-    <Setter Property="Background" Value="#1BFFFFFF" />
-    <Setter Property="Transitions">
-      <Transitions>
-        <BrushTransition Property="Background"
-                         Duration="0:0:0.18"
-                         Easing="CubicEaseOut" />
-      </Transitions>
-    </Setter>
+    <Setter Property="Width" Value="64" />
+    <Setter Property="Height" Value="64" />
+    <Setter Property="CornerRadius" Value="32" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
   </Style>
   <Style Selector="TextBlock.addFolderGlyph">
-    <Setter Property="Foreground" Value="#A6FFFFFF" />
-    <Setter Property="Transitions">
-      <Transitions>
-        <BrushTransition Property="Foreground"
-                         Duration="0:0:0.18"
-                         Easing="CubicEaseOut" />
-      </Transitions>
-    </Setter>
-  </Style>
-  <Style Selector="TextBlock.addFolderIconGlyph">
-    <Setter Property="RenderTransform" Value="translateY(-7px)" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
   </Style>
   <Style Selector="ListBox.tileGrid ListBoxItem:pointerover TextBlock.addFolderGlyph,
                    ListBox.tileGrid ListBoxItem:selected TextBlock.addFolderGlyph">
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
-  <Style Selector="ListBox.tileGrid ListBoxItem:pointerover Border.addFolderTile,
-                   ListBox.tileGrid ListBoxItem:selected Border.addFolderTile">
-    <Setter Property="Background" Value="#1AFFFFFF" />
-    <Setter Property="BorderBrush" Value="#55FFFFFF" />
+  <Style Selector="ListBox.tileGrid ListBoxItem:pointerover Border.addFolderTile">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
   </Style>
-  <Style Selector="ListBox.tileGrid ListBoxItem:pointerover Border.addFolderTileIcon,
-                   ListBox.tileGrid ListBoxItem:selected Border.addFolderTileIcon">
-    <Setter Property="Background" Value="#2EFFFFFF" />
+  <Style Selector="ListBox.tileGrid ListBoxItem:pointerover Border.addFolderTileIcon">
+    <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
   </Style>
 </Styles>

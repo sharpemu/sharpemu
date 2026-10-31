@@ -65,8 +65,8 @@ public sealed class LocalizationTests : IDisposable
     {
         var localization = new Localization(_languagesDirectory);
         var choice = LocalizedChoice.FromKey(
-            "Native",
-            "Options.CpuEngine.Native");
+            "Fit",
+            "Options.Scaling.Fit");
         var changedProperties = new List<string?>();
         choice.PropertyChanged += (_, args) =>
             changedProperties.Add(args.PropertyName);
@@ -78,9 +78,9 @@ public sealed class LocalizationTests : IDisposable
         localization.Load("ru");
         choice.Refresh(localization);
 
-        Assert.Equal("Native", choice.Value);
+        Assert.Equal("Fit", choice.Value);
         Assert.NotEqual(englishLabel, choice.Label);
-        Assert.Equal(localization.Get("Options.CpuEngine.Native"), choice.Label);
+        Assert.Equal(localization.Get("Options.Scaling.Fit"), choice.Label);
         Assert.Contains(nameof(LocalizedChoice.Label), changedProperties);
     }
 
@@ -129,8 +129,8 @@ public sealed class LocalizationTests : IDisposable
     {
         var localization = new Localization(_languagesDirectory);
         var choice = LocalizedChoice.FromKey(
-            "Native",
-            "Options.CpuEngine.Native");
+            "Fit",
+            "Options.Scaling.Fit");
         localization.Load("en");
         choice.Refresh(localization);
         var comboBox = new ComboBox
@@ -145,7 +145,7 @@ public sealed class LocalizationTests : IDisposable
         choice.Refresh(localization);
 
         Assert.Same(choice, comboBox.SelectionBoxItem);
-        Assert.Equal(localization.Get("Options.CpuEngine.Native"), choice.Label);
+        Assert.Equal(localization.Get("Options.Scaling.Fit"), choice.Label);
     }
 
     [Fact]
@@ -183,6 +183,37 @@ public sealed class LocalizationTests : IDisposable
             Assert.True(
                 empty.Length == 0,
                 $"{resourceName} has empty option values: {string.Join(", ", empty)}");
+        }
+    }
+
+    // A catalog switch without strings shows its raw key in Game options.
+    [Fact]
+    public void EmbeddedLanguages_LabelEveryEnvironmentSetting()
+    {
+        var assembly = typeof(Localization).Assembly;
+        var keys = new List<string>();
+        foreach (var setting in EnvironmentSettings.All)
+        {
+            keys.Add($"Setting.{setting.Id}.Label");
+            keys.Add($"Setting.{setting.Id}.Desc");
+            keys.AddRange((setting.Choices ?? [])
+                .Where(choice => choice.Label is null)
+                .Select(choice => $"Setting.{setting.Id}.{choice.Value}"));
+        }
+
+        var resourceNames = assembly.GetManifestResourceNames()
+            .Where(name =>
+                name.StartsWith("Languages.", StringComparison.Ordinal) &&
+                name.EndsWith(".json", StringComparison.Ordinal));
+        foreach (var resourceName in resourceNames)
+        {
+            var language = ReadEmbeddedLanguage(assembly, resourceName);
+            var missing = keys
+                .Where(key => !language.TryGetValue(key, out var value) || string.IsNullOrWhiteSpace(value))
+                .ToArray();
+            Assert.True(
+                missing.Length == 0,
+                $"{resourceName} has no text for: {string.Join(", ", missing)}");
         }
     }
 

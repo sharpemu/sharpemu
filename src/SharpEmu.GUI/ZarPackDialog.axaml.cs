@@ -10,7 +10,7 @@ namespace SharpEmu.GUI;
 // while packing and closes once done; the dialog returns true when the archive was written. Deleting
 // the game folder is offered only after packing, once the finished archive opens and holds every
 // file of the folder at the same size, so an interrupted or incomplete archive never costs the folder.
-public partial class ZarPackDialog : Window
+public partial class ZarPackDialog : SheetView
 {
     private readonly CancellationTokenSource _cancellation = new();
     private readonly string _sourceFolder = string.Empty;
@@ -42,7 +42,7 @@ public partial class ZarPackDialog : Window
             MuteMusicChanged?.Invoke(muted);
         };
         Opened += async (_, _) => await PackAsync();
-        Closing += (_, _) =>
+        Closed += (_, _) =>
         {
             if (!_finished)
             {
@@ -53,6 +53,14 @@ public partial class ZarPackDialog : Window
 
     // Raised when the mute button changes; the owner silences its title music while it is set.
     public event Action<bool>? MuteMusicChanged;
+
+    public override void RequestCancel()
+    {
+        if (CloseButton.IsEnabled)
+        {
+            OnCloseClicked();
+        }
+    }
 
     private void OnCloseClicked()
     {
@@ -98,7 +106,7 @@ public partial class ZarPackDialog : Window
         }
 
         _finished = true;
-        if (cancelled && !IsVisible)
+        if (cancelled && !IsOpen)
         {
             return;
         }

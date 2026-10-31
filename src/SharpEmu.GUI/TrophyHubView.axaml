@@ -11,7 +11,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
              ClipToBounds="True">
   <Grid>
     <Grid Margin="0,4,0,0" RowDefinitions="Auto,Auto,*">
-      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="16" Margin="0,0,12,16">
+      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="16" Margin="0,0,0,16">
         <Grid Width="60" Height="60">
           <Border Width="76" Height="76" CornerRadius="38" IsHitTestVisible="False">
             <Border.Background>
@@ -25,9 +25,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </Grid>
         <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
           <TextBlock Text="{Binding [Trophies.Title], Source={x:Static local:Localization.Instance}}"
-                     FontSize="22"
+                     FontSize="24"
                      FontWeight="Bold" />
-          <TextBlock x:Name="TotalOfText" Foreground="{StaticResource SecondaryTextBrush}" FontSize="12" />
+          <TextBlock x:Name="TotalOfText" Foreground="{StaticResource SecondaryTextBrush}" FontSize="13" />
           <WrapPanel x:Name="TotalGrades" Orientation="Horizontal" Margin="0,4,0,0" />
         </StackPanel>
         <Grid Grid.Column="2" Width="84" Height="84" VerticalAlignment="Center">
@@ -36,33 +36,33 @@ SPDX-License-Identifier: GPL-2.0-or-later
             <TextBlock x:Name="TotalEarnedText" FontSize="21" FontWeight="Bold" HorizontalAlignment="Center" />
             <TextBlock Text="{Binding [Trophies.EarnedTotal], Source={x:Static local:Localization.Instance}}"
                        Foreground="{StaticResource SecondaryTextBrush}"
-                       FontSize="10.5"
+                       FontSize="11"
                        HorizontalAlignment="Center" />
           </StackPanel>
         </Grid>
       </Grid>
 
-      <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="0,0,12,12">
+      <Grid Grid.Row="1" ColumnDefinitions="*,Auto" Margin="0,0,0,12">
         <StackPanel x:Name="SortBar" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" />
         <Border x:Name="SearchFrame"
                 Grid.Column="1"
-                Width="240"
-                Height="32"
-                CornerRadius="16"
+                Width="280"
+                Height="40"
+                CornerRadius="20"
                 Padding="14,0,6,0"
                 VerticalAlignment="Center"
-                Background="#16FFFFFF"
-                BorderBrush="#26FFFFFF"
+                Background="{StaticResource GlassBrush}"
+                BorderBrush="{StaticResource GlassRimBrush}"
                 BorderThickness="1">
           <Border.Styles>
             <Style Selector="Border#SearchFrame:pointerover">
-              <Setter Property="Background" Value="#1FFFFFFF" />
+              <Setter Property="Background" Value="{StaticResource GlassHoverBrush}" />
             </Style>
+            <!-- The frame is the field: it takes the ring, the bare text box inside does not. -->
             <Style Selector="Border#SearchFrame:focus-within">
-              <Setter Property="Width" Value="300" />
-              <Setter Property="Background" Value="#24FFFFFF" />
-              <Setter Property="BorderBrush" Value="#40FFFFFF" />
-                          </Style>
+              <Setter Property="Background" Value="{StaticResource GlassHoverBrush}" />
+              <Setter Property="BoxShadow" Value="{DynamicResource FocusRingInsetShadow}" />
+            </Style>
             <Style Selector="TextBox#SearchBox /template/ Border#PART_BorderElement">
               <Setter Property="Background" Value="Transparent" />
               <Setter Property="BorderThickness" Value="0" />
@@ -74,11 +74,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
             <Style Selector="TextBox#SearchBox:focus /template/ Border#PART_BorderElement">
               <Setter Property="Background" Value="Transparent" />
               <Setter Property="BorderThickness" Value="0" />
+              <Setter Property="BoxShadow" Value="none" />
             </Style>
           </Border.Styles>
           <Border.Transitions>
             <Transitions>
-              <DoubleTransition Property="Width" Duration="0:0:0.22" Easing="CubicEaseOut" />
               <BrushTransition Property="Background" Duration="0:0:0.18" />
               <BrushTransition Property="BorderBrush" Duration="0:0:0.18" />
             </Transitions>
@@ -95,7 +95,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                      BorderThickness="0"
                      Padding="0"
                      MinHeight="0"
-                     FontSize="12.5"
+                     FontSize="14"
                      VerticalAlignment="Center"
                      VerticalContentAlignment="Center" />
             <Button x:Name="SearchClear"
@@ -111,7 +111,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
         </Border>
       </Grid>
 
-      <ScrollViewer Grid.Row="2" HorizontalScrollBarVisibility="Disabled">
+      <!-- The list reaches the page gutter; its scroll bar sits in the gutter beyond it. -->
+      <ScrollViewer Grid.Row="2" Margin="0,0,-12,0" HorizontalScrollBarVisibility="Disabled">
         <StackPanel x:Name="GameList" Spacing="10" Margin="0,4,12,12" />
       </ScrollViewer>
 
@@ -124,7 +125,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
         <ProgressBar IsIndeterminate="{Binding $parent[StackPanel].IsVisible}" Width="180" Height="3" />
         <TextBlock Text="{Binding [Trophies.Loading], Source={x:Static local:Localization.Instance}}"
                    FontSize="13"
-                   Foreground="{StaticResource MutedBrush}"
+                   Foreground="{StaticResource SecondaryTextBrush}"
                    HorizontalAlignment="Center" />
       </StackPanel>
     </Grid>

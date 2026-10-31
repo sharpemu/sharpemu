@@ -11,12 +11,11 @@ public sealed class StrictComputeSettingsTests
 {
     [Theory]
     [InlineData("{}")]
-    [InlineData("{\"EnvironmentToggles\":[]}")]
-    [InlineData("{\"EnvironmentToggles\":[\"SHARPEMU_PROFILE_PERFORMANCE\"]}")]
-    public void NewAndExistingSettingsUseStrictModeByDefault(string json)
+    [InlineData("{\"EnvironmentChanges\":[]}")]
+    [InlineData("{\"EnvironmentChanges\":[\"SHARPEMU_PROFILE_PERFORMANCE\"]}")]
+    public void NewAndExistingGamesUseStrictModeByDefault(string json)
     {
-        var settings = GuiSettings.NormalizeFromJson(json);
-        var effective = EffectiveLaunchSettings.Resolve(settings, new PerGameSettings());
+        var effective = EffectiveLaunchSettings.Resolve(PerGameSettings.NormalizeFromJson(json));
         Assert.True(StrictComputeSettings.IsEnabled(effective.EnvironmentToggles));
         Assert.Equal("1", StrictComputeSettings.GetLaunchValue(effective.EnvironmentToggles));
     }
@@ -24,36 +23,45 @@ public sealed class StrictComputeSettingsTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void GlobalChoiceSurvivesReloadAndOverridesPreviousEntries(bool enabled)
+    public void GameChoiceSurvivesReloadAndOverridesPreviousEntries(bool enabled)
     {
-        var settings = new GuiSettings();
+        var settings = new PerGameSettings { EnvironmentToggles = [.. EffectiveLaunchSettings.Defaults.EnvironmentToggles] };
         settings.EnvironmentToggles.AddRange([StrictComputeSettings.VariableName, "SHARPEMU_STRICT_COMPUTE=0"]);
         StrictComputeSettings.SetEnabled(settings.EnvironmentToggles, enabled);
-        var restored = GuiSettings.NormalizeFromJson(JsonSerializer.Serialize(settings));
-        var effective = EffectiveLaunchSettings.Resolve(restored, new PerGameSettings());
+        var restored = PerGameSettings.NormalizeFromJson(JsonSerializer.Serialize(settings))!;
+        var effective = EffectiveLaunchSettings.Resolve(restored);
         Assert.Equal(enabled, StrictComputeSettings.IsEnabled(effective.EnvironmentToggles));
         Assert.Equal(enabled ? "1" : "0", StrictComputeSettings.GetLaunchValue(effective.EnvironmentToggles));
-        Assert.Single(restored.EnvironmentToggles, entry => entry.StartsWith(StrictComputeSettings.VariableName));
-        Assert.Contains("SHARPEMU_WRITABLE_APP0", restored.EnvironmentToggles);
+        Assert.Single(restored.EnvironmentToggles!, entry => entry.StartsWith(StrictComputeSettings.VariableName));
+        Assert.Contains("SHARPEMU_WRITABLE_APP0", effective.EnvironmentToggles);
     }
 
     [Theory]
+    [InlineData(false, null)]
+    [InlineData(true, null)]
     [InlineData(false, false)]
     [InlineData(false, true)]
     [InlineData(true, false)]
     [InlineData(true, true)]
-    public void GameOverrideSurvivesReloadWithoutChangingGlobalChoice(bool globalEnabled, bool gameEnabled)
+    public void LegacyGlobalChoiceMovesToGamesWithoutTheirOwn(bool globalEnabled, bool? gameEnabled)
     {
-        var global = new GuiSettings();
-        StrictComputeSettings.SetEnabled(global.EnvironmentToggles, globalEnabled);
-        var game = new PerGameSettings { EnvironmentToggles = [.. global.EnvironmentToggles] };
-        StrictComputeSettings.SetEnabled(game.EnvironmentToggles, gameEnabled);
-        game.RemoveInheritedValues(global);
-        Assert.Equal(globalEnabled == gameEnabled, game.IsEmpty);
+        List<string> global = [.. EffectiveLaunchSettings.Defaults.EnvironmentToggles];
+        StrictComputeSettings.SetEnabled(global, globalEnabled);
+        var game = new PerGameSettings
+        {
+            EnvironmentChanges = gameEnabled is { } own
+                ? [own ? StrictComputeSettings.VariableName : StrictComputeSettings.VariableName + "=0"]
+                : null,
+        };
+
+        SettingsSplitMigration.Fill(
+            game,
+            SettingsSplitMigration.CarriedValues(JsonSerializer.Serialize(new { EnvironmentToggles = global })));
         var restored = PerGameSettings.NormalizeFromJson(JsonSerializer.Serialize(game));
-        var effective = EffectiveLaunchSettings.Resolve(global, restored);
-        Assert.Equal(gameEnabled ? "1" : "0", StrictComputeSettings.GetLaunchValue(effective.EnvironmentToggles));
-        Assert.Equal(globalEnabled, StrictComputeSettings.IsEnabled(global.EnvironmentToggles));
+        var effective = EffectiveLaunchSettings.Resolve(restored);
+
+        var expected = gameEnabled ?? globalEnabled;
+        Assert.Equal(expected ? "1" : "0", StrictComputeSettings.GetLaunchValue(effective.EnvironmentToggles));
     }
 
     [Theory]
@@ -61,12 +69,11 @@ public sealed class StrictComputeSettingsTests
     [InlineData(true)]
     public void ExplicitGameChoiceIsComparedWithTheEnabledDefault(bool gameEnabled)
     {
-        var global = new GuiSettings();
-        var game = new PerGameSettings { EnvironmentToggles = [.. global.EnvironmentToggles] };
+        var game = new PerGameSettings { EnvironmentToggles = [.. EffectiveLaunchSettings.Defaults.EnvironmentToggles] };
         StrictComputeSettings.SetEnabled(game.EnvironmentToggles, gameEnabled);
-        game.RemoveInheritedValues(global);
+        game.RemoveDefaultValues();
         Assert.Equal(gameEnabled, game.IsEmpty);
         Assert.Equal(gameEnabled, StrictComputeSettings.IsEnabled(
-            EffectiveLaunchSettings.Resolve(global, game).EnvironmentToggles));
+            EffectiveLaunchSettings.Resolve(game).EnvironmentToggles));
     }
 }

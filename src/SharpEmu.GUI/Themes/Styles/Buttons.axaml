@@ -2,100 +2,260 @@
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 Shared launcher button variants and page switcher styles.
+
+Filled buttons carry no border. Hover is a one-step fill change only; the
+white focus treatment (Focus.axaml) is the strong state. Controller targets are
+at least 44 pt tall.
 -->
 
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <Style Selector="Button.accent">
     <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
     <Setter Property="FontWeight" Value="SemiBold" />
-    <Setter Property="Padding" Value="22,10" />
-    <Setter Property="CornerRadius" Value="8" />
-  </Style>
-  <Style Selector="Button.accent:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
-    <Setter Property="Foreground" Value="White" />
-  </Style>
-
-  <Style Selector="Button.danger">
-    <Setter Property="Background" Value="{StaticResource DangerBrush}" />
-    <Setter Property="Foreground" Value="White" />
-    <Setter Property="FontWeight" Value="SemiBold" />
-    <Setter Property="Padding" Value="22,10" />
-    <Setter Property="CornerRadius" Value="8" />
-  </Style>
-  <Style Selector="Button.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource DangerHoverBrush}" />
-    <Setter Property="Foreground" Value="White" />
-  </Style>
-
-  <Style Selector="Button.ghost">
-    <Setter Property="Background" Value="Transparent" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-    <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-    <Setter Property="Padding" Value="12,7" />
-    <Setter Property="CornerRadius" Value="8" />
-  </Style>
-  <Style Selector="Button.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
-    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-  </Style>
-
-  <Style Selector="Button.iconGhost">
-    <Setter Property="Width" Value="32" />
-    <Setter Property="Height" Value="32" />
-    <Setter Property="Padding" Value="0" />
-    <Setter Property="Background" Value="Transparent" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-    <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
+    <Setter Property="Padding" Value="22,0" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="BorderThickness" Value="0" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
   </Style>
-  <Style Selector="Button.iconGhost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+  <!-- Set on the presenter too: the stock template otherwise paints string content white. -->
+  <Style Selector="Button.accent /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+  </Style>
+  <Style Selector="Button.accent:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+  </Style>
+  <Style Selector="Button.accent:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource AccentPressedBrush}" />
+  </Style>
+
+  <!-- Destructive: red text on a faint red tint, never a red border. -->
+  <Style Selector="Button.danger">
+    <Setter Property="Background" Value="{StaticResource DangerTintBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
+    <Setter Property="Padding" Value="22,0" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource DangerHoverTintBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource DangerHoverBrush}" />
+  </Style>
+
+  <!-- Secondary action: a raised fill, no border. -->
+  <Style Selector="Button.ghost">
     <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+    <Setter Property="FontWeight" Value="Medium" />
+    <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
+    <Setter Property="Padding" Value="18,0" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource RaisedHoverBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+
+  <!-- Inline text link (opens documentation): no fill, brightens on hover. -->
+  <Style Selector="Button.link">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="MinHeight" Value="0" />
+    <Setter Property="HorizontalAlignment" Value="Left" />
+    <Setter Property="Foreground" Value="{StaticResource SettingsDescriptionBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeDescription}" />
+    <Setter Property="FontWeight" Value="Medium" />
+  </Style>
+  <Style Selector="Button.link /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Foreground" Value="{StaticResource SettingsDescriptionBrush}" />
+  </Style>
+  <Style Selector="Button.link:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="Button.link:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+
+  <Style Selector="Button.iconGhost, ToggleButton.iconGhost">
+    <Setter Property="Width" Value="{StaticResource ControlHeight}" />
+    <Setter Property="Height" Value="{StaticResource ControlHeight}" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.iconGhost:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.iconGhost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource RaisedHoverBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <!-- An icon toggle that is on (the console) lights up like a selected segment. -->
+  <Style Selector="ToggleButton.iconGhost:checked /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.iconGhost:checked:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource SegmentActiveBrush}" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 
   <Style Selector="ToggleButton.ghost">
-    <Setter Property="Background" Value="Transparent" />
-    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
-    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="BorderThickness" Value="0" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
-    <Setter Property="Padding" Value="12,7" />
-    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+    <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
+    <Setter Property="Padding" Value="18,0" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
   </Style>
   <Style Selector="ToggleButton.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="Background" Value="{StaticResource RaisedHoverBrush}" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
   <Style Selector="ToggleButton.ghost:checked /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
-    <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+    <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 
-  <!-- Top-level page switcher (Library / Options): plain transparent
-       buttons, not TabItem, so there is no Fluent selected-tab underline.
-       The active page is conveyed by brightness alone; LB/RB gamepad
-       hints flank the pair. -->
+  <!-- Toolbar action on the library header (Open file...). -->
+  <Style Selector="Button.toolbarAction">
+    <Setter Property="Height" Value="{StaticResource ControlHeight}" />
+    <Setter Property="Padding" Value="18,0" />
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+    <Setter Property="FontWeight" Value="Medium" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.toolbarAction:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource RaisedHoverBrush}" />
+  </Style>
+
+  <!-- Top-level page switcher (Library / Trophies / Options): plain buttons in a
+       glass capsule, so there is no Fluent tab chrome. The active page sits on a
+       lighter pill in full white; the others are dimmed but stay above 4.5:1. -->
+  <Style Selector="Border.segmentGroup">
+    <Setter Property="CornerRadius" Value="26" />
+    <Setter Property="Padding" Value="4" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
   <Style Selector="Button.segment">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
-    <Setter Property="FontSize" Value="22" />
-    <Setter Property="FontWeight" Value="Bold" />
-    <Setter Property="Padding" Value="6,4" />
-    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
+    <Setter Property="Padding" Value="20,0" />
+    <Setter Property="CornerRadius" Value="22" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
   </Style>
-  <Style Selector="Button.segment:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+  <!-- The thumb behind the active tab is the only fill; tabs themselves only change text. -->
+  <Style Selector="Button.segment /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Foreground" Duration="0:0:0.2" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.segment:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                   Button.segment:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+  </Style>
+  <Style Selector="Button.segment.active /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
-  <Style Selector="Button.segment.active">
+  <Style Selector="Border.segmentThumb">
+    <Setter Property="HorizontalAlignment" Value="Left" />
+    <Setter Property="VerticalAlignment" Value="Stretch" />
+    <Setter Property="CornerRadius" Value="22" />
+    <Setter Property="Background" Value="{StaticResource SegmentActiveBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BoxShadow" Value="inset 0 1 0 0 #1FFFFFFF, 0 2 10 0 #40000000" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.32" Easing="CubicEaseOut" />
+        <DoubleTransition Property="Width" Duration="0:0:0.32" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <!-- An icon and a label side by side: the icon's taller line box left the label riding high. -->
+  <Style Selector="Button StackPanel[Orientation=Horizontal] > TextBlock,
+                   ToggleButton StackPanel[Orientation=Horizontal] > TextBlock">
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+
+  <!-- Selected-game actions: the same height as the Launch pill, an icon and a word each. -->
+  <Style Selector="Button.heroAction, ToggleButton.heroAction">
+    <Setter Property="Height" Value="52" />
+    <Setter Property="Padding" Value="20,0" />
+    <Setter Property="CornerRadius" Value="26" />
+    <Setter Property="FontSize" Value="15" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <!-- The reset button of a game setting that has its own value (SettingRow). -->
+  <Style Selector="Button.scopeReset">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Padding" Value="6" />
+    <Setter Property="CornerRadius" Value="999" />
+    <Setter Property="Foreground" Value="{DynamicResource SecondaryTextBrush}" />
+  </Style>
+  <Style Selector="Button.scopeReset:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource PressedOverlayBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+  </Style>
+  <Style Selector="Button.heroAction.iconOnly">
+    <Setter Property="Width" Value="52" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="ToggleButton.heroAction:checked /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource SegmentActiveBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+
+  <!-- Pressed: one step lighter than hover, never the stock grey. -->
+  <Style Selector="Button.ghost:pressed /template/ ContentPresenter#PART_ContentPresenter,
+                   Button.iconGhost:pressed /template/ ContentPresenter#PART_ContentPresenter,
+                   Button.toolbarAction:pressed /template/ ContentPresenter#PART_ContentPresenter,
+                   Button.optionsCircle:pressed /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.optionsCircle:pressed /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.ghost:pressed /template/ ContentPresenter#PART_ContentPresenter,
+                   Button.gameAction:not(.dangerAction):pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="Button.optionsNav:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource PressedOverlayBrush}" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 </Styles>

@@ -14,6 +14,6 @@ public partial class MainWindow
 
         var dialog = new GamePatchesDialog(game, _isRunning);
         dialog.Warning += message => AppendConsoleLine($"[PATCH][WARN] {message}", WarningLineBrush);
-        await dialog.ShowDialog(this);
+        await Sheets.ShowAsync(dialog);
     }
 }

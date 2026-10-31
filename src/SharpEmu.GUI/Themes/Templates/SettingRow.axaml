@@ -2,62 +2,111 @@
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 Control theme for the shared launcher settings row.
+
+A row is one line of an inset list: it has no card of its own. Rows sit in a
+Border.optionsGroup glass container, separated by a hairline drawn at the top of
+each row (Options.axaml hides it on the first row of a group). The highlight is a
+rounded surface inset from the group edge, so it never meets the group's corners.
+
+The whole row is the focus target: when the control inside it takes keyboard or
+D-pad focus the row gets the :rowfocus pseudo-class (see SettingRow.cs) and
+draws an accent fill with the shared white ring, inside the row because the group
+clips. Hover only washes the surface.
 -->
 
 <ResourceDictionary xmlns="https://github.com/avaloniaui"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:local="clr-namespace:SharpEmu.GUI">
   <ControlTheme x:Key="{x:Type local:SettingRow}" TargetType="local:SettingRow">
-    <Setter Property="MinHeight" Value="70" />
+    <Setter Property="MinHeight" Value="{StaticResource RowHeight}" />
     <Setter Property="Template">
       <ControlTemplate>
-        <Border x:Name="PART_RowSurface"
-                Classes="settingRowSurface"
-                Background="#06FFFFFF"
-                BorderBrush="#0AFFFFFF"
-                BorderThickness="1"
-                CornerRadius="14"
-                Padding="18,12">
-          <Border.Transitions>
-            <Transitions>
-              <BrushTransition Property="Background"
-                               Duration="0:0:0.18"
-                               Easing="CubicEaseOut" />
-              <BrushTransition Property="BorderBrush"
-                               Duration="0:0:0.18"
-                               Easing="CubicEaseOut" />
-            </Transitions>
-          </Border.Transitions>
-          <Grid ColumnDefinitions="*,Auto">
-            <StackPanel VerticalAlignment="Center" Spacing="3" Margin="0,0,18,0">
-              <TextBlock x:Name="PART_Label"
-                         Text="{TemplateBinding Label}"
-                         FontSize="14"
-                         FontWeight="Medium"
-                         TextWrapping="Wrap"
-                         Foreground="{StaticResource TextBrush}" />
-              <TextBlock Text="{TemplateBinding Description}"
-                         FontSize="11"
-                         FontWeight="Normal"
-                         Foreground="{StaticResource SettingsDescriptionBrush}"
-                         LineHeight="16"
-                         MaxWidth="690"
-                         HorizontalAlignment="Left"
-                         TextAlignment="Left"
-                         TextWrapping="Wrap"
-                         IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
-                                     Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
-            </StackPanel>
-            <ContentPresenter Grid.Column="1"
-                              Content="{TemplateBinding Content}"
-                              VerticalAlignment="Center" />
-          </Grid>
-        </Border>
+        <Panel>
+          <Border x:Name="PART_Divider"
+                  Height="1"
+                  VerticalAlignment="Top"
+                  Background="{StaticResource CardBorderBrush}"
+                  IsHitTestVisible="False" />
+          <Border x:Name="PART_RowSurface"
+                  Classes="settingRowSurface"
+                  Margin="8,4"
+                  Background="Transparent"
+                  CornerRadius="{StaticResource RadiusMd}"
+                  Padding="16,10">
+            <Grid ColumnDefinitions="*,Auto,Auto">
+              <StackPanel VerticalAlignment="Center" Spacing="4" Margin="0,0,24,0">
+                <WrapPanel Orientation="Horizontal">
+                  <TextBlock x:Name="PART_Label"
+                             Text="{TemplateBinding Label}"
+                             FontSize="{StaticResource FontSizeBody}"
+                             FontWeight="Medium"
+                             TextWrapping="Wrap"
+                             VerticalAlignment="Center"
+                             Foreground="{StaticResource TextBrush}" />
+                  <!-- Shown while a game uses the value set for every game. -->
+                  <Border x:Name="PART_InheritedBadge"
+                          Classes="scopeBadge"
+                          Margin="10,0,0,0"
+                          VerticalAlignment="Center"
+                          IsVisible="False"
+                          ToolTip.Tip="{Binding [Setting.Scope.Global.Tip], Source={x:Static local:Localization.Instance}}">
+                    <TextBlock Text="{Binding [Setting.Scope.Global], Source={x:Static local:Localization.Instance}}" />
+                  </Border>
+                </WrapPanel>
+                <TextBlock Text="{TemplateBinding Description}"
+                           FontSize="{StaticResource FontSizeDescription}"
+                           FontWeight="Normal"
+                           Foreground="{StaticResource SettingsDescriptionBrush}"
+                           LineHeight="20"
+                           MaxWidth="560"
+                           HorizontalAlignment="Left"
+                           TextAlignment="Left"
+                           TextWrapping="Wrap"
+                           IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
+                                       Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+              </StackPanel>
+              <!-- Shown while a game has its own value: puts back the value set for every game. -->
+              <Button x:Name="PART_Reset"
+                      Grid.Column="1"
+                      Classes="scopeReset"
+                      Margin="0,0,12,0"
+                      VerticalAlignment="Center"
+                      IsVisible="False">
+                <TextBlock Classes="materialSymbol compact" Text="undo" />
+              </Button>
+              <ContentPresenter Grid.Column="2"
+                                Content="{TemplateBinding Content}"
+                                VerticalAlignment="Center" />
+            </Grid>
+          </Border>
+        </Panel>
       </ControlTemplate>
     </Setter>
-    <Style Selector="^.controllerFocus /template/ Border#PART_RowSurface">
-      <Setter Property="Background" Value="#16FFFFFF" />
-      <Setter Property="BorderBrush" Value="#C8FFFFFF" />
+    <Style Selector="^:inherited /template/ Border#PART_InheritedBadge">
+      <Setter Property="IsVisible" Value="True" />
+    </Style>
+    <Style Selector="^:overridden /template/ Button#PART_Reset">
+      <Setter Property="IsVisible" Value="True" />
+    </Style>
+    <Style Selector="^ /template/ Border.scopeBadge">
+      <Setter Property="Background" Value="{DynamicResource PressedOverlayBrush}" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Padding" Value="8,1" />
+    </Style>
+    <Style Selector="^ /template/ Border.scopeBadge > TextBlock">
+      <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+      <Setter Property="FontWeight" Value="Medium" />
+      <Setter Property="Foreground" Value="{DynamicResource SecondaryTextBrush}" />
+    </Style>
+    <Style Selector="^:pointerover /template/ Border#PART_RowSurface">
+      <Setter Property="Background" Value="{StaticResource HoverOverlayBrush}" />
+    </Style>
+    <Style Selector="^:rowfocus">
+      <Setter Property="ZIndex" Value="3" />
+    </Style>
+    <Style Selector="^:rowfocus /template/ Border#PART_RowSurface">
+      <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
+      <Setter Property="BoxShadow" Value="{DynamicResource FocusRingInsetShadow}" />
     </Style>
   </ControlTheme>
 </ResourceDictionary>

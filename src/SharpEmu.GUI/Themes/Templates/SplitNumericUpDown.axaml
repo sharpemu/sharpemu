@@ -14,7 +14,7 @@ Control themes for SplitNumericUpDown and its spinner parts
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Foreground" Value="#B8FFFFFF" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="FocusAdorner" Value="{x:Null}" />
@@ -41,12 +41,12 @@ Control themes for SplitNumericUpDown and its spinner parts
       </ControlTemplate>
     </Setter>
     <Style Selector="^:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="#16FFFFFF" />
-      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Background" Value="{StaticResource HoverOverlayBrush}" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
     </Style>
     <Style Selector="^:pressed /template/ ContentPresenter#PART_ContentPresenter">
-      <Setter Property="Background" Value="#22FFFFFF" />
-      <Setter Property="Foreground" Value="White" />
+      <Setter Property="Background" Value="{StaticResource PressedOverlayBrush}" />
+      <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
     </Style>
     <Style Selector="^:disabled /template/ ContentPresenter#PART_ContentPresenter">
       <Setter Property="Opacity" Value="0.45" />
@@ -57,10 +57,10 @@ Control themes for SplitNumericUpDown and its spinner parts
     <Setter Property="MinHeight" Value="44" />
     <Setter Property="MinWidth" Value="0" />
     <Setter Property="Padding" Value="0" />
-    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Foreground" Value="#E8FFFFFF" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     <Setter Property="VerticalContentAlignment" Value="Stretch" />
     <Setter Property="Focusable" Value="True" />
@@ -116,7 +116,7 @@ Control themes for SplitNumericUpDown and its spinner parts
               </RepeatButton>
               <Border Height="1"
                       Grid.RowSpan="2"
-                      Background="#14FFFFFF"
+                      Background="{StaticResource CardBorderBrush}"
                       VerticalAlignment="Center"
                       IsHitTestVisible="False" />
             </Grid>
@@ -133,11 +133,11 @@ Control themes for SplitNumericUpDown and its spinner parts
     </Setter>
     <Style Selector="^:pointerover /template/ Border#PART_ValueSurface,
                      ^:focus-within /template/ Border#PART_ValueSurface">
-      <Setter Property="Background" Value="#20FFFFFF" />
+      <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
     </Style>
     <Style Selector="^:pointerover /template/ Border#PART_SpinnerSurface,
                      ^:focus-within /template/ Border#PART_SpinnerSurface">
-      <Setter Property="Background" Value="#20FFFFFF" />
+      <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
     </Style>
   </ControlTheme>
 
@@ -146,10 +146,10 @@ Control themes for SplitNumericUpDown and its spinner parts
     <Setter Property="MinHeight" Value="44" />
     <Setter Property="MinWidth" Value="0" />
     <Setter Property="Padding" Value="0" />
-    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Foreground" Value="#E8FFFFFF" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
     <Setter Property="HorizontalContentAlignment" Value="Left" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="TextAlignment" Value="Left" />

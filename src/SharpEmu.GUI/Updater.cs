@@ -16,7 +16,7 @@ namespace SharpEmu.GUI;
 /// <summary>Self-contained Windows updater; the emulator layers do not depend on it.</summary>
 public static class Updater
 {
-    private const string ApplyArgument = "--sharpemu-apply-update";
+    public const string ApplyArgument = "--sharpemu-apply-update";
     private const string LatestReleaseUrl = "https://api.github.com/repos/sharpemu/sharpemu/releases/latest";
     private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(10);
     private static readonly HttpClient Http = CreateHttpClient();

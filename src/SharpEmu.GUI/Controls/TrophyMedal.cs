@@ -67,34 +67,34 @@ internal sealed class TrophyMedal : Control
         _ => (Color.Parse("#FFD9B0"), Color.Parse("#D0844A"), Color.Parse("#6E3714")),
     };
 
-    public override void Render(DrawingContext context)
+    // Brushes and pens depend only on the grade and the size, so a spin or glint animation reuses them every frame.
+    private sealed class Look
     {
-        var size = Math.Min(Bounds.Width, Bounds.Height);
-        if (size <= 0)
+        public int Grade;
+        public double Radius;
+        public IBrush Rim = null!, Body = null!, Face = null!, EmblemShadow = null!, EmblemFill = null!, Highlight = null!;
+        public Pen Ring = null!, ArtRing = null!, ArtHalo = null!;
+    }
+
+    private Look? _look;
+    private EllipseGeometry? _artClip;
+    private Rect _artClipRect;
+
+    private Look LookFor(int grade, double radius)
+    {
+        if (_look is { } cached && cached.Grade == grade && cached.Radius == radius)
         {
-            return;
+            return cached;
         }
 
-        var (light, mid, dark) = Palette(Grade);
-        var center = new Point(Bounds.Width / 2, Bounds.Height / 2);
-        var radius = size / 2;
-        var facing = Math.Cos(Spin);
-        var squash = Math.Max(0.04, Math.Abs(facing));
-        var front = facing >= 0;
-
-        var edgeShift = radius * 0.13 * Math.Sin(Spin);
-        using (context.PushTransform(Squash(center, squash, edgeShift)))
+        var (light, mid, dark) = Palette(grade);
+        return _look = new Look
         {
-            context.DrawEllipse(new SolidColorBrush(Shade(dark, 0.55)), null, center, radius, radius);
-        }
-
-        using (context.PushTransform(Squash(center, squash, 0)))
-        {
-            context.DrawEllipse(Linear(light, mid, dark, 0.15, 0.1, 0.9, 0.95), null, center, radius, radius);
-            context.DrawEllipse(null, new Pen(new SolidColorBrush(Shade(dark, 0.8)), radius * 0.03), center, radius * 0.86, radius * 0.86);
-
-            var face = radius * 0.82;
-            context.DrawEllipse(new RadialGradientBrush
+            Grade = grade,
+            Radius = radius,
+            Rim = new SolidColorBrush(Shade(dark, 0.55)),
+            Body = Linear(light, mid, dark, 0.15, 0.1, 0.9, 0.95),
+            Face = new RadialGradientBrush
             {
                 Center = new RelativePoint(0.36, 0.3, RelativeUnit.Relative),
                 GradientOrigin = new RelativePoint(0.36, 0.3, RelativeUnit.Relative),
@@ -106,36 +106,79 @@ internal sealed class TrophyMedal : Control
                     new GradientStop(mid, 0.45),
                     new GradientStop(dark, 1),
                 },
-            }, null, center, face, face);
-
-            if (front && Icon is { } icon)
-            {
-                var art = face * 0.9;
-                var rect = new Rect(center.X - art, center.Y - art, art * 2, art * 2);
-                using (context.PushGeometryClip(new EllipseGeometry(rect)))
-                {
-                    context.DrawImage(icon, new Rect(icon.Size), rect);
-                }
-
-                context.DrawEllipse(null, new Pen(new SolidColorBrush(Shade(dark, 0.8)), radius * 0.035), center, art, art);
-                context.DrawEllipse(null, new Pen(new SolidColorBrush(Color.FromArgb(120, light.R, light.G, light.B)), radius * 0.02), center, art + radius * 0.03, art + radius * 0.03);
-            }
-            else
-            {
-                var emblem = front ? Cup : Star;
-                var scale = face * 1.32 / 100;
-                DrawEmblem(context, emblem, center, scale, new Vector(radius * 0.025, radius * 0.035), new SolidColorBrush(Shade(dark, 0.75)));
-                DrawEmblem(context, emblem, center, scale, default, Linear(light, light, mid, 0.3, 0.2, 0.7, 0.85));
-            }
-
-            context.DrawEllipse(new RadialGradientBrush
+            },
+            EmblemShadow = new SolidColorBrush(Shade(dark, 0.75)),
+            EmblemFill = Linear(light, light, mid, 0.3, 0.2, 0.7, 0.85),
+            Highlight = new RadialGradientBrush
             {
                 GradientStops =
                 {
                     new GradientStop(Color.FromArgb(150, 255, 255, 255), 0),
                     new GradientStop(Color.FromArgb(0, 255, 255, 255), 1),
                 },
-            }, null, new Point(center.X - radius * 0.32, center.Y - radius * 0.4), radius * 0.42, radius * 0.24);
+            },
+            Ring = new Pen(new SolidColorBrush(Shade(dark, 0.8)), radius * 0.03),
+            ArtRing = new Pen(new SolidColorBrush(Shade(dark, 0.8)), radius * 0.035),
+            ArtHalo = new Pen(new SolidColorBrush(Color.FromArgb(120, light.R, light.G, light.B)), radius * 0.02),
+        };
+    }
+
+    public override void Render(DrawingContext context)
+    {
+        var size = Math.Min(Bounds.Width, Bounds.Height);
+        if (size <= 0)
+        {
+            return;
+        }
+
+        var center = new Point(Bounds.Width / 2, Bounds.Height / 2);
+        var radius = size / 2;
+        var look = LookFor(Grade, radius);
+        var facing = Math.Cos(Spin);
+        var squash = Math.Max(0.04, Math.Abs(facing));
+        var front = facing >= 0;
+
+        var edgeShift = radius * 0.13 * Math.Sin(Spin);
+        using (context.PushTransform(Squash(center, squash, edgeShift)))
+        {
+            context.DrawEllipse(look.Rim, null, center, radius, radius);
+        }
+
+        using (context.PushTransform(Squash(center, squash, 0)))
+        {
+            context.DrawEllipse(look.Body, null, center, radius, radius);
+            context.DrawEllipse(null, look.Ring, center, radius * 0.86, radius * 0.86);
+
+            var face = radius * 0.82;
+            context.DrawEllipse(look.Face, null, center, face, face);
+
+            if (front && Icon is { } icon)
+            {
+                var art = face * 0.9;
+                var rect = new Rect(center.X - art, center.Y - art, art * 2, art * 2);
+                if (_artClip is null || _artClipRect != rect)
+                {
+                    _artClip = new EllipseGeometry(rect);
+                    _artClipRect = rect;
+                }
+
+                using (context.PushGeometryClip(_artClip))
+                {
+                    context.DrawImage(icon, new Rect(icon.Size), rect);
+                }
+
+                context.DrawEllipse(null, look.ArtRing, center, art, art);
+                context.DrawEllipse(null, look.ArtHalo, center, art + radius * 0.03, art + radius * 0.03);
+            }
+            else
+            {
+                var emblem = front ? Cup : Star;
+                var scale = face * 1.32 / 100;
+                DrawEmblem(context, emblem, center, scale, new Vector(radius * 0.025, radius * 0.035), look.EmblemShadow);
+                DrawEmblem(context, emblem, center, scale, default, look.EmblemFill);
+            }
+
+            context.DrawEllipse(look.Highlight, null, new Point(center.X - radius * 0.32, center.Y - radius * 0.4), radius * 0.42, radius * 0.24);
 
             if (Glint is >= 0 and <= 1)
             {

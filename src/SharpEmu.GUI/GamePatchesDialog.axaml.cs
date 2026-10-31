@@ -15,7 +15,7 @@ using SharpEmu.Core.Patches;
 
 namespace SharpEmu.GUI;
 
-public partial class GamePatchesDialog : Window
+public partial class GamePatchesDialog : SheetView
 {
     private readonly GamePatchRepository _repository = new();
     private readonly GameEntry? _game;
@@ -167,27 +167,30 @@ public partial class GamePatchesDialog : Window
             Content = Localization.Instance.Get("Exit.Ok"),
             HorizontalAlignment = HorizontalAlignment.Right,
             IsDefault = true,
-            IsCancel = true,
             Classes = { "accent" },
         };
-        var dialog = new Window
+        var sheet = new SheetView
         {
-            Title = Localization.Instance.Get("Library.Patches.Download"),
-            Width = 440,
-            SizeToContent = SizeToContent.Height,
-            CanResize = false,
-            ShowInTaskbar = false,
-            WindowStartupLocation = WindowStartupLocation.CenterOwner,
-            Background = Background,
+            SheetWidth = 460,
             Content = new StackPanel
             {
-                Margin = new Thickness(24),
+                Margin = new Thickness(28),
                 Spacing = 20,
-                Children = { new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap }, close },
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Text = Localization.Instance.Get("Library.Patches.Download"),
+                        FontSize = 20,
+                        FontWeight = FontWeight.Bold,
+                    },
+                    new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap },
+                    close,
+                },
             },
         };
-        close.Click += (_, _) => dialog.Close();
-        return dialog.ShowDialog(this);
+        close.Click += (_, _) => sheet.Close();
+        return ShowSheetAsync(sheet);
     }
 
     private void ApplyFilter()

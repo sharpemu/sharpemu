@@ -19,9 +19,32 @@ public partial class MainWindow
     private void InitializeController()
     {
         XYFocus.SetNavigationModes(this, XYFocusNavigationModes.Gamepad);
-        AddHandler(PointerPressedEvent, (_, _) => MarkControllerFocus(null), RoutingStrategies.Tunnel, handledEventsToo: true);
-        AddHandler(PointerWheelChangedEvent, (_, _) => MarkControllerFocus(null), RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerPressedEvent, (_, _) => UsePointerNavigation(), RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(PointerWheelChangedEvent, (_, _) => UsePointerNavigation(), RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(
+            KeyDownEvent,
+            (_, e) =>
+            {
+                if (e.Key is Key.Up or Key.Down or Key.Left or Key.Right or Key.Tab or Key.Enter or Key.Escape)
+                {
+                    SetPadNavigation(true);
+                }
+            },
+            RoutingStrategies.Tunnel,
+            handledEventsToo: true);
     }
+
+    private void UsePointerNavigation()
+    {
+        MarkControllerFocus(null);
+        SetPadNavigation(false);
+    }
+
+    /// <summary>
+    /// True while the last input was a key or the pad. The library tiles use it (focus-visible
+    /// does not reach list items) to show the full focus treatment instead of the selected ring.
+    /// </summary>
+    private void SetPadNavigation(bool active) => SetClass(this, "padNav", active);
 
     private void MarkControllerFocus(Control? target)
     {
@@ -54,7 +77,8 @@ public partial class MainWindow
     }
 
     private Control? ControllerRoot() =>
-        _isGameSettingsOpen ? GameOptionsOverlay
+        Sheets.Top is { } sheet ? sheet
+        : _isGameSettingsOpen ? GameOptionsOverlay
         : _activePageIndex == 1 ? OptionsPage
         : _activePageIndex == 2 ? TrophyPageHost
         : null;
@@ -113,11 +137,12 @@ public partial class MainWindow
         }
     }
 
-    private sealed record SettingsLayout(Control Root, Button[] Navigation, Control[] Panels, Func<int> Section, Action<int> SetSection);
+    private sealed record SettingsLayout(Control Root, Button[] Navigation, Control[] Panels, Func<int> Section, Action<int> SetSection, Button? Launch = null);
 
     private SettingsLayout? ControllerSettings() =>
-        _isGameSettingsOpen
-            ? new SettingsLayout(GameOptionsOverlay, GameOptionsNavigationButtons(), GameOptionsSectionPanels(), () => _gameOptionsSectionIndex, section => SetGameOptionsSection(section))
+        Sheets.Top is not null ? null
+        : _isGameSettingsOpen
+            ? new SettingsLayout(GameOptionsOverlay, GameOptionsNavigationButtons(), GameOptionsSectionPanels(), () => _gameOptionsSectionIndex, section => SetGameOptionsSection(section), GameOptionsLaunchButton)
             : _activePageIndex == 1
                 ? new SettingsLayout(OptionsPage, OptionsNavigationButtons(), OptionsSectionPanels(), () => _optionsSectionIndex, SetOptionsSection)
                 : null;
@@ -136,6 +161,26 @@ public partial class MainWindow
 
         var navigation = layout.Navigation;
         var panel = layout.Panels[Math.Clamp(layout.Section(), 0, layout.Panels.Length - 1)];
+
+        // The Launch button above the menu is the overlay's default focus: Cross launches,
+        // Down drops into the section list, Circle (unhandled here) closes the overlay.
+        if (layout.Launch is { } launch && ReferenceEquals(focused, launch))
+        {
+            switch (key)
+            {
+                case Key.Down:
+                    FocusControl(navigation[layout.Section()]);
+                    return true;
+                case Key.Enter:
+                    ActivateControl(launch);
+                    return true;
+                case Key.Up or Key.Left or Key.Right:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
         if (focused is null || !panel.IsVisualAncestorOf(focused))
         {
             var current = Array.IndexOf(navigation, focused);
@@ -147,6 +192,12 @@ public partial class MainWindow
             switch (key)
             {
                 case Key.Up or Key.Down:
+                    if (key == Key.Up && current == 0 && layout.Launch is { } above)
+                    {
+                        FocusControl(above);
+                        return true;
+                    }
+
                     var next = Math.Clamp(current + (key == Key.Down ? 1 : -1), 0, navigation.Length - 1);
                     if (next < layout.Panels.Length)
                     {
@@ -271,6 +322,13 @@ public partial class MainWindow
             (focused == root || root.IsVisualAncestorOf(focused) ||
              (focused is ILogical logical && root.IsLogicalAncestorOf(logical))))
         {
+            return;
+        }
+
+        // Settings open on their selected section (or on Launch in a game's overlay).
+        if (ControllerSettings() is { } layout)
+        {
+            FocusControl(layout.Launch ?? layout.Navigation[layout.Section()]);
             return;
         }
 

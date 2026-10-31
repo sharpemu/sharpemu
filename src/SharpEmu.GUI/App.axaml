@@ -34,5 +34,7 @@ cascade order so individual launcher views do not redefine global visuals.
     <StyleInclude Source="avares://SharpEmu.GUI/Themes/Styles/OptionsNav.axaml" />
     <StyleInclude Source="avares://SharpEmu.GUI/Themes/Styles/Options.axaml" />
     <StyleInclude Source="avares://SharpEmu.GUI/Themes/Styles/GameOptions.axaml" />
+    <StyleInclude Source="avares://SharpEmu.GUI/Themes/Styles/Glass.axaml" />
+    <StyleInclude Source="avares://SharpEmu.GUI/Themes/Styles/Focus.axaml" />
   </Application.Styles>
 </Application>

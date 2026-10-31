@@ -3,17 +3,12 @@ Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
-<Window xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:local="clr-namespace:SharpEmu.GUI"
-        x:Class="SharpEmu.GUI.ZarPackDialog"
-        Width="520"
-        SizeToContent="Height"
-        CanResize="False"
-        WindowStartupLocation="CenterOwner"
-        Background="{StaticResource BgBrush}"
-        Title="{Binding [Library.Pack.Title], Source={x:Static local:Localization.Instance}}">
-  <StackPanel Margin="24" Spacing="12">
+<local:SheetView xmlns="https://github.com/avaloniaui"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:local="clr-namespace:SharpEmu.GUI"
+                 x:Class="SharpEmu.GUI.ZarPackDialog"
+                 SheetWidth="560">
+  <StackPanel Margin="28" Spacing="12">
     <TextBlock x:Name="HeadingText"
                FontSize="20"
                FontWeight="Bold"
@@ -59,4 +54,4 @@ SPDX-License-Identifier: GPL-2.0-or-later
               Content="{Binding [Common.Cancel], Source={x:Static local:Localization.Instance}}" />
     </Grid>
   </StackPanel>
-</Window>
+</local:SheetView>

@@ -37,20 +37,14 @@ internal sealed class GlobalCustomEnvironmentSettings
         }
     }
 
-    public static void Save(IEnumerable<string> entries)
+    /// <summary>Writes the normalized entries; failures reach the caller so the launcher can report them.</summary>
+    public static void SaveOrThrow(IEnumerable<string> entries)
     {
-        try
+        var settings = new GlobalCustomEnvironmentSettings
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-            var settings = new GlobalCustomEnvironmentSettings
-            {
-                EnvironmentVariables = Normalize(entries).ToList(),
-            };
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(settings, SerializerOptions));
-        }
-        catch (Exception)
-        {
-        }
+            EnvironmentVariables = Normalize(entries).ToList(),
+        };
+        SettingsFilePersistence.Write(FilePath, JsonSerializer.Serialize(settings, SerializerOptions));
     }
 
     private static IReadOnlyList<string> Normalize(IEnumerable<string>? entries) =>
