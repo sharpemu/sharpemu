@@ -1360,6 +1360,31 @@ public static partial class Gen5SpirvTranslator
                             GetRawSource(instruction, 1)),
                         GetRawSource(instruction, 2));
                     break;
+                case "VPermB32":
+                {
+                    var first = GetRawSource(instruction, 0);
+                    var second = GetRawSource(instruction, 1);
+                    var selectors = GetRawSource(instruction, 2);
+                    result = UInt(0);
+                    for (var shift = 0u; shift < 32; shift += 8)
+                    {
+                        var selector = BitwiseAnd(ShiftRightLogical(selectors, UInt(shift)), UInt(255));
+                        var byteSelection = UCmp(SpirvOp.ULessThan, selector, UInt(8));
+                        var source = SelectU(byteSelection,
+                            SelectU(UCmp(SpirvOp.ULessThan, selector, UInt(4)), second, first),
+                            SelectU(UCmp(SpirvOp.ULessThan, selector, UInt(10)), second, first));
+                        var byteShift = ShiftLeftLogical(BitwiseAnd(selector, UInt(3)), UInt(3));
+                        var selectedByte = BitwiseAnd(ShiftRightLogical(source, byteShift), UInt(255));
+                        var signShift = SelectU(Equal(BitwiseAnd(selector, UInt(1)), 0), UInt(15), UInt(31));
+                        var signByte = BitwiseAnd(ISubU(UInt(0),
+                            BitwiseAnd(ShiftRightLogical(source, signShift), UInt(1))), UInt(255));
+                        var value = SelectU(byteSelection, selectedByte,
+                            SelectU(UCmp(SpirvOp.ULessThan, selector, UInt(12)), signByte,
+                                SelectU(Equal(selector, 12), UInt(0), UInt(255))));
+                        result = BitwiseOr(result, ShiftLeftLogical(value, UInt(shift)));
+                    }
+                    break;
+                }
                 case "VPermlane16B32":
                     result = EmitPermlane16(instruction, exchangeRows: false);
                     break;

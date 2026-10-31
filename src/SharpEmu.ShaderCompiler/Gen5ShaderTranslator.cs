@@ -1455,6 +1455,7 @@ public static partial class Gen5ShaderTranslator
             0x2FF => "VLshlrevB64",
             0x300 => "VLshrrevB64",
             0x373 => "VMadU32U16",
+            0x344 => "VPermB32",
             0x346 => "VLshlAddU32",
             0x345 => "VXadU32",
             0x347 => "VAddLshlU32",
