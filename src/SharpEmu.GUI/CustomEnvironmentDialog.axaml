@@ -9,11 +9,13 @@ SPDX-License-Identifier: GPL-2.0-or-later
                  x:Class="SharpEmu.GUI.CustomEnvironmentDialog"
                  SheetWidth="640">
   <Grid Margin="32,28" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
-    <TextBlock Grid.Row="0"
+    <TextBlock x:Name="TitleText"
+               Grid.Row="0"
                Classes="sheetTitle"
                Text="{Binding [Setting.CustomEnv.Label], Source={x:Static local:Localization.Instance}}" />
 
-    <TextBlock Grid.Row="1"
+    <TextBlock x:Name="DescriptionText"
+               Grid.Row="1"
                Margin="0,8,0,0"
                Text="{Binding [Launch.CustomEnv.Desc], Source={x:Static local:Localization.Instance}}"
                Foreground="{StaticResource SecondaryTextBrush}"
@@ -39,14 +41,20 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
     <Grid Grid.Row="4"
           Margin="0,18,0,0"
-          ColumnDefinitions="*,Auto,Auto"
+          ColumnDefinitions="Auto,*,Auto,Auto"
           ColumnSpacing="8">
+      <!-- Launch mode only: keep the variables as the game's own instead of launching. -->
+      <Button x:Name="SaveToGameButton"
+              Grid.Column="0"
+              Classes="ghost"
+              IsVisible="False"
+              Content="{Binding [Launch.Variables.SaveToGame], Source={x:Static local:Localization.Instance}}" />
       <Button x:Name="CancelButton"
-              Grid.Column="1"
+              Grid.Column="2"
               Classes="ghost"
               Content="{Binding [Common.Cancel], Source={x:Static local:Localization.Instance}}" />
       <Button x:Name="SaveButton"
-              Grid.Column="2"
+              Grid.Column="3"
               Classes="accent"
               Content="{Binding [Common.Save], Source={x:Static local:Localization.Instance}}" />
     </Grid>

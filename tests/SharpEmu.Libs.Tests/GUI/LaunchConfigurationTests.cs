@@ -94,4 +94,18 @@ public sealed class LaunchConfigurationTests
         Assert.Equal("default-logs", Path.GetDirectoryName(LaunchConfiguration.ResolveLogFilePath(launcher, "PPSA01234", "default-logs")));
     }
 
+    [Fact]
+    public void OneOffVariablesApplyAfterEverySavedVariable()
+    {
+        var launch = new LaunchConfiguration(EffectiveLaunchSettings.Defaults, ["SHARPEMU_LOG_IO=1", "MY_VAR=saved"])
+            .WithOneOff(["MY_VAR=once", "SHARPEMU_WRITABLE_APP0=0"]);
+
+        var environment = launch.BuildEnvironment(new GuiSettings());
+
+        Assert.Equal("once", environment["MY_VAR"]);
+        Assert.Equal("1", environment["SHARPEMU_LOG_IO"]);
+        Assert.Equal("0", environment["SHARPEMU_WRITABLE_APP0"]);
+        Assert.Same(launch, launch.WithOneOff(null));
+        Assert.Same(launch, launch.WithOneOff([]));
+    }
 }

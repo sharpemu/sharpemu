@@ -19,6 +19,7 @@ public partial class MainWindow
     private DateTime _launchStartedAt;
     private bool _gameWindowShown;
     private int _launchCardToken;
+    private int _launchOneOffCount;
 
     private void InitializeLaunchCard()
     {
@@ -61,7 +62,10 @@ public partial class MainWindow
             return;
         }
 
-        LaunchCardDetail.Text = Localization.Instance.Format("Launch.Card.Loading", (int)elapsed.TotalSeconds);
+        var detail = Localization.Instance.Format("Launch.Card.Loading", (int)elapsed.TotalSeconds);
+        LaunchCardDetail.Text = _launchOneOffCount > 0
+            ? detail + " · " + Localization.Instance.Format("Launch.Card.OneOff", _launchOneOffCount)
+            : detail;
     }
 
     // Called when the game reports its window open (or the card gives up waiting).

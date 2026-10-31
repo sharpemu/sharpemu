@@ -57,20 +57,17 @@ public sealed class SettingsSplitMigrationTests : IDisposable
 
     private string SettingsPath => Path.Combine(_root, "gui-settings.json");
 
-    private string GamesPath => Path.Combine(_root, "user", "custom_configs");
+    private string SharedPath => Path.Combine(_root, "user", "game_defaults.json");
 
-    private string GamePath(string titleId) => Path.Combine(GamesPath, titleId + ".json");
+    private bool Migrate() => SettingsSplitMigration.Migrate(SettingsPath, SharedPath);
 
-    private bool Migrate(params string[] library) =>
-        SettingsSplitMigration.Migrate(SettingsPath, GamesPath, _ => library);
+    private PerGameSettings Shared() =>
+        PerGameSettings.NormalizeFromJson(File.ReadAllText(SharedPath))!;
 
-    private PerGameSettings Game(string titleId) =>
-        PerGameSettings.NormalizeFromJson(File.ReadAllText(GamePath(titleId)))!;
-
-    private void WriteGame(string titleId, string json)
+    private void WriteShared(string json)
     {
-        Directory.CreateDirectory(GamesPath);
-        File.WriteAllText(GamePath(titleId), json);
+        Directory.CreateDirectory(Path.GetDirectoryName(SharedPath)!);
+        File.WriteAllText(SharedPath, json);
     }
 
     [Fact]
@@ -104,13 +101,11 @@ public sealed class SettingsSplitMigrationTests : IDisposable
     }
 
     [Fact]
-    public void MovesChangedValuesToKnownGamesAndCleansTheGlobalFile()
+    public void MovesChangedValuesToTheSharedFileAndCleansTheLauncherFile()
     {
         File.WriteAllText(SettingsPath, LegacyGlobal);
-        // A game with settings of its own keeps them; everything else follows the old global.
-        WriteGame("PPSA00001", """{ "OverlayCorner": "TopLeft", "EnvironmentChanges": ["SHARPEMU_CRASH_CAPTURE=0", "SHARPEMU_LOG_IO"] }""");
 
-        Assert.True(Migrate("PPSA00002", "ppsa00001", ""));
+        Assert.True(Migrate());
 
         Assert.Equal(LegacyGlobal, File.ReadAllText(SettingsPath + SettingsSplitMigration.BackupSuffix));
         var global = JsonNode.Parse(File.ReadAllText(SettingsPath))!.AsObject();
@@ -119,104 +114,91 @@ public sealed class SettingsSplitMigrationTests : IDisposable
         Assert.Equal("/Volumes/Games", (string?)global["GameFolders"]![0]);
         Assert.Equal(0.9, (double)global["LibraryTileScale"]!);
 
-        var own = EffectiveLaunchSettings.Resolve(Game("PPSA00001"));
-        Assert.Equal("TopLeft", own.OverlayCorner);
-        Assert.Equal("Full", own.OverlayMode);
-        Assert.False(own.VSync);
-        Assert.True(own.LogToFile);
-        Assert.Equal("Off", own.GpuReadbacks);
-        Assert.Equal("Host", own.BinkPlaybackMode);
-        Assert.Contains("SHARPEMU_LOG_IO", own.EnvironmentToggles);
-        Assert.DoesNotContain(own.EnvironmentToggles, entry => entry.StartsWith("SHARPEMU_CRASH_CAPTURE"));
-        Assert.Contains("SHARPEMU_WRITABLE_APP0", own.EnvironmentToggles);
-
-        var library = Game("PPSA00002");
-        Assert.Equal("BottomRight", library.OverlayCorner);
-        Assert.Equal("Full", library.OverlayMode);
-        Assert.False(library.VSync);
-        Assert.Equal("Host", library.BinkPlaybackMode);
-        Assert.Contains("SHARPEMU_CRASH_CAPTURE", EffectiveLaunchSettings.Resolve(library).EnvironmentToggles);
+        var shared = Shared();
+        Assert.Equal("BottomRight", shared.OverlayCorner);
+        Assert.Equal("Full", shared.OverlayMode);
+        Assert.False(shared.VSync);
+        Assert.True(shared.LogToFile);
+        Assert.Equal("Off", shared.GpuReadbacks);
+        Assert.Equal("Host", shared.BinkPlaybackMode);
+        Assert.Contains("SHARPEMU_CRASH_CAPTURE", EffectiveLaunchSettings.Resolve(shared).EnvironmentToggles);
         // Values the old file held at their defaults are not written out.
-        Assert.Null(library.LogLevel);
-        Assert.Null(library.WindowMode);
-        Assert.Null(library.Resolution);
-        Assert.Null(library.OverlayEnabled);
-
-        // A game the launcher has never seen starts from the built-in defaults.
-        Assert.False(File.Exists(GamePath("PPSA00003")));
-        Assert.Equal(EffectiveLaunchSettings.Defaults, EffectiveLaunchSettings.Resolve(null));
+        Assert.Null(shared.LogLevel);
+        Assert.Null(shared.WindowMode);
+        Assert.Null(shared.Resolution);
+        Assert.Null(shared.OverlayEnabled);
+        Assert.Null(shared.EnvironmentToggles);
     }
 
-    [Fact]
-    public void EachKnownGameKeepsTheEffectiveSettingsItHadBefore()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("""{ "VSync": true, "Resolution": "2560x1440", "EnvironmentChanges": ["SHARPEMU_LOG_NP"] }""")]
+    [InlineData("""{ "OverlayCorner": "TopLeft", "EnvironmentChanges": ["SHARPEMU_CRASH_CAPTURE=0", "SHARPEMU_LOG_IO"] }""")]
+    [InlineData("""{ "EnvironmentToggles": ["SHARPEMU_WRITABLE_APP0"] }""")]
+    public void EveryGameKeepsTheEffectiveSettingsItHadBefore(string? gameJson)
     {
         File.WriteAllText(SettingsPath, LegacyGlobal);
-        WriteGame("PPSA00001", """{ "VSync": true, "Resolution": "2560x1440", "EnvironmentChanges": ["SHARPEMU_LOG_NP"] }""");
-        WriteGame("PPSA00004", """{ "EnvironmentToggles": ["SHARPEMU_WRITABLE_APP0"] }""");
-        var before = new Dictionary<string, PerGameSettings?>
-        {
-            ["PPSA00001"] = Game("PPSA00001"),
-            ["PPSA00002"] = null,
-            ["PPSA00004"] = Game("PPSA00004"),
-        };
+        var game = gameJson is null ? null : PerGameSettings.NormalizeFromJson(gameJson);
 
-        Migrate("PPSA00002");
+        Migrate();
 
         var legacy = SettingsSplitMigration.CarriedValues(LegacyGlobal);
-        foreach (var (titleId, game) in before)
-        {
-            var after = EffectiveLaunchSettings.Resolve(Game(titleId));
-            // The pre-split rule: a game's value, else the global one, with its environment
-            // changes laid over its own whole list or the global list.
-            Assert.Equal(game?.VSync ?? false, after.VSync);
-            Assert.Equal(game?.Resolution ?? "1920x1080", after.Resolution);
-            Assert.Equal("BottomRight", after.OverlayCorner);
-            Assert.Equal(
-                EnvironmentOverrides.Merge(game?.EnvironmentToggles ?? legacy.EnvironmentToggles!, game?.EnvironmentChanges)
-                    .Select(EnvironmentOverrides.Name).Order(StringComparer.OrdinalIgnoreCase),
-                after.EnvironmentToggles.Select(EnvironmentOverrides.Name).Order(StringComparer.OrdinalIgnoreCase));
-        }
+        var after = EffectiveLaunchSettings.Resolve(Shared(), game);
+        // The pre-split rule: a game's value, else the global one, with its environment
+        // changes laid over its own whole list or the global list.
+        Assert.Equal(game?.VSync ?? false, after.VSync);
+        Assert.Equal(game?.Resolution ?? "1920x1080", after.Resolution);
+        Assert.Equal(game?.OverlayCorner ?? "BottomRight", after.OverlayCorner);
+        Assert.Equal("Host", after.BinkPlaybackMode);
+        Assert.Equal(
+            EnvironmentOverrides.Merge(game?.EnvironmentToggles ?? legacy.EnvironmentToggles!, game?.EnvironmentChanges)
+                .Select(EnvironmentOverrides.Name).Order(StringComparer.OrdinalIgnoreCase),
+            after.EnvironmentToggles.Select(EnvironmentOverrides.Name).Order(StringComparer.OrdinalIgnoreCase));
     }
 
     [Fact]
     public void SecondRunChangesNothing()
     {
         File.WriteAllText(SettingsPath, LegacyGlobal);
-        WriteGame("PPSA00001", """{ "OverlayCorner": "TopLeft" }""");
-        Assert.True(Migrate("PPSA00002"));
+        Assert.True(Migrate());
         var global = File.ReadAllBytes(SettingsPath);
-        var first = File.ReadAllBytes(GamePath("PPSA00001"));
-        var second = File.ReadAllBytes(GamePath("PPSA00002"));
+        var shared = File.ReadAllBytes(SharedPath);
         var backup = File.ReadAllBytes(SettingsPath + SettingsSplitMigration.BackupSuffix);
 
-        Assert.False(Migrate("PPSA00002", "PPSA00005"));
+        Assert.False(Migrate());
 
         Assert.Equal(global, File.ReadAllBytes(SettingsPath));
-        Assert.Equal(first, File.ReadAllBytes(GamePath("PPSA00001")));
-        Assert.Equal(second, File.ReadAllBytes(GamePath("PPSA00002")));
+        Assert.Equal(shared, File.ReadAllBytes(SharedPath));
         Assert.Equal(backup, File.ReadAllBytes(SettingsPath + SettingsSplitMigration.BackupSuffix));
-        Assert.False(File.Exists(GamePath("PPSA00005")));
     }
 
     [Fact]
-    public void FailedRunKeepsTheGlobalKeysAndTheNextRunFinishes()
+    public void SharedValuesAlreadySetAreKept()
     {
         File.WriteAllText(SettingsPath, LegacyGlobal);
-        WriteGame("PPSA00001", "{}");
-        // A directory where a game's file goes makes that write fail part way through.
-        Directory.CreateDirectory(GamePath("PPSA00002"));
+        WriteShared("""{ "OverlayMode": "Minimal" }""");
 
-        Assert.ThrowsAny<IOException>(() => Migrate("PPSA00002"));
+        Assert.True(Migrate());
+
+        Assert.Equal("Minimal", Shared().OverlayMode);
+        Assert.Equal("BottomRight", Shared().OverlayCorner);
+    }
+
+    [Fact]
+    public void FailedRunKeepsTheLauncherKeysAndTheNextRunFinishes()
+    {
+        File.WriteAllText(SettingsPath, LegacyGlobal);
+        // A directory where the shared file goes makes its write fail.
+        Directory.CreateDirectory(SharedPath);
+
+        Assert.ThrowsAny<IOException>(() => Migrate());
         Assert.Equal(LegacyGlobal, File.ReadAllText(SettingsPath));
         Assert.Equal(LegacyGlobal, File.ReadAllText(SettingsPath + SettingsSplitMigration.BackupSuffix));
 
-        // The user changes a value in the meantime; the retry must not undo it.
-        WriteGame("PPSA00001", """{ "OverlayMode": "Minimal" }""");
-        Directory.Delete(GamePath("PPSA00002"));
-        Assert.True(Migrate("PPSA00002"));
+        Directory.Delete(SharedPath);
+        Assert.True(Migrate());
 
-        Assert.Equal("Minimal", Game("PPSA00001").OverlayMode);
-        Assert.Equal("Full", Game("PPSA00002").OverlayMode);
+        Assert.Equal("Full", Shared().OverlayMode);
         Assert.DoesNotContain("OverlayMode", File.ReadAllText(SettingsPath));
         Assert.Equal(LegacyGlobal, File.ReadAllText(SettingsPath + SettingsSplitMigration.BackupSuffix));
     }
@@ -234,22 +216,22 @@ public sealed class SettingsSplitMigrationTests : IDisposable
         });
         File.WriteAllText(SettingsPath, json);
 
-        Assert.True(Migrate("PPSA00002"));
+        Assert.True(Migrate());
 
-        Assert.False(Directory.Exists(GamesPath));
+        Assert.False(File.Exists(SharedPath));
         Assert.Equal("""{"LauncherTheme":"Midnight"}""", JsonNode.Parse(File.ReadAllText(SettingsPath))!.ToJsonString());
         Assert.True(File.Exists(SettingsPath + SettingsSplitMigration.BackupSuffix));
     }
 
     [Fact]
-    public void UnreadableGameFileIsLeftAlone()
+    public void UnreadableSharedFileIsLeftAlone()
     {
         File.WriteAllText(SettingsPath, LegacyGlobal);
-        WriteGame("PPSA00001", "{ not json");
+        WriteShared("{ not json");
 
         Assert.True(Migrate());
 
-        Assert.Equal("{ not json", File.ReadAllText(GamePath("PPSA00001")));
+        Assert.Equal("{ not json", File.ReadAllText(SharedPath));
     }
 
     [Theory]
@@ -263,11 +245,11 @@ public sealed class SettingsSplitMigrationTests : IDisposable
             File.WriteAllText(SettingsPath, json);
         }
 
-        Assert.False(Migrate("PPSA00002"));
+        Assert.False(Migrate());
 
         Assert.Equal(json is not null, File.Exists(SettingsPath));
         Assert.False(File.Exists(SettingsPath + SettingsSplitMigration.BackupSuffix));
-        Assert.False(Directory.Exists(GamesPath));
+        Assert.False(File.Exists(SharedPath));
     }
 
     public void Dispose()

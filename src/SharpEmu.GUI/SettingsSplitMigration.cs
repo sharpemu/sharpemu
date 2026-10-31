@@ -7,16 +7,17 @@ using System.Text.Json.Nodes;
 namespace SharpEmu.GUI;
 
 /// <summary>
-/// Moves the game settings a gui-settings.json written before the split still holds into each
-/// known game's file, then drops them from the global file. A value equal to the built-in
-/// default needs no move; any other one goes to every game that has no setting of its own for
-/// it, so each known game keeps running exactly as before. A game the launcher has never seen
-/// starts from the built-in defaults.
+/// Moves the game settings a gui-settings.json written before the split still holds into the
+/// settings every game starts from (<see cref="PerGameSettings.GlobalPath"/>), then drops them
+/// from the launcher's file. A value equal to the built-in default needs no move. Each game's
+/// own file is left as it is: it still lays its values over the same shared ones, so every game
+/// keeps running exactly as before.
 /// </summary>
 /// <remarks>
-/// Safe to run on every start: the global file is backed up once before anything is written,
-/// game files are written before the global file, and a run that stops part way leaves the
-/// global keys in place for the next run, which skips every value a game already has.
+/// Safe to run on every start: the launcher's file is backed up once before anything is
+/// written, the shared file is written before the launcher's file, and a run that stops part
+/// way leaves the old keys in place for the next run, which keeps every value the shared file
+/// already has.
 /// </remarks>
 public static class SettingsSplitMigration
 {
@@ -51,7 +52,7 @@ public static class SettingsSplitMigration
     {
         try
         {
-            return Migrate(GuiSettings.SettingsPath, PerGameSettings.DirectoryPath, LibraryTitleIds);
+            return Migrate(GuiSettings.SettingsPath, PerGameSettings.GlobalPath);
         }
         catch (Exception exception)
         {
@@ -62,12 +63,9 @@ public static class SettingsSplitMigration
         }
     }
 
-    /// <param name="libraryTitleIds">The title ids of the library under the given game folders.</param>
-    /// <returns>Whether the global file held game settings and was rewritten without them.</returns>
-    public static bool Migrate(
-        string settingsPath,
-        string perGameDirectory,
-        Func<IReadOnlyList<string>, IEnumerable<string>> libraryTitleIds)
+    /// <param name="sharedGamePath">The file of the settings every game starts from.</param>
+    /// <returns>Whether the launcher's file held game settings and was rewritten without them.</returns>
+    public static bool Migrate(string settingsPath, string sharedGamePath)
     {
         if (!File.Exists(settingsPath))
         {
@@ -100,11 +98,7 @@ public static class SettingsSplitMigration
         var carried = CarriedValues(json);
         if (!carried.IsEmpty)
         {
-            var folders = GuiSettings.NormalizeFromJson(json).GameFolders;
-            foreach (var titleId in KnownTitleIds(perGameDirectory, libraryTitleIds(folders)))
-            {
-                CarryInto(PerGameSettings.PathFor(perGameDirectory, titleId), carried);
-            }
+            CarryInto(sharedGamePath, carried);
         }
 
         foreach (var key in LegacyGameKeys)
@@ -149,8 +143,8 @@ public static class SettingsSplitMigration
     }
 
     /// <summary>
-    /// Fills every setting <paramref name="game"/> leaves unset with the carried global value;
-    /// a setting the game already has, and every environment variable it names, stays its own.
+    /// Fills every setting <paramref name="game"/> leaves unset with the carried value; a setting
+    /// it already has, and every environment variable it names, stays as it is.
     /// </summary>
     /// <returns>Whether anything changed.</returns>
     public static bool Fill(PerGameSettings game, PerGameSettings carried)
@@ -173,9 +167,8 @@ public static class SettingsSplitMigration
         game.OverlayMode = Fill(game.OverlayMode, carried.OverlayMode, ref changed);
         game.BinkPlaybackMode = Fill(game.BinkPlaybackMode, carried.BinkPlaybackMode, ref changed);
 
-        // A game with a whole list of its own never followed the global one. Otherwise its
-        // changes were laid over the global list; the same effective list, as changes from the
-        // defaults, is what it keeps.
+        // A whole list of its own never followed the carried one. Otherwise its changes are laid
+        // over the carried list; the same effective list, as changes from the defaults, is kept.
         if (carried.EnvironmentToggles is { } globalToggles && game.EnvironmentToggles is null)
         {
             var changes = EnvironmentOverrides.Between(
@@ -225,7 +218,7 @@ public static class SettingsSplitMigration
             catch (JsonException)
             {
                 // The launcher already ignores this file; leave it for the user rather than
-                // replace it.
+                // replace it. The old keys are still dropped: they would only fill it again.
                 return;
             }
         }
@@ -235,28 +228,6 @@ public static class SettingsSplitMigration
             SettingsFilePersistence.Write(path, PerGameSettings.Serialize(game));
         }
     }
-
-    private static IEnumerable<string> KnownTitleIds(string perGameDirectory, IEnumerable<string> libraryTitleIds)
-    {
-        List<string> existing = Directory.Exists(perGameDirectory)
-            ? Directory.EnumerateFiles(perGameDirectory, "*.json")
-                .Select(Path.GetFileNameWithoutExtension)
-                .Where(name => !string.IsNullOrEmpty(name) && !name.StartsWith('.'))
-                .Select(name => name!)
-                .ToList()
-            : [];
-        return existing
-            .Concat(libraryTitleIds.Where(titleId => !string.IsNullOrWhiteSpace(titleId)))
-            .Distinct(StringComparer.OrdinalIgnoreCase);
-    }
-
-    // The library as the launcher last saw it, plus whatever the folders hold now: a drive that
-    // is not mounted still has its games in the cache, and a game added since the last scan is
-    // only on disk. Games removed from the library are included, in case they come back.
-    private static IEnumerable<string> LibraryTitleIds(IReadOnlyList<string> folders) =>
-        GameLibraryCache.CachedSettingsKeys()
-            .Concat(MainWindow.ScanFolders(folders, new HashSet<string>())
-                .Select(game => PerGameSettings.KeyFor(game.TitleId, game.Path)));
 
     private static string NormalizeResolution(string? value) =>
         HostDisplayOptions.TryParseResolution(value, out var width, out var height)

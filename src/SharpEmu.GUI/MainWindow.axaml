@@ -413,6 +413,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                         Classes="playButton"
                         Content="Launch"
                         IsEnabled="False" />
+                <!-- Variables for one launch only: quick tests without touching saved settings. -->
+                <Button x:Name="LaunchVariablesButton"
+                        Classes="heroAction glass iconOnly"
+                        IsEnabled="False"
+                        ToolTip.Tip="{Binding [Launch.Variables.Title], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                        AutomationProperties.Name="{Binding [Launch.Variables.Title], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                  <TextBlock Classes="materialSymbol compact" Text="data_object" />
+                </Button>
                 <Button x:Name="GameSettingsButton" Classes="heroAction glass">
                   <StackPanel Orientation="Horizontal" Spacing="8">
                     <TextBlock Classes="materialSymbol compact" Text="settings" />
@@ -541,7 +549,30 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
               <!-- Anchor the cover to the actual menu-surface boundary so it
                    overlaps both the key art and the settings surface -->
-              <Border Grid.Row="1"
+              <!-- Stands in for the cover while the settings for every game are open. -->
+              <Border x:Name="GameOptionsAllGamesTile"
+                      Grid.Row="1"
+                      Width="180"
+                      Height="180"
+                      Margin="0,-152,0,0"
+                      ZIndex="2"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Top"
+                      IsVisible="False"
+                      BoxShadow="{StaticResource SheetShadow}">
+                <Border Classes="coverClip"
+                        Background="{DynamicResource ElevatedBrush}">
+                  <TextBlock Classes="materialSymbol"
+                             Text="&#xE5C3;"
+                             FontSize="64"
+                             LineHeight="76.8"
+                             Foreground="{DynamicResource SecondaryTextBrush}"
+                             HorizontalAlignment="Center"
+                             VerticalAlignment="Center" />
+                </Border>
+              </Border>
+              <Border x:Name="GameOptionsCover"
+                      Grid.Row="1"
                       Width="180"
                       Height="180"
                       Margin="0,-152,0,0"
@@ -572,7 +603,27 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       BorderThickness="0,1,0,0">
                 <Grid ColumnDefinitions="*,Auto,Auto"
                       ColumnSpacing="40">
-                  <StackPanel Spacing="6"
+                  <StackPanel x:Name="GameOptionsAllGamesTitle"
+                              Spacing="6"
+                              VerticalAlignment="Center"
+                              IsVisible="False">
+                    <TextBlock Text="{Binding [GameSettings.AllGames.Title],
+                                              Source={x:Static local:Localization.Instance},
+                                              x:CompileBindings=False}"
+                               FontSize="{StaticResource FontSizeDisplay}"
+                               FontWeight="SemiBold"
+                               TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{Binding [GameSettings.AllGames.Desc],
+                                              Source={x:Static local:Localization.Instance},
+                                              x:CompileBindings=False}"
+                               MaxWidth="620"
+                               HorizontalAlignment="Left"
+                               FontSize="{StaticResource FontSizeCaption}"
+                               Foreground="{StaticResource SecondaryTextBrush}"
+                               TextWrapping="Wrap" />
+                  </StackPanel>
+                  <StackPanel x:Name="GameOptionsGameTitle"
+                              Spacing="6"
                               VerticalAlignment="Center">
                     <TextBlock Text="{Binding Name}"
                                FontSize="{StaticResource FontSizeDisplay}"
@@ -586,7 +637,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                TextTrimming="CharacterEllipsis" />
                   </StackPanel>
 
-                  <StackPanel Grid.Column="1"
+                  <StackPanel x:Name="GameOptionsStats"
+                              Grid.Column="1"
                               Orientation="Horizontal"
                               Spacing="40"
                               VerticalAlignment="Center">
@@ -796,7 +848,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                       </StackPanel>
                     </Border>
 
-                    <UniformGrid Margin="0,0,-12,-12"
+                    <UniformGrid x:Name="GameOptionsActions"
+                                 Margin="0,0,-12,-12"
                                  Columns="2">
                       <Button x:Name="GameOptionsOpenFolderButton"
                               Classes="gameAction"
@@ -1240,9 +1293,9 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                Text="{Binding [Setting.Group.EnvironmentVariables], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
                     <Border x:Name="GameCustomEnvironmentGroup" Classes="optionsGroup">
                       <StackPanel>
-                        <local:SettingRow Classes="optionRow"
-                                          Label="{Binding [Setting.CustomEnv.Label], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
-                                          Description="{Binding [Launch.CustomEnv.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <!-- Label and description follow the layer being edited (MainWindow.GameOptions.cs). -->
+                        <local:SettingRow x:Name="GameCustomEnvRow"
+                                          Classes="optionRow">
                           <Button x:Name="GameCustomEnvButton" Classes="ghost">
                             <StackPanel Orientation="Horizontal" Spacing="6">
                               <TextBlock Classes="materialSymbol compact" Text="edit" />
@@ -1401,6 +1454,23 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                        VerticalAlignment="Center" />
                           </Button>
                         </StackPanel>
+                      </local:SettingRow>
+                    </StackPanel>
+                  </Border>
+
+                  <TextBlock Classes="optionsGroupHeader"
+                             Text="{Binding [Options.Group.Games], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border Classes="optionsGroup">
+                    <StackPanel>
+                      <local:SettingRow x:Name="AllGamesSettingsRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [GameSettings.AllGames.Title], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                        Description="{Binding [Options.AllGames.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                        <Button x:Name="AllGamesSettingsButton"
+                                Classes="optionAction">
+                          <TextBlock Text="{Binding [Options.AllGames.Open], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                     VerticalAlignment="Center" />
+                        </Button>
                       </local:SettingRow>
                     </StackPanel>
                   </Border>

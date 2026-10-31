@@ -33,14 +33,26 @@ clips. Hover only washes the surface.
                   Background="Transparent"
                   CornerRadius="{StaticResource RadiusMd}"
                   Padding="16,10">
-            <Grid ColumnDefinitions="*,Auto">
+            <Grid ColumnDefinitions="*,Auto,Auto">
               <StackPanel VerticalAlignment="Center" Spacing="4" Margin="0,0,24,0">
-                <TextBlock x:Name="PART_Label"
-                           Text="{TemplateBinding Label}"
-                           FontSize="{StaticResource FontSizeBody}"
-                           FontWeight="Medium"
-                           TextWrapping="Wrap"
-                           Foreground="{StaticResource TextBrush}" />
+                <WrapPanel Orientation="Horizontal">
+                  <TextBlock x:Name="PART_Label"
+                             Text="{TemplateBinding Label}"
+                             FontSize="{StaticResource FontSizeBody}"
+                             FontWeight="Medium"
+                             TextWrapping="Wrap"
+                             VerticalAlignment="Center"
+                             Foreground="{StaticResource TextBrush}" />
+                  <!-- Shown while a game uses the value set for every game. -->
+                  <Border x:Name="PART_InheritedBadge"
+                          Classes="scopeBadge"
+                          Margin="10,0,0,0"
+                          VerticalAlignment="Center"
+                          IsVisible="False"
+                          ToolTip.Tip="{Binding [Setting.Scope.Global.Tip], Source={x:Static local:Localization.Instance}}">
+                    <TextBlock Text="{Binding [Setting.Scope.Global], Source={x:Static local:Localization.Instance}}" />
+                  </Border>
+                </WrapPanel>
                 <TextBlock Text="{TemplateBinding Description}"
                            FontSize="{StaticResource FontSizeDescription}"
                            FontWeight="Normal"
@@ -53,7 +65,16 @@ clips. Hover only washes the surface.
                            IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent},
                                        Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
               </StackPanel>
-              <ContentPresenter Grid.Column="1"
+              <!-- Shown while a game has its own value: puts back the value set for every game. -->
+              <Button x:Name="PART_Reset"
+                      Grid.Column="1"
+                      Classes="scopeReset"
+                      Margin="0,0,12,0"
+                      VerticalAlignment="Center"
+                      IsVisible="False">
+                <TextBlock Classes="materialSymbol compact" Text="undo" />
+              </Button>
+              <ContentPresenter Grid.Column="2"
                                 Content="{TemplateBinding Content}"
                                 VerticalAlignment="Center" />
             </Grid>
@@ -61,6 +82,22 @@ clips. Hover only washes the surface.
         </Panel>
       </ControlTemplate>
     </Setter>
+    <Style Selector="^:inherited /template/ Border#PART_InheritedBadge">
+      <Setter Property="IsVisible" Value="True" />
+    </Style>
+    <Style Selector="^:overridden /template/ Button#PART_Reset">
+      <Setter Property="IsVisible" Value="True" />
+    </Style>
+    <Style Selector="^ /template/ Border.scopeBadge">
+      <Setter Property="Background" Value="{DynamicResource PressedOverlayBrush}" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Padding" Value="8,1" />
+    </Style>
+    <Style Selector="^ /template/ Border.scopeBadge > TextBlock">
+      <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+      <Setter Property="FontWeight" Value="Medium" />
+      <Setter Property="Foreground" Value="{DynamicResource SecondaryTextBrush}" />
+    </Style>
     <Style Selector="^:pointerover /template/ Border#PART_RowSurface">
       <Setter Property="Background" Value="{StaticResource HoverOverlayBrush}" />
     </Style>

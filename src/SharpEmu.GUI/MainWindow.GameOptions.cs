@@ -129,16 +129,33 @@ public partial class MainWindow
             return;
         }
 
-        _gameSettingsTitleId = PerGameSettings.KeyFor(game.TitleId, game.Path);
+        _returnToOptionsOnClose = false;
+        OpenGameSettingsOverlay(game);
+    }
+
+    /// <summary>Opens the overlay on one game's settings, or on the settings for every game when <paramref name="game"/> is null.</summary>
+    private void OpenGameSettingsOverlay(GameEntry? game)
+    {
+        _editingAllGames = game is null;
+        _gameSettingsTitleId = game is null ? null : PerGameSettings.KeyFor(game.TitleId, game.Path);
         GameOptionsOverlay.DataContext = game;
-        GameOptionsBackdrop.Show(game);
-        LoadGameSettings(_gameSettingsTitleId);
+        if (game is null)
+        {
+            GameOptionsBackdrop.Clear();
+        }
+        else
+        {
+            GameOptionsBackdrop.Show(game);
+        }
+
+        ApplyGameSettingsScopeChrome();
+        _isGameSettingsOpen = true;
+        LoadScopedGameSettings();
         SetGameOptionsSection(0, animateIndicator: false);
         GameOptionsLaunchButton.IsEnabled = !_isRunning;
         GameOptionsCopyTitleIdButton.IsEnabled =
-            !string.IsNullOrWhiteSpace(game.TitleId);
+            !string.IsNullOrWhiteSpace(game?.TitleId);
 
-        _isGameSettingsOpen = true;
         UpdateEmbeddedConsoleVisibility();
         SetGameOptionsPagesSpan(coversConsoleRow: true);
         SetGameOptionsOpenClass(BackdropLayer, active: true);
@@ -148,7 +165,14 @@ public partial class MainWindow
         GameList.IsHitTestVisible = false;
         LibraryToolbar.IsHitTestVisible = false;
         GameOptionsOverlay.IsHitTestVisible = true;
-        GameOptionsLaunchButton.Focus(_gamepadConnected ? NavigationMethod.Directional : NavigationMethod.Unspecified);
+        if (game is null)
+        {
+            GameOptionsGeneralNav.Focus(_gamepadConnected ? NavigationMethod.Directional : NavigationMethod.Unspecified);
+        }
+        else
+        {
+            GameOptionsLaunchButton.Focus(_gamepadConnected ? NavigationMethod.Directional : NavigationMethod.Unspecified);
+        }
     }
 
     private void CloseGameSettings(bool restoreLibrary = true)
@@ -175,17 +199,31 @@ public partial class MainWindow
         GameList.IsHitTestVisible = true;
         LibraryToolbar.IsHitTestVisible = true;
 
-        if (restoreLibrary && _activePageIndex == 0)
+        var returnToOptions = _returnToOptionsOnClose;
+        _returnToOptionsOnClose = false;
+        _editingAllGames = false;
+        BackdropLayer.IsVisible = true;
+        UpdateScopeBadges();
+        if (restoreLibrary && returnToOptions)
+        {
+            SetActivePage(1);
+            AllGamesSettingsButton.Focus();
+        }
+        else if (restoreLibrary && _activePageIndex == 0)
         {
             GameList.Focus();
         }
     }
 
-    private void LoadGameSettings(string titleId)
+    // One game's file lies over the settings for every game; those lie over the built-in defaults.
+    private void LoadScopedGameSettings()
     {
-        var stored = PerGameSettings.Load(titleId);
-        UpdateGameCustomEnvironmentSummary(titleId);
-        var effective = EffectiveLaunchSettings.Resolve(stored);
+        var stored = _editingAllGames ? PerGameSettings.LoadGlobal() : PerGameSettings.Load(_gameSettingsTitleId);
+        _gameSettingsInherited = _editingAllGames
+            ? EffectiveLaunchSettings.Defaults
+            : PerGameSettings.GlobalEffective();
+        UpdateGameCustomEnvironmentSummary();
+        var effective = EffectiveLaunchSettings.Over(_gameSettingsInherited, stored);
 
         _isLoadingGameSettings = true;
         _updatingGameHostDisplayOptions = true;
@@ -258,6 +296,7 @@ public partial class MainWindow
 
         _gameSettingsStored = stored;
         _gameSettingsBaseline = GameSettingsFromControls();
+        UpdateScopeBadges();
     }
 
     // The mode only matters while the overlay is on, and the corner only for a panel drawn
@@ -270,8 +309,15 @@ public partial class MainWindow
     }
 
     // The game's own variables, edited in a sheet over the game settings and saved on Save.
+    // With the settings for every game open, the variables for every game instead.
     private async Task EditGameCustomEnvironmentAsync()
     {
+        if (_editingAllGames)
+        {
+            await EditGlobalCustomEnvironmentAsync();
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(_gameSettingsTitleId))
         {
             return;
@@ -290,7 +336,7 @@ public partial class MainWindow
         try
         {
             settings.SaveOrThrow(titleId);
-            UpdateGameCustomEnvironmentSummary(titleId);
+            UpdateGameCustomEnvironmentSummary();
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -298,9 +344,15 @@ public partial class MainWindow
         }
     }
 
-    private void UpdateGameCustomEnvironmentSummary(string? titleId)
+    private void UpdateGameCustomEnvironmentSummary()
     {
-        var count = PerGameSettings.Load(titleId)?.CustomEnvironmentVariables?.Count ?? 0;
+        var count = _editingAllGames
+            ? GlobalCustomEnvironmentSettings.Load().Count
+            : PerGameSettings.Load(_gameSettingsTitleId)?.CustomEnvironmentVariables?.Count ?? 0;
+        GameCustomEnvRow.Label = Localization.Instance.Get(
+            _editingAllGames ? "Options.GlobalCustomEnv.Label" : "Setting.CustomEnv.Label");
+        GameCustomEnvRow.Description = Localization.Instance.Get(
+            _editingAllGames ? "Options.GlobalCustomEnv.Desc" : "Launch.CustomEnv.Desc");
         GameCustomEnvSummary.Text = count == 0
             ? Localization.Instance.Get("Common.Edit")
             : string.Format(Localization.Instance.Get("Setting.CustomEnv.Count"), count);
@@ -311,7 +363,7 @@ public partial class MainWindow
         if (!_isGameSettingsOpen ||
             _isLoadingGameSettings ||
             _updatingGameHostDisplayOptions ||
-            string.IsNullOrWhiteSpace(_gameSettingsTitleId))
+            (!_editingAllGames && string.IsNullOrWhiteSpace(_gameSettingsTitleId)))
         {
             return;
         }
@@ -338,21 +390,33 @@ public partial class MainWindow
             OverlayMode = Pick(current.OverlayMode, baseline.OverlayMode, stored.OverlayMode),
             OverlayCorner = Pick(current.OverlayCorner, baseline.OverlayCorner, stored.OverlayCorner),
             BinkPlaybackMode = Pick(current.BinkPlaybackMode, baseline.BinkPlaybackMode, stored.BinkPlaybackMode),
-            // An older file's whole list becomes the changes from the defaults it amounts to.
+            // An older file's whole list becomes the changes from the list it inherits.
             EnvironmentChanges = EnvironmentOverrides.PickChanged(
                 current.EnvironmentToggles ?? [],
                 baseline.EnvironmentToggles ?? [],
                 stored.EnvironmentToggles is { } legacy
                     ? EnvironmentOverrides.Between(
-                        EffectiveLaunchSettings.Defaults.EnvironmentToggles,
+                        _gameSettingsInherited.EnvironmentToggles,
                         EnvironmentOverrides.Merge(legacy, stored.EnvironmentChanges))
                     : stored.EnvironmentChanges),
-            CustomEnvironmentVariables = PerGameSettings.Load(_gameSettingsTitleId)?.CustomEnvironmentVariables,
+            CustomEnvironmentVariables = _editingAllGames
+                ? null
+                : PerGameSettings.Load(_gameSettingsTitleId)?.CustomEnvironmentVariables,
         };
-        settings.RemoveDefaultValues();
+        // A value equal to the layer below is dropped, so the game follows later changes to
+        // the settings for every game.
+        settings.RemoveInheritedValues(_gameSettingsInherited);
         try
         {
-            settings.SaveOrThrow(_gameSettingsTitleId);
+            if (_editingAllGames)
+            {
+                settings.SaveGlobalOrThrow();
+            }
+            else
+            {
+                settings.SaveOrThrow(_gameSettingsTitleId!);
+            }
+
             _gameSettingsStored = settings;
             _gameSettingsBaseline = current;
         }
@@ -360,6 +424,8 @@ public partial class MainWindow
         {
             AppendConsoleLine($"[SETTINGS][WARN] {exception.Message}", WarningLineBrush);
         }
+
+        UpdateScopeBadges();
     }
 
     // Every game setting as the overlay's controls show it, with the environment switches as

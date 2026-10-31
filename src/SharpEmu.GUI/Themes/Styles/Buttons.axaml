@@ -221,6 +221,23 @@ at least 44 pt tall.
     <Setter Property="FontWeight" Value="SemiBold" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
   </Style>
+  <!-- The reset button of a game setting that has its own value (SettingRow). -->
+  <Style Selector="Button.scopeReset">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Padding" Value="6" />
+    <Setter Property="CornerRadius" Value="999" />
+    <Setter Property="Foreground" Value="{DynamicResource SecondaryTextBrush}" />
+  </Style>
+  <Style Selector="Button.scopeReset:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource PressedOverlayBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource TextBrush}" />
+  </Style>
+  <Style Selector="Button.heroAction.iconOnly">
+    <Setter Property="Width" Value="52" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+  </Style>
   <Style Selector="ToggleButton.heroAction:checked /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="{StaticResource SegmentActiveBrush}" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />

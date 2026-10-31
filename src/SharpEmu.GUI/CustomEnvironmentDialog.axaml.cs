@@ -24,6 +24,36 @@ public partial class CustomEnvironmentDialog : SheetView
         SaveButton.Click += (_, _) => Save();
     }
 
+    // The launcher-wide list: same editor, its own title and description.
+    public CustomEnvironmentDialog(IEnumerable<string> initialEntries, string title, string description)
+        : this(initialEntries)
+    {
+        TitleText.Text = title;
+        DescriptionText.Text = description;
+    }
+
+    /// <summary>
+    /// Variables for one launch: the main button launches with them (closing with
+    /// <see cref="LaunchVariables"/>) and a second one saves them as the game's own instead.
+    /// </summary>
+    public static CustomEnvironmentDialog ForLaunch(IEnumerable<string> initialEntries, string gameName)
+    {
+        var dialog = new CustomEnvironmentDialog(
+            initialEntries,
+            Localization.Instance.Get("Launch.Variables.Title"),
+            Localization.Instance.Format("Launch.Variables.Desc", gameName));
+        dialog._launchMode = true;
+        dialog.SaveButton.Content = Localization.Instance.Get("Launch.Launch");
+        dialog.SaveToGameButton.IsVisible = true;
+        dialog.SaveToGameButton.Click += (_, _) => dialog.Save(saveToGame: true);
+        return dialog;
+    }
+
+    /// <summary>What a launch-mode dialog closes with.</summary>
+    public sealed record LaunchVariables(IReadOnlyList<string> Entries, bool SaveToGame);
+
+    private bool _launchMode;
+
     public override Control? InitialFocus => EnvironmentTextBox;
 
     private static void OpenDocumentation()
@@ -35,7 +65,7 @@ public partial class CustomEnvironmentDialog : SheetView
         });
     }
 
-    private void Save()
+    private void Save(bool saveToGame = false)
     {
         if (!CustomEnvironmentVariables.TryParseLines(
                 EnvironmentTextBox.Text,
@@ -48,6 +78,6 @@ public partial class CustomEnvironmentDialog : SheetView
             return;
         }
 
-        Close(parsed);
+        Close(_launchMode ? new LaunchVariables(parsed, saveToGame) : parsed);
     }
 }

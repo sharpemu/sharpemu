@@ -53,6 +53,24 @@ public partial class MainWindow
             combo!.SelectedItem = choice;
         }
 
+        /// <summary>The switch's state in a list, comparable between settings layers.</summary>
+        public string ValueKey(IEnumerable<string> entries) =>
+            toggle is not null
+                ? EnvironmentSettings.IsEnabled(entries, Setting).ToString()
+                : EnvironmentSettings.GetChoice(entries, Setting).ToUpperInvariant();
+
+        /// <summary>The switch's state in a list, as the row would show it.</summary>
+        public string Describe(IEnumerable<string> entries)
+        {
+            if (toggle is not null)
+            {
+                return Localization.Instance.Get(EnvironmentSettings.IsEnabled(entries, Setting) ? "Common.On" : "Common.Off");
+            }
+
+            var value = EnvironmentSettings.GetChoice(entries, Setting);
+            return choices!.FirstOrDefault(c => string.Equals(c.Value, value, StringComparison.OrdinalIgnoreCase))?.Label ?? value;
+        }
+
         public void Store(List<string> entries)
         {
             if (toggle is not null)
@@ -93,10 +111,36 @@ public partial class MainWindow
             var perGame = CreateEnvironmentSettingRow(setting, "Game", PersistOpenGameSettings, out var gameControl);
             gameHosts[setting.Group].Children.Add(perGame);
             _gameEnvironmentSettings.Add(gameControl);
+            _gameEnvironmentSettingRows.Add((perGame, gameControl));
         }
 
         OpenShaderCacheButton.Click += (_, _) => OpenFolder(EmulatorShaderCacheRoot());
         ClearShaderCacheButton.Click += (_, _) => OnClearShaderCacheClicked();
+    }
+
+    // Variables for every launch, kept in user/custom_envs.json. A game's own list is merged
+    // after this one, so it wins for a name both set.
+    private async Task EditGlobalCustomEnvironmentAsync()
+    {
+        var dialog = new CustomEnvironmentDialog(
+            GlobalCustomEnvironmentSettings.Load(),
+            Localization.Instance.Get("Options.GlobalCustomEnv.Label"),
+            Localization.Instance.Get("Options.GlobalCustomEnv.Desc"));
+        if (await Sheets.ShowAsync(dialog) is not IReadOnlyList<string> entries)
+        {
+            return;
+        }
+
+        try
+        {
+            GlobalCustomEnvironmentSettings.SaveOrThrow(entries);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            AppendConsoleLine($"[SETTINGS][WARN] {exception.Message}", WarningLineBrush);
+        }
+
+        UpdateGameCustomEnvironmentSummary();
     }
 
     private SettingRow CreateEnvironmentSettingRow(

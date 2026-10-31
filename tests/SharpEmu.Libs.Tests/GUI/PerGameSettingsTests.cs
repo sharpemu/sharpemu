@@ -296,4 +296,54 @@ public sealed class PerGameSettingsTests
 
         Assert.Equal(["SHARPEMU_LOG_IO", "SHARPEMU_LOG_NP"], changes);
     }
+
+    // Built-in defaults, then the settings for every game, then the game's own.
+    [Fact]
+    public void GameSettingsLayerOverTheSettingsForEveryGame()
+    {
+        var global = new PerGameSettings
+        {
+            VSync = true,
+            OverlayMode = "Full",
+            EnvironmentChanges = ["SHARPEMU_LOG_IO"],
+        };
+        var game = new PerGameSettings
+        {
+            OverlayMode = "Minimal",
+            EnvironmentChanges = ["SHARPEMU_WRITABLE_APP0=0"],
+        };
+
+        var effective = EffectiveLaunchSettings.Resolve(global, game);
+
+        Assert.True(effective.VSync);
+        Assert.Equal("Minimal", effective.OverlayMode);
+        Assert.Equal("Fit", effective.ScalingMode);
+        Assert.Contains("SHARPEMU_LOG_IO", effective.EnvironmentToggles);
+        Assert.DoesNotContain("SHARPEMU_WRITABLE_APP0", effective.EnvironmentToggles);
+        var globalOnly = EffectiveLaunchSettings.Resolve(global, null);
+        Assert.Equal("Full", globalOnly.OverlayMode);
+        Assert.Equal(EffectiveLaunchSettings.Resolve(global).EnvironmentToggles, globalOnly.EnvironmentToggles);
+    }
+
+    // A game value equal to the one it would inherit is not its own, so it follows later
+    // changes to the settings for every game.
+    [Fact]
+    public void ValuesEqualToTheInheritedOnesAreNotKept()
+    {
+        var inherited = EffectiveLaunchSettings.Over(
+            EffectiveLaunchSettings.Defaults,
+            new PerGameSettings { VSync = true, EnvironmentChanges = ["SHARPEMU_LOG_IO"] });
+        var game = new PerGameSettings
+        {
+            VSync = true,
+            OverlayMode = "Full",
+            EnvironmentChanges = ["SHARPEMU_LOG_IO"],
+        };
+
+        game.RemoveInheritedValues(inherited);
+
+        Assert.Null(game.VSync);
+        Assert.Equal("Full", game.OverlayMode);
+        Assert.True(game.EnvironmentChanges is null or { Count: 0 });
+    }
 }

@@ -9,9 +9,10 @@ using System.Text.Json.Serialization;
 namespace SharpEmu.GUI;
 
 /// <summary>
-/// One game's settings: everything that changes how a game runs or is shown. A null value
-/// means the built-in default in <see cref="EffectiveLaunchSettings.Defaults"/>; there is no
-/// global layer in between, so a file holds only what the game changes.
+/// One layer of game settings: everything that changes how a game runs or is shown. The
+/// settings for every game (<see cref="LoadGlobal"/>) lie over the built-in
+/// <see cref="EffectiveLaunchSettings.Defaults"/>, and a game's own file lies over those. A null
+/// value inherits from the layer below, so each file holds only what it changes.
 /// </summary>
 public sealed class PerGameSettings
 {
@@ -88,6 +89,10 @@ public sealed class PerGameSettings
     public static string DirectoryPath =>
         Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "custom_configs");
 
+    /// <summary>The settings for every game, beside (not inside) the per-game folder.</summary>
+    public static string GlobalPath =>
+        Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "game_defaults.json");
+
     // Windows paths are case-insensitive. Keep case on Unix, where a case-sensitive volume
     // can hold two different games whose paths differ only by case.
     public static string KeyFor(string? titleId, string gamePath)
@@ -128,6 +133,28 @@ public sealed class PerGameSettings
         return null;
     }
 
+    public static PerGameSettings? LoadGlobal() => LoadFrom(GlobalPath);
+
+    internal static PerGameSettings? LoadFrom(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                return NormalizeFromJson(File.ReadAllText(path));
+            }
+        }
+        catch (Exception)
+        {
+        }
+
+        return null;
+    }
+
+    /// <summary>What every game inherits: the built-in defaults with the global settings laid over them.</summary>
+    public static EffectiveLaunchSettings GlobalEffective() =>
+        EffectiveLaunchSettings.Over(EffectiveLaunchSettings.Defaults, LoadGlobal());
+
     // A null list keeps the defaults; only entries in a present list are sanitized.
     public static PerGameSettings? NormalizeFromJson(string json)
     {
@@ -151,12 +178,17 @@ public sealed class PerGameSettings
     }
 
     /// <summary>
-    /// Removes values that already match <see cref="EffectiveLaunchSettings.Defaults"/> so the
-    /// remaining object contains only the game's own settings.
+    /// Removes values that already match <see cref="EffectiveLaunchSettings.Defaults"/>; used for
+    /// the settings for every game, which lie directly over the built-in defaults.
     /// </summary>
-    public void RemoveDefaultValues()
+    public void RemoveDefaultValues() => RemoveInheritedValues(EffectiveLaunchSettings.Defaults);
+
+    /// <summary>
+    /// Removes values that already match what this layer inherits, so a game's file keeps only
+    /// what differs from the settings for every game and follows them for everything else.
+    /// </summary>
+    public void RemoveInheritedValues(EffectiveLaunchSettings defaults)
     {
-        var defaults = EffectiveLaunchSettings.Defaults;
         LogLevel = UnlessEqual(LogLevel, defaults.LogLevel);
         ImportTraceLimit = UnlessEqual(ImportTraceLimit, defaults.ImportTraceLimit);
         StrictDynlibResolution = UnlessEqual(StrictDynlibResolution, defaults.StrictDynlibResolution);
@@ -214,7 +246,14 @@ public sealed class PerGameSettings
     public void SaveOrThrow(string titleId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(titleId);
-        var path = PathFor(titleId);
+        SaveToOrThrow(PathFor(titleId));
+    }
+
+    /// <summary>Writes the settings for every game, or removes the file when nothing differs from the defaults.</summary>
+    public void SaveGlobalOrThrow() => SaveToOrThrow(GlobalPath);
+
+    internal void SaveToOrThrow(string path)
+    {
         if (IsEmpty)
         {
             File.Delete(path); // missing file is harmless; permission/query failure must reach the explicit caller
@@ -278,7 +317,7 @@ public sealed class PerGameSettings
     }
 }
 
-/// <summary>What a launch uses: the game's settings with the built-in default for every value it leaves unset.</summary>
+/// <summary>What a launch uses: every settings layer resolved, so no value is left unset.</summary>
 public sealed record EffectiveLaunchSettings(
     string LogLevel,
     int ImportTraceLimit,
@@ -321,9 +360,20 @@ public sealed record EffectiveLaunchSettings(
         BinkPlaybackMode: "Guest",
         EnvironmentToggles: ["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"]);
 
-    public static EffectiveLaunchSettings Resolve(PerGameSettings? perGame)
+    /// <summary>One layer over the built-in defaults, with no global layer (tests, and the global file itself).</summary>
+    public static EffectiveLaunchSettings Resolve(PerGameSettings? perGame) => Over(Defaults, perGame);
+
+    /// <summary>A game's launch: the built-in defaults, then the settings for every game, then the game's own.</summary>
+    public static EffectiveLaunchSettings Resolve(PerGameSettings? global, PerGameSettings? perGame) =>
+        Over(Over(Defaults, global), perGame);
+
+    /// <summary>
+    /// <paramref name="perGame"/> laid over <paramref name="defaults"/>: each value it sets wins,
+    /// and its switch changes apply to the inherited switch list (an older file's whole list
+    /// replaces the inherited one first).
+    /// </summary>
+    public static EffectiveLaunchSettings Over(EffectiveLaunchSettings defaults, PerGameSettings? perGame)
     {
-        var defaults = Defaults;
         return new(
             perGame?.LogLevel ?? defaults.LogLevel,
             perGame?.ImportTraceLimit ?? defaults.ImportTraceLimit,
