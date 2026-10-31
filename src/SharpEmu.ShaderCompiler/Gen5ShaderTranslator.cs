@@ -1811,6 +1811,8 @@ public static partial class Gen5ShaderTranslator
             0x4C => "BufferAtomicInc",
             0x50 => "BufferAtomicSwapX2",
             0x5A => "BufferAtomicOrX2",
+            0x71 => "BufferGl0Inv",
+            0x72 => "BufferGl1Inv",
             0x80 => "BufferLoadFormatD16X",
             0x81 => "BufferLoadFormatD16Xy",
             0x82 => "BufferLoadFormatD16Xyz",
