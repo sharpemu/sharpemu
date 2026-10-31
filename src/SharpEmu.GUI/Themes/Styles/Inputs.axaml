@@ -1,29 +1,103 @@
 <!--
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
-Shared text input and context-menu styles.
+Shared text input, combo box and context-menu styles.
 -->
 
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- Text fields: raised fill, no border; the focus ring comes from Focus.axaml. -->
   <Style Selector="TextBox">
-    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+    <Setter Property="Padding" Value="14,0" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <!-- Placeholders sit on glass over key art too, so they use the description tier. -->
+  <Style Selector="TextBox /template/ TextBlock#PART_Watermark, TextBox /template/ TextBlock#PART_FloatingWatermark">
+    <Setter Property="Foreground" Value="{StaticResource SettingsDescriptionBrush}" />
+  </Style>
+  <Style Selector="TextBox /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="TextBox:pointerover /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="TextBox:focus /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
+    <Setter Property="BorderThickness" Value="0" />
   </Style>
 
-  <Style Selector="ContextMenu">
-    <Setter Property="Background" Value="{StaticResource CardBrush}" />
+  <!-- Combo boxes: one height, one radius; the popup is a floating sheet. -->
+  <Style Selector="ComboBox">
+    <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+    <Setter Property="Padding" Value="16,0,12,0" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <!-- Tall enough for the longest list (themes) without a scroll. -->
+    <Setter Property="MaxDropDownHeight" Value="560" />
+  </Style>
+  <Style Selector="ComboBox /template/ Border#Background">
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="ComboBox:pointerover /template/ Border#Background, ComboBox:pressed /template/ Border#Background">
+    <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
+  </Style>
+  <Style Selector="ComboBox:focus /template/ Border#Background, ComboBox:dropdownopen /template/ Border#Background">
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="ComboBox /template/ Border#PopupBorder">
+    <Setter Property="Background" Value="{StaticResource OverlayBrush}" />
     <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
     <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="10" />
-    <Setter Property="Padding" Value="6" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+    <Setter Property="Padding" Value="8" />
+    <Setter Property="BoxShadow" Value="{StaticResource SheetShadow}" />
+  </Style>
+  <Style Selector="ComboBoxItem">
+    <Setter Property="MinHeight" Value="48" />
+    <Setter Property="Padding" Value="16,0" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="Margin" Value="0,2" />
+  </Style>
+  <Style Selector="ComboBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource HoverOverlayBrush}" />
+  </Style>
+  <Style Selector="ComboBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
+  </Style>
+  <Style Selector="ComboBoxItem:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
+  </Style>
+
+  <!-- Context menus float: overlay fill, hairline, soft shadow. -->
+  <Style Selector="ContextMenu">
+    <Setter Property="Background" Value="{StaticResource OverlayBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+    <Setter Property="Padding" Value="8" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
   </Style>
   <Style Selector="ContextMenu MenuItem">
-    <Setter Property="Padding" Value="10,7" />
-    <Setter Property="CornerRadius" Value="7" />
+    <Setter Property="MinHeight" Value="44" />
+    <Setter Property="Padding" Value="12,0" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
   </Style>
   <Style Selector="ContextMenu Separator">
     <Setter Property="Background" Value="{StaticResource CardBorderBrush}" />
     <Setter Property="Height" Value="1" />
-    <Setter Property="Margin" Value="8,4" />
+    <Setter Property="Margin" Value="8,6" />
   </Style>
 </Styles>

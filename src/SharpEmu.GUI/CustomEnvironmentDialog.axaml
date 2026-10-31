@@ -3,74 +3,52 @@ Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
-<Window xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:local="clr-namespace:SharpEmu.GUI"
-        x:Class="SharpEmu.GUI.CustomEnvironmentDialog"
-        Width="620"
-        Height="520"
-        MinWidth="520"
-        MinHeight="430"
-        CanResize="True"
-        WindowStartupLocation="CenterOwner"
-        Background="{StaticResource BgBrush}"
-        Title="{Binding [Launch.CustomEnv.Title], Source={x:Static local:Localization.Instance}}">
-  <Grid Margin="24" RowDefinitions="Auto,Auto,Auto,*,Auto,Auto">
+<local:SheetView xmlns="https://github.com/avaloniaui"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:local="clr-namespace:SharpEmu.GUI"
+                 x:Class="SharpEmu.GUI.CustomEnvironmentDialog"
+                 SheetWidth="640">
+  <Grid Margin="32,28" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
     <TextBlock Grid.Row="0"
-               Text="{Binding [Launch.CustomEnv.Title], Source={x:Static local:Localization.Instance}}"
-               FontSize="24"
-               FontWeight="Bold" />
+               Classes="sheetTitle"
+               Text="{Binding [Setting.CustomEnv.Label], Source={x:Static local:Localization.Instance}}" />
 
     <TextBlock Grid.Row="1"
-               Margin="0,8,0,16"
+               Margin="0,8,0,0"
                Text="{Binding [Launch.CustomEnv.Desc], Source={x:Static local:Localization.Instance}}"
-               Foreground="{StaticResource MutedBrush}"
+               Foreground="{StaticResource SecondaryTextBrush}"
+               LineHeight="20"
                TextWrapping="Wrap" />
 
     <Button x:Name="DocumentationButton"
             Grid.Row="2"
-            Classes="ghost"
-            HorizontalAlignment="Left"
-            Margin="0,0,0,12"
-            Padding="0,4"
+            Classes="link"
+            Margin="0,10,0,18"
             Content="{Binding [Launch.CustomEnv.Documentation], Source={x:Static local:Localization.Instance}}" />
 
-    <TextBox x:Name="EnvironmentTextBox"
-             Grid.Row="3"
-             AcceptsReturn="True"
-             TextWrapping="NoWrap"
-             FontFamily="Consolas,monospace"
-             FontSize="13"
-             VerticalContentAlignment="Top"
-             PlaceholderText="{Binding [Launch.CustomEnv.Placeholder], Source={x:Static local:Localization.Instance}}" />
+    <StackPanel Grid.Row="3" Spacing="10">
+      <TextBox x:Name="EnvironmentTextBox"
+               Classes="codeEditor"
+               AcceptsReturn="True"
+               TextWrapping="NoWrap"
+               PlaceholderText="{Binding [Launch.CustomEnv.Placeholder], Source={x:Static local:Localization.Instance}}" />
+      <TextBlock x:Name="StatusText"
+                 Foreground="{StaticResource MutedBrush}"
+                 TextWrapping="Wrap" />
+    </StackPanel>
 
-    <TextBlock x:Name="StatusText"
-               Grid.Row="4"
-               Margin="0,12,0,0"
-               Foreground="{StaticResource MutedBrush}"
-               TextWrapping="Wrap" />
-
-    <Grid Grid.Row="5"
+    <Grid Grid.Row="4"
           Margin="0,18,0,0"
-          ColumnDefinitions="Auto,Auto,*,Auto,Auto">
-      <Button x:Name="SaveGameButton"
-              Grid.Column="0"
-              Classes="ghost"
-              Margin="0,0,8,0"
-              Content="{Binding [Launch.CustomEnv.SaveGame], Source={x:Static local:Localization.Instance}}" />
-      <Button x:Name="SaveGlobalButton"
+          ColumnDefinitions="*,Auto,Auto"
+          ColumnSpacing="8">
+      <Button x:Name="CancelButton"
               Grid.Column="1"
               Classes="ghost"
-              Content="{Binding [Launch.CustomEnv.SaveGlobal], Source={x:Static local:Localization.Instance}}" />
-      <Button x:Name="CancelButton"
-              Grid.Column="3"
-              Classes="ghost"
-              Margin="0,0,8,0"
               Content="{Binding [Common.Cancel], Source={x:Static local:Localization.Instance}}" />
-      <Button x:Name="PlayButton"
-              Grid.Column="4"
+      <Button x:Name="SaveButton"
+              Grid.Column="2"
               Classes="accent"
-              Content="{Binding [Launch.CustomEnv.Play], Source={x:Static local:Localization.Instance}}" />
+              Content="{Binding [Common.Save], Source={x:Static local:Localization.Instance}}" />
     </Grid>
   </Grid>
-</Window>
+</local:SheetView>

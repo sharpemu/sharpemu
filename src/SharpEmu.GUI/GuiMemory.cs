@@ -8,6 +8,11 @@ namespace SharpEmu.GUI;
 
 internal static partial class GuiMemory
 {
+    // Frees what a closed page held on the background collector, so no animation stalls on it.
+    public static void Trim() => GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: false);
+
+    // A full compacting collection that pauses every thread; only call it while the launcher
+    // is out of sight.
     public static void Release()
     {
         GCSettings.LargeObjectHeapCompactionMode = GCLargeObjectHeapCompactionMode.CompactOnce;

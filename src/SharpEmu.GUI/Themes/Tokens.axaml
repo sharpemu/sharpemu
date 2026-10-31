@@ -1,32 +1,145 @@
 <!--
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
-Shared colors and brushes used throughout the launcher.
+Design tokens for the launcher: palette, type scale, radii and spacing.
+
+The colours below are the Graphite theme, the default. LauncherThemes.cs
+repaints these same brush instances when another theme is picked, so styles keep
+using StaticResource and still follow the active theme. Elevation is expressed
+by lightness: background < surface < raised < overlay. Hairline borders use one
+alpha and only appear on surfaces and rows; filled buttons carry no border.
+Shadows belong to floating layers (sheets, menus, toasts, dialogs) alone.
 -->
 
 <ResourceDictionary xmlns="https://github.com/avaloniaui"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <FontFamily x:Key="MaterialSymbolsRounded">avares://SharpEmu.GUI/Assets/Fonts/MaterialSymbolsRounded-400.ttf#Material Symbols Rounded</FontFamily>
 
-  <Color x:Key="SystemAccentColor">#7C5CFC</Color>
-
-  <SolidColorBrush x:Key="BgBrush" Color="#0C0C0C" />
-  <SolidColorBrush x:Key="ChromeBrush" Color="#070707" />
-  <SolidColorBrush x:Key="CardBrush" Color="#161616" />
-  <SolidColorBrush x:Key="CardBorderBrush" Color="#12FFFFFF" />
-  <SolidColorBrush x:Key="ElevatedBrush" Color="#1E1E1E" />
-  <SolidColorBrush x:Key="GameOptionsMenuBrush" Color="#1B1B1B" />
-  <SolidColorBrush x:Key="TextBrush" Color="#F7F8FB" />
-  <SolidColorBrush x:Key="SecondaryTextBrush" Color="#C0C5CF" />
-  <SolidColorBrush x:Key="MutedBrush" Color="#777F8E" />
-  <SolidColorBrush x:Key="SettingsDescriptionBrush" Color="#8A8A8A" />
-  <SolidColorBrush x:Key="FaintBrush" Color="#4D5461" />
-  <SolidColorBrush x:Key="AccentBrush" Color="#7C5CFC" />
-  <SolidColorBrush x:Key="AccentHoverBrush" Color="#8F73FF" />
-  <SolidColorBrush x:Key="DangerBrush" Color="#FF646E" />
-  <SolidColorBrush x:Key="DangerHoverBrush" Color="#FF858D" />
-  <SolidColorBrush x:Key="SuccessBrush" Color="#66F2A3" />
-  <SolidColorBrush x:Key="InfoBrush" Color="#64A7FF" />
+  <!-- Neutrals -->
+  <SolidColorBrush x:Key="BgBrush" Color="#121212" />
+  <SolidColorBrush x:Key="ChromeBrush" Color="#0A0A0A" />
+  <SolidColorBrush x:Key="CardBrush" Color="#222222" />
+  <SolidColorBrush x:Key="ElevatedBrush" Color="#2A2A2A" />
+  <SolidColorBrush x:Key="RaisedHoverBrush" Color="#353535" />
+  <!-- Fills for controls that sit on a card or row (combo boxes, fields, row buttons). -->
+  <SolidColorBrush x:Key="FieldBrush" Color="#323232" />
+  <SolidColorBrush x:Key="FieldHoverBrush" Color="#3D3D3D" />
+  <SolidColorBrush x:Key="GameOptionsMenuBrush" Color="#1A1A1A" />
+  <SolidColorBrush x:Key="OverlayBrush" Color="#262626" />
+  <SolidColorBrush x:Key="ToastBrush" Color="#F0262626" />
+  <SolidColorBrush x:Key="CardBorderBrush" Color="#14FFFFFF" />
   <SolidColorBrush x:Key="TileHoverBrush" Color="#0BFFFFFF" />
   <SolidColorBrush x:Key="TileSelectedBrush" Color="#12FFFFFF" />
+  <!-- Hover and pressed washes over any surface; LauncherThemes derives them from the text colour. -->
+  <SolidColorBrush x:Key="HoverOverlayBrush" Color="#0FFFFFFF" />
+  <SolidColorBrush x:Key="PressedOverlayBrush" Color="#1AFFFFFF" />
+
+  <!-- Text: primary, secondary (>= 7:1 on every surface), muted (>= 4.5:1). -->
+  <SolidColorBrush x:Key="TextBrush" Color="#F5F5F5" />
+  <SolidColorBrush x:Key="SecondaryTextBrush" Color="#CCCCCC" />
+  <SolidColorBrush x:Key="SettingsDescriptionBrush" Color="#ABABAB" />
+  <SolidColorBrush x:Key="MutedBrush" Color="#9C9C9C" />
+  <SolidColorBrush x:Key="FaintBrush" Color="#646464" />
+
+  <!-- Accent: the primary action, switch-on, progress and selected fills.
+       AccentForegroundBrush is the text and icon colour drawn on an accent fill. -->
+  <Color x:Key="SystemAccentColor">#F2F2F2</Color>
+  <SolidColorBrush x:Key="AccentBrush" Color="#F2F2F2" />
+  <SolidColorBrush x:Key="AccentHoverBrush" Color="#FFFFFF" />
+  <SolidColorBrush x:Key="AccentPressedBrush" Color="#D4D4D4" />
+  <SolidColorBrush x:Key="AccentTintBrush" Color="#24FFFFFF" />
+  <SolidColorBrush x:Key="AccentForegroundBrush" Color="#111111" />
+
+  <!-- Fluent draws a hovered or dragged slider in its own accent shades (blue); keep
+       sliders on the launcher accent in every state. -->
+  <StaticResource x:Key="SliderThumbBackground" ResourceKey="AccentBrush" />
+  <StaticResource x:Key="SliderThumbBackgroundPointerOver" ResourceKey="AccentHoverBrush" />
+  <StaticResource x:Key="SliderThumbBackgroundPressed" ResourceKey="AccentPressedBrush" />
+  <StaticResource x:Key="SliderTrackValueFill" ResourceKey="AccentBrush" />
+  <StaticResource x:Key="SliderTrackValueFillPointerOver" ResourceKey="AccentHoverBrush" />
+  <StaticResource x:Key="SliderTrackValueFillPressed" ResourceKey="AccentPressedBrush" />
+
+  <!-- Semantic colours tuned for dark surfaces. -->
+  <SolidColorBrush x:Key="DangerBrush" Color="#FF7A86" />
+  <SolidColorBrush x:Key="DangerHoverBrush" Color="#FF98A1" />
+  <SolidColorBrush x:Key="DangerTintBrush" Color="#1FFF7A86" />
+  <SolidColorBrush x:Key="DangerHoverTintBrush" Color="#33FF7A86" />
+  <SolidColorBrush x:Key="DangerStrongTintBrush" Color="#47FF7A86" />
+  <SolidColorBrush x:Key="SuccessBrush" Color="#5DE3A4" />
+  <SolidColorBrush x:Key="SuccessTintBrush" Color="#1E46C46B" />
+  <SolidColorBrush x:Key="SuccessRimBrush" Color="#5546C46B" />
+  <SolidColorBrush x:Key="WarningBrush" Color="#F5C46E" />
+  <SolidColorBrush x:Key="InfoBrush" Color="#6DAEFF" />
+  <SolidColorBrush x:Key="InfoTintBrush" Color="#1E58A6FF" />
+  <SolidColorBrush x:Key="InfoRimBrush" Color="#5558A6FF" />
+
+  <!-- Focus is the strongest thing on screen: a crisp ring with a soft glow. These are the
+       Graphite values; LauncherThemes.Apply replaces them with the theme's accent. -->
+  <SolidColorBrush x:Key="FocusRingBrush" Color="#FFFFFF" />
+  <BoxShadows x:Key="FocusRingShadow">0 0 0 2 #FFFFFFFF, 0 0 22 4 #4DFFFFFF</BoxShadows>
+  <!-- The same ring drawn inside the element, for rows and list items that sit in a
+       clipping container. -->
+  <BoxShadows x:Key="FocusRingInsetShadow">inset 0 0 0 2 #FFFFFFFF</BoxShadows>
+  <BoxShadows x:Key="SelectedRingShadow">0 0 0 2 #B3FFFFFF</BoxShadows>
+  <BoxShadows x:Key="SheetShadow">0 8 32 0 #66000000</BoxShadows>
+  <!-- Glass: controls that float over key art. The theme's raised colour, mostly
+       opaque, so the art tints through without hurting legibility; a rim lit from
+       the top edge; a faint inner highlight. LauncherThemes repaints the fills. -->
+  <SolidColorBrush x:Key="GlassBrush" Color="#BF353535" />
+  <SolidColorBrush x:Key="GlassHoverBrush" Color="#D93D3D3D" />
+  <SolidColorBrush x:Key="GlassPressedBrush" Color="#F23D3D3D" />
+  <!-- Glass panes: settings rows and panels over the blurred page art. -->
+  <SolidColorBrush x:Key="PaneGlassBrush" Color="#A6222222" />
+  <!-- The selected page inside the page switcher capsule. -->
+  <SolidColorBrush x:Key="SegmentActiveBrush" Color="#2EFFFFFF" />
+  <LinearGradientBrush x:Key="GlassRimBrush" StartPoint="0%,0%" EndPoint="0%,100%">
+    <GradientStop Offset="0" Color="#3DFFFFFF" />
+    <GradientStop Offset="0.5" Color="#17FFFFFF" />
+    <GradientStop Offset="1" Color="#0FFFFFFF" />
+  </LinearGradientBrush>
+  <BoxShadows x:Key="GlassShadow">inset 0 1 0 0 #14FFFFFF, 0 4 14 0 #2E000000</BoxShadows>
+  <!-- Lit top edge on the accent pill. -->
+  <BoxShadows x:Key="AccentEdgeShadow">inset 0 1 0 0 #40FFFFFF</BoxShadows>
+
+  <!-- Scrim that keeps text legible on any key art. -->
+  <LinearGradientBrush x:Key="ArtScrimBrush" StartPoint="0%,0%" EndPoint="0%,100%">
+    <GradientStop Offset="0" Color="#D9121212" />
+    <GradientStop Offset="0.4" Color="#CC121212" />
+    <GradientStop Offset="1" Color="#F2121212" />
+  </LinearGradientBrush>
+  <!-- Fade that keeps trophy text legible over the blurred game art. -->
+  <LinearGradientBrush x:Key="TrophyBackdropFadeBrush" StartPoint="0%,0%" EndPoint="0%,100%">
+    <GradientStop Offset="0" Color="#4D1A1A1A" />
+    <GradientStop Offset="0.5" Color="#991A1A1A" />
+    <GradientStop Offset="1" Color="#D91A1A1A" />
+  </LinearGradientBrush>
+
+  <!-- Radius scale: chips 6, buttons/inputs/rows 10, cards/tiles/panels 14. -->
+  <CornerRadius x:Key="RadiusSm">6</CornerRadius>
+  <CornerRadius x:Key="RadiusMd">10</CornerRadius>
+  <CornerRadius x:Key="RadiusLg">14</CornerRadius>
+
+  <!-- Type scale (pt): caption 13, description 14, body 16, subtitle 20, title 28, display 40. -->
+  <x:Double x:Key="FontSizeCaption">13</x:Double>
+  <x:Double x:Key="FontSizeDescription">14</x:Double>
+  <x:Double x:Key="FontSizeBody">16</x:Double>
+  <x:Double x:Key="FontSizeSubtitle">20</x:Double>
+  <x:Double x:Key="FontSizeTitle">28</x:Double>
+  <x:Double x:Key="FontSizeDisplay">40</x:Double>
+
+  <!-- Metrics: one page gutter, one control height. -->
+  <x:Double x:Key="ControlHeight">44</x:Double>
+  <x:Double x:Key="RowHeight">72</x:Double>
+
+  <!-- The stock combo box tints itself with the system accent while focused; pin it to the field colours. -->
+  <SolidColorBrush x:Key="ComboBoxBackground" Color="#323232" />
+  <SolidColorBrush x:Key="ComboBoxBackgroundUnfocused" Color="#323232" />
+  <SolidColorBrush x:Key="ComboBoxBackgroundPointerOver" Color="#3D3D3D" />
+  <SolidColorBrush x:Key="ComboBoxBackgroundPressed" Color="#3D3D3D" />
+  <SolidColorBrush x:Key="ComboBoxBackgroundBorderBrushFocused" Color="Transparent" />
+  <SolidColorBrush x:Key="ComboBoxBackgroundBorderBrushUnfocused" Color="Transparent" />
+  <SolidColorBrush x:Key="ComboBoxForegroundFocused" Color="#F5F5F5" />
+  <SolidColorBrush x:Key="ComboBoxForegroundFocusedPressed" Color="#F5F5F5" />
+  <SolidColorBrush x:Key="ComboBoxDropDownGlyphForegroundFocused" Color="#F5F5F5" />
+  <SolidColorBrush x:Key="ComboBoxDropDownGlyphForegroundFocusedPressed" Color="#F5F5F5" />
 </ResourceDictionary>

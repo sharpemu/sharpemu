@@ -54,7 +54,8 @@ internal sealed class EmulatorProcess : IDisposable
         }
     }
 
-    public void Start(string exePath, IReadOnlyList<string> arguments, string? workingDirectory)
+    public void Start(string exePath, IReadOnlyList<string> arguments, string? workingDirectory,
+        IReadOnlyDictionary<string, string?>? environment = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(exePath);
         ArgumentNullException.ThrowIfNull(arguments);
@@ -70,13 +71,32 @@ internal sealed class EmulatorProcess : IDisposable
             _stopRequested = false;
         }
 
-        if (OperatingSystem.IsWindows())
+        // CreateProcess and Process.Start both inherit the calling process's environment.
+        // Scope the game's values to process creation and restore them even when startup fails.
+        // The Windows mitigation path takes the same (reentrant) gate.
+        lock (EnvironmentGate)
         {
-            StartWindows(exePath, arguments, workingDirectory);
-            return;
+            var previous = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
+                previous[(string)entry.Key] = (string?)entry.Value;
+            IReadOnlyList<string> loaderVariables = [];
+            try
+            {
+                foreach (var (name, value) in environment ?? new Dictionary<string, string?>())
+                    Environment.SetEnvironmentVariable(name, value);
+                // SHARPEMU_VK_DISABLE_IMPLICITS also needs the Vulkan loader configured in the
+                // child's environment; undo those variables along with the game's own.
+                if (SharpEmu.Libs.VideoOut.RenderDocCapture.ApplyVulkanLoaderEnvironment())
+                    loaderVariables = ["VK_LOADER_DEBUG", "VK_LOADER_LAYERS_DISABLE", "VK_LOADER_LAYERS_ALLOW"];
+                if (OperatingSystem.IsWindows()) StartWindows(exePath, arguments, workingDirectory);
+                else StartFallback(exePath, arguments, workingDirectory);
+            }
+            finally
+            {
+                foreach (var name in (environment?.Keys ?? []).Concat(loaderVariables).Distinct(StringComparer.OrdinalIgnoreCase))
+                    Environment.SetEnvironmentVariable(name, previous.GetValueOrDefault(name));
+            }
         }
-
-        StartFallback(exePath, arguments, workingDirectory);
     }
 
     public void Stop()

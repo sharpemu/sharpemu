@@ -22,6 +22,8 @@ internal static partial class Program
     private static readonly SharpEmuLogger Log = SharpEmuLog.For("SharpEmu.CLI");
     private static readonly object ConsoleMirrorSync = new();
     private static StreamWriter? _consoleMirrorFile;
+    private sealed record ParsedLaunch(string Path, SharpEmuRuntimeOptions Runtime, HostVideoOptions Video, LogLevel LogLevel, string? LogFile);
+    private static ParsedLaunch? _preparedLaunch;
     private const int DefaultImportTraceLimit = 32;
     private const string MitigatedChildFlag = "--sharpemu-mitigated-child";
     private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
@@ -56,6 +58,21 @@ internal static partial class Program
     private static int Main(string[] args)
     {
         ConfigureManagedPluginResolution();
+        // Apply the game's settings file before anything reads the environment (the Vulkan
+        // loader setup below, and backend settings cached in static fields). Keep the result
+        // for RunEmulator so settings and relative paths are resolved once.
+        if (args.Length > 0 &&
+            args[0] != SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument &&
+            args[0] != Updater.ApplyArgument)
+        {
+            var launchArgs = NormalizeInternalArguments(args, out _)
+                .Where(argument => !argument.StartsWith(GnmLoadExecSession.ArgumentPrefix, StringComparison.Ordinal))
+                .ToArray();
+            if (TryParseArguments(launchArgs, out var path, out var runtime, out var video, out var level, out var logFile))
+            {
+                _preparedLaunch = new(path, runtime, video, level, logFile);
+            }
+        }
 
         if (args.Length > 0 && args[0] == SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument)
             return SharpEmu.Core.Diagnostics.WindowsCrashCapture.RunHelper(args);
@@ -128,7 +145,7 @@ internal static partial class Program
         // itself to a console before the first write.
         EnsureCliConsole();
         UseUtf8ConsoleOutput();
-        if (isMitigatedChild && TryGetLogFileArgument(args, out var earlyLogFilePath))
+        if (isMitigatedChild && _preparedLaunch?.LogFile is { Length: > 0 } earlyLogFilePath)
         {
             TryEnableConsoleFileMirror(earlyLogFilePath);
         }
@@ -204,7 +221,7 @@ internal static partial class Program
         if (sessionArgument is not null)
             args = args.Where(argument => !argument.StartsWith(GnmLoadExecSession.ArgumentPrefix, StringComparison.Ordinal)).ToArray();
 
-        if (!TryParseArguments(
+        if (!TryGetLaunchArguments(
                 args,
                 out var ebootPath,
                 out var runtimeOptions,
@@ -650,50 +667,32 @@ internal static partial class Program
         }
     }
 
-    private static bool TryGetLogFileArgument(IReadOnlyList<string> args, out string path)
-    {
-        for (var i = 0; i < args.Count; i++)
-        {
-            var argument = args[i];
-            if (string.Equals(argument, "--log-file", StringComparison.OrdinalIgnoreCase))
-            {
-                if (i + 1 < args.Count &&
-                    !string.IsNullOrWhiteSpace(args[i + 1]) &&
-                    !args[i + 1].StartsWith("--", StringComparison.Ordinal) &&
-                    ShouldConsumeLogFilePath(args, i + 1))
-                {
-                    path = args[i + 1];
-                    return true;
-                }
-
-                path = BuildDefaultLogFilePath(TryFindEbootPathToken(args));
-                return true;
-            }
-
-            const string logFilePrefix = "--log-file=";
-            if (argument.StartsWith(logFilePrefix, StringComparison.OrdinalIgnoreCase) &&
-                !string.IsNullOrWhiteSpace(argument[logFilePrefix.Length..]))
-            {
-                path = argument[logFilePrefix.Length..];
-                return true;
-            }
-        }
-
-        path = string.Empty;
-        return false;
-    }
-
     private static string BuildDefaultLogFilePath(string? ebootPath)
     {
-        var logsDirectory = Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "logs");
-        var name = TryReadTitleId(ebootPath) ?? "UNKNOWN";
+        var key = string.IsNullOrWhiteSpace(ebootPath) ? "UNKNOWN"
+            : PerGameSettings.KeyFor(TryReadSettingsTitleId(ebootPath), ebootPath);
+        return LaunchConfiguration.ResolveLogFilePath(
+            GuiSettings.Load(), key, Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "logs"));
+    }
 
-        foreach (var invalid in Path.GetInvalidFileNameChars())
+    // The title id that names a game's settings file, the way the launcher resolves it:
+    // param.json, else the compatibility-mode (GNM) executable's own metadata.
+    private static string? TryReadSettingsTitleId(string ebootPath)
+    {
+        var titleId = TryReadTitleId(ebootPath);
+        if (titleId is not null)
         {
-            name = name.Replace(invalid, '_');
+            return titleId;
         }
 
-        return Path.Combine(logsDirectory, $"{name}-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+        try
+        {
+            return GnmRuntime.ReadApplicationInfo(ebootPath).TitleId;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            return null;
+        }
     }
 
     private static string? TryReadTitleId(string? ebootPath)
@@ -724,8 +723,7 @@ internal static partial class Program
                     continue;
                 }
 
-                using var stream = File.OpenRead(paramPath);
-                using var document = JsonDocument.Parse(stream);
+                using var document = JsonDocument.Parse(File.ReadAllText(paramPath));
                 if (document.RootElement.TryGetProperty("titleId", out var titleIdElement) &&
                     titleIdElement.ValueKind == JsonValueKind.String)
                 {
@@ -742,23 +740,6 @@ internal static partial class Program
         catch
         {
             // Logging should never block launch; unknown title ids use a stable fallback.
-        }
-
-        return null;
-    }
-
-    private static string? TryFindEbootPathToken(IReadOnlyList<string> args)
-    {
-        for (var i = args.Count - 1; i >= 0; i--)
-        {
-            var argument = args[i];
-            if (string.IsNullOrWhiteSpace(argument) ||
-                argument.StartsWith("--", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            return argument;
         }
 
         return null;
@@ -991,7 +972,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
+        Log.Info("Usage: SharpEmu.CLI [--strict[=on|off]] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--no-log-file] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }
@@ -1032,6 +1013,19 @@ internal static partial class Program
         return true;
     }
 
+    private static bool TryGetLaunchArguments(string[] args, out string path,
+        out SharpEmuRuntimeOptions runtime, out HostVideoOptions video, out LogLevel level, out string? logFile)
+    {
+        if (_preparedLaunch is not { } prepared)
+            return TryParseArguments(args, out path, out runtime, out video, out level, out logFile);
+        path = prepared.Path;
+        runtime = prepared.Runtime;
+        video = prepared.Video;
+        level = prepared.LogLevel;
+        logFile = prepared.LogFile;
+        return true;
+    }
+
     private static bool TryParseArguments(
         string[] args,
         out string ebootPath,
@@ -1050,7 +1044,7 @@ internal static partial class Program
             return false;
         }
 
-        var strictDynlibResolution = false;
+        bool? strictDynlibResolution = null;
         var importTraceLimit = 0;
         var cpuEngine = CpuExecutionEngine.NativeOnly;
         var systemLanguage = 1;
@@ -1205,6 +1199,22 @@ internal static partial class Program
                 hdrModeOverride = hdrMode;
                 continue;
             }
+            if (TrySplitOption(argument, "--strict", out var strictText))
+            {
+                if (!TryParseSwitch(strictText, out var strict))
+                {
+                    ebootPath = string.Empty;
+                    runtimeOptions = default;
+                    return false;
+                }
+                strictDynlibResolution = strict;
+                continue;
+            }
+            if (string.Equals(argument, "--no-log-file", StringComparison.OrdinalIgnoreCase))
+            {
+                logFilePath = null;
+                continue;
+            }
             if (string.Equals(argument, "--strict", StringComparison.OrdinalIgnoreCase))
             {
                 strictDynlibResolution = true;
@@ -1271,7 +1281,7 @@ internal static partial class Program
                 }
                 else
                 {
-                    logFilePath = BuildDefaultLogFilePath(TryFindEbootPathToken(args));
+                    logFilePath = string.Empty; // resolve the default after the executable path is known
                 }
 
                 continue;
@@ -1360,14 +1370,40 @@ internal static partial class Program
         }
 
         ebootPath = string.Join(' ', pathTokens);
+        LaunchConfiguration configured;
+        try
+        {
+            configured = LaunchConfiguration.Load(ebootPath, TryReadSettingsTitleId(ebootPath));
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            runtimeOptions = default;
+            logFilePath = null;
+            return false;
+        }
+        foreach (var (name, value) in configured.BuildCliEnvironment(GuiSettings.Load(), Environment.GetEnvironmentVariable))
+        {
+            Environment.SetEnvironmentVariable(name, value);
+        }
+        if (!HasOption(args, "--log-level") && SharpEmuLog.TryParseLevel(
+            Environment.GetEnvironmentVariable("SHARPEMU_LOG_LEVEL") ?? configured.Settings.LogLevel, out var configuredLogLevel))
+        {
+            logLevel = configuredLogLevel;
+        }
+        if (!HasOption(args, "--trace-imports")) importTraceLimit = Math.Max(0, configured.Settings.ImportTraceLimit);
+        if (!HasOption(args, "--log-file") && !HasOption(args, "--no-log-file") && configured.Settings.LogToFile)
+        {
+            logFilePath = BuildDefaultLogFilePath(ebootPath);
+        }
+        if (logFilePath == string.Empty) logFilePath = BuildDefaultLogFilePath(ebootPath);
         runtimeOptions = new SharpEmuRuntimeOptions
         {
             CpuEngine = cpuEngine,
             SystemLanguage = systemLanguage,
-            StrictDynlibResolution = strictDynlibResolution,
+            StrictDynlibResolution = strictDynlibResolution ?? configured.Settings.StrictDynlibResolution,
             ImportTraceLimit = importTraceLimit,
         };
-        var configuredVideoOptions = LoadConfiguredVideoOptions(ebootPath);
+        var configuredVideoOptions = LoadConfiguredVideoOptions(configured.Settings);
         videoOptions = (configuredVideoOptions with
         {
             WindowMode = windowModeOverride ?? configuredVideoOptions.WindowMode,
@@ -1385,15 +1421,15 @@ internal static partial class Program
         return true;
     }
 
-    private static HostVideoOptions LoadConfiguredVideoOptions(string ebootPath)
+    private static bool HasOption(IEnumerable<string> args, string option) =>
+        args.Any(argument => argument.Equals(option, StringComparison.OrdinalIgnoreCase) ||
+            argument.StartsWith(option + "=", StringComparison.OrdinalIgnoreCase));
+
+    private static HostVideoOptions LoadConfiguredVideoOptions(EffectiveLaunchSettings effective)
     {
         var defaults = HostVideoOptions.Default;
         try
         {
-            var effective = EffectiveLaunchSettings.Resolve(
-                GuiSettings.Load(),
-                PerGameSettings.Load(TryReadTitleId(ebootPath)));
-
             var windowMode = TryParseWindowMode(effective.WindowMode, out var parsedWindowMode)
                 ? parsedWindowMode
                 : defaults.WindowMode;

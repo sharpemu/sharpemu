@@ -19,18 +19,12 @@ Window chrome button sizing and interaction states.
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
   </Style>
-  <Style Selector="TextBlock.windowChromeGlyph">
-    <Setter Property="IsHitTestVisible" Value="False" />
-  </Style>
-  <Style Selector="TextBlock.windowCloseGlyph">
-    <Setter Property="Margin" Value="0,-1,0,1" />
-  </Style>
   <Style Selector="Button.windowChrome:pointerover /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
   <Style Selector="Button.windowClose:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource DangerBrush}" />
+    <Setter Property="Background" Value="#E5484D" />
     <Setter Property="Foreground" Value="White" />
   </Style>
 </Styles>

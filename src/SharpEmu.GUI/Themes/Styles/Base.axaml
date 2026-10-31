@@ -7,35 +7,73 @@ Window and text defaults shared by all launcher views.
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <Style Selector="Window">
-    <Setter Property="FontFamily" Value="Inter, Segoe UI, sans-serif" />
+    <Setter Property="FontFamily" Value="fonts:Inter#Inter" />
     <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
   </Style>
 
+  <!--
+    Material Symbols glyphs. The font's ascent/descent (1056/-96 on a 960 em)
+    put the glyph exactly mid-way through a line that is 1.2 em tall, so every
+    icon uses LineHeight = 1.2 x FontSize: the glyph is then centred in its own
+    box and a glyph in a circular button is centred in the circle. (A shorter
+    LineHeight makes the text engine keep the ascent and trim the bottom, which
+    is what used to leave the icons sitting low.) The label next to an icon is
+    set in a text face whose cap-height centre sits slightly above its line
+    centre, so icon+label pairs get the optical correction in iconLabel below.
+  -->
   <Style Selector="TextBlock.materialSymbol">
     <Setter Property="FontFamily" Value="{StaticResource MaterialSymbolsRounded}" />
     <Setter Property="FontFeatures" Value="+liga" />
-    <Setter Property="FontSize" Value="18" />
+    <Setter Property="FontSize" Value="24" />
+    <Setter Property="LineHeight" Value="28.8" />
     <Setter Property="FontWeight" Value="Normal" />
-    <Setter Property="LineHeight" Value="20" />
     <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="HorizontalAlignment" Value="Center" />
     <Setter Property="TextAlignment" Value="Center" />
+    <Setter Property="IsHitTestVisible" Value="False" />
   </Style>
 
   <Style Selector="TextBlock.materialSymbol.compact">
-    <Setter Property="FontSize" Value="16" />
-    <Setter Property="LineHeight" Value="18" />
+    <Setter Property="FontSize" Value="20" />
+    <Setter Property="LineHeight" Value="24" />
+  </Style>
+
+  <Style Selector="TextBlock.materialSymbol.large">
+    <Setter Property="FontSize" Value="32" />
+    <Setter Property="LineHeight" Value="38.4" />
+  </Style>
+
+  <!-- Optical alignment of an icon with the cap height of the label beside it. -->
+  <Style Selector="Button.optionsNav TextBlock.materialSymbol,
+                   Button.gameAction TextBlock.materialSymbol,
+                   Button.gameOptionsLaunch TextBlock.materialSymbol,
+                   Button.toolbarAction TextBlock.materialSymbol,
+                   .iconLabel TextBlock.materialSymbol">
+    <Setter Property="RenderTransform" Value="translateY(-0.75px)" />
   </Style>
 
   <Style Selector="TextBlock.sectionTitle">
-    <Setter Property="FontSize" Value="11" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
     <Setter Property="FontWeight" Value="SemiBold" />
-    <Setter Property="LetterSpacing" Value="1.5" />
+    <Setter Property="LetterSpacing" Value="1.2" />
     <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
   </Style>
 
   <Style Selector="TextBlock.fieldLabel">
-    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeDescription}" />
     <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
-    <Setter Property="Margin" Value="0,0,0,6" />
+    <Setter Property="Margin" Value="0,0,0,8" />
+  </Style>
+
+  <!-- Page title and subtitle used by the Trophies hub and empty states. -->
+  <Style Selector="TextBlock.pageHeading">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeTitle}" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="LetterSpacing" Value="-0.4" />
+  </Style>
+  <Style Selector="TextBlock.caption">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
   </Style>
 </Styles>

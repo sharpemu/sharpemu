@@ -12,7 +12,7 @@ namespace SharpEmu.GUI;
 
 internal sealed class TrophyPage : UserControl
 {
-    private static readonly TimeSpan SlideTime = TimeSpan.FromMilliseconds(260);
+    private static readonly TimeSpan SlideTime = TimeSpan.FromMilliseconds(220);
 
     private readonly TrophyHubView _hub = new();
     private readonly TrophyGameView _game = new() { IsVisible = false };

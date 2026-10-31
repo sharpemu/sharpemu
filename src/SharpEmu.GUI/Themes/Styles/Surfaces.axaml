@@ -10,46 +10,236 @@ Shared card, badge, hint and cover surfaces.
     <Setter Property="Background" Value="{StaticResource CardBrush}" />
     <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
     <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="CornerRadius" Value="12" />
-    <Setter Property="Padding" Value="16" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+    <Setter Property="Padding" Value="20" />
   </Style>
 
+  <!-- Metadata chip (title id, version, size): 13 pt on glass, 28 pt, fully round. -->
   <Style Selector="Border.pill">
-    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
-    <Setter Property="CornerRadius" Value="999" />
-    <Setter Property="Padding" Value="10,3" />
+    <Setter Property="Background" Value="{StaticResource GlassBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="Padding" Value="12,0" />
+    <Setter Property="MinHeight" Value="28" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Border.pill > TextBlock">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="VerticalAlignment" Value="Center" />
   </Style>
 
   <!-- Session status/hotkey badges: the title-id pill geometry with a
        tinted fill so state (RUNNING) and keys (F11) read at a glance. -->
   <Style Selector="Border.badge">
-    <Setter Property="CornerRadius" Value="999" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusSm}" />
     <Setter Property="Padding" Value="8,2" />
     <Setter Property="BorderThickness" Value="1" />
   </Style>
   <Style Selector="Border.badge.running">
-    <Setter Property="Background" Value="#1E46C46B" />
-    <Setter Property="BorderBrush" Value="#5546C46B" />
+    <Setter Property="Background" Value="{StaticResource SuccessTintBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource SuccessRimBrush}" />
   </Style>
   <Style Selector="Border.badge.key">
-    <Setter Property="Background" Value="#1E58A6FF" />
-    <Setter Property="BorderBrush" Value="#5558A6FF" />
+    <Setter Property="Background" Value="{StaticResource InfoTintBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource InfoRimBrush}" />
   </Style>
 
-  <!-- Gamepad shoulder-button hint chip (LB/RB, L1/R1). -->
+  <!-- Gamepad shoulder-button keycap (L1/R1): shown only while a controller is connected. -->
   <Style Selector="Border.padHint">
-    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
-    <Setter Property="CornerRadius" Value="6" />
-    <Setter Property="Padding" Value="8,3" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusSm}" />
+    <Setter Property="MinWidth" Value="36" />
+    <Setter Property="Height" Value="26" />
+    <Setter Property="Padding" Value="8,0" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Border.padHint > TextBlock">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="HorizontalAlignment" Value="Center" />
+    <Setter Property="VerticalAlignment" Value="Center" />
   </Style>
 
   <Style Selector="Border.coverShadow">
-    <Setter Property="CornerRadius" Value="10" />
-    <Setter Property="BoxShadow" Value="0 6 14 0 #55000000" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
   </Style>
   <Style Selector="Border.coverClip">
-    <Setter Property="CornerRadius" Value="10" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
     <Setter Property="ClipToBounds" Value="True" />
     <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+  </Style>
+
+  <!-- In-window sheets (SheetHost): a dimmed scrim and a floating card. -->
+  <Style Selector="Border.sheetScrim">
+    <Setter Property="Background" Value="#A6000000" />
+  </Style>
+  <Style Selector="Border.sheetCard">
+    <Setter Property="Margin" Value="40" />
+    <Setter Property="Background" Value="{StaticResource OverlayBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+    <Setter Property="BoxShadow" Value="{StaticResource SheetShadow}" />
+  </Style>
+  <Style Selector="Border.sheetScrim.popover">
+    <Setter Property="Background" Value="#33000000" />
+  </Style>
+  <Style Selector="TextBlock.sheetTitle">
+    <Setter Property="FontSize" Value="22" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="LetterSpacing" Value="-0.3" />
+  </Style>
+
+  <!-- Library menu (a popover sheet): labelled rows, small segments and sliders. -->
+  <Style Selector="TextBlock.menuSection">
+    <Setter Property="FontSize" Value="11" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="LetterSpacing" Value="0.8" />
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+    <Setter Property="Margin" Value="8,6,8,4" />
+  </Style>
+  <Style Selector="Grid.menuRow">
+    <Setter Property="MinHeight" Value="44" />
+    <Setter Property="Margin" Value="8,0" />
+  </Style>
+  <Style Selector="TextBlock.menuIcon">
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+    <Setter Property="Margin" Value="0,0,12,0" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="TextBlock.menuLabel">
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="FontWeight" Value="Medium" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="TextBlock.menuValue">
+    <Setter Property="MinWidth" Value="40" />
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="TextAlignment" Value="Right" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="TextBlock.menuHint">
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+    <Setter Property="Margin" Value="42,-6,8,6" />
+  </Style>
+  <Style Selector="Slider.menuSlider">
+    <Setter Property="Width" Value="128" />
+    <Setter Property="Margin" Value="16,0,0,0" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Border.menuSegments">
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
+    <Setter Property="CornerRadius" Value="16" />
+    <Setter Property="Padding" Value="2" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.menuSegment">
+    <Setter Property="Height" Value="28" />
+    <Setter Property="MinHeight" Value="28" />
+    <Setter Property="Padding" Value="14,0" />
+    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.menuSegment /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+  </Style>
+  <Style Selector="Button.menuSegment:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource TileHoverBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="Button.menuSegment.active /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+  </Style>
+  <Style Selector="Border.menuDivider">
+    <Setter Property="Height" Value="1" />
+    <Setter Property="Margin" Value="8,8" />
+    <Setter Property="Background" Value="{StaticResource CardBorderBrush}" />
+  </Style>
+  <Style Selector="Button.menuItem">
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
+    <Setter Property="HorizontalContentAlignment" Value="Left" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="Height" Value="42" />
+    <Setter Property="Padding" Value="8,0" />
+    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <Style Selector="Button.menuItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource TileHoverBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+
+  <!-- Launch card: what a launch is doing while the console is closed. -->
+  <Style Selector="Border.launchCard">
+    <Setter Property="Width" Value="380" />
+    <Setter Property="Padding" Value="16,14,16,12" />
+    <Setter Property="Background" Value="{StaticResource ToastBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+    <Setter Property="BoxShadow" Value="{StaticResource SheetShadow}" />
+  </Style>
+  <Style Selector="Border.launchCardIcon">
+    <Setter Property="Width" Value="40" />
+    <Setter Property="Height" Value="40" />
+    <Setter Property="CornerRadius" Value="20" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Border.launchCardIcon > TextBlock">
+    <Setter Property="FontSize" Value="22" />
+    <Setter Property="HorizontalAlignment" Value="Center" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+  </Style>
+  <Style Selector="Border.launchCard.failed Border.launchCardIcon">
+    <Setter Property="Background" Value="{StaticResource DangerTintBrush}" />
+  </Style>
+  <Style Selector="Border.launchCard.failed Border.launchCardIcon > TextBlock">
+    <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
+  </Style>
+  <Style Selector="TextBlock.launchCardTitle">
+    <Setter Property="FontSize" Value="15" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+    <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    <Setter Property="MaxLines" Value="2" />
+  </Style>
+  <Style Selector="TextBlock.launchCardDetail">
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="Foreground" Value="{StaticResource SettingsDescriptionBrush}" />
+    <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    <Setter Property="MaxLines" Value="1" />
+  </Style>
+  <Style Selector="ProgressBar.launchCardProgress">
+    <Setter Property="MinHeight" Value="3" />
+    <Setter Property="Height" Value="3" />
+    <Setter Property="Margin" Value="0,12,0,0" />
+    <Setter Property="CornerRadius" Value="2" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource AccentBrush}" />
+  </Style>
+
+  <!-- Multi-line monospace field (custom environment variables). -->
+  <Style Selector="TextBox.codeEditor">
+    <Setter Property="Height" Value="220" />
+    <Setter Property="Padding" Value="16,14" />
+    <Setter Property="FontFamily" Value="Menlo, Consolas, monospace" />
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="VerticalContentAlignment" Value="Top" />
   </Style>
 </Styles>

@@ -4,6 +4,7 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
+using Avalonia.Input;
 using Avalonia.Media;
 
 namespace SharpEmu.GUI;
@@ -20,6 +21,14 @@ public sealed class SettingRow : ContentControl
         AvaloniaProperty.Register<SettingRow, FontFamily?>(nameof(LabelFontFamily));
 
     private TextBlock? _label;
+
+    public SettingRow()
+    {
+        // The row, not the control inside it, is the focus target: keyboard and
+        // D-pad focus anywhere within lights the row; a mouse click does not.
+        AddHandler(GotFocusEvent, (_, e) => PseudoClasses.Set(":rowfocus", e.NavigationMethod != NavigationMethod.Pointer));
+        AddHandler(LostFocusEvent, (_, _) => PseudoClasses.Set(":rowfocus", false));
+    }
 
     public string? Label
     {

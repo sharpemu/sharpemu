@@ -7,16 +7,15 @@ Contextual per-game options reveal, actions, and selected-game motion.
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <Style Selector="TextBlock.gameStatLabel">
-    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
     <Setter Property="FontWeight" Value="Normal" />
-    <Setter Property="Foreground" Value="White" />
-    <Setter Property="Opacity" Value="0.75" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
   </Style>
 
   <Style Selector="TextBlock.gameStatValue">
     <Setter Property="FontSize" Value="18" />
-    <Setter Property="FontWeight" Value="Medium" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 
   <Style Selector="Panel.backdropLayer">
@@ -57,142 +56,170 @@ Contextual per-game options reveal, actions, and selected-game motion.
     <Setter Property="Opacity" Value="1" />
   </Style>
 
+  <!-- Primary call to action: the only pill, the only accent-filled button. -->
   <Style Selector="Button.playButton">
-    <Setter Property="MinHeight" Value="54" />
-    <Setter Property="MinWidth" Value="200" />
-    <Setter Property="Padding" Value="34,13" />
-    <Setter Property="CornerRadius" Value="999" />
-    <Setter Property="Background" Value="White" />
-    <Setter Property="Foreground" Value="#111111" />
+    <Setter Property="Height" Value="52" />
+    <Setter Property="MinWidth" Value="180" />
+    <Setter Property="Padding" Value="30,0" />
+    <Setter Property="CornerRadius" Value="26" />
+    <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="FontSize" Value="16" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
     <Setter Property="FontWeight" Value="Bold" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
   </Style>
 
+  <Style Selector="Button.playButton /template/ ContentPresenter#PART_ContentPresenter,
+                   Button.gameOptionsLaunch /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+  </Style>
   <Style Selector="Button.playButton:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource AccentBrush}" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+  </Style>
+  <Style Selector="Button.playButton:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource AccentPressedBrush}" />
+  </Style>
+  <Style Selector="Button.playButton:disabled /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource FaintBrush}" />
   </Style>
 
+  <!-- While a session is running the same button stops it: tinted red, not solid. -->
   <Style Selector="Button.playButton.danger">
-    <Setter Property="Background" Value="{StaticResource DangerBrush}" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Background" Value="{StaticResource DangerHoverTintBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
   </Style>
 
   <Style Selector="Button.playButton.danger:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="{StaticResource DangerHoverBrush}" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Background" Value="{StaticResource DangerStrongTintBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource DangerHoverBrush}" />
   </Style>
 
+  <!-- Round selected-game actions: all 52 pt, matching the Launch pill. -->
   <Style Selector="Button.optionsCircle, ToggleButton.optionsCircle">
-    <Setter Property="Width" Value="54" />
-    <Setter Property="Height" Value="54" />
+    <Setter Property="Width" Value="52" />
+    <Setter Property="Height" Value="52" />
     <Setter Property="Padding" Value="0" />
-    <Setter Property="CornerRadius" Value="27" />
-    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="CornerRadius" Value="26" />
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
   </Style>
 
   <Style Selector="Button.optionsCircle:pointerover /template/ ContentPresenter#PART_ContentPresenter,
-                   ToggleButton.optionsCircle:pointerover /template/ ContentPresenter#PART_ContentPresenter,
-                   ToggleButton.optionsCircle:checked /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#24FFFFFF" />
-    <Setter Property="Foreground" Value="White" />
+                   ToggleButton.optionsCircle:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource RaisedHoverBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="ToggleButton.optionsCircle:checked /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 
   <Style Selector="Button.optionsCircle.compact, ToggleButton.optionsCircle.compact">
-    <Setter Property="Width" Value="40" />
-    <Setter Property="Height" Value="40" />
-    <Setter Property="CornerRadius" Value="20" />
+    <Setter Property="Width" Value="48" />
+    <Setter Property="Height" Value="48" />
+    <Setter Property="CornerRadius" Value="24" />
   </Style>
 
+  <!-- Inter is drawn for text sizes; display sizes read better a touch tighter. -->
   <Style Selector="TextBlock.selectedGameTitle">
-    <Setter Property="FontSize" Value="28" />
+    <Setter Property="FontSize" Value="56" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="LetterSpacing" Value="-1.4" />
   </Style>
 
+  <!-- The grid needs the height for rows, so the stage shrinks there. -->
   <Style Selector="Grid.selectedDetailsHost.gridLayout TextBlock.selectedGameTitle">
-    <Setter Property="FontSize" Value="26" />
+    <Setter Property="FontSize" Value="36" />
+    <Setter Property="LetterSpacing" Value="-0.8" />
+  </Style>
+  <Style Selector="Grid.selectedDetailsHost.gridLayout StackPanel#HeroActions">
+    <Setter Property="Margin" Value="0,14,0,0" />
+  </Style>
+
+  <Style Selector="StackPanel.heroFacts">
+    <Setter Property="Spacing" Value="8" />
+  </Style>
+  <Style Selector="StackPanel.heroFacts > TextBlock">
+    <Setter Property="FontSize" Value="15" />
+    <Setter Property="FontWeight" Value="Medium" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+  </Style>
+  <Style Selector="StackPanel.heroFacts > TextBlock.heroFactDot">
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
   </Style>
 
   <Style Selector="Border.selectedDetailsDivider">
     <Setter Property="Height" Value="1" />
-    <Setter Property="Margin" Value="0,10,0,0" />
+    <Setter Property="Margin" Value="0,16,0,0" />
     <Setter Property="HorizontalAlignment" Value="Stretch" />
-    <Setter Property="Background">
-      <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
-        <GradientStop Offset="0" Color="#00FFFFFF" />
-        <GradientStop Offset="0.06" Color="#2EFFFFFF" />
-        <GradientStop Offset="0.55" Color="#14FFFFFF" />
-        <GradientStop Offset="1" Color="#00FFFFFF" />
-      </LinearGradientBrush>
-    </Setter>
-  </Style>
-
-  <Style Selector="Grid.selectedDetailsHost Button.playButton">
-    <Setter Property="MinHeight" Value="44" />
-    <Setter Property="MinWidth" Value="168" />
-    <Setter Property="Padding" Value="28,10" />
-    <Setter Property="FontSize" Value="15" />
-  </Style>
-
-  <Style Selector="Grid.selectedDetailsHost Button.optionsCircle,
-                   Grid.selectedDetailsHost ToggleButton.optionsCircle">
-    <Setter Property="Width" Value="44" />
-    <Setter Property="Height" Value="44" />
-    <Setter Property="CornerRadius" Value="22" />
+    <Setter Property="Background" Value="{StaticResource CardBorderBrush}" />
   </Style>
 
   <Style Selector="Button.gameOptionsLaunch">
-    <Setter Property="Width" Value="220" />
-    <Setter Property="Height" Value="46" />
+    <Setter Property="Height" Value="52" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
     <Setter Property="Padding" Value="20,0" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
-    <Setter Property="CornerRadius" Value="999" />
-    <Setter Property="Background" Value="White" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="CornerRadius" Value="26" />
+    <Setter Property="Background" Value="{StaticResource AccentBrush}" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Foreground" Value="#111111" />
-    <Setter Property="FontSize" Value="15" />
-    <Setter Property="FontWeight" Value="SemiBold" />
-  </Style>
-
-  <Style Selector="Button.gameOptionsLaunch /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="BoxShadow" Value="0 0 0 0 Transparent" />
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+    <Setter Property="FontWeight" Value="Bold" />
   </Style>
 
   <Style Selector="Button.gameOptionsLaunch:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#EAF3FF" />
-    <Setter Property="Foreground" Value="#111111" />
+    <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource AccentForegroundBrush}" />
+  </Style>
+  <Style Selector="Button.gameOptionsLaunch:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource AccentPressedBrush}" />
+  </Style>
+  <Style Selector="Button.gameOptionsLaunch:disabled /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource FaintBrush}" />
   </Style>
 
+  <!-- Per-game action tile (open folder, copy path, ...). -->
   <Style Selector="Button.gameAction">
-    <Setter Property="Width" Value="250" />
-    <Setter Property="Height" Value="48" />
-    <Setter Property="Padding" Value="16,0" />
+    <Setter Property="Height" Value="56" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
+    <Setter Property="Padding" Value="20,0" />
     <Setter Property="HorizontalContentAlignment" Value="Left" />
-    <Setter Property="CornerRadius" Value="10" />
-    <Setter Property="Background" Value="#0FFFFFFF" />
-    <Setter Property="BorderBrush" Value="#14FFFFFF" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+    <Setter Property="Background" Value="{StaticResource PaneGlassBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
     <Setter Property="BorderThickness" Value="1" />
-    <Setter Property="Foreground" Value="White" />
-    <Setter Property="FontSize" Value="12" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
     <Setter Property="FontWeight" Value="Medium" />
   </Style>
 
   <Style Selector="Button.gameAction:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#1AFFFFFF" />
-    <Setter Property="BorderBrush" Value="#28FFFFFF" />
+    <Setter Property="Background" Value="{StaticResource ElevatedBrush}" />
   </Style>
 
   <Style Selector="Button.gameAction.dangerAction">
     <Setter Property="Foreground" Value="{StaticResource DangerBrush}" />
-    <Setter Property="BorderBrush" Value="#48FF646E" />
+    <Setter Property="Background" Value="{StaticResource DangerTintBrush}" />
   </Style>
 
   <Style Selector="Button.gameAction.dangerAction:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#1FFF646E" />
-    <Setter Property="BorderBrush" Value="{StaticResource DangerBrush}" />
+    <Setter Property="Background" Value="{StaticResource DangerHoverTintBrush}" />
+  </Style>
+
+  <!-- The game's menu shares its height with the header band, so its rows are a step
+       shorter than the Options page's and all five fit above the hint bar. -->
+  <Style Selector="Grid#GameOptionsNavHost Button.optionsNav, Grid#GameOptionsNavHost Border.optionsNavIndicator">
+    <Setter Property="Height" Value="48" />
   </Style>
 </Styles>

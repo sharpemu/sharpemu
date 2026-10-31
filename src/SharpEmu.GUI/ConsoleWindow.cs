@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Collections;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
 using Avalonia.Data;
 using Avalonia.Input.Platform;
@@ -21,7 +23,7 @@ public sealed class ConsoleWindow : Window
     private readonly AvaloniaList<LogLine> _visibleLines = new();
     private readonly ListBox _list;
     private readonly TextBox _searchBox;
-    private readonly CheckBox _autoScrollCheck;
+    private readonly ToggleButton _autoScrollCheck;
     private readonly GuiSettings _settings;
     private bool _placementRestored;
 
@@ -40,36 +42,19 @@ public sealed class ConsoleWindow : Window
         Height = settings.ConsoleWindowHeight;
         MinWidth = 520;
         MinHeight = 320;
-        Background = new SolidColorBrush(Color.Parse("#0D1017"));
+        Background = LauncherThemes.Brush("CardBrush");
         Icon = new WindowIcon(AssetLoader.Open(new Uri("avares://SharpEmu.GUI/Assets/SharpEmu.ico")));
 
+        // Same toolbar and log surface as the console panel docked in the launcher.
         _searchBox = new TextBox
         {
+            Classes = { "consoleSearch" },
             PlaceholderText = loc.Get("Console.SearchWatermark"),
-            Width = 320,
-            Margin = new Thickness(0, 0, 12, 0),
+            Margin = new Thickness(0, 0, 6, 0),
         };
-        _autoScrollCheck = new CheckBox
-        {
-            Content = loc.Get("Console.AutoScroll"),
-            IsChecked = autoScroll,
-            FontSize = 12,
-            Margin = new Thickness(0, 0, 12, 0),
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-        var copyButton = new Button
-        {
-            Classes = { "ghost" },
-            Content = loc.Get("Console.Copy"),
-            Padding = new Thickness(10, 4),
-            Margin = new Thickness(0, 0, 8, 0),
-        };
-        var clearButton = new Button
-        {
-            Classes = { "ghost" },
-            Content = loc.Get("Console.Clear"),
-            Padding = new Thickness(10, 4),
-        };
+        _autoScrollCheck = ConsoleControls.Tool(new ToggleButton { IsChecked = autoScroll }, "vertical_align_bottom", loc.Get("Console.AutoScroll"));
+        var copyButton = ConsoleControls.Tool(new Button(), "content_copy", loc.Get("Console.Copy"));
+        var clearButton = ConsoleControls.Tool(new Button(), "delete_sweep", loc.Get("Console.Clear"));
         copyButton.Click += async (_, _) => await CopyAsync();
         clearButton.Click += (_, _) => clear();
         _searchBox.TextChanged += (_, _) => RefreshVisibleLines();
@@ -78,8 +63,6 @@ public sealed class ConsoleWindow : Window
         {
             Classes = { "console" },
             ItemsSource = _visibleLines,
-            BorderThickness = new Thickness(1),
-            BorderBrush = new SolidColorBrush(Color.Parse("#232B3A")),
             ItemTemplate = new FuncDataTemplate<LogLine>((_, _) =>
             {
                 var text = new TextBlock { TextWrapping = TextWrapping.NoWrap };
@@ -91,26 +74,26 @@ public sealed class ConsoleWindow : Window
 
         Content = new Grid
         {
-            Margin = new Thickness(12),
             RowDefinitions = new RowDefinitions("Auto,*"),
             Children =
             {
                 new Grid
                 {
-                    Margin = new Thickness(0, 0, 0, 8),
-                    ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto"),
+                    Margin = new Thickness(18, 10, 10, 10),
+                    ColumnDefinitions = new ColumnDefinitions("*,Auto"),
                     Children =
                     {
                         new TextBlock
                         {
-                            Classes = { "sectionTitle" },
+                            Classes = { "consoleTitle" },
                             Text = loc.Get("Console.Title"),
-                            VerticalAlignment = VerticalAlignment.Center,
                         },
-                        _searchBox.WithGridColumn(1),
-                        _autoScrollCheck.WithGridColumn(2),
-                        copyButton.WithGridColumn(3),
-                        clearButton.WithGridColumn(4),
+                        new StackPanel
+                        {
+                            Orientation = Orientation.Horizontal,
+                            Spacing = 4,
+                            Children = { _searchBox, _autoScrollCheck, copyButton, clearButton },
+                        }.WithGridColumn(1),
                     },
                 },
                 _list.WithGridRow(1),
@@ -208,7 +191,7 @@ public sealed class ConsoleWindow : Window
     }
 }
 
-file static class GridExtensions
+file static class ConsoleControls
 {
     public static T WithGridColumn<T>(this T control, int column) where T : Control
     {
@@ -220,5 +203,15 @@ file static class GridExtensions
     {
         Grid.SetRow(control, row);
         return control;
+    }
+
+    public static T Tool<T>(T button, string symbol, string name)
+        where T : Button
+    {
+        button.Classes.Add("consoleTool");
+        button.Content = new TextBlock { Classes = { "materialSymbol", "compact" }, Text = symbol };
+        ToolTip.SetTip(button, name);
+        AutomationProperties.SetName(button, name);
+        return button;
     }
 }

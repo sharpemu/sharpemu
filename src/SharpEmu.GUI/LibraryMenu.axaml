@@ -1,0 +1,93 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<!-- The library popover: how the library is shown, the title music, and the ways to add
+     games. None of it needs to sit on screen all the time. -->
+<local:SheetView xmlns="https://github.com/avaloniaui"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:local="clr-namespace:SharpEmu.GUI"
+                 x:Class="SharpEmu.GUI.LibraryMenu"
+                 SheetWidth="360"
+                 IsPopover="True">
+  <StackPanel Margin="10,12,10,10" Spacing="2">
+    <TextBlock Classes="menuSection"
+               Text="{Binding [LibraryMenu.Library], Source={x:Static local:Localization.Instance}}" />
+    <Grid Classes="menuRow" ColumnDefinitions="Auto,*,Auto">
+      <TextBlock Classes="materialSymbol compact menuIcon" Text="view_carousel" />
+      <TextBlock Grid.Column="1"
+                 Classes="menuLabel"
+                 Text="{Binding [LibraryMenu.View], Source={x:Static local:Localization.Instance}}" />
+      <Border Grid.Column="2" Classes="menuSegments">
+        <StackPanel Orientation="Horizontal" Spacing="2">
+          <Button x:Name="CarouselViewButton"
+                  Classes="menuSegment"
+                  Content="{Binding [LibraryMenu.Row], Source={x:Static local:Localization.Instance}}" />
+          <Button x:Name="GridViewButton"
+                  Classes="menuSegment"
+                  Content="{Binding [LibraryMenu.Grid], Source={x:Static local:Localization.Instance}}" />
+        </StackPanel>
+      </Border>
+    </Grid>
+    <Grid x:Name="TileSizeRow" Classes="menuRow" ColumnDefinitions="Auto,*,Auto">
+      <TextBlock Classes="materialSymbol compact menuIcon" Text="photo_size_select_large" />
+      <TextBlock Grid.Column="1"
+                 Classes="menuLabel"
+                 Text="{Binding [Library.TileSize], Source={x:Static local:Localization.Instance}}" />
+      <Slider x:Name="TileSizeSlider"
+              Grid.Column="2"
+              Classes="menuSlider"
+              Minimum="75" Maximum="160"
+              SmallChange="5" LargeChange="15"
+              TickFrequency="5" IsSnapToTickEnabled="True"
+              AutomationProperties.Name="{Binding [Library.TileSize], Source={x:Static local:Localization.Instance}}" />
+    </Grid>
+
+    <Border Classes="menuDivider" />
+    <TextBlock Classes="menuSection"
+               Text="{Binding [LibraryMenu.Sound], Source={x:Static local:Localization.Instance}}" />
+    <Grid Classes="menuRow" ColumnDefinitions="Auto,*,Auto">
+      <TextBlock Classes="materialSymbol compact menuIcon" Text="music_note" />
+      <TextBlock Grid.Column="1"
+                 Classes="menuLabel"
+                 Text="{Binding [Options.TitleMusic.Label], Source={x:Static local:Localization.Instance}}" />
+      <ToggleSwitch x:Name="TitleMusicSwitch"
+                    Grid.Column="2"
+                    Classes="optionToggle"
+                    AutomationProperties.Name="{Binding [Options.TitleMusic.Label], Source={x:Static local:Localization.Instance}}" />
+    </Grid>
+    <Grid x:Name="VolumeRow" Classes="menuRow" ColumnDefinitions="Auto,*,Auto,Auto">
+      <TextBlock x:Name="VolumeGlyph" Classes="materialSymbol compact menuIcon" Text="volume_up" />
+      <TextBlock Grid.Column="1"
+                 Classes="menuLabel"
+                 Text="{Binding [LibraryMenu.Volume], Source={x:Static local:Localization.Instance}}" />
+      <Slider x:Name="VolumeSlider"
+              Grid.Column="2"
+              Classes="menuSlider"
+              Minimum="0" Maximum="100"
+              SmallChange="5" LargeChange="10"
+              TickFrequency="5" IsSnapToTickEnabled="True"
+              AutomationProperties.Name="{Binding [Library.Music.Volume], Source={x:Static local:Localization.Instance}}" />
+      <TextBlock x:Name="VolumeValue" Grid.Column="3" Classes="menuValue" />
+    </Grid>
+
+    <Border Classes="menuDivider" />
+    <TextBlock Classes="menuSection"
+               Text="{Binding [LibraryMenu.AddGames], Source={x:Static local:Localization.Instance}}" />
+    <Button x:Name="AddFolderButton" Classes="menuItem">
+      <StackPanel Orientation="Horizontal" Spacing="12">
+        <TextBlock Classes="materialSymbol compact menuIcon" Text="create_new_folder" />
+        <TextBlock Classes="menuLabel"
+                   Text="{Binding [LibraryMenu.AddFolder], Source={x:Static local:Localization.Instance}}" />
+      </StackPanel>
+    </Button>
+    <Button x:Name="OpenFileButton" Classes="menuItem">
+      <StackPanel Orientation="Horizontal" Spacing="12">
+        <TextBlock Classes="materialSymbol compact menuIcon" Text="file_open" />
+        <TextBlock Classes="menuLabel"
+                   Text="{Binding [Library.OpenFile], Source={x:Static local:Localization.Instance}}" />
+      </StackPanel>
+    </Button>
+  </StackPanel>
+</local:SheetView>

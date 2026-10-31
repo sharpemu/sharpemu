@@ -5,7 +5,8 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
-using Avalonia.Threading;
+using Avalonia.Rendering.Composition;
+using Avalonia.Rendering.Composition.Animations;
 using SharpEmu.GUI.Controls;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -32,23 +33,20 @@ internal sealed class TrophyToast : Window
     private const double MedalColumn = 140;
     private const double PillSize = 56;
     private const double CardRadius = 28;
-    private const double PopSeconds = 0.3;
-    private const double ExpandAt = 0.3;
-    private const double TextAt = 0.75;
-    private const double ExitSeconds = 0.75;
+    private const double PopSeconds = 0.22;
+    private const double ExpandAt = 0.22;
+    private const double TextAt = 0.55;
+    private const double ExitSeconds = 0.45;
     private const double SpinStart = 0.15;
     private const double Impact = SpinStart + TrophySound.ImpactDelaySeconds;
 
     private static readonly Queue<TrophyToastContent> Pending = new();
     private static bool _showing;
 
-    private sealed class Sparkle
-    {
-        public Control Visual = null!;
-        public RotateTransform Rotation = null!;
-        public ScaleTransform Scale = null!;
-        public double X, Y, Vx, Vy, Life, Age, Spin, Twinkle, Size;
-    }
+    // A sparkle's whole flight is handed to the compositor as keyframes when it spawns; the clock only retires it.
+    private sealed record Sparkle(Control Visual, double ExpiresAt);
+
+    private const double SparkleSampleSeconds = 1.0 / 30;
 
     private static readonly Geometry SparkleShape = Geometry.Parse(
         "M50,0 C53,35 65,47 100,50 C65,53 53,65 50,100 C47,65 35,53 0,50 C35,47 47,35 50,0 Z");
@@ -58,7 +56,6 @@ internal sealed class TrophyToast : Window
     private readonly bool _reducedMotion = ReducedMotion();
     private readonly double _leaveAt;
     private readonly Stopwatch _clock = new();
-    private readonly DispatcherTimer _frame = new() { Interval = TimeSpan.FromMilliseconds(15) };
     private readonly Random _random = new();
     private readonly List<Sparkle> _sparkles = [];
     private readonly Canvas _overlay = new() { IsHitTestVisible = false };
@@ -73,7 +70,6 @@ internal sealed class TrophyToast : Window
     private readonly ScaleTransform _medalScale = new();
     private readonly Border _burst = new();
     private readonly Canvas _rays = new() { IsHitTestVisible = false };
-    private readonly RotateTransform _raysSpin = new();
     private readonly Border _ring = new();
     private readonly ScaleTransform _ringScale = new();
     private readonly Border _shine = new();
@@ -81,13 +77,14 @@ internal sealed class TrophyToast : Window
     private readonly TranslateTransform _auroraA = new();
     private readonly TranslateTransform _auroraB = new();
     private readonly RotateTransform _edgeSpin = new();
-    private readonly ProgressBar _progress = new();
+    private readonly Border _progressFill = new();
+    private readonly ScaleTransform _progressScale = new(0, 1);
     private readonly TextBlock _progressText = new();
     private readonly List<(Control Line, TranslateTransform Shift, double Delay)> _lines = [];
     private bool _chimed;
     private bool _burstDone;
     private bool _secondBurstDone;
-    private double _lastFrame;
+    private bool _closed;
 
     public static void Show(TrophyToastContent content)
     {
@@ -133,7 +130,12 @@ internal sealed class TrophyToast : Window
         TransparencyLevelHint = [WindowTransparencyLevel.Transparent];
 
         Content = BuildContent();
-        _frame.Tick += (_, _) => Tick();
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        _closed = true;
+        base.OnClosed(e);
     }
 
     private static double CardLeft => WindowWidth - CardMargin - CardWidth;
@@ -416,21 +418,26 @@ internal sealed class TrophyToast : Window
         Grid.SetColumn(_progressText, 1);
         labels.Children.Add(_progressText);
 
-        _progress.Minimum = 0;
-        _progress.Maximum = 100;
-        _progress.Height = 4;
-        _progress.MinHeight = 4;
-        _progress.CornerRadius = new CornerRadius(2);
-        _progress.Value = PercentOf(_content.Earned - 1);
-        _progress.Background = new SolidColorBrush(Color.FromArgb(45, 255, 255, 255));
-        _progress.Foreground = new LinearGradientBrush
+        // The fill is a full-width bar scaled from its left edge, so progress never triggers a layout pass.
+        _progressFill.RenderTransformOrigin = new RelativePoint(0, 0.5, RelativeUnit.Relative);
+        _progressFill.RenderTransform = _progressScale;
+        _progressScale.ScaleX = PercentOf(_content.Earned - 1) / 100;
+        _progressFill.Background = new LinearGradientBrush
         {
             StartPoint = new RelativePoint(0, 0.5, RelativeUnit.Relative),
             EndPoint = new RelativePoint(1, 0.5, RelativeUnit.Relative),
             GradientStops = { new GradientStop(_mid, 0), new GradientStop(_light, 1) },
         };
+        var track = new Border
+        {
+            Height = 4,
+            CornerRadius = new CornerRadius(2),
+            ClipToBounds = true,
+            Background = new SolidColorBrush(Color.FromArgb(45, 255, 255, 255)),
+            Child = _progressFill,
+        };
 
-        return new StackPanel { Spacing = 4, Margin = new Thickness(0, 8, 0, 0), Children = { labels, _progress } };
+        return new StackPanel { Spacing = 4, Margin = new Thickness(0, 8, 0, 0), Children = { labels, track } };
     }
 
     private double PercentOf(int earned) => _content.Total == 0 ? 0 : Math.Clamp(earned, 0, _content.Total) * 100.0 / _content.Total;
@@ -462,8 +469,6 @@ internal sealed class TrophyToast : Window
         const double length = 120;
         _rays.Width = MedalColumn;
         _rays.Height = CardHeight;
-        _rays.RenderTransformOrigin = new RelativePoint(0.5, 0.5, RelativeUnit.Relative);
-        _rays.RenderTransform = _raysSpin;
         _rays.Opacity = 0;
         var count = _content.Grade == 1 ? 16 : 10;
         for (var i = 0; i < count; i++)
@@ -494,20 +499,65 @@ internal sealed class TrophyToast : Window
     private void Start()
     {
         _clock.Start();
-        _frame.Start();
+        if (!_reducedMotion)
+        {
+            StartAmbientAnimations();
+        }
+
         Tick();
+        this.RequestAnimationFrame(OnFrame);
     }
 
-    private void Tick()
+    private void OnFrame(TimeSpan now)
+    {
+        if (!_closed && Tick())
+        {
+            this.RequestAnimationFrame(OnFrame);
+        }
+    }
+
+    // The endless loops run on the render thread, so they keep their pace whatever the UI thread is doing.
+    private void StartAmbientAnimations()
+    {
+        TrophyUi.WithVisual(_glow, glow =>
+        {
+            const int steps = 8;
+            var pulse = glow.Compositor.CreateScalarKeyFrameAnimation();
+            pulse.Target = "Opacity";
+            pulse.Duration = TimeSpan.FromSeconds(2 * Math.PI / 2.4);
+            pulse.IterationBehavior = AnimationIterationBehavior.Forever;
+            for (var i = 0; i <= steps; i++)
+            {
+                var phase = (double)i / steps;
+                pulse.InsertKeyFrame((float)phase, (float)(0.75 + 0.25 * Math.Sin(phase * 2 * Math.PI)));
+            }
+
+            glow.StartAnimation("Opacity", pulse);
+        });
+
+        if (_rays.Children.Count > 0)
+        {
+            TrophyUi.WithVisual(_rays, rays =>
+            {
+                var spin = rays.Compositor.CreateScalarKeyFrameAnimation();
+                spin.Target = "RotationAngle";
+                spin.Duration = TimeSpan.FromSeconds(20);
+                spin.IterationBehavior = AnimationIterationBehavior.Forever;
+                spin.InsertKeyFrame(0f, 0f);
+                spin.InsertKeyFrame(1f, (float)(2 * Math.PI));
+                rays.CenterPoint = new Vector3D(MedalColumn / 2, CardHeight / 2, 0);
+                rays.StartAnimation("RotationAngle", spin);
+            });
+        }
+    }
+
+    private bool Tick()
     {
         var t = _clock.Elapsed.TotalSeconds;
-        var dt = Math.Min(0.05, t - _lastFrame);
-        _lastFrame = t;
         if (t >= _leaveAt + ExitSeconds)
         {
-            _frame.Stop();
             Close();
-            return;
+            return false;
         }
 
         var leaving = t > _leaveAt;
@@ -530,11 +580,11 @@ internal sealed class TrophyToast : Window
             _medalScale.ScaleX = _medalScale.ScaleY = 1;
             if (_content.Total > 0)
             {
-                _progress.Value = PercentOf(_content.Earned);
+                _progressScale.ScaleX = PercentOf(_content.Earned) / 100;
                 _progressText.Text = $"{_content.Earned} / {_content.Total}";
             }
 
-            return;
+            return true;
         }
 
         Opacity = 1;
@@ -544,6 +594,9 @@ internal sealed class TrophyToast : Window
         var melt = EaseInOutCubic(Math.Clamp((leave - 0.65) / 0.35, 0, 1));
         var openW = leaving ? 1 - fold : Math.Max(0, Spring(t - ExpandAt, 11, 0.74));
         var openH = leaving ? 1 - fold : Math.Max(0, Spring(t - ExpandAt - 0.04, 10, 0.8));
+
+        // The pill-to-card morph is the one layout-driven step: it lasts about half a second at each end, and the
+        // subtree it re-arranges is fixed-size.
         var width = PillSize + (CardWidth - PillSize) * openW;
         var height = PillSize + (CardHeight - PillSize) * openH;
         _cardHost.Width = width;
@@ -554,7 +607,6 @@ internal sealed class TrophyToast : Window
         _glow.CornerRadius = radius;
         _cardHost.Opacity = Math.Min(1, t / 0.2) * (1 - melt);
         _cardShift.Y = -10 * melt;
-        SetBlur(_cardHost, (1 - pop) * 12 + melt * 10);
 
         var spin = Math.Clamp((t - SpinStart) / (Impact - SpinStart), 0, 1);
         _medal.Spin = (1 - EaseOutQuart(spin)) * Math.PI * 6;
@@ -574,13 +626,13 @@ internal sealed class TrophyToast : Window
         if (sinceImpact >= 0 && !_burstDone)
         {
             _burstDone = true;
-            SpawnSparkles(_content.Grade switch { 1 => 26, 2 => 18, 3 => 14, _ => 10 }, _content.Grade == 1 ? 1.25 : 1.0);
+            SpawnSparkles(t, _content.Grade switch { 1 => 26, 2 => 18, 3 => 14, _ => 10 }, _content.Grade == 1 ? 1.25 : 1.0);
         }
 
         if (_content.Grade == 1 && sinceImpact >= 0.55 && !_secondBurstDone)
         {
             _secondBurstDone = true;
-            SpawnSparkles(16, 0.8);
+            SpawnSparkles(t, 16, 0.8);
         }
 
         var ring = sinceImpact / 0.7;
@@ -591,21 +643,19 @@ internal sealed class TrophyToast : Window
         }
 
         _rays.Opacity = sinceImpact >= 0 ? Math.Min(1, sinceImpact * 3) * (1 - textOut) : 0;
-        _raysSpin.Angle = t * 18;
 
         foreach (var (line, shift, delay) in _lines)
         {
-            var progress = EaseOutCubic(Math.Clamp((t - delay) / 0.45, 0, 1));
-            shift.Y = (1 - progress) * 8 - textOut * 4;
+            var progress = EaseOutCubic(Math.Clamp((t - delay) / 0.35, 0, 1));
+            shift.Y = (1 - progress) * 10 - textOut * 4;
             line.Opacity = progress * (1 - textOut);
-            SetBlur(line, (1 - progress) * 6 + textOut * 5);
         }
 
         if (_content.Total > 0)
         {
             var fill = Math.Clamp((sinceImpact - 0.15) / 0.8, 0, 1);
             var before = PercentOf(_content.Earned - 1);
-            _progress.Value = before + (PercentOf(_content.Earned) - before) * EaseOutCubic(fill);
+            _progressScale.ScaleX = (before + (PercentOf(_content.Earned) - before) * EaseOutCubic(fill)) / 100;
             _progressText.Text = $"{(fill > 0.5 ? _content.Earned : Math.Max(0, _content.Earned - 1))} / {_content.Total}";
         }
 
@@ -617,20 +667,21 @@ internal sealed class TrophyToast : Window
         _auroraA.Y = Math.Cos(t * 0.5) * 25;
         _auroraB.X = Math.Cos(t * 0.6) * 70;
         _auroraB.Y = Math.Sin(t * 0.8) * 30;
-        _glow.Opacity = 0.75 + 0.25 * Math.Sin(t * 2.4);
         if (_content.Grade == 1)
         {
             _edgeSpin.Angle = t * 40;
         }
 
-        StepSparkles(dt);
+        RetireSparkles(t);
+        return true;
     }
 
-    private void SpawnSparkles(int count, double reach)
+    private void SpawnSparkles(double now, int count, double reach)
     {
         Color[] colors = _content.Grade == 1
             ? [_light, Colors.White, Color.Parse("#C9B8FF"), Color.Parse("#FFC4EC")]
             : [_light, Colors.White, _light, _mid];
+        var looks = new Dictionary<Color, (IBrush Fill, IBrush Halo)>();
         var origin = MedalCenter;
         for (var i = 0; i < count; i++)
         {
@@ -639,64 +690,104 @@ internal sealed class TrophyToast : Window
             var dot = _random.NextDouble() < 0.3;
             var size = dot ? 3 + _random.NextDouble() * 2 : 9 + _random.NextDouble() * (_content.Grade == 1 ? 12 : 8);
             var color = colors[_random.Next(colors.Length)];
-            var rotation = new RotateTransform(_random.NextDouble() * 45);
-            var scale = new ScaleTransform(0, 0);
-            Control visual = dot
-                ? new Border { Width = size, Height = size, CornerRadius = new CornerRadius(size / 2), Background = new SolidColorBrush(color) }
-                : new Avalonia.Controls.Shapes.Path
-                {
-                    Data = SparkleShape,
-                    Width = size,
-                    Height = size,
-                    Stretch = Stretch.Fill,
-                    Fill = new SolidColorBrush(color),
-                };
-            visual.RenderTransformOrigin = new RelativePoint(0.5, 0.5, RelativeUnit.Relative);
-            visual.RenderTransform = new TransformGroup { Children = { scale, rotation } };
-            visual.Effect = new DropShadowEffect { BlurRadius = 8, OffsetX = 0, OffsetY = 0, Color = color, Opacity = 0.9 };
-            _sparkles.Add(new Sparkle
+            if (!looks.TryGetValue(color, out var look))
             {
-                Visual = visual,
-                Rotation = rotation,
-                Scale = scale,
-                X = origin.X,
-                Y = origin.Y,
-                Vx = Math.Cos(angle) * speed,
-                Vy = Math.Sin(angle) * speed,
-                Life = 0.55 + _random.NextDouble() * 0.5,
-                Spin = (_random.NextDouble() - 0.5) * 240,
-                Twinkle = 14 + _random.NextDouble() * 12,
-                Size = size,
-            });
+                look = (new SolidColorBrush(color), new RadialGradientBrush
+                {
+                    GradientStops =
+                    {
+                        new GradientStop(Color.FromArgb(150, color.R, color.G, color.B), 0),
+                        new GradientStop(Color.FromArgb(0, color.R, color.G, color.B), 1),
+                    },
+                });
+                looks[color] = look;
+            }
+
+            // The soft halo is a gradient disc rather than a drop shadow, which would need an offscreen pass per frame.
+            var box = size * 2.6;
+            Control body = dot
+                ? new Border { Width = size, Height = size, CornerRadius = new CornerRadius(size / 2), Background = look.Fill }
+                : new Avalonia.Controls.Shapes.Path { Data = SparkleShape, Width = size, Height = size, Stretch = Stretch.Fill, Fill = look.Fill };
+            body.HorizontalAlignment = HorizontalAlignment.Center;
+            body.VerticalAlignment = VerticalAlignment.Center;
+            var visual = new Grid
+            {
+                Width = box,
+                Height = box,
+                IsHitTestVisible = false,
+                Children =
+                {
+                    new Border { CornerRadius = new CornerRadius(box / 2), Background = look.Halo },
+                    body,
+                },
+            };
+            Canvas.SetLeft(visual, origin.X - box / 2);
+            Canvas.SetTop(visual, origin.Y - box / 2);
             _overlay.Children.Add(visual);
+
+            var life = 0.55 + _random.NextDouble() * 0.5;
+            AnimateSparkle(
+                visual,
+                new Vector(Math.Cos(angle) * speed, Math.Sin(angle) * speed),
+                life,
+                _random.NextDouble() * 45,
+                (_random.NextDouble() - 0.5) * 240,
+                14 + _random.NextDouble() * 12);
+            _sparkles.Add(new Sparkle(visual, now + life + 0.1));
         }
     }
 
-    private void StepSparkles(double dt)
+    private static void AnimateSparkle(Control visual, Vector velocity, double life, double rotation, double spin, double twinkle)
+    {
+        // Closed form of the original drag-and-lift integration: velocity decays by dragRate and an upward drift fights it.
+        const double dragRate = 5.5;
+        const double lift = 30;
+        var steps = (int)Math.Ceiling(life / SparkleSampleSeconds);
+        TrophyUi.WithVisual(visual, composition =>
+        {
+            var compositor = composition.Compositor;
+            var move = compositor.CreateVector3DKeyFrameAnimation();
+            var scale = compositor.CreateVector3DKeyFrameAnimation();
+            var fade = compositor.CreateScalarKeyFrameAnimation();
+            var turn = compositor.CreateScalarKeyFrameAnimation();
+            move.Target = "Translation";
+            scale.Target = "Scale";
+            fade.Target = "Opacity";
+            turn.Target = "RotationAngle";
+            move.Duration = scale.Duration = fade.Duration = turn.Duration = TimeSpan.FromSeconds(life);
+            for (var i = 0; i <= steps; i++)
+            {
+                var fraction = (double)i / steps;
+                var age = fraction * life;
+                var decay = 1 - Math.Exp(-dragRate * age);
+                var x = velocity.X / dragRate * decay;
+                var y = (velocity.Y + lift / dragRate) / dragRate * decay - lift / dragRate * age;
+                var twinkling = 0.8 + 0.2 * Math.Sin(age * twinkle);
+                var size = Math.Min(1, fraction * 6) * twinkling * (1 - 0.5 * fraction);
+                move.InsertKeyFrame((float)fraction, new Vector3D(x, y, 0));
+                scale.InsertKeyFrame((float)fraction, new Vector3D(size, size, 1));
+                fade.InsertKeyFrame((float)fraction, (float)(1 - EaseInCubic(fraction)));
+            }
+
+            turn.InsertKeyFrame(0f, (float)(rotation * Math.PI / 180));
+            turn.InsertKeyFrame(1f, (float)((rotation + spin * life) * Math.PI / 180));
+            composition.CenterPoint = new Vector3D(visual.Width / 2, visual.Height / 2, 0);
+            composition.StartAnimation("Translation", move);
+            composition.StartAnimation("Scale", scale);
+            composition.StartAnimation("Opacity", fade);
+            composition.StartAnimation("RotationAngle", turn);
+        }, () => visual.IsVisible = false);
+    }
+
+    private void RetireSparkles(double now)
     {
         for (var i = _sparkles.Count - 1; i >= 0; i--)
         {
-            var p = _sparkles[i];
-            p.Age += dt;
-            if (p.Age >= p.Life)
+            if (now >= _sparkles[i].ExpiresAt)
             {
-                _overlay.Children.Remove(p.Visual);
+                _overlay.Children.Remove(_sparkles[i].Visual);
                 _sparkles.RemoveAt(i);
-                continue;
             }
-
-            p.Vx *= 1 - 5.5 * dt;
-            p.Vy = p.Vy * (1 - 5.5 * dt) - 30 * dt;
-            p.X += p.Vx * dt;
-            p.Y += p.Vy * dt;
-            p.Rotation.Angle += p.Spin * dt;
-            var life = p.Age / p.Life;
-            var grow = Math.Min(1, life * 6);
-            var twinkle = 0.8 + 0.2 * Math.Sin(p.Age * p.Twinkle);
-            p.Scale.ScaleX = p.Scale.ScaleY = grow * twinkle * (1 - 0.5 * life);
-            Canvas.SetLeft(p.Visual, p.X - p.Size / 2);
-            Canvas.SetTop(p.Visual, p.Y - p.Size / 2);
-            p.Visual.Opacity = 1 - EaseInCubic(life);
         }
     }
 
@@ -709,28 +800,6 @@ internal sealed class TrophyToast : Window
 
         var damped = omega * Math.Sqrt(1 - zeta * zeta);
         return 1 - Math.Exp(-zeta * omega * t) * (Math.Cos(damped * t) + zeta * omega / damped * Math.Sin(damped * t));
-    }
-
-    private static void SetBlur(Control control, double radius)
-    {
-        if (radius < 0.4)
-        {
-            if (control.Effect is not null)
-            {
-                control.Effect = null;
-            }
-
-            return;
-        }
-
-        if (control.Effect is BlurEffect blur)
-        {
-            blur.Radius = radius;
-        }
-        else
-        {
-            control.Effect = new BlurEffect { Radius = radius };
-        }
     }
 
     private static double EaseOutCubic(double t) => 1 - Math.Pow(1 - t, 3);

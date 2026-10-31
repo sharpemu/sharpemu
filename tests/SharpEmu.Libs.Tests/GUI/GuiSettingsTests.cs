@@ -9,34 +9,35 @@ namespace SharpEmu.Libs.Tests.GUI;
 public sealed class GuiSettingsTests
 {
     [Fact]
-    public void NewSettingsEnableWritableApp0AndDisableImportLoopGuard()
+    public void NewGamesEnableWritableApp0AndDisableImportLoopGuard()
     {
-        var settings = new GuiSettings();
-        Assert.Equal(["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"], settings.EnvironmentToggles);
-        Assert.True(settings.OverlayEnabled);
-        Assert.Equal("TitleBar", settings.OverlayMode);
-        Assert.Equal("Guest", settings.BinkPlaybackMode);
-        settings.EnvironmentToggles.Clear();
-        Assert.Equal(["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"], new GuiSettings().EnvironmentToggles);
+        var effective = EffectiveLaunchSettings.Resolve(null);
+        Assert.Equal(["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"], effective.EnvironmentToggles);
+        Assert.True(effective.OverlayEnabled);
+        Assert.Equal("TitleBar", effective.OverlayMode);
+        Assert.Equal("Guest", effective.BinkPlaybackMode);
     }
 
     [Theory]
     [InlineData("{ \"EnvironmentToggles\": [] }")]
-    [InlineData("{ \"EnvironmentToggles\": [\"SHARPEMU_WRITABLE_APP0=0\"] }")]
-    public void SavedWritableApp0OptOutSurvivesReload(string json)
+    [InlineData("{ \"EnvironmentToggles\": [\"SHARPEMU_WRITABLE_APP0=0\", \"SHARPEMU_DISABLE_IMPORT_LOOP_GUARD=0\"] }")]
+    public void GlobalWritableApp0OptOutMovesToGames(string json)
     {
-        var settings = GuiSettings.NormalizeFromJson(json);
-        Assert.DoesNotContain("SHARPEMU_WRITABLE_APP0", settings.EnvironmentToggles);
-        Assert.DoesNotContain("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD", settings.EnvironmentToggles);
-        var restored = GuiSettings.NormalizeFromJson(System.Text.Json.JsonSerializer.Serialize(settings));
-        Assert.Equal(settings.EnvironmentToggles, restored.EnvironmentToggles);
+        var game = new PerGameSettings();
+        SettingsSplitMigration.Fill(game, SettingsSplitMigration.CarriedValues(json));
+        var restored = PerGameSettings.NormalizeFromJson(System.Text.Json.JsonSerializer.Serialize(game));
+
+        var effective = EffectiveLaunchSettings.Resolve(restored);
+        Assert.DoesNotContain("SHARPEMU_WRITABLE_APP0", effective.EnvironmentToggles);
+        Assert.DoesNotContain("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD", effective.EnvironmentToggles);
     }
 
     [Fact]
-    public void SavedHostPlaybackChoiceSurvivesNewGuestDefault()
+    public void GlobalHostPlaybackChoiceMovesToGames()
     {
-        var settings = GuiSettings.NormalizeFromJson("""{"BinkPlaybackMode":"Host"}""");
-        Assert.Equal("Host", settings.BinkPlaybackMode);
+        var carried = SettingsSplitMigration.CarriedValues("""{"BinkPlaybackMode":"Host"}""");
+        Assert.Equal("Host", carried.BinkPlaybackMode);
+        Assert.Null(SettingsSplitMigration.CarriedValues("""{"BinkPlaybackMode":"guest"}""").BinkPlaybackMode);
     }
 
     [Theory]
@@ -44,11 +45,9 @@ public sealed class GuiSettingsTests
     [InlineData(true)]
     public void CrashDumpChoiceSurvivesReload(bool enabled)
     {
-        var settings = new GuiSettings();
-        if (enabled)
-            settings.EnvironmentToggles.Add("SHARPEMU_CRASH_CAPTURE");
-        var restored = GuiSettings.NormalizeFromJson(System.Text.Json.JsonSerializer.Serialize(settings));
-        Assert.Equal(enabled, restored.EnvironmentToggles.Contains("SHARPEMU_CRASH_CAPTURE"));
+        var settings = new PerGameSettings { EnvironmentChanges = enabled ? ["SHARPEMU_CRASH_CAPTURE"] : null };
+        var restored = PerGameSettings.NormalizeFromJson(System.Text.Json.JsonSerializer.Serialize(settings));
+        Assert.Equal(enabled, EffectiveLaunchSettings.Resolve(restored).EnvironmentToggles.Contains("SHARPEMU_CRASH_CAPTURE"));
     }
 
     [Fact]
@@ -102,23 +101,17 @@ public sealed class GuiSettingsTests
 
         var settings = GuiSettings.NormalizeFromJson(json);
 
-        Assert.Equal("Info", settings.LogLevel);
         Assert.Equal("en", settings.Language);
-        Assert.Equal("PS5", settings.ConsoleType);
         Assert.Equal("EnglishUS", settings.ConsoleLanguage);
         Assert.Equal("1525606762248540221", settings.DiscordClientId);
         Assert.Empty(settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
-        Assert.Equal(["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"], settings.EnvironmentToggles);
-        Assert.Equal("Windowed", settings.WindowMode);
-        Assert.Equal("1920x1080", settings.Resolution);
-        Assert.Equal("Fit", settings.ScalingMode);
-        Assert.Equal("Auto", settings.HdrMode);
-        Assert.True(settings.VSync);
+        // Null game settings in a pre-split file are the defaults, so no game takes them.
+        Assert.True(SettingsSplitMigration.CarriedValues(json).IsEmpty);
     }
 
     [Fact]
-    public void NormalizeFromJson_InvalidVideoValues_FallBackAndClamp()
+    public void LegacyInvalidVideoValues_FallBackAndClamp()
     {
         const string json = """
             {
@@ -131,14 +124,15 @@ public sealed class GuiSettingsTests
             }
             """;
 
-        var settings = GuiSettings.NormalizeFromJson(json);
+        var carried = SettingsSplitMigration.CarriedValues(json);
 
-        Assert.Equal("Windowed", settings.WindowMode);
-        Assert.Equal("1920x1080", settings.Resolution);
-        Assert.Equal("Fit", settings.ScalingMode);
-        Assert.Equal("Auto", settings.HdrMode);
-        Assert.Equal(0, settings.DisplayIndex);
-        Assert.Equal(1000, settings.RefreshRate);
+        // Invalid values were loaded as the defaults, which games now start from anyway.
+        Assert.Null(carried.WindowMode);
+        Assert.Null(carried.Resolution);
+        Assert.Null(carried.ScalingMode);
+        Assert.Null(carried.HdrMode);
+        Assert.Null(carried.DisplayIndex);
+        Assert.Equal(1000, carried.RefreshRate);
     }
 
     [Fact]
@@ -149,9 +143,7 @@ public sealed class GuiSettingsTests
         var turkish = GuiSettings.NormalizeFromJson(
             """{ "ConsoleType": "ps5", "ConsoleLanguage": "turkish" }""");
 
-        Assert.Equal("PS5", invalid.ConsoleType);
         Assert.Equal("EnglishUS", invalid.ConsoleLanguage);
-        Assert.Equal("PS5", turkish.ConsoleType);
         Assert.Equal("Turkish", turkish.ConsoleLanguage);
     }
 
@@ -169,13 +161,13 @@ public sealed class GuiSettingsTests
     }
 
     [Fact]
-    public void NormalizeFromJson_CustomResolution_IsPreserved()
+    public void LegacyCustomResolution_IsCarried()
     {
         const string json = """{ "Resolution": "3440x1440" }""";
 
-        var settings = GuiSettings.NormalizeFromJson(json);
+        var carried = SettingsSplitMigration.CarriedValues(json);
 
-        Assert.Equal("3440x1440", settings.Resolution);
+        Assert.Equal("3440x1440", carried.Resolution);
     }
 
     [Fact]
@@ -193,13 +185,14 @@ public sealed class GuiSettingsTests
             """;
 
         var settings = GuiSettings.NormalizeFromJson(json);
+        var carried = SettingsSplitMigration.CarriedValues(json);
 
-        Assert.Equal("Debug", settings.LogLevel);
         Assert.Equal("pt-BR", settings.Language);
         Assert.Equal("999", settings.DiscordClientId);
         Assert.Equal(["C:\\Games"], settings.GameFolders);
         Assert.Equal(["C:\\Games\\skip.bin"], settings.ExcludedGames);
-        Assert.Equal(["SHARPEMU_TRACE"], settings.EnvironmentToggles);
+        Assert.Equal("Debug", carried.LogLevel);
+        Assert.Equal(["SHARPEMU_TRACE"], carried.EnvironmentToggles);
     }
 
     [Fact]
@@ -235,29 +228,29 @@ public sealed class GuiSettingsTests
             """;
 
         var settings = GuiSettings.NormalizeFromJson(json);
+        var carried = SettingsSplitMigration.CarriedValues(json);
 
-        Assert.Equal("Debug", settings.LogLevel);
-        Assert.Equal(96, settings.ImportTraceLimit);
-        Assert.True(settings.StrictDynlibResolution);
-        Assert.True(settings.LogToFile);
+        Assert.Equal("Debug", carried.LogLevel);
+        Assert.Equal(96, carried.ImportTraceLimit);
+        Assert.True(carried.StrictDynlibResolution);
+        Assert.True(carried.LogToFile);
         Assert.Equal("C:\\Logs\\sharpemu.log", settings.LogFilePath);
         Assert.True(settings.OverrideLogFile);
         Assert.False(settings.PlayTitleMusic);
         Assert.Equal("C:\\SharpEmu\\SharpEmu.exe", settings.EmulatorPath);
         Assert.Equal("ru", settings.Language);
-        Assert.Equal("Player", settings.DefaultProfile);
         Assert.False(settings.DiscordRichPresence);
         Assert.False(settings.CheckForUpdatesOnStartup);
-        Assert.Equal("Borderless", settings.WindowMode);
-        Assert.Equal("2560x1440", settings.Resolution);
-        Assert.Equal(2, settings.DisplayIndex);
-        Assert.Equal(144, settings.RefreshRate);
-        Assert.Equal("Integer", settings.ScalingMode);
-        Assert.False(settings.VSync);
-        Assert.Equal("On", settings.HdrMode);
+        Assert.Equal("Borderless", carried.WindowMode);
+        Assert.Equal("2560x1440", carried.Resolution);
+        Assert.Equal(2, carried.DisplayIndex);
+        Assert.Equal(144, carried.RefreshRate);
+        Assert.Equal("Integer", carried.ScalingMode);
+        Assert.False(carried.VSync);
+        Assert.Equal("On", carried.HdrMode);
         Assert.Equal(
             ["SHARPEMU_VK_VALIDATION", "SHARPEMU_DUMP_SPIRV"],
-            settings.EnvironmentToggles);
+            carried.EnvironmentToggles);
         Assert.Equal("999", settings.DiscordClientId);
     }
 
@@ -287,7 +280,7 @@ public sealed class GuiSettingsTests
 
         Assert.Equal(["C:\\Games"], settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
-        Assert.Equal(["SHARPEMU_TRACE"], settings.EnvironmentToggles);
+        Assert.Equal(["SHARPEMU_TRACE"], SettingsSplitMigration.CarriedValues(json).EnvironmentToggles);
     }
 
     [Fact]
@@ -295,27 +288,15 @@ public sealed class GuiSettingsTests
     {
         var settings = GuiSettings.NormalizeFromJson("{}");
 
-        Assert.Equal("Info", settings.LogLevel);
         Assert.Equal("en", settings.Language);
         Assert.Equal("1525606762248540221", settings.DiscordClientId);
         Assert.Empty(settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
-        Assert.Equal(["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"], settings.EnvironmentToggles);
     }
 
     [Fact]
     public void EffectiveLaunchSettings_PerGameVideoValuesOverrideOnlySelectedFields()
     {
-        var global = new GuiSettings
-        {
-            WindowMode = "Windowed",
-            Resolution = "1920x1080",
-            DisplayIndex = 1,
-            RefreshRate = 60,
-            ScalingMode = "Fit",
-            HdrMode = "Auto",
-            VSync = true,
-        };
         var perGame = new PerGameSettings
         {
             Resolution = "2560x1440",
@@ -324,12 +305,12 @@ public sealed class GuiSettingsTests
             VSync = false,
         };
 
-        var effective = EffectiveLaunchSettings.Resolve(global, perGame);
+        var effective = EffectiveLaunchSettings.Resolve(perGame);
 
         Assert.Equal("Windowed", effective.WindowMode);
         Assert.Equal("2560x1440", effective.Resolution);
         Assert.Equal(2, effective.DisplayIndex);
-        Assert.Equal(60, effective.RefreshRate);
+        Assert.Equal(0, effective.RefreshRate);
         Assert.Equal("Fit", effective.ScalingMode);
         Assert.Equal("On", effective.HdrMode);
         Assert.False(effective.VSync);

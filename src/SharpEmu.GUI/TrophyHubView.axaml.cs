@@ -38,30 +38,36 @@ public partial class TrophyHubView : UserControl
     }
 
     private static readonly Color Gold = Color.Parse("#F2B93B");
-    private static readonly TimeSpan PageSettleTime = TimeSpan.FromMilliseconds(320);
-    private static readonly IBrush SecondaryText = new SolidColorBrush(Color.Parse("#A8ADB7"));
-    private static readonly IBrush CardBrush = new SolidColorBrush(Color.FromArgb(20, 255, 255, 255));
-    private static readonly IBrush CompleteCardBrush = new LinearGradientBrush
+    private const double HeroSpinSeconds = 1.1;
+    private static readonly TimeSpan PageSettleTime = TimeSpan.FromMilliseconds(260);
+    private static readonly IBrush SecondaryText = LauncherThemes.Brush("SecondaryTextBrush");
+    private static readonly IBrush CardBrush = LauncherThemes.Brush("PaneGlassBrush");
+    private static readonly IBrush CardRim = LauncherThemes.Brush("GlassRimBrush");
+    private static readonly IBrush CompleteRim = new SolidColorBrush(Color.FromArgb(150, Gold.R, Gold.G, Gold.B));
+
+    // A completed game gets a gold wash fading out from its left edge over the glass.
+    private static readonly IBrush CompleteWash = new LinearGradientBrush
     {
         StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
         EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
         GradientStops =
         {
-            new GradientStop(Color.FromArgb(56, Gold.R, Gold.G, Gold.B), 0),
-            new GradientStop(Color.FromArgb(14, 255, 255, 255), 0.6),
+            new GradientStop(Color.FromArgb(64, Gold.R, Gold.G, Gold.B), 0),
+            new GradientStop(Color.FromArgb(0, Gold.R, Gold.G, Gold.B), 0.6),
         },
     };
 
     private IReadOnlyList<GameEntry> _games = [];
-    private readonly List<(Border Card, GameSummary Summary)> _cards = [];
+    private readonly List<(Border Card, GameSummary Summary, Border Ring)> _cards = [];
     private readonly List<(Border Chip, Sort Sort)> _sortChips = [];
-    private readonly DispatcherTimer _idle = new() { Interval = TimeSpan.FromMilliseconds(16) };
     private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
     private IReadOnlyList<GameSummary> _summaries = [];
     private Sort _sort = Sort.Recent;
     private int _selected = -1;
     private double _shownAt;
     private bool _wasShown;
+    private bool _active;
+    private bool _heroPending;
     private bool _animated;
     private string _signature = string.Empty;
     private long _stamp;
@@ -91,26 +97,46 @@ public partial class TrophyHubView : UserControl
                 e.Handled = true;
             }
         };
+    }
 
-        _idle.Tick += (_, _) =>
+    private void RequestHeroFrame()
+    {
+        if (_heroPending || TopLevel.GetTopLevel(this) is not { } topLevel)
         {
-            if (!IsEffectivelyVisible)
-            {
-                _idle.Stop();
-                return;
-            }
+            return;
+        }
 
-            if (!_wasShown)
-            {
-                _wasShown = true;
-                _shownAt = _clock.Elapsed.TotalSeconds;
-            }
+        _heroPending = true;
+        topLevel.RequestAnimationFrame(HeroFrame);
+    }
 
-            var t = _clock.Elapsed.TotalSeconds - _shownAt;
-            HeroMedal.Spin = t < 1.4 ? (1 - (1 - Math.Pow(1 - t / 1.4, 4))) * Math.PI * 4 : 0;
-            var cycle = (t - 1.2) % 4.5;
-            HeroMedal.Glint = t > 1.2 && cycle < 0.9 ? cycle / 0.9 : -1;
-        };
+    // The medal only needs frames while it spins or glints; between glints a timer wakes it up.
+    private void HeroFrame(TimeSpan now)
+    {
+        _heroPending = false;
+        if (!_active || !IsEffectivelyVisible)
+        {
+            return;
+        }
+
+        if (!_wasShown)
+        {
+            _wasShown = true;
+            _shownAt = _clock.Elapsed.TotalSeconds;
+        }
+
+        var t = _clock.Elapsed.TotalSeconds - _shownAt;
+        HeroMedal.Spin = t < HeroSpinSeconds ? Math.Pow(1 - t / HeroSpinSeconds, 4) * Math.PI * 4 : 0;
+        var cycle = (t - 1.0) % 4.5;
+        HeroMedal.Glint = t > 1.0 && cycle < 0.9 ? cycle / 0.9 : -1;
+        if (t < HeroSpinSeconds || HeroMedal.Glint >= 0)
+        {
+            RequestHeroFrame();
+            return;
+        }
+
+        var wait = 1.0 + 4.5 * Math.Ceiling((t - 1.0) / 4.5) - t;
+        DispatcherTimer.RunOnce(RequestHeroFrame, TimeSpan.FromSeconds(Math.Max(0.05, wait)));
     }
 
     public async Task ShowAsync(IReadOnlyList<GameEntry> games)
@@ -118,7 +144,8 @@ public partial class TrophyHubView : UserControl
         _games = games;
         SearchBox.PlaceholderText = Localization.Instance.Get("Trophies.SearchWatermark");
         BuildSortChips();
-        _idle.Start();
+        _active = true;
+        RequestHeroFrame();
         await LoadAsync();
     }
 
@@ -131,7 +158,7 @@ public partial class TrophyHubView : UserControl
         _stamp = 0;
         _selected = -1;
         _animated = false;
-        _idle.Stop();
+        _active = false;
     }
 
     public bool HandleKey(Key key)
@@ -196,7 +223,9 @@ public partial class TrophyHubView : UserControl
         }
 
         LoadingState.IsVisible = _summaries.Count == 0;
-        await Task.Delay(PageSettleTime);
+
+        // Load while the page slides in; the cards are only built once the slide has settled.
+        var settle = Task.Delay(PageSettleTime);
         var summaries = await Task.Run(() =>
         {
             var loaded = games
@@ -211,6 +240,7 @@ public partial class TrophyHubView : UserControl
             TrophyCache.Save();
             return loaded;
         });
+        await settle;
 
         _stamp = stamp;
         LoadingState.IsVisible = false;
@@ -269,21 +299,20 @@ public partial class TrophyHubView : UserControl
         _cards.Clear();
         foreach (var summary in Sorted())
         {
-            var card = BuildCard(summary);
-            _cards.Add((card, summary));
+            var (card, ring) = BuildCard(summary);
+            _cards.Add((card, summary, ring));
             GameList.Children.Add(card);
         }
 
         if (_cards.Count == 0)
         {
-            GameList.Children.Add(new TextBlock
-            {
-                Text = Localization.Instance.Get(_summaries.Count == 0 ? "Trophies.None" : "Trophies.NoMatch"),
-                Foreground = SecondaryText,
-                FontSize = 13,
-            });
+            GameList.Children.Add(BuildEmptyState(noGames: _summaries.Count == 0));
+            Backdrop?.Show(null);
             return;
         }
+
+        // The page always has art behind it, not only once a card is hovered.
+        SetBackdrop(_cards[Math.Clamp(_selected, 0, _cards.Count - 1)].Summary.Game);
 
         if (stagger)
         {
@@ -293,15 +322,63 @@ public partial class TrophyHubView : UserControl
         Select(Math.Clamp(_selected, 0, _cards.Count - 1));
     }
 
+    /// <summary>Centred empty state: no trophy games yet, or nothing matching the search.</summary>
+    private static StackPanel BuildEmptyState(bool noGames)
+    {
+        var panel = new StackPanel
+        {
+            Spacing = 10,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 72, 0, 0),
+        };
+        panel.Children.Add(new Border
+        {
+            Width = 88,
+            Height = 88,
+            CornerRadius = new CornerRadius(44),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 8),
+            Background = LauncherThemes.Brush("FieldBrush"),
+            Child = new TextBlock
+            {
+                Classes = { "materialSymbol" },
+                Text = "emoji_events",
+                FontSize = 40,
+                LineHeight = 48,
+                Foreground = SecondaryText,
+            },
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = Localization.Instance.Get(noGames ? "Trophies.HubEmpty.Title" : "Trophies.NoMatch"),
+            FontSize = 20,
+            FontWeight = FontWeight.SemiBold,
+            HorizontalAlignment = HorizontalAlignment.Center,
+        });
+        if (noGames)
+        {
+            panel.Children.Add(new TextBlock
+            {
+                Text = Localization.Instance.Get("Trophies.HubEmpty.Hint"),
+                FontSize = 16,
+                Foreground = SecondaryText,
+                TextAlignment = TextAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center,
+            });
+        }
+
+        return panel;
+    }
+
     private void RenderTotals(IReadOnlyList<GameSummary> summaries)
     {
         var earned = summaries.Sum(s => s.Earned);
         var total = summaries.Sum(s => s.Trophies.Count);
         var percent = total == 0 ? 0 : earned * 100.0 / total;
         TotalOfText.Text = Localization.Instance.Format("Trophies.HubSummary", earned, total, summaries.Count);
-        var duration = TimeSpan.FromMilliseconds(_animated ? 400 : 1300);
-        TrophyUi.Animate(_animated ? earned : 0, earned, duration, value => TotalEarnedText.Text = ((int)Math.Round(value)).ToString());
-        TrophyUi.Animate(_animated ? percent : 0, percent, duration, value => TotalRing.Value = value);
+        var duration = TimeSpan.FromMilliseconds(_animated ? 300 : 800);
+        TrophyUi.Animate(TotalEarnedText, _animated ? earned : 0, earned, duration, value => TotalEarnedText.Text = ((int)Math.Round(value)).ToString());
+        TrophyUi.Animate(TotalRing, _animated ? percent : 0, percent, duration, value => TotalRing.Value = value);
         TotalGrades.Children.Clear();
         for (var grade = 1; grade <= 4; grade++)
         {
@@ -309,13 +386,13 @@ public partial class TrophyHubView : UserControl
         }
     }
 
-    private Border BuildCard(GameSummary summary)
+    private (Border Card, Border Ring) BuildCard(GameSummary summary)
     {
         var cover = new Border
         {
             Width = 72,
             Height = 72,
-            CornerRadius = new CornerRadius(16),
+            CornerRadius = new CornerRadius(12),
             ClipToBounds = true,
             Background = summary.Game.PlaceholderBrush,
         };
@@ -354,7 +431,7 @@ public partial class TrophyHubView : UserControl
         var coverFrame = new Grid { Width = 72, Height = 72, VerticalAlignment = VerticalAlignment.Center };
         coverFrame.Children.Add(new Border
         {
-            CornerRadius = new CornerRadius(16),
+            CornerRadius = new CornerRadius(12),
             BoxShadow = new BoxShadows(new BoxShadow { OffsetY = 3, Blur = 8, Color = Color.FromArgb(120, 0, 0, 0) }),
             Child = cover,
         });
@@ -374,8 +451,9 @@ public partial class TrophyHubView : UserControl
         var name = new TextBlock
         {
             Text = summary.Game.Name,
-            FontSize = 17,
+            FontSize = 18,
             FontWeight = FontWeight.SemiBold,
+            Foreground = LauncherThemes.Brush("TextBrush"),
             TextTrimming = TextTrimming.CharacterEllipsis,
         };
 
@@ -390,19 +468,19 @@ public partial class TrophyHubView : UserControl
                 {
                     Text = Localization.Instance.Format("Trophies.Progress", summary.Earned, summary.Trophies.Count, (int)Math.Round(summary.Percent)),
                     Foreground = SecondaryText,
-                    FontSize = 13.5,
+                    FontSize = 14,
                     VerticalAlignment = VerticalAlignment.Center,
                 },
             },
         };
         if (latest is not null)
         {
-            details.Children.Add(TrophyUi.Glyph("workspace_premium", 14, TrophyMedal.Palette(latest.Grade).Mid));
+            details.Children.Add(TrophyUi.Glyph("workspace_premium", 14, new SolidColorBrush(TrophyMedal.Palette(latest.Grade).Mid)));
             details.Children.Add(new TextBlock
             {
                 Text = Localization.Instance.Format("Trophies.Latest", latest.Name, latest.UnlockedAtUtc!.Value.ToLocalTime().ToString("d")),
                 Foreground = SecondaryText,
-                FontSize = 13.5,
+                FontSize = 14,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 VerticalAlignment = VerticalAlignment.Center,
             });
@@ -437,11 +515,11 @@ public partial class TrophyHubView : UserControl
             Children = { name, details, medals },
         };
 
-        var ring = new Grid { Width = 44, Height = 44, VerticalAlignment = VerticalAlignment.Center };
+        var percentRing = new Grid { Width = 44, Height = 44, VerticalAlignment = VerticalAlignment.Center };
         var progressRing = new TrophyProgressRing { Thickness = 4 };
-        TrophyUi.Animate(_animated ? summary.Percent : 0, summary.Percent, TimeSpan.FromMilliseconds(_animated ? 1 : 1100), value => progressRing.Value = value);
-        ring.Children.Add(progressRing);
-        ring.Children.Add(new TextBlock
+        TrophyUi.Animate(progressRing, _animated ? summary.Percent : 0, summary.Percent, TimeSpan.FromMilliseconds(_animated ? 1 : 700), value => progressRing.Value = value);
+        percentRing.Children.Add(progressRing);
+        percentRing.Children.Add(new TextBlock
         {
             Text = $"{Math.Round(summary.Percent)}%",
             FontSize = 12,
@@ -454,15 +532,16 @@ public partial class TrophyHubView : UserControl
         grid.Children.Add(coverFrame);
         Grid.SetColumn(middle, 1);
         grid.Children.Add(middle);
-        Grid.SetColumn(ring, 2);
-        grid.Children.Add(ring);
+        Grid.SetColumn(percentRing, 2);
+        grid.Children.Add(percentRing);
 
+        // The spotlight is the theme's text colour seen through a soft radial mask that follows the pointer.
         var spotlightBrush = new RadialGradientBrush
         {
             RadiusX = new RelativeScalar(0.3, RelativeUnit.Relative),
             GradientStops =
             {
-                new GradientStop(Color.FromArgb(30, 255, 255, 255), 0),
+                new GradientStop(Colors.White, 0),
                 new GradientStop(Color.FromArgb(0, 255, 255, 255), 1),
             },
         };
@@ -470,28 +549,44 @@ public partial class TrophyHubView : UserControl
         {
             IsHitTestVisible = false,
             Opacity = 0,
-            Background = spotlightBrush,
+            Background = LauncherThemes.Brush("TextBrush"),
+            OpacityMask = spotlightBrush,
             Transitions = [new Avalonia.Animation.DoubleTransition { Property = Visual.OpacityProperty, Duration = TimeSpan.FromMilliseconds(220) }],
         };
+        var wash = TrophyUi.HoverWash();
+        var ring = TrophyUi.SelectionRing();
         var layers = new Grid();
+        if (summary.Complete)
+        {
+            layers.Children.Add(new Border { IsHitTestVisible = false, Background = CompleteWash });
+        }
+
+        layers.Children.Add(wash);
         layers.Children.Add(spotlight);
         layers.Children.Add(grid);
+        layers.Children.Add(ring);
 
         var card = new Border
         {
-            CornerRadius = new CornerRadius(18),
+            CornerRadius = TrophyUi.CardRadius,
             BorderThickness = new Thickness(1),
             ClipToBounds = true,
-            Background = summary.Complete ? CompleteCardBrush : CardBrush,
-            BorderBrush = RestingBorder(summary, selected: false),
+            Background = CardBrush,
+            BorderBrush = summary.Complete ? CompleteRim : CardRim,
+            BoxShadow = TrophyUi.GlassShadow,
             Cursor = new Cursor(StandardCursorType.Hand),
             Child = layers,
         };
-        TrophyUi.Lift(card);
+        TrophyUi.Lift(card, wash);
         card.PointerEntered += (_, _) =>
         {
-            _selected = _cards.FindIndex(c => c.Card == card);
-            spotlight.Opacity = 1;
+            var index = _cards.FindIndex(c => c.Card == card);
+            if (index >= 0)
+            {
+                ShowSelection(index);
+            }
+
+            spotlight.Opacity = 0.14;
             SetBackdrop(summary.Game);
         };
         card.PointerExited += (_, _) => spotlight.Opacity = 0;
@@ -506,13 +601,18 @@ public partial class TrophyHubView : UserControl
             spotlightBrush.RadiusY = new RelativeScalar(0.3 * width / height, RelativeUnit.Relative);
         };
         card.PointerPressed += (_, _) => Open(summary);
-        return card;
+        return (card, ring);
     }
 
-    private static IBrush RestingBorder(GameSummary summary, bool selected) =>
-        new SolidColorBrush(selected
-            ? Color.FromArgb(150, 255, 255, 255)
-            : summary.Complete ? Color.FromArgb(120, Gold.R, Gold.G, Gold.B) : Color.FromArgb(22, 255, 255, 255));
+    // Keyboard, pad and pointer share one selected state: the accent ring on exactly one card.
+    private void ShowSelection(int index)
+    {
+        _selected = index;
+        for (var i = 0; i < _cards.Count; i++)
+        {
+            _cards[i].Ring.Opacity = i == index ? 1 : 0;
+        }
+    }
 
     private void SetBackdrop(GameEntry game) => Backdrop?.Show(game);
 
@@ -523,12 +623,7 @@ public partial class TrophyHubView : UserControl
             return;
         }
 
-        _selected = index;
-        for (var i = 0; i < _cards.Count; i++)
-        {
-            _cards[i].Card.BorderBrush = RestingBorder(_cards[i].Summary, i == index);
-        }
-
+        ShowSelection(index);
         _cards[index].Card.BringIntoView();
         SetBackdrop(_cards[index].Summary.Game);
     }

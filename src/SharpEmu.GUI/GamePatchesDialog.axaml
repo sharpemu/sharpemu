@@ -3,15 +3,12 @@ Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
-<Window xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:local="clr-namespace:SharpEmu.GUI"
-        x:Class="SharpEmu.GUI.GamePatchesDialog"
-        Width="960" Height="700" MinWidth="780" MinHeight="560"
-        CanResize="True" WindowStartupLocation="CenterOwner"
-        Background="{StaticResource BgBrush}"
-        Title="{Binding [Library.Context.Patches], Source={x:Static local:Localization.Instance}}">
-  <Grid Margin="24" RowDefinitions="*,Auto,Auto" ColumnDefinitions="260,24,*">
+<local:SheetView xmlns="https://github.com/avaloniaui"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:local="clr-namespace:SharpEmu.GUI"
+                 x:Class="SharpEmu.GUI.GamePatchesDialog"
+                 SheetWidth="1040" SheetHeight="760">
+  <Grid Margin="28" RowDefinitions="*,Auto,Auto" ColumnDefinitions="260,24,*">
     <Grid Grid.Column="0" RowDefinitions="Auto,Auto,*">
       <Grid Height="150">
         <TextBlock x:Name="CoverInitials" FontSize="36" HorizontalAlignment="Left" VerticalAlignment="Center" />
@@ -111,4 +108,4 @@ SPDX-License-Identifier: GPL-2.0-or-later
               Content="{Binding [Library.Patches.Close], Source={x:Static local:Localization.Instance}}" />
     </Grid>
   </Grid>
-</Window>
+</local:SheetView>
