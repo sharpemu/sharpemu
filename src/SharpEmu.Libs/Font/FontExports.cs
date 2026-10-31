@@ -9,7 +9,7 @@ using SkiaSharp;
 
 namespace SharpEmu.Libs.Font;
 
-public static class FontExports
+public static partial class FontExports
 {
     private const ushort GlyphMagic = 0x0F03;
     private const int GlyphSize = 0x100;
