@@ -593,7 +593,10 @@ public sealed class CommandStreamQueue
         }
 
         if (complete)
+        {
             submission.Completion?.Consumed();
+            submission.ReleaseCommandBytes();
+        }
 
         return complete;
     }
