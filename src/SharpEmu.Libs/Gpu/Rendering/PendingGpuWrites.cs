@@ -46,14 +46,54 @@ public sealed class PendingGpuWrites
     private static long _scannedEntries;
     private static readonly long[] _pendingByKind = new long[(int)PendingWriteKind.Count];
 
-    private sealed class Entry(ulong address, ulong size, Level level)
+    private sealed class Entry(ulong address, ulong size, Level level, long sequence)
     {
         public readonly ulong Address = address;
         public readonly ulong Size = size;
         public readonly Level Level = level;
-        public long Sequence;
-        public long Oldest;
+        public long Sequence = sequence;
+        public long Oldest = sequence;
         public PendingWriteKind Kind;
+        private readonly List<long> _sequences = [sequence];
+        private long _prunedThrough;
+
+        public void NoteSequence(long value, long released)
+        {
+            lock (_sequences)
+            {
+                if (_sequences.Count != 0 && _sequences[0] <= released)
+                {
+                    var through = _sequences.BinarySearch(released);
+                    var count = through >= 0 ? through + 1 : ~through;
+                    _prunedThrough = Math.Max(_prunedThrough, _sequences[count - 1]);
+                    _sequences.RemoveRange(0, count);
+                }
+
+                if (_sequences.Count == 0 || value > _sequences[^1])
+                {
+                    _sequences.Add(value);
+                }
+                else
+                {
+                    var index = _sequences.BinarySearch(value);
+                    if (index < 0) _sequences.Insert(~index, value);
+                }
+            }
+        }
+
+        public bool HasBetween(long after, long before)
+        {
+            var oldest = Volatile.Read(ref Oldest);
+            var newest = Volatile.Read(ref Sequence);
+            if ((oldest > after && oldest < before) || (newest > after && newest < before)) return true;
+            lock (_sequences)
+            {
+                if (after < _prunedThrough) return true;
+                var index = _sequences.BinarySearch(after);
+                index = index >= 0 ? index + 1 : ~index;
+                return index < _sequences.Count && _sequences[index] < before;
+            }
+        }
 
         public ulong FirstBlock => Address >> Level.Shift;
 
@@ -110,7 +150,8 @@ public sealed class PendingGpuWrites
                 {
                     var entrySequence = Volatile.Read(ref entry.Sequence);
                     if (entrySequence > afterSequence && Volatile.Read(ref entry.Oldest) < beforeSequence &&
-                        entry.Address < address + size && address < entry.Address + entry.Size)
+                        entry.Address < address + size && address < entry.Address + entry.Size &&
+                        entry.HasBetween(afterSequence, beforeSequence))
                     {
                         return true;
                     }
@@ -176,6 +217,7 @@ public sealed class PendingGpuWrites
         {
             if (_entries.TryGetValue((address, size), out var remarked))
             {
+                remarked.NoteSequence(sequence, Volatile.Read(ref _released));
                 if (Volatile.Read(ref remarked.Sequence) <= Volatile.Read(ref _released))
                 {
                     Volatile.Write(ref remarked.Oldest, sequence);
@@ -206,6 +248,7 @@ public sealed class PendingGpuWrites
         {
             if (_entries.TryGetValue((address, size), out var remarked))
             {
+                remarked.NoteSequence(sequence, Volatile.Read(ref _released));
                 if (Volatile.Read(ref remarked.Sequence) <= Volatile.Read(ref _released))
                 {
                     Volatile.Write(ref remarked.Oldest, sequence);
@@ -227,7 +270,7 @@ public sealed class PendingGpuWrites
             }
 
             var fine = ((address + size - 1) >> FineShift) - (address >> FineShift) < MaxFineBlocks;
-            var entry = new Entry(address, size, fine ? _fine : _coarse) { Sequence = sequence, Oldest = sequence, Kind = kind };
+            var entry = new Entry(address, size, fine ? _fine : _coarse, sequence) { Kind = kind };
             _entries.Add((address, size), entry);
             if (fine)
             {
@@ -389,7 +432,8 @@ public sealed class PendingGpuWrites
                 {
                     var entrySequence = Volatile.Read(ref entry.Sequence);
                     if (entrySequence > afterSequence && Volatile.Read(ref entry.Oldest) < beforeSequence &&
-                        entry.Address < address + size && address < entry.Address + entry.Size)
+                        entry.Address < address + size && address < entry.Address + entry.Size &&
+                        entry.HasBetween(afterSequence, beforeSequence))
                     {
                         return true;
                     }

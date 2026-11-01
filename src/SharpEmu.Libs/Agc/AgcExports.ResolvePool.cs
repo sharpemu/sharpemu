@@ -144,8 +144,13 @@ public static partial class AgcExports
 
         // On a render worker recording a slice: the worker's result when it still holds, otherwise the
         // render thread takes the draw in order through JoinDeferredDraw.
-        private ResolvedDraw TakeWorkerResolvedDraw(DeferredDraw deferred)
+        internal bool CanRecordDeferred(DeferredWork work)
         {
+            if (work is not DeferredDraw deferred)
+            {
+                return true;
+            }
+
             if (!deferred.Done.IsSet)
             {
                 var started = Stopwatch.GetTimestamp();
@@ -159,12 +164,7 @@ public static partial class AgcExports
                 throw new InvalidOperationException("A resolve worker failed.", failure);
             }
 
-            if (deferred.SerialReason is not null || deferred.Record is null || !ValidateDeferredReads(deferred))
-            {
-                throw new SerialRequiredException("unresolved draw", resumable: true);
-            }
-
-            return deferred.Record;
+            return deferred.SerialReason is null && deferred.Record is not null && ValidateDeferredReads(deferred);
         }
 
         // At the stream position of a slice segment: whether a worker-resolved draw it recorded still holds.

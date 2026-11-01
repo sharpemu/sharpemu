@@ -1,11 +1,13 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using SharpEmu.GnmMode.Shaders;
 using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -28,6 +30,61 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
     private readonly HeadlessVulkan? _vulkan;
 
     public SliceRecordingTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
+
+    [Fact]
+    public void UnresolvedDrawsReachTheJoinerInOrderWithoutAllocatingRecordingBuffers()
+    {
+        var presenter = RuntimeHelpers.GetUninitializedObject(PresenterUnderTest.PresenterType);
+        var translation = (AgcExports.CommandStreamTranslation)RuntimeHelpers.GetUninitializedObject(typeof(AgcExports.CommandStreamTranslation));
+        PresenterUnderTest.PresenterType.GetField("_translation", PresenterUnderTest.InstanceMembers)!.SetValue(presenter, translation);
+        var host = RuntimeHelpers.GetUninitializedObject(PresenterUnderTest.RecordingHostType);
+        SetHostField(host, "_presenter", presenter);
+        SetHostField(host, "_bufferCache", RuntimeHelpers.GetUninitializedObject(typeof(GuestBufferCache)));
+        SetHostField(host, "_arena", new SliceArena(null!, 1));
+        var slice = Activator.CreateInstance(SliceType, nonPublic: true)!;
+        var items = (IList)SliceType.GetField("Items")!.GetValue(slice)!;
+        var itemType = items.GetType().GetGenericArguments()[0];
+        for (var index = 0; index < 32; index++)
+        {
+            var work = new AgcExports.DeferredDraw { SerialReason = "pending write read" };
+            work.Done.Set();
+            var item = Activator.CreateInstance(itemType, nonPublic: true)!;
+            itemType.GetField("Work")!.SetValue(item, work);
+            items.Add(item);
+        }
+
+        PresenterUnderTest.RecordingHostType.GetMethod("RecordSlice", PresenterUnderTest.InstanceMembers)!.Invoke(host, [slice]);
+
+        var segments = SliceType.GetField("Segments")!.GetValue(slice)!;
+        var dequeue = segments.GetType().GetMethod("TryDequeue")!;
+        for (var index = 0; index < items.Count; index++)
+        {
+            object?[] result = [null];
+            Assert.True((bool)dequeue.Invoke(segments, result)!);
+            var segment = result[0]!;
+            Assert.Equal(index, SegmentType.GetField("First")!.GetValue(segment));
+            Assert.Equal(0, SegmentType.GetField("Count")!.GetValue(segment));
+            Assert.Equal("unresolved draw", SegmentType.GetField("SerialReason")!.GetValue(segment));
+            Assert.Null(SegmentType.GetField("Buffer")!.GetValue(segment));
+            Assert.False((bool)PresenterUnderTest.PresenterType.GetMethod("JoinSegment", PresenterUnderTest.InstanceMembers)!.Invoke(presenter, [slice, segment])!);
+        }
+
+        Assert.Equal(items.Count, SliceType.GetField("Resume")!.GetValue(slice));
+        Assert.Null(PresenterUnderTest.RecordingHostType.GetField("_workerBuffer", PresenterUnderTest.InstanceMembers)!.GetValue(host));
+        Assert.Empty((IEnumerable)SliceType.GetField("Chunks")!.GetValue(slice)!);
+        Assert.Empty((IEnumerable)segments);
+    }
+
+    [Fact]
+    public void DeferredReadinessPropagatesWorkerFailures()
+    {
+        var translation = (AgcExports.CommandStreamTranslation)RuntimeHelpers.GetUninitializedObject(typeof(AgcExports.CommandStreamTranslation));
+        var failure = new InvalidOperationException("worker failed");
+        var work = new AgcExports.DeferredDraw { Failure = failure };
+        work.Done.Set();
+
+        Assert.Same(failure, Assert.Throws<InvalidOperationException>(() => translation.CanRecordDeferred(work)).InnerException);
+    }
 
     [Fact]
     public void GnmImagePreparationRefusesARecordingWorkerBeforeTouchingGpuStateWhileATextureAwaitsItsDetile()

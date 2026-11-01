@@ -207,4 +207,57 @@ public sealed class PendingGpuWritesTests
         pending.Mark(0x1000, 0, sequence: 3);
         Assert.Equal(generation, pending.Generation);
     }
+
+    [Theory]
+    [InlineData(0x10ul)]
+    [InlineData(0x10_0000ul)]
+    [InlineData(0x80_0000ul)]
+    public void ReleasedAndFutureWritesDoNotMakeAnEmptySequenceGapPending(ulong size)
+    {
+        var pending = new PendingGpuWrites();
+        pending.Mark(0x1000, size, sequence: 10);
+        pending.Mark(0x1000, size, sequence: 30);
+        pending.Release(15);
+
+        Assert.False(pending.HasPendingBetween(0x1000, 4, 15, 20));
+        Assert.False(pending.HasPendingBetween(0x1000, size, 15, 30));
+        Assert.True(pending.HasPendingBetween(0x1000, size, 15, 31));
+        pending.Mark(0x1000, size, sequence: 18);
+        Assert.True(pending.HasPendingBetween(0x1000, 4, 15, 20));
+        Assert.False(pending.HasPendingBetween(0x1000, size, 18, 30));
+    }
+
+    [Fact]
+    public void SequencePruningPreservesUnreleasedWritersAndConservativeHistoricalQueries()
+    {
+        var pending = new PendingGpuWrites();
+        pending.Mark(0x1000, 16, sequence: 10);
+        pending.Mark(0x1000, 16, sequence: 20);
+        pending.Mark(0x1000, 16, sequence: 30);
+        pending.Release(15);
+        pending.Mark(0x1000, 16, sequence: 40);
+
+        Assert.True(pending.HasPendingBetween(0x1000, 4, 15, 21));
+        Assert.True(pending.HasPendingBetween(0x1000, 4, 0, 15));
+        Assert.False(pending.HasPendingBetween(0x1000, 4, 20, 30));
+        pending.Release(35);
+        pending.Mark(0x1000, 16, sequence: 50);
+        Assert.False(pending.HasPendingBetween(0x1000, 4, 35, 40));
+        Assert.True(pending.HasPendingBetween(0x1000, 4, 35, 41));
+    }
+
+    [Fact]
+    public void ConcurrentOutOfOrderMarksPreserveEachActualSequence()
+    {
+        var pending = new PendingGpuWrites();
+        Parallel.For(1, 128, index => pending.Mark(0x1000, 16, sequence: index * 2));
+        pending.Release(101);
+        pending.Mark(0x1000, 16, sequence: 256);
+
+        for (var after = 101; after < 255; after++)
+        {
+            var expected = (after + 1) % 2 == 0;
+            Assert.Equal(expected, pending.HasPendingBetween(0x1000, 4, after, after + 2));
+        }
+    }
 }

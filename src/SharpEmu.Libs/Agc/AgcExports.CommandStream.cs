@@ -318,7 +318,7 @@ public static partial class AgcExports
                     recorder.Record(dispatch.Record);
                     break;
                 case DeferredDraw deferred:
-                    recorder.Record(TakeWorkerResolvedDraw(deferred));
+                    recorder.Record(deferred.Record!);
                     break;
                 default:
                     throw _host.Fatal($"The deferred work is unknown: {work.GetType().Name}.");

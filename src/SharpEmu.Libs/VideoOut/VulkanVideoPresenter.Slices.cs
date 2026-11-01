@@ -611,7 +611,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (segment.Count == 0)
                 {
                     _segmentsEmpty.Increment();
-                    _scheduler.DiscardRecording(segment.Buffer!);
+                    if (segment.Buffer is { } emptyBuffer)
+                    {
+                        _scheduler.DiscardRecording(emptyBuffer);
+                    }
                     return false;
                 }
 
@@ -865,7 +868,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             slice.Host = this;
             _buffers = _bufferCache.Snapshot;
-            var segment = BeginSegment(0);
+            SliceSegment? segment = null;
             slice.Resume = slice.Items.Count;
             try
             {
@@ -874,6 +877,26 @@ internal static unsafe partial class VulkanVideoPresenter
                     var started = System.Diagnostics.Stopwatch.GetTimestamp();
                     try
                     {
+                        if (!_presenter._translation.CanRecordDeferred(slice.Items[index].Work!))
+                        {
+                            const string reason = "unresolved draw";
+                            Interlocked.Increment(ref _serialReasons.GetOrAdd(reason, static _ => new StrongBox<long>()).Value);
+                            if (segment is null)
+                            {
+                                slice.Segments.Enqueue(new SliceSegment { First = index, SerialReason = reason });
+                                slice.Progress.Set();
+                            }
+                            else
+                            {
+                                segment.SerialReason = reason;
+                                EndSegment(slice, segment);
+                                segment = null;
+                            }
+
+                            continue;
+                        }
+
+                        segment ??= BeginSegment(index);
                         _itemSequence = slice.Items[index].Sequence;
                         if (slice.Items[index].Work is SharpEmu.Libs.Agc.AgcExports.GlobalBarrierWork)
                         {
@@ -898,8 +921,6 @@ internal static unsafe partial class VulkanVideoPresenter
                             slice.Resume = index + 1;
                             break;
                         }
-
-                        segment = BeginSegment(index + 1);
                     }
                     finally
                     {
