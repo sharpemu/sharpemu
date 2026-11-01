@@ -9,7 +9,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <SharpEmuVersion>0.0.6-mono</SharpEmuVersion>
+    <SharpEmuVersion>0.0.7-pulse</SharpEmuVersion>
     <Version>$(SharpEmuVersion)</Version>
 
     <RepoRoot>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)'))</RepoRoot>
