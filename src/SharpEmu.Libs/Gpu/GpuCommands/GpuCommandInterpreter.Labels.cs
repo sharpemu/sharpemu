@@ -194,7 +194,7 @@ public sealed partial class GpuCommandInterpreter
             case 4:
                 if (is64Bit)
                 {
-                    var clock = EndOfPipe.ReadReferenceClock();
+                    var clock = EndOfPipe.ReadGpuClock();
                     switch (cacheAction)
                     {
                         case 0x00:
@@ -240,12 +240,14 @@ public sealed partial class GpuCommandInterpreter
         PublishLabel(new EndOfPipeWrite(kind, SubmitId, destination, value, eventId, contextId), true);
     }
 
+    // The clock read here is only what a host without a GPU timeline writes. A host that defers the
+    // write replaces it with the clock at the end-of-pipe event (EndOfPipeWrite.ClockAtCompletion).
     private void RecordClock(ulong destination, ulong clock, bool withWriteBack, bool withInterrupt, int eventId, uint contextId)
     {
         var kind = withInterrupt
             ? (withWriteBack ? EndOfPipeWriteKind.InterruptWriteBack64 : EndOfPipeWriteKind.Interrupt64)
             : (withWriteBack ? EndOfPipeWriteKind.ClockWriteBack : EndOfPipeWriteKind.ClockWrite);
-        PublishLabel(new EndOfPipeWrite(kind, SubmitId, destination, clock, eventId, contextId), true);
+        PublishLabel(new EndOfPipeWrite(kind, SubmitId, destination, clock, eventId, contextId, ClockAtCompletion: true), true);
     }
 
     private void PublishLabel(in EndOfPipeWrite write, bool is64Bit)

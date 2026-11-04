@@ -94,6 +94,10 @@ public sealed class EndOfPipe
                 write.Kind == EndOfPipeWriteKind.FlipWithInterruptWriteBack32 ? 0 : write.ContextId);
     }
 
+    // The clock a guest reads as GPU time: the virtual GPU clock when the host can time its work, else the
+    // reference clock. CPU-side readers keep ReadReferenceClock.
+    public static ulong ReadGpuClock() => SharpEmu.Libs.Gpu.Vulkan.VirtualGpuClock.Active?.CurrentValue() ?? ReadReferenceClock();
+
     public static ulong ReadReferenceClock()
     {
         var hostFrequency = KernelRuntimeCompatExports.TscFrequency;
