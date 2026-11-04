@@ -50,6 +50,16 @@ Shadows belong to floating layers (sheets, menus, toasts, dialogs) alone.
   <SolidColorBrush x:Key="AccentTintBrush" Color="#24FFFFFF" />
   <SolidColorBrush x:Key="AccentForegroundBrush" Color="#111111" />
 
+  <!-- Checked boxes share the launcher accent and its contrasting glyph in each active state. -->
+  <StaticResource x:Key="CheckBoxCheckBackgroundFillChecked" ResourceKey="AccentBrush" />
+  <StaticResource x:Key="CheckBoxCheckBackgroundFillCheckedPointerOver" ResourceKey="AccentHoverBrush" />
+  <StaticResource x:Key="CheckBoxCheckBackgroundStrokeCheckedPointerOver" ResourceKey="AccentHoverBrush" />
+  <StaticResource x:Key="CheckBoxCheckBackgroundFillCheckedPressed" ResourceKey="AccentPressedBrush" />
+  <StaticResource x:Key="CheckBoxCheckBackgroundStrokeCheckedPressed" ResourceKey="AccentPressedBrush" />
+  <StaticResource x:Key="CheckBoxCheckGlyphForegroundChecked" ResourceKey="AccentForegroundBrush" />
+  <StaticResource x:Key="CheckBoxCheckGlyphForegroundCheckedPointerOver" ResourceKey="AccentForegroundBrush" />
+  <StaticResource x:Key="CheckBoxCheckGlyphForegroundCheckedPressed" ResourceKey="AccentForegroundBrush" />
+
   <!-- Fluent draws a hovered or dragged slider in its own accent shades (blue); keep
        sliders on the launcher accent in every state. -->
   <StaticResource x:Key="SliderThumbBackground" ResourceKey="AccentBrush" />
