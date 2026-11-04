@@ -76,6 +76,7 @@ public sealed class ModuleManager : IModuleManager
         var failed = 0;
         var jitted = 0;
         var jitFailed = 0;
+        var methods = new List<MethodBase>();
         foreach (var assembly in assemblies)
         {
             Type[] types;
@@ -129,18 +130,23 @@ public sealed class ModuleManager : IModuleManager
                         continue;
                     }
 
-                    try
-                    {
-                        RuntimeHelpers.PrepareMethod(member.MethodHandle);
-                        jitted++;
-                    }
-                    catch
-                    {
-                        jitFailed++;
-                    }
+                    methods.Add(member);
                 }
             }
         }
+
+        Parallel.ForEach(methods, new ParallelOptions { MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, 8) }, member =>
+        {
+            try
+            {
+                RuntimeHelpers.PrepareMethod(member.MethodHandle);
+                Interlocked.Increment(ref jitted);
+            }
+            catch
+            {
+                Interlocked.Increment(ref jitFailed);
+            }
+        });
 
         Console.Error.WriteLine(
             $"[HLE] Warmed {warmed} type initializers ({failed} threw) + JIT-compiled {jitted} methods ({jitFailed} skipped) across {assemblies.Length} HLE assemblies, plus {bclWarmed} framework type initializers.");

@@ -108,10 +108,13 @@ public sealed partial class GnmSelfLoader : ISelfLoader
         var importedModules = layout.ImportedModuleNames.Select(offset => ReadString(strings, offset))
             .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         var executable = imageName ?? (main ? "eboot.bin" : string.Empty);
+        var appliedPatchIds = new List<string>();
         foreach (var patch in _patches.Where(patch => string.Equals(patch.Executable, executable, StringComparison.OrdinalIgnoreCase)))
         {
             if (!patch.TryApply(memory, headers, imageBase, out var error))
                 Console.Error.WriteLine($"[GNM][PATCH] Could not apply '{patch.Name}': {error}");
+            else
+                appliedPatchIds.Add(patch.Id);
         }
         if (tlsId != 0)
             GuestTlsTemplate.UpdateInitializationImage(tlsId, ReadTlsImage(memory, imageBase, tls));
@@ -123,7 +126,7 @@ public sealed partial class GnmSelfLoader : ISelfLoader
         if (initEntry != 0)
             initializers.Insert(0, initEntry);
         if (memory is PhysicalVirtualMemory physical)
-            _ = GuestRedZonePatcher.Patch(memory, physical, headers, imageBase, imageSize);
+            _ = GuestRedZonePatcher.Patch(memory, physical, headers, imageBase, imageSize, data, appliedPatchIds);
         var proc = headers.FirstOrDefault(header => header.HeaderType == ProgramHeaderType.SceProcParam);
 
         Console.Error.WriteLine($"[GNM][LOADER] {executable}: base=0x{imageBase:X} entry=0x{imageBase + layout.ElfHeader.EntryPoint:X} " +

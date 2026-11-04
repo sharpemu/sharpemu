@@ -54,6 +54,32 @@ public sealed class TlsLoadPatchBoundaryTests
     }
 
     [Theory]
+    [InlineData(0x10u)]
+    [InlineData(0x20u)]
+    [InlineData(0x40u)]
+    public void ScanRestoresProtectionsAfterPatchingMultipleSites(uint firstPageProtection)
+    {
+        if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64) return;
+        using var fixture = new PatchFixture();
+        int[] offsets = [0x20, 0x80, 0x1008];
+        foreach (var offset in offsets)
+            fixture.Write([0x64, 0x48, 0x8B, 0x04, 0x25, 0, 0, 0, 0], offset);
+        fixture.Protect(0, 0x1000, firstPageProtection);
+        fixture.Protect(0x1000, 0x1000, 0x20);
+
+        fixture.Scan(0, 0x2000);
+
+        foreach (var offset in offsets)
+        {
+            Assert.Equal(new byte[] { 0x48, 0xE8 }, fixture.Read(2, offset));
+            Assert.Equal(0x90, fixture.Read(1, offset + 9)[0]);
+        }
+        Assert.Equal(firstPageProtection, fixture.ProtectionAt(0));
+        Assert.Equal(0x20u, fixture.ProtectionAt(0x1000));
+        Assert.Equal(0x40u, fixture.ProtectionAt(0x2000));
+    }
+
+    [Theory]
     [InlineData(0x01u)]
     [InlineData(0x104u)]
     [InlineData(0x04u)]
