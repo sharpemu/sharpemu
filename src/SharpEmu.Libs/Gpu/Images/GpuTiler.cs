@@ -73,6 +73,8 @@ public sealed unsafe class GpuTiler : IDisposable
     {
         public TileTransferArguments Arguments;
         public uint PipelineSlot;
+        public bool PackedWords;
+        public uint GroupsX, GroupsY, GroupsZ;
         public VkBuffer ArgumentsBuffer;
         public ulong ArgumentsOffset;
     }
@@ -84,6 +86,7 @@ public sealed unsafe class GpuTiler : IDisposable
     private readonly GpuRingBuffer _stream;
     private readonly TickDescriptorPools _pools;
     private readonly Pipeline[] _pipelines = new Pipeline[PipelineCount];
+    private readonly Pipeline[] _packedPipelines = new Pipeline[PipelineCount];
     private DescriptorSetLayout _descriptorLayout;
     private PipelineLayout _pipelineLayout;
     private Pipeline _d16ToD24;
@@ -136,7 +139,7 @@ public sealed unsafe class GpuTiler : IDisposable
     public void Dispose()
     {
         var vk = _device.Vk;
-        foreach (var pipeline in _pipelines)
+        foreach (var pipeline in _pipelines.Concat(_packedPipelines))
         {
             DestroyPipeline(pipeline);
         }
@@ -293,24 +296,25 @@ public sealed unsafe class GpuTiler : IDisposable
         return pipeline;
     }
 
-    private Pipeline GetPipeline(uint slot)
+    private Pipeline GetPipeline(uint slot, bool packedWords)
     {
         if (slot >= PipelineCount)
         {
             throw SubmissionScheduler.Fatal($"The tiler pipeline slot is out of range: slot={slot}.");
         }
 
-        if (_pipelines[slot].Handle != 0)
+        var pipelines = packedWords ? _packedPipelines : _pipelines;
+        if (pipelines[slot].Handle != 0)
         {
-            return _pipelines[slot];
+            return pipelines[slot];
         }
 
         var elementIndex = slot % ElementSizeCount;
         var directionIndex = slot / (KindCount * ElementSizeCount);
         var kindIndex = (slot / ElementSizeCount) % KindCount;
-        var spirv = TilerShaders.CreateBlockCopy((TilerBlockShape)kindIndex, 1u << (int)elementIndex, directionIndex != 0);
-        _pipelines[slot] = CreateComputePipeline(spirv, $"tiler kind={kindIndex} bytes={1u << (int)elementIndex} tile={directionIndex}");
-        return _pipelines[slot];
+        var spirv = TilerShaders.CreateBlockCopy((TilerBlockShape)kindIndex, 1u << (int)elementIndex, directionIndex != 0, packedWords);
+        pipelines[slot] = CreateComputePipeline(spirv, $"tiler kind={kindIndex} bytes={1u << (int)elementIndex} tile={directionIndex} packedWords={packedWords}");
+        return pipelines[slot];
     }
 
     private static bool TryMultiply(ulong left, ulong right, out ulong result)
@@ -348,11 +352,8 @@ public sealed unsafe class GpuTiler : IDisposable
         {
             var tiledWidth = transfer.TiledWidth != 0 ? transfer.TiledWidth : transfer.Pitch;
             var tiledHeight = transfer.TiledHeight != 0 ? transfer.TiledHeight : transfer.Height;
-            var groupsX = ((ulong)transfer.Width + 7) / 8;
-            var groupsY = ((ulong)transfer.Height + 7) / 8;
             if (!TileGeometry.TryGetBlockLayout(transfer.Kind, transfer.BytesPerElement, out var block) || transfer.Width == 0 ||
                 transfer.Height == 0 || transfer.Depth == 0 || transfer.Pitch < transfer.Width ||
-                groupsX > groupLimit.X || groupsY > groupLimit.Y || transfer.Depth > groupLimit.Z ||
                 (!transfer.Tail && (tiledWidth < transfer.Width || tiledHeight < transfer.Height)) ||
                 !IsValidRange(transfer.LinearOffset, transfer.LinearSize, linearCapacity) ||
                 !IsValidRange(transfer.TiledOffset, transfer.TiledSize, tiledCapacity) ||
@@ -442,9 +443,25 @@ public sealed unsafe class GpuTiler : IDisposable
                 throw SubmissionScheduler.Fatal($"The tile transfer has no pipeline: kind={kindIndex} bytes={transfer.BytesPerElement}.");
             }
 
+            var packedWords = TilerShaders.SupportsPackedWords((TilerBlockShape)transfer.Kind, transfer.BytesPerElement) &&
+                ((source | destination | pitchBytes | sliceBytes | ((ulong)transfer.Width * transfer.BytesPerElement) |
+                    (transfer.Tail ? (ulong)transfer.TailX * transfer.BytesPerElement : 0)) & 3) == 0;
+            var local = TilerShaders.BlockCopyWorkgroupSize((TilerBlockShape)transfer.Kind, transfer.BytesPerElement, tile, packedWords);
+            var groupsX = ((ulong)transfer.Width + local.X - 1) / local.X;
+            var groupsY = ((ulong)transfer.Height + local.Y - 1) / local.Y;
+            var groupsZ = ((ulong)transfer.Depth + local.Z - 1) / local.Z;
+            if (groupsX > groupLimit.X || groupsY > groupLimit.Y || groupsZ > groupLimit.Z)
+            {
+                throw SubmissionScheduler.Fatal($"The tile transfer exceeds the workgroup limits: groups={groupsX},{groupsY},{groupsZ}.");
+            }
+
             dispatches.Add(new TransferDispatch
             {
                 PipelineSlot = ((tile ? KindCount : 0u) + kindIndex) * ElementSizeCount + elementIndex,
+                PackedWords = packedWords,
+                GroupsX = (uint)groupsX,
+                GroupsY = (uint)groupsY,
+                GroupsZ = (uint)groupsZ,
                 Arguments = new TileTransferArguments
                 {
                     SourceBase = (uint)source,
@@ -597,12 +614,12 @@ public sealed unsafe class GpuTiler : IDisposable
             BindDescriptorSet(command, WriteDescriptorSet(infos, 2));
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
             {
-                vk.CmdBindPipeline(command, PipelineBindPoint.Compute, GetPipeline(dispatch.PipelineSlot));
+                vk.CmdBindPipeline(command, PipelineBindPoint.Compute, GetPipeline(dispatch.PipelineSlot, dispatch.PackedWords));
             }
             Vulkan.NativeBindingEpoch.Advance();
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
             {
-                vk.CmdDispatch(command, (dispatch.Arguments.Width + 7) / 8, (dispatch.Arguments.Height + 7) / 8, dispatch.Arguments.Depth);
+                vk.CmdDispatch(command, dispatch.GroupsX, dispatch.GroupsY, dispatch.GroupsZ);
             }
         }
 

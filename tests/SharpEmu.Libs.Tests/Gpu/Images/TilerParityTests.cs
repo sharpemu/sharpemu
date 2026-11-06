@@ -59,7 +59,9 @@ public sealed class TilerParityTests : IClassFixture<HeadlessVulkanFixture>
         foreach (var tilerCase in TilerCases.All())
         {
             var transfer = tilerCase.Transfer;
-            if (transfer.Kind == TileBlockKind.RenderTarget64KBGen5)
+            // The reference blobs predate Gen5 and GCN. Their layouts are checked
+            // against the CPU oracle in GpuTilerTests and PackedTilerWordTests.
+            if (transfer.Kind is TileBlockKind.RenderTarget64KBGen5 or TileBlockKind.GcnThin1D)
             {
                 continue;
             }
