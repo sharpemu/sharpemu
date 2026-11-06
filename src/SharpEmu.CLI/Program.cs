@@ -260,6 +260,11 @@ internal static partial class Program
         Log.Info(HostSystemInfo.Summary);
 
         ebootPath = Path.GetFullPath(ebootPath);
+        runtimeOptions = runtimeOptions with
+        {
+            ModsDirectory = new SharpEmu.Core.Mods.GameModRepository(
+                PerGameSettings.KeyFor(TryReadSettingsTitleId(ebootPath), ebootPath)).DirectoryPath,
+        };
         Console.Error.WriteLine($"[DEBUG] Full path: {ebootPath}");
 
         if (!File.Exists(ebootPath))

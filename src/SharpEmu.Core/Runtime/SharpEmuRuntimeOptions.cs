@@ -18,6 +18,8 @@ public readonly struct SharpEmuRuntimeOptions
 
     public bool AdoptStartupAddressReservations { get; init; }
 
+    public string? ModsDirectory { get; init; }
+
     /// <summary>
     /// An optional debugger to attach to guest execution. Flows through to
     /// <see cref="CpuExecutionOptions.DebugHook"/>. Null (the default) runs with

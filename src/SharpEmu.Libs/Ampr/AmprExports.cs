@@ -109,6 +109,7 @@ public static class AmprExports
 
         public CachedHostFile(string path)
         {
+            path = GameFileOverlay.ResolveFile(path);
             if (!File.Exists(path) && App0Archive.OpenRead(path) is { } archived)
             {
                 _archived = archived;

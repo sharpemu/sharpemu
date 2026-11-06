@@ -2687,6 +2687,12 @@ public static class AvPlayerExports
         out string resolved)
     {
         resolved = string.Empty;
+        var modded = GameFileOverlay.ResolveFile(Path.Combine(root, relativePath));
+        if (!string.Equals(modded, Path.Combine(root, relativePath), HostFsPath.Comparison))
+        {
+            resolved = modded;
+            return true;
+        }
         // A media file only in an archive-mounted app0 is extracted so the host decoder can open it.
         App0Archive.Extract(Path.Combine(root, relativePath));
         var current = root;

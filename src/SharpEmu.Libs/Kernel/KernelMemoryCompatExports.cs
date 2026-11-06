@@ -4904,7 +4904,7 @@ public static partial class KernelMemoryCompatExports
         if (_resolvedGuestPaths.TryGetValue(guestPath, out var memoized) &&
             string.Equals(memoized.Root, roots, StringComparison.Ordinal))
         {
-            return memoized.Path;
+            return GameFileOverlay.ResolveFile(memoized.Path);
         }
 
         var resolved = ResolveGuestPathUncached(guestPath);
@@ -4917,7 +4917,7 @@ public static partial class KernelMemoryCompatExports
             Interlocked.Increment(ref _resolvedGuestPathCount);
         }
 
-        return resolved;
+        return GameFileOverlay.ResolveFile(resolved);
     }
 
     private static string ResolveGuestPathUncached(string guestPath)
@@ -7039,6 +7039,7 @@ public static partial class KernelMemoryCompatExports
 
     private static bool TryGetAprFileSize(string hostPath, out ulong size)
     {
+        hostPath = GameFileOverlay.ResolveFile(hostPath);
         size = 0;
 
         string cachePath;
@@ -7078,7 +7079,7 @@ public static partial class KernelMemoryCompatExports
                 return true;
             }
 
-            if (!new DirectoryInfo(cachePath).Exists && !App0Archive.IsDirectory(cachePath))
+            if (!new DirectoryInfo(cachePath).Exists && !GameFileOverlay.IsDirectory(cachePath) && !App0Archive.IsDirectory(cachePath))
             {
                 if (IsUnderApp0(cachePath))
                 {
@@ -7100,6 +7101,7 @@ public static partial class KernelMemoryCompatExports
 
     private static bool TryWriteHostPathStat(CpuContext ctx, ulong statAddress, string hostPath, bool isDirectory)
     {
+        hostPath = isDirectory ? GameFileOverlay.DirectorySource(hostPath) ?? hostPath : GameFileOverlay.ResolveFile(hostPath);
         if (isDirectory ? !Directory.Exists(hostPath) : !File.Exists(hostPath))
         {
             return TryWriteArchivePathStat(ctx, statAddress, hostPath, isDirectory);
@@ -7137,7 +7139,7 @@ public static partial class KernelMemoryCompatExports
         File.Exists(hostPath) || App0Archive.TryGetFile(hostPath, out _);
 
     private static bool HostDirectoryExists(string hostPath) =>
-        Directory.Exists(hostPath) || App0Archive.IsDirectory(hostPath);
+        Directory.Exists(hostPath) || GameFileOverlay.IsDirectory(hostPath) || App0Archive.IsDirectory(hostPath);
 
     private static string OpenFileName(Stream stream) => stream switch
     {
@@ -7281,6 +7283,7 @@ public static partial class KernelMemoryCompatExports
             ? Directory.EnumerateFileSystemEntries(hostPath).Select(Path.GetFileName)
             : [];
         var children = onDisk
+            .Concat(GameFileOverlay.List(hostPath))
             .Concat(App0Archive.List(hostPath).Select(static entry => entry.Name))
             .Where(static name => !string.IsNullOrEmpty(name))
             .Distinct(HostFsPath.Comparer)

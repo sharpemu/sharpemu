@@ -224,7 +224,7 @@ public static class AppContentExports
             return true;
         }
 
-        var paramJsonPath = Path.Combine(app0Root, "sce_sys", "param.json");
+        var paramJsonPath = SharpEmu.HLE.FileSystem.GameFileOverlay.ResolveFile(Path.Combine(app0Root, "sce_sys", "param.json"));
         if (!File.Exists(paramJsonPath))
         {
             return true;

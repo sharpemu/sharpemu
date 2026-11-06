@@ -790,9 +790,9 @@ public static class PlayGoExports
             return CreateBaseChunkMetadata(PlayGoChunkIdKnowledge.Authoritative);
         }
 
-        var playGoDat = Path.Combine(app0Root, "sce_sys", "playgo-chunk.dat");
-        var scenarioJson = Path.Combine(app0Root, "sce_sys", "playgo-scenario.json");
-        var chunkDefsXml = Path.Combine(app0Root, "playgo-chunkdefs.xml");
+        var playGoDat = GameFileOverlay.ResolveFile(Path.Combine(app0Root, "sce_sys", "playgo-chunk.dat"));
+        var scenarioJson = GameFileOverlay.ResolveFile(Path.Combine(app0Root, "sce_sys", "playgo-scenario.json"));
+        var chunkDefsXml = GameFileOverlay.ResolveFile(Path.Combine(app0Root, "playgo-chunkdefs.xml"));
         App0Archive.Extract(chunkDefsXml);
 
         var hasMetadata = File.Exists(playGoDat) || File.Exists(scenarioJson) || File.Exists(chunkDefsXml);

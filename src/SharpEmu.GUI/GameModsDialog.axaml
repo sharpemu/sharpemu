@@ -1,0 +1,85 @@
+<!-- Copyright (C) 2026 SharpEmu Emulator Project
+     SPDX-License-Identifier: GPL-2.0-or-later -->
+<local:SheetView xmlns="https://github.com/avaloniaui"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:local="clr-namespace:SharpEmu.GUI"
+                 x:Class="SharpEmu.GUI.GameModsDialog"
+                 SheetWidth="1040" SheetHeight="700">
+  <Grid Margin="28" RowDefinitions="*,Auto,Auto" ColumnDefinitions="260,24,*">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+      <StackPanel>
+        <Grid Height="150">
+          <TextBlock x:Name="CoverInitials" FontSize="36" HorizontalAlignment="Left" VerticalAlignment="Center" />
+          <Image x:Name="GameCover" Stretch="Uniform" HorizontalAlignment="Left" />
+        </Grid>
+        <StackPanel Margin="0,14,0,18" Spacing="6">
+          <TextBlock x:Name="GameNameText" FontSize="20" FontWeight="Bold" TextWrapping="Wrap" />
+          <TextBlock x:Name="GameInfoText" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+        </StackPanel>
+        <Border Padding="14" CornerRadius="8" Background="{StaticResource CardBrush}">
+          <StackPanel Spacing="14">
+            <TextBlock Text="{Binding [Library.Mods.Layout], Source={x:Static local:Localization.Instance}}" TextWrapping="Wrap" />
+            <SelectableTextBlock x:Name="FolderPathText" TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" />
+            <TextBlock Text="{Binding [Library.Mods.Priority], Source={x:Static local:Localization.Instance}}"
+                       TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" />
+          </StackPanel>
+        </Border>
+      </StackPanel>
+    </ScrollViewer>
+    <Grid Grid.Column="2" RowDefinitions="Auto,16,*,Auto">
+      <TextBlock Text="{Binding [Library.Context.Mods], Source={x:Static local:Localization.Instance}}" FontSize="24" FontWeight="Bold" />
+      <Grid Grid.Row="2">
+        <ListBox x:Name="ModList" Background="{StaticResource CardBrush}"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto">
+          <ListBox.Styles>
+            <Style Selector="ListBoxItem">
+              <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+              <Setter Property="Padding" Value="0" />
+            </Style>
+            <Style Selector="ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+              <Setter Property="Background" Value="{StaticResource TileSelectedBrush}" />
+            </Style>
+          </ListBox.Styles>
+          <ListBox.ItemTemplate>
+            <DataTemplate x:DataType="local:GameModOption" x:CompileBindings="True">
+              <Border Padding="12" Background="Transparent">
+                <Grid ColumnDefinitions="Auto,12,*">
+                  <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay}" VerticalAlignment="Top"
+                            ToolTip.Tip="{Binding Name}" AutomationProperties.Name="{Binding Name}" />
+                  <TextBlock Grid.Column="2" Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap"
+                             VerticalAlignment="Center" ToolTip.Tip="{Binding DirectoryPath}" />
+                </Grid>
+              </Border>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+        <TextBlock x:Name="EmptyText" TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center"
+                   MaxWidth="340" Margin="16" Foreground="{StaticResource MutedBrush}" />
+      </Grid>
+      <TextBlock x:Name="CountText" Grid.Row="3" Foreground="{StaticResource MutedBrush}" Margin="0,10,0,0" />
+    </Grid>
+    <StackPanel Grid.Row="1" Grid.ColumnSpan="3" Spacing="8" Margin="0,16,0,16">
+      <StackPanel x:Name="ImportPanel" IsVisible="False" Spacing="6">
+        <TextBlock Text="{Binding [Library.Mods.Installing], Source={x:Static local:Localization.Instance}}" />
+        <ProgressBar x:Name="ImportProgress" Minimum="0" Maximum="100" Height="6" />
+        <Grid ColumnDefinitions="*,Auto">
+          <TextBlock x:Name="ImportFileText" TextTrimming="CharacterEllipsis" Foreground="{StaticResource MutedBrush}" Margin="0,0,12,0" />
+          <TextBlock x:Name="ImportSizeText" Grid.Column="1" Foreground="{StaticResource MutedBrush}" />
+        </Grid>
+      </StackPanel>
+      <TextBlock Text="{Binding [Library.Mods.AutoSave], Source={x:Static local:Localization.Instance}}"
+                 TextWrapping="Wrap" Foreground="{StaticResource MutedBrush}" />
+      <ScrollViewer MaxHeight="64" HorizontalScrollBarVisibility="Disabled">
+        <TextBlock x:Name="StatusText" TextWrapping="Wrap" Foreground="{StaticResource DangerBrush}" />
+      </ScrollViewer>
+    </StackPanel>
+    <Grid Grid.Row="2" Grid.ColumnSpan="3" ColumnDefinitions="Auto,Auto,*,Auto,Auto">
+      <Button x:Name="OpenFolderButton" Classes="ghost" Content="{Binding [Library.Mods.OpenFolder], Source={x:Static local:Localization.Instance}}" />
+      <Button x:Name="ReloadButton" Grid.Column="1" Classes="ghost" Margin="10,0,0,0"
+              Content="{Binding [Library.Mods.Reload], Source={x:Static local:Localization.Instance}}" />
+      <Button x:Name="InstallButton" Grid.Column="3" Classes="ghost" Margin="0,0,10,0"
+              Content="{Binding [Library.Mods.InstallZip], Source={x:Static local:Localization.Instance}}" />
+      <Button x:Name="CloseButton" Grid.Column="4" Classes="accent" Content="{Binding [Common.Close], Source={x:Static local:Localization.Instance}}" />
+    </Grid>
+  </Grid>
+</local:SheetView>

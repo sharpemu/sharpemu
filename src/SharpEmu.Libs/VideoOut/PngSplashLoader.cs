@@ -42,7 +42,7 @@ internal static class PngSplashLoader
                 return false;
             }
 
-            var path = Path.Combine(app0Root, "sce_sys", fileName);
+            var path = SharpEmu.HLE.FileSystem.GameFileOverlay.ResolveFile(Path.Combine(app0Root, "sce_sys", fileName));
             if (!File.Exists(path))
             {
                 return false;

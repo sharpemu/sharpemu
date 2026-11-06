@@ -39,7 +39,8 @@ public static partial class GnmRuntime
                     DebugHook = options.DebugHook,
                     ProcessArguments = session?.Startup?.Arguments,
                 }, new PhysicalFileSystem(), gpuMemory, options.SystemLanguage ?? 1,
-                executableRelativePath: session?.Startup?.Executable);
+                executableRelativePath: session?.Startup?.Executable,
+                modsDirectory: options.ModsDirectory);
         }
         catch
         {

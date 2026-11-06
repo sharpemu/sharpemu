@@ -285,6 +285,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <TextBlock Classes="materialSymbol compact" Text="settings" />
                   </MenuItem.Icon>
                 </MenuItem>
+                <MenuItem x:Name="CtxMods"
+                          Header="{Binding [Library.Context.Mods], Source={x:Static local:Localization.Instance}}">
+                  <MenuItem.Icon>
+                    <TextBlock Classes="materialSymbol compact" Text="folder_special" />
+                  </MenuItem.Icon>
+                </MenuItem>
                 <MenuItem x:Name="CtxPatches"
                           Header="{Binding [Library.Context.Patches], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>

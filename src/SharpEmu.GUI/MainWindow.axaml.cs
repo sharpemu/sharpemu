@@ -449,6 +449,7 @@ public partial class MainWindow : Window
             await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.TitleId);
         CtxGameSettings.Click += (_, _) => OpenSelectedGameSettings();
         CtxPatches.Click += async (_, _) => await OpenSelectedGamePatchesAsync();
+        CtxMods.Click += async (_, _) => await OpenSelectedGameModsAsync();
         CtxTrophies.Click += (_, _) => OpenSelectedGameTrophies();
         InitializeTrophies();
         CtxRemove.Click += (_, _) => RemoveSelectedFromLibrary();
