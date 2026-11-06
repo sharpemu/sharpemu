@@ -9,6 +9,12 @@
   "Page.GameCount.Other": "{0} oyun",
 
   "Library.SearchWatermark": "Kitabxanada axtar…",
+  "Library.Versions.Title": "Versiya seç",
+  "Library.Versions.Description": "Bir neçə versiya quraşdırılıb. Davam etmək üçün birini seç.",
+  "Library.Versions.Count": "{0} versiya",
+  "Library.Versions.Unknown": "Naməlum versiya",
+  "Library.Versions.PackTitle": "Paketlənəcək versiyanı seç",
+  "Library.Versions.PackDescription": "ZAR formatında paketlənəcək oyun qovluğunu seç. Artıq ZAR formatında olan versiyalar siyahıda göstərilmir.",
   "LibraryMenu.Library": "Kitabxana",
   "LibraryMenu.View": "Görünüş",
   "LibraryMenu.Row": "Sıra",

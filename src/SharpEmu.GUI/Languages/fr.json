@@ -25,6 +25,12 @@
   "Page.GameCount.Other": "{0} jeux",
 
   "Library.SearchWatermark": "Rechercher dans la bibliothèque…",
+  "Library.Versions.Title": "Choisir une version",
+  "Library.Versions.Description": "Plusieurs versions sont installées. Choisissez-en une pour continuer.",
+  "Library.Versions.Count": "{0} versions",
+  "Library.Versions.Unknown": "Version inconnue",
+  "Library.Versions.PackTitle": "Choisir une version à archiver",
+  "Library.Versions.PackDescription": "Choisissez le dossier du jeu à archiver au format ZAR. Les versions déjà au format ZAR ne sont pas affichées.",
   "LibraryMenu.Library": "Bibliothèque",
   "LibraryMenu.View": "Affichage",
   "LibraryMenu.Row": "Rangée",

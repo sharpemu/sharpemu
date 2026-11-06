@@ -25,6 +25,12 @@
   "Page.GameCount.Other": "ゲーム {0}本",
 
   "Library.SearchWatermark": "ライブラリを検索…",
+  "Library.Versions.Title": "バージョンを選択",
+  "Library.Versions.Description": "複数のバージョンがインストールされています。続行するバージョンを選択してください。",
+  "Library.Versions.Count": "バージョン数: {0}",
+  "Library.Versions.Unknown": "不明なバージョン",
+  "Library.Versions.PackTitle": "アーカイブするバージョンを選択",
+  "Library.Versions.PackDescription": "ZAR 形式でアーカイブするゲームフォルダーを選択してください。すでに ZAR 形式のバージョンは表示されません。",
   "LibraryMenu.Library": "ライブラリ",
   "LibraryMenu.View": "表示",
   "LibraryMenu.Row": "列",

@@ -25,6 +25,12 @@
   "Page.GameCount.Other": "{0} mängu",
 
   "Library.SearchWatermark": "Otsi teegist…",
+  "Library.Versions.Title": "Vali versioon",
+  "Library.Versions.Description": "Paigaldatud on mitu versiooni. Jätkamiseks vali üks.",
+  "Library.Versions.Count": "Versioone: {0}",
+  "Library.Versions.Unknown": "Tundmatu versioon",
+  "Library.Versions.PackTitle": "Vali pakitav versioon",
+  "Library.Versions.PackDescription": "Vali mängukaust, mis pakitakse ZAR-vormingusse. Juba ZAR-vormingus versioone ei kuvata.",
   "LibraryMenu.Library": "Teek",
   "LibraryMenu.View": "Vaade",
   "LibraryMenu.Row": "Rida",

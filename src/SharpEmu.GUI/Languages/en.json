@@ -24,6 +24,12 @@
   "Page.GameCount.Other": "{0} games",
 
   "Library.SearchWatermark": "Search library…",
+  "Library.Versions.Title": "Choose a version",
+  "Library.Versions.Description": "Multiple versions are installed. Choose one to continue.",
+  "Library.Versions.Count": "{0} versions",
+  "Library.Versions.Unknown": "Unknown version",
+  "Library.Versions.PackTitle": "Choose a version to pack",
+  "Library.Versions.PackDescription": "Choose the game folder to pack into ZAR. Versions already in ZAR format are not listed.",
   "LibraryMenu.Library": "Library",
   "LibraryMenu.View": "View",
   "LibraryMenu.Row": "Row",

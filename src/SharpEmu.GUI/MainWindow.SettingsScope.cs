@@ -229,7 +229,8 @@ public partial class MainWindow
     /// </summary>
     private async Task LaunchWithVariablesAsync()
     {
-        if (_isRunning || GameList.SelectedItem is not GameEntry game)
+        if (_isRunning || GameList.SelectedItem is not GameEntry selected ||
+            await SelectGameVersionAsync(selected) is not { } game)
         {
             return;
         }

@@ -25,6 +25,12 @@
   "Page.GameCount.Other": "{0} games",
 
   "Library.SearchWatermark": "Zoeken in bibliotheek…",
+  "Library.Versions.Title": "Versie kiezen",
+  "Library.Versions.Description": "Er zijn meerdere versies geïnstalleerd. Kies er een om door te gaan.",
+  "Library.Versions.Count": "{0} versies",
+  "Library.Versions.Unknown": "Onbekende versie",
+  "Library.Versions.PackTitle": "Versie kiezen om in te pakken",
+  "Library.Versions.PackDescription": "Kies de spelmap die je als ZAR wilt inpakken. Versies die al in ZAR-formaat zijn, worden niet getoond.",
   "LibraryMenu.Library": "Bibliotheek",
   "LibraryMenu.View": "Weergave",
   "LibraryMenu.Row": "Rij",

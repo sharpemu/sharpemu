@@ -7,7 +7,8 @@ public partial class MainWindow
 {
     private async Task OpenSelectedGamePatchesAsync()
     {
-        if (GameList.SelectedItem is not GameEntry game || string.IsNullOrWhiteSpace(game.TitleId))
+        if (GameList.SelectedItem is not GameEntry selected || string.IsNullOrWhiteSpace(selected.TitleId) ||
+            await SelectGameVersionAsync(selected) is not { } game)
         {
             return;
         }

@@ -25,6 +25,12 @@
   "Page.GameCount.Other": "Игр: {0}",
 
   "Library.SearchWatermark": "Поиск…",
+  "Library.Versions.Title": "Выберите версию",
+  "Library.Versions.Description": "Установлено несколько версий. Выберите одну, чтобы продолжить.",
+  "Library.Versions.Count": "Версий: {0}",
+  "Library.Versions.Unknown": "Неизвестная версия",
+  "Library.Versions.PackTitle": "Выберите версию для упаковки",
+  "Library.Versions.PackDescription": "Выберите папку игры для упаковки в ZAR. Версии, уже упакованные в ZAR, не отображаются.",
   "LibraryMenu.Library": "Библиотека",
   "LibraryMenu.View": "Вид",
   "LibraryMenu.Row": "Ряд",

@@ -25,6 +25,12 @@
   "Page.GameCount.Other": "{0} لعبة",
 
   "Library.SearchWatermark": "ابحث في المكتبة...",
+  "Library.Versions.Title": "اختر إصدارًا",
+  "Library.Versions.Description": "تم تثبيت عدة إصدارات. اختر أحدها للمتابعة.",
+  "Library.Versions.Count": "عدد الإصدارات: {0}",
+  "Library.Versions.Unknown": "إصدار غير معروف",
+  "Library.Versions.PackTitle": "اختر إصدارًا لحزمه",
+  "Library.Versions.PackDescription": "اختر مجلد اللعبة لحزمه بصيغة ZAR. لن تظهر الإصدارات الموجودة بالفعل بصيغة ZAR.",
   "LibraryMenu.Library": "المكتبة",
   "LibraryMenu.View": "العرض",
   "LibraryMenu.Row": "صف",

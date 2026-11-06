@@ -312,6 +312,23 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                Stretch="UniformToFill"
                                RenderOptions.BitmapInterpolationMode="LowQuality"
                                IsVisible="{Binding HasCover}" />
+                        <Border Width="24"
+                                Height="24"
+                                CornerRadius="12"
+                                Background="{StaticResource OverlayBrush}"
+                                BorderBrush="{StaticResource GlassRimBrush}"
+                                BorderThickness="1"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Top"
+                                Margin="6"
+                                ToolTip.Tip="{Binding VersionText}"
+                                AutomationProperties.Name="{Binding VersionText}"
+                                IsVisible="{Binding HasMultipleVersions}">
+                          <TextBlock Classes="materialSymbol"
+                                     Text="layers"
+                                     FontSize="16"
+                                     LineHeight="19.2" />
+                        </Border>
                       </Panel>
                     </Border>
                   </Border>

@@ -25,6 +25,12 @@
   "Page.GameCount.Other": "{0} giochi",
 
   "Library.SearchWatermark": "Cerca nella libreria…",
+  "Library.Versions.Title": "Scegli una versione",
+  "Library.Versions.Description": "Sono installate più versioni. Scegline una per continuare.",
+  "Library.Versions.Count": "{0} versioni",
+  "Library.Versions.Unknown": "Versione sconosciuta",
+  "Library.Versions.PackTitle": "Scegli la versione da archiviare",
+  "Library.Versions.PackDescription": "Scegli la cartella del gioco da archiviare in formato ZAR. Le versioni già in formato ZAR non sono elencate.",
   "LibraryMenu.Library": "Libreria",
   "LibraryMenu.View": "Vista",
   "LibraryMenu.Row": "Riga",

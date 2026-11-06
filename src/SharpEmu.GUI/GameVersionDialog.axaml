@@ -1,0 +1,61 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<local:SheetView xmlns="https://github.com/avaloniaui"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:local="clr-namespace:SharpEmu.GUI"
+                 x:Class="SharpEmu.GUI.GameVersionDialog"
+                 SheetWidth="640">
+  <local:SheetView.Styles>
+    <Style Selector="Button.versionOption">
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Setter Property="MinHeight" Value="88" />
+      <Setter Property="Padding" Value="18,14" />
+    </Style>
+    <Style Selector="TextBlock.versionName">
+      <Setter Property="FontSize" Value="17" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="TextBlock.versionPath">
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+      <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    </Style>
+  </local:SheetView.Styles>
+
+  <Grid Margin="32,28" RowDefinitions="Auto,Auto,*,Auto" MaxHeight="560">
+    <StackPanel Spacing="6">
+      <TextBlock x:Name="TitleText"
+                 Classes="sheetTitle"
+                 Text="{Binding [Library.Versions.Title], Source={x:Static local:Localization.Instance}}" />
+      <TextBlock x:Name="GameNameText"
+                 FontSize="16"
+                 Foreground="{StaticResource SecondaryTextBrush}"
+                 TextWrapping="Wrap" />
+    </StackPanel>
+
+    <TextBlock x:Name="DescriptionText"
+               Grid.Row="1"
+               Margin="0,14,0,0"
+               Text="{Binding [Library.Versions.Description], Source={x:Static local:Localization.Instance}}"
+               Foreground="{StaticResource MutedBrush}"
+               TextWrapping="Wrap" />
+
+    <ScrollViewer Grid.Row="2"
+                  Margin="0,20,0,0"
+                  MaxHeight="320"
+                  HorizontalScrollBarVisibility="Disabled">
+      <StackPanel x:Name="VersionList" Spacing="10" />
+    </ScrollViewer>
+
+    <Button x:Name="CancelButton"
+            Grid.Row="3"
+            Margin="0,20,0,0"
+            HorizontalAlignment="Right"
+            Classes="ghost"
+            Content="{Binding [Common.Cancel], Source={x:Static local:Localization.Instance}}" />
+  </Grid>
+</local:SheetView>

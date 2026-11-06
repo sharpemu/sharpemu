@@ -25,6 +25,12 @@
   "Page.GameCount.Other": "{0} játékok",
 
   "Library.SearchWatermark": "Keresés a könyvtárban",
+  "Library.Versions.Title": "Verzió kiválasztása",
+  "Library.Versions.Description": "Több verzió van telepítve. A folytatáshoz válassz egyet.",
+  "Library.Versions.Count": "{0} verzió",
+  "Library.Versions.Unknown": "Ismeretlen verzió",
+  "Library.Versions.PackTitle": "Csomagolandó verzió kiválasztása",
+  "Library.Versions.PackDescription": "Válaszd ki a ZAR-formátumba csomagolandó játék mappáját. A már ZAR-formátumú verziók nem jelennek meg.",
   "LibraryMenu.Library": "Könyvtár",
   "LibraryMenu.View": "Nézet",
   "LibraryMenu.Row": "Sor",

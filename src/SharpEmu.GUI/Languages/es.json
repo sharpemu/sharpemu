@@ -25,6 +25,12 @@
   "Page.GameCount.Other": "{0} juegos",
 
   "Library.SearchWatermark": "Buscar en la biblioteca…",
+  "Library.Versions.Title": "Elegir versión",
+  "Library.Versions.Description": "Hay varias versiones instaladas. Elige una para continuar.",
+  "Library.Versions.Count": "{0} versiones",
+  "Library.Versions.Unknown": "Versión desconocida",
+  "Library.Versions.PackTitle": "Elegir versión para empaquetar",
+  "Library.Versions.PackDescription": "Elige la carpeta del juego que quieras empaquetar en ZAR. Las versiones que ya están en formato ZAR no aparecen en la lista.",
   "LibraryMenu.Library": "Biblioteca",
   "LibraryMenu.View": "Vista",
   "LibraryMenu.Row": "Fila",

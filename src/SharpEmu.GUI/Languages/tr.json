@@ -25,6 +25,12 @@
   "Page.GameCount.Other": "{0} oyun",
 
   "Library.SearchWatermark": "Kütüphanede ara…",
+  "Library.Versions.Title": "Sürüm seç",
+  "Library.Versions.Description": "Birden fazla sürüm kurulu. Devam etmek için birini seç.",
+  "Library.Versions.Count": "{0} sürüm",
+  "Library.Versions.Unknown": "Bilinmeyen sürüm",
+  "Library.Versions.PackTitle": "Paketlenecek sürümü seç",
+  "Library.Versions.PackDescription": "ZAR olarak paketlenecek oyun klasörünü seç. Zaten ZAR biçimindeki sürümler listelenmez.",
   "LibraryMenu.Library": "Kütüphane",
   "LibraryMenu.View": "Görünüm",
   "LibraryMenu.Row": "Sıra",

@@ -25,6 +25,12 @@
   "Page.GameCount.Other": "{0} spil",
 
   "Library.SearchWatermark": "Søg i biblioteket…",
+  "Library.Versions.Title": "Vælg en version",
+  "Library.Versions.Description": "Flere versioner er installeret. Vælg en for at fortsætte.",
+  "Library.Versions.Count": "{0} versioner",
+  "Library.Versions.Unknown": "Ukendt version",
+  "Library.Versions.PackTitle": "Vælg en version at pakke",
+  "Library.Versions.PackDescription": "Vælg den spilmappe, der skal pakkes som ZAR. Versioner, der allerede er i ZAR-format, vises ikke.",
   "LibraryMenu.Library": "Bibliotek",
   "LibraryMenu.View": "Visning",
   "LibraryMenu.Row": "Række",

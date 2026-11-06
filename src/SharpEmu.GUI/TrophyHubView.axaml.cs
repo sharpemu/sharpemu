@@ -22,7 +22,7 @@ public partial class TrophyHubView : UserControl
         Name,
     }
 
-    private sealed record GameSummary(GameEntry Game, string Directory, IReadOnlyList<TrophyEntry> Trophies)
+    internal sealed record GameSummary(GameEntry Game, string Directory, IReadOnlyList<TrophyEntry> Trophies)
     {
         public int Earned => Trophies.Count(t => t.Unlocked);
 
@@ -238,7 +238,7 @@ public partial class TrophyHubView : UserControl
                 .Where(summary => summary.Trophies.Count > 0)
                 .ToList();
             TrophyCache.Save();
-            return loaded;
+            return MergeVersions(loaded);
         });
         await settle;
 
@@ -274,6 +274,26 @@ public partial class TrophyHubView : UserControl
 
     private static string Signature(IReadOnlyList<GameSummary> summaries) =>
         string.Join('|', summaries.Select(s => $"{s.Game.Path}:{s.Earned}/{s.Trophies.Count}:{s.Latest?.UnlockedAtUtc?.Ticks}"));
+
+    internal static IReadOnlyList<GameSummary> MergeVersions(IEnumerable<GameSummary> summaries)
+    {
+        var merged = new List<GameSummary>();
+        foreach (var summary in summaries.OrderByDescending(summary => GameVersions.VersionNumber(summary.Game)))
+        {
+            if (!merged.Any(existing => GameVersions.SameGame(existing.Game, summary.Game) &&
+                Definitions(existing.Trophies).SequenceEqual(Definitions(summary.Trophies))))
+            {
+                merged.Add(summary);
+            }
+        }
+
+        return merged;
+    }
+
+    private static IEnumerable<(int Id, int Grade, string Name, string Description, bool Hidden, int GroupId, int PlatinumId)>
+        Definitions(IReadOnlyList<TrophyEntry> trophies) =>
+        trophies.OrderBy(trophy => trophy.Id)
+            .Select(trophy => (trophy.Id, trophy.Grade, trophy.Name, trophy.Description, trophy.Hidden, trophy.GroupId, trophy.PlatinumId));
 
     private IEnumerable<GameSummary> Sorted()
     {

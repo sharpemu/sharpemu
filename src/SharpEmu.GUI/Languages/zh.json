@@ -24,6 +24,12 @@
   "Page.GameCount.Other": "{0} 个游戏",
 
   "Library.SearchWatermark": "搜索游戏库…",
+  "Library.Versions.Title": "选择版本",
+  "Library.Versions.Description": "已安装多个版本。请选择一个版本以继续。",
+  "Library.Versions.Count": "{0} 个版本",
+  "Library.Versions.Unknown": "未知版本",
+  "Library.Versions.PackTitle": "选择要打包的版本",
+  "Library.Versions.PackDescription": "请选择要打包为 ZAR 的游戏文件夹。已采用 ZAR 格式的版本不会显示。",
   "LibraryMenu.Library": "游戏库",
   "LibraryMenu.View": "视图",
   "LibraryMenu.Row": "横排",

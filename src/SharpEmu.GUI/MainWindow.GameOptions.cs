@@ -80,8 +80,7 @@ public partial class MainWindow
         };
         GameOptionsCloseButton.Click += (_, _) => CloseGameSettings();
         GameOptionsOpenFolderButton.Click += (_, _) => OpenSelectedGameFolder();
-        GameOptionsCopyPathButton.Click += async (_, _) =>
-            await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.Path);
+        GameOptionsCopyPathButton.Click += async (_, _) => await CopySelectedGamePathAsync();
         GameOptionsCopyTitleIdButton.Click += async (_, _) =>
             await CopyToClipboardAsync((GameList.SelectedItem as GameEntry)?.TitleId);
         GameOptionsRemoveButton.Click += (_, _) =>
