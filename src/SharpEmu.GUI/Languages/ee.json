@@ -1,5 +1,9 @@
 {
   "_languageName": "Eesti",
+  "Library.Context.CreateShortcut": "Loo töölaua otsetee",
+  "Library.Shortcut.Created": "Töölaua otsetee loodud:\n{0}",
+  "Library.Shortcut.Failed": "Otsetee loomine ebaõnnestus: {0}",
+  "Common.Close": "Sulge",
   "Options.Env.SkipRt.Desc": "Jäta vahele ray tracingut kasutavad compute-shaderid. Vaikimisi välja lülitatud.\nSee võib efekte eemaldada või põhjustada valet pilti. Taaskäivita mäng pärast muutmist.",
   "Options.Env.StrictCompute.Desc": "Peata arvutus- ja joonistusvarjutajate tagasilükkamisel (vaikimisi).\nLülita välja, et mõjutatud töö vahele jätta. Võimalikud on puuduvad pildid, vead või hangumine. Pärast muudatust taaskäivita mäng.",
   "Options.Env.PerformanceProfile.Desc": "Logi jõudlusajad ja FPS alates järgmisest mängu käivitamisest.\nSee võib jõudlust vähendada.",

@@ -1,5 +1,9 @@
 {
   "_languageName": "Türkçe",
+  "Library.Context.CreateShortcut": "Masaüstü kısayolu oluştur",
+  "Library.Shortcut.Created": "Masaüstü kısayolu oluşturuldu:\n{0}",
+  "Library.Shortcut.Failed": "Kısayol oluşturulamadı: {0}",
+  "Common.Close": "Kapat",
   "Options.Env.SkipRt.Desc": "Işın izleme kullanan compute shader'ları atla. Varsayılan olarak kapalı.\nBu, bazı efektleri kaldırabilir veya yanlış görüntüye yol açabilir. Değişiklikten sonra oyunu yeniden başlat.",
   "Options.Env.StrictCompute.Desc": "Hesaplama ve çizim gölgelendiricisi retlerinde durdur (varsayılan).\nEtkilenen işlemleri atlamak için kapat. Eksik görüntüler, hatalar veya takılmalar olabilir. Değişiklikten sonra oyunu yeniden başlatın.",
   "Options.Env.PerformanceProfile.Desc": "Sonraki oyun başlangıcından itibaren performans sürelerini ve FPS değerlerini kaydet.\nBu, performansı düşürebilir.",

@@ -1,5 +1,9 @@
 {
   "_languageName": "Azərbaycanca",
+  "Library.Context.CreateShortcut": "Masaüstü qısayolu yarat",
+  "Library.Shortcut.Created": "Masaüstü qısayolu yaradıldı:\n{0}",
+  "Library.Shortcut.Failed": "Qısayol yaradıla bilmədi: {0}",
+  "Common.Close": "Bağla",
   "Options.Env.SkipRt.Desc": "Şüa izləmədən istifadə edən hesablama kölgələndiricilərini keç. Susmaya görə söndürülüb.\nBu, bəzi effektləri aradan qaldıra və ya təsvirin yanlış görünməsinə səbəb ola bilər. Dəyişiklikdən sonra oyunu yenidən başladın.",
 
   "Page.Library": "Kitabxana",

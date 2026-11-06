@@ -1,5 +1,9 @@
 {
   "_languageName": "Português (Brasil)",
+  "Library.Context.CreateShortcut": "Criar atalho na área de trabalho",
+  "Library.Shortcut.Created": "Atalho criado na área de trabalho:\n{0}",
+  "Library.Shortcut.Failed": "Não foi possível criar o atalho: {0}",
+  "Common.Close": "Fechar",
   "Options.Env.SkipRt.Desc": "Ignora os shaders de computação que usam ray tracing. Desativado por padrão.\nPode remover efeitos ou causar gráficos incorretos. Reinicie o jogo após alterar.",
   "Options.Env.StrictCompute.Desc": "Parar nas rejeições de shaders de cálculo e desenho (padrão).\nDesative para ignorar o trabalho afetado. Podem ocorrer imagens ausentes, erros ou travamentos. Reinicie o jogo após uma alteração.",
   "Options.Env.PerformanceProfile.Desc": "Registre os tempos de desempenho e FPS a partir da próxima execução do jogo.\nIsso pode reduzir o desempenho.",

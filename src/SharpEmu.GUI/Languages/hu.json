@@ -1,5 +1,9 @@
 {
   "_languageName": "Hungarian",
+  "Library.Context.CreateShortcut": "Asztali parancsikon létrehozása",
+  "Library.Shortcut.Created": "Asztali parancsikon létrehozva:\n{0}",
+  "Library.Shortcut.Failed": "Nem sikerült létrehozni a parancsikont: {0}",
+  "Common.Close": "Bezárás",
   "Options.Env.SkipRt.Desc": "A sugárkövetést használó számítási shaderek kihagyása. Alapértelmezetten ki van kapcsolva.\nEz effektek eltűnését vagy hibás grafikát okozhat. Módosítás után indítsd újra a játékot.",
   "Options.Env.StrictCompute.Desc": "Leállás a számítási és rajzolási shaderek elutasításakor (alapértelmezett).\nKikapcsolva az érintett munka kimarad. Hiányzó képek, hibák vagy lefagyás fordulhat elő. Módosítás után indítsd újra a játékot.",
   "Options.Env.PerformanceProfile.Desc": "Teljesítményidők és FPS naplózása a játék következő indításától.\nEz csökkentheti a teljesítményt.",

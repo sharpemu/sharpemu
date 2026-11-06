@@ -1,5 +1,9 @@
 {
   "_languageName": "Deutsch",
+  "Library.Context.CreateShortcut": "Desktop-Verknüpfung erstellen",
+  "Library.Shortcut.Created": "Desktop-Verknüpfung erstellt:\n{0}",
+  "Library.Shortcut.Failed": "Die Verknüpfung konnte nicht erstellt werden: {0}",
+  "Common.Close": "Schließen",
   "Options.Env.SkipRt.Desc": "Compute-Shader überspringen, die Raytracing verwenden. Standardmäßig aus.\nDadurch können Effekte fehlen oder die Grafik fehlerhaft sein. Starte das Spiel nach einer Änderung neu.",
   "Options.Env.StrictCompute.Desc": "Bei Shader-Ablehnungen für Compute und Zeichenbefehle stoppen (Standard).\nAusschalten, um betroffene Arbeit zu überspringen. Fehlende Bilder, Fehler oder Stillstände sind möglich. Spiel nach Änderungen neu starten.",
   "Options.Env.PerformanceProfile.Desc": "Leistungszeiten und FPS ab dem nächsten Spielstart protokollieren.\nDies kann die Leistung verringern.",

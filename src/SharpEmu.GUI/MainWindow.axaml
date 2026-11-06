@@ -241,6 +241,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <TextBlock Classes="materialSymbol compact" Text="play_arrow" />
                   </MenuItem.Icon>
                 </MenuItem>
+                <MenuItem x:Name="CtxCreateShortcut"
+                          Header="{Binding [Library.Context.CreateShortcut], Source={x:Static local:Localization.Instance}}">
+                  <MenuItem.Icon>
+                    <TextBlock Classes="materialSymbol compact" Text="add_link" />
+                  </MenuItem.Icon>
+                </MenuItem>
                 <MenuItem x:Name="CtxOpenFolder"
                           Header="{Binding [Library.Context.OpenFolder], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>

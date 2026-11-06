@@ -1,5 +1,9 @@
 {
   "_languageName": "简体中文",
+  "Library.Context.CreateShortcut": "创建桌面快捷方式",
+  "Library.Shortcut.Created": "已创建桌面快捷方式：\n{0}",
+  "Library.Shortcut.Failed": "无法创建快捷方式：{0}",
+  "Common.Close": "关闭",
   "Options.Env.StrictCompute.Desc": "计算着色器和绘制着色器被拒绝时停止运行（默认）。\n关闭后将跳过受影响的工作，可能出现图像缺失、错误或卡死。更改后请重启游戏。",
   "Options.Env.PerformanceProfile.Desc": "从下次启动游戏起记录性能耗时和 FPS。\n可能会降低性能。",
   "Options.Env.PerformanceFrameTrace.Desc": "保留最近 4,096 个显示间隔，并在关闭时写入日志。\n需要启用性能分析。请正常关闭游戏以保存记录。",

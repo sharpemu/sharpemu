@@ -9,6 +9,12 @@ namespace SharpEmu.GUI;
 /// <summary>The platform-neutral launch contract shared by the launcher and command line.</summary>
 public sealed record LaunchConfiguration(EffectiveLaunchSettings Settings, IReadOnlyList<string> CustomEnvironment)
 {
+    public const string NoConsoleArgument = "--no-console";
+    public const string ShortcutArgument = "--shortcut";
+
+    public static IReadOnlyList<string> ShortcutArguments(string gamePath) =>
+        [ShortcutArgument, Path.GetFullPath(gamePath)];
+
     public static IReadOnlyList<string> SwitchVariables { get; } =
     [
         "SHARPEMU_PROFILE_PERFORMANCE", "SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE",

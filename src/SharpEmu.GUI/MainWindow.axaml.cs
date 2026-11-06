@@ -442,6 +442,7 @@ public partial class MainWindow : Window
         GameList.AddHandler(ContextRequestedEvent, OnGameContextRequested, RoutingStrategies.Tunnel);
         AddHandler(KeyDownEvent, OnPreviewKeyDown, RoutingStrategies.Tunnel);
         CtxLaunch.Click += (_, _) => LaunchSelected();
+        CtxCreateShortcut.Click += async (_, _) => await CreateSelectedGameShortcutAsync();
         CtxOpenFolder.Click += (_, _) => OpenSelectedGameFolder();
         CtxCopyPath.Click += async (_, _) => await CopySelectedGamePathAsync();
         CtxCopyTitleId.Click += async (_, _) =>
@@ -1926,6 +1927,8 @@ public partial class MainWindow : Window
             .Concat(_allGames.Where(game => game.Cover is null && game.CoverPath is not null))
             .Distinct()
             .ToArray();
+        var shortcutArt = _allGames.Where(game => game.BackgroundPath is not null)
+            .Select(game => (game.Path, game.BackgroundPath)).ToArray();
         _ = Task.Run(() =>
         {
             // Covers first: they are cheap and the most visible, so the grid
@@ -1972,6 +1975,15 @@ public partial class MainWindow : Window
                     Console.Error.WriteLine(
                         $"[GUI][WARN] Could not load cover '{requestedCoverPath}': {exception.Message}");
                 }
+            }
+
+            // Upgrade existing thumbnail splashes to their lossless originals without blocking the UI.
+            foreach (var (path, background) in shortcutArt)
+            {
+                if (generation != _detailLoadGeneration)
+                    return;
+                if (File.Exists(ShortcutSplashCache.PathForGame(path)))
+                    ShortcutSplashCache.Prepare(path, background);
             }
 
             foreach (var game in gamesToMeasure)
@@ -3249,8 +3261,7 @@ public partial class MainWindow : Window
     private void OnEmulatorOutput(string line, bool isError)
     {
         _pendingLines.Enqueue((line, isError));
-        if (line.Contains("[LOADER][INFO]", StringComparison.Ordinal) &&
-            line.Contains(" window ready:", StringComparison.Ordinal))
+        if (EmulatorProcess.IsWindowReadyMessage(line))
         {
             Dispatcher.UIThread.Post(OnGameWindowShown);
         }

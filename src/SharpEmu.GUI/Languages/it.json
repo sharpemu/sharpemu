@@ -1,5 +1,9 @@
 {
   "_languageName": "Italiano",
+  "Library.Context.CreateShortcut": "Crea collegamento sul desktop",
+  "Library.Shortcut.Created": "Collegamento creato sul desktop:\n{0}",
+  "Library.Shortcut.Failed": "Impossibile creare il collegamento: {0}",
+  "Common.Close": "Chiudi",
   "Options.Env.SkipRt.Desc": "Salta gli shader di calcolo che usano il ray tracing. Disattivato per impostazione predefinita.\nPuò rimuovere effetti o causare grafica errata. Riavvia il gioco dopo la modifica.",
   "Options.Env.StrictCompute.Desc": "Arresta in caso di rifiuto degli shader di calcolo e disegno (predefinito).\nDisattiva per saltare il lavoro interessato. Sono possibili immagini mancanti, errori o blocchi. Riavvia il gioco dopo una modifica.",
   "Options.Env.PerformanceProfile.Desc": "Registra tempi di prestazione e FPS dal prossimo avvio del gioco.\nQuesto può ridurre le prestazioni.",

@@ -18,6 +18,10 @@ internal sealed class EmulatorProcess : IDisposable
 {
     public const int HostStopExitCode = -2;
 
+    internal static bool IsWindowReadyMessage(string line) =>
+        line.Contains("[LOADER][INFO]", StringComparison.Ordinal) &&
+        line.Contains(" window ready:", StringComparison.Ordinal);
+
     private const uint ExtendedStartupInfoPresent = 0x00080000;
     private const uint CreateNoWindow = 0x08000000;
     private const int StartfUseStdHandles = 0x00000100;
@@ -476,7 +480,7 @@ internal sealed class EmulatorProcess : IDisposable
         return builder.ToString();
     }
 
-    private static string QuoteArgument(string value)
+    internal static string QuoteArgument(string value)
     {
         if (value.Length == 0)
         {

@@ -58,6 +58,12 @@ internal static partial class Program
     private static int Main(string[] args)
     {
         ConfigureManagedPluginResolution();
+        if (args is [LaunchConfiguration.ShortcutArgument, var shortcutGame])
+        {
+            try { return ShortcutLauncher.Run(shortcutGame); }
+            finally { SharpEmuLog.Shutdown(); }
+        }
+
         // Apply the game's settings file before anything reads the environment (the Vulkan
         // loader setup below, and backend settings cached in static fields). Keep the result
         // for RunEmulator so settings and relative paths are resolved once.
@@ -143,7 +149,10 @@ internal static partial class Program
 
         // The executable uses the GUI subsystem, so CLI mode has to connect
         // itself to a console before the first write.
-        EnsureCliConsole();
+        if (!args.Contains(LaunchConfiguration.NoConsoleArgument, StringComparer.OrdinalIgnoreCase))
+        {
+            EnsureCliConsole();
+        }
         UseUtf8ConsoleOutput();
         if (isMitigatedChild && _preparedLaunch?.LogFile is { Length: > 0 } earlyLogFilePath)
         {
@@ -1068,6 +1077,10 @@ internal static partial class Program
         for (var i = 0; i < args.Length; i++)
         {
             var argument = args[i];
+            if (argument.Equals(LaunchConfiguration.NoConsoleArgument, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
             if (TrySplitOption(argument, "--console", out var consoleText))
             {
                 if (!string.Equals(consoleText, "ps5", StringComparison.OrdinalIgnoreCase))
@@ -1383,7 +1396,12 @@ internal static partial class Program
             logFilePath = null;
             return false;
         }
-        foreach (var (name, value) in configured.BuildCliEnvironment(GuiSettings.Load(), Environment.GetEnvironmentVariable))
+        var launcher = GuiSettings.Load();
+        if (!HasOption(args, "--console-language") && TryParseSystemLanguage(launcher.ConsoleLanguage, out var configuredLanguage))
+        {
+            systemLanguage = configuredLanguage;
+        }
+        foreach (var (name, value) in configured.BuildCliEnvironment(launcher, Environment.GetEnvironmentVariable))
         {
             Environment.SetEnvironmentVariable(name, value);
         }

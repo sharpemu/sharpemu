@@ -1,5 +1,9 @@
 {
   "_languageName": "Dansk",
+  "Library.Context.CreateShortcut": "Opret genvej på skrivebordet",
+  "Library.Shortcut.Created": "Genvej oprettet på skrivebordet:\n{0}",
+  "Library.Shortcut.Failed": "Kunne ikke oprette genvejen: {0}",
+  "Common.Close": "Luk",
   "Options.Env.SkipRt.Desc": "Spring compute-shadere over, der bruger ray tracing. Slået fra som standard.\nDet kan fjerne effekter eller give forkert grafik. Genstart spillet efter en ændring.",
   "Options.Env.StrictCompute.Desc": "Stop ved shaderafvisninger for beregning og tegning (standard).\nSlå fra for at springe det berørte arbejde over. Manglende billeder, fejl eller stop kan forekomme. Genstart spillet efter en ændring.",
   "Options.Env.PerformanceProfile.Desc": "Log ydelsestider og FPS fra næste spilstart.\nDette kan reducere ydelsen.",

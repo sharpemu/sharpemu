@@ -1,5 +1,9 @@
 {
   "_languageName": "Français",
+  "Library.Context.CreateShortcut": "Créer un raccourci sur le bureau",
+  "Library.Shortcut.Created": "Raccourci créé sur le bureau :\n{0}",
+  "Library.Shortcut.Failed": "Impossible de créer le raccourci : {0}",
+  "Common.Close": "Fermer",
   "Options.Env.SkipRt.Desc": "Ignorer les shaders de calcul qui utilisent le ray tracing. Désactivé par défaut.\nCela peut supprimer des effets ou provoquer des graphismes incorrects. Redémarrez le jeu après un changement.",
   "Options.Env.StrictCompute.Desc": "Arrêter lors des rejets de shaders pour le calcul et le dessin (par défaut).\nDésactiver pour ignorer le travail concerné. Des images manquantes, des erreurs ou des blocages sont possibles. Redémarrer le jeu après modification.",
   "Options.Env.PerformanceProfile.Desc": "Enregistrer les temps de performance et les FPS au prochain lancement du jeu.\nCela peut réduire les performances.",

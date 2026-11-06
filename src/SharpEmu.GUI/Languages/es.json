@@ -1,5 +1,9 @@
 {
   "_languageName": "Español",
+  "Library.Context.CreateShortcut": "Crear acceso directo en el escritorio",
+  "Library.Shortcut.Created": "Acceso directo creado en el escritorio:\n{0}",
+  "Library.Shortcut.Failed": "No se pudo crear el acceso directo: {0}",
+  "Common.Close": "Cerrar",
   "Options.Env.SkipRt.Desc": "Omite los shaders de cálculo que usan trazado de rayos. Desactivado por defecto.\nPuede eliminar efectos o provocar gráficos incorrectos. Reinicia el juego tras cambiarlo.",
   "Options.Env.StrictCompute.Desc": "Detener ante rechazos de shaders de cálculo y dibujo (predeterminado).\nDesactivar para omitir el trabajo afectado. Puede haber imágenes ausentes, errores o bloqueos. Reinicia el juego tras un cambio.",
   "Options.Env.PerformanceProfile.Desc": "Registra tiempos de rendimiento y FPS desde el próximo inicio del juego.\nEsto puede reducir el rendimiento.",

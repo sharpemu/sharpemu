@@ -1,5 +1,9 @@
 {
   "_languageName": "Polski",
+  "Library.Context.CreateShortcut": "Utwórz skrót na pulpicie",
+  "Library.Shortcut.Created": "Utworzono skrót na pulpicie:\n{0}",
+  "Library.Shortcut.Failed": "Nie udało się utworzyć skrótu: {0}",
+  "Common.Close": "Zamknij",
   "Options.Env.SkipRt.Desc": "Pomijaj shadery obliczeniowe korzystające ze śledzenia promieni. Domyślnie wyłączone.\nMoże to usunąć efekty lub spowodować błędną grafikę. Po zmianie uruchom grę ponownie.",
   "Options.Env.StrictCompute.Desc": "Zatrzymuj przy odrzuceniu shaderów obliczeń i rysowania (domyślnie).\nWyłącz, aby pomijać te operacje. Mogą wystąpić brakujące obrazy, błędy lub zawieszenia. Po zmianie uruchom grę ponownie.",
   "Options.Env.PerformanceProfile.Desc": "Zapisuj czasy wydajności i FPS od następnego uruchomienia gry.\nMoże to obniżyć wydajność.",
