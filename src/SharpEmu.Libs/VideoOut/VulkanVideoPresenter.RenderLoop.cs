@@ -163,7 +163,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var renderWorkDeadline = _renderWorkBudgetTicks > 0
                 ? System.Diagnostics.Stopwatch.GetTimestamp() + _renderWorkBudgetTicks
                 : long.MaxValue;
-            RunCommandStreamSlices(renderWorkDeadline);
+            RunCommandStreamSlices(renderWorkDeadline, yieldForPresentation: true);
 
             if (BatchShouldFlush)
             {

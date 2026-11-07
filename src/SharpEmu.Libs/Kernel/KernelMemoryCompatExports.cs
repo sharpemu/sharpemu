@@ -931,7 +931,7 @@ public static partial class KernelMemoryCompatExports
     private static int WcschrCore(CpuContext ctx, ulong address, ushort needle)
     {
         const int maxReadBytes = 4096;
-        var readBuffer = GC.AllocateUninitializedArray<byte>(maxReadBytes);
+        Span<byte> readBuffer = stackalloc byte[maxReadBytes];
         const ulong maxUnits = 1_048_576;
         for (ulong index = 0; index < maxUnits;)
         {
@@ -949,7 +949,7 @@ public static partial class KernelMemoryCompatExports
                 remainingBytes);
             readBytes &= ~(WideCharSize - 1);
             if (readBytes == 0 ||
-                !TryReadCompat(ctx, unitAddress, readBuffer.AsSpan(0, readBytes)))
+                !TryReadCompat(ctx, unitAddress, readBuffer[..readBytes]))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
             }
@@ -957,7 +957,7 @@ public static partial class KernelMemoryCompatExports
             for (var offset = 0; offset < readBytes; offset += WideCharSize)
             {
                 var unit = BinaryPrimitives.ReadUInt16LittleEndian(
-                    readBuffer.AsSpan(offset, WideCharSize));
+                    readBuffer.Slice(offset, WideCharSize));
                 if (unit == needle)
                 {
                     ctx[CpuRegister.Rax] = unitAddress + (ulong)offset;

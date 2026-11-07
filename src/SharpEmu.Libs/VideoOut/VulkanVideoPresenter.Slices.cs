@@ -218,6 +218,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public readonly List<ImageSliceUse> Images = new();
         private HashSet<BufferSliceUse>? _bufferSet;
         private Dictionary<(ResourceSlotIdentifier Image, ImageRole Role, ImageViewDescription View), int>? _imageIndex;
+        private readonly List<int> _previousImageUses = new();
 
         public void AddBuffer(in BufferSliceUse use)
         {
@@ -242,20 +243,26 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             var key = (use.Image, use.Request.Role, use.Request.View);
             _imageIndex ??= new();
+            var previous = -1;
             if (_imageIndex.TryGetValue(key, out var index))
             {
-                var known = Images[index];
-                if (ReferenceEquals(known.Expected, use.Expected) && SameRequest(known.Request, use.Request))
+                previous = index;
+                do
                 {
-                    _usesShared.Increment();
-                    return;
+                    var known = Images[index];
+                    if (ReferenceEquals(known.Expected, use.Expected) && SameRequest(known.Request, use.Request))
+                    {
+                        _usesShared.Increment();
+                        return;
+                    }
+                    index = _previousImageUses[index];
                 }
-            }
-            else
-            {
-                _imageIndex.Add(key, Images.Count);
+                while (index >= 0);
             }
 
+            // Keep distinct metadata requests, but retain each repeated variant only once.
+            _imageIndex[key] = Images.Count;
+            _previousImageUses.Add(previous);
             Images.Add(use);
         }
 

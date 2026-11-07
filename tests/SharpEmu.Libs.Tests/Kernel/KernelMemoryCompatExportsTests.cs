@@ -28,6 +28,29 @@ public sealed class KernelMemoryCompatExportsTests
     private const ulong SpanSizeOutAddress = GuestMemoryBase + 0x110;
 
     [Theory]
+    [InlineData('>', 3001)]
+    [InlineData('z', -1)]
+    [InlineData('\0', 3002)]
+    public void Wcschr_ScansAcrossPagesWithoutAllocating(char needle, int expectedIndex)
+    {
+        const ulong address = GuestMemoryBase + 0xFF0;
+        var memory = new FakeCpuMemory(GuestMemoryBase, 0x4000);
+        Assert.True(memory.TryWrite(address, Encoding.Unicode.GetBytes("<" + new string('x', 3000) + ">\0")));
+        var context = new CpuContext(memory, Generation.Gen5);
+        context[CpuRegister.Rdi] = address;
+        context[CpuRegister.Rsi] = needle;
+        Assert.Equal(0, KernelMemoryCompatExports.Wcschr(context));
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        var result = 0;
+        for (var index = 0; index < 100; index++)
+            result |= KernelMemoryCompatExports.Wcschr(context);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.Equal(0, result);
+        Assert.Equal(0, allocated);
+        Assert.Equal(expectedIndex < 0 ? 0UL : address + (ulong)expectedIndex * 2, context[CpuRegister.Rax]);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void UppercaseStringConversion_ConsumesWideArgumentBetweenNarrowStrings(bool useVaList)

@@ -141,6 +141,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _imageInitialized = new bool[swapchainImageCount];
             Console.Error.WriteLine(
+                $"[LOADER][INFO] Vulkan presentation: vsync={_videoOptions.VSync} " +
+                $"mode={presentMode} images={swapchainImageCount} frames_in_flight={MaxFramesInFlight}");
+            Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan output color: requested={_videoOptions.HdrMode} " +
                 $"display_hdr={hdrState.Enabled} guest_hdr_supported={hdrOutputSupported} " +
                 $"guest_hdr={guestHdrRequested} active={_hdrOutputActive} " +

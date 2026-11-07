@@ -449,6 +449,76 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void ReadyPresentationYieldsQueuedWorkButShutdownStillDrainsIt()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        var threadType = typeof(VulkanVideoPresenter).GetNestedType("CommandThread", BindingFlags.NonPublic)!;
+        var thread = Activator.CreateInstance(threadType,
+            presenter.Instance, presenter.GetField<SharpEmu.Libs.Gpu.GpuCommands.CommandStreamQueue>("_commandStream"),
+            presenter.Harness.Memory, (Action<AgcExports.DeferredWork>)(_ => { }),
+            (Func<SharpEmu.Libs.Gpu.GpuCommands.SliceResult>)(() => SharpEmu.Libs.Gpu.GpuCommands.SliceResult.NoWork))!;
+        presenter.SetField("_commandThread", thread);
+        presenter.SetField("_betweenCommandItems", (Action)(() => { }));
+        var ran = 0;
+        var post = threadType.GetMethod("Post")!;
+        for (var index = 0; index < 513; index++)
+            post.Invoke(thread, [(Action)(() => ran++), "test"]);
+
+        var latest = typeof(VulkanVideoPresenter).GetField("_latestPresentation", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var original = latest.GetValue(null);
+        var presentationType = typeof(VulkanVideoPresenter).GetNestedType("Presentation", BindingFlags.NonPublic)!;
+        try
+        {
+            latest.SetValue(null, Activator.CreateInstance(presentationType,
+                new byte[4], 1u, 1u, 1L, SharpEmu.ShaderCompiler.GuestDrawKind.None, false, 0UL, 0L, false, 0UL, 0UL, null));
+            presenter.Run(() =>
+            {
+                presenter.InvokeMethod("RunCommandStreamSlices", long.MaxValue, true);
+                Assert.Equal(0, ran);
+                presenter.InvokeMethod("RunCommandStreamSlices", long.MaxValue, false);
+                Assert.Equal(513, ran);
+            });
+        }
+        finally
+        {
+            latest.SetValue(null, original);
+            presenter.SetField("_commandThread", null!);
+        }
+        presenter.Harness.Shutdown();
+    }
+
+    [Fact]
+    public void WorkerReadValidation_ReusesScratchAndDetectsChangesPastTheStackBuffer()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ImageCacheTestSupport.ReadWrite);
+        var bytes = new byte[4097];
+        bytes[^1] = 42;
+        Assert.True(harness.Memory.TryWrite(address, bytes));
+        var reads = new SharpEmu.Libs.Gpu.GpuCommands.ResolveReadLog { Publications = -1 };
+        reads.Add(address, bytes);
+        var host = (SharpEmu.Libs.Gpu.GpuCommands.ICommandStreamHost)presenter.Instance;
+        presenter.Run(() =>
+        {
+            Assert.True(host.ValidateWorkerReads(reads));
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var index = 0; index < 100; index++)
+                Assert.True(host.ValidateWorkerReads(reads));
+            Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
+            bytes[^1]++;
+            Assert.True(harness.Memory.TryWrite(address, bytes));
+            Assert.False(host.ValidateWorkerReads(reads));
+            bytes[^1]--;
+            Assert.True(harness.Memory.TryWrite(address, bytes));
+            Assert.True(host.ValidateWorkerReads(reads));
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void SegmentImageUsesAndKeptAttachmentsCompareRequestsByValue()
     {
         var image = new ResourceSlotIdentifier(1, 1);
@@ -460,7 +530,7 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
         var segment = Activator.CreateInstance(SegmentType, nonPublic: true)!;
         var requests = SegmentType.GetField("Requests")!.GetValue(segment)!;
         var addImage = requests.GetType().GetMethod("AddImage")!;
-        foreach (var use in new[] { request, equal, cleared })
+        foreach (var use in new[] { request, equal, cleared, cleared, request, equal, cleared })
         {
             addImage.Invoke(requests, [new ImageSliceUse(image, null!, use)]);
         }
