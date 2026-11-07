@@ -143,6 +143,39 @@ public sealed class CompactMemoryAccessPolicyTests
         }
     }
 
+    // The compact lowering reports an invocation's first and last missing pages when it ends; the null page, reached through
+    // a zero read from a missing page, never replaces them. The default lowering reports every missing page.
+    [Fact]
+    public void CompactLoweringReportsFirstAndLastMissingPagesButNotTheNullPage()
+    {
+        const ulong first = InputAddress, middle = InputAddress + 0x4000, last = InputAddress + 0x8000;
+        var program = Program(
+            MoveScalar(0x00, 12, unchecked((uint)first)), MoveScalar(0x08, 13, (uint)(first >> 32)),
+            MoveScalar(0x10, 14, unchecked((uint)middle)), MoveScalar(0x18, 15, (uint)(middle >> 32)),
+            MoveScalar(0x20, 16, unchecked((uint)last)), MoveScalar(0x28, 17, (uint)(last >> 32)),
+            MoveScalar(0x30, 18, 0x100), MoveScalar(0x38, 19, 0),
+            MoveVector(0x40, 0, 0),
+            GlobalMemory(0x48, "GlobalLoadDword", 12, 0, 1, 0),
+            GlobalMemory(0x50, "GlobalLoadDword", 14, 0, 2, 0),
+            GlobalMemory(0x58, "GlobalLoadDword", 16, 0, 3, 0),
+            GlobalMemory(0x60, "GlobalLoadDword", 18, 0, 4, 0),
+            EndProgram(0x68));
+        var pages = new HashSet<ulong> { first >> Gen5SpirvTranslator.DeviceAddressPageBits, middle >> Gen5SpirvTranslator.DeviceAddressPageBits,
+            last >> Gen5SpirvTranslator.DeviceAddressPageBits };
+        ulong Faults(bool compact, string path)
+        {
+            var executor = new SpirvExecutor(Compile(program, compact)) { UnmappedPages = pages };
+            executor.Run(Word, (_, _) => throw new InvalidOperationException("the program stores nothing"));
+            return executor.ReadVariable("faultBuffer", path);
+        }
+
+        var word = $".0.{(first >> Gen5SpirvTranslator.DeviceAddressPageBits) >> 5}";
+        var bit = (int)((first >> Gen5SpirvTranslator.DeviceAddressPageBits) & 31);
+        Assert.Equal(0b111ul << bit, Faults(compact: false, word));
+        Assert.Equal(0b101ul << bit, Faults(compact: true, word));
+        Assert.Equal(0ul, Faults(compact: true, ".0.0"));
+    }
+
     private static uint Word(ulong address) => unchecked((uint)(address * 0x9E3779B97F4A7C15ul >> 32));
 
     private static SortedDictionary<ulong, uint> Run(byte[] spirv)
