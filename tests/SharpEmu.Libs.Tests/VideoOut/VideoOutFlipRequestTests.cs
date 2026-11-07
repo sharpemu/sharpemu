@@ -40,6 +40,72 @@ public sealed class VideoOutFlipRequestTests : IDisposable
         _ = VideoOutExports.VideoOutClose(_context);
     }
 
+    [Theory]
+    [InlineData(24)]
+    [InlineData(30)]
+    [InlineData(60)]
+    public void CpuFlipAndItsGpuCaptureCountAsOneGuestFrame(int frames)
+    {
+        AssertSubmittedFrames(frames, () =>
+        {
+            for (var frame = 0; frame < frames; frame++)
+            {
+                Assert.Equal(0, VideoOutExports.SubmitFlip(_context, _handle, -1, 2, frame));
+                VideoOutExports.TraceGpuFlip(_memory, _handle, -1, 2, frame, 0, 0);
+            }
+            for (var present = 0; present < frames * 2; present++) PerfOverlay.RecordPresent();
+        });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AcceptedFlipIsCountedWithoutDependingOnCaptureDiagnostics(bool gpuQueued)
+    {
+        AssertSubmittedFrames(1, () =>
+        {
+            Assert.Equal(0, VideoOutExports.TryReserveFlipRequest(_handle, -1, 2, 21, gpuQueued, out var request));
+            VideoOutExports.CompleteFlip(request);
+            VideoOutExports.CompleteFlip(request);
+            VideoOutExports.MarkFlipPresented(request);
+        });
+    }
+
+    [Fact]
+    public void RejectedFlipsAreNotCountedAsGuestFrames()
+    {
+        AssertSubmittedFrames(0, () =>
+        {
+            Assert.NotEqual(0, VideoOutExports.SubmitFlip(_context, -1, -1, 2, 21));
+            Assert.NotEqual(0, VideoOutExports.TryReserveFlipRequest(_handle, 16, 2, 21, true, out _));
+            Assert.NotEqual(0, VideoOutExports.TryReserveFlipRequest(_handle, 0, 2, 21, true, out _));
+        });
+    }
+
+    private static void AssertSubmittedFrames(int expected, Action submit)
+    {
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+        var overlayCounter = typeof(PerfOverlay).GetField("_submittedInWindow", flags)!;
+        var logCounter = typeof(VideoOutExports).GetField("_submittedFrameCount", flags)!;
+        var logEnabled = (bool)typeof(VideoOutExports).GetField("_logFrameRate", flags)!.GetValue(null)!;
+        var windowStart = typeof(VideoOutExports).GetField("_frameRateWindowStart", flags)!;
+        var originalStart = windowStart.GetValue(null);
+        var overlayBefore = (long)overlayCounter.GetValue(null)!;
+        var logBefore = (long)logCounter.GetValue(null)!;
+        try
+        {
+            // Keep the reporting timer from resetting counters during the assertions.
+            windowStart.SetValue(null, Stopwatch.GetTimestamp() + 60 * Stopwatch.Frequency);
+            submit();
+            Assert.Equal(overlayBefore + expected, (long)overlayCounter.GetValue(null)!);
+            Assert.Equal(logBefore + (logEnabled ? expected : 0), (long)logCounter.GetValue(null)!);
+        }
+        finally
+        {
+            windowStart.SetValue(null, originalStart);
+        }
+    }
+
     [Fact]
     public void ChangeBufferAttribute2UpdatesTheRegisteredGroupAndValidatesArguments()
     {

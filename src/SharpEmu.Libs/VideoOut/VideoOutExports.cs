@@ -1587,8 +1587,6 @@ public static partial class VideoOutExports
             CancelFlip(requestId);
             return OrbisVideoOutErrorInvalidHandle;
         }
-        PerfOverlay.RecordSubmit();
-
         var guestImageSubmitted = false;
         ulong guestImageAddress = 0;
         if (bufferIndex >= 0 &&
@@ -1630,7 +1628,6 @@ public static partial class VideoOutExports
             guestImageAddress,
             flipEventCount);
         LoadProgressDiagnostics.TraceGpuWaitSnapshot(ctx.Memory);
-        ReportFrameRate(presented: false);
         var diagnosticFlipNumber = Interlocked.Increment(ref _diagnosticFlipCount);
         if (_holdFirstFlipMilliseconds > 0 && diagnosticFlipNumber == _holdFlipNumber)
         {

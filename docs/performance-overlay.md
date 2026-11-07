@@ -33,6 +33,10 @@ emulator path is configured:
 
 ## Usage values
 
+FPS and the frame graph count each accepted guest VideoOut flip once. Capturing
+that flip's image on the GPU does not count another frame. The `submitted_fps`
+log uses the same submission event; `presented_fps` counts host presentations.
+
 The panel dimensions are separate constants in `PerfOverlay.cs`:
 `PanelWidth` / `PanelHeight` for Full, and
 `MinimalPanelWidth` / `MinimalPanelHeight` for Minimal. Both heights are fixed;
