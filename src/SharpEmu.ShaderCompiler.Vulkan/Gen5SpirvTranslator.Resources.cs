@@ -211,7 +211,10 @@ public static partial class Gen5SpirvTranslator
         {
             _module = new SpirvModuleBuilder { InheritBlockState = inheritBlockState };
             _request = request;
-            _compactMemoryAccess = Gen5ShaderCallLinker.IsLinked(request.Program);
+            // The layout decides: ShaderResourcePlan binds the fallback address for a program it lowers compactly.
+            _compactMemoryAccess = Gen5ShaderCallLinker.IsLinked(request.Program) ||
+                (request.Bindings.Find(DescriptorBindingKind.DeviceAddressPageTable) is not null &&
+                 request.Bindings.Find(DescriptorBindingKind.DeviceAddressFallback) is not null);
             _sharedCalls = sharedCalls;
             _callArgumentSlots = callArguments?.Select((argument, slot) => (argument, slot)).ToDictionary(entry => entry.argument, entry => entry.slot);
             _callTargetSlots = callTargets?.Select((address, slot) => (address, slot)).ToDictionary(entry => entry.address, entry => entry.slot);
