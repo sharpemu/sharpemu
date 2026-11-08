@@ -22,6 +22,29 @@ public sealed class EmbeddedVertexFetchDetectorTests
         Vop2(pc, "VCndmaskB32", 1, Gen5Operand.Vector(8), Gen5Operand.Vector(5));
 
     [Theory]
+    [InlineData(0x1230u, 4u, 8u, 0x23)]
+    [InlineData(0x1230u, 4u, 0u, 0)]
+    [InlineData(0x80000000u, 31u, 127u, 1)]
+    [InlineData(0x1230u, 36u, 136u, 0x23)]
+    [InlineData(0x230u, 4u, 8u, 0x23)]
+    [InlineData(0x230u, 0u, 32u, 0x230)]
+    public void ConstantBitfieldExtractionSelectsTheCorrectAttribute(uint value, uint offset, uint width, int attributeId)
+    {
+        var program = Program(
+            MoveScalar(0, 8, value),
+            Sop2(4, "SBfeU32", 9, Gen5Operand.Scalar(8), Operand(offset | (width << 16))),
+            Sop2(8, "SLshlB32", 9, Gen5Operand.Scalar(9), Operand(4)),
+            ScalarLoad(12, BufferTable, destination: 12, count: 4, dynamicOffsetRegister: 9),
+            IndexSelect(20), FetchLoad(24, 12, 4), EndProgram(32));
+
+        var plan = EmbeddedVertexFetchDetector.Detect(program, AttributeTable, BufferTable, 0, 8, 32);
+
+        var load = Assert.Single(plan.Loads);
+        Assert.Equal(attributeId, load.AttributeId);
+        Assert.Equal([12u], load.PrologLoads);
+    }
+
+    [Theory]
     [InlineData(124u)]
     [InlineData(126u)]
     [InlineData(127u)]
