@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.ShaderCompiler;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -74,15 +73,6 @@ public sealed class FlattenedReadReuseTests
         var module = new SpirvModuleInspector(spirv.Spirv);
         Assert.Equal(0u, module.AddressingModel);
         Assert.DoesNotContain(request.Bindings.Descriptors, descriptor => descriptor.Kind == DescriptorBindingKind.DeviceAddressPageTable);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out var metalError), metalError);
-        var kernel = metal.Source[metal.Source.IndexOf("kernel void ", StringComparison.Ordinal)..];
-        Assert.DoesNotContain("sharpemu_load_device_dword", kernel);
-        for (uint component = 0; component < components; component++)
-        {
-            Assert.Contains($"s[{16 + component}] =", metal.Source);
-            Assert.Contains($"s[{32 + component}] =", metal.Source);
-            Assert.Equal(2, metal.Source.Split($".flattened_table[{component}u]").Length - 1);
-        }
     }
 
     [Fact]
@@ -93,8 +83,5 @@ public sealed class FlattenedReadReuseTests
         Assert.Empty(request.FlattenedSlotByMemoryIndex);
         Assert.Contains(request.Bindings.Descriptors, descriptor => descriptor.Kind == DescriptorBindingKind.DeviceAddressPageTable);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metal, out var metalError), metalError);
-        var kernel = metal.Source[metal.Source.IndexOf("kernel void ", StringComparison.Ordinal)..];
-        Assert.Contains("sharpemu_load_device_dword", kernel);
     }
 }

@@ -6,6 +6,7 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.Tests.Agc;
+using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Scheduling.SchedulingTestSupport;
 
@@ -96,6 +97,27 @@ public sealed class EndOfPipeTests
         Assert.Equal(
             new[] { "interrupt 9 3", "complete_flip 11", "complete_flip 12", "interrupt 13 0", "complete_flip 14", "interrupt 15 16" },
             _completion.Snapshot());
+    }
+
+    [Fact]
+    public void SignalsKeepADeferredBarrierDeferred()
+    {
+        using var scheduler = NewActiveScheduler(_device);
+        _device.CompleteOnSubmit = true;
+        var eop = NewEndOfPipe();
+        var recorded = new List<MemoryBarrierRequest>();
+        scheduler.MemoryBarrierRecorder = (_, request) => recorded.Add(request);
+        var promotions = scheduler.Current.DeferredPromotions;
+        var buffer = scheduler.Current;
+        buffer.DeferMemoryBarrier(new MemoryBarrierRequest(
+            PipelineStageFlags.ComputeShaderBit, PipelineStageFlags.AllCommandsBit, AccessFlags.ShaderWriteBit, AccessFlags.MemoryReadBit));
+
+        eop.RecordWrite64(1, buffer, 0x1000, 2);
+        eop.RecordWrite32WithInterrupt(2, buffer, 0x2000, 3, 4, 5);
+        eop.QueueInterruptOnCompletion(buffer, 6, 7);
+
+        Assert.Empty(recorded);
+        Assert.Equal(promotions, scheduler.Current.DeferredPromotions);
     }
 
     [Fact]

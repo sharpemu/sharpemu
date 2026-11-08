@@ -77,8 +77,35 @@ internal sealed class GameLibraryWatcher : IDisposable
         }
     }
 
+    private static readonly HashSet<string> LibraryFiles = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "eboot.bin",
+        "param.json",
+        "icon0.png",
+        "pic0.png",
+        "pic1.png",
+        "snd0.at9",
+        "trophy00.ucp",
+        "trophy00.trp",
+        "npbind.dat",
+    };
+
     private void OnFileSystemChanged(object sender, FileSystemEventArgs args)
-        => ScheduleRefresh();
+    {
+        if (args.ChangeType is WatcherChangeTypes.Deleted or WatcherChangeTypes.Renamed || AffectsLibrary(args.FullPath))
+        {
+            ScheduleRefresh();
+        }
+    }
+
+    private static bool AffectsLibrary(string path)
+    {
+        var name = Path.GetFileName(path);
+        return name.Length == 0 ||
+               Path.GetExtension(name).Length == 0 ||
+               name.EndsWith(".zar", StringComparison.OrdinalIgnoreCase) ||
+               LibraryFiles.Contains(name);
+    }
 
     private void OnWatcherError(object sender, ErrorEventArgs args)
     {

@@ -7,7 +7,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <!-- The backend-neutral half of guest shader compilation: the Gen5 (gfx10) microcode
        decoder, the scalar evaluator, and the shader IR every codegen consumes. Emitters
-       (SPIR-V, MSL, DXIL) live in sibling SharpEmu.ShaderCompiler.* projects; nothing
+       (SPIR-V, DXIL) live in sibling SharpEmu.ShaderCompiler.* projects; nothing
        here may depend on a host graphics API. -->
   <PropertyGroup>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>

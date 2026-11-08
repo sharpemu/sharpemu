@@ -41,6 +41,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private static bool _hdrOutputSupported;
 
     private static bool _splashHidden;
+    private static (byte[] Pixels, uint Width, uint Height)? _splashFrame;
 
     private static bool ShouldSamplePresentedGuestImageForDiagnostics(long frame)
     {
@@ -85,6 +86,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _windowWidth = width;
             _windowHeight = height;
+            _splashFrame = hasSplash ? (splashPixels, splashWidth, splashHeight) : null;
             _latestPresentation ??= _splashHidden
                 ? new Presentation(
                     CreateBlackFrame(width, height),
@@ -102,12 +104,12 @@ internal static unsafe partial class VulkanVideoPresenter
                     GuestDrawKind.None,
                     IsSplash: true)
                 : new Presentation(
-                    null,
+                    CreateBlackFrame(width, height),
                     width,
                     height,
-                    0,
+                    1,
                     GuestDrawKind.None,
-                    IsSplash: false);
+                    IsSplash: true);
             StartPresenterLocked();
         }
     }
@@ -377,9 +379,9 @@ internal static unsafe partial class VulkanVideoPresenter
     {
         if (HostMainThread.IsAvailable)
         {
-            // AppKit windowing traps when touched off the process
-            // main thread on macOS, so hand the whole window loop to the
-            // main-thread pump the CLI parked for us. _thread only marks the
+            // Window work belongs on the process main thread, so hand
+            // the whole window loop to the main-thread pump the CLI
+            // parked for us. _thread only marks the
             // presenter as running; Run() clears it on exit either way.
             _thread = Thread.CurrentThread;
             HostMainThread.SetShutdownRequestHandler(RequestClose);
@@ -457,6 +459,26 @@ internal static unsafe partial class VulkanVideoPresenter
     /// visible.  In that case the AvPlayer HLE keeps a host-decoded BGRA frame
     /// available; substitute it for the guest image the title is flipping.
     /// </summary>
+    private static void TryReplaceWithHeldSplash(ref Presentation presentation)
+    {
+        if (!VideoOutExports.SplashHoldsGuestFrames || _splashHidden || presentation.IsSplash ||
+            _splashFrame is not { } splash)
+        {
+            return;
+        }
+
+        presentation = new Presentation(
+            splash.Pixels,
+            splash.Width,
+            splash.Height,
+            presentation.Sequence,
+            GuestDrawKind.None,
+            IsSplash: false,
+            RequiredTick: presentation.RequiredTick,
+            FlipRequestId: presentation.FlipRequestId,
+            Publication: presentation.Publication);
+    }
+
     private static void TryReplaceWithHostMovieFrame(ref Presentation presentation)
     {
         if (!TryTakeHostMovieFrame(out var pixels, out var width, out var height))
@@ -472,7 +494,8 @@ internal static unsafe partial class VulkanVideoPresenter
             GuestDrawKind.None,
             IsSplash: false,
             RequiredTick: presentation.RequiredTick,
-            FlipRequestId: presentation.FlipRequestId);
+            FlipRequestId: presentation.FlipRequestId,
+            Publication: presentation.Publication);
     }
 
     /// <summary>
@@ -557,5 +580,6 @@ internal static unsafe partial class VulkanVideoPresenter
         long GuestImageVersion = 0,
         bool IsHdr = false,
         ulong RequiredTick = 0,
-        ulong FlipRequestId = 0);
+        ulong FlipRequestId = 0,
+        SharpEmu.Libs.Gpu.Scheduling.PendingGuestPublications.Entry? Publication = null);
 }

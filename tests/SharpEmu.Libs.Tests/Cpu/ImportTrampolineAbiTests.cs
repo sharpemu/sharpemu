@@ -14,13 +14,51 @@ namespace SharpEmu.Libs.Tests.Cpu;
 public sealed class ImportTrampolineAbiTests
 {
     [Fact]
+    public unsafe void GeneratedTransferExit_BypassesGuestRestoreAndBalancesHostStack()
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64) return;
+        var code = CreateTrampolineBytes();
+        byte[] exit = [0x4C, 0x8B, 0x5C, 0x24, 0x20, 0x4D, 0x85, 0xDB,
+            0x74, 0x07, 0x48, 0x83, 0xC4, 0x38, 0x41, 0xFF, 0xE3];
+        var position = code.AsSpan().IndexOf(exit);
+        Assert.True(position >= 0);
+        var guestRestore = code.AsSpan(position).IndexOf(new byte[] { 0x4C, 0x89, 0xE4 });
+        Assert.True(guestRestore > exit.Length);
+        var page = (byte*)HostMemory.Alloc(null, 4096,
+            HostMemory.MEM_COMMIT | HostMemory.MEM_RESERVE, HostMemory.PAGE_EXECUTE_READWRITE);
+        Assert.True(page != null);
+        try
+        {
+            byte[] prefix = [0x48, 0x83, 0xEC, 0x38, 0x49, 0xBB];
+            prefix.CopyTo(new Span<byte>(page, prefix.Length));
+            var offset = prefix.Length;
+            *(ulong*)(page + offset) = (ulong)(page + 128);
+            offset += 8;
+            byte[] store = [0x4C, 0x89, 0x5C, 0x24, 0x20, 0x48, 0xB8];
+            store.CopyTo(new Span<byte>(page + offset, store.Length));
+            offset += store.Length;
+            *(ulong*)(page + offset) = 0x123456789ABCDEF0;
+            offset += 8;
+            code.AsSpan(position, exit.Length).CopyTo(new Span<byte>(page + offset, exit.Length));
+            offset += exit.Length;
+            page[offset] = 0x0F;
+            page[offset + 1] = 0x0B;
+            page[128] = 0xC3;
+            Assert.Equal(0x123456789ABCDEF0UL, ((delegate* unmanaged<ulong>)page)());
+        }
+        finally
+        {
+            Assert.True(HostMemory.Free(page, 0, HostMemory.MEM_RELEASE));
+        }
+    }
+
+    [Fact]
     public unsafe void GeneratedTrampoline_PreservesVolatileGuestState()
     {
         if (RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
             // The production backend emits and initializes x86-64 callback
-            // thunks, so inspect it only in an x64 test process. Apple Silicon
-            // runs this path through the same Rosetta environment as SharpEmu.
+            // thunks, so inspect it only in an x64 test process.
             return;
         }
 

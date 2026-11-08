@@ -48,7 +48,7 @@ public enum SamplerBorderColor : uint
 public sealed unsafe class SamplerStore : IDisposable
 {
     private readonly GpuDeviceInfo _device;
-    private readonly Dictionary<(uint, uint, uint, uint, bool), Sampler> _samplers = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<(uint, uint, uint, uint, bool), Sampler> _samplers = new();
     private readonly object _gate = new();
 
     public SamplerStore(GpuDeviceInfo device) => _device = device;
@@ -57,16 +57,30 @@ public sealed unsafe class SamplerStore : IDisposable
 
     public Sampler GetSampler(in SamplerDescriptorWords words, bool integerView)
     {
+        lock (_samplers)
+        {
+            return GetSamplerCore(in words, integerView);
+        }
+    }
+
+    private Sampler GetSamplerCore(in SamplerDescriptorWords words, bool integerView)
+    {
+        var key = (words[0], words[1], words[2], words[3], integerView);
+        // Every sampler binding of every draw asks; only the first of each kind creates.
+        if (_samplers.TryGetValue(key, out var found))
+        {
+            return found;
+        }
+
         lock (_gate)
         {
-            var key = (words[0], words[1], words[2], words[3], integerView);
             if (_samplers.TryGetValue(key, out var existing))
             {
                 return existing;
             }
 
             var sampler = CreateSampler(words, integerView);
-            _samplers.Add(key, sampler);
+            _samplers[key] = sampler;
             return sampler;
         }
     }
@@ -98,6 +112,20 @@ public sealed unsafe class SamplerStore : IDisposable
         _ => throw SubmissionScheduler.Fatal($"The sampler clamp mode is unknown: clamp={clamp}."),
     };
 
+    // Bit per reserved ratio encoding already reported, so each warns once.
+    private static int _reportedReservedAnisotropyRatios;
+
+    private static float ReservedAnisotropyRatio(uint ratio)
+    {
+        var bit = 1 << (int)(ratio & 0x7);
+        if ((Interlocked.Or(ref _reportedReservedAnisotropyRatios, bit) & bit) == 0)
+        {
+            Console.Error.WriteLine($"[LOADER][WARN] A reserved sampler anisotropy ratio is clamped to 16x: ratio={ratio}.");
+        }
+
+        return 16.0f;
+    }
+
     private Sampler CreateSampler(in SamplerDescriptorWords words, bool integerView)
     {
         var magnify = integerView ? (uint)SamplerFilter.Point : words.MagnifyFilter;
@@ -113,8 +141,8 @@ public sealed unsafe class SamplerStore : IDisposable
                 2 => 4.0f,
                 3 => 8.0f,
                 4 => 16.0f,
-                _ => throw SubmissionScheduler.Fatal(
-                    $"The anisotropy ratio is unknown: ratio={words.MaxAnisotropyRatio} words={words[0]:x8},{words[1]:x8},{words[2]:x8},{words[3]:x8}."),
+                // The reserved encodings clamp to the 16x maximum instead of failing.
+                _ => ReservedAnisotropyRatio(words.MaxAnisotropyRatio),
             };
         }
 

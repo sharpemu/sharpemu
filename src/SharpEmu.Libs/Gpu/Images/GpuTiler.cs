@@ -63,7 +63,7 @@ public struct TileTransferArguments
 // Runs the tiling, detiling, depth conversion and channel swap compute passes.
 public sealed unsafe class GpuTiler : IDisposable
 {
-    private const uint KindCount = 9;
+    private const uint KindCount = 11;
     private const uint ElementSizeCount = 5;
     private const uint DirectionCount = 2;
     private const uint PipelineCount = KindCount * ElementSizeCount * DirectionCount;
@@ -540,8 +540,14 @@ public sealed unsafe class GpuTiler : IDisposable
         return set;
     }
 
-    private void BindDescriptorSet(CommandBuffer command, DescriptorSet set) =>
-        _device.Vk.CmdBindDescriptorSets(command, PipelineBindPoint.Compute, _pipelineLayout, 0, 1, &set, 0, null);
+    private void BindDescriptorSet(CommandBuffer command, DescriptorSet set)
+    {
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            _device.Vk.CmdBindDescriptorSets(command, PipelineBindPoint.Compute, _pipelineLayout, 0, 1, &set, 0, null);
+        }
+        Vulkan.NativeBindingEpoch.Advance();
+    }
 
     private void Record(bool tile, VkBuffer source, ulong sourceOffset, ulong sourceCapacity, VkBuffer target, ulong targetOffset, ulong targetCapacity, List<TransferDispatch> dispatches, bool clearTarget)
     {
@@ -570,13 +576,16 @@ public sealed unsafe class GpuTiler : IDisposable
         var last = dispatches[^1].ArgumentsOffset;
         barriers[2] = Barrier(dispatches[0].ArgumentsBuffer, first, last - first + TileTransferArguments.Size, AccessFlags.HostWriteBit, AccessFlags.UniformReadBit);
         VulkanSynchronization.PipelineBarrier(vk,command, PipelineStageFlags.AllCommandsBit | PipelineStageFlags.HostBit,
-            PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.TransferBit, 0, 0, null, 3, barriers, 0, null);
+            PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.TransferBit, 0, 0, null, 3, barriers, 0, null, BarrierSource.Tiler);
         if (clearTarget)
         {
-            vk.CmdFillBuffer(command, target, targetOffset, targetCapacity, 0);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                vk.CmdFillBuffer(command, target, targetOffset, targetCapacity, 0);
+            }
             barriers[1].SrcAccessMask = AccessFlags2.TransferWriteBit;
             barriers[1].DstAccessMask = AccessFlags2.ShaderReadBit | AccessFlags2.ShaderWriteBit;
-            VulkanSynchronization.PipelineBarrier(vk,command, PipelineStageFlags.TransferBit, PipelineStageFlags.ComputeShaderBit, 0, 0, null, 1, barriers + 1, 0, null);
+            VulkanSynchronization.PipelineBarrier(vk,command, PipelineStageFlags.TransferBit, PipelineStageFlags.ComputeShaderBit, 0, 0, null, 1, barriers + 1, 0, null, BarrierSource.Tiler);
         }
 
         Span<DescriptorBufferInfo> infos = stackalloc DescriptorBufferInfo[3];
@@ -586,13 +595,20 @@ public sealed unsafe class GpuTiler : IDisposable
         {
             infos[2] = new DescriptorBufferInfo(dispatch.ArgumentsBuffer, dispatch.ArgumentsOffset, TileTransferArguments.Size);
             BindDescriptorSet(command, WriteDescriptorSet(infos, 2));
-            vk.CmdBindPipeline(command, PipelineBindPoint.Compute, GetPipeline(dispatch.PipelineSlot));
-            vk.CmdDispatch(command, (dispatch.Arguments.Width + 7) / 8, (dispatch.Arguments.Height + 7) / 8, dispatch.Arguments.Depth);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                vk.CmdBindPipeline(command, PipelineBindPoint.Compute, GetPipeline(dispatch.PipelineSlot));
+            }
+            Vulkan.NativeBindingEpoch.Advance();
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                vk.CmdDispatch(command, (dispatch.Arguments.Width + 7) / 8, (dispatch.Arguments.Height + 7) / 8, dispatch.Arguments.Depth);
+            }
         }
 
         barriers[1].SrcAccessMask = AccessFlags2.ShaderWriteBit;
         barriers[1].DstAccessMask = AccessFlags2.TransferReadBit | AccessFlags2.MemoryReadBit;
-        VulkanSynchronization.PipelineBarrier(vk,command, PipelineStageFlags.ComputeShaderBit, PipelineStageFlags.AllCommandsBit, 0, 0, null, 1, barriers + 1, 0, null);
+        VulkanSynchronization.PipelineBarrier(vk,command, PipelineStageFlags.ComputeShaderBit, PipelineStageFlags.AllCommandsBit, 0, 0, null, 1, barriers + 1, 0, null, BarrierSource.Tiler);
     }
 
     // Detiles into a scratch buffer that lives through the current tick.
@@ -604,6 +620,15 @@ public sealed unsafe class GpuTiler : IDisposable
         var scratch = AllocateScratch((linearCapacity + 3) & ~3UL);
         Record(false, tiled, tiledOffset, tiledCapacity, scratch.Buffer, 0, scratch.Size, dispatches, true);
         return new TilerBufferSpan(scratch.Buffer, 0, linearCapacity);
+    }
+
+    public void Detile(VkBuffer tiled, ulong tiledOffset, ulong tiledCapacity, VkBuffer linear, ulong linearOffset, ulong linearCapacity, ReadOnlySpan<TileTransfer> transfers)
+    {
+        var sourceBase = tiledOffset & (StorageAlignment - 1);
+        var targetBase = linearOffset & (StorageAlignment - 1);
+        var dispatches = new List<TransferDispatch>();
+        Prepare(false, tiledCapacity, linearCapacity, transfers, sourceBase, targetBase, dispatches);
+        Record(false, tiled, tiledOffset, tiledCapacity, linear, linearOffset, linearCapacity, dispatches, false);
     }
 
     public void Tile(VkBuffer linear, ulong linearOffset, ulong linearCapacity, VkBuffer tiled, ulong tiledOffset, ulong tiledCapacity, ReadOnlySpan<TileTransfer> transfers)
@@ -696,7 +721,11 @@ public sealed unsafe class GpuTiler : IDisposable
     {
         fixed (TileTransferArguments* pointer = &arguments)
         {
-            _device.Vk.CmdPushConstants(command, _pipelineLayout, ShaderStageFlags.ComputeBit, 0, TileTransferArguments.Size, pointer);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _device.Vk.CmdPushConstants(command, _pipelineLayout, ShaderStageFlags.ComputeBit, 0, TileTransferArguments.Size, pointer);
+            }
+            Vulkan.NativeBindingEpoch.Advance();
         }
     }
 
@@ -741,8 +770,12 @@ public sealed unsafe class GpuTiler : IDisposable
         barriers[1] = Barrier(target.Buffer, target.Offset, targetBarrierSize,
             AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit | AccessFlags.HostWriteBit | AccessFlags.TransferWriteBit | AccessFlags.ShaderWriteBit,
             AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit);
-        VulkanSynchronization.PipelineBarrier(vk,command, PipelineStageFlags.AllCommandsBit | PipelineStageFlags.HostBit, PipelineStageFlags.ComputeShaderBit, 0, 0, null, 2, barriers, 0, null);
-        vk.CmdBindPipeline(command, PipelineBindPoint.Compute, pipeline);
+        VulkanSynchronization.PipelineBarrier(vk,command, PipelineStageFlags.AllCommandsBit | PipelineStageFlags.HostBit, PipelineStageFlags.ComputeShaderBit, 0, 0, null, 2, barriers, 0, null, BarrierSource.Tiler);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdBindPipeline(command, PipelineBindPoint.Compute, pipeline);
+        }
+        Vulkan.NativeBindingEpoch.Advance();
 
         var descriptorAlignment = StorageAlignment;
         var groupLimit = _device.MaxComputeWorkGroupCount;
@@ -794,14 +827,17 @@ public sealed unsafe class GpuTiler : IDisposable
                     PitchBytes = (uint)layout.SourceRowStride,
                     SliceBytes = (uint)layout.TargetRowStride,
                 });
-                vk.CmdDispatch(command, (uint)groupsX, rows, 1);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    vk.CmdDispatch(command, (uint)groupsX, rows, 1);
+                }
                 row += rows;
             }
         }
 
         barriers[1].SrcAccessMask = AccessFlags2.ShaderWriteBit;
         barriers[1].DstAccessMask = AccessFlags2.TransferReadBit | AccessFlags2.MemoryReadBit;
-        VulkanSynchronization.PipelineBarrier(vk,command, PipelineStageFlags.ComputeShaderBit, PipelineStageFlags.AllCommandsBit, 0, 0, null, 1, barriers + 1, 0, null);
+        VulkanSynchronization.PipelineBarrier(vk,command, PipelineStageFlags.ComputeShaderBit, PipelineStageFlags.AllCommandsBit, 0, 0, null, 1, barriers + 1, 0, null, BarrierSource.Tiler);
     }
 
     private void SwapBgra16(TilerBufferSpan input, TilerBufferSpan output, uint pixels)
@@ -828,14 +864,21 @@ public sealed unsafe class GpuTiler : IDisposable
         var vk = _device.Vk;
         _scheduler.EndRendering();
         var command = new CommandBuffer(_scheduler.Current.Handle);
-        VulkanSynchronization.PipelineBarrier(vk,command, PipelineStageFlags.AllCommandsBit | PipelineStageFlags.HostBit, PipelineStageFlags.ComputeShaderBit, 0, 0, null, 2, barriers, 0, null);
-        vk.CmdBindPipeline(command, PipelineBindPoint.Compute, _swapBgra16);
+        VulkanSynchronization.PipelineBarrier(vk,command, PipelineStageFlags.AllCommandsBit | PipelineStageFlags.HostBit, PipelineStageFlags.ComputeShaderBit, 0, 0, null, 2, barriers, 0, null, BarrierSource.Tiler);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdBindPipeline(command, PipelineBindPoint.Compute, _swapBgra16);
+        }
+        Vulkan.NativeBindingEpoch.Advance();
         BindDescriptorSet(command, WriteDescriptorSet(infos, -1));
         PushArguments(command, new TileTransferArguments { SourceBase = inputBinding.Base, DestinationBase = outputBinding.Base, Width = pixels });
-        vk.CmdDispatch(command, (pixels + 63) / 64, 1, 1);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdDispatch(command, (pixels + 63) / 64, 1, 1);
+        }
         barriers[1].SrcAccessMask = AccessFlags2.ShaderWriteBit;
         barriers[1].DstAccessMask = AccessFlags2.TransferReadBit;
-        VulkanSynchronization.PipelineBarrier(vk,command, PipelineStageFlags.ComputeShaderBit, PipelineStageFlags.TransferBit, 0, 0, null, 1, barriers + 1, 0, null);
+        VulkanSynchronization.PipelineBarrier(vk,command, PipelineStageFlags.ComputeShaderBit, PipelineStageFlags.TransferBit, 0, 0, null, 1, barriers + 1, 0, null, BarrierSource.Tiler);
     }
 
     public TilerBufferSpan SwapBgra16(TilerBufferSpan input)

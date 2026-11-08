@@ -63,6 +63,69 @@ internal sealed unsafe class FfmpegMediaStream : Stream
     internal static bool TryOpenAudio(string path, out FfmpegMediaStream? stream) =>
         TryOpen(path, AVMediaType.AVMEDIA_TYPE_AUDIO, 0, 0, out stream);
 
+    internal static bool TryOpenAudio(string path, int streamIndex, out FfmpegMediaStream? stream) =>
+        TryOpen(path, AVMediaType.AVMEDIA_TYPE_AUDIO, 0, 0, out stream, streamIndex);
+
+    internal enum MediaStreamKind : uint
+    {
+        Video,
+        Audio,
+        TimedText,
+    }
+
+    internal readonly record struct MediaStreamEntry(int Index, MediaStreamKind Kind, string Language);
+
+    internal static bool TryListStreams(string path, out MediaStreamEntry[] streams)
+    {
+        streams = [];
+        FfmpegRuntime.EnsureInitialized();
+
+        AVFormatContext* formatContext = null;
+        try
+        {
+            if (ffmpeg.avformat_open_input(&formatContext, path, null, null) < 0 ||
+                ffmpeg.avformat_find_stream_info(formatContext, null) < 0)
+            {
+                return false;
+            }
+
+            var entries = new System.Collections.Generic.List<MediaStreamEntry>();
+            for (var index = 0; index < formatContext->nb_streams; index++)
+            {
+                var stream = formatContext->streams[index];
+                MediaStreamKind? kind = stream->codecpar->codec_type switch
+                {
+                    AVMediaType.AVMEDIA_TYPE_VIDEO => MediaStreamKind.Video,
+                    AVMediaType.AVMEDIA_TYPE_AUDIO => MediaStreamKind.Audio,
+                    AVMediaType.AVMEDIA_TYPE_SUBTITLE => MediaStreamKind.TimedText,
+                    _ => null,
+                };
+                if (kind is null)
+                {
+                    continue;
+                }
+
+                var language = ffmpeg.av_dict_get(stream->metadata, "language", null, 0);
+                entries.Add(new MediaStreamEntry(
+                    index,
+                    kind.Value,
+                    language is null
+                        ? string.Empty
+                        : System.Runtime.InteropServices.Marshal.PtrToStringUTF8((IntPtr)language->value) ?? string.Empty));
+            }
+
+            streams = entries.ToArray();
+            return true;
+        }
+        finally
+        {
+            if (formatContext is not null)
+            {
+                ffmpeg.avformat_close_input(&formatContext);
+            }
+        }
+    }
+
     internal bool TrySeekMilliseconds(ulong milliseconds)
     {
         lock (_decodeGate)
@@ -122,7 +185,8 @@ internal sealed unsafe class FfmpegMediaStream : Stream
         AVMediaType mediaType,
         int width,
         int height,
-        out FfmpegMediaStream? stream)
+        out FfmpegMediaStream? stream,
+        int preferredStream = -1)
     {
         stream = null;
         FfmpegRuntime.EnsureInitialized();
@@ -143,7 +207,17 @@ internal sealed unsafe class FfmpegMediaStream : Stream
             }
 
             AVCodec* decoder = null;
-            var streamIndex = ffmpeg.av_find_best_stream(formatContext, mediaType, -1, -1, &decoder, 0);
+            int streamIndex;
+            if (preferredStream >= 0 && preferredStream < formatContext->nb_streams &&
+                formatContext->streams[preferredStream]->codecpar->codec_type == mediaType)
+            {
+                streamIndex = preferredStream;
+                decoder = ffmpeg.avcodec_find_decoder(formatContext->streams[streamIndex]->codecpar->codec_id);
+            }
+            else
+            {
+                streamIndex = ffmpeg.av_find_best_stream(formatContext, mediaType, -1, -1, &decoder, 0);
+            }
             if (streamIndex < 0 || decoder is null)
             {
                 ffmpeg.avformat_close_input(&formatContext);

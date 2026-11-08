@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Scheduling;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.GpuCommands;
@@ -92,6 +93,27 @@ public sealed class GpuCommandInterpreterLoopTests
 
         Assert.Equal(SubmissionProgress.Complete, progress);
         Assert.Equal(5u, runner.Interpreter.InstanceCount);
+    }
+
+    // A GPU pass earlier in the stream can build the buffer a packet calls or chains to (a dispatch
+    // list): the list holds padding until that work ran. The submitted buffer is the guest's own.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CalledBuffer_IsReadBehindTheWorkBeforeTheCall(bool chain)
+    {
+        var runner = new StreamRunner();
+        runner.Load(Nested, [0x80000000, 0x80000000]);
+        runner.Host.BeforeOperandRead = address =>
+        {
+            if (address == Nested) runner.Load(Nested, CreateInstanceCountPacket(5));
+        };
+
+        var progress = runner.Run(CreateInstanceCountPacket(2), IndirectBuffer(Nested, 2, chain));
+
+        Assert.Equal(SubmissionProgress.Complete, progress);
+        Assert.Equal(5u, runner.Interpreter.InstanceCount);
+        Assert.DoesNotContain(Command, runner.Host.OperandReads);
     }
 
     [Fact]
@@ -294,6 +316,113 @@ public sealed class GpuCommandInterpreterLoopTests
         Assert.Equal(SubmissionProgress.Complete, progress);
         Assert.Equal((uint)chains, runner.Interpreter.InstanceCount);
         Assert.Equal(0, runner.Commands.Depth);
+    }
+
+    [Fact]
+    public void WriteDataPatchingALaterPacketOfTheSameBuffer_IsSeen()
+    {
+        var runner = new StreamRunner();
+        var later = Command + (7 * 4);
+
+        runner.Run(WriteData(later + 4, 41), CreateInstanceCountPacket(2), CreateInstanceCountPacket(40));
+
+        Assert.Equal(41u, runner.Interpreter.InstanceCount);
+        Assert.Equal(1, runner.Host.GuestReads.Count(address => address == Command));
+    }
+
+    [Fact]
+    public void RegisterAndDrawPackets_ShareOneReadOfTheirWindow()
+    {
+        var runner = new StreamRunner();
+
+        runner.Run(
+            CreateInstanceCountPacket(2),
+            StreamRunner.Packet(PacketOpcode.SetShaderRegister, 0x10, 0xAA, 0xBB),
+            StreamRunner.Packet(PacketOpcode.DrawIndexAuto, 3, 0),
+            CreateInstanceCountPacket(5));
+
+        Assert.Equal(new[] { Command }, runner.Host.GuestReads);
+        Assert.Equal(2u, Assert.Single(runner.Host.AutoDraws).InstanceCount);
+        Assert.Equal(5u, runner.Interpreter.InstanceCount);
+    }
+
+    [Fact]
+    public void PacketsAcrossWindowAndPageEdges_RunInOrder()
+    {
+        var runner = new StreamRunner();
+        var packets = new List<uint[]> { new[] { PacketHeader.FillerHeader } };
+        for (var draw = 0u; draw < 250; draw++)
+        {
+            packets.Add(CreateInstanceCountPacket(draw + 1));
+            packets.Add(StreamRunner.Packet(PacketOpcode.DrawIndexAuto, draw, 0));
+        }
+
+        var longValues = Enumerable.Range(0, 300).Select(static value => (uint)value + 0x100).ToArray();
+        packets.Add(StreamRunner.Packet(Nop, longValues));
+        packets.Add(StreamRunner.Packet(PacketOpcode.SetShaderRegister, 0x10, 0xAB));
+        packets.Add(CreateInstanceCountPacket(77));
+
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(packets.ToArray()));
+
+        Assert.Equal(250, runner.Host.AutoDraws.Count);
+        for (var draw = 0; draw < 250; draw++)
+        {
+            Assert.Equal((uint)draw, runner.Host.AutoDraws[draw].VertexCount);
+            Assert.Equal((uint)draw + 1, runner.Host.AutoDraws[draw].InstanceCount);
+        }
+
+        Assert.Equal(0xABu, runner.Interpreter.Registers.Shader[0x10]);
+        Assert.Equal(77u, runner.Interpreter.InstanceCount);
+    }
+
+    [Fact]
+    public void CpuWriteAheadOfASuspendedWait_IsReadOnResume()
+    {
+        var runner = new StreamRunner();
+        runner.Host.WriteDword(Label, 0);
+
+        Assert.Equal(SubmissionProgress.Blocked, runner.Run(WaitEqual(Label, 1), CreateInstanceCountPacket(3)));
+
+        runner.Host.WriteDword(Command + (7 * 4) + 4, 9);
+        runner.Host.WriteDword(Label, 1);
+        Assert.Equal(SubmissionProgress.Complete, runner.Run());
+        Assert.Equal(9u, runner.Interpreter.InstanceCount);
+    }
+
+    [Fact]
+    public void RingChunkAppendAfterTheHeader_IsReadWithThePacket()
+    {
+        var runner = new StreamRunner();
+        var chunkBase = RecordingCommandStreamHost.MemoryBase + 0x2_0000;
+        var nextChunk = chunkBase + GpuCommandInterpreter.RingChunkBytes;
+        runner.Host.WriteWords(chunkBase, StreamRunner.Concat(CreateInstanceCountPacket(4), IndirectBuffer(1, 0)));
+        runner.Host.WriteWords(nextChunk, StreamRunner.Concat(CreateInstanceCountPacket(6), new[] { PacketHeader.Make(2, PacketOpcode.NumInstances) }));
+        runner.Host.BeforeGuestRead = address =>
+        {
+            if (address == nextChunk + 12)
+            {
+                runner.Host.WriteDword(nextChunk + 12, 11);
+            }
+        };
+
+        Assert.Equal(SubmissionProgress.Blocked, runner.Run(IndirectBuffer(chunkBase, 6, chain: true)));
+
+        Assert.Equal(11u, runner.Interpreter.InstanceCount);
+    }
+
+    [Fact]
+    public void LoweredCommandSignal_SkipsThePendingCommandCall()
+    {
+        var runner = new StreamRunner();
+        var signal = new PendingCommandSignal();
+        runner.Host.CommandSignal = signal;
+
+        runner.Run(CreateInstanceCountPacket(2), CreateInstanceCountPacket(3));
+        Assert.Equal(0, runner.Host.PendingCommandRuns);
+
+        signal.Raise();
+        runner.Run(CreateInstanceCountPacket(2));
+        Assert.Equal(2, runner.Host.PendingCommandRuns);
     }
 
     [Fact]

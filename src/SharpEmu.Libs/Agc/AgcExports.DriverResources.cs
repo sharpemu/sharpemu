@@ -325,10 +325,11 @@ public static partial class AgcExports
     }
 
     // Tessellation-factor ring and hull-shader off-chip buffers are guest-driver
-    // configuration for on-hardware tessellation memory. Our translator handles
-    // shader execution directly, so there is no guest-side ring to program: the
-    // guest driver only needs these to report success so init proceeds. Games
-    // (e.g. Unity titles) call them during GPU setup and stall if unresolved.
+    // configuration for on-hardware tessellation memory. The hull writes its factors
+    // through its own buffer descriptor, so the factor ring needs no host state. The
+    // off-chip parameter decides how many hull groups may run together; it is kept for
+    // the tessellation draws. Games (e.g. Unity titles) call these during GPU setup and
+    // stall if unresolved.
     [SysAbiExport(
         Nid = "XlNp7jzGiPo",
         ExportName = "sceAgcDriverSetTFRing",
@@ -352,6 +353,7 @@ public static partial class AgcExports
         TraceAgc(
             $"agc.driver_set_hs_offchip_param buffer=0x{ctx[CpuRegister.Rdi]:X16} " +
             $"param=0x{(uint)ctx[CpuRegister.Rsi]:X8}");
+        Gpu.TessellationOffchip.Configure((uint)ctx[CpuRegister.Rsi]);
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 }

@@ -36,6 +36,7 @@ public readonly record struct ColorTargetWords(
     public uint Depth => Attrib3 & 0x1FFF;
     public GuestTileMode TileMode => (GuestTileMode)((Attrib3 >> 14) & 0x1F);
     public uint Dimension => (Attrib3 >> 24) & 0x3;
+    public bool WriteVrsRateHintToCmask => (Attrib3 & (1u << 31)) != 0;
     public bool DataWriteOnDccClearToRegister => ((DccControl >> 19) & 0x1) != 0;
 }
 
@@ -106,10 +107,10 @@ public readonly record struct DisplaySurfaceWords(
     bool Compressed);
 
 // The shape the shader module was compiled with; the view type must match it.
-public readonly record struct ShaderImageShape(bool Volume, bool Arrayed, bool Cube, bool Storage, bool DynamicMip, TextureNumericClass NumericClass, bool OneDimensional = false, bool R128 = false, bool Multisampled = false, bool DepthCompare = false, bool Atomic = false)
+public readonly record struct ShaderImageShape(bool Volume, bool Arrayed, bool Cube, bool Storage, bool DynamicMip, TextureNumericClass NumericClass, bool OneDimensional = false, bool R128 = false, bool Multisampled = false, bool DepthCompare = false, bool Atomic = false, bool Atomic64 = false)
 {
     public ShaderImageShape(bool volume, bool arrayed, bool storage, bool dynamicMip, TextureNumericClass numericClass)
-        : this(volume, arrayed, false, storage, dynamicMip, numericClass, false, false, false, false, false)
+        : this(volume, arrayed, false, storage, dynamicMip, numericClass, false, false, false, false, false, false)
     {
     }
 }

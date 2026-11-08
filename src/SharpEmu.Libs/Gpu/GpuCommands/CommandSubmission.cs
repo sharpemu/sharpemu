@@ -78,6 +78,16 @@ public sealed class PacketCursorStack
     }
 }
 
+public sealed record CommandStreamCompletion(Action Consumed, PacketHandler?[]? PacketHandlers = null);
+
+internal sealed record SubmittedCommandBuffer(byte[] Commands, object? GeometrySnapshots,
+    IReadOnlyDictionary<ulong, byte[]>? RegisterTables = null)
+{
+    public int Length { get; init; } = Commands.Length;
+
+    public bool Pooled { get; init; }
+}
+
 public sealed class CommandSubmission
 {
     public CommandSubmission(CommandSubmissionKind kind, int queueId, ulong address, uint dwordCount, ulong submissionId, object? geometrySnapshots)
@@ -87,7 +97,15 @@ public sealed class CommandSubmission
         Address = address;
         DwordCount = dwordCount;
         SubmissionId = submissionId;
-        GeometrySnapshots = geometrySnapshots;
+        if (geometrySnapshots is SubmittedCommandBuffer submitted)
+        {
+            CommandBytes = submitted.Commands.AsMemory(0, submitted.Length);
+            _pooledCommands = submitted.Pooled ? submitted.Commands : null;
+            RegisterTables = submitted.RegisterTables;
+            geometrySnapshots = submitted.GeometrySnapshots;
+        }
+        GeometrySnapshots = geometrySnapshots is CommandStreamCompletion ? null : geometrySnapshots;
+        Completion = geometrySnapshots as CommandStreamCompletion;
     }
 
     public CommandSubmissionKind Kind { get; }
@@ -98,11 +116,31 @@ public sealed class CommandSubmission
 
     public uint DwordCount { get; }
 
+    internal ReadOnlyMemory<byte> CommandBytes { get; private set; }
+
+    internal IReadOnlyDictionary<ulong, byte[]>? RegisterTables { get; private set; }
+
+    private byte[]? _pooledCommands;
+
+    internal void ReleaseCommandBytes()
+    {
+        CommandBytes = default;
+        RegisterTables = null;
+        if (Interlocked.Exchange(ref _pooledCommands, null) is { } pooled)
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(pooled);
+        }
+    }
+
     // The submitter's own sequence number, kept for diagnostics and the translation state.
     public ulong SubmissionId { get; }
 
+    internal ulong AdmissionOrdinal { get; set; }
+
     // Snapshots captured at submit time; the processor never reads them.
     public object? GeometrySnapshots { get; }
+
+    internal CommandStreamCompletion? Completion { get; }
 
     public int FlipHandle { get; init; }
 

@@ -35,7 +35,7 @@ public sealed class KernelRuntimeCompatExportsTests
     [Fact]
     public void WithoutHostRdtsc_ReportsStopwatchFrequency_NotHardwareTsc()
     {
-        // Regression: on Linux/macOS ReadTsc returns the Stopwatch counter, so the reported
+        // Regression: on Linux ReadTsc returns the Stopwatch counter, so the reported
         // frequency must be the Stopwatch's, never the CPU's much larger hardware TSC frequency.
         var (frequencyHz, source) = KernelRuntimeCompatExports.SelectKernelTscFrequency(
             rdtscAvailable: false,

@@ -172,29 +172,29 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         using var harness = new ImageTestHarness(_vulkan);
         var image = harness.CreateImage(Color2D(64, 64, levels: 3, layers: 2));
 
-        var (initial, initialStages) = image.GetBarriers(ImageLayout.General, AccessFlags.ShaderReadBit, PipelineStageFlags.ComputeShaderBit, null);
+        var (initial, initialStages) = image.GetBarriers(AccessFlags.ShaderReadBit, PipelineStageFlags.ComputeShaderBit, null);
         var only = Assert.Single(initial);
         Assert.Equal(ImageLayout.Undefined, only.OldLayout);
         Assert.Equal(Vk.RemainingMipLevels, only.SubresourceRange.LevelCount);
         Assert.Equal(PipelineStageFlags.AllCommandsBit, initialStages);
         Assert.Null(image.Backing.SubresourceStates);
 
-        var (unchanged, _) = image.GetBarriers(ImageLayout.General, AccessFlags.ShaderReadBit, PipelineStageFlags.ComputeShaderBit, null);
+        var (unchanged, _) = image.GetBarriers(AccessFlags.ShaderReadBit, PipelineStageFlags.ComputeShaderBit, null);
         Assert.Empty(unchanged);
 
         var partial = new SubresourceRange(1, 1, 1, 1);
-        var (partialBarriers, partialStages) = image.GetBarriers(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit, partial);
+        var (partialBarriers, partialStages) = image.GetBarriers(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit, partial);
         var one = Assert.Single(partialBarriers);
         Assert.Equal((1u, 1u, 1u, 1u), (one.SubresourceRange.BaseMipLevel, one.SubresourceRange.LevelCount, one.SubresourceRange.BaseArrayLayer, one.SubresourceRange.LayerCount));
         Assert.Equal(PipelineStageFlags.ComputeShaderBit, partialStages);
         Assert.NotNull(image.Backing.SubresourceStates);
         Assert.Equal(6, image.Backing.SubresourceStates!.Count);
 
-        var (repeated, _) = image.GetBarriers(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit, partial);
+        var (repeated, _) = image.GetBarriers(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit, partial);
         Assert.Single(repeated);
 
         // Only the subresource the transfer changed needs a barrier; the others are already in the target state.
-        var (whole, wholeStages) = image.GetBarriers(ImageLayout.General, AccessFlags.ShaderReadBit, PipelineStageFlags.ComputeShaderBit, null);
+        var (whole, wholeStages) = image.GetBarriers(AccessFlags.ShaderReadBit, PipelineStageFlags.ComputeShaderBit, null);
         var collapsed = Assert.Single(whole);
         Assert.Equal((1u, 1u), (collapsed.SubresourceRange.BaseMipLevel, collapsed.SubresourceRange.BaseArrayLayer));
         Assert.Equal(PipelineStageFlags.TransferBit, wholeStages);
@@ -204,15 +204,225 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
     }
 
     [Fact]
+    public void Barriers_ReadsAfterReadsNeedNoBarrierUntilTheNextWrite()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(64, 64, levels: 2));
+
+        Assert.Single(image.GetBarriers(AccessFlags.ShaderReadBit, PipelineStageFlags.ComputeShaderBit, null).Barriers);
+        Assert.Empty(image.GetBarriers(AccessFlags.TransferReadBit, PipelineStageFlags.TransferBit, null).Barriers);
+        Assert.Equal(new ImageAccessState(PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.TransferBit,
+            AccessFlags.ShaderReadBit | AccessFlags.TransferReadBit, ImageLayout.General), image.Backing.State);
+
+        var (write, writeStages) = image.GetBarriers(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit, new SubresourceRange(1, 1, 0, 1));
+        var only = Assert.Single(write);
+        Assert.Equal(PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.TransferBit, writeStages);
+        Assert.Equal(AccessFlags2.ShaderReadBit | AccessFlags2.TransferReadBit, only.SrcAccessMask);
+
+        var (whole, wholeStages) = image.GetBarriers(AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, null);
+        var written = Assert.Single(whole);
+        Assert.Equal(1u, written.SubresourceRange.BaseMipLevel);
+        Assert.Equal(PipelineStageFlags.TransferBit, wholeStages);
+        Assert.Null(image.Backing.SubresourceStates);
+        Assert.Equal(PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.TransferBit, image.Backing.State.Stage);
+
+        var (after, afterStages) = image.GetBarriers(AccessFlags.ShaderWriteBit, PipelineStageFlags.ComputeShaderBit, null);
+        Assert.Single(after);
+        Assert.Equal(PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.TransferBit, afterStages);
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
+    public void Barriers_AttachmentReadsKeepTheirBarrierAfterSampling()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(64, 64));
+
+        Assert.Single(image.GetBarriers(AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, null).Barriers);
+        Assert.Single(image.GetBarriers(AccessFlags.ColorAttachmentReadBit, PipelineStageFlags.ColorAttachmentOutputBit, null).Barriers);
+        Assert.Single(image.GetBarriers(AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, null).Barriers);
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
+    public void Barriers_RepeatedGuestStorageWritesNeedNoBarrierButEveryOtherWriteKeepsOne()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(64, 64));
+        const AccessFlags Storage = ImageAccessState.GuestStorageAccess;
+
+        Assert.Single(image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, null, guest: true).Barriers);
+        Assert.Empty(image.GetBarriers(Storage, PipelineStageFlags.FragmentShaderBit, null, guest: true).Barriers);
+        Assert.Equal(PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.FragmentShaderBit, image.Backing.State.Stage);
+
+        Assert.Single(image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, null).Barriers);
+        Assert.Single(image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, null, guest: true).Barriers);
+
+        var (afterTransfer, transferStages) = image.GetBarriers(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit, null);
+        Assert.Single(afterTransfer);
+        Assert.Equal(PipelineStageFlags.ComputeShaderBit, transferStages);
+        Assert.Single(image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, null, guest: true).Barriers);
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
+    public void Barriers_RepeatedGuestStorageWritesNeedNoBarrierPerSubresource()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(64, 64, levels: 2));
+        const AccessFlags Storage = ImageAccessState.GuestStorageAccess;
+        var level = new SubresourceRange(1, 1, 0, 1);
+
+        Assert.Single(image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, level, guest: true).Barriers);
+        Assert.Empty(image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, level, guest: true).Barriers);
+        var (whole, _) = image.GetBarriers(Storage, PipelineStageFlags.ComputeShaderBit, null, guest: true);
+        var other = Assert.Single(whole);
+        Assert.Equal(0u, other.SubresourceRange.BaseMipLevel);
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
     public void Barriers_IgnoreLayerWindowsOnVolumes()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
         using var harness = new ImageTestHarness(_vulkan);
         var image = harness.CreateImage(Volume(16, 16, 8));
-        var (barriers, _) = image.GetBarriers(ImageLayout.General, AccessFlags.ShaderReadBit, PipelineStageFlags.ComputeShaderBit, new SubresourceRange(0, 1, 3, 2));
+        var (barriers, _) = image.GetBarriers(AccessFlags.ShaderReadBit, PipelineStageFlags.ComputeShaderBit, new SubresourceRange(0, 1, 3, 2));
         Assert.Single(barriers);
         Assert.Null(image.Backing.SubresourceStates);
         harness.AssertNoValidationMessages();
+    }
+
+    // A minimum LOD past the levels a view keeps on the host clamps to its last level, which the guest levels past
+    // the host chain alias (VK_EXT_image_view_min_lod requires a minimum LOD inside the view).
+    [Fact]
+    public void ClampToHostLevels_KeepsTheMinimumLodInsideTheView()
+    {
+        var view = ImageViewDescription.Default with { LevelCount = 7, MinLod = 6 };
+        var clamped = CachedImage.ClampToHostLevels(view, hostLevels: 5, guestLevels: 7);
+        Assert.Equal(5u, clamped.LevelCount);
+        Assert.Equal(4f, clamped.MinLod);
+        Assert.Equal(2f, CachedImage.ClampToHostLevels(view with { MinLod = 2 }, hostLevels: 5, guestLevels: 7).MinLod);
+        var tail = CachedImage.ClampToHostLevels(view with { BaseLevel = 6, LevelCount = 1 }, hostLevels: 5, guestLevels: 7);
+        Assert.Equal((4u, 1u, 4f), (tail.BaseLevel, tail.LevelCount, tail.MinLod));
+    }
+
+    [Fact]
+    public void MipChainLevels_CountsTheLevelsOfTheLargestDimension()
+    {
+        Assert.Equal(1u, CachedImage.MipChainLevels(ImageType.Type2D, new Extent3D(1, 1, 1)));
+        Assert.Equal(5u, CachedImage.MipChainLevels(ImageType.Type2D, new Extent3D(16, 16, 1)));
+        Assert.Equal(7u, CachedImage.MipChainLevels(ImageType.Type2D, new Extent3D(64, 3, 1)));
+        Assert.Equal(9u, CachedImage.MipChainLevels(ImageType.Type2D, new Extent3D(300, 2, 1)));
+        Assert.Equal(6u, CachedImage.MipChainLevels(ImageType.Type3D, new Extent3D(4, 4, 32)));
+    }
+
+    // An uncompressed view of a block-compressed image measures its extent in blocks but keeps the compressed
+    // image's levels: a 64x64 BC4 texture with seven levels is viewed as 16x16 texels with seven levels. A 16x16
+    // image has five. Created with seven, copies into the last two levels wrote past the image's memory and the
+    // device was lost (Saros, a compute shader writing the blocks of a BC4 texture array).
+    [Fact]
+    public void Constructor_KeepsOnlyTheLevelsOfTheExtentsMipChain()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(16, 16, levels: 7, layers: 2));
+        Assert.Equal(7u, image.Description.Resources.Levels);
+        Assert.Equal(5u, image.Backing.MipLevels);
+
+        // A view of a guest level past the host chain views the last host level.
+        var view = image.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R8G8B8A8Unorm, BaseLevel = 6 });
+        Assert.NotEqual(0UL, view.Handle);
+        Assert.Equal(view, image.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R8G8B8A8Unorm, BaseLevel = 4 }));
+        var all = image.GetOrCreateView(ImageViewDescription.Default with
+        {
+            Format = Format.R8G8B8A8Unorm,
+            Type = ImageViewType.Type2DArray,
+            LevelCount = 7,
+            LayerCount = 2,
+        });
+        Assert.NotEqual(0UL, all.Handle);
+        harness.AssertNoValidationMessages();
+    }
+
+    [Theory]
+    [InlineData(GuestPixelFormat.Bc1UNorm, Format.BC1RgbaUnormBlock, Format.R32G32Uint, 8u)]
+    [InlineData(GuestPixelFormat.Bc7UNorm, Format.BC7UnormBlock, Format.R32G32B32A32Uint, 16u)]
+    public void GetOrCreateView_CompressedImageSupportsIntegerStorageView(
+        GuestPixelFormat guestFormat, Format imageFormat, Format storageFormat, uint blockBytes)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var description = Color2D(64, 64, levels: 2) with
+        {
+            GuestFormat = guestFormat,
+            PixelFormat = imageFormat,
+            BytesPerBlock = blockBytes,
+        };
+        var image = harness.CreateImage(description);
+        var storageFeatures = _vulkan.DeviceInfo.GetFormatProperties(storageFormat).OptimalTilingFeatures;
+        var supportsStorage = (storageFeatures & FormatFeatureFlags.StorageImageBit) != 0 &&
+            _vulkan.DeviceInfo.TryGetImageFormatProperties(imageFormat, ImageType.Type2D, ImageTiling.Optimal,
+                image.Backing.Usage | ImageUsageFlags.StorageBit, image.Backing.Flags, out var properties) &&
+            (properties.SampleCounts & SampleCountFlags.Count1Bit) != 0;
+        Assert.Equal(supportsStorage, (image.Backing.Usage & ImageUsageFlags.StorageBit) != 0);
+        var sampled = image.GetOrCreateView(ImageViewDescription.Default with { Format = imageFormat });
+        Assert.NotEqual(0UL, sampled.Handle);
+        var storageRequest = ImageViewDescription.Default with
+        {
+            Format = storageFormat,
+            Usage = ImageUsageFlags.StorageBit,
+        };
+        if (!supportsStorage)
+        {
+            using var fatal = new FatalScope();
+            Assert.Throws<SchedulerFatalException>(() => image.GetOrCreateView(storageRequest));
+            harness.AssertNoValidationMessages();
+            return;
+        }
+        var storage = image.GetOrCreateView(storageRequest);
+        Assert.NotEqual(0UL, storage.Handle);
+        Assert.NotEqual(sampled, storage);
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
+    public void GetOrCreateView_ConcurrentRequestsPublishOnlyOneView()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var fatal = new FatalScope();
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(64, 64));
+        var request = ImageViewDescription.Default with { Format = Format.R8G8B8A8Unorm };
+        var handles = new ulong[64];
+        Parallel.For(0, handles.Length, index => handles[index] = image.GetOrCreateView(request).Handle);
+        Assert.NotEqual(0UL, handles[0]);
+        Assert.All(handles, handle => Assert.Equal(handles[0], handle));
+        Assert.Single(image.Views);
+    }
+
+    [Fact]
+    public void GetOrCreateView_CachedLookupDoesNotWaitForTheCreationGate()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var fatal = new FatalScope();
+        using var harness = new ImageTestHarness(_vulkan);
+        var image = harness.CreateImage(Color2D(64, 64));
+        var request = ImageViewDescription.Default with { Format = Format.R8G8B8A8Unorm };
+        var expected = image.GetOrCreateView(request);
+        Task<ImageView> lookup;
+        bool completed;
+        lock (image.Views)
+        {
+            lookup = Task.Run(() => image.GetOrCreateView(request));
+            completed = lookup.Wait(TimeSpan.FromSeconds(2));
+        }
+        Assert.Equal(expected, lookup.GetAwaiter().GetResult());
+        Assert.True(completed);
     }
 
     [Fact]
@@ -348,10 +558,10 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         harness.Run(() =>
         {
             var command = new CommandBuffer(harness.Scheduler.Current.Handle);
-            samples.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            samples.Transition(AccessFlags.TransferWriteBit, null, command);
             var clear = new ClearColorValue { Float32_0 = 1.0f, Float32_1 = 0.25f, Float32_2 = 0.0f, Float32_3 = 1.0f };
             var range = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1);
-            harness.Vk.CmdClearColorImage(command, samples.Backing.Handle, ImageLayout.TransferDstOptimal, &clear, 1, &range);
+            harness.Vk.CmdClearColorImage(command, samples.Backing.Handle, ImageLayout.General, &clear, 1, &range);
         });
         var resolved = harness.CreateImage(description);
         harness.Run(() => resolved.ResolveFrom(samples, SubresourceRange.First, SubresourceRange.First));

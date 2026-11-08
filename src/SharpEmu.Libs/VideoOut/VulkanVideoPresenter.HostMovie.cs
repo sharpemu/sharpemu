@@ -116,7 +116,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private uint _hostMovieChromaImageHeight;
         private uint _hostMovieChromaImageDstSelect;
         private bool _hostMovieChromaImageInitialized;
-        private byte[]? _hostMovieFramePixels;
+        internal byte[]? _hostMovieFramePixels;
         private uint _hostMovieFrameWidth;
         private uint _hostMovieFrameHeight;
         private long _hostMovieFrameSerial;
@@ -130,7 +130,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private readonly HashSet<string> _tracedHostMovieTextureBindings =
             new(StringComparer.Ordinal);
 
-        private void PumpHostMovieFrame()
+        internal void PumpHostMovieFrame()
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.MovieFramePolling);
             if (!HostMovieBridge.TryDecodeNextFrame(
@@ -179,12 +179,12 @@ internal static unsafe partial class VulkanVideoPresenter
             _hostMovieFrameSerial = frameSerial;
         }
 
-        private readonly record struct HostMovieTextureBindings(int Luma, int Chroma)
+        internal readonly record struct HostMovieTextureBindings(int Luma, int Chroma)
         {
             public static HostMovieTextureBindings None { get; } = new(-1, -1);
         }
 
-        private HostMovieTextureBindings FindHostMovieTextureBindings(
+        internal HostMovieTextureBindings FindHostMovieTextureBindings(
             IReadOnlyList<GuestDrawTexture> textures)
         {
             if (_hostMovieFramePixels is null ||
@@ -295,7 +295,7 @@ internal static unsafe partial class VulkanVideoPresenter
             GuestDrawTexture chroma) =>
             IsHostMovieChromaCandidateForLuma(luma, chroma);
 
-        private TextureResource CreateHostMovieTextureResource(
+        internal TextureResource CreateHostMovieTextureResource(
             GuestDrawTexture texture,
             int plane)
         {

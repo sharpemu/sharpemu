@@ -104,8 +104,51 @@ public static class NpTrophy2Exports
         ExportName = "sceNpTrophy2GetTrophyInfoArray",
         Target = Generation.Gen5,
         LibraryName = "libSceNpTrophy2")]
-    public static int NpTrophy2GetTrophyInfoArray(CpuContext ctx) =>
-        SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND);
+    public static int NpTrophy2GetTrophyInfoArray(CpuContext ctx)
+    {
+        var offset = (uint)ctx[CpuRegister.Rdx];
+        var limit = (uint)ctx[CpuRegister.Rcx];
+        var detailsAddress = ctx[CpuRegister.R8];
+        var dataAddress = ctx[CpuRegister.R9];
+        if ((detailsAddress == 0 && dataAddress == 0) ||
+            !ctx.TryGetImportStackArgument(0, out var countAddress) || countAddress == 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        var trophies = TrophyService.Trophies;
+        var start = (int)Math.Min(offset, (uint)trophies.Length);
+        var count = (int)Math.Min(limit, (uint)(trophies.Length - start));
+        Span<byte> details = stackalloc byte[TrophyService.DetailsSize];
+        Span<byte> data = stackalloc byte[TrophyService.DataSize];
+        for (var index = 0; index < count; index++)
+        {
+            var trophy = trophies[start + index];
+            if (detailsAddress != 0)
+            {
+                trophy.WriteDetails(details);
+                if (!ctx.Memory.TryWrite(detailsAddress + (ulong)index * TrophyService.DetailsSize, details))
+                {
+                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+            }
+
+            if (dataAddress != 0)
+            {
+                trophy.WriteData(data);
+                if (!ctx.Memory.TryWrite(dataAddress + (ulong)index * TrophyService.DataSize, data))
+                {
+                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+            }
+        }
+
+        Span<byte> countBytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(countBytes, (uint)count);
+        return ctx.Memory.TryWrite(countAddress, countBytes)
+            ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK)
+            : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
 
 
     private static int WriteIdAndReturn(CpuContext ctx, ulong outAddress, ref int nextId)

@@ -9,6 +9,7 @@
 [Aa]rtifacts/
 logs/
 .tmp/
+src/SharpEmu.Demo/
 
 x86/
 x64/

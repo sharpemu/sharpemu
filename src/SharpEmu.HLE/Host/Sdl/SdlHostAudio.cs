@@ -174,9 +174,14 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                     }
 
                     var bytesPerSecond = (double)_bytesPerFrame * _sampleRate;
-                    return bytesPerSecond <= 0
-                        ? -1
-                        : (int)(SDL_GetAudioStreamQueued(_stream) / bytesPerSecond * 1000.0);
+                    if (bytesPerSecond <= 0)
+                    {
+                        return -1;
+                    }
+
+                    // SDL reports a failed query as -1, which would otherwise truncate to an empty queue.
+                    var queuedBytes = SDL_GetAudioStreamQueued(_stream);
+                    return queuedBytes < 0 ? -1 : (int)(queuedBytes / bytesPerSecond * 1000.0);
                 }
             }
         }

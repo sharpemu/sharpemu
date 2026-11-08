@@ -27,7 +27,8 @@ public readonly record struct ImageSpecialization(
     uint IndirectMappingOffset,
     uint IndirectSearchIterations,
     bool Cube,
-    int EmulatedCompareFunction = -1);
+    int EmulatedCompareFunction = -1,
+    bool MipStatistics = false);
 
 // The module-affecting resource state of one draw. Addresses and descriptor payloads
 // stay in the snapshot, so they never create a permutation.
@@ -38,10 +39,14 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     public List<BufferSpecialization> Buffers { get; init; } = [];
     public List<ImageSpecialization> Images { get; init; } = [];
     public List<BufferCandidateTableSpecialization> BufferCandidateTables { get; init; } = [];
+    public List<uint> ImageDescriptorGroups { get; init; } = [];
+    public List<uint> SamplerDescriptorGroups { get; init; } = [];
 
     public bool Equals(ResourceSpecialization? other) =>
-        other is not null && BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&
-        Images.SequenceEqual(other.Images) && BufferCandidateTables.SequenceEqual(other.BufferCandidateTables);
+        ReferenceEquals(this, other) || other is not null && BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&
+        Images.SequenceEqual(other.Images) && BufferCandidateTables.SequenceEqual(other.BufferCandidateTables) &&
+        ImageDescriptorGroups.SequenceEqual(other.ImageDescriptorGroups) &&
+        SamplerDescriptorGroups.SequenceEqual(other.SamplerDescriptorGroups);
 
     public override bool Equals(object? obj) => Equals(obj as ResourceSpecialization);
 
@@ -64,6 +69,8 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
             hash.Add(table);
         }
 
+        foreach (var group in ImageDescriptorGroups) hash.Add(group);
+        foreach (var group in SamplerDescriptorGroups) hash.Add(group);
         return hash.ToHashCode();
     }
 
@@ -73,6 +80,8 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
         Buffers = [.. Buffers],
         Images = [.. Images],
         BufferCandidateTables = [.. BufferCandidateTables],
+        ImageDescriptorGroups = [.. ImageDescriptorGroups],
+        SamplerDescriptorGroups = [.. SamplerDescriptorGroups],
     };
 
     // The specialization of a plan before any draw: raw buffers and the tracked image classes.
@@ -81,7 +90,9 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
         BaseBufferCount = info.Buffers.Count,
         Buffers = info.Buffers.Select(_ => new BufferSpecialization(0, DescriptorConstants.InvalidFormat, DescriptorConstants.IdentityDestinationSelect)).ToList(),
         Images = info.Images.Select(image => new ImageSpecialization(
-            image.NumericClass == ImageNumericClass.Unsupported ? (image.Atomic ? ImageNumericClass.Uint : ImageNumericClass.Float) : image.NumericClass,
+            image.NumericClass == ImageNumericClass.Unsupported
+                ? (image.Atomic64 ? ImageNumericClass.Uint64 : image.Atomic ? ImageNumericClass.Uint : ImageNumericClass.Float)
+                : image.NumericClass,
             image.Dimension == ImageDimension.Unknown ? ImageDimension.Dim2D : image.Dimension,
             image.MipCount, image.ConversionFormat, image.ShaderSwizzle,
             image.IndirectRoot, image.IndirectMappingOffset, image.IndirectSearchIterations, image.Cube)).ToList(),

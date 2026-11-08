@@ -7,12 +7,12 @@ Options-only control resources: compact toggle theme
 <ResourceDictionary xmlns="https://github.com/avaloniaui"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <ControlTheme x:Key="OptionToggleTheme" TargetType="ToggleSwitch">
-    <Setter Property="Width" Value="46" />
-    <Setter Property="Height" Value="26" />
-    <Setter Property="MinWidth" Value="46" />
-    <Setter Property="MinHeight" Value="26" />
+    <Setter Property="Width" Value="54" />
+    <Setter Property="Height" Value="32" />
+    <Setter Property="MinWidth" Value="54" />
+    <Setter Property="MinHeight" Value="32" />
     <Setter Property="Padding" Value="0" />
-    <Setter Property="Background" Value="#2BFFFFFF" />
+    <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
     <Setter Property="FocusAdorner" Value="{x:Null}" />
@@ -30,24 +30,24 @@ Options-only control resources: compact toggle theme
         <Border x:Name="PART_Track"
                 Width="{TemplateBinding Width}"
                 Height="{TemplateBinding Height}"
-                Padding="3"
+                Padding="4"
                 Background="{TemplateBinding Background}"
                 BorderThickness="0"
-                CornerRadius="13"
+                CornerRadius="16"
                 ClipToBounds="True">
           <Canvas x:Name="PART_SwitchKnob"
-                  Width="20"
-                  Height="20"
+                  Width="24"
+                  Height="24"
                   HorizontalAlignment="Left"
                   VerticalAlignment="Center">
             <Grid x:Name="PART_MovingKnobs"
-                  Width="20"
-                  Height="20"
+                  Width="24"
+                  Height="24"
                   Canvas.Left="0">
               <Border x:Name="PART_Thumb"
                       Background="{StaticResource TextBrush}"
                       BorderThickness="0"
-                      CornerRadius="10" />
+                      CornerRadius="12" />
             </Grid>
           </Canvas>
           <Border.Transitions>
@@ -61,13 +61,16 @@ Options-only control resources: compact toggle theme
       </ControlTemplate>
     </Setter>
     <Style Selector="^:pointerover /template/ Border#PART_Track">
-      <Setter Property="Background" Value="#38FFFFFF" />
+      <Setter Property="Background" Value="{StaticResource RaisedHoverBrush}" />
     </Style>
     <Style Selector="^:checked /template/ Border#PART_Track">
       <Setter Property="Background" Value="{StaticResource AccentBrush}" />
     </Style>
     <Style Selector="^:checked:pointerover /template/ Border#PART_Track">
       <Setter Property="Background" Value="{StaticResource AccentHoverBrush}" />
+    </Style>
+    <Style Selector="^:checked /template/ Border#PART_Thumb">
+      <Setter Property="Background" Value="{StaticResource AccentForegroundBrush}" />
     </Style>
     <Style Selector="^:disabled /template/ Border#PART_Track">
       <Setter Property="Opacity" Value="0.45" />

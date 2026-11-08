@@ -11,7 +11,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Cpu;
 
-// Test instruction recovery with Linux and macOS signal frames.
+// Test instruction recovery with Linux signal frames.
 // Confirm that recovery reads and updates the vector register values.
 [Collection("PosixSignalRecovery")]
 public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
@@ -47,33 +47,10 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
         "TryRecoverAmdCompatInstruction",
         BindingFlags.Instance | BindingFlags.NonPublic)!;
 
-    [Theory]
-    [InlineData(184UL, false)]
-    [InlineData(607UL, false)]
-    [InlineData(608UL, true)]
-    [InlineData(712UL, true)]
-    [InlineData(1032UL, true)]
-    public void MacOsSignalRequiresCompleteVectorRegisters(ulong contextSize, bool expected)
-    {
-        if (!OperatingSystem.IsMacOS() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
-            return;
-
-        var getVectorRegisterAddress = typeof(DirectExecutionBackend).GetMethod(
-            "GetSignalVectorRegisterAddress", BindingFlags.Static | BindingFlags.NonPublic)!;
-        byte* userContext = stackalloc byte[64];
-        byte* machineContext = stackalloc byte[1032];
-        *(ulong*)(userContext + 40) = contextSize;
-
-        var result = Pointer.Unbox(getVectorRegisterAddress.Invoke(null,
-            [(nint)userContext, Pointer.Box(machineContext, typeof(byte*))])!);
-
-        Assert.Equal(expected ? (nint)(machineContext + 352) : 0, (nint)result);
-    }
-
     [Fact]
     public void ExtrqSigillRoundTripsXmmThroughTheBridge()
     {
-        if ((!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) ||
+        if (!OperatingSystem.IsLinux() ||
             RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
             return;
@@ -106,7 +83,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
     [Fact]
     public void InsertqSigillReadsSourceXmmThroughTheBridge()
     {
-        if ((!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) ||
+        if (!OperatingSystem.IsLinux() ||
             RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
             return;
@@ -138,7 +115,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
     [Fact]
     public void ExtractSignalPreservesLivePointerAndOtherVectorRegisters()
     {
-        if ((!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) ||
+        if (!OperatingSystem.IsLinux() ||
             RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
 
@@ -152,7 +129,6 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
                 frame.SetXmmLow(FxsaveXmm0Offset + registerIndex * 16 + 8, ~(ulong)registerIndex);
             }
             frame.SetXmmLow(FxsaveXmm1Offset, 0xAABB_FF93_00FF_9300);
-            frame.FillMacOsExtendedVectorState(0xA5);
 
             Assert.True(frame.Dispatch());
 
@@ -166,7 +142,6 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
                 Assert.Equal((ulong)registerIndex, frame.XmmLow(FxsaveXmm0Offset + registerIndex * 16));
                 Assert.Equal(~(ulong)registerIndex, frame.XmmHigh(FxsaveXmm0Offset + registerIndex * 16));
             }
-            frame.AssertMacOsExtendedVectorStateEquals(0xA5);
         }
         finally
         {
@@ -177,7 +152,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
     [Fact]
     public void InsertInstructionPreservesOtherVectorRegisters()
     {
-        if ((!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) ||
+        if (!OperatingSystem.IsLinux() ||
             RuntimeInformation.ProcessArchitecture != Architecture.X64)
             return;
 
@@ -194,7 +169,6 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
                 frame.SetXmmLow(FxsaveXmm0Offset + registerIndex * 16, (ulong)registerIndex);
                 frame.SetXmmLow(FxsaveXmm0Offset + registerIndex * 16 + 8, ~(ulong)registerIndex);
             }
-            frame.FillMacOsExtendedVectorState(0xA5);
 
             Assert.True(frame.Dispatch());
 
@@ -206,7 +180,6 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
                 Assert.Equal((ulong)registerIndex, frame.XmmLow(FxsaveXmm0Offset + registerIndex * 16));
                 Assert.Equal(~(ulong)registerIndex, frame.XmmHigh(FxsaveXmm0Offset + registerIndex * 16));
             }
-            frame.AssertMacOsExtendedVectorStateEquals(0xA5);
         }
         finally
         {
@@ -217,7 +190,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
     [Fact]
     public void RecoveryDeclinesWhenNoXmmStateWasBridged()
     {
-        if ((!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) ||
+        if (!OperatingSystem.IsLinux() ||
             RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
             return;
@@ -245,25 +218,18 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
     }
 
     // Build the signal frame that the host system gives to the signal handler.
-    // Use the register offsets for Linux or macOS.
+    // Use the register offsets for Linux.
     private sealed class FakeSignalFrame
     {
         private readonly byte[] _userContext = new byte[512];
         private readonly byte[] _floatingPointState = new byte[512];
-        private readonly byte[] _machineContext = new byte[1032];
         private readonly bool _includeFloatingPointState;
 
         public FakeSignalFrame(ulong instructionPointer, bool includeFloatingPointState = true)
         {
             _includeFloatingPointState = includeFloatingPointState;
             fixed (byte* userContext = _userContext)
-            fixed (byte* machineContext = _machineContext)
-            {
-                if (OperatingSystem.IsMacOS())
-                    *(ulong*)(machineContext + 144) = instructionPointer;
-                else
-                    *(ulong*)(userContext + LinuxUcontextGregsOffset + LinuxGregsRipOffset) = instructionPointer;
-            }
+                *(ulong*)(userContext + LinuxUcontextGregsOffset + LinuxGregsRipOffset) = instructionPointer;
         }
 
         public ulong Rip
@@ -271,12 +237,7 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
             get
             {
                 fixed (byte* userContext = _userContext)
-                fixed (byte* machineContext = _machineContext)
-                {
-                    return OperatingSystem.IsMacOS()
-                        ? *(ulong*)(machineContext + 144)
-                        : *(ulong*)(userContext + LinuxUcontextGregsOffset + LinuxGregsRipOffset);
-                }
+                    return *(ulong*)(userContext + LinuxUcontextGregsOffset + LinuxGregsRipOffset);
             }
         }
 
@@ -284,32 +245,26 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
         {
             get
             {
-                fixed (byte* state = OperatingSystem.IsMacOS() ? _machineContext : _userContext)
-                    return *(ulong*)(state + (OperatingSystem.IsMacOS() ? 16 : LinuxUcontextGregsOffset + 13 * 8));
+                fixed (byte* state = _userContext)
+                    return *(ulong*)(state + LinuxUcontextGregsOffset + 13 * 8);
             }
             set
             {
-                fixed (byte* state = OperatingSystem.IsMacOS() ? _machineContext : _userContext)
-                    *(ulong*)(state + (OperatingSystem.IsMacOS() ? 16 : LinuxUcontextGregsOffset + 13 * 8)) = value;
+                fixed (byte* state = _userContext)
+                    *(ulong*)(state + LinuxUcontextGregsOffset + 13 * 8) = value;
             }
         }
 
         public void SetXmmLow(int fxsaveOffset, ulong value)
         {
-            fixed (byte* state = OperatingSystem.IsMacOS() ? _machineContext : _floatingPointState)
-            {
-                var offset = OperatingSystem.IsMacOS() ? 352 + fxsaveOffset - FxsaveXmm0Offset : fxsaveOffset;
-                *(ulong*)(state + offset) = value;
-            }
+            fixed (byte* state = _floatingPointState)
+                *(ulong*)(state + fxsaveOffset) = value;
         }
 
         public ulong XmmLow(int fxsaveOffset)
         {
-            fixed (byte* state = OperatingSystem.IsMacOS() ? _machineContext : _floatingPointState)
-            {
-                var offset = OperatingSystem.IsMacOS() ? 352 + fxsaveOffset - FxsaveXmm0Offset : fxsaveOffset;
-                return *(ulong*)(state + offset);
-            }
+            fixed (byte* state = _floatingPointState)
+                return *(ulong*)(state + fxsaveOffset);
         }
 
         public ulong XmmHigh(int fxsaveOffset)
@@ -317,27 +272,13 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
             return XmmLow(fxsaveOffset + 8);
         }
 
-        public void FillMacOsExtendedVectorState(byte value) => _machineContext.AsSpan(772, 256).Fill(value);
-
-        public void AssertMacOsExtendedVectorStateEquals(byte value)
-        {
-            foreach (var actual in _machineContext.AsSpan(772, 256))
-                Assert.Equal(value, actual);
-        }
-
         public bool Dispatch()
         {
             EnsureBridgeBackend();
             fixed (byte* userContext = _userContext)
             fixed (byte* floatingPointState = _floatingPointState)
-            fixed (byte* machineContext = _machineContext)
             {
-                if (OperatingSystem.IsMacOS())
-                {
-                    *(byte**)(userContext + 48) = machineContext;
-                    *(ulong*)(userContext + 40) = _includeFloatingPointState ? (ulong)_machineContext.Length : 184;
-                }
-                else if (_includeFloatingPointState)
+                if (_includeFloatingPointState)
                 {
                     *(byte**)(userContext + LinuxUcontextGregsOffset + LinuxGregsFpstateOffset) = floatingPointState;
                 }
@@ -366,7 +307,6 @@ public sealed unsafe class Sse4aPosixSignalRecoveryTests : IDisposable
     }
 
     // Use the host allocator so Linux memory probes can read the instruction bytes.
-    // macOS reads these bytes through Mach.
     private static nint AllocateProbeVisibleCode(ReadOnlySpan<byte> instructions)
     {
         var size = checked((nuint)Environment.SystemPageSize);

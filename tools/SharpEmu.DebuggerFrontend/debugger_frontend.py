@@ -477,7 +477,6 @@ class EmulatorProcessManager:
                 ("linux", "amd64"): "linux-x64",
                 ("windows", "amd64"): "win-x64",
                 ("windows", "x86_64"): "win-x64",
-                ("darwin", "x86_64"): "osx-x64",
             }.get((system, machine))
             executable_name = "SharpEmu.exe" if os.name == "nt" else "SharpEmu"
             candidates: list[Path] = []

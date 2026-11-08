@@ -198,7 +198,29 @@ public sealed class AudioOutExportsTests : IDisposable
             Assert.True(manager.TryGetExport("w3PdaSTSwGE", out var export));
             Assert.Equal("sceAudioOutOutputs", export.Name);
             Assert.Equal("libSceAudioOut", export.LibraryName);
+            Assert.True(manager.TryGetExport("QOQtbeDqsT4", out var singleExport));
+            Assert.Equal("sceAudioOutOutput", singleExport.Name);
+            Assert.Equal("libSceAudioOut", singleExport.LibraryName);
         }
+    }
+
+    [Theory]
+    [InlineData(Generation.Gen4)]
+    [InlineData(Generation.Gen5)]
+    public void OutputExportSubmitsThroughTheSharedHostAudioPath(Generation generation)
+    {
+        var handle = OpenPort(bufferLength: 2);
+        byte[] samples = [1, 0, 2, 0, 3, 0, 4, 0];
+        Assert.True(_memory.TryWrite(FirstSourceAddress, samples));
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(generation));
+        var context = new CpuContext(_memory, generation);
+        context[CpuRegister.Rdi] = (ulong)handle;
+        context[CpuRegister.Rsi] = FirstSourceAddress;
+
+        Assert.True(manager.TryDispatch("QOQtbeDqsT4", context, out var result));
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.Equal(samples, Assert.Single(Assert.Single(_streams).Submissions));
     }
 
     public void Dispose() => AudioOutExports.ResetForTests();

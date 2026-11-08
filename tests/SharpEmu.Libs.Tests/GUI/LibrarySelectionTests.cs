@@ -40,6 +40,29 @@ public sealed class LibrarySelectionTests
         Assert.Same(first, selected);
     }
 
+    [Theory]
+    [InlineData("Hades", "PPSA03355", "01.003.000", "PPSA03355-1.003")]
+    [InlineData("Hades", "PPSA03355", "01.004.002", "PPSA03355-1.004.002")]
+    [InlineData("Hades", "PPSA03355", "10.000.000", "PPSA03355-10.000")]
+    [InlineData("Hades", "PPSA03355", null, "PPSA03355")]
+    [InlineData("Hades", null, "01.003.000", "Hades-1.003")]
+    [InlineData("Hades", " ", " ", "Hades")]
+    [InlineData("Game", "PPSA00001", "1.0/beta", "PPSA00001-1.0_beta")]
+    public void SuggestedArchiveName_IsTitleIdAndVersion(string folder, string? titleId, string? version, string expected)
+    {
+        Assert.Equal(expected, MainWindow.SuggestedArchiveName(folder, titleId, version));
+    }
+
+    [Theory]
+    [InlineData(@"C:\games\PPSA16901-1.001", @"C:\games\PPSA16901-1.001.zar")]
+    [InlineData(@"C:\games\PPSA03355-1.003.zar", @"C:\games\PPSA03355-1.003.zar")]
+    [InlineData(@"C:\games\Hades.ZAR", @"C:\games\Hades.ZAR")]
+    [InlineData(@"C:\games\Hades", @"C:\games\Hades.zar")]
+    public void ArchiveDestination_EndsInZar(string picked, string expected)
+    {
+        Assert.Equal(expected, MainWindow.ArchiveDestination(picked));
+    }
+
     private static GameEntry CreateGame(string name) =>
         new(name, null, null, $"/games/{name}/eboot.bin", 0, null, null);
 }

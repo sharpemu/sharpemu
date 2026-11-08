@@ -1,7 +1,9 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.HLE.GuestMemory;
 
 namespace SharpEmu.Libs.Gpu.Scheduling;
 
@@ -14,19 +16,76 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
     private readonly object _gate = new();
     private readonly Queue<Action> _commands = new();
     private readonly Action _wake;
-    private int _pendingCount;
+    private readonly Func<Action, Action, bool>? _tryEnqueueAfterPendingWork;
+    private readonly PendingCommandSignal _pending = new();
     private bool _accepting = true;
 
-    public GpuWorkerRelay(Action wake)
+    private sealed class HandoffTiming
+    {
+        public long LockStarted;
+        public long LockAcquired;
+        public long Published;
+        public long WakeStarted;
+        public long WakeFinished;
+        public long CallbackStarted;
+        public long CompletionStarted;
+    }
+
+    public GpuWorkerRelay(Action wake, Func<Action, Action, bool>? tryEnqueueAfterPendingWork = null)
     {
         _wake = wake;
+        _tryEnqueueAfterPendingWork = tryEnqueueAfterPendingWork;
     }
 
     public bool TryRunAfterPendingWork(Action work) => TryRunOnGpuQueue(work);
 
+    public bool TryRunAfterAcceptedCommandStreams(Action work)
+    {
+        ArgumentNullException.ThrowIfNull(work);
+        if (IsGpuQueueThread || _tryEnqueueAfterPendingWork is null)
+        {
+            return TryRunOnGpuQueue(work);
+        }
+
+        using var done = new SemaphoreSlim(0);
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? failure = null;
+        if (!_tryEnqueueAfterPendingWork(
+                () =>
+                {
+                    try
+                    {
+                        work();
+                    }
+                    catch (Exception exception)
+                    {
+                        failure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(exception);
+                    }
+                    finally
+                    {
+                        done.Release();
+                    }
+                },
+                () =>
+                {
+                    failure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(
+                        new OperationCanceledException(
+                            "The command stream stopped before the ordered GPU worker action could run."));
+                    done.Release();
+                }))
+        {
+            return false;
+        }
+
+        done.Wait();
+        failure?.Throw();
+        return true;
+    }
+
     public bool IsGpuQueueThread => _boundWorker == this;
 
-    public bool HasPendingCommands => Volatile.Read(ref _pendingCount) != 0;
+    public bool HasPendingCommands => _pending.IsRaised;
+
+    public PendingCommandSignal CommandSignal => _pending;
 
     public void BindCurrentThread() => _boundWorker = this;
 
@@ -38,7 +97,9 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
         }
     }
 
-    public bool TryPost(Action work)
+    public bool TryPost(Action work) => TryPost(work, null);
+
+    private bool TryPost(Action work, HandoffTiming? timing)
     {
         if (IsGpuQueueThread)
         {
@@ -46,18 +107,28 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
             return true;
         }
 
+        if (timing is not null)
+            timing.LockStarted = GuestMemoryProfile.GetTimestamp();
         lock (_gate)
         {
+            if (timing is not null)
+                timing.LockAcquired = GuestMemoryProfile.GetTimestamp();
             if (!_accepting)
             {
                 return false;
             }
 
             _commands.Enqueue(work);
-            Interlocked.Increment(ref _pendingCount);
+            _pending.Raise();
+            if (timing is not null)
+                timing.Published = GuestMemoryProfile.GetTimestamp();
         }
 
+        if (timing is not null)
+            timing.WakeStarted = GuestMemoryProfile.GetTimestamp();
         _wake();
+        if (timing is not null)
+            timing.WakeFinished = GuestMemoryProfile.GetTimestamp();
         return true;
     }
 
@@ -74,7 +145,7 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
             lock (_gate)
             {
                 command = _commands.Dequeue();
-                Interlocked.Decrement(ref _pendingCount);
+                _pending.Lower();
             }
 
             command();
@@ -98,17 +169,62 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
         }
 
         using var done = new SemaphoreSlim(0);
+        var timing = GuestMemoryProfile.GetTimestamp() != 0 ? new HandoffTiming() : null;
         if (!TryPost(() =>
             {
+                if (timing is not null)
+                    timing.CallbackStarted = GuestMemoryProfile.GetTimestamp();
                 work();
+                if (timing is not null)
+                    timing.CompletionStarted = GuestMemoryProfile.GetTimestamp();
                 done.Release();
-            }))
+            }, timing))
         {
             return false;
         }
 
-        done.Wait();
+        WaitForRelayedWork(done);
+        if (timing is not null)
+        {
+            var callerResumed = GuestMemoryProfile.GetTimestamp();
+            GuestMemoryProfile.RecordInterval(GuestMemoryProfile.Operation.RelayQueueLockAcquisition,
+                timing.LockStarted, timing.LockAcquired);
+            GuestMemoryProfile.RecordInterval(GuestMemoryProfile.Operation.RelayQueuePublication,
+                timing.LockAcquired, timing.Published);
+            GuestMemoryProfile.RecordInterval(GuestMemoryProfile.Operation.RelayWakeCall,
+                timing.WakeStarted, timing.WakeFinished);
+            GuestMemoryProfile.RecordInterval(GuestMemoryProfile.Operation.RelayQueueResidence,
+                timing.Published, timing.CallbackStarted);
+            GuestMemoryProfile.RecordInterval(GuestMemoryProfile.Operation.RelayCallerCompletion,
+                timing.CompletionStarted, callerResumed);
+        }
         return true;
+    }
+
+    private static readonly long RelaySpinTicks = System.Diagnostics.Stopwatch.Frequency / 50_000;
+    private static readonly ThreadCounter _spunWaits = new();
+    private static readonly ThreadCounter _blockedWaits = new();
+
+    public static string TakeRelayWaitReport() =>
+        FormattableString.Invariant($"relay_wait=spun:{_spunWaits.Take()},blocked:{_blockedWaits.Take()}");
+
+    private static void WaitForRelayedWork(SemaphoreSlim done)
+    {
+        var spinUntil = System.Diagnostics.Stopwatch.GetTimestamp() + RelaySpinTicks;
+        while (done.CurrentCount == 0)
+        {
+            if (System.Diagnostics.Stopwatch.GetTimestamp() >= spinUntil)
+            {
+                _blockedWaits.Increment();
+                done.Wait();
+                return;
+            }
+
+            Thread.SpinWait(16);
+        }
+
+        _spunWaits.Increment();
+        done.Wait();
     }
 
     // Reject new work from other threads. The worker can still run accepted commands.

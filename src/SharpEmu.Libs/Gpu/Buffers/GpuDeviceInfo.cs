@@ -34,6 +34,81 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
         MaxMemoryAllocationCount = properties.Limits.MaxMemoryAllocationCount;
         MaxComputeWorkGroupCount = (properties.Limits.MaxComputeWorkGroupCount[0], properties.Limits.MaxComputeWorkGroupCount[1], properties.Limits.MaxComputeWorkGroupCount[2]);
         Slabs = new GpuMemorySlabs(this);
+        MappedDeviceLocalBudget = PlanMappedDeviceLocalBudget();
+    }
+
+    private const ulong MiB = 1024 * 1024;
+    private const ulong ResizableBarHeapBytes = 2048 * MiB;
+    private const ulong MaxMappedDeviceLocalBudget = 1024 * MiB;
+    private const ulong SmallBarReserve = 32 * MiB;
+    private static readonly SharpEmu.Logging.SharpEmuLogger Log = SharpEmu.Logging.SharpEmuLog.For("GPU");
+    private static int _loggedMappedDeviceLocalBudget;
+
+    public ulong MappedDeviceLocalBudget { get; }
+
+    public bool ResizableBar { get; private set; }
+
+    public uint MemoryHeapCount => _memoryProperties.MemoryHeapCount;
+
+    public uint GetMemoryHeapIndex(uint memoryType)
+    {
+        fixed (PhysicalDeviceMemoryProperties* properties = &_memoryProperties)
+        {
+            return (&properties->MemoryTypes.Element0)[memoryType].HeapIndex;
+        }
+    }
+
+    public ulong GetMemoryHeapSize(uint heap)
+    {
+        fixed (PhysicalDeviceMemoryProperties* properties = &_memoryProperties)
+        {
+            return (&properties->MemoryHeaps.Element0)[heap].Size;
+        }
+    }
+
+    public bool IsDeviceLocalHeap(uint heap)
+    {
+        fixed (PhysicalDeviceMemoryProperties* properties = &_memoryProperties)
+        {
+            return ((&properties->MemoryHeaps.Element0)[heap].Flags & MemoryHeapFlags.DeviceLocalBit) != 0;
+        }
+    }
+
+    private ulong PlanMappedDeviceLocalBudget()
+    {
+        var mappedTypes = GpuBuffer.RankMemoryTypes(this, uint.MaxValue, GpuBufferUsage.MappedDeviceLocal).ToArray();
+        var largestDeviceLocalHeap = 0UL;
+        for (uint heap = 0; heap < MemoryHeapCount; heap++)
+        {
+            if (IsDeviceLocalHeap(heap))
+            {
+                largestDeviceLocalHeap = Math.Max(largestDeviceLocalHeap, GetMemoryHeapSize(heap));
+            }
+        }
+
+        if (mappedTypes.Length == 0)
+        {
+            NoteMappedDeviceLocalBudget(FormattableString.Invariant($"Mapped device-local buffers are unavailable: no memory type is both device-local and host-visible (largest device-local heap {largestDeviceLocalHeap / MiB} MiB)"));
+            return 0;
+        }
+
+        var memoryType = mappedTypes[0];
+        var mappedHeap = GetMemoryHeapIndex(memoryType);
+        var heapSize = GetMemoryHeapSize(mappedHeap);
+        ResizableBar = heapSize >= largestDeviceLocalHeap / 2 || heapSize >= ResizableBarHeapBytes;
+        var budget = ResizableBar
+            ? Math.Min(heapSize / 4, MaxMappedDeviceLocalBudget)
+            : heapSize / 4 > SmallBarReserve ? heapSize / 4 - SmallBarReserve : 0;
+        NoteMappedDeviceLocalBudget(FormattableString.Invariant($"Mapped device-local buffers use memory type {memoryType} ({GetMemoryTypeFlags(memoryType)}) on heap {mappedHeap} of {heapSize / MiB} MiB (largest device-local heap {largestDeviceLocalHeap / MiB} MiB, resizable BAR {ResizableBar}): budget {budget / MiB} MiB"));
+        return budget;
+    }
+
+    private static void NoteMappedDeviceLocalBudget(string message)
+    {
+        if (Interlocked.Exchange(ref _loggedMappedDeviceLocalBudget, 1) == 0)
+        {
+            Log.Info(message);
+        }
     }
 
     // Shared chunks the small buffers are carved from; freed at device teardown.

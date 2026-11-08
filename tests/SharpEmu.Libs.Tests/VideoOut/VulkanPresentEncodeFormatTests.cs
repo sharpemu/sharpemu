@@ -17,6 +17,32 @@ public sealed class VulkanPresentEncodeFormatTests
         Assert.Equal(SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Uint, decoded.OutputKind);
     }
 
+    [Fact]
+    public void UnsignedRgba32TargetUsesUnsignedPixelOutput()
+    {
+        Assert.True(VulkanVideoPresenter.TryDecodeRenderTargetFormat(14, 4, 0, out var decoded));
+        Assert.Equal(Format.R32G32B32A32Uint, decoded.Format);
+        Assert.Equal(SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Uint, decoded.OutputKind);
+        Assert.True(decoded.ExportMapping.IsIdentity);
+    }
+
+    [Theory]
+    [InlineData(13u, 4u, Format.R32G32B32A32Uint, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Uint)]
+    [InlineData(14u, 4u, Format.R32G32B32A32Uint, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Uint)]
+    [InlineData(13u, 5u, Format.R32G32B32A32Sint, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Sint)]
+    [InlineData(14u, 5u, Format.R32G32B32A32Sint, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Sint)]
+    [InlineData(14u, 7u, Format.R32G32B32A32Sfloat, SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float)]
+    public void FullWidthTargetsFollowTheirNumberType(
+        uint dataFormat,
+        uint numberType,
+        Format expectedFormat,
+        SharpEmu.ShaderCompiler.Gen5PixelOutputKind expectedKind)
+    {
+        Assert.True(VulkanVideoPresenter.TryDecodeRenderTargetFormat(dataFormat, numberType, 0, out var decoded));
+        Assert.Equal(expectedFormat, decoded.Format);
+        Assert.Equal(expectedKind, decoded.OutputKind);
+    }
+
     [Theory]
     [InlineData(Format.B8G8R8A8Srgb, Format.B8G8R8A8Unorm)]
     [InlineData(Format.R8G8B8A8Srgb, Format.R8G8B8A8Unorm)]

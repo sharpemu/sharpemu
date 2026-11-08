@@ -27,6 +27,7 @@ internal static class FfmpegRuntime
             _initialized = true;
             ffmpeg.RootPath = Path.Combine(AppContext.BaseDirectory, "plugins");
             DynamicallyLoadedBindings.Initialize();
+            ffmpeg.av_log_set_level(ffmpeg.AV_LOG_ERROR);
         }
     }
 }

@@ -9,8 +9,11 @@ public static unsafe class HostLaneReservation
 {
     private const int RelationProcessorCore = 0;
     private const int ThreadPriorityHighest = 2;
+    private const int ThreadPriorityAboveNormal = 1;
+    private const int LanesForTwoCores = 12;
 
     public static readonly ulong ReservedMask;
+    public static readonly ulong FrontEndMask;
     public static readonly ulong GuestMask;
 
     static HostLaneReservation()
@@ -26,15 +29,19 @@ public static unsafe class HostLaneReservation
             return;
         }
 
-        var core = SelectCore();
+        var cores = SelectCores(lanes >= LanesForTwoCores ? 2 : 1);
+        var render = cores.Count > 0 ? cores[0] : 0;
+        var front = cores.Count > 1 ? cores[1] : 0;
+        var reserved = render | front;
         var all = lanes == 64 ? ulong.MaxValue : (1UL << lanes) - 1;
-        if (core == 0 || (core & ~all) != 0 || (all & ~core) == 0)
+        if (render == 0 || (reserved & ~all) != 0 || (all & ~reserved) == 0)
         {
             return;
         }
 
-        ReservedMask = core;
-        GuestMask = all & ~core;
+        ReservedMask = render;
+        FrontEndMask = front;
+        GuestMask = all & ~reserved;
     }
 
     public static bool Active => ReservedMask != 0;
@@ -49,7 +56,20 @@ public static unsafe class HostLaneReservation
         var thread = GetCurrentThread();
         _ = SetThreadAffinityMask(thread, (nuint)ReservedMask);
         _ = SetThreadPriority(thread, ThreadPriorityHighest);
-        Console.Error.WriteLine($"[LOADER][INFO] Render thread reserved host lanes 0x{ReservedMask:X}; guest threads use 0x{GuestMask:X}.");
+        Console.Error.WriteLine($"[LOADER][INFO] Render thread reserved host lanes 0x{ReservedMask:X}; front end 0x{FrontEndMask:X}; guest threads use 0x{GuestMask:X}.");
+    }
+
+    public static void ApplyToFrontEndThread()
+    {
+        if (FrontEndMask == 0)
+        {
+            ApplyToGuestThread();
+            return;
+        }
+
+        var thread = GetCurrentThread();
+        _ = SetThreadAffinityMask(thread, (nuint)FrontEndMask);
+        _ = SetThreadPriority(thread, ThreadPriorityAboveNormal);
     }
 
     public static void ApplyToGuestThread()
@@ -60,13 +80,28 @@ public static unsafe class HostLaneReservation
         }
     }
 
-    private static ulong SelectCore()
+    private static readonly bool HostWorkersRaised = Environment.GetEnvironmentVariable("SHARPEMU_HOST_WORKER_PRIORITY") != "0";
+
+    public static void ApplyToHostWorkerThread()
     {
+        if (!Active || !HostWorkersRaised)
+        {
+            return;
+        }
+
+        var thread = GetCurrentThread();
+        _ = SetThreadAffinityMask(thread, (nuint)(GuestMask | FrontEndMask));
+        _ = SetThreadPriority(thread, ThreadPriorityAboveNormal);
+    }
+
+    private static List<ulong> SelectCores(int count)
+    {
+        var selected = new List<ulong>();
         uint length = 0;
         _ = GetLogicalProcessorInformationEx(RelationProcessorCore, null, &length);
         if (length == 0)
         {
-            return 0;
+            return selected;
         }
 
         var buffer = new byte[length];
@@ -74,11 +109,10 @@ public static unsafe class HostLaneReservation
         {
             if (!GetLogicalProcessorInformationEx(RelationProcessorCore, start, &length))
             {
-                return 0;
+                return selected;
             }
 
-            ulong selected = 0;
-            var selectedClass = -1;
+            var cores = new List<(ulong Mask, int EfficiencyClass, int Order)>();
             for (uint offset = 0; offset + 48 <= length;)
             {
                 var entry = start + offset;
@@ -92,13 +126,25 @@ public static unsafe class HostLaneReservation
                 var groupCount = *(ushort*)(entry + 30);
                 var mask = *(ulong*)(entry + 32);
                 var group = *(ushort*)(entry + 40);
-                if (*(int*)entry == RelationProcessorCore && groupCount == 1 && group == 0 && mask != 0 && efficiencyClass >= selectedClass)
+                if (*(int*)entry == RelationProcessorCore && groupCount == 1 && group == 0 && mask != 0)
                 {
-                    selected = mask;
-                    selectedClass = efficiencyClass;
+                    cores.Add((mask, efficiencyClass, cores.Count));
                 }
 
                 offset += size;
+            }
+
+            cores.Sort(static (left, right) => right.EfficiencyClass != left.EfficiencyClass
+                ? right.EfficiencyClass.CompareTo(left.EfficiencyClass)
+                : right.Order.CompareTo(left.Order));
+            foreach (var core in cores)
+            {
+                if (selected.Count == count)
+                {
+                    break;
+                }
+
+                selected.Add(core.Mask);
             }
 
             return selected;

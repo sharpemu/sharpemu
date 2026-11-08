@@ -54,9 +54,10 @@ public sealed class SamplerStoreTests : IClassFixture<HeadlessVulkanFixture>
         Assert.NotEqual(first, store.GetSampler(linear, true));
         Assert.Equal(5, store.Count);
 
-        Assert.Throws<SchedulerFatalException>(() => store.GetSampler(Words(5u << 9, 0, (3u << 22) | (3u << 20)), false));
-        Assert.Contains(fatal.Messages, message => message.Contains("anisotropy ratio is unknown"));
-        Assert.Equal(5, store.Count);
+        // The reserved ratio encodings clamp to 16x like hardware instead of failing.
+        Assert.NotEqual(0UL, store.GetSampler(Words(5u << 9, 0, (3u << 22) | (3u << 20)), false).Handle);
+        Assert.Empty(fatal.Messages);
+        Assert.Equal(6, store.Count);
         _vulkan.AssertNoValidationMessages();
     }
 }

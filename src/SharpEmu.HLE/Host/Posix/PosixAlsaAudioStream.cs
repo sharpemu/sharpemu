@@ -44,7 +44,7 @@ internal sealed unsafe class PosixAlsaAudioStream : IHostAudioStream
                 $"snd_pcm_open(\"{device}\") failed: {DescribeError(status)}.");
         }
 
-        // Match WinMM/CoreAudio soft queue depth: 32 KiB stereo PCM16 @ 48 kHz
+        // Match the WinMM soft queue depth: 32 KiB stereo PCM16 @ 48 kHz
         // is ~170 ms. AudioOut2 may request a deeper bed.
         var queuedBytes = Math.Max(maxQueuedPcmBytes, 4 * 1024);
         var latencyMicroseconds = (uint)Math.Clamp(

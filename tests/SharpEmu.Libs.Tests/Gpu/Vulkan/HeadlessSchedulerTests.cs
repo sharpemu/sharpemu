@@ -312,6 +312,7 @@ public sealed class HeadlessSchedulerTests : IClassFixture<HeadlessVulkanFixture
         using var memory = new GuestGpuMemory(new RecordingAddressSpace());
         memory.AttachStores(stores, stores);
         memory.Register(0x10000, 0x1000, GuestPageProtection.Read | GuestPageProtection.Write);
+        stores.Calls.Clear();
         memory.AttachGpuQueue(worker.Relay, worker.Scheduler);
         var order = new List<string>();
         worker.RunOnWorker(() =>
@@ -353,6 +354,7 @@ public sealed class HeadlessSchedulerTests : IClassFixture<HeadlessVulkanFixture
             using var memory = new GuestGpuMemory(new RecordingAddressSpace());
             memory.AttachStores(stores, stores);
             memory.Register(0x10000, 0x1000, GuestPageProtection.Read | GuestPageProtection.Write);
+            stores.Calls.Clear();
             memory.AttachGpuQueue(worker.Relay, worker.Scheduler);
             worker.RunOnWorker(() =>
             {

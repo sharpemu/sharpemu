@@ -66,6 +66,65 @@ public sealed class RawReadPrefetchTests
     }
 
     [Fact]
+    public void APrefetchSeedsTheCompiledEvaluatorByIndex()
+    {
+        var (plan, _, _) = Prepare(FlattenedReadReuseTests.RepeatedReadProgram(4), userDataCount: 9);
+        Assert.NotNull(plan.CompileEvaluatorNow());
+        var memory = new TestWordMemory { Words = [11, 22, 33, 44] };
+        var resident = new ResidentMemory(memory);
+
+        for (var walk = 0; walk < 2; walk++)
+        {
+            Assert.True(RuntimeValueEvaluator.EvaluateSources(plan, [], PrefetchInputs(memory, resident), plan.CleanFlatSlots,
+                evaluateTable: true, out _, out var table));
+            Assert.Equal([11u, 22, 33, 44], table);
+        }
+
+        Assert.Equal(2, resident.Calls);
+        Assert.Equal(8, resident.Words);
+        Assert.Equal(0u, memory.Reads);
+    }
+
+    private static Gen5ShaderProgram ChainedReadProgram()
+    {
+        var instructions = new List<Gen5ShaderInstruction> { ScalarLoad(0, 0, 10, 2), ScalarLoad(8, 10, 16, 4) };
+        uint pc = 16;
+        for (uint component = 0; component < 4; component++)
+        {
+            instructions.Add(Vop1(pc, "VMovB32", 4, Gen5Operand.Scalar(16 + component)));
+            pc += 4;
+            instructions.Add(BufferStore(pc, 4, (int)(component * 4)));
+            pc += 8;
+        }
+
+        instructions.Add(EndProgram(pc));
+        return Program([.. instructions]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void APointerOnTheWayIsReadInARunBeforeTheWordsBehindIt(bool compiled)
+    {
+        var (plan, _, _) = Prepare(ChainedReadProgram(), userDataCount: 9);
+        if (compiled)
+        {
+            Assert.NotNull(plan.CompileEvaluatorNow());
+        }
+
+        var memory = new TestWordMemory { Words = [0x1010, 0, 0, 0, 11, 22, 33, 44] };
+        var resident = new ResidentMemory(memory);
+
+        Assert.True(RuntimeValueEvaluator.EvaluateSources(plan, [], PrefetchInputs(memory, resident), plan.CleanFlatSlots,
+            evaluateTable: true, out _, out var table));
+
+        Assert.Equal([11u, 22, 33, 44], table.TakeLast(4));
+        Assert.Equal(2, resident.Calls);
+        Assert.Equal(6, resident.Words);
+        Assert.Equal(0u, memory.Reads);
+    }
+
+    [Fact]
     public void ARefusedRunFallsBackToWordReads()
     {
         var (plan, _, _) = Prepare(FlattenedReadReuseTests.RepeatedReadProgram(4), userDataCount: 9);

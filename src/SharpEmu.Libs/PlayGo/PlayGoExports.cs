@@ -1,7 +1,8 @@
-﻿// Copyright (C) 2026 SharpEmu Emulator Project
+// Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.FileSystem;
 using System.Buffers.Binary;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
@@ -19,6 +20,7 @@ public static class PlayGoExports
     private const int OrbisPlayGoErrorBadChunkId = unchecked((int)0x80B2000C);
     private const int OrbisPlayGoErrorNotSupportPlayGo = unchecked((int)0x80B2000E);
     private const int OrbisPlayGoErrorBadLocus = unchecked((int)0x80B20010);
+    private const int OrbisPlayGoErrorBadOptionalType = unchecked((int)0x80B20024);
     private const ulong PlayGoInitBufAddrOffset = 0;
     private const ulong PlayGoInitBufSizeOffset = 8;
     private const uint PlayGoMinimumInitBufferSize = 0x200000;
@@ -29,6 +31,10 @@ public static class PlayGoExports
     private const int PlayGoInstallSpeedSuspended = 0;
     private const int PlayGoInstallSpeedTrickle = 1;
     private const int PlayGoInstallSpeedFull = 2;
+    private const int PlayGoOptionalTypeLanguage = 0;
+    private const int PlayGoOptionalTypeScenario = 1;
+    private const ulong PlayGoLanguageMaskAll = ulong.MaxValue;
+    private const ulong PlayGoScenarioMaskAll = 0x1f;
     private const uint MaxPlayGoQueryEntries = 0x4000;
     private const uint PlayGoAllEntriesSentinel = uint.MaxValue;
 
@@ -131,6 +137,7 @@ public static class PlayGoExports
 
             if (!_metadata.Available)
             {
+                TracePlayGo("open result=0x80B2000E metadata_unavailable");
                 return OrbisPlayGoErrorNotSupportPlayGo;
             }
 
@@ -231,7 +238,7 @@ public static class PlayGoExports
             chunkIds = _metadata.ChunkIds;
         }
 
-        var availableEntries = chunkIds.Length == 0 ? 1u : (uint)chunkIds.Length;
+        var availableEntries = (uint)chunkIds.Length;
         if (outChunkIdList == 0)
         {
             TracePlayGo($"get_chunk_id count_only entries={availableEntries} out_entries=0x{outEntries:X16}");
@@ -249,7 +256,7 @@ public static class PlayGoExports
 
         for (uint i = 0; i < entriesToWrite; i++)
         {
-            var chunkId = chunkIds.Length == 0 ? (ushort)0 : chunkIds[i];
+            var chunkId = chunkIds[i];
             if (!ctx.TryWriteUInt16(outChunkIdList + (i * sizeof(ushort)), chunkId))
             {
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -260,6 +267,91 @@ public static class PlayGoExports
         return ctx.TryWriteUInt32(outEntries, entriesToWrite)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+    }
+
+    [SysAbiExport(
+        Nid = "8-e7E989rCU",
+        ExportName = "scePlayGoGetInstallChunkId",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePlayGo")]
+    public static int PlayGoGetInstallChunkId(CpuContext ctx)
+    {
+        return PlayGoGetChunkId(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "g4AZyxpSAlA",
+        ExportName = "scePlayGoGetOptionalChunk",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePlayGo")]
+    public static int PlayGoGetOptionalChunk(CpuContext ctx)
+    {
+        var handle = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var type = unchecked((int)ctx[CpuRegister.Rsi]);
+        var outOption = ctx[CpuRegister.Rdx];
+
+        var validation = ValidateHandle(handle);
+        if (validation != 0)
+        {
+            return validation;
+        }
+
+        if (outOption == 0)
+        {
+            return OrbisPlayGoErrorBadPointer;
+        }
+
+        var option = type switch
+        {
+            PlayGoOptionalTypeLanguage => PlayGoLanguageMaskAll,
+            PlayGoOptionalTypeScenario => PlayGoScenarioMaskAll,
+            _ => 0UL,
+        };
+        if (type is not PlayGoOptionalTypeLanguage and not PlayGoOptionalTypeScenario)
+        {
+            return OrbisPlayGoErrorBadOptionalType;
+        }
+
+        return ctx.TryWriteUInt64(outOption, option)
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+    }
+
+    [SysAbiExport(
+        Nid = "IfiN+-oeVWI",
+        ExportName = "scePlayGoGetSupportedOptionalChunk",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePlayGo")]
+    public static int PlayGoGetSupportedOptionalChunk(CpuContext ctx)
+    {
+        return PlayGoGetOptionalChunk(ctx);
+    }
+
+    [SysAbiExport(
+        Nid = "HVAa744ecdw",
+        ExportName = "scePlayGoPrefetchOptionalChunk",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePlayGo")]
+    public static int PlayGoPrefetchOptionalChunk(CpuContext ctx)
+    {
+        var handle = unchecked((uint)ctx[CpuRegister.Rdi]);
+        var type = unchecked((int)ctx[CpuRegister.Rsi]);
+        var option = ctx[CpuRegister.Rdx];
+
+        var validation = ValidateHandle(handle);
+        if (validation != 0)
+        {
+            return validation;
+        }
+
+        if (option == 0)
+        {
+            return OrbisPlayGoErrorBadPointer;
+        }
+
+        return type is PlayGoOptionalTypeLanguage or PlayGoOptionalTypeScenario
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : OrbisPlayGoErrorBadOptionalType;
     }
 
     [SysAbiExport(
@@ -680,24 +772,38 @@ public static class PlayGoExports
 
     private static PlayGoMetadata LoadPlayGoMetadata()
     {
+        var disableMetadataFallback = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_PLAYGO_DISABLE_METADATA_FALLBACK"),
+            "1",
+            StringComparison.Ordinal);
         var app0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
         if (string.IsNullOrWhiteSpace(app0Root))
         {
+            if (disableMetadataFallback)
+            {
+                TracePlayGo("metadata_unavailable app0_unset fallback_disabled=1");
+                return PlayGoMetadata.Empty;
+            }
+
             // No app0 override to probe for sidecar files: same fully-installed
             // single-chunk fallback as below, or scePlayGoOpen fails fatally.
-            return new PlayGoMetadata(
-                true,
-                [(ushort)0],
-                PlayGoChunkIdKnowledge.Authoritative);
+            return CreateBaseChunkMetadata(PlayGoChunkIdKnowledge.Authoritative);
         }
 
-        var playGoDat = Path.Combine(app0Root, "sce_sys", "playgo-chunk.dat");
-        var scenarioJson = Path.Combine(app0Root, "sce_sys", "playgo-scenario.json");
-        var chunkDefsXml = Path.Combine(app0Root, "playgo-chunkdefs.xml");
+        var playGoDat = GameFileOverlay.ResolveFile(Path.Combine(app0Root, "sce_sys", "playgo-chunk.dat"));
+        var scenarioJson = GameFileOverlay.ResolveFile(Path.Combine(app0Root, "sce_sys", "playgo-scenario.json"));
+        var chunkDefsXml = GameFileOverlay.ResolveFile(Path.Combine(app0Root, "playgo-chunkdefs.xml"));
+        App0Archive.Extract(chunkDefsXml);
 
         var hasMetadata = File.Exists(playGoDat) || File.Exists(scenarioJson) || File.Exists(chunkDefsXml);
         if (!hasMetadata)
         {
+            if (disableMetadataFallback)
+            {
+                TracePlayGo("metadata_missing fallback_disabled=1");
+                return PlayGoMetadata.Empty;
+            }
+
             // No PlayGo sidecar: derive the installed chunk set from the pak files
             // actually present on disk. A locally dumped title has all of its data
             // installed, and a package that splits content across chunks names them
@@ -718,13 +824,26 @@ public static class PlayGoExports
         }
 
         var chunkIds = LoadChunkIds(chunkDefsXml);
+        if (chunkIds.Length == 0)
+        {
+            TracePlayGo("metadata_has_no_chunk_definitions; installed chunk ids unknown");
+            return new PlayGoMetadata(
+                true,
+                Array.Empty<ushort>(),
+                PlayGoChunkIdKnowledge.Unknown);
+        }
+
         return new PlayGoMetadata(
             true,
             chunkIds,
-            chunkIds.Length == 0
-                ? PlayGoChunkIdKnowledge.Unknown
-                : PlayGoChunkIdKnowledge.Authoritative);
+            PlayGoChunkIdKnowledge.Authoritative);
     }
+
+    private static PlayGoMetadata CreateBaseChunkMetadata(PlayGoChunkIdKnowledge knowledge) =>
+        new(
+            true,
+            [(ushort)0],
+            knowledge);
 
     // Chunk ids for a title that ships no PlayGo sidecar, taken from the
     // pakchunk<N>-<platform>.pak files on disk. Chunk 0 is always included: it
@@ -735,7 +854,7 @@ public static class PlayGoExports
         var ids = new SortedSet<ushort> { 0 };
         try
         {
-            foreach (var pakFile in Directory.EnumerateFiles(app0Root, "pakchunk*.pak", SearchOption.AllDirectories))
+            foreach (var pakFile in App0Archive.EnumerateFilesRecursive(app0Root, "pakchunk*.pak"))
             {
                 var name = Path.GetFileNameWithoutExtension(pakFile);
                 var digits = name.AsSpan("pakchunk".Length);
@@ -831,7 +950,7 @@ public static class PlayGoExports
         }
     }
 
-    internal static void ResetForTests()
+    public static void ResetRuntimeState()
     {
         lock (_stateGate)
         {
@@ -845,6 +964,8 @@ public static class PlayGoExports
         Interlocked.Exchange(ref _unknownChunkDiagnostics, 0);
         Interlocked.Exchange(ref _locusTraceDiagnostics, 0);
     }
+
+    internal static void ResetForTests() => ResetRuntimeState();
 
     private enum PlayGoChunkIdKnowledge
     {

@@ -18,6 +18,9 @@ public sealed partial class GuestImageCache
     {
         using var held = _lock.Hold();
         var tick = endsFrame ? _collectionTick++ : _collectionTick;
+        if (endsFrame && SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled && tick % 300 == 0)
+            ReportImageMemory("collection", true, tick);
+        ExpireParkedImages(tick);
         if (_totalUsedMemory < _collectionStartBytes)
         {
             return;
@@ -34,6 +37,7 @@ public sealed partial class GuestImageCache
     {
         var pressured = _totalUsedMemory >= _memoryPressureBytes;
         var aggressive = allowAggressive && _totalUsedMemory >= _criticalMemoryBytes;
+        var profile = SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled;
         var age = aggressive ? 160UL : pressured ? 80UL : 16UL;
         if (tick < age && !pressured && !aggressive)
         {
@@ -44,47 +48,67 @@ public sealed partial class GuestImageCache
         var deletions = aggressive ? 40 : pressured ? 20 : 10;
         var candidates = new List<ResourceSlotIdentifier>(deletions);
         // Deleting a depth image also deletes its stencil association, so the recency walk ends first.
-        _recencyQueue.ForEachItemAtOrBeforeTick(tick - age, imageIdentifier =>
-        {
-            candidates.Add(imageIdentifier);
-            return candidates.Count == deletions;
-        });
+        _recencyQueue.CollectNextAtOrBeforeTick(tick - age, deletions, candidates);
         foreach (var imageIdentifier in candidates)
         {
-            if (deletions == 0)
+            if (deletions == 0 || _totalUsedMemory < _collectionStartBytes)
             {
                 break;
             }
 
             deletions--;
+            if (profile) _collectionCandidates++;
             var owner = _slots.TryGet(imageIdentifier);
             if (owner == null || !owner.Registered || owner.DepthOwner.IsValid)
             {
+                if (profile && owner?.DepthOwner.IsValid == true) _collectionAssociations++;
                 continue;
             }
 
             if (owner.IsGpuModified)
             {
+                if (owner.IsMaybeCpuDirty)
+                {
+                    if (owner.NeedsMaybeCpuHash)
+                        continue;
+                    _ = owner.ResolveMaybeCpuHash(owner.HashGuestEdges());
+                }
+
                 var safe = CanReadBack(owner);
+                // A dirty buffer overlap does not prove that it replaces the image contents.
+                if (!safe && owner.SafeToDownload)
+                {
+                    if (profile) _collectionBufferOverlapRetentions++;
+                    continue;
+                }
                 if (safe && owner.Description.IsTiled)
                 {
+                    if (profile) _collectionTiledRetentions++;
                     continue;
                 }
 
                 if (safe && !pressured)
                 {
+                    if (profile) _collectionUnpressuredRetentions++;
                     continue;
                 }
 
                 if (safe && !TryDownloadToGuest(imageIdentifier))
                 {
+                    if (profile) _collectionReadbackFailures++;
                     continue;
                 }
 
+                ReportImageLifetime(owner, safe ? "collect-readback-queued" : "collect-unreadable-gpu", deletion: true);
                 owner.ClearGpuModified();
+            }
+            else
+            {
+                ReportImageLifetime(owner, "collect-no-gpu-ownership", deletion: true);
             }
 
             DeleteImage(imageIdentifier);
+            if (profile) _collectionDeletions++;
             if (_totalUsedMemory < _criticalMemoryBytes && aggressive)
             {
                 deletions >>= 2;
@@ -114,6 +138,14 @@ public sealed partial class GuestImageCache
 
         _scheduledReadbacks.Clear();
     }
+
+    private long _pendingDestroyBytes;
+
+    private long _destroyedImageReclaims;
+
+    public void NoteDestroyedImageReclaim() => Interlocked.Increment(ref _destroyedImageReclaims);
+
+    public bool HoldsManyDestroyedImages => (ulong)Math.Max(0, Volatile.Read(ref _pendingDestroyBytes)) >= _memoryPressureBytes;
 
     // Test seams: thresholds, the recency order and the private state the tests inspect.
     internal void SetCollectionThresholds(ulong trigger, ulong pressure, ulong critical, ulong tick)
@@ -165,6 +197,9 @@ public sealed partial class GuestImageCache
 
     internal void SetLinearReadback(bool enabled) => _readbackLinearImages = enabled;
 
+    // Runs inside a readback's landing once it has decided which pages to write, before it writes them.
+    internal Action? LandingDecidedForTest { get; set; }
+
     internal List<ResourceSlotIdentifier> FindImagesInRangeForTest(ulong address, ulong size, bool pageOverlap)
     {
         using var held = _lock.Hold();
@@ -199,15 +234,17 @@ public sealed partial class GuestImageCache
     internal void AddPageOwner(ulong address, ResourceSlotIdentifier imageIdentifier)
     {
         using var held = _lock.Hold();
-        InvalidateLookups();
-        _pageOwners.GetOrCreate(address >> ImagePageOwnerTable.PageBits).Add(imageIdentifier);
+        var page = address >> ImagePageOwnerTable.PageBits;
+        InvalidateLookups(page << ImagePageOwnerTable.PageBits, (page + 1) << ImagePageOwnerTable.PageBits);
+        _pageOwners.GetOrCreate(page).Add(imageIdentifier);
     }
 
     internal bool RemovePageOwner(ulong address, ResourceSlotIdentifier imageIdentifier)
     {
         using var held = _lock.Hold();
-        InvalidateLookups();
-        return _pageOwners.Find(address >> ImagePageOwnerTable.PageBits)?.Remove(imageIdentifier) == true;
+        var page = address >> ImagePageOwnerTable.PageBits;
+        InvalidateLookups(page << ImagePageOwnerTable.PageBits, (page + 1) << ImagePageOwnerTable.PageBits);
+        return _pageOwners.Find(page)?.Remove(imageIdentifier) == true;
     }
 
     internal uint QueryEpoch
@@ -255,6 +292,7 @@ public sealed partial class GuestImageCache
     internal void RegisterHtileMetadataForTest(ulong address)
     {
         using var held = _lock.Hold();
+        IncludeMetadataWriteRange(address, 1);
         if (!_surfaceMetadata.TryGetValue(address, out var metadata))
         {
             metadata = new SurfaceMetadata();
@@ -268,6 +306,7 @@ public sealed partial class GuestImageCache
     internal void RegisterDccMetadataForTest(ulong address, ulong size)
     {
         using var held = _lock.Hold();
+        IncludeMetadataWriteRange(address, size);
         _surfaceMetadata[address] = new SurfaceMetadata { Kind = SurfaceMetadataKind.Dcc, Size = size };
     }
 
@@ -275,14 +314,14 @@ public sealed partial class GuestImageCache
 
     internal readonly struct RegionLockScope : IDisposable
     {
-        private readonly HLE.GpuMemory.RegionLock _lock;
+        private readonly HLE.GpuMemory.SpinReadWriteLock _lock;
 
-        public RegionLockScope(HLE.GpuMemory.RegionLock regionLock)
+        public RegionLockScope(HLE.GpuMemory.SpinReadWriteLock cacheLock)
         {
-            _lock = regionLock;
-            regionLock.Enter();
+            _lock = cacheLock;
+            cacheLock.EnterWrite();
         }
 
-        public void Dispose() => _lock.Exit();
+        public void Dispose() => _lock.ExitWrite();
     }
 }

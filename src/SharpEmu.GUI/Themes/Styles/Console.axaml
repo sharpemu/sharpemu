@@ -1,18 +1,67 @@
 <!--
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
-Console list typography and compact item spacing.
+Console panel: one themed surface, a compact icon toolbar and the log on the theme background.
 -->
 
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Style Selector="Border.consolePanel">
+    <Setter Property="Background" Value="{StaticResource CardBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+    <Setter Property="ClipToBounds" Value="True" />
+  </Style>
+
+  <Style Selector="TextBlock.consoleTitle">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+
+  <Style Selector="TextBox.consoleSearch">
+    <Setter Property="Width" Value="260" />
+    <Setter Property="MinHeight" Value="34" />
+    <Setter Property="Height" Value="34" />
+    <Setter Property="FontSize" Value="13" />
+    <Setter Property="Padding" Value="14,0" />
+    <Setter Property="CornerRadius" Value="17" />
+  </Style>
+
+  <!-- Toolbar icons: quiet until hovered; the auto-scroll toggle is tinted while on. -->
+  <Style Selector="Button.consoleTool, ToggleButton.consoleTool">
+    <Setter Property="Width" Value="34" />
+    <Setter Property="Height" Value="34" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="CornerRadius" Value="17" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.consoleTool:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.consoleTool:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="ToggleButton.consoleTool:checked /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+
   <Style Selector="ListBox.console">
-    <Setter Property="Background" Value="#0B0E14" />
-    <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Courier New, monospace" />
+    <Setter Property="Background" Value="{StaticResource BgBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="0,1,0,0" />
+    <Setter Property="Padding" Value="0,6" />
+    <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Menlo, Courier New, monospace" />
     <Setter Property="FontSize" Value="12" />
   </Style>
   <Style Selector="ListBox.console ListBoxItem">
-    <Setter Property="Padding" Value="10,1" />
+    <Setter Property="Padding" Value="16,1" />
     <Setter Property="MinHeight" Value="0" />
   </Style>
 </Styles>

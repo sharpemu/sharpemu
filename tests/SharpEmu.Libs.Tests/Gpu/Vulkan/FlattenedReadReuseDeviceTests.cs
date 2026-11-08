@@ -15,9 +15,11 @@ namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 public sealed class FlattenedReadReuseDeviceTests(HeadlessVulkanFixture fixture) : IClassFixture<HeadlessVulkanFixture>
 {
     [Theory]
-    [InlineData(1u)]
-    [InlineData(4u)]
-    public void EquivalentReads_StoreBothResultsWithoutAPageTable(uint components)
+    [InlineData(1u, false)]
+    [InlineData(4u, false)]
+    [InlineData(1u, true)]
+    [InlineData(4u, true)]
+    public void EquivalentReads_StoreBothResultsWithoutAPageTable(uint components, bool tableBlock)
     {
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan))
@@ -25,7 +27,8 @@ public sealed class FlattenedReadReuseDeviceTests(HeadlessVulkanFixture fixture)
             return;
         }
 
-        var request = Request(FlattenedReadReuseTests.RepeatedReadProgram(components), userDataCount: 9);
+        var request = Request(FlattenedReadReuseTests.RepeatedReadProgram(components), userDataCount: 9, tableBlock: tableBlock);
+        Assert.Equal(tableBlock, request.Bindings.UsesTableBlock);
         Assert.False(request.Resources.Info.UsesDeviceAddresses);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         using var harness = new ImageTestHarness(vulkan);

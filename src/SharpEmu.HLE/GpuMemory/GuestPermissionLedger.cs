@@ -7,14 +7,19 @@ namespace SharpEmu.HLE.GpuMemory;
 public sealed class GuestPermissionLedger
 {
     private readonly object _gate = new();
-    private readonly SortedList<ulong, (ulong End, GuestPageProtection Protection)> _spans = new();
+    private readonly PermissionRangeTree _spans = new();
+
+    // The records as of the last whole change. Page tracking looks pages up on the render thread and in
+    // the fault handlers of the guest threads at once, so a lookup takes no lock: it reads this snapshot.
+    private PermissionRangeTree _published = new();
 
     public void Set(ulong address, ulong size, GuestPageProtection protection)
     {
         lock (_gate)
         {
             RemoveRangeRecords(address, address + size);
-            _spans[address] = (address + size, protection);
+            _spans[address] = new PermissionRange(address, size, protection);
+            Volatile.Write(ref _published, _spans.Snapshot());
         }
     }
 
@@ -23,65 +28,52 @@ public sealed class GuestPermissionLedger
         lock (_gate)
         {
             RemoveRangeRecords(address, address + size);
+            Volatile.Write(ref _published, _spans.Snapshot());
         }
     }
 
     // A span without a record is read-write: every caller is gated by a registered span first.
-    public GuestPageProtection Lookup(ulong address)
+    // A lookup during a change answers from the records before it, as a locked one just before would.
+    public GuestPageProtection Lookup(ulong address) => Lookup(address, out _);
+
+    // validEnd is where the answer stops holding: the end of the record that holds the address, or the
+    // start of the next record in a gap. A caller walking pages upward reuses the answer below it.
+    public GuestPageProtection Lookup(ulong address, out ulong validEnd)
     {
-        lock (_gate)
+        if (Volatile.Read(ref _published).FindAtOrBelow(address, out var nextAddress) is { } span &&
+            span.Address + span.Size > address)
         {
-            var index = FindFirstStartAfter(address) - 1;
-            return index >= 0 && _spans.Values[index].End > address
-                ? _spans.Values[index].Protection
-                : GuestPageProtection.Read | GuestPageProtection.Write;
+            validEnd = span.Address + span.Size;
+            return span.Protection;
         }
+
+        validEnd = nextAddress;
+        return GuestPageProtection.Read | GuestPageProtection.Write;
     }
 
     private void RemoveRangeRecords(ulong start, ulong end)
     {
-        var index = FindFirstStartAfter(start);
-        if (index > 0 && _spans.Values[index - 1].End > start)
+        var candidate = _spans.FindAtOrBelow(start);
+        if (candidate is not { } preceding || preceding.Address + preceding.Size <= start)
+            candidate = start == ulong.MaxValue ? null : _spans.FindAtOrAbove(start + 1);
+        while (candidate is { } span && span.Address < end)
         {
-            index--;
-        }
-
-        while (index < _spans.Count && _spans.Keys[index] < end)
-        {
-            var spanStart = _spans.Keys[index];
-            var (spanEnd, protection) = _spans.Values[index];
-            _spans.RemoveAt(index);
+            var spanStart = span.Address;
+            var spanEnd = span.Address + span.Size;
+            var protection = span.Protection;
+            _spans.Remove(span);
             if (spanStart < start)
             {
-                _spans[spanStart] = (start, protection);
-                index++;
+                _spans[spanStart] = new PermissionRange(spanStart, start - spanStart, protection);
             }
 
             if (spanEnd > end)
             {
-                _spans[end] = (spanEnd, protection);
-                index++;
+                _spans[end] = new PermissionRange(end, spanEnd - end, protection);
+                break;
             }
+            candidate = spanEnd > spanStart ? _spans.FindAtOrAbove(spanEnd)
+                : spanStart == ulong.MaxValue ? null : _spans.FindAtOrAbove(spanStart + 1);
         }
-    }
-
-    private int FindFirstStartAfter(ulong key)
-    {
-        var low = 0;
-        var high = _spans.Count;
-        while (low < high)
-        {
-            var mid = (low + high) / 2;
-            if (_spans.Keys[mid] <= key)
-            {
-                low = mid + 1;
-            }
-            else
-            {
-                high = mid;
-            }
-        }
-
-        return low;
     }
 }

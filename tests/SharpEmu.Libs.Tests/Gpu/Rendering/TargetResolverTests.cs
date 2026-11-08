@@ -207,15 +207,12 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
         var state = DepthTargetResolver.ResolveState(context, true, Fatal);
 
         Assert.Equal(ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit, state.AttachmentWriteAspects(Format.D32SfloatS8Uint));
-        Assert.Equal(ImageLayout.DepthStencilAttachmentOptimal, state.AttachmentLayout(Format.D32SfloatS8Uint));
         Assert.Equal(ImageAspectFlags.DepthBit, state.AttachmentWriteAspects(Format.D32Sfloat));
-        Assert.Equal(ImageLayout.DepthAttachmentOptimal, state.AttachmentLayout(Format.D32Sfloat));
         Assert.Equal(ImageAspectFlags.None, state.AttachmentWriteAspects(Format.Undefined));
 
         var testOnly = state with { DepthWriteEnabled = false, StencilTestEnabled = false };
         Assert.Equal(ImageAspectFlags.None, testOnly.AttachmentWriteAspects(Format.D32SfloatS8Uint));
         Assert.True(testOnly.IsReadOnly(Format.D32SfloatS8Uint));
-        Assert.Equal(ImageLayout.DepthStencilReadOnlyOptimal, testOnly.AttachmentLayout(Format.D32SfloatS8Uint));
 
         // A compare that can never pass with an all-keep fail path writes nothing; a fail operation does.
         var neverPasses = state with
@@ -229,9 +226,7 @@ public sealed class TargetResolverTests : IClassFixture<HeadlessVulkanFixture>
         Assert.Equal(ImageAspectFlags.None, neverPasses.AttachmentWriteAspects(Format.D32SfloatS8Uint));
         var failWrites = neverPasses with { FrontOperations = neverPasses.FrontOperations with { FailOperation = StencilOp.Zero } };
         Assert.Equal(ImageAspectFlags.StencilBit, failWrites.AttachmentWriteAspects(Format.D32SfloatS8Uint));
-        Assert.Equal(ImageLayout.DepthReadOnlyStencilAttachmentOptimal, failWrites.AttachmentLayout(Format.D32SfloatS8Uint));
         var depthOnlyWrite = state with { StencilTestEnabled = false };
-        Assert.Equal(ImageLayout.DepthAttachmentStencilReadOnlyOptimal, depthOnlyWrite.AttachmentLayout(Format.D32SfloatS8Uint));
     }
 
     [Fact]

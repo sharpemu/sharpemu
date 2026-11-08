@@ -1,10 +1,15 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
+using SharpEmu.Libs.Tests.Gpu.Images;
+using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
+using TestProgram = SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
@@ -20,6 +25,44 @@ public sealed class ShaderProgramCacheTests : IDisposable
     private const ulong DataBase = PipelineTestGuest.MemoryBase + 0x4_0000;
     private const uint Format32x4Uint = 75;
     private const uint Format32x4Float = 77;
+
+    private sealed class ImageFrontend(bool ordered) : IShaderFrontend
+    {
+        public ulong CacheDomain => 1;
+        public bool RequiresOrderedImagePreparation => ordered;
+        public ImageDescriptorNormalizer NormalizeImageDescriptor => (words, _, _, _) => words.ToArray();
+
+        public RegisteredShader ReadShader(CpuContext context, ulong codeAddress, string label, ReadOnlySpan<uint> userData = default) =>
+            throw new NotSupportedException();
+
+        public bool TryDecode(CpuContext context, RegisteredShader shader, out Gen5ShaderProgram program, out string error)
+        {
+            program = TestProgram.Program(TestProgram.Image(0, "ImageLoad", 0, dmask: 1), TestProgram.EndProgram(8));
+            error = string.Empty;
+            return true;
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FrontendImageNormalizationUsesTheHostWhenPreparationRequiresGpuOrdering(bool ordered)
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.EndProgram);
+        var words = RegisterWords.Texture(DataBase, GuestPixelFormat.Bits8_8_8_8UNorm, 16, 16);
+        var frontend = new ImageFrontend(ordered);
+        var source = _guest.Source(CodeA, ShaderStage.Compute, words);
+        source = source with { Registered = source.Registered with { Frontend = frontend } };
+        var cursor = 0u;
+
+        var compiled = _guest.Programs.GetOrCompile(source,
+            new StageCompileOptions { ComputeInfo = new ComputeInputInfo { ThreadsX = 1, ThreadsY = 1, ThreadsZ = 1 } },
+            ref cursor, out var stage);
+
+        Assert.True(compiled.IsValid);
+        Assert.Equal(words, Assert.Single(stage.Resources.Images));
+        Assert.Equal(ordered, _guest.Host.ImageNormalizations > 0);
+    }
 
     [Fact]
     public void EmbeddedFetchIsReplacedBeforeTheProgramRequestsResourceTables()
@@ -51,6 +94,29 @@ public sealed class ShaderProgramCacheTests : IDisposable
 
     private readonly FatalScope _fatal = new();
     private readonly PipelineTestGuest _guest = new();
+
+    [Fact]
+    public void PixelOutputModesHaveSeparateProgramKeys()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.EndProgram);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        var cursor = 0u;
+        ShaderProgram CompileOutput(params SharpEmu.ShaderCompiler.Gen5PixelOutputBinding[] outputs) =>
+            _guest.Programs.GetOrCompile(source, new StageCompileOptions
+            {
+                PixelInfo = new PixelInputInfo(), PixelOutputs = outputs,
+            }, ref cursor, out _);
+        var primary = new SharpEmu.ShaderCompiler.Gen5PixelOutputBinding(0, 0,
+            SharpEmu.ShaderCompiler.Gen5PixelOutputKind.Float);
+        var ordinary = CompileOutput(primary);
+        var synthetic = CompileOutput(primary with { DualSourceAlpha = true });
+        var explicitPair = CompileOutput(primary, primary with { GuestSlot = 1, ExportTarget = 1, Index = 1 });
+        Assert.NotEqual(ordinary, synthetic);
+        Assert.NotEqual(ordinary, explicitPair);
+        Assert.NotEqual(synthetic, explicitPair);
+        Assert.Equal(ordinary, CompileOutput(primary));
+        Assert.Equal(synthetic, CompileOutput(primary with { DualSourceAlpha = true }));
+    }
 
     public void Dispose() => _fatal.Dispose();
 
@@ -134,6 +200,70 @@ public sealed class ShaderProgramCacheTests : IDisposable
         Assert.Equal(1, _guest.Programs.ProgramCount);
         Assert.Single(_guest.Host.Modules);
         Assert.Equal(1, _guest.Compiler.Compilations);
+    }
+
+    [Fact]
+    public void Materializations_AreTalliedByOutcome()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.FormatLoadProgram);
+        _ = MaterializationTally.TakeReport();
+        var cursor = 0u;
+        _ = Compile(CodeA, PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Uint), ref cursor, out _);
+        cursor = 0;
+        _ = Compile(CodeA, PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Uint), ref cursor, out var stage);
+        _ = _guest.Programs.Revalidate(stage);
+
+        var report = MaterializationTally.TakeReport();
+        Assert.StartsWith("materialize=", report);
+        Assert.Matches(@"(FastHit|FastMiss|FastFallback|CacheHit|CacheRebaseHit|TableRefresh|Volatile|Full)=[1-9]", report);
+        Assert.Matches(@"(KeptRevalidated|KeptStale|RevalidateRefused)=[1-9]", report);
+    }
+
+    [Fact]
+    public void ConcurrentLookups_BuildOneEntryAndOneCompilePerKey()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.FormatLoadProgram);
+        var descriptors = new[]
+        {
+            PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Uint),
+            PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Float),
+        };
+        using var start = new ManualResetEventSlim();
+        var ids = new System.Collections.Concurrent.ConcurrentBag<(int Variant, ulong Id)>();
+        var failures = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        var threads = Enumerable.Range(0, 8).Select(index => new Thread(() =>
+        {
+            try
+            {
+                start.Wait();
+                for (var round = 0; round < 50; round++)
+                {
+                    var variant = (index + round) % 2;
+                    var threadsX = round % 3 == 0 ? 32u : 64u;
+                    ids.Add((variant * 2 + (threadsX == 32 ? 1 : 0), Compile(CodeA, descriptors[variant], threadsX).Id));
+                }
+            }
+            catch (Exception exception)
+            {
+                failures.Enqueue(exception);
+            }
+        })).ToArray();
+        foreach (var thread in threads)
+        {
+            thread.Start();
+        }
+
+        start.Set();
+        foreach (var thread in threads)
+        {
+            thread.Join();
+        }
+
+        Assert.Empty(failures);
+        Assert.Equal(2, _guest.Programs.ProgramCount);
+        Assert.All(_guest.Programs.Entries, entry => Assert.Equal(2, entry.Permutations.Count));
+        Assert.Equal(4, _guest.Compiler.Compilations);
+        Assert.All(ids.GroupBy(id => id.Variant), group => Assert.Single(group.Select(id => id.Id).Distinct()));
     }
 
     [Fact]

@@ -49,22 +49,22 @@ public sealed unsafe class PresentationColorTests : IClassFixture<HeadlessVulkan
         harness.Run(() =>
         {
             var command = new CommandBuffer(harness.Scheduler.Current.Handle);
-            source.Transition(ImageLayout.TransferSrcOptimal, AccessFlags.TransferReadBit, null, command);
-            snapshot.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            source.Transition(AccessFlags.TransferReadBit, null, command);
+            snapshot.Transition(AccessFlags.TransferWriteBit, null, command);
             var copy = new ImageCopy
             {
                 SrcSubresource = colorLayer,
                 DstSubresource = colorLayer,
                 Extent = new Extent3D(2, 2, 1),
             };
-            harness.Vk.CmdCopyImage(command, source.Backing.Handle, ImageLayout.TransferSrcOptimal,
-                snapshot.Backing.Handle, ImageLayout.TransferDstOptimal, 1, &copy);
-            snapshot.Transition(ImageLayout.TransferSrcOptimal, AccessFlags.TransferReadBit, null, command);
-            target.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            harness.Vk.CmdCopyImage(command, source.Backing.Handle, ImageLayout.General,
+                snapshot.Backing.Handle, ImageLayout.General, 1, &copy);
+            snapshot.Transition(AccessFlags.TransferReadBit, null, command);
+            target.Transition(AccessFlags.TransferWriteBit, null, command);
             var black = new ClearColorValue(0f, 0f, 0f, 1f);
             var range = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 1);
             harness.Vk.CmdClearColorImage(command, target.Backing.Handle,
-                ImageLayout.TransferDstOptimal, &black, 1, &range);
+                ImageLayout.General, &black, 1, &range);
             var clearComplete = new MemoryBarrier2
             {
                 SType = StructureType.MemoryBarrier2,
@@ -84,8 +84,8 @@ public sealed unsafe class PresentationColorTests : IClassFixture<HeadlessVulkan
                     Element1 = new Offset3D(1, 2, 1),
                 },
             };
-            harness.Vk.CmdBlitImage(command, snapshot.Backing.Handle, ImageLayout.TransferSrcOptimal,
-                target.Backing.Handle, ImageLayout.TransferDstOptimal, 1, &blit, Filter.Linear);
+            harness.Vk.CmdBlitImage(command, snapshot.Backing.Handle, ImageLayout.General,
+                target.Backing.Handle, ImageLayout.General, 1, &blit, Filter.Linear);
         });
         var result = harness.ReadImage(target, [new BufferImageCopy
         {

@@ -117,13 +117,16 @@ internal static unsafe partial class VulkanVideoPresenter
                 ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.ColorBit, 0, 0, 1),
                 ImageExtent = new Extent3D(PerfOverlay.PixelBufferWidth, PerfOverlay.PixelBufferHeight, 1),
             };
-            _vk.CmdCopyBufferToImage(
-                _commandBuffer,
-                _overlayStagingBuffers[frameSlot],
-                _overlayImage,
-                ImageLayout.TransferDstOptimal,
-                1,
-                &copyRegion);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdCopyBufferToImage(
+                    _commandBuffer,
+                    _overlayStagingBuffers[frameSlot],
+                    _overlayImage,
+                    ImageLayout.TransferDstOptimal,
+                    1,
+                    &copyRegion);
+            }
 
             var toTransferSrc = new ImageMemoryBarrier2
             {
@@ -172,14 +175,17 @@ internal static unsafe partial class VulkanVideoPresenter
                 DstOffset = new Offset3D(rectangle.Left, rectangle.Top, 0),
                 Extent = new Extent3D((uint)panelWidth, (uint)panelHeight, 1),
             };
-            _vk.CmdCopyImage(
-                _commandBuffer,
-                _overlayImage,
-                ImageLayout.TransferSrcOptimal,
-                presentationTarget,
-                ImageLayout.TransferDstOptimal,
-                1,
-                &copy);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdCopyImage(
+                    _commandBuffer,
+                    _overlayImage,
+                    ImageLayout.TransferSrcOptimal,
+                    presentationTarget,
+                    ImageLayout.TransferDstOptimal,
+                    1,
+                    &copy);
+            }
 
             var presentationTargetToFinal = new ImageMemoryBarrier2
             {

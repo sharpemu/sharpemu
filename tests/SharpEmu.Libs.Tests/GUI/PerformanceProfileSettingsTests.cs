@@ -17,10 +17,9 @@ public sealed class PerformanceProfileSettingsTests
     [InlineData(PerformanceFrameTraceVariable)]
     public void PerformanceProfilingIsDisabledByDefault(string variable)
     {
-        var settings = GuiSettings.NormalizeFromJson("{}");
-        var effective = EffectiveLaunchSettings.Resolve(settings, new PerGameSettings());
+        var effective = EffectiveLaunchSettings.Resolve(PerGameSettings.NormalizeFromJson("{}"));
 
-        Assert.DoesNotContain(variable, settings.EnvironmentToggles);
+        Assert.DoesNotContain(variable, EffectiveLaunchSettings.Defaults.EnvironmentToggles);
         Assert.DoesNotContain(variable, effective.EnvironmentToggles);
     }
 
@@ -29,46 +28,42 @@ public sealed class PerformanceProfileSettingsTests
     [InlineData(PerformanceProfileVariable, true)]
     [InlineData(PerformanceFrameTraceVariable, false)]
     [InlineData(PerformanceFrameTraceVariable, true)]
-    public void GlobalProfileChoiceSurvivesReloadAndIsInherited(string variable, bool enabled)
+    public void LegacyGlobalProfileChoiceMovesToGames(string variable, bool enabled)
     {
-        var settings = new GuiSettings();
+        List<string> toggles = [.. EffectiveLaunchSettings.Defaults.EnvironmentToggles];
         if (enabled)
-            settings.EnvironmentToggles.Add(variable);
+            toggles.Add(variable);
 
-        var restored = GuiSettings.NormalizeFromJson(JsonSerializer.Serialize(settings));
-        var effective = EffectiveLaunchSettings.Resolve(restored, new PerGameSettings());
+        var game = new PerGameSettings();
+        SettingsSplitMigration.Fill(
+            game,
+            SettingsSplitMigration.CarriedValues(JsonSerializer.Serialize(new { EnvironmentToggles = toggles })));
+        var restored = PerGameSettings.NormalizeFromJson(JsonSerializer.Serialize(game));
+        var effective = EffectiveLaunchSettings.Resolve(restored);
 
-        Assert.Equal(enabled, restored.EnvironmentToggles.Contains(variable));
         Assert.Equal(enabled, effective.EnvironmentToggles.Contains(variable));
         Assert.Contains("SHARPEMU_WRITABLE_APP0", effective.EnvironmentToggles);
+        Assert.Equal(!enabled, game.IsEmpty);
     }
 
     [Theory]
-    [InlineData(PerformanceProfileVariable, false, false)]
-    [InlineData(PerformanceProfileVariable, false, true)]
-    [InlineData(PerformanceProfileVariable, true, false)]
-    [InlineData(PerformanceProfileVariable, true, true)]
-    [InlineData(PerformanceFrameTraceVariable, false, false)]
-    [InlineData(PerformanceFrameTraceVariable, false, true)]
-    [InlineData(PerformanceFrameTraceVariable, true, false)]
-    [InlineData(PerformanceFrameTraceVariable, true, true)]
-    public void GameProfileChoiceSurvivesReloadWithoutChangingGlobalSettings(string variable, bool globalEnabled, bool gameEnabled)
+    [InlineData(PerformanceProfileVariable, false)]
+    [InlineData(PerformanceProfileVariable, true)]
+    [InlineData(PerformanceFrameTraceVariable, false)]
+    [InlineData(PerformanceFrameTraceVariable, true)]
+    public void GameProfileChoiceSurvivesReload(string variable, bool gameEnabled)
     {
-        var global = new GuiSettings();
-        var game = new PerGameSettings { EnvironmentToggles = [.. global.EnvironmentToggles] };
-        if (globalEnabled)
-            global.EnvironmentToggles.Add(variable);
+        var game = new PerGameSettings { EnvironmentToggles = [.. EffectiveLaunchSettings.Defaults.EnvironmentToggles] };
         if (gameEnabled)
             game.EnvironmentToggles.Add(variable);
 
-        game.RemoveInheritedValues(global);
+        game.RemoveDefaultValues();
         var restored = PerGameSettings.NormalizeFromJson(JsonSerializer.Serialize(game));
-        var effective = EffectiveLaunchSettings.Resolve(global, restored);
+        var effective = EffectiveLaunchSettings.Resolve(restored);
 
         Assert.Equal(gameEnabled, effective.EnvironmentToggles.Contains(variable));
-        Assert.Equal(globalEnabled, global.EnvironmentToggles.Contains(variable));
         Assert.Contains("SHARPEMU_WRITABLE_APP0", effective.EnvironmentToggles);
-        Assert.Equal(globalEnabled == gameEnabled, game.IsEmpty);
+        Assert.Equal(!gameEnabled, game.IsEmpty);
     }
 
     [Theory]
@@ -78,13 +73,14 @@ public sealed class PerformanceProfileSettingsTests
     [InlineData(true, true)]
     public void ProfileAndFrameTraceChoicesRemainSeparate(bool profileEnabled, bool traceEnabled)
     {
-        var settings = new GuiSettings();
+        var settings = new PerGameSettings { EnvironmentChanges = [] };
         if (profileEnabled)
-            settings.EnvironmentToggles.Add(PerformanceProfileVariable);
+            settings.EnvironmentChanges.Add(PerformanceProfileVariable);
         if (traceEnabled)
-            settings.EnvironmentToggles.Add(PerformanceFrameTraceVariable);
+            settings.EnvironmentChanges.Add(PerformanceFrameTraceVariable);
 
-        var restored = GuiSettings.NormalizeFromJson(JsonSerializer.Serialize(settings));
+        var restored = EffectiveLaunchSettings.Resolve(
+            PerGameSettings.NormalizeFromJson(JsonSerializer.Serialize(settings)));
 
         Assert.Equal(profileEnabled, restored.EnvironmentToggles.Contains(PerformanceProfileVariable));
         Assert.Equal(traceEnabled, restored.EnvironmentToggles.Contains(PerformanceFrameTraceVariable));

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.GpuCommands;
@@ -196,6 +197,34 @@ public sealed class GpuCommandInterpreterDrawTests
 
         Assert.Equal(new uint[] { 1, 2 }, runner.Host.AutoDraws.Select(draw => draw.VertexCount));
         Assert.Contains("stride is smaller", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.DrawIndirectMulti, 0, 0, 0, 0, 1, 0, 0, 8, 2)).Message);
+    }
+
+    [Fact]
+    public void IndirectDraws_NameTheLiveUserRegisterOfTheirStartInstance()
+    {
+        var runner = new StreamRunner();
+        runner.Host.ResolvesIndirectDrawOnGpu = true;
+        runner.Host.WriteWords(Arguments, new uint[] { 9, 3, 1, 2 });
+        runner.Host.WriteWords(Arguments + 16, new uint[] { 50, 2, 4, 7, 1 });
+        const uint gs0 = ShaderRegisterOffset.SpiShaderUserDataGs0;
+
+        runner.Run(
+            StreamRunner.Packet(PacketOpcode.SetShaderRegister, ShaderRegisterOffset.SpiShaderPgmRsrc2Gs, 4u << 1),
+            SetBase(Arguments, dispatch: false),
+            StreamRunner.Packet(PacketOpcode.IndexBase, StreamRunner.Low(Indices), StreamRunner.High(Indices)),
+            StreamRunner.Packet(PacketOpcode.IndexType, 0),
+            StreamRunner.Packet(PacketOpcode.IndexBufferSize, 40),
+            StreamRunner.Packet(PacketOpcode.DrawIndirect, 0, gs0 + 3, gs0, 2),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 16, 0x280, gs0 + 2, 0x22),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 16, 0x280, gs0 + 9, 0x22),
+            StreamRunner.Packet(PacketOpcode.IndexType, 2),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 16, 0x280, gs0 + 1, 0x22));
+
+        Assert.Equal(0, Assert.Single(runner.Host.AutoDraws).StartInstanceUserData);
+        Assert.Equal(3, runner.Host.IndexedDraws.Count);
+        Assert.Equal((Arguments + 16, 2), (runner.Host.IndexedDraws[0].IndirectArgumentsAddress, runner.Host.IndexedDraws[0].StartInstanceUserData));
+        Assert.Equal((Arguments + 16, -1), (runner.Host.IndexedDraws[1].IndirectArgumentsAddress, runner.Host.IndexedDraws[1].StartInstanceUserData));
+        Assert.Equal((0ul, 1, 1u), (runner.Host.IndexedDraws[2].IndirectArgumentsAddress, runner.Host.IndexedDraws[2].StartInstanceUserData, runner.Host.IndexedDraws[2].FirstInstance));
     }
 
     [Fact]

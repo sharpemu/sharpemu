@@ -3,6 +3,53 @@
 
 namespace SharpEmu.HLE.GpuMemory;
 
+public sealed class SpanSnapshot(ulong[] starts, ulong[] ends)
+{
+    public static readonly SpanSnapshot Empty = new([], []);
+
+    public bool Contains(ulong address, ulong size)
+    {
+        var index = Array.BinarySearch(starts, address);
+        if (index < 0)
+        {
+            index = ~index - 1;
+        }
+
+        return index >= 0 && ends[index] >= address + size;
+    }
+
+    public bool TryGetContaining(ulong address, out ulong start, out ulong end)
+    {
+        var index = Array.BinarySearch(starts, address);
+        if (index < 0)
+        {
+            index = ~index - 1;
+        }
+
+        if (index >= 0 && ends[index] > address)
+        {
+            start = starts[index];
+            end = ends[index];
+            return true;
+        }
+
+        start = 0;
+        end = 0;
+        return false;
+    }
+
+    public bool Overlaps(ulong address, ulong size)
+    {
+        var index = Array.BinarySearch(starts, address + size);
+        if (index < 0)
+        {
+            index = ~index;
+        }
+
+        return index > 0 && ends[index - 1] > address;
+    }
+}
+
 public sealed class SpanSet
 {
     private readonly SortedList<ulong, ulong> _spans = new();
@@ -77,6 +124,29 @@ public sealed class SpanSet
         ValidateRange(address, size);
         var index = LowerBound(address + size);
         return index > 0 && _spans.GetValueAtIndex(index - 1) > address;
+    }
+
+    public SpanSnapshot Snapshot()
+    {
+        var starts = new ulong[_spans.Count];
+        var ends = new ulong[_spans.Count];
+        for (var index = 0; index < starts.Length; index++)
+        {
+            starts[index] = _spans.GetKeyAtIndex(index);
+            ends[index] = _spans.GetValueAtIndex(index);
+        }
+
+        return new SpanSnapshot(starts, ends);
+    }
+
+    public void CopyTo(List<GuestSpan> destination)
+    {
+        destination.EnsureCapacity(destination.Count + _spans.Count);
+        for (var index = 0; index < _spans.Count; index++)
+        {
+            var start = _spans.GetKeyAtIndex(index);
+            destination.Add(new GuestSpan(start, _spans.GetValueAtIndex(index) - start));
+        }
     }
 
     public void ForEach(Action<ulong, ulong> visit)

@@ -15,12 +15,12 @@ namespace SharpEmu.Libs.Tests;
 public sealed class SaveDataStorageTests
 {
     [Fact]
-    public void RootHonorsOverrideAndFallsBackToPortableDirectory()
+    public void RootHonorsOverrideAndFallsBackToUserDataRoot()
     {
         Assert.Equal(Path.GetFullPath("/tmp/custom-saves"), SaveDataStorage.Root("/tmp/custom-saves"));
 
         Assert.Equal(
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "user", "savedata")),
+            Path.GetFullPath(Path.Combine(SharpEmuPaths.DataRoot, "user", "savedata")),
             SaveDataStorage.Root());
     }
 

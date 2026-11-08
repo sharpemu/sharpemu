@@ -20,9 +20,9 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
     }
 
     // The top of the x86-64 user address space (0x7FFD..0x7FFF) is only
-    // freely mappable on Windows; on macOS/Linux it hosts the dyld shared
-    // cache / vdso and (under Rosetta 2) the translator runtime, so POSIX
-    // hosts use the equivalent layout one slot lower at 0x6FFx.
+    // freely mappable on Windows; on Linux it hosts the vdso and other
+    // runtime mappings, so POSIX hosts use the equivalent layout one slot
+    // lower at 0x6FFx.
     private static readonly ulong StackBaseAddress = OperatingSystem.IsWindows() ? 0x7FFF_F000_0000UL : 0x6FFF_F000_0000UL;
     private const ulong StackSize = 0x0020_0000UL;
     private static readonly ulong TlsBaseAddress = OperatingSystem.IsWindows() ? 0x7FFE_0000_0000UL : 0x6FFE_0000_0000UL;
@@ -238,7 +238,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
                 return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
 
-            if (!InitializeProcessEntryFrame(context, processImageName, programExitHandlerStubAddress))
+            if (!InitializeProcessEntryFrame(context, processImageName, programExitHandlerStubAddress, executionOptions.ProcessArguments))
             {
                 return FailEarly(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
             }
@@ -441,12 +441,15 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
     private static bool InitializeProcessEntryFrame(
         CpuContext context,
         string processImageName,
-        ulong programExitHandlerAddress)
+        ulong programExitHandlerAddress,
+        IReadOnlyList<string>? processArguments = null)
     {
         var imageName = string.IsNullOrWhiteSpace(processImageName) ? "eboot.bin" : processImageName;
-        var arguments = new List<string>(3) { imageName };
+        var arguments = processArguments is { Count: > 0 }
+            ? new List<string>(processArguments)
+            : new List<string>(3) { imageName };
         var configuredArguments = Environment.GetEnvironmentVariable("SHARPEMU_GUEST_ARGS");
-        if (!string.IsNullOrWhiteSpace(configuredArguments))
+        if (processArguments is null && !string.IsNullOrWhiteSpace(configuredArguments))
         {
             // The PS5 entry-parameter ABI exposes three inline argv pointers.
             // Two compatibility arguments are therefore safe without changing
@@ -471,7 +474,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             argumentAddresses[index] = cursor;
         }
 
-        const ulong entryParamsSize = 0x20;
+        var entryParamsSize = processArguments is null ? 0x20UL : Math.Max(0x20UL, (ulong)(arguments.Count + 2) * 8);
         var entryParamsAddress = AlignDown(cursor - entryParamsSize, 16);
         if (!TryWriteUInt32(context, entryParamsAddress + 0x00, (uint)arguments.Count) ||
             !TryWriteUInt32(context, entryParamsAddress + 0x04, 0) ||
@@ -484,6 +487,14 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
                 argumentAddresses.Length > 2 ? argumentAddresses[2] : 0))
         {
             return false;
+        }
+
+        if (processArguments is not null)
+        {
+            for (var index = 0; index <= argumentAddresses.Length; index++)
+                if (!context.TryWriteUInt64(entryParamsAddress + 8 + (ulong)index * 8,
+                        index < argumentAddresses.Length ? argumentAddresses[index] : 0))
+                    return false;
         }
 
         if (arguments.Count > 1)
@@ -505,6 +516,8 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         context[CpuRegister.Rcx] = 0;
         context[CpuRegister.R8] = 0;
         context[CpuRegister.R9] = 0;
+        if (processArguments is not null)
+            HleDataSymbols.ConfigureProcessArguments(arguments.Count, entryParamsAddress + 8);
         return true;
     }
 

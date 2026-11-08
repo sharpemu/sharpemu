@@ -167,6 +167,7 @@ internal sealed class CacheHarness : IDisposable
         Cache = new GuestBufferCache(vulkan.DeviceInfo, Worker.Scheduler, Worker.Relay, Gpu.Pages, Memory, space);
         Images = new GuestImageCache(vulkan.DeviceInfo, Worker.Scheduler, Gpu.Pages, Cache, space, readbackLinearImages);
         Cache.ImageCache = Images;
+        Cache.AllocatesMappedBuffers = false;
         Gpu.AttachStores(Cache, Images);
         Gpu.AttachGpuQueue(Worker.Relay, Worker.Scheduler);
     }
@@ -197,6 +198,7 @@ internal sealed class CacheHarness : IDisposable
         Assert.True(Memory.TryMapBacked(address, size, _nextBackingOffset, protection, out _));
         _nextBackingOffset += hole;
         Gpu.Register(address, size, protection);
+        Worker.Run(static () => { });
         return address;
     }
 
@@ -210,6 +212,7 @@ internal sealed class CacheHarness : IDisposable
         _nextBackingOffset += 2 * granule;
         Gpu.Register(first, granule, GuestPageProtection.Read | GuestPageProtection.Write);
         Gpu.Register(first + 2 * granule, granule, GuestPageProtection.Read | GuestPageProtection.Write);
+        Worker.Run(static () => { });
         return (first, granule, first + 2 * granule);
     }
 
@@ -217,6 +220,7 @@ internal sealed class CacheHarness : IDisposable
     {
         Assert.True(Memory.TryAllocateAtOrAbove(GuestBase, size, executable: false, 0x4000, out var address));
         Gpu.Register(address, size, GuestPageProtection.Read | GuestPageProtection.Write);
+        Worker.Run(static () => { });
         return address;
     }
 

@@ -25,6 +25,9 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
     private readonly Pipeline _pipeline;
     private readonly List<GpuBuffer> _buffers = [];
     private readonly List<Sampler> _samplers = [];
+    private bool IsMesh => _request.Stage == ShaderStage.Mesh;
+    private ShaderStageFlags StageFlags => IsMesh ? ShaderStageFlags.MeshBitExt : ShaderStageFlags.ComputeBit;
+    private PipelineStageFlags PipelineStages => IsMesh ? PipelineStageFlags.MeshShaderBitExt : PipelineStageFlags.ComputeShaderBit;
 
     // The descriptor type of one layout kind: images by class, samplers, else a storage buffer.
     public static DescriptorType DescriptorTypeOf(DescriptorBindingKind kind) =>
@@ -48,7 +51,7 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
                 BindingLayout.NativeBindingIndex(request.Stage, descriptor.Kind),
                 DescriptorTypeOf(descriptor.Kind),
                 (uint)Math.Max(descriptor.Resources.Count, 1),
-                ShaderStageFlags.ComputeBit);
+                StageFlags);
         }
 
         var layoutInfo = new DescriptorSetLayoutCreateInfo
@@ -58,7 +61,7 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
             PBindings = bindings,
         };
         Require(vk.CreateDescriptorSetLayout(device, &layoutInfo, null, out _setLayout), "vkCreateDescriptorSetLayout");
-        var push = new PushConstantRange(ShaderStageFlags.ComputeBit, 0, PushData.ByteSize);
+        var push = new PushConstantRange(StageFlags, 0, PushData.ByteSize);
         fixed (DescriptorSetLayout* layout = &_setLayout)
         {
             var pipelineLayoutInfo = new PipelineLayoutCreateInfo
@@ -90,19 +93,48 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         var entry = (byte*)Marshal.StringToHGlobalAnsi("main");
         try
         {
-            var info = new ComputePipelineCreateInfo
+            var requiredSubgroupSize = new PipelineShaderStageRequiredSubgroupSizeCreateInfo
             {
-                SType = StructureType.ComputePipelineCreateInfo,
-                Stage = new PipelineShaderStageCreateInfo
-                {
-                    SType = StructureType.PipelineShaderStageCreateInfo,
-                    Stage = ShaderStageFlags.ComputeBit,
-                    Module = module,
-                    PName = entry,
-                },
-                Layout = _pipelineLayout,
+                SType = StructureType.PipelineShaderStageRequiredSubgroupSizeCreateInfo,
+                RequiredSubgroupSize = 32,
             };
-            Require(vk.CreateComputePipelines(device, default, 1, &info, null, out _pipeline), "vkCreateComputePipelines");
+            var pinSubgroup32 = !IsMesh && request.HostComputeSubgroup32 && harness.Vulkan.CanRequireComputeSubgroup32;
+            var stage = new PipelineShaderStageCreateInfo
+            {
+                SType = StructureType.PipelineShaderStageCreateInfo,
+                PNext = pinSubgroup32 ? &requiredSubgroupSize : null,
+                Stage = StageFlags,
+                Module = module,
+                PName = entry,
+                Flags = IsMesh ? PipelineShaderStageCreateFlags.RequireFullSubgroupsBit : 0,
+            };
+            if (IsMesh)
+            {
+                var rasterization = new PipelineRasterizationStateCreateInfo
+                {
+                    SType = StructureType.PipelineRasterizationStateCreateInfo,
+                    RasterizerDiscardEnable = true,
+                    LineWidth = 1,
+                };
+                var rendering = new PipelineRenderingCreateInfo { SType = StructureType.PipelineRenderingCreateInfo };
+                var graphics = new GraphicsPipelineCreateInfo
+                {
+                    SType = StructureType.GraphicsPipelineCreateInfo, PNext = &rendering,
+                    StageCount = 1, PStages = &stage, Layout = _pipelineLayout,
+                    PRasterizationState = &rasterization,
+                };
+                Require(vk.CreateGraphicsPipelines(device, default, 1, &graphics, null, out _pipeline), "vkCreateGraphicsPipelines");
+            }
+            else
+            {
+                var info = new ComputePipelineCreateInfo
+                {
+                    SType = StructureType.ComputePipelineCreateInfo,
+                    Stage = stage,
+                    Layout = _pipelineLayout,
+                };
+                Require(vk.CreateComputePipelines(device, default, 1, &info, null, out _pipeline), "vkCreateComputePipelines");
+            }
         }
         finally
         {
@@ -140,7 +172,7 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
     public GpuBuffer CreateBuffer(ulong size) => CreateBuffer([], size);
 
     // A clamp-to-edge sampler with one filter for both directions, kept until the runner is disposed.
-    public Sampler CreateSampler(Filter filter)
+    public Sampler CreateSampler(Filter filter, SamplerAddressMode addressMode = SamplerAddressMode.ClampToEdge, float maxLod = 1)
     {
         var info = new SamplerCreateInfo
         {
@@ -148,10 +180,10 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
             MagFilter = filter,
             MinFilter = filter,
             MipmapMode = SamplerMipmapMode.Nearest,
-            AddressModeU = SamplerAddressMode.ClampToEdge,
-            AddressModeV = SamplerAddressMode.ClampToEdge,
-            AddressModeW = SamplerAddressMode.ClampToEdge,
-            MaxLod = 1,
+            AddressModeU = addressMode,
+            AddressModeV = addressMode,
+            AddressModeW = addressMode,
+            MaxLod = maxLod,
         };
         Require(_harness.Vk.CreateSampler(_harness.Device.Device, &info, null, out var sampler), "vkCreateSampler");
         _samplers.Add(sampler);
@@ -181,12 +213,31 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         uint[]? flattenedTable = null,
         IReadOnlyDictionary<DescriptorBindingKind, DescriptorImageInfo[]>? boundImages = null,
         ulong shaderBase = 0,
-        uint[]? dispatchThreadLimits = null)
+        uint[]? dispatchThreadLimits = null,
+        uint[]? meshDrawParameters = null,
+        ulong[]? bufferRanges = null,
+        uint[]? memoryOffsets = null,
+        ulong[]? callArguments = null,
+        ulong[]? callTargets = null,
+        uint[]? tessellationData = null)
     {
         var vk = _harness.Vk;
         var device = _harness.Device.Device;
         var layout = _request.Bindings;
         var shaderData = new uint[layout.ShaderDataDwordCount];
+        if (layout.UsesBufferLengths && boundBuffers.TryGetValue(DescriptorBindingKind.Buffers, out var bounded))
+            for (var index = 0; index < bounded.Length; index++)
+                shaderData[layout.BufferLengthsDword + (uint)index] = checked((uint)(
+                    (bufferRanges is not null && index < bufferRanges.Length ? bufferRanges[index] : bounded[index].Size) / sizeof(uint)));
+        if (layout.UsesTessellationData)
+        {
+            if (tessellationData is not { Length: (int)Gen5TessellationData.DwordCount })
+            {
+                throw new InvalidOperationException("The tessellation kernel requires its runtime data.");
+            }
+
+            tessellationData.CopyTo(shaderData, (int)layout.TessellationDataDword);
+        }
         for (var index = 0; index < layout.UserDataRegisters.Count; index++)
         {
             var register = layout.UserDataRegisters[index];
@@ -199,10 +250,62 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
             shaderData[layout.ShaderBaseDword + 1] = (uint)(shaderBase >> 32);
         }
 
+        if (memoryOffsets is not null)
+        {
+            for (var index = 0; index < memoryOffsets.Length; index++)
+                shaderData[layout.MemoryOffsetDword + (uint)index / 4] |= (memoryOffsets[index] & 0xFF) << (index % 4 * 8);
+        }
+
         if (layout.UsesDispatchThreadLimits)
         {
             if (dispatchThreadLimits is not { Length: 3 }) throw new InvalidOperationException("The dispatch requires three thread limits.");
             dispatchThreadLimits.CopyTo(shaderData, (int)layout.DispatchThreadLimitsDword);
+        }
+        if (layout.UsesMeshDrawParameters)
+        {
+            if (meshDrawParameters is not { Length: 6 }) throw new InvalidOperationException("The mesh draw requires six parameters.");
+            meshDrawParameters.CopyTo(shaderData, (int)layout.MeshDrawParametersDword);
+        }
+        if (layout.CallArgumentCount != 0)
+        {
+            if (callArguments?.Length != layout.CallArgumentCount) throw new InvalidOperationException("The dispatch requires its call arguments.");
+            for (var index = 0; index < callArguments.Length; index++)
+            {
+                shaderData[layout.CallArgumentsDword + index * 2] = (uint)callArguments[index];
+                shaderData[layout.CallArgumentsDword + index * 2 + 1] = (uint)(callArguments[index] >> 32);
+            }
+        }
+        if (layout.CallTargetCount != 0)
+        {
+            if (callTargets?.Length != layout.CallTargetCount) throw new InvalidOperationException("The dispatch requires its call targets.");
+            for (var index = 0; index < callTargets.Length; index++)
+            {
+                shaderData[layout.CallTargetsDword + index * 2] = (uint)callTargets[index];
+                shaderData[layout.CallTargetsDword + index * 2 + 1] = (uint)(callTargets[index] >> 32);
+            }
+        }
+
+        if (layout.UsesTableBlock)
+        {
+            var bound = boundBuffers.TryGetValue(DescriptorBindingKind.Buffers, out var tableBuffers) ? tableBuffers : [];
+            var table = flattenedTable ?? [];
+            var block = new uint[layout.TableFlattenedDword + table.Length];
+            block[0] = (uint)table.Length;
+            for (var index = 0; index < layout.BufferCount; index++)
+            {
+                var buffer = index < bound.Length ? bound[index] : CreateBuffer(16);
+                var record = (int)(BindingLayout.TableBlockHeaderDwords + (uint)index * BindingLayout.TableBufferDwords);
+                var range = bufferRanges is not null && index < bufferRanges.Length ? bufferRanges[index] : buffer.Size;
+                block[record] = (uint)buffer.DeviceAddress;
+                block[record + 1] = (uint)(buffer.DeviceAddress >> 32);
+                block[record + 2] = (uint)(range >> 2);
+                block[record + 3] = memoryOffsets is not null && index < memoryOffsets.Length ? memoryOffsets[index] & 0xFF : 0;
+            }
+
+            table.CopyTo(block, (int)layout.TableFlattenedDword);
+            var blockAddress = CreateBuffer(MemoryMarshal.AsBytes<uint>(block)).DeviceAddress;
+            shaderData[layout.TableBlockDword] = (uint)blockAddress;
+            shaderData[layout.TableBlockDword + 1] = (uint)(blockAddress >> 32);
         }
 
         var setLayout = _setLayout;
@@ -238,6 +341,12 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
             {
                 buffers = [CreateBuffer(MemoryMarshal.AsBytes<uint>(shaderData))];
             }
+            else if (descriptor.Kind == DescriptorBindingKind.DeviceAddressFallback && !boundBuffers.ContainsKey(descriptor.Kind))
+            {
+                // As the buffer cache does: the address of a readable buffer.
+                ulong[] fallback = [CreateBuffer(256).DeviceAddress, 0];
+                buffers = [CreateBuffer(MemoryMarshal.AsBytes<ulong>(fallback))];
+            }
             else if (!boundBuffers.TryGetValue(descriptor.Kind, out buffers!))
             {
                 buffers = [CreateBuffer(16)];
@@ -249,9 +358,12 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
             }
 
             writes.Add((binding, type, infos.Count, count));
+            var first = infos.Count;
             foreach (var buffer in buffers)
             {
-                infos.Add(new DescriptorBufferInfo(buffer.Handle, 0, buffer.Size));
+                var range = descriptor.Kind == DescriptorBindingKind.Buffers && bufferRanges is not null && infos.Count - first < bufferRanges.Length
+                    ? bufferRanges[infos.Count - first] : buffer.Size;
+                infos.Add(new DescriptorBufferInfo(buffer.Handle, 0, range));
             }
         }
 
@@ -295,25 +407,42 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
             SrcAccessMask = AccessFlags2.HostWriteBit | AccessFlags2.MemoryWriteBit,
             DstAccessMask = AccessFlags2.ShaderReadBit | AccessFlags2.ShaderWriteBit,
         };
-        VulkanSynchronization.PipelineBarrier(vk, command, PipelineStageFlags.AllCommandsBit | PipelineStageFlags.HostBit, PipelineStageFlags.ComputeShaderBit, 0, 1, &barrier, 0, null, 0, null);
-        vk.CmdBindPipeline(command, PipelineBindPoint.Compute, _pipeline);
-        vk.CmdBindDescriptorSets(command, PipelineBindPoint.Compute, _pipelineLayout, 0, 1, &set, 0, null);
+        VulkanSynchronization.PipelineBarrier(vk, command, PipelineStageFlags.AllCommandsBit | PipelineStageFlags.HostBit, PipelineStages, 0, 1, &barrier, 0, null, 0, null);
+        var bindPoint = IsMesh ? PipelineBindPoint.Graphics : PipelineBindPoint.Compute;
+        vk.CmdBindPipeline(command, bindPoint, _pipeline);
+        vk.CmdBindDescriptorSets(command, bindPoint, _pipelineLayout, 0, 1, &set, 0, null);
         if (layout.UsesPushData)
         {
             fixed (uint* pointer = pushData)
             {
-                vk.CmdPushConstants(command, _pipelineLayout, ShaderStageFlags.ComputeBit, 0, PushData.ByteSize, pointer);
+                vk.CmdPushConstants(command, _pipelineLayout, StageFlags, 0, PushData.ByteSize, pointer);
             }
         }
 
-        vk.CmdDispatch(command, groupsX, groupsY, groupsZ);
+        if (IsMesh)
+        {
+            var rendering = new RenderingInfo
+            {
+                SType = StructureType.RenderingInfo,
+                RenderArea = new Rect2D(new Offset2D(0, 0), new Extent2D(1, 1)),
+                LayerCount = 1,
+            };
+            vk.CmdBeginRendering(command, &rendering);
+            var drawMesh = (delegate* unmanaged<CommandBuffer, uint, uint, uint, void>)
+                vk.GetDeviceProcAddr(device, "vkCmdDrawMeshTasksEXT").Handle;
+            if (drawMesh is null)
+                throw new InvalidOperationException("The mesh extension is unavailable.");
+            drawMesh(command, groupsX, groupsY, groupsZ);
+            vk.CmdEndRendering(command);
+        }
+        else vk.CmdDispatch(command, groupsX, groupsY, groupsZ);
         var after = new MemoryBarrier2
         {
             SType = StructureType.MemoryBarrier2,
             SrcAccessMask = AccessFlags2.ShaderWriteBit,
             DstAccessMask = AccessFlags2.TransferReadBit | AccessFlags2.MemoryReadBit | AccessFlags2.HostReadBit,
         };
-        VulkanSynchronization.PipelineBarrier(vk, command, PipelineStageFlags.ComputeShaderBit, PipelineStageFlags.AllCommandsBit | PipelineStageFlags.HostBit, 0, 1, &after, 0, null, 0, null);
+        VulkanSynchronization.PipelineBarrier(vk, command, PipelineStages, PipelineStageFlags.AllCommandsBit | PipelineStageFlags.HostBit, 0, 1, &after, 0, null, 0, null);
     }
 
     public byte[] ReadBack(GpuBuffer buffer, ulong offset, ulong size) => _harness.ReadBack(buffer.Handle, offset, size);

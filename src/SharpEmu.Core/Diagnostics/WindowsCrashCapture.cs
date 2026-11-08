@@ -29,7 +29,7 @@ public static partial class WindowsCrashCapture
         try
         {
             var logPath = string.IsNullOrWhiteSpace(logFilePath)
-                ? Path.Combine(AppContext.BaseDirectory, "user", "logs", $"run-{DateTime.UtcNow:yyyyMMdd-HHmmss}.log")
+                ? Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "logs", $"run-{DateTime.UtcNow:yyyyMMdd-HHmmss}.log")
                 : Path.GetFullPath(logFilePath);
             var dumpPath = Path.ChangeExtension(logPath, $"crash-{Environment.ProcessId}.dmp");
             Directory.CreateDirectory(Path.GetDirectoryName(dumpPath)!);
@@ -49,6 +49,7 @@ public static partial class WindowsCrashCapture
             using var helper = Process.Start(startInfo) ?? throw new InvalidOperationException("The crash helper did not start.");
             using var exited = new ProcessExitWaitHandle(helper);
             WaitForHelper(readyEvent, exited);
+            Console.Error.WriteLine("[CRASH][WARN] CRASH DUMPS ARE ENABLED. DEBUGGER ATTACHMENT CAN REDUCE FPS AND CHANGE TIMING.");
             Console.Error.WriteLine($"[CRASH][INFO] Crash capture ready. Dump: {dumpPath}");
             Console.Error.WriteLine($"[CRASH][INFO] Capture report: {dumpPath}.capture.log");
             Console.Error.WriteLine($"[CRASH][INFO] Runtime: {RuntimeInformation.FrameworkDescription}. Debugging can change timing.");

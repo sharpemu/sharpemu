@@ -9,6 +9,7 @@ using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.VideoOut;
+using System.Buffers.Binary;
 
 namespace SharpEmu.Libs.Agc;
 
@@ -87,6 +88,33 @@ public static partial class AgcExports
             RecordShaderRegisters(captureState.ShRegisters));
 
 
+
+    private const ulong MaximumDcbWindowBytes = 64UL * 1024 * 1024;
+    [ThreadStatic] private static byte[]? _dcbWindow;
+    [ThreadStatic] private static ulong _dcbWindowBase;
+    [ThreadStatic] private static int _dcbWindowBytes;
+
+    private static bool TryReadPacketUInt32(CpuContext ctx, ulong address, out uint value)
+    {
+        if (_dcbWindow is { } window && address >= _dcbWindowBase && address - _dcbWindowBase <= (ulong)(_dcbWindowBytes - sizeof(uint)))
+        {
+            value = BinaryPrimitives.ReadUInt32LittleEndian(window.AsSpan((int)(address - _dcbWindowBase)));
+            return true;
+        }
+
+        return TryReadUInt32(ctx, address, out value);
+    }
+
+    private static bool TryReadPacketUInt64(CpuContext ctx, ulong address, out ulong value)
+    {
+        if (_dcbWindow is { } window && address >= _dcbWindowBase && address - _dcbWindowBase <= (ulong)(_dcbWindowBytes - sizeof(ulong)))
+        {
+            value = BinaryPrimitives.ReadUInt64LittleEndian(window.AsSpan((int)(address - _dcbWindowBase)));
+            return true;
+        }
+
+        return TryReadUInt64(ctx, address, out value);
+    }
 
     private const long MaximumRetainedIndexBytesPerSubmission = 64L * 1024 * 1024;
     private const long MaximumRetainedVertexBytesPerSubmission = 64L * 1024 * 1024;
@@ -169,137 +197,162 @@ public static partial class AgcExports
             return;
         }
 
-        var offset = 0u;
-        while (offset < dwordCount)
+        var windowBytes = (ulong)dwordCount * sizeof(uint) <= MaximumDcbWindowBytes ? (int)dwordCount * sizeof(uint) : 0;
+        var window = windowBytes != 0 ? System.Buffers.ArrayPool<byte>.Shared.Rent(windowBytes) : null;
+        var previousWindow = _dcbWindow;
+        var previousWindowBase = _dcbWindowBase;
+        var previousWindowBytes = _dcbWindowBytes;
+        if (window is not null && ctx.Memory.TryRead(commandAddress, window.AsSpan(0, windowBytes)))
         {
-            var packetAddress = commandAddress + ((ulong)offset * sizeof(uint));
-            if (!TryReadUInt32(ctx, packetAddress, out var header))
-            {
-                return;
-            }
+            _dcbWindow = window;
+            _dcbWindowBase = commandAddress;
+            _dcbWindowBytes = windowBytes;
+        }
 
-            var packetType = header >> 30;
-            if (packetType == 2)
+        try
+        {
+            var offset = 0u;
+            while (offset < dwordCount)
             {
-                offset++;
-                continue;
-            }
-
-            if (packetType != 3)
-            {
-                return;
-            }
-
-            var length = Pm4Length(header);
-            if (length == 0 || offset + length > dwordCount)
-            {
-                return;
-            }
-
-            var opcode = (header >> 8) & 0xFFu;
-            var register = (header >> 2) & 0x3Fu;
-            if (opcode == ItIndexType && length >= 2 &&
-                TryReadUInt32(ctx, packetAddress + 4, out var packetIndexSize))
-            {
-                captureState.IndexSize = packetIndexSize & 0x3u;
-            }
-
-            ApplyGeometryStatePacket(ctx, captureState, packetAddress, length, opcode, register);
-
-            if (NeedsGeometryRegisterUpdate(opcode, register))
-            {
-                using var registerProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.Registers);
-                ApplySubmittedRegisters(
-                    ctx,
-                    captureState,
-                    packetAddress,
-                    length,
-                    opcode,
-                    register);
-            }
-
-            if (opcode == ItDrawIndex2 && length >= 6 &&
-                TryReadUInt32(ctx, packetAddress + 4, out var maximumIndexCount) &&
-                TryReadUInt32(ctx, packetAddress + 8, out var indexBaseLo) &&
-                TryReadUInt32(ctx, packetAddress + 12, out var indexBaseHi) &&
-                TryReadUInt32(ctx, packetAddress + 16, out var indexCount))
-            {
-                var indexAddress = indexBaseLo | ((ulong)indexBaseHi << 32);
-                var indexStride = AgcIndexHelpers.GetGuestStrideBytes(
-                    AgcIndexHelpers.Decode(captureState.IndexSize));
-                var byteCount64 = (ulong)indexCount * (uint)indexStride;
-                captureState.DrawIndexOffset = 0;
-                var capture = CreateCaptureFingerprint(captureState, indexAddress, indexCount);
-                SubmittedIndexSnapshot? indexSnapshot = null;
-                if (indexSnapshots is not null &&
-                    byteCount64 != 0 &&
-                    byteCount64 <= int.MaxValue &&
-                    retainedIndexBytes + (long)byteCount64 <=
-                        MaximumRetainedIndexBytesPerSubmission)
+                var packetAddress = commandAddress + ((ulong)offset * sizeof(uint));
+                if (!TryReadPacketUInt32(ctx, packetAddress, out var header))
                 {
-                    using var captureProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.IndexCapture);
-                    var data = new byte[(int)byteCount64];
-                    if (ctx.Memory.TryRead(indexAddress, data) ||
-                        KernelMemoryCompatExports.TryReadTrackedLibcHeap(indexAddress, data))
-                    {
-                        indexSnapshot = new SubmittedIndexSnapshot(
-                            indexAddress,
-                            indexCount,
-                            indexStride,
-                            data,
-                            capture);
-                        indexSnapshots[packetAddress] = indexSnapshot;
-                        retainedIndexBytes += data.Length;
-                    }
+                    return;
                 }
 
-                captureState.IndexBufferAddress = indexAddress;
-                captureState.IndexBufferCount = maximumIndexCount;
-                captureState.CurrentIndexSnapshot = indexSnapshot;
-                TryCaptureSubmittedVertexSnapshot(
-                    ctx,
-                    captureState,
-                    packetAddress,
-                    indexCount,
-                    capture,
-                    vertexSnapshots,
-                    ref retainedVertexBytes);
-                captureState.CurrentIndexSnapshot = null;
-            }
-            else if (opcode == ItDrawIndexAuto && length >= 3 &&
-                     TryReadUInt32(ctx, packetAddress + 4, out var vertexCount))
-            {
-                TryCaptureSubmittedVertexSnapshot(
-                    ctx,
-                    captureState,
-                    packetAddress,
-                    vertexCount,
-                    CreateCaptureFingerprint(captureState, 0, vertexCount),
-                    vertexSnapshots,
-                    ref retainedVertexBytes);
-            }
+                var packetType = header >> 30;
+                if (packetType == 2)
+                {
+                    offset++;
+                    continue;
+                }
 
-            if (opcode == ItIndirectBuffer && length >= 4 &&
-                TryReadUInt32(ctx, packetAddress + 4, out var chainLow) &&
-                TryReadUInt32(ctx, packetAddress + 8, out var chainHigh) &&
-                TryReadUInt32(ctx, packetAddress + 12, out var chainDwords))
-            {
-                var chainAddress = ((ulong)(chainHigh & 0xFFFFu) << 32) | chainLow;
-                var chainLength = chainDwords & 0xFFFFFu;
-                CaptureSubmittedIndexPacketsCore(
-                    ctx,
-                    chainAddress,
-                    chainLength,
-                    visited,
-                    indexSnapshots,
-                    vertexSnapshots,
-                    captureState,
-                    ref retainedIndexBytes,
-                    ref retainedVertexBytes,
-                    depth + 1);
-            }
+                if (packetType != 3)
+                {
+                    return;
+                }
 
-            offset += length;
+                var length = Pm4Length(header);
+                if (length == 0 || offset + length > dwordCount)
+                {
+                    return;
+                }
+
+                var opcode = (header >> 8) & 0xFFu;
+                var register = (header >> 2) & 0x3Fu;
+                if (opcode == ItIndexType && length >= 2 &&
+                    TryReadPacketUInt32(ctx, packetAddress + 4, out var packetIndexSize))
+                {
+                    captureState.IndexSize = packetIndexSize & 0x3u;
+                }
+
+                ApplyGeometryStatePacket(ctx, captureState, packetAddress, length, opcode, register);
+
+                if (NeedsGeometryRegisterUpdate(opcode, register))
+                {
+                    using var registerProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.Registers);
+                    ApplySubmittedRegisters(
+                        ctx,
+                        captureState,
+                        packetAddress,
+                        length,
+                        opcode,
+                        register);
+                }
+
+                if (opcode == ItDrawIndex2 && length >= 6 &&
+                    TryReadPacketUInt32(ctx, packetAddress + 4, out var maximumIndexCount) &&
+                    TryReadPacketUInt32(ctx, packetAddress + 8, out var indexBaseLo) &&
+                    TryReadPacketUInt32(ctx, packetAddress + 12, out var indexBaseHi) &&
+                    TryReadPacketUInt32(ctx, packetAddress + 16, out var indexCount))
+                {
+                    var indexAddress = indexBaseLo | ((ulong)indexBaseHi << 32);
+                    var indexStride = AgcIndexHelpers.GetGuestStrideBytes(
+                        AgcIndexHelpers.Decode(captureState.IndexSize));
+                    var byteCount64 = (ulong)indexCount * (uint)indexStride;
+                    captureState.DrawIndexOffset = 0;
+                    var capture = CreateCaptureFingerprint(captureState, indexAddress, indexCount);
+                    SubmittedIndexSnapshot? indexSnapshot = null;
+                    if (indexSnapshots is not null &&
+                        byteCount64 != 0 &&
+                        byteCount64 <= int.MaxValue &&
+                        retainedIndexBytes + (long)byteCount64 <=
+                            MaximumRetainedIndexBytesPerSubmission)
+                    {
+                        using var captureProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.IndexCapture);
+                        var data = new byte[(int)byteCount64];
+                        if (ctx.Memory.TryRead(indexAddress, data) ||
+                            KernelMemoryCompatExports.TryReadTrackedLibcHeap(indexAddress, data))
+                        {
+                            indexSnapshot = new SubmittedIndexSnapshot(
+                                indexAddress,
+                                indexCount,
+                                indexStride,
+                                data,
+                                capture);
+                            indexSnapshots[packetAddress] = indexSnapshot;
+                            retainedIndexBytes += data.Length;
+                        }
+                    }
+
+                    captureState.IndexBufferAddress = indexAddress;
+                    captureState.IndexBufferCount = maximumIndexCount;
+                    captureState.CurrentIndexSnapshot = indexSnapshot;
+                    TryCaptureSubmittedVertexSnapshot(
+                        ctx,
+                        captureState,
+                        packetAddress,
+                        indexCount,
+                        capture,
+                        vertexSnapshots,
+                        ref retainedVertexBytes);
+                    captureState.CurrentIndexSnapshot = null;
+                }
+                else if (opcode == ItDrawIndexAuto && length >= 3 &&
+                         TryReadPacketUInt32(ctx, packetAddress + 4, out var vertexCount))
+                {
+                    TryCaptureSubmittedVertexSnapshot(
+                        ctx,
+                        captureState,
+                        packetAddress,
+                        vertexCount,
+                        CreateCaptureFingerprint(captureState, 0, vertexCount),
+                        vertexSnapshots,
+                        ref retainedVertexBytes);
+                }
+
+                if (opcode == ItIndirectBuffer && length >= 4 &&
+                    TryReadPacketUInt32(ctx, packetAddress + 4, out var chainLow) &&
+                    TryReadPacketUInt32(ctx, packetAddress + 8, out var chainHigh) &&
+                    TryReadPacketUInt32(ctx, packetAddress + 12, out var chainDwords))
+                {
+                    var chainAddress = ((ulong)(chainHigh & 0xFFFFu) << 32) | chainLow;
+                    var chainLength = chainDwords & 0xFFFFFu;
+                    CaptureSubmittedIndexPacketsCore(
+                        ctx,
+                        chainAddress,
+                        chainLength,
+                        visited,
+                        indexSnapshots,
+                        vertexSnapshots,
+                        captureState,
+                        ref retainedIndexBytes,
+                        ref retainedVertexBytes,
+                        depth + 1);
+                }
+
+                offset += length;
+            }
+        }
+        finally
+        {
+            _dcbWindow = previousWindow;
+            _dcbWindowBase = previousWindowBase;
+            _dcbWindowBytes = previousWindowBytes;
+            if (window is not null)
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(window);
+            }
         }
     }
 
@@ -326,28 +379,28 @@ public static partial class AgcExports
         }
 
         if (opcode == ItIndexBase && length >= 3 &&
-            TryReadUInt32(ctx, packetAddress + 4, out var indexBaseLo) &&
-            TryReadUInt32(ctx, packetAddress + 8, out var indexBaseHi))
+            TryReadPacketUInt32(ctx, packetAddress + 4, out var indexBaseLo) &&
+            TryReadPacketUInt32(ctx, packetAddress + 8, out var indexBaseHi))
         {
             captureState.IndexBufferAddress = indexBaseLo | ((ulong)indexBaseHi << 32);
         }
         else if (opcode == ItIndexBufferSize && length >= 2 &&
-            TryReadUInt32(ctx, packetAddress + 4, out var indexBufferCount))
+            TryReadPacketUInt32(ctx, packetAddress + 4, out var indexBufferCount))
         {
             captureState.IndexBufferCount = indexBufferCount;
         }
         else if (opcode == ItNop && register == RIndexCount && length >= 2 &&
-            TryReadUInt32(ctx, packetAddress + 4, out var customIndexCount))
+            TryReadPacketUInt32(ctx, packetAddress + 4, out var customIndexCount))
         {
             captureState.IndexBufferCount = customIndexCount;
         }
         else if (opcode == ItNumInstances && length >= 2 &&
-            TryReadUInt32(ctx, packetAddress + 4, out var instanceCount))
+            TryReadPacketUInt32(ctx, packetAddress + 4, out var instanceCount))
         {
             captureState.InstanceCount = Math.Max(instanceCount, 1);
         }
         else if (opcode == ItDrawIndexOffset2 && length >= 5 &&
-            TryReadUInt32(ctx, packetAddress + 8, out var indexOffset))
+            TryReadPacketUInt32(ctx, packetAddress + 8, out var indexOffset))
         {
             captureState.DrawIndexOffset = indexOffset;
         }

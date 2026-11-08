@@ -3,7 +3,6 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -63,12 +62,11 @@ public sealed class Gen5ScalarBitClearTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void CompilesOnBothBackends(bool overlapDestination)
+    public void Compiles(bool overlapDestination)
     {
         var (plan, resources, layout) = Prepare(CreateReadbackProgram(false, overlapDestination, true));
         var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
     }
 
     public static Gen5ShaderProgram CreateReadbackProgram(bool emptyExecutionMask, bool overlapDestination, bool condition)

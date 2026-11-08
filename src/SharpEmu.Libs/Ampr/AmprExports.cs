@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.FileSystem;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Kernel;
 using System.Buffers;
@@ -100,23 +101,41 @@ public static class AmprExports
         public uint Flush;
     }
 
+    // A host file, or a file of an archive-mounted app0 that is not on disk.
     private sealed class CachedHostFile : IDisposable
     {
+        private readonly SafeFileHandle? _handle;
+        private readonly ZArchiveFileStream? _archived;
+
         public CachedHostFile(string path)
         {
-            Handle = File.OpenHandle(
+            path = GameFileOverlay.ResolveFile(path);
+            if (!File.Exists(path) && App0Archive.OpenRead(path) is { } archived)
+            {
+                _archived = archived;
+                Length = archived.Length;
+                return;
+            }
+
+            _handle = File.OpenHandle(
                 path,
                 FileMode.Open,
                 FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete,
                 FileOptions.RandomAccess);
-            Length = RandomAccess.GetLength(Handle);
+            Length = RandomAccess.GetLength(_handle);
         }
 
-        public SafeFileHandle Handle { get; }
         public long Length { get; }
 
-        public void Dispose() => Handle.Dispose();
+        public int Read(Span<byte> buffer, long offset) =>
+            _archived?.ReadAt(buffer, offset) ?? RandomAccess.Read(_handle!, buffer, offset);
+
+        public void Dispose()
+        {
+            _handle?.Dispose();
+            _archived?.Dispose();
+        }
     }
 
     private sealed class CachedHostFileEntry
@@ -126,7 +145,7 @@ public static class AmprExports
     }
 
     // Keep a bounded LRU of open host files. An unbounded cache exhausts the
-    // process FD limit (~10k on macOS) during large asset storms, after
+    // process FD limit during large asset storms, after
     // which every new open throws IOException and surfaces as NOT_FOUND — the
     // guest then reports InvalidFileFourCC on empty buffers.
     private const int MaxCachedHostFiles = 1536;
@@ -1221,7 +1240,7 @@ public static class AmprExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
-        // 4 MiB chunks cut syscall/Rosetta round-trips on DeS' large sequential
+        // 4 MiB chunks cut syscall round-trips on DeS' large sequential
         // APR reads without blowing the ArrayPool for small probes.
         const int ChunkSize = 4 * 1024 * 1024;
         var buffer = ArrayPool<byte>.Shared.Rent((int)Math.Min((ulong)ChunkSize, size));
@@ -1252,8 +1271,7 @@ public static class AmprExports
                 }
 
                 var request = (int)Math.Min((ulong)buffer.Length, size - bytesRead);
-                var read = RandomAccess.Read(
-                    cachedFile.Handle,
+                var read = cachedFile.Read(
                     buffer.AsSpan(0, request),
                     unchecked((long)absoluteOffset));
 

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -16,6 +17,26 @@ public sealed class VertexTableMetadata
     public int VertexAttributeRegister { get; init; } = NoRegister;
     public uint[] InputSemantics { get; init; } = [];
 }
+
+public sealed class VertexTableWords
+{
+    public const int MaxAttributes = 256;
+    public const int DescriptorWords = 4;
+    public const int MaxWords = MaxAttributes + VertexInputInfo.MaxBuffers * DescriptorWords;
+
+    public uint FirstAttribute { get; init; }
+
+    public int AttributeCount { get; init; }
+
+    public uint FirstBuffer { get; init; }
+
+    public int BufferCount { get; init; }
+
+    public uint[] Words { get; init; } = [];
+
+    public bool WholeSpans { get; init; } = true;
+}
+
 // One packed input semantic word of a shader header.
 public readonly record struct ShaderInputSemantic(uint Word)
 {
@@ -32,17 +53,29 @@ public readonly record struct ShaderInputSemantic(uint Word)
 public static class VertexInputResolver
 {
     public static VertexInputInfo ResolveVertexInputs(CpuContext context, RegisteredShader shader, ReadOnlySpan<uint> userData,
-        uint positionExportControl = 0, ClipSpaceTransform clipSpace = default)
+        uint positionExportControl = 0, ClipSpaceTransform clipSpace = default) =>
+        ResolveVertexInputs(context, shader, RequireTables(context, shader), userData, positionExportControl, clipSpace, out _);
+
+    public static VertexTableMetadata RequireTables(CpuContext context, RegisteredShader shader)
     {
+        // Legacy fetches remain explicit buffer instructions in the frontend's IR, not AGC vertex tables.
+        if (shader.Frontend is { HasVertexTables: false })
+            return new VertexTableMetadata();
         if (!TryReadTables(context, shader, GpuCommands.Registers.UserScalarRegisters.Capacity, out var metadata, out var error))
         {
             throw SubmissionScheduler.Fatal($"The vertex program header is invalid: shader=0x{shader.CodeAddress:X16} error={error}.");
         }
 
+        return metadata;
+    }
+
+    public static VertexInputInfo ResolveVertexInputs(CpuContext context, RegisteredShader shader, VertexTableMetadata metadata,
+        ReadOnlySpan<uint> userData, uint positionExportControl, ClipSpaceTransform clipSpace, out VertexTableWords? tableWords)
+    {
+        tableWords = null;
         var attributes = new List<VertexAttributeResource>();
         VertexInputBuffer[] buffers = [];
-        // A shader without input semantics never reads its vertex tables, which may be null.
-        if (metadata.VertexAttributeRegister >= 0 && metadata.InputSemantics.Length != 0)
+        if (ReadsTables(metadata))
         {
             var attributeTable = ReadTablePointer(userData, metadata.VertexAttributeRegister);
             var bufferTable = ReadTablePointer(userData, metadata.VertexBufferRegister);
@@ -54,7 +87,8 @@ public static class VertexInputResolver
                     $"user_data=[{string.Join(",", userData.ToArray().Select(word => $"{word:X8}"))}].");
             }
 
-            attributes = ApplySemantics(context, metadata.InputSemantics, attributeTable, bufferTable, shader.CodeAddress);
+            tableWords = ReadTableWords(context, metadata.InputSemantics, attributeTable, bufferTable, shader.CodeAddress);
+            attributes = ApplySemantics(metadata.InputSemantics, tableWords);
             buffers = MergeBuffers(attributes, shader.CodeAddress);
         }
 
@@ -71,7 +105,10 @@ public static class VertexInputResolver
         };
     }
 
-    private static ulong ReadTablePointer(ReadOnlySpan<uint> userData, int register) =>
+    public static bool ReadsTables(VertexTableMetadata metadata) =>
+        metadata.VertexAttributeRegister >= 0 && metadata.InputSemantics.Length != 0;
+
+    public static ulong ReadTablePointer(ReadOnlySpan<uint> userData, int register) =>
         register < 0 || register + 1 >= userData.Length ? 0 : userData[register] | ((ulong)userData[register + 1] << 32);
 
     private const ushort IllegalDirectOffset = 0xFFFF;
@@ -85,15 +122,6 @@ public static class VertexInputResolver
         ((channels > 1 ? 5u : 0u) << 3) |
         ((channels > 2 ? 6u : 0u) << 6) |
         ((channels > 3 ? 7u : 1u) << 9);
-
-    private sealed class ResolvedBuffer
-    {
-        public ulong Address;
-        public uint Stride;
-        public uint RecordCount;
-        public uint FetchIndex;
-        public List<int> AttributeIndices { get; } = [];
-    }
 
     // Reads the direct resource registers and the input semantics; false with the reason when invalid.
     public static bool TryReadTables(CpuContext context, RegisteredShader shader, uint maxUserScalarRegisters, out VertexTableMetadata metadata, out string error)
@@ -222,10 +250,24 @@ public static class VertexInputResolver
         ReadOnlySpan<uint> semantics,
         ulong attributeTable,
         ulong bufferTable,
+        ulong shaderAddress) =>
+        ApplySemantics(semantics, ReadTableWords(context, semantics, attributeTable, bufferTable, shaderAddress));
+
+    public static VertexTableWords ReadTableWords(CpuContext context, ReadOnlySpan<uint> semantics, ulong attributeTable, ulong bufferTable,
         ulong shaderAddress)
     {
-        var resources = new List<VertexAttributeResource>(semantics.Length);
-        Span<uint> descriptorWords = stackalloc uint[4];
+        if (semantics.Length > VertexInputInfo.MaxBuffers)
+        {
+            throw SubmissionScheduler.Fatal($"The vertex program has too many attributes: shader=0x{shaderAddress:X16} count={semantics.Length}.");
+        }
+
+        if (semantics.IsEmpty)
+        {
+            return new VertexTableWords();
+        }
+
+        var firstAttribute = uint.MaxValue;
+        var lastAttribute = 0u;
         foreach (var word in semantics)
         {
             var semantic = new ShaderInputSemantic(word);
@@ -234,36 +276,96 @@ public static class VertexInputResolver
                 throw SubmissionScheduler.Fatal($"A static vertex attribute is not supported: shader=0x{shaderAddress:X16} semantic=0x{word:X8}.");
             }
 
-            var attributeAddress = attributeTable + semantic.Semantic * sizeof(uint);
-            if (!context.TryReadUInt32(attributeAddress, out var attribute))
+            firstAttribute = Math.Min(firstAttribute, semantic.Semantic);
+            lastAttribute = Math.Max(lastAttribute, semantic.Semantic);
+        }
+
+        var attributeCount = (int)(lastAttribute - firstAttribute) + 1;
+        Span<uint> attributes = stackalloc uint[VertexTableWords.MaxAttributes];
+        attributes = attributes[..attributeCount];
+        var wholeSpans = context.Memory.TryRead(attributeTable + (ulong)firstAttribute * sizeof(uint), MemoryMarshal.AsBytes(attributes));
+        var firstBuffer = uint.MaxValue;
+        var lastBuffer = 0u;
+        foreach (var word in semantics)
+        {
+            var semantic = new ShaderInputSemantic(word).Semantic;
+            ref var attribute = ref attributes[(int)(semantic - firstAttribute)];
+            var attributeAddress = attributeTable + (ulong)semantic * sizeof(uint);
+            if (!wholeSpans && !context.TryReadUInt32(attributeAddress, out attribute))
             {
                 throw SubmissionScheduler.Fatal($"The vertex attribute table is unreadable: shader=0x{shaderAddress:X16} address=0x{attributeAddress:X16}.");
             }
 
+            firstBuffer = Math.Min(firstBuffer, attribute & 0x1Fu);
+            lastBuffer = Math.Max(lastBuffer, attribute & 0x1Fu);
+        }
+
+        var bufferCount = (int)(lastBuffer - firstBuffer) + 1;
+        var words = new uint[attributeCount + bufferCount * VertexTableWords.DescriptorWords];
+        attributes.CopyTo(words);
+        var buffers = words.AsSpan(attributeCount);
+        if (!context.Memory.TryRead(bufferTable + (ulong)firstBuffer * 16, MemoryMarshal.AsBytes(buffers)))
+        {
+            wholeSpans = false;
+            foreach (var word in semantics)
+            {
+                var index = attributes[(int)(new ShaderInputSemantic(word).Semantic - firstAttribute)] & 0x1Fu;
+                var descriptorAddress = bufferTable + (ulong)index * 16;
+                var descriptor = buffers.Slice((int)(index - firstBuffer) * VertexTableWords.DescriptorWords, VertexTableWords.DescriptorWords);
+                for (var component = 0; component < descriptor.Length; component++)
+                {
+                    if (!context.TryReadUInt32(descriptorAddress + (ulong)component * sizeof(uint), out descriptor[component]))
+                    {
+                        throw SubmissionScheduler.Fatal($"The vertex buffer table is unreadable: shader=0x{shaderAddress:X16} address=0x{descriptorAddress:X16}.");
+                    }
+                }
+            }
+        }
+
+        return new VertexTableWords
+        {
+            FirstAttribute = firstAttribute,
+            AttributeCount = attributeCount,
+            FirstBuffer = firstBuffer,
+            BufferCount = bufferCount,
+            Words = words,
+            WholeSpans = wholeSpans,
+        };
+    }
+
+    public static bool SameTableWords(CpuContext context, VertexTableWords kept, ulong attributeTable, ulong bufferTable, Span<uint> scratch)
+    {
+        if (!kept.WholeSpans)
+        {
+            return false;
+        }
+
+        if (kept.Words.Length == 0)
+        {
+            return true;
+        }
+
+        var current = scratch[..kept.Words.Length];
+        var bytes = MemoryMarshal.AsBytes(current);
+        var attributeBytes = kept.AttributeCount * sizeof(uint);
+        return context.Memory.TryRead(attributeTable + (ulong)kept.FirstAttribute * sizeof(uint), bytes[..attributeBytes]) &&
+            context.Memory.TryRead(bufferTable + (ulong)kept.FirstBuffer * 16, bytes[attributeBytes..]) &&
+            current.SequenceEqual(kept.Words);
+    }
+
+    public static List<VertexAttributeResource> ApplySemantics(ReadOnlySpan<uint> semantics, VertexTableWords tables)
+    {
+        var resources = new List<VertexAttributeResource>(semantics.Length);
+        foreach (var word in semantics)
+        {
+            var semantic = new ShaderInputSemantic(word);
+            var attribute = tables.Words[(int)(semantic.Semantic - tables.FirstAttribute)];
             var index = attribute & 0x1Fu;
             var format = (attribute >> 5) & 0x1FFu;
             var offset = (attribute >> 14) & 0xFFFu;
             var fetchIndex = (attribute >> 26) & 0x1u;
-            if (index >= VertexInputInfo.MaxBuffers)
-            {
-                throw SubmissionScheduler.Fatal($"The vertex attribute names a buffer outside the table: shader=0x{shaderAddress:X16} index={index}.");
-            }
-
-            if (resources.Count >= VertexInputInfo.MaxBuffers)
-            {
-                throw SubmissionScheduler.Fatal($"The vertex program has too many attributes: shader=0x{shaderAddress:X16} count={resources.Count + 1}.");
-            }
-
-            var descriptorAddress = bufferTable + index * 16u;
-            for (var component = 0; component < 4; component++)
-            {
-                if (!context.TryReadUInt32(descriptorAddress + (ulong)component * sizeof(uint), out descriptorWords[component]))
-                {
-                    throw SubmissionScheduler.Fatal($"The vertex buffer table is unreadable: shader=0x{shaderAddress:X16} address=0x{descriptorAddress:X16}.");
-                }
-            }
-
-            var descriptor = BufferDescriptorWords.From(descriptorWords);
+            var descriptor = BufferDescriptorWords.From(tables.Words.AsSpan(
+                tables.AttributeCount + (int)(index - tables.FirstBuffer) * VertexTableWords.DescriptorWords, VertexTableWords.DescriptorWords));
             if (format != 0)
             {
                 var bufferFormat = format >> 2;
@@ -297,39 +399,47 @@ public static class VertexInputResolver
     // Attributes with one stride and fetch rate whose bases lie within one record share a buffer.
     public static VertexInputBuffer[] MergeBuffers(List<VertexAttributeResource> resources, ulong shaderAddress)
     {
-        var buffers = new List<ResolvedBuffer>();
+        const int StackResources = 64;
+        Span<int> bufferOf = resources.Count <= StackResources ? stackalloc int[StackResources] : new int[resources.Count];
+        Span<ulong> addresses = stackalloc ulong[VertexInputInfo.MaxBuffers];
+        Span<uint> strides = stackalloc uint[VertexInputInfo.MaxBuffers];
+        Span<uint> recordCounts = stackalloc uint[VertexInputInfo.MaxBuffers];
+        Span<uint> fetchIndices = stackalloc uint[VertexInputInfo.MaxBuffers];
+        Span<int> attributeCounts = stackalloc int[VertexInputInfo.MaxBuffers];
+        var bufferCount = 0;
         for (var resourceIndex = 0; resourceIndex < resources.Count; resourceIndex++)
         {
             var resource = resources[resourceIndex];
             var descriptor = resource.Descriptor;
             var merged = false;
-            foreach (var buffer in buffers)
+            for (var bufferIndex = 0; bufferIndex < bufferCount; bufferIndex++)
             {
-                ulong stride = buffer.Stride;
-                if (stride != descriptor.Stride || buffer.FetchIndex != resource.FetchIndex)
+                ulong stride = strides[bufferIndex];
+                if (stride != descriptor.Stride || fetchIndices[bufferIndex] != resource.FetchIndex)
                 {
                     continue;
                 }
 
                 var resourceBase = descriptor.Address;
-                var lowest = Math.Min(resourceBase, buffer.Address);
+                var lowest = Math.Min(resourceBase, addresses[bufferIndex]);
                 var offset1 = resourceBase - lowest;
-                var offset2 = buffer.Address - lowest;
+                var offset2 = addresses[bufferIndex] - lowest;
                 if (offset1 < stride && offset2 < stride)
                 {
-                    if (buffer.RecordCount != descriptor.RecordCount)
+                    if (recordCounts[bufferIndex] != descriptor.RecordCount)
                     {
                         throw SubmissionScheduler.Fatal(
-                            $"Two attributes of one vertex buffer disagree on the record count: shader=0x{shaderAddress:X16} records={buffer.RecordCount}/{descriptor.RecordCount}.");
+                            $"Two attributes of one vertex buffer disagree on the record count: shader=0x{shaderAddress:X16} records={recordCounts[bufferIndex]}/{descriptor.RecordCount}.");
                     }
 
-                    buffer.Address = lowest;
-                    if (buffer.AttributeIndices.Count >= VertexInputInfo.MaxBuffers)
+                    addresses[bufferIndex] = lowest;
+                    if (attributeCounts[bufferIndex] >= VertexInputInfo.MaxBuffers)
                     {
                         throw SubmissionScheduler.Fatal($"A vertex buffer has too many attributes: shader=0x{shaderAddress:X16}.");
                     }
 
-                    buffer.AttributeIndices.Add(resourceIndex);
+                    attributeCounts[bufferIndex]++;
+                    bufferOf[resourceIndex] = bufferIndex;
                     merged = true;
                     break;
                 }
@@ -340,36 +450,34 @@ public static class VertexInputResolver
                 continue;
             }
 
-            if (buffers.Count >= VertexInputInfo.MaxBuffers)
+            if (bufferCount >= VertexInputInfo.MaxBuffers)
             {
                 throw SubmissionScheduler.Fatal($"The vertex program has too many buffers: shader=0x{shaderAddress:X16}.");
             }
 
-            var created = new ResolvedBuffer
-            {
-                Address = descriptor.Address,
-                Stride = descriptor.Stride,
-                RecordCount = descriptor.RecordCount,
-                FetchIndex = resource.FetchIndex,
-            };
-            created.AttributeIndices.Add(resourceIndex);
-            buffers.Add(created);
+            addresses[bufferCount] = descriptor.Address;
+            strides[bufferCount] = descriptor.Stride;
+            recordCounts[bufferCount] = descriptor.RecordCount;
+            fetchIndices[bufferCount] = resource.FetchIndex;
+            attributeCounts[bufferCount] = 1;
+            bufferOf[resourceIndex] = bufferCount++;
         }
 
-        var result = new VertexInputBuffer[buffers.Count];
-        for (var bufferIndex = 0; bufferIndex < buffers.Count; bufferIndex++)
+        var result = new VertexInputBuffer[bufferCount];
+        for (var bufferIndex = 0; bufferIndex < bufferCount; bufferIndex++)
         {
-            var buffer = buffers[bufferIndex];
-            result[bufferIndex] = new VertexInputBuffer(buffer.Address, buffer.Stride, buffer.RecordCount, buffer.FetchIndex != 0);
-            foreach (var resourceIndex in buffer.AttributeIndices)
+            result[bufferIndex] = new VertexInputBuffer(addresses[bufferIndex], strides[bufferIndex], recordCounts[bufferIndex], fetchIndices[bufferIndex] != 0);
+        }
+
+        for (var resourceIndex = 0; resourceIndex < resources.Count; resourceIndex++)
+        {
+            var resource = resources[resourceIndex];
+            var bufferIndex = bufferOf[resourceIndex];
+            resources[resourceIndex] = resource with
             {
-                var resource = resources[resourceIndex];
-                resources[resourceIndex] = resource with
-                {
-                    BufferIndex = bufferIndex,
-                    OffsetBytes = (uint)(resource.Descriptor.Address - buffer.Address),
-                };
-            }
+                BufferIndex = bufferIndex,
+                OffsetBytes = (uint)(resource.Descriptor.Address - addresses[bufferIndex]),
+            };
         }
 
         return result;

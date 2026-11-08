@@ -14,7 +14,7 @@ public enum ContextStateOperation : uint
 // Shader compilation reads raw words until its typed register connection is complete.
 public sealed class CommandRegisterBanks
 {
-    public Dictionary<uint, uint> Shader { get; } = new();
+    public ShaderRegisterMirror Shader { get; } = new();
 
     public void Reset() => Shader.Clear();
 }

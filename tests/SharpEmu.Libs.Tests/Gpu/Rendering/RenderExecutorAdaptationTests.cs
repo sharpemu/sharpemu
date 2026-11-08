@@ -222,6 +222,68 @@ public sealed class RenderExecutorAdaptationTests : IDisposable
         Assert.Contains(_host.Calls, call => call.StartsWith("draw 3", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void TargetlessDrawWithImagesAndBufferWrites_IsNeverRetained(bool vertexWrites, bool atomic)
+    {
+        _host.RetainTargetlessDraws = true;
+        var written = new BufferResourceInfo(false, true, atomic, false, false, 4, 0);
+        var vertex = Stage(Program(ShaderStageKind.Vertex,
+            buffers: vertexWrites ? [written] : []),
+            buffers: vertexWrites ? [BufferDescriptor(VertexBase, 4, 16)] : []);
+        var pixel = Stage(Program(ShaderStageKind.Pixel,
+            images: [new ImageResourceInfo(ImageResourceClass.Sampled, false)],
+            buffers: vertexWrites ? [] : [written]),
+            buffers: vertexWrites ? [] : [BufferDescriptor(VertexBase, 4, 16)]);
+        _pipelines.Graphics = Programs(vertexStage: vertex, pixelStage: pixel);
+
+        _executor.DrawAuto(1, TargetlessBanks(), Auto(3));
+
+        Assert.Empty(_host.RetainedDraws);
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("retain_targetless", StringComparison.Ordinal));
+        Assert.Contains(_host.Calls, call => call.StartsWith("draw 3", StringComparison.Ordinal));
+        Assert.Contains(_host.Calls, call => call.StartsWith("write_barrier ", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TargetlessDrawWithImagesAndDeviceAddresses_IsNeverRetained(bool vertexUsesDeviceAddresses)
+    {
+        _host.RetainTargetlessDraws = true;
+        _pipelines.Graphics = Programs(
+            vertexStage: Stage(Program(ShaderStageKind.Vertex, usesDeviceAddresses: vertexUsesDeviceAddresses)),
+            pixelStage: Stage(Program(ShaderStageKind.Pixel,
+                images: [new ImageResourceInfo(ImageResourceClass.Sampled, false)],
+                usesDeviceAddresses: !vertexUsesDeviceAddresses)));
+
+        _executor.DrawAuto(1, TargetlessBanks(), Auto(3));
+
+        Assert.Empty(_host.RetainedDraws);
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("retain_targetless", StringComparison.Ordinal));
+        Assert.Contains(_host.Calls, call => call.StartsWith("draw 3", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TargetlessDrawWithImagesAndVertexImageWrites_IsNeverRetained()
+    {
+        _host.RetainTargetlessDraws = true;
+        _pipelines.Graphics = Programs(
+            vertexStage: Stage(Program(ShaderStageKind.Vertex,
+                images: [new ImageResourceInfo(ImageResourceClass.Storage, true)])),
+            pixelStage: Stage(Program(ShaderStageKind.Pixel,
+                images: [new ImageResourceInfo(ImageResourceClass.Sampled, false)])));
+
+        _executor.DrawAuto(1, TargetlessBanks(), Auto(3));
+
+        Assert.Empty(_host.RetainedDraws);
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("retain_targetless", StringComparison.Ordinal));
+        Assert.Contains(_host.Calls, call => call.StartsWith("draw 3", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void ConsumedComputeProgram_RecordsNothing()
     {

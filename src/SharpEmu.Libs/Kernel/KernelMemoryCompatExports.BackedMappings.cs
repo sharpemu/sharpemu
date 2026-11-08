@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.HLE.GuestMemory;
 using SharpEmu.Libs.Agc;
 
 namespace SharpEmu.Libs.Kernel;
@@ -18,10 +19,7 @@ public static partial class KernelMemoryCompatExports
     // portions are ever mapped. Windows cannot always create one contiguous
     // placeholder that large after the executable and runtime are loaded.
     private const ulong SparseReservationThreshold = 0x10_0000_0000UL;
-    // macOS reserves 0x10_0000_0000..0x70_0000_0000 for graphics memory (see
-    // DefaultMapSearchBase), so sparse reservations start above that window there.
-    private static ulong SparseReservationBase =>
-        OperatingSystem.IsMacOS() ? 0x70_0000_0000UL : 0x40_0000_0000UL;
+    private const ulong SparseReservationBase = 0x40_0000_0000UL;
     private const ulong UserAddressLimit = 0xFC_0000_0000UL;
     private static FlexibleBackingPool _flexibleBacking =
         new(GuestMemoryLayout.FlexibleOffset, GuestMemoryLayout.FlexibleBytes);
@@ -37,18 +35,53 @@ public static partial class KernelMemoryCompatExports
                 !KernelRuntimeCompatExports.ContainsPrtRange(address, size))
                 return false;
 
-            var regions = GetMappingSlices(address, size);
-            if (!MappingsCoverRange(regions, address, size) ||
-                regions.Any(region => !region.IsReserved && !backing.IsBackedRange(region.Address, region.Length)))
+            // Keep mappings stable while copying resident bytes and clearing reserved gaps.
+            destination.Clear();
+            foreach (var region in GetMappingSlices(address, size))
+            {
+                if (region.IsReserved)
+                    continue;
+                if (backing.IsBackedRange(region.Address, region.Length))
+                {
+                    if (!backing.TryReadBacking(region.Address, destination.Slice((int)(region.Address - address), (int)region.Length)))
+                        return false;
+                    continue;
+                }
+
+                var regionEnd = region.Address + region.Length;
+                for (var chunk = region.Address; chunk < regionEnd;)
+                {
+                    var next = Math.Min(regionEnd, (chunk & ~(PrtResidencyProbeBytes - 1)) + PrtResidencyProbeBytes);
+                    if (backing.IsBackedRange(chunk, next - chunk) &&
+                        !backing.TryReadBacking(chunk, destination.Slice((int)(chunk - address), (int)(next - chunk))))
+                        return false;
+                    chunk = next;
+                }
+            }
+            return true;
+        }
+    }
+
+    private const ulong PrtResidencyProbeBytes = 0x4000;
+
+    internal static bool TryWritePrtBacking(IGuestBackedSpace backing, ulong address, ReadOnlySpan<byte> source)
+    {
+        var size = (ulong)source.Length;
+        lock (_memoryGate)
+        {
+            if (!ReferenceEquals(backing, _backingOwner) ||
+                !KernelRuntimeCompatExports.ContainsPrtRange(address, size))
                 return false;
 
-            // Keep mappings stable while copying resident bytes and clearing reserved gaps.
+            var regions = GetMappingSlices(address, size);
+            if (regions.Any(region => !region.IsReserved && !backing.IsBackedRange(region.Address, region.Length)))
+                return false;
+
             foreach (var region in regions)
             {
-                var target = destination.Slice((int)(region.Address - address), (int)region.Length);
                 if (region.IsReserved)
-                    target.Clear();
-                else if (!backing.TryReadBacking(region.Address, target))
+                    continue;
+                if (!backing.TryWriteBacking(region.Address, source.Slice((int)(region.Address - address), (int)region.Length)))
                     return false;
             }
             return true;
@@ -93,9 +126,11 @@ public static partial class KernelMemoryCompatExports
         }
     }
 
-    private static IGuestBackedSpace? ResolveBackingSpace(CpuContext ctx)
+    private static IGuestBackedSpace? ResolveBackingSpace(CpuContext ctx) => ResolveBackingSpace(ctx.Memory);
+
+    private static IGuestBackedSpace? ResolveBackingSpace(ICpuMemory memory)
     {
-        if (!KernelVirtualRangeAllocator.TryResolveAddressSpace(ctx.Memory, out var addressSpace) ||
+        if (!KernelVirtualRangeAllocator.TryResolveAddressSpace(memory, out var addressSpace) ||
             addressSpace is not IGuestBackedSpace space)
             return null;
         if (_backingOwner is not null && !ReferenceEquals(_backingOwner, space))
@@ -149,23 +184,10 @@ public static partial class KernelMemoryCompatExports
 
     private static MappedRegion[] GetMappingSlices(ulong address, ulong size, bool clip = true)
     {
-        var lowerIndex = 0;
-        var upperIndex = _mappedRegions.Count;
-        while (lowerIndex < upperIndex)
-        {
-            var middleIndex = lowerIndex + (upperIndex - lowerIndex) / 2;
-            if (_mappedRegions.Keys[middleIndex] <= address)
-                lowerIndex = middleIndex + 1;
-            else
-                upperIndex = middleIndex;
-        }
-
-        // Mappings do not overlap. Only the preceding entry can extend across the start.
         var end = address + size;
         List<MappedRegion>? slices = null;
-        for (var index = Math.Max(0, lowerIndex - 1); index < _mappedRegions.Count; index++)
+        foreach (var region in _mappedRegions.FromAddress(address))
         {
-            var region = _mappedRegions.Values[index];
             if (region.Address >= end)
                 break;
             if (address >= region.Address + region.Length)
@@ -190,8 +212,10 @@ public static partial class KernelMemoryCompatExports
 
     private static void RemoveMappingLocked(ulong address, ulong size)
     {
+        using var removalProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.KernelMappingRemoval);
         ReplaceMappedRegionRangeLocked(new MappedRegion(address, size, 0, false, false, 0, IsReserved: true));
-        _mappedRegions.Remove(address);
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.KernelMappingTreeRemoval))
+            _mappedRegions.Remove(address);
     }
 
     private static void RestoreViews(IGuestBackedSpace space, IReadOnlyList<MappedRegion> regions)
@@ -214,22 +238,33 @@ public static partial class KernelMemoryCompatExports
 
     private static bool TryUnmapViews(IGuestBackedSpace space, MappedRegion[] regions)
     {
+        using var viewsProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.KernelUnmapViews);
         var removed = new List<MappedRegion>();
-        foreach (var region in regions)
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.KernelUnmapValidation))
         {
-            if (region.IsReserved)
-                continue;
-            if ((!region.IsDirect && !region.IsFlexible) || !space.IsBackedView(region.Address))
-                return false;
+            foreach (var region in regions)
+            {
+                if (region.IsReserved)
+                    continue;
+                if ((!region.IsDirect && !region.IsFlexible) || !space.IsBackedView(region.Address))
+                    return false;
+            }
+        }
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.KernelUnmapGpuNotification))
+        {
+            foreach (var region in regions)
+                GuestGpuMemoryHook.NoteUnmapped(region.Address, region.Length);
         }
         foreach (var region in regions)
-            GuestGpuMemoryHook.NoteUnmapped(region.Address, region.Length);
-        foreach (var region in regions)
         {
             if (region.IsReserved)
                 continue;
-            if (!space.TryUnmapBacked(region.Address, region.Length))
+            bool unmapped;
+            using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.KernelUnmapBackingCall))
+                unmapped = space.TryUnmapBacked(region.Address, region.Length);
+            if (!unmapped)
             {
+                using var rollbackProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.KernelUnmapRollback);
                 RestoreViews(space, removed);
                 RestoreGpuMappings(regions);
                 return false;
@@ -282,6 +317,7 @@ public static partial class KernelMemoryCompatExports
     private static bool TrySelectBackingAddress(IGuestBackedSpace space, ulong requested, ulong length,
         ulong alignment, ulong flags, out ulong address, bool reuseReservation = true)
     {
+        using var selectionProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingAddressSelection);
         address = 0;
         if ((flags & OrbisKernelMapFixed) != 0)
         {
@@ -306,7 +342,13 @@ public static partial class KernelMemoryCompatExports
                 MappingsCoverRange(hintedRegions, requested, length) && hintedRegions.All(region => region.IsReserved);
             if (!reusableHint)
                 desired = FindAvailableMappingAddress(desired, length, alignment);
-            if (desired == 0 || !space.TryHoldRangeAtOrAbove(desired, length, alignment, out address))
+            if (desired == 0)
+                return false;
+            // On Windows, search lower addresses before using the startup data reservation.
+            var held = requested == 0 && !OperatingSystem.IsWindows()
+                ? space.TryHoldAvailableRange(desired, length, alignment, out address)
+                : space.TryHoldRangeAtOrAbove(desired, length, alignment, out address);
+            if (!held)
                 return false;
             var overlap = GetMappingSlices(address, length, clip: false);
             if (overlap.Length == 0 || (reuseReservation && address == requested &&
@@ -324,25 +366,16 @@ public static partial class KernelMemoryCompatExports
     // Skip kernel reservations before asking the host to reserve a candidate.
     private static ulong FindAvailableMappingAddress(ulong desired, ulong length, ulong alignment)
     {
+        if (_mappedRegions.TryFindAvailableAddress(desired, length, alignment, out var available))
+            return available;
         var padding = (alignment - desired % alignment) % alignment;
         if (padding > ulong.MaxValue - desired)
             return 0;
         var candidate = desired + padding;
-        var lowerIndex = 0;
-        var upperIndex = _mappedRegions.Count;
-        while (lowerIndex < upperIndex)
-        {
-            var middleIndex = lowerIndex + (upperIndex - lowerIndex) / 2;
-            if (_mappedRegions.Keys[middleIndex] <= candidate)
-                lowerIndex = middleIndex + 1;
-            else
-                upperIndex = middleIndex;
-        }
-        for (var index = Math.Max(0, lowerIndex - 1); index < _mappedRegions.Count; index++)
+        foreach (var region in _mappedRegions.FromAddress(candidate))
         {
             if (length > ulong.MaxValue - candidate)
                 return 0;
-            var region = _mappedRegions.Values[index];
             if (region.Address >= candidate + length)
                 break;
             var regionEnd = region.Address + region.Length;
@@ -361,6 +394,27 @@ public static partial class KernelMemoryCompatExports
             () => ReserveBackingRangeCore(ctx, pointer, length, flags, alignment),
             () => (flags & OrbisKernelMapFixed) == 0 ||
                 (ctx.TryReadUInt64(pointer, out var requested) && IsUntouchedByGpu(requested, length)));
+
+    internal static bool TryReserveDriverMemory(ICpuMemory memory, ulong length, ulong alignment, out ulong address)
+    {
+        var reserved = 0UL;
+        var result = RunMappingTransaction(() =>
+        {
+            if (!IsValidMapRange(length, alignment))
+                return MemoryInvalidArgument;
+            lock (_memoryGate)
+            {
+                var space = ResolveBackingSpace(memory);
+                if (space is null || !TrySelectBackingAddress(space, 0, length,
+                        alignment == 0 ? OrbisPageSize : alignment, 0, out reserved, reuseReservation: false))
+                    return MemoryNoSpace;
+                ReplaceMappedRegionRangeLocked(new MappedRegion(reserved, length, 0, false, false, 0, IsReserved: true));
+                return 0;
+            }
+        }, static () => true);
+        address = result == 0 ? reserved : 0;
+        return result == 0;
+    }
 
     // A batch wraps its entries in one transaction, so the entries must not hand off again.
     [ThreadStatic]
@@ -494,6 +548,9 @@ public static partial class KernelMemoryCompatExports
         if (candidate > UserAddressLimit - length)
         {
             candidate = AlignUp(SparseReservationBase, alignment);
+            // A range too large for the aperture can only live at the guest's own hint.
+            if (candidate > UserAddressLimit - length)
+                candidate = AlignUp(requested, alignment);
             if (candidate == 0 || candidate > UserAddressLimit - length)
                 return false;
         }
@@ -534,14 +591,18 @@ public static partial class KernelMemoryCompatExports
 
     private static bool TryReleaseDirectMemoryRangeLocked(CpuContext ctx, ulong start, ulong length)
     {
+        using var releaseProfile = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.KernelDirectRelease);
         if (!HasPhysicalSpan(start, length))
             return false;
         var end = start + length;
-        var aliases = _mappedRegions.Values.Where(region => region.IsDirect &&
-            region.DirectStart < end && start < region.DirectStart + region.Length)
-            .Select(region => SliceMapping(region,
-                region.Address + Math.Max(start, region.DirectStart) - region.DirectStart,
-                region.Address + Math.Min(end, region.DirectStart + region.Length) - region.DirectStart)).ToArray();
+        MappedRegion[] aliases;
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.DirectReleaseAliasSearch))
+        {
+            aliases = _mappedRegions.FindDirectOverlaps(start, length)
+                .Select(region => SliceMapping(region,
+                    region.Address + Math.Max(start, region.DirectStart) - region.DirectStart,
+                    region.Address + Math.Min(end, region.DirectStart + region.Length) - region.DirectStart)).ToArray();
+        }
         if (aliases.Length != 0)
         {
             var space = ResolveBackingSpace(ctx);
@@ -552,7 +613,8 @@ public static partial class KernelMemoryCompatExports
         {
             RemoveMappingLocked(alias.Address, alias.Length);
         }
-        _directAllocations.ReleaseRange(start, length);
+        using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.DirectAllocationRelease))
+            _directAllocations.ReleaseRange(start, length);
         return true;
     }
 

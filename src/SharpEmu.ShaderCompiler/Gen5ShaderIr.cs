@@ -119,6 +119,16 @@ public readonly record struct Gen5ColorComponentMapping
     }
 }
 
+// SPI_SHADER_COL_FORMAT: what a compressed EXP of a color target carries in each half of a register.
+public enum Gen5PixelExportFormat : byte
+{
+    Float16 = 4,
+    Unorm16 = 5,
+    Snorm16 = 6,
+    Uint16 = 7,
+    Sint16 = 8,
+}
+
 public readonly record struct Gen5PixelOutputBinding(
     uint GuestSlot,
     uint HostLocation,
@@ -135,6 +145,9 @@ public readonly record struct Gen5PixelOutputBinding(
 
     private readonly uint? _exportTarget;
 
+    // Preserve shader alpha at location zero, index one when component mapping moves it.
+    public bool DualSourceAlpha { get; init; }
+
     // The EXP MRT target that feeds this slot. It differs from the slot when the pixel
     // program skips targets, because the hardware packs color exports into the slots
     // that CB_SHADER_MASK enables.
@@ -143,6 +156,13 @@ public readonly record struct Gen5PixelOutputBinding(
         get => _exportTarget ?? GuestSlot;
         init => _exportTarget = value;
     }
+
+    // The fragment output index: 1 is the second source of dual-source blending, which
+    // shares its location with the first and is not a render target.
+    public uint Index { get; init; }
+
+    // The format of the export that feeds this slot.
+    public Gen5PixelExportFormat ExportFormat { get; init; } = Gen5PixelExportFormat.Float16;
 }
 
 public readonly record struct Gen5ComputeSystemRegisters(
@@ -255,7 +275,11 @@ public sealed record Gen5BufferMemoryControl(
     bool Glc,
     bool Slc,
     bool Typed = false,
-    uint TypedFormat = 0) : Gen5InstructionControl;
+    uint TypedFormat = 0) : Gen5InstructionControl
+{
+    // Applies only to raw, shader-loaded descriptors; CPU-specialized formats are already unified.
+    public bool SplitDescriptorFormat { get; init; }
+}
 
 public sealed record Gen5ExportControl(
     uint Target,
@@ -341,12 +365,22 @@ public sealed record Gen5ShaderInstruction(
     public ulong? AddressOffset { get; init; }
 
     public ulong ProgramOffset => AddressOffset ?? Pc;
+    public uint DestinationWidth => Opcode is "SBcnt1I32B64" or "SFF1I32B64" or "SFlbitI32B64"
+        ? 1u : Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
 }
 
 public sealed record Gen5ShaderProgram(
     ulong Address,
     IReadOnlyList<Gen5ShaderInstruction> Instructions)
 {
+    public uint VertexIndexRegister { get; init; } = 5;
+    public IReadOnlyList<uint> InstanceIndexRegisters { get; init; } = [8];
+    public IReadOnlySet<uint> FunctionBufferAccesses { get; init; } = new HashSet<uint>();
+    public bool IsFusedProgram { get; init; }
+    // First pc of the continuation half of a fused program (the HS of a merged LS/HS).
+    public uint? FusedContinuationPc { get; init; }
+    public Gen5TessellationRegisters TessellationRegisters { get; init; } = Gen5TessellationRegisters.Merged;
+
     private const uint PixelColorTargetCount = 8;
     private const int PixelColorMaskBits = 4;
     private readonly uint _pixelColorExportMasks = ComputePixelColorExportMasks(Instructions);

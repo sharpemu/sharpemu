@@ -5,8 +5,10 @@ using SharpEmu.Core;
 using SharpEmu.Core.Cpu;
 using SharpEmu.Core.Cpu.Disasm;
 using SharpEmu.Core.Loader;
+using SharpEmu.Core.Mods;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.HLE.FileSystem;
 using SharpEmu.HLE.Host;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.VideoOut;
@@ -43,6 +45,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
     private readonly IFileSystem _fileSystem;
     private readonly GuestGpuMemory? _gpuMemory;
     private readonly int _systemLanguage;
+    private readonly string? _executableRelativePath;
+    private readonly string? _modsDirectory;
     private readonly object _dynamicModuleGate = new();
     private bool _disposed;
 
@@ -65,7 +69,9 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         CpuExecutionOptions cpuExecutionOptions = default,
         IFileSystem? fileSystem = null,
         GuestGpuMemory? gpuMemory = null,
-        int systemLanguage = 1)
+        int systemLanguage = 1,
+        string? executableRelativePath = null,
+        string? modsDirectory = null)
     {
         _gpuMemory = gpuMemory;
         _selfLoader = selfLoader ?? throw new ArgumentNullException(nameof(selfLoader));
@@ -79,13 +85,18 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             StrictDynlibResolution = cpuExecutionOptions.StrictDynlibResolution,
             ImportTraceLimit = Math.Max(0, cpuExecutionOptions.ImportTraceLimit),
             DebugHook = cpuExecutionOptions.DebugHook,
+            ProcessArguments = cpuExecutionOptions.ProcessArguments,
         };
         _fileSystem = fileSystem ?? new PhysicalFileSystem();
         _systemLanguage = systemLanguage;
+        _executableRelativePath = executableRelativePath;
+        _modsDirectory = modsDirectory;
     }
 
     public static ISharpEmuRuntime CreateDefault(SharpEmuRuntimeOptions options = default)
     {
+        Console.Error.WriteLine("[MEDIA][INFO] BINK VIDEO PLAYBACK MODE: " +
+            SharpEmu.Libs.Media.HostMovieBridge.GetPlaybackModeName(Environment.GetEnvironmentVariable("SHARPEMU_BINK_MODE")));
         var cpuExecutionOptions = new CpuExecutionOptions
         {
             CpuEngine = options.CpuEngine,
@@ -95,7 +106,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         };
         var virtualMemory = new PhysicalVirtualMemory(
             viewHost: HostViewMemory.Create(),
-            preReserveGuestAddressSpace: true);
+            preReserveGuestAddressSpace: true,
+            adoptStartupAddressReservations: options.AdoptStartupAddressReservations);
         var moduleManager = new ModuleManager();
         // The compile-time generated registry (SharpEmu.SourceGenerators) is the sole
         // registration source; content tests in SharpEmu.Libs.Tests pin its invariants.
@@ -116,40 +128,62 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             cpuExecutionOptions,
             fileSystem,
             gpuMemory,
-            options.SystemLanguage ?? 1);
+            options.SystemLanguage ?? 1,
+            modsDirectory: options.ModsDirectory);
     }
 
-    public SelfImage LoadImage(string ebootPath)
+    public SelfImage LoadImage(string ebootPath) => LoadImage(ebootPath, null);
+
+    private SelfImage LoadImage(string ebootPath, string? applicationRoot)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(ebootPath);
 
         var fullPath = Path.GetFullPath(ebootPath);
-        if (!File.Exists(fullPath))
+        if (!File.Exists(GameFileOverlay.ResolveFile(fullPath)))
         {
             throw new FileNotFoundException("Executable file was not found.", fullPath);
         }
 
-        var fileInfo = new FileInfo(fullPath);
+        var sourcePath = GameFileOverlay.ResolveFile(fullPath);
+        var fileInfo = new FileInfo(sourcePath);
         if (fileInfo.Length > int.MaxValue)
         {
             throw new NotSupportedException("Images larger than 2 GB are not currently supported.");
         }
 
         var bytes = GC.AllocateUninitializedArray<byte>((int)fileInfo.Length);
-        using (var stream = File.OpenRead(fullPath))
+        using (var stream = File.OpenRead(sourcePath))
         {
             stream.ReadExactly(bytes);
         }
 
-        var mountRoot = Path.GetDirectoryName(fullPath);
+        var mountRoot = applicationRoot ?? Path.GetDirectoryName(fullPath);
 
-        return _selfLoader.Load(bytes.AsSpan(), _virtualMemory, _moduleManager, _fileSystem, mountRoot);
+        return _selfLoader.Load(bytes.AsSpan(), _virtualMemory, _moduleManager, _fileSystem, mountRoot, Path.GetFileName(fullPath));
     }
 
     public OrbisGen2Result Run(string ebootPath)
     {
+        using var archiveMount = MountArchive(ref ebootPath);
+        var applicationEbootPath = Path.GetFullPath(ebootPath);
+        using var app0Binding = BindApp0Root(applicationEbootPath);
+        using var mods = MountMods();
+        // Overlap the APR walk with module load after mod-only files have been indexed.
+        SharpEmu.Libs.Ampr.AmprFileRegistry.BeginApp0IndexPreload(KernelMemoryCompatExports.ResolveGuestPath("/app0"));
+        var app0Root = Path.GetDirectoryName(applicationEbootPath) ?? string.Empty;
+        if (_executableRelativePath is { } selected)
+        {
+            var root = KernelMemoryCompatExports.ResolveGuestPath("/app0");
+            app0Root = root;
+            ebootPath = Path.GetFullPath(Path.Combine(root, selected));
+            var boundary = Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar;
+            if (!ebootPath.StartsWith(boundary,
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                throw new InvalidDataException("The selected executable must remain inside the application.");
+            if (!File.Exists(GameFileOverlay.ResolveFile(ebootPath)) && !App0Archive.Extract(ebootPath))
+                throw new FileNotFoundException("The selected executable was not found.", ebootPath);
+        }
         var normalizedEbootPath = Path.GetFullPath(ebootPath);
-        using var app0Binding = BindApp0Root(normalizedEbootPath);
         Console.Error.WriteLine($"[RUNTIME] Loading: {ebootPath}");
         LastExecutionDiagnostics = null;
         LastExecutionTrace = null;
@@ -159,8 +193,9 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         FiberExports.ResetRuntimeState();
         Http2Exports.ResetRuntimeState();
         NpAuthExports.ResetRuntimeState();
+        NpUniversalDataSystemExports.ResetRuntimeState();
         KernelModuleRegistry.Reset();
-        var image = LoadImage(normalizedEbootPath);
+        var image = LoadImage(normalizedEbootPath, _executableRelativePath is null ? null : app0Root);
         VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version);
         KernelMemoryCompatExports.ConfigureApplicationInfo(image.TitleId);
         SaveDataExports.ConfigureApplicationInfo(image.TitleId);
@@ -179,9 +214,9 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         HleDataSymbols.ConfigureProcessImageName(processImageName);
         MergeKnownHleDataSymbols(activeRuntimeSymbols);
-        var loadedModuleImages = LoadAdjacentSceModules(ebootPath, image, activeImportStubs, activeRuntimeSymbols);
+        var loadedModuleImages = LoadAdjacentSceModules(_executableRelativePath is null ? ebootPath : Path.Combine(app0Root, "eboot.bin"),
+            image, activeImportStubs, activeRuntimeSymbols);
         RebindImportedDataSymbols(image, loadedModuleImages, activeRuntimeSymbols);
-        var app0Root = Path.GetDirectoryName(normalizedEbootPath) ?? string.Empty;
         KernelModuleRegistry.ConfigureModuleLoader(modulePath => LoadRequestedAppModule(
             modulePath,
             app0Root,
@@ -399,6 +434,72 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         return result;
     }
 
+    // A .zar holds the whole application folder. Mount it at a cache folder that gets the files host
+    // code reads by path (the executable, its modules and sce_sys); everything else is read from the
+    // archive when the guest asks for it. The path becomes the cached executable.
+    private static ArchiveMountScope? MountArchive(ref string ebootPath)
+    {
+        if (!ZArchive.IsArchivePath(ebootPath))
+        {
+            return null;
+        }
+
+        var archivePath = Path.GetFullPath(ebootPath);
+        var archive = ZArchive.Open(archivePath) ??
+            throw new InvalidDataException($"'{archivePath}' is not a valid .zar archive.");
+        if (!archive.IsFile(archive.LookUp("eboot.bin")))
+        {
+            archive.Dispose();
+            throw new FileNotFoundException("The archive has no eboot.bin at its root.", archivePath);
+        }
+
+        var cacheRoot = ZArchiveCache.Prepare(archivePath);
+        App0Archive.Mount(archive, cacheRoot);
+        try
+        {
+            foreach (var entry in archive.GetEntries(archive.LookUp(string.Empty)))
+            {
+                if (entry.IsDirectory)
+                {
+                    if (entry.Name.Equals("sce_sys", StringComparison.OrdinalIgnoreCase) ||
+                        entry.Name.Equals("sce_module", StringComparison.OrdinalIgnoreCase) ||
+                        entry.Name.Equals("sce_modules", StringComparison.OrdinalIgnoreCase))
+                    {
+                        App0Archive.ExtractDirectory(entry.Name);
+                    }
+                }
+                else if (entry.Name.Equals("eboot.bin", StringComparison.OrdinalIgnoreCase) ||
+                    Path.GetExtension(entry.Name).Equals(".prx", StringComparison.OrdinalIgnoreCase) ||
+                    Path.GetExtension(entry.Name).Equals(".sprx", StringComparison.OrdinalIgnoreCase))
+                {
+                    App0Archive.Extract(Path.Combine(cacheRoot, entry.Name));
+                }
+            }
+
+            foreach (var modules in new[] { Path.Combine("Media", "Modules"), Path.Combine("Media", "Plugins") })
+            {
+                if (App0Archive.IsDirectory(Path.Combine(cacheRoot, modules)))
+                {
+                    App0Archive.ExtractDirectory(modules);
+                }
+            }
+        }
+        catch
+        {
+            App0Archive.Unmount();
+            throw;
+        }
+
+        Console.Error.WriteLine($"[RUNTIME] Mounted archive '{archivePath}' at '{cacheRoot}'");
+        ebootPath = Path.Combine(cacheRoot, "eboot.bin");
+        return new ArchiveMountScope();
+    }
+
+    private sealed class ArchiveMountScope : IDisposable
+    {
+        public void Dispose() => App0Archive.Unmount();
+    }
+
     private static App0BindingScope? BindApp0Root(string normalizedEbootPath)
     {
         const string app0VariableName = "SHARPEMU_APP0_DIR";
@@ -428,10 +529,26 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         }
 
         Environment.SetEnvironmentVariable(app0VariableName, app0Root);
-        // Overlap the cooked-id APR walk with module load so the first ReadFile
-        // miss mid-boot does not stall on a cold USB index.
-        SharpEmu.Libs.Ampr.AmprFileRegistry.BeginApp0IndexPreload(app0Root);
         return new App0BindingScope(app0VariableName);
+    }
+
+    private GameFileOverlay? MountMods()
+    {
+        if (_modsDirectory is null) return null;
+        try
+        {
+            var repository = new GameModRepository(Path.GetFileName(_modsDirectory), Path.GetDirectoryName(_modsDirectory));
+            var directories = repository.Load().Where(mod => mod.Enabled).Select(mod => mod.DirectoryPath).ToArray();
+            if (directories.Length == 0) return null;
+            var overlay = new GameFileOverlay(KernelMemoryCompatExports.ResolveGuestPath("/app0"), directories);
+            Console.Error.WriteLine($"[MODS][INFO] Enabled mods: {string.Join(", ", directories.Select(Path.GetFileName))}");
+            return overlay;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or ArgumentException)
+        {
+            Console.Error.WriteLine($"[MODS][WARN] Could not load mods: {exception.Message}");
+            return null;
+        }
     }
 
     private sealed class App0BindingScope(string variableName) : IDisposable
@@ -681,7 +798,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             // can resolve their exports, but defer DT_INIT until the guest requests them.
             (Path: Path.Combine(ebootDirectory, "Media", "Plugins"), StartAtBoot: false, LinkedOnly: false, SearchOption: SearchOption.TopDirectoryOnly),
         }
-        .Where(entry => Directory.Exists(entry.Path))
+        .Where(entry => Directory.Exists(entry.Path) || GameFileOverlay.IsDirectory(entry.Path))
         .ToArray();
 
         if (moduleDirectories.Length == 0)
@@ -690,8 +807,10 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         }
 
         var allModulePaths = moduleDirectories
-            .SelectMany(directory => Directory
-                .EnumerateFiles(directory.Path, "*", directory.SearchOption)
+            .SelectMany(directory => (Directory.Exists(directory.Path)
+                    ? Directory.EnumerateFiles(directory.Path, "*", directory.SearchOption) : [])
+                .Concat(GameFileOverlay.EnumerateFiles(directory.Path, "*", directory.SearchOption))
+                .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
                 .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
                 .Where(path => !directory.LinkedOnly || IsMainImageLinkedModule(path, mainImage.ImportedModuleNames))
                 .Select(path => (Path: path, directory.StartAtBoot)))
@@ -734,7 +853,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             var modulePath = moduleEntry.Path;
             try
             {
-                var fileInfo = new FileInfo(modulePath);
+                var sourcePath = GameFileOverlay.ResolveFile(modulePath);
+                var fileInfo = new FileInfo(sourcePath);
                 if (!fileInfo.Exists || fileInfo.Length <= 0 || fileInfo.Length > int.MaxValue)
                 {
                     failedModules++;
@@ -742,7 +862,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                 }
 
                 var moduleBytes = GC.AllocateUninitializedArray<byte>((int)fileInfo.Length);
-                using (var stream = File.OpenRead(modulePath))
+                using (var stream = File.OpenRead(sourcePath))
                 {
                     stream.ReadExactly(moduleBytes);
                 }
@@ -752,7 +872,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                     _virtualMemory,
                     _moduleManager,
                     _fileSystem,
-                    Path.GetDirectoryName(modulePath));
+                    Path.GetDirectoryName(modulePath),
+                    Path.GetFileName(modulePath));
 
                 mergedImportCount += MergeImportStubs(importStubs, moduleImage.ImportStubs, modulePath);
                 mergedSymbolCount += MergeRuntimeSymbols(runtimeSymbols, moduleImage.RuntimeSymbols);
@@ -805,7 +926,9 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
             try
             {
-                var fileInfo = new FileInfo(modulePath);
+                var sourcePath = GameFileOverlay.ResolveFile(modulePath);
+                App0Archive.Extract(sourcePath);
+                var fileInfo = new FileInfo(sourcePath);
                 if (!fileInfo.Exists || fileInfo.Length <= 0 || fileInfo.Length > int.MaxValue)
                 {
                     return KernelModuleRegistry.ModuleLoadResult.Failure(
@@ -813,7 +936,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                 }
 
                 var moduleBytes = GC.AllocateUninitializedArray<byte>((int)fileInfo.Length);
-                using (var stream = File.OpenRead(modulePath))
+                using (var stream = File.OpenRead(sourcePath))
                 {
                     stream.ReadExactly(moduleBytes);
                 }
@@ -823,7 +946,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
                     _virtualMemory,
                     _moduleManager,
                     _fileSystem,
-                    Path.GetDirectoryName(modulePath));
+                    Path.GetDirectoryName(modulePath),
+                    Path.GetFileName(modulePath));
                 var candidateImportStubs = new Dictionary<ulong, string>(activeImportStubs);
                 var candidateRuntimeSymbols = new Dictionary<string, ulong>(activeRuntimeSymbols, StringComparer.Ordinal);
                 _ = MergeImportStubs(candidateImportStubs, moduleImage.ImportStubs, modulePath);

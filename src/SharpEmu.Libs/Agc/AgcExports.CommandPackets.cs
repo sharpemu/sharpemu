@@ -87,13 +87,14 @@ public static partial class AgcExports
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var dwordCount = (uint)ctx[CpuRegister.Rsi];
-        if (commandBufferAddress == 0 || dwordCount < 2 || dwordCount > 0x4001)
+        if (commandBufferAddress == 0 || dwordCount == 0 || dwordCount > MaximumNopDwords)
         {
             return ReturnPointer(ctx, 0);
         }
 
+        // A type-3 packet is at least two dwords; a single dword is the type-2 filler.
         if (!TryAllocateCommandDwords(ctx, commandBufferAddress, dwordCount, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(dwordCount, ItNop, RZero)))
+            !TryWriteUInt32(ctx, commandAddress, dwordCount == 1 ? Type2FillerHeader : Pm4(dwordCount, ItNop, RZero)))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -109,9 +110,9 @@ public static partial class AgcExports
         return ReturnPointer(ctx, commandAddress);
     }
 
-    // RenderThread/Subrender probe this before writing a NOP. Unresolved
-    // GetSize returns NOT_FOUND and leaves command-buffer sizing broken.
-    // CbNop rejects dwordCount < 2, so report that floor.
+    // Titles probe this before writing a NOP and reserve the bytes it reports. Unresolved
+    // GetSize returns NOT_FOUND and leaves command-buffer sizing broken. The argument is
+    // the NOP's length in dwords; a length CbNop does not write reports no size.
     [SysAbiExport(
         Nid = "t7PlZ9nt5Lc",
         ExportName = "sceAgcCbNopGetSize",
@@ -119,7 +120,10 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int CbNopGetSize(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 2u * sizeof(uint);
+        var dwordCount = (uint)ctx[CpuRegister.Rdi];
+        ctx[CpuRegister.Rax] = dwordCount is >= 1 and <= MaximumNopDwords
+            ? dwordCount * sizeof(uint)
+            : 0;
         return (int)ctx[CpuRegister.Rax];
     }
 
@@ -136,12 +140,7 @@ public static partial class AgcExports
         var groupCountZ = (uint)ctx[CpuRegister.Rcx];
         var modifier = (uint)ctx[CpuRegister.R8];
         if (commandBufferAddress == 0 ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, 5, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(5, ItDispatchDirect, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, groupCountX) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, groupCountY) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, groupCountZ) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, DirectDispatchInitiator(modifier)))
+            !TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(5, ItDispatchDirect, 0), groupCountX, groupCountY, groupCountZ, DirectDispatchInitiator(modifier)))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -166,9 +165,7 @@ public static partial class AgcExports
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         if (commandBufferAddress == 0 ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(2, ItNop, RAcbReset)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, 0))
+            !TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(2, ItNop, RAcbReset), 0))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -188,30 +185,51 @@ public static partial class AgcExports
         var baseAddress = ctx[CpuRegister.Rdx];
         var sizeBytes = ctx[CpuRegister.Rcx];
         var pollCycles = (uint)ctx[CpuRegister.R8];
-        var noSize = sizeBytes == ulong.MaxValue;
-        if (commandBufferAddress == 0 ||
-            (!noSize && (sizeBytes & 0xFF) != 0) ||
-            (!noSize && (sizeBytes >> 40) != 0) ||
-            (baseAddress & 0xFF) != 0 ||
-            (baseAddress >> 40) != 0)
+        if (commandBufferAddress == 0 || !TryEncloseAcquireRange(baseAddress, sizeBytes, out var baseUnits, out var sizeUnits))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 8, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(8, ItNop, RAcquireMem)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, 0x8000_0000u) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, noSize ? 0 : (uint)(sizeBytes >> 8)) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, 0) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, (uint)(baseAddress >> 8)) ||
-            !TryWriteUInt32(ctx, commandAddress + 20, 0) ||
-            !TryWriteUInt32(ctx, commandAddress + 24, pollCycles / 40) ||
-            !TryWriteUInt32(ctx, commandAddress + 28, gcrControl))
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(8, ItNop, RAcquireMem), 0x8000_0000u, sizeUnits, 0, baseUnits, 0, pollCycles / 40, gcrControl))
         {
             return ReturnPointer(ctx, 0);
         }
 
         return ReturnPointer(ctx, commandAddress);
+    }
+
+    // ACQUIRE_MEM takes its range in 256-byte units below 1 TiB. The library accepts any byte range and writes the
+    // units that enclose it, as AMD's PAL does (BuildAcquireMemInternal): the SDK's label sync asks for the 32 bytes of
+    // a label. A size of all ones (the whole memory) and a size of zero are written as zero units, as before.
+    internal static bool TryEncloseAcquireRange(ulong baseAddress, ulong sizeBytes, out uint baseUnits, out uint sizeUnits)
+    {
+        const ulong Limit = 1UL << 40;
+        baseUnits = 0;
+        sizeUnits = 0;
+        if (baseAddress >= Limit)
+        {
+            return false;
+        }
+
+        baseUnits = (uint)(baseAddress >> 8);
+        if (sizeBytes == ulong.MaxValue || sizeBytes == 0)
+        {
+            return true;
+        }
+
+        if (sizeBytes > Limit - baseAddress)
+        {
+            return false;
+        }
+
+        var units = (baseAddress + sizeBytes - (baseAddress & ~0xFFUL) + 0xFF) >> 8;
+        if (units > uint.MaxValue)
+        {
+            return false;
+        }
+
+        sizeUnits = (uint)units;
+        return true;
     }
 
     // Matches the fixed 8-dword ACQUIRE_MEM packet AcbAcquireMem writes above.
@@ -301,11 +319,7 @@ public static partial class AgcExports
         var argumentsAddress = ctx[CpuRegister.Rsi];
         var modifier = (uint)ctx[CpuRegister.Rdx];
         if (commandBufferAddress == 0 ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, 4, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(4, ItDispatchIndirect, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, (uint)argumentsAddress) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, (uint)(argumentsAddress >> 32)) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, (modifier & 0xA038u) | 0x41u))
+            !TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(4, ItDispatchIndirect, 0), (uint)argumentsAddress, (uint)(argumentsAddress >> 32), (modifier & 0xA038u) | 0x41u))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -360,18 +374,7 @@ public static partial class AgcExports
         var packetAddressValue = interrupt == 4 ? 0UL : destinationAddress;
         var packetData = interrupt == 4 ? 0UL : data;
 
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 8, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(8, ItNop, RReleaseMem)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, action | (cachePolicy << 8)) ||
-            !TryWriteUInt32(
-                ctx,
-                commandAddress + 8,
-                gcrControl | (dataSelection << 16) | (interrupt << 24)) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, (uint)packetAddressValue) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, (uint)(packetAddressValue >> 32)) ||
-            !TryWriteUInt32(ctx, commandAddress + 20, (uint)packetData) ||
-            !TryWriteUInt32(ctx, commandAddress + 24, (uint)(packetData >> 32)) ||
-            !TryWriteUInt32(ctx, commandAddress + 28, interruptContextId & 0x07FF_FFFFu))
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(8, ItNop, RReleaseMem), action | (cachePolicy << 8), gcrControl | (dataSelection << 16) | (interrupt << 24), (uint)packetAddressValue, (uint)(packetAddressValue >> 32), (uint)packetData, (uint)(packetData >> 32), interruptContextId & 0x07FF_FFFFu))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -397,9 +400,7 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(2, ItNop, RDrawReset)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, 0))
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(2, ItNop, RDrawReset), 0))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -448,12 +449,7 @@ public static partial class AgcExports
             (resetCounters << 18) |
             (counterMask << 10) |
             (counterSelect << 2);
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 5, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(5, ItGetLodStats, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, control) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, (uint)destinationAddress & ~0x3Fu) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, (uint)(destinationAddress >> 32)) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, packetControl))
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(5, ItGetLodStats, 0), control, (uint)destinationAddress & ~0x3Fu, (uint)(destinationAddress >> 32), packetControl))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -482,26 +478,14 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        var noSize = sizeBytes == ulong.MaxValue;
         if (commandBufferAddress == 0 ||
             engine > 1 ||
-            (!noSize && (sizeBytes & 0xFF) != 0) ||
-            (!noSize && (sizeBytes >> 40) != 0) ||
-            (baseAddress & 0xFF) != 0 ||
-            (baseAddress >> 40) != 0)
+            !TryEncloseAcquireRange(baseAddress, sizeBytes, out var baseUnits, out var sizeUnits))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 8, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(8, ItNop, RAcquireMem)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, (engine << 31) | cbDbOp) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, noSize ? 0 : (uint)(sizeBytes >> 8)) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, 0) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, (uint)(baseAddress >> 8)) ||
-            !TryWriteUInt32(ctx, commandAddress + 20, 0) ||
-            !TryWriteUInt32(ctx, commandAddress + 24, pollCycles / 40) ||
-            !TryWriteUInt32(ctx, commandAddress + 28, gcrControl))
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(8, ItNop, RAcquireMem), (engine << 31) | cbDbOp, sizeUnits, 0, baseUnits, 0, pollCycles / 40, gcrControl))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -631,16 +615,7 @@ public static partial class AgcExports
         var control = 0x10u |
                       compareFunction |
                       (writeSpace == 1 ? 0x100u : 0u);
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 9, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(9, ItCondWrite, RZero)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, control) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, (uint)readAddress & ~0x3u) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, (uint)(readAddress >> 32) & 0xFFFFu) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, reference) ||
-            !TryWriteUInt32(ctx, commandAddress + 20, mask) ||
-            !TryWriteUInt32(ctx, commandAddress + 24, (uint)writeAddress & ~0x3u) ||
-            !TryWriteUInt32(ctx, commandAddress + 28, (uint)(writeAddress >> 32) & 0xFFFFu) ||
-            !TryWriteUInt32(ctx, commandAddress + 32, writeValue))
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(9, ItCondWrite, RZero), control, (uint)readAddress & ~0x3u, (uint)(readAddress >> 32) & 0xFFFFu, reference, mask, (uint)writeAddress & ~0x3u, (uint)(writeAddress >> 32) & 0xFFFFu, writeValue))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -752,9 +727,7 @@ public static partial class AgcExports
         var address = ctx[CpuRegister.Rdx];
         var reference = ctx[CpuRegister.Rcx];
         if (commandBufferAddress == 0 || size > 1 ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(2, ItNop, RZero)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, 0))
+            !TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(2, ItNop, RZero), 0))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -790,11 +763,7 @@ public static partial class AgcExports
         var baseIndex = (uint)ctx[CpuRegister.Rsi];
         var address = ctx[CpuRegister.Rdx];
         if (commandBufferAddress == 0 ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, 4, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(4, ItSetBase, 0) | (baseIndex << 1)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, 1) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, (uint)address & ~7u) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, (uint)(address >> 32)))
+            !TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(4, ItSetBase, 0) | (baseIndex << 1), 1, (uint)address & ~7u, (uint)(address >> 32)))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -813,16 +782,21 @@ public static partial class AgcExports
         var dataOffset = (uint)ctx[CpuRegister.Rsi];
         var modifier = (uint)ctx[CpuRegister.Rdx];
         if (commandBufferAddress == 0 ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, 3, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(3, ItDispatchIndirect, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, dataOffset) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, (modifier & 0xA038u) | 0x41u))
+            !TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(3, ItDispatchIndirect, 0), dataOffset, (modifier & 0xA038u) | 0x41u))
         {
             return ReturnPointer(ctx, 0);
         }
 
         return ReturnPointer(ctx, commandAddress);
     }
+
+    [SysAbiExport(
+        Nid = "w8HVkEeXPv8",
+        ExportName = "sceAgcDcbDispatchIndirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDispatchIndirectGetSize(CpuContext ctx) =>
+        ctx.SetReturn(3 * sizeof(uint));
 
     [SysAbiExport(
         Nid = "+kSrjIVxKFE",
@@ -869,6 +843,13 @@ public static partial class AgcExports
     }
 
     [SysAbiExport(
+        Nid = "QhCbS4X9Rl8",
+        ExportName = "sceAgcDcbSetMarker",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int SetDrawCommandBufferMarker(CpuContext ctx) => DcbPushMarker(ctx);
+
+    [SysAbiExport(
         Nid = "cpCILPya5Zk",
         ExportName = "sceAgcAcbPushMarker",
         Target = Generation.Gen5,
@@ -884,9 +865,7 @@ public static partial class AgcExports
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         if (commandBufferAddress == 0 ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(2, ItNop, RPopMarker)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, 0))
+            !TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(2, ItNop, RPopMarker), 0))
         {
             return ReturnPointer(ctx, 0);
         }

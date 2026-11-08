@@ -12,13 +12,18 @@ internal sealed class RawReadGroup
     public required ScalarValue[] Reads { get; init; }
     public required long[] Immediates { get; init; }
     public required uint[] Offsets { get; init; }
+
+    public CompiledResourceEvaluator? IndexedFor;
+    public int[] HandleIndices = [];
+    public int[] ReadIndices = [];
 }
 
 internal sealed class RawReadPrefetchPlan
 {
-    public required RawReadGroup[] Table { get; init; }
-    public required RawReadGroup[] CleanTable { get; init; }
-    public required RawReadGroup[][] Sources { get; init; }
+    public required RawReadGroup[][] Table { get; init; }
+    public required RawReadGroup[][] CleanTable { get; init; }
+    public required RawReadGroup[][][] Sources { get; init; }
+    public required int SourceLevels { get; init; }
 }
 
 internal static class RawReadPrefetch
@@ -39,20 +44,26 @@ internal static class RawReadPrefetch
     private sealed class Scratch
     {
         public ulong[] Addresses = new ulong[256];
+        public int[] Order = new int[256];
         public ScalarValue[] Values = new ScalarValue[256];
+        public int[] Indices = new int[256];
         public byte[] Bytes = new byte[1024];
         public int Count;
 
-        public void Add(ulong address, ScalarValue value)
+        public void Add(ulong address, ScalarValue value, int index)
         {
             if (Count == Addresses.Length)
             {
                 Array.Resize(ref Addresses, Count * 2);
+                Array.Resize(ref Order, Count * 2);
                 Array.Resize(ref Values, Count * 2);
+                Array.Resize(ref Indices, Count * 2);
             }
 
             Addresses[Count] = address;
+            Order[Count] = Count;
             Values[Count] = value;
+            Indices[Count] = index;
             Count++;
         }
     }
@@ -72,10 +83,12 @@ internal static class RawReadPrefetch
             (clean ? cleanTable : table).Add(read.Value);
         }
 
-        var sources = new RawReadGroup[plan.DescriptorSources.Count][];
+        var sources = new RawReadGroup[plan.DescriptorSources.Count][][];
+        var sourceLevels = 0;
         for (var index = 0; index < sources.Length; index++)
         {
             sources[index] = Group(plan, plan.DescriptorSources[index].Dwords);
+            sourceLevels = Math.Max(sourceLevels, sources[index].Length);
         }
 
         var built = new RawReadPrefetchPlan
@@ -83,38 +96,124 @@ internal static class RawReadPrefetch
             Table = Group(plan, table),
             CleanTable = Group(plan, cleanTable),
             Sources = sources,
+            SourceLevels = sourceLevels,
         };
         plan.RawReadPrefetch = built;
         return built;
     }
 
-    private static RawReadGroup[] Group(ShaderResourcePlan plan, IEnumerable<ScalarValue> values)
+    private const int MaximumChainDepth = 64;
+
+    private sealed class Chains
     {
-        var groups = new Dictionary<(ScalarValue Handle, ScalarValueKind Kind), List<ScalarValue>>(HandleComparer.Instance);
-        var seen = new HashSet<ScalarValue>(ReferenceEqualityComparer.Instance);
+        public readonly Dictionary<ScalarValue, int> Depths = new(ReferenceEqualityComparer.Instance);
+        public readonly List<Dictionary<(ScalarValue Handle, ScalarValueKind Kind), List<ScalarValue>>> Levels = new();
+    }
+
+    private static RawReadGroup[][] Group(ShaderResourcePlan plan, IEnumerable<ScalarValue> values)
+    {
+        var chains = new Chains();
         foreach (var value in values)
         {
-            if (value.Kind is not (ScalarValueKind.ScalarBufferWord or ScalarValueKind.ScalarAddressWord) ||
-                value.Operands.Length < 2 || value.MemoryIndex >= plan.Memory.Count || !value.Operands[1].IsConstant)
-            {
-                continue;
-            }
-
-            var handle = value.Operands[0];
-            if (handle.Operands.Length < 2 || (value.Kind == ScalarValueKind.ScalarBufferWord && handle.Operands.Length != 4) ||
-                !seen.Add(value))
-            {
-                continue;
-            }
-
-            if (!groups.TryGetValue((handle, value.Kind), out var reads))
-            {
-                groups[(handle, value.Kind)] = reads = [];
-            }
-
-            reads.Add(value);
+            Depth(plan, value, chains, MaximumChainDepth);
         }
 
+        var levels = new RawReadGroup[chains.Levels.Count][];
+        for (var level = 0; level < levels.Length; level++)
+        {
+            levels[level] = Build(plan, chains.Levels[level]);
+        }
+
+        return levels;
+    }
+
+    private static int Depth(ShaderResourcePlan plan, ScalarValue value, Chains chains, int budget)
+    {
+        if (chains.Depths.TryGetValue(value, out var known))
+        {
+            return known;
+        }
+
+        chains.Depths[value] = 0;
+        if (budget == 0)
+        {
+            return 0;
+        }
+
+        var depth = 0;
+        switch (value.Kind)
+        {
+            case ScalarValueKind.Operation:
+            case ScalarValueKind.Select:
+                foreach (var operand in value.Operands)
+                {
+                    depth = Math.Max(depth, Depth(plan, operand, chains, budget - 1));
+                }
+
+                break;
+            case ScalarValueKind.Phi:
+                if (plan.Graph.ResolveInvariantPhi(value) is { } invariant)
+                {
+                    depth = Depth(plan, invariant, chains, budget - 1);
+                }
+
+                break;
+            case ScalarValueKind.ResourceTableWord:
+                if (value.Payload < (ulong)plan.TableReads.Count)
+                {
+                    depth = Depth(plan, plan.TableReads[(int)value.Payload].Value, chains, budget - 1);
+                }
+
+                break;
+            case ScalarValueKind.ScalarAddressWord:
+            case ScalarValueKind.ScalarBufferWord:
+            {
+                if (value.Operands.Length < 2)
+                {
+                    break;
+                }
+
+                var handle = value.Operands[0];
+                var handleOperands = value.Kind == ScalarValueKind.ScalarBufferWord ? 4 : 2;
+                if (handle.Operands.Length < handleOperands)
+                {
+                    break;
+                }
+
+                for (var operand = 0; operand < handleOperands; operand++)
+                {
+                    depth = Math.Max(depth, Depth(plan, handle.Operands[operand], chains, budget - 1));
+                }
+
+                depth = Math.Max(depth, Depth(plan, value.Operands[1], chains, budget - 1));
+                if (value.MemoryIndex < plan.Memory.Count && value.Operands[1].IsConstant &&
+                    (value.Kind != ScalarValueKind.ScalarBufferWord || handle.Operands.Length == 4))
+                {
+                    while (chains.Levels.Count <= depth)
+                    {
+                        chains.Levels.Add(new(HandleComparer.Instance));
+                    }
+
+                    var groups = chains.Levels[depth];
+                    if (!groups.TryGetValue((handle, value.Kind), out var reads))
+                    {
+                        groups[(handle, value.Kind)] = reads = [];
+                    }
+
+                    reads.Add(value);
+                }
+
+                depth++;
+                break;
+            }
+        }
+
+        chains.Depths[value] = depth;
+        return depth;
+    }
+
+    private static RawReadGroup[] Build(ShaderResourcePlan plan, Dictionary<(ScalarValue Handle, ScalarValueKind Kind), List<ScalarValue>> groups)
+    {
         var result = new List<RawReadGroup>();
         foreach (var ((handle, kind), reads) in groups)
         {
@@ -147,18 +246,22 @@ internal static class RawReadPrefetch
         }
 
         var prefetch = For(plan);
-        var scratch = Begin();
-        foreach (var source in sources)
+        for (var level = 0; level < prefetch.SourceLevels; level++)
         {
-            if (source >= prefetch.Sources.Length || (activeSources.Length != 0 && !activeSources[source]))
+            var scratch = Begin();
+            foreach (var source in sources)
             {
-                continue;
+                if (source >= prefetch.Sources.Length || (activeSources.Length != 0 && !activeSources[source]) ||
+                    level >= prefetch.Sources[source].Length)
+                {
+                    continue;
+                }
+
+                Collect(prefetch.Sources[source][level], evaluator, scratch);
             }
 
-            Collect(prefetch.Sources[source], evaluator, scratch);
+            ReadRuns(evaluator, scratch);
         }
-
-        ReadRuns(evaluator, scratch);
     }
 
     public static void PrefetchTable(ShaderResourcePlan plan, RuntimeValueEvaluator evaluator, RuntimeValueEvaluator cleanEvaluator,
@@ -170,18 +273,24 @@ internal static class RawReadPrefetch
         }
 
         var prefetch = For(plan);
-        if (prefetch.Table.Length != 0 && evaluator.Inputs.ReadMemory is not null)
+        if (evaluator.Inputs.ReadMemory is not null)
         {
-            var scratch = Begin();
-            Collect(prefetch.Table, evaluator, scratch);
-            ReadRuns(evaluator, scratch);
+            foreach (var level in prefetch.Table)
+            {
+                var scratch = Begin();
+                Collect(level, evaluator, scratch);
+                ReadRuns(evaluator, scratch);
+            }
         }
 
-        if (prefetch.CleanTable.Length != 0 && cleanEvaluator.Inputs.ReadMemory is not null)
+        if (cleanEvaluator.Inputs.ReadMemory is not null)
         {
-            var scratch = Begin();
-            Collect(prefetch.CleanTable, cleanEvaluator, scratch);
-            ReadRuns(cleanEvaluator, scratch);
+            foreach (var level in prefetch.CleanTable)
+            {
+                var scratch = Begin();
+                Collect(level, cleanEvaluator, scratch);
+                ReadRuns(cleanEvaluator, scratch);
+            }
         }
     }
 
@@ -194,24 +303,68 @@ internal static class RawReadPrefetch
 
     private static void Collect(RawReadGroup[] groups, RuntimeValueEvaluator evaluator, Scratch scratch)
     {
+        var compiled = evaluator.IndexedEvaluator;
         foreach (var group in groups)
         {
-            if (!evaluator.TryEvaluateRawBase(group.Handle, group.Kind, out var baseAddress, out var high, out var records) ||
-                (baseAddress & ~3ul) == 0)
+            int[]? readIndices = null;
+            bool based;
+            ulong baseAddress;
+            ulong high;
+            ulong records;
+            if (compiled is not null)
+            {
+                if (!ReferenceEquals(Volatile.Read(ref group.IndexedFor), compiled))
+                {
+                    Index(group, compiled);
+                }
+
+                readIndices = group.ReadIndices;
+                based = evaluator.TryEvaluateRawBase(group.Handle, group.Kind, group.HandleIndices, out baseAddress, out high, out records);
+            }
+            else
+            {
+                based = evaluator.TryEvaluateRawBase(group.Handle, group.Kind, out baseAddress, out high, out records);
+            }
+
+            if (!based || (baseAddress & ~3ul) == 0)
             {
                 continue;
             }
 
             for (var index = 0; index < group.Reads.Length; index++)
             {
-                if (!evaluator.IsEvaluated(group.Reads[index]) &&
+                var readIndex = readIndices is null ? -1 : readIndices[index];
+                var evaluated = readIndex >= 0 ? evaluator.IsEvaluatedAt(readIndex) : evaluator.IsEvaluated(group.Reads[index]);
+                if (!evaluated &&
                     RuntimeValueEvaluator.ResolveRawAddress(group.Kind, baseAddress, high, records, group.Immediates[index], group.Offsets[index],
                         out var address) == RuntimeValueEvaluator.RawAddress.Read)
                 {
-                    scratch.Add(address, group.Reads[index]);
+                    scratch.Add(address, group.Reads[index], readIndex);
                 }
             }
         }
+    }
+
+    private static void Index(RawReadGroup group, CompiledResourceEvaluator compiled)
+    {
+        static int IndexOf(CompiledResourceEvaluator compiled, ScalarValue value) =>
+            !value.IsConstant && compiled.TryGetIndex(value, out var index) ? index : -1;
+
+        var handle = new int[group.Handle.Operands.Length];
+        for (var operand = 0; operand < handle.Length; operand++)
+        {
+            handle[operand] = IndexOf(compiled, group.Handle.Operands[operand]);
+        }
+
+        var reads = new int[group.Reads.Length];
+        for (var read = 0; read < reads.Length; read++)
+        {
+            reads[read] = IndexOf(compiled, group.Reads[read]);
+        }
+
+        group.HandleIndices = handle;
+        group.ReadIndices = reads;
+        Volatile.Write(ref group.IndexedFor, compiled);
     }
 
     private static void ReadRuns(RuntimeValueEvaluator evaluator, Scratch scratch)
@@ -227,7 +380,7 @@ internal static class RawReadPrefetch
         var clean = evaluator.Inputs.ReadsClean;
         var addresses = scratch.Addresses;
         var values = scratch.Values;
-        Array.Sort(addresses, values, 0, count);
+        Array.Sort(addresses, scratch.Order, 0, count);
         var start = 0;
         while (start < count)
         {
@@ -277,7 +430,18 @@ internal static class RawReadPrefetch
         for (var index = start; index < end; index++)
         {
             var word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[(int)(addresses[index] - first)..]);
-            evaluator.Seed(scratch.Values[index], word);
+            var added = scratch.Order[index];
+            var compiledIndex = scratch.Indices[added];
+            if (compiledIndex >= 0)
+            {
+                evaluator.SeedAt(compiledIndex, word);
+            }
+            else
+            {
+                evaluator.Seed(scratch.Values[added], word);
+            }
+
+            evaluator.RecordPrefetchedConsumer(scratch.Values[added], addresses[index]);
         }
     }
 

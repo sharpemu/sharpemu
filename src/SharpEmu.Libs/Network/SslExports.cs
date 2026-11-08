@@ -9,6 +9,7 @@ namespace SharpEmu.Libs.Network;
 public static class SslExports
 {
     private const int SslErrorInvalidId = unchecked((int)0x8095F006);
+    private const int SslErrorInvalidValue = unchecked((int)0x8095F007);
     private const int SslErrorOutOfSize = unchecked((int)0x8095F008);
 
     private static readonly ConcurrentDictionary<int, SslContext> _contexts = new();
@@ -52,6 +53,30 @@ public static class SslExports
 
         TraceSsl("term", id, 0);
         return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "-PoIzr3PEk0",
+        ExportName = "sceSslGetMemoryPoolStats",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSsl")]
+    public static int SslGetMemoryPoolStats(CpuContext ctx)
+    {
+        var id = unchecked((int)ctx[CpuRegister.Rdi]);
+        var statsAddress = ctx[CpuRegister.Rsi];
+        if (!_contexts.TryGetValue(id, out var context))
+        {
+            return ctx.SetReturn(SslErrorInvalidId);
+        }
+
+        if (statsAddress == 0)
+        {
+            return ctx.SetReturn(SslErrorInvalidValue);
+        }
+
+        return MemoryPoolStats.TryWrite(ctx, statsAddress, context.PoolSize)
+            ? ctx.SetReturn(0)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(

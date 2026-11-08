@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.CompilerServices;
 using SharpEmu.Libs.Gpu.Images;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands.Registers;
@@ -15,6 +16,12 @@ public struct BlendRegisters
     public byte AlphaDestinationFactor;
     public bool SeparateAlpha = true;
     public bool Enable;
+
+    public readonly bool UsesSecondarySource => Enable &&
+        (IsSecondaryFactor(ColorSourceFactor) || IsSecondaryFactor(ColorDestinationFactor) ||
+         (SeparateAlpha && (IsSecondaryFactor(AlphaSourceFactor) || IsSecondaryFactor(AlphaDestinationFactor))));
+
+    private static bool IsSecondaryFactor(byte factor) => factor is >= 15 and <= 18;
 
     public BlendRegisters()
     {
@@ -305,7 +312,8 @@ public sealed class ScreenViewportRegisters
     public const int ViewportCount = 16;
     public const int ClipRectangleCount = 4;
 
-    public ViewportRegisters[] Viewports = new ViewportRegisters[ViewportCount];
+    public ViewportRegisters Primary;
+    public ViewportRegisters[] Secondary = new ViewportRegisters[ViewportCount - 1];
     public uint TransformControl = 1087;
     public int ScreenScissorLeft;
     public int ScreenScissorTop;
@@ -330,23 +338,28 @@ public sealed class ScreenViewportRegisters
     public float GuardBandHorizontalDiscard;
     public float GuardBandVerticalDiscard;
     public ushort ClipRectangleRule = 0xFFFF;
-    public int[] ClipRectangleLeft = new int[ClipRectangleCount];
-    public int[] ClipRectangleTop = new int[ClipRectangleCount];
-    public int[] ClipRectangleRight = new int[ClipRectangleCount];
-    public int[] ClipRectangleBottom = new int[ClipRectangleCount];
-    public bool[] ClipRectangleWindowOffsetEnable = new bool[ClipRectangleCount];
+    public ClipRectangleValues<int> ClipRectangleLeft;
+    public ClipRectangleValues<int> ClipRectangleTop;
+    public ClipRectangleValues<int> ClipRectangleRight;
+    public ClipRectangleValues<int> ClipRectangleBottom;
+    public ClipRectangleValues<bool> ClipRectangleWindowOffsetEnable;
+
+    public ref ViewportRegisters Viewport(int slot) => ref slot == 0 ? ref Primary : ref Secondary[slot - 1];
 
     public ScreenViewportRegisters Copy()
     {
-        var copy = (ScreenViewportRegisters)MemberwiseClone();
-        copy.Viewports = (ViewportRegisters[])Viewports.Clone();
-        copy.ClipRectangleLeft = (int[])ClipRectangleLeft.Clone();
-        copy.ClipRectangleTop = (int[])ClipRectangleTop.Clone();
-        copy.ClipRectangleRight = (int[])ClipRectangleRight.Clone();
-        copy.ClipRectangleBottom = (int[])ClipRectangleBottom.Clone();
-        copy.ClipRectangleWindowOffsetEnable = (bool[])ClipRectangleWindowOffsetEnable.Clone();
+        var copy = CopySharingSecondary();
+        copy.Secondary = (ViewportRegisters[])Secondary.Clone();
         return copy;
     }
+
+    public ScreenViewportRegisters CopySharingSecondary() => (ScreenViewportRegisters)MemberwiseClone();
+}
+
+[InlineArray(ScreenViewportRegisters.ClipRectangleCount)]
+public struct ClipRectangleValues<T>
+{
+    private T _first;
 }
 
 // The context bank as the register writers decode it; the draw path reads it without lookups.
@@ -356,6 +369,8 @@ public sealed class ContextRegisters
 
     public float LineWidth = 1f;
     public uint PrimitiveResetIndex = 0xFFFF_FFFFu;
+    // AGC's initial/clear context enables Z-pass counter zero on both slices.
+    public uint DepthCountControl = 0x1100_0100u;
     public BlendRegisters[] BlendControls = NewBlendControls();
     public BlendColorRegisters BlendColor;
     public ColorTargetWords[] ColorTargets = new ColorTargetWords[ColorTargetCount];
@@ -387,6 +402,9 @@ public sealed class ContextRegisters
     public PolygonOffsetRegisters PolygonOffset = new();
     public EnhancedQualityAntialiasingRegisters EnhancedQualityAntialiasing;
     public ShaderInterfaceRegisters ShaderInterface = new();
+
+    // A copy that shares every nested part; RegisterBanks copies a part before writing it.
+    public ContextRegisters ShallowCopy() => (ContextRegisters)MemberwiseClone();
 
     public uint RenderTargetMaskForSlot(uint slot) => (RenderTargetMask >> (int)(slot * 4)) & 0xFu;
 

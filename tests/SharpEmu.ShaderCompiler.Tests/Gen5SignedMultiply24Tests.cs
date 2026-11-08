@@ -3,7 +3,6 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -47,7 +46,7 @@ public sealed class Gen5SignedMultiply24Tests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void BothEncodingsCompileOnBothBackends(bool extendedEncoding)
+    public void BothEncodingsCompile(bool extendedEncoding)
     {
         var program = CreateReadbackProgram(extendedEncoding, true);
         var multiply = Assert.Single(program.Instructions, instruction => instruction.Opcode == "VMulI32I24");
@@ -55,9 +54,6 @@ public sealed class Gen5SignedMultiply24Tests
         var (plan, resources, layout) = Prepare(program);
         var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metalShader, out var metalError), metalError);
-        Assert.Contains("<< 8u", metalShader.Source);
-        Assert.Contains(">> 8", metalShader.Source);
     }
 
     [Theory]

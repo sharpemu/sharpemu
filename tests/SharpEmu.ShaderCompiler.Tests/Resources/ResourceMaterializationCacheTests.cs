@@ -88,6 +88,37 @@ public sealed class ResourceMaterializationCacheTests
     }
 
     [Fact]
+    public void ToggledMipStatisticsBitsReuseTheMaterializationWithTheCurrentSlot()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var first, out _));
+        Assert.Null(first.MipStatistics);
+        var record = HeapBase + 0x100 + 5 * 32;
+        var image = Array.FindIndex(first.Images, words => words[0] == 0x1000);
+        Assert.True(image >= 0);
+
+        heap.Words[record + 5 * 4] = 1u << 25;
+        heap.Words[record + 6 * 4] = 0x2A;
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var second, out _));
+        Assert.Same(first.Images, second.Images);
+        Assert.Equal((1, 1), (cache.Hits, cache.Misses));
+        Assert.Equal(0x2Au | ResourceSnapshot.MipStatisticsEnabled, second.MipStatistics![image]);
+        Assert.Equal(0u, second.MipStatistics[1 - image]);
+
+        heap.Words[record + 6 * 4] = 0x2B;
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var third, out _));
+        Assert.Same(first.Images, third.Images);
+        Assert.Equal(0x2Bu | ResourceSnapshot.MipStatisticsEnabled, third.MipStatistics![image]);
+
+        heap.Words[record] = 0x3000;
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var fourth, out _));
+        Assert.NotSame(first.Images, fourth.Images);
+        Assert.Equal((2, 2), (cache.Hits, cache.Misses));
+    }
+
+    [Fact]
     public void AChangedDescriptorWordMaterializesAgain()
     {
         var plan = Plan();
@@ -151,6 +182,26 @@ public sealed class ResourceMaterializationCacheTests
         heap.GpuOwned = true;
         Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _));
         Assert.Equal(0, cache.Hits);
+    }
+
+    private static ShaderResourcePlan PlanWithSpareUserData() =>
+        ShaderResourcePlan.Extract(DirectImageTableTests.CreateWaveIndexedDescriptorProgram(), ShaderStage.Compute, Hash, 0, 4);
+
+    [Fact]
+    public void AUserDataWordTheProgramNeverReadsDoesNotSplitTheEntry()
+    {
+        var plan = PlanWithSpareUserData();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        Assert.True(Run(cache, plan, heap, [0x1000, 0, 5, 6], out var first, out _));
+        Assert.True(Run(cache, plan, heap, [0x1000, 0, 7, 8], out var second, out _));
+        Assert.Equal((1, 1), (cache.Hits, cache.Misses));
+        // The hit carries the second draw's user data and leaves the first draw's snapshot alone.
+        Assert.Equal(new uint[] { 0x1000, 0, 7, 8 }, second.UserData);
+        Assert.Equal(new uint[] { 0x1000, 0, 5, 6 }, first.UserData);
+        Assert.Same(first.Images, second.Images);
+        Assert.True(Run(cache, plan, heap, [0x1000, 0, 5, 6], out var third, out _));
+        Assert.Same(first, third);
     }
 
     [Fact]
@@ -264,6 +315,276 @@ public sealed class ResourceMaterializationCacheTests
         Assert.Equal(0, cache.TableRefreshes);
     }
 
+    // A V# taken verbatim from s[4:7], the way titles pass per-draw constants.
+    private static ShaderResourcePlan DirectBufferPlan() =>
+        Extract(Program(BufferLoad(0, 4), EndProgram(8)), userDataCount: 8);
+
+    // The same V#, whose base pair s[4:5] is also the address of a scalar load.
+    private static ShaderResourcePlan SteeringBufferPlan() =>
+        Extract(Program(ScalarLoad(0, 4, 16), Vop1(8, "VMovB32", 0, Gen5Operand.Scalar(16)), BufferStore(12, 4), EndProgram(20)),
+            userDataCount: 8);
+
+    private static bool RunWords(ResourceMaterializationCache cache, ShaderResourcePlan plan, TestWordMemory memory, uint[] userData,
+        out ResourceSnapshot snapshot)
+    {
+        snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        return cache.Materialize(plan, Inputs(userData, memory.Read, memory.Read), (address, destination, _) =>
+        {
+            for (var offset = 0; offset < destination.Length; offset += 4)
+            {
+                if (!memory.Read(address + (ulong)offset, out var word))
+                    return false;
+                BitConverter.TryWriteBytes(destination[offset..], word);
+            }
+
+            return true;
+        }, ref snapshot, ref specialization, out _);
+    }
+
+    private static uint[] Reference(ShaderResourcePlan plan, TestWordMemory memory, uint[] userData)
+    {
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, memory.Read, memory.Read), ref snapshot, ref specialization));
+        return snapshot.Buffers[0];
+    }
+
+    private static uint[] LinearConstants(int draw) => [0, 0, 0, 0, 0x10000u + (uint)draw * 0x100u, 0, 256, 0x2_0000];
+
+    [Fact]
+    public void ALinearlyAllocatedBufferBaseStopsMissingOnceConfirmed()
+    {
+        var plan = DirectBufferPlan();
+        var memory = new TestWordMemory();
+        var cache = new ResourceMaterializationCache();
+        for (var draw = 0; draw < 16; draw++)
+        {
+            var userData = LinearConstants(draw);
+            Assert.True(RunWords(cache, plan, memory, userData, out var snapshot));
+            Assert.Equal(Reference(plan, memory, userData), snapshot.Buffers[0]);
+            Assert.Equal(userData, snapshot.UserData);
+        }
+
+        // One miss to build, three to confirm the word; every later draw is a hit.
+        Assert.Equal((12, 4), (cache.Hits, cache.Misses));
+    }
+
+    [Fact]
+    public void InterleavedObjectsConfirmTheirOwnBases()
+    {
+        // Constants V# in s[4:7], a second buffer in s[8:11] whose size tells the two objects apart.
+        var plan = Extract(Program(BufferLoad(0, 4), BufferLoad(8, 8), EndProgram(16)), userDataCount: 12);
+        var memory = new TestWordMemory();
+        var cache = new ResourceMaterializationCache();
+        for (var draw = 0; draw < 32; draw++)
+        {
+            uint[] userData = [0, 0, 0, 0, 0x10000u + (uint)draw * 0x100u, 0, 256, 0x2_0000, 0x40000, 0, draw % 2 == 0 ? 256u : 512u, 0x2_0000];
+            Assert.True(RunWords(cache, plan, memory, userData, out var snapshot));
+            var expected = new ResourceSnapshot();
+            var expectedSpecialization = new ResourceSpecialization();
+            Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, memory.Read, memory.Read), ref expected, ref expectedSpecialization));
+            Assert.Equal(expected.Buffers.Select(buffer => buffer.ToArray()), snapshot.Buffers.Select(buffer => buffer.ToArray()));
+        }
+
+        Assert.True(cache.Hits >= 20, $"hits={cache.Hits} misses={cache.Misses}");
+    }
+
+    // Pointer s[0:1] moves on every draw; the program loads four constants through it.
+    private static uint[] PointerConstants(int draw) => [0x10000u + (uint)draw * 0x100u, 0, 0, 0, 0x30000, 0, 256, 0x2_0000, 0];
+
+    [Fact]
+    public void AMovingScalarLoadPointerStopsMissingOnceConfirmed()
+    {
+        var (plan, _, _) = Prepare(FlattenedReadReuseTests.RepeatedReadProgram(4), userDataCount: 9);
+        // The same four words repeat every 0x100 bytes, so every pointer finds the same constants.
+        var memory = new TestWordMemory { Base = 0x10000, Words = Enumerable.Range(0, 0x1000).Select(index => (uint)(index % 64) * 3 + 1).ToArray() };
+        var cache = new ResourceMaterializationCache();
+        for (var draw = 0; draw < 16; draw++)
+        {
+            var userData = PointerConstants(draw);
+            Assert.True(RunWords(cache, plan, memory, userData, out var snapshot));
+            var expected = new ResourceSnapshot();
+            var expectedSpecialization = new ResourceSpecialization();
+            Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, memory.Read, memory.Read), ref expected, ref expectedSpecialization));
+            Assert.Equal(expected.FlattenedResourceTable, snapshot.FlattenedResourceTable);
+            Assert.Equal(expected.Buffers.Select(buffer => buffer.ToArray()), snapshot.Buffers.Select(buffer => buffer.ToArray()));
+        }
+
+        Assert.Equal((12, 4), (cache.Hits, cache.Misses));
+
+        // Other constants behind the next pointer: the draw reads them instead of reusing the table.
+        var moved = PointerConstants(30);
+        memory.At(moved[0] + 8) = 0xBEEF;
+        Assert.True(RunWords(cache, plan, memory, moved, out var reread));
+        Assert.Equal(0xBEEFu, reread.FlattenedResourceTable[2]);
+        Assert.Equal(12, cache.Hits);
+    }
+
+    [Fact]
+    public void ARebasedHitLeavesTheCachedSnapshotAlone()
+    {
+        var plan = DirectBufferPlan();
+        var memory = new TestWordMemory();
+        var cache = new ResourceMaterializationCache();
+        for (var draw = 0; draw < 4; draw++)
+            Assert.True(RunWords(cache, plan, memory, LinearConstants(draw), out _));
+
+        Assert.True(RunWords(cache, plan, memory, LinearConstants(3), out var built));
+        Assert.True(RunWords(cache, plan, memory, LinearConstants(9), out var patched));
+        Assert.Equal(0x10900u, patched.Buffers[0][0]);
+        Assert.Equal(0x10300u, built.Buffers[0][0]);
+        Assert.NotSame(built.Buffers, patched.Buffers);
+        Assert.True(RunWords(cache, plan, memory, LinearConstants(3), out var again));
+        Assert.Equal(0x10300u, again.Buffers[0][0]);
+    }
+
+    [Fact]
+    public void AReadThatMovesWithTheBaseAndKeepsItsBytesIsReused()
+    {
+        var plan = SteeringBufferPlan();
+        var memory = new TestWordMemory { Base = 0x10000, Words = Enumerable.Repeat(0x1234u, 0x1000).ToArray() };
+        var cache = new ResourceMaterializationCache();
+        for (var draw = 0; draw < 16; draw++)
+        {
+            var userData = LinearConstants(draw);
+            Assert.True(RunWords(cache, plan, memory, userData, out var snapshot));
+            var expected = new ResourceSnapshot();
+            var expectedSpecialization = new ResourceSpecialization();
+            Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, memory.Read, memory.Read), ref expected, ref expectedSpecialization));
+            Assert.Equal(expected.Buffers[0], snapshot.Buffers[0]);
+            Assert.Equal(expected.FlattenedResourceTable, snapshot.FlattenedResourceTable);
+        }
+
+        Assert.Equal((12, 4), (cache.Hits, cache.Misses));
+
+        // The moved read now finds other bytes at the new base: the draw must not reuse the table.
+        var changed = LinearConstants(20);
+        memory.At(changed[4]) = 0x5678;
+        Assert.True(RunWords(cache, plan, memory, changed, out var refreshed));
+        Assert.Equal(0x5678u, refreshed.FlattenedResourceTable[0]);
+        Assert.Equal(12, cache.Hits);
+    }
+
+    [Fact]
+    public void MovedConstantsThatChangeEveryDrawAreReadAgain()
+    {
+        var plan = SteeringBufferPlan();
+        var memory = new TestWordMemory { Base = 0x10000, Words = Enumerable.Range(0, 0x1000).Select(index => (uint)index * 7).ToArray() };
+        var cache = new ResourceMaterializationCache();
+        for (var draw = 0; draw < 16; draw++)
+        {
+            var userData = LinearConstants(draw);
+            Assert.True(RunWords(cache, plan, memory, userData, out var snapshot));
+            Assert.Equal(Reference(plan, memory, userData), snapshot.Buffers[0]);
+            var expected = new ResourceSnapshot();
+            var expectedSpecialization = new ResourceSpecialization();
+            Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, memory.Read, memory.Read), ref expected, ref expectedSpecialization));
+            Assert.Equal(expected.FlattenedResourceTable, snapshot.FlattenedResourceTable);
+        }
+
+        // The constants differ at every base, so nothing is reused as is; once the base is
+        // confirmed, the moved table is evaluated again instead of the whole walk.
+        Assert.Equal(0, cache.Hits);
+        Assert.True(cache.TableRefreshes >= 10, $"refreshes={cache.TableRefreshes} misses={cache.Misses}");
+    }
+
+    // The V# comes from a descriptor table at s[0:1]; its constants are read through it.
+    private static ShaderResourcePlan MemoryDescriptorPlan() =>
+        Extract(Program(ScalarLoad(0, 0, 8, 4), ScalarBufferLoad(4, 8, 12, 4), Vop1(8, "VMovB32", 0, Gen5Operand.Scalar(12)),
+            BufferLoad(12, 8), EndProgram(16)), userDataCount: 2);
+
+    // The title rewrites the table every draw: a freshly allocated base, and new constants there.
+    private static void WriteDraw(TestWordMemory memory, int draw)
+    {
+        var bufferBase = 0x10000u + (uint)draw * 0x100u;
+        memory.At(0x1000) = bufferBase;
+        memory.At(0x1004) = 0;
+        memory.At(0x1008) = 256;
+        memory.At(0x100C) = 0x2_0000;
+        for (var word = 0u; word < 4; word++)
+            memory.At(bufferBase + word * 4) = (uint)draw * 10 + word;
+    }
+
+    [Fact]
+    public void ABaseRewrittenInGuestMemoryStopsMissingOnceConfirmed()
+    {
+        var plan = MemoryDescriptorPlan();
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[0x8000] };
+        var cache = new ResourceMaterializationCache();
+        uint[] userData = [0x1000, 0];
+        for (var draw = 0; draw < 16; draw++)
+        {
+            WriteDraw(memory, draw);
+            Assert.True(RunWords(cache, plan, memory, userData, out var snapshot));
+            var expected = new ResourceSnapshot();
+            var expectedSpecialization = new ResourceSpecialization();
+            Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, memory.Read, memory.Read), ref expected, ref expectedSpecialization));
+            Assert.Equal(expected.Buffers.Select(buffer => buffer.ToArray()), snapshot.Buffers.Select(buffer => buffer.ToArray()));
+            Assert.Equal(expected.FlattenedResourceTable, snapshot.FlattenedResourceTable);
+        }
+
+        // One miss to build, three to confirm the base; the later draws patch it.
+        Assert.True(cache.Hits >= 10, $"hits={cache.Hits} misses={cache.Misses}");
+
+        // Another descriptor word changed with the base: the draw is materialized again.
+        WriteDraw(memory, 20);
+        memory.At(0x1008) = 512;
+        var hits = cache.Hits;
+        Assert.True(RunWords(cache, plan, memory, userData, out var resized));
+        Assert.Equal(hits, cache.Hits);
+        Assert.Equal(512u, resized.Buffers[0][2]);
+    }
+
+    private static void AssertMatchesFullWalk(ShaderResourcePlan plan, TestWordMemory memory, uint[] userData, ResourceSnapshot snapshot)
+    {
+        var expected = new ResourceSnapshot();
+        var expectedSpecialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, memory.Read, memory.Read), ref expected, ref expectedSpecialization));
+        Assert.Equal(expected.Buffers.Select(buffer => buffer.ToArray()), snapshot.Buffers.Select(buffer => buffer.ToArray()));
+        Assert.Equal(expected.FlattenedResourceTable, snapshot.FlattenedResourceTable);
+    }
+
+    [Fact]
+    public void ATableConstantBesideARewrittenBaseIsCopiedForTheDraw()
+    {
+        // The V# and a constant both come from the table at s[0:1]; the constant changes every draw.
+        var plan = Extract(Program(ScalarLoad(0, 0, 8, 4), ScalarLoad(4, 0, 16, 1, immediateOffset: 16),
+            ScalarBufferLoad(8, 8, 12, 4), Vop1(12, "VMovB32", 0, Gen5Operand.Scalar(12)),
+            Vop1(16, "VMovB32", 1, Gen5Operand.Scalar(16)), BufferLoad(20, 8), EndProgram(24)), userDataCount: 2);
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[0x8000] };
+        var cache = new ResourceMaterializationCache();
+        uint[] userData = [0x1000, 0];
+        for (var draw = 0; draw < 16; draw++)
+        {
+            WriteDraw(memory, draw);
+            memory.At(0x1010) = (uint)draw * 3 + 1;
+            Assert.True(RunWords(cache, plan, memory, userData, out var snapshot));
+            AssertMatchesFullWalk(plan, memory, userData, snapshot);
+        }
+
+        Assert.True(cache.Hits >= 10, $"hits={cache.Hits} misses={cache.Misses}");
+    }
+
+    [Fact]
+    public void AlternatingObjectsWithRewrittenBasesRebaseTheirOwnVariant()
+    {
+        // Two objects share the draw key and differ in their buffer size; both move their base.
+        var plan = MemoryDescriptorPlan();
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[0x8000] };
+        var cache = new ResourceMaterializationCache();
+        uint[] userData = [0x1000, 0];
+        for (var draw = 0; draw < 32; draw++)
+        {
+            WriteDraw(memory, draw);
+            memory.At(0x1008) = draw % 2 == 0 ? 256u : 512u;
+            Assert.True(RunWords(cache, plan, memory, userData, out var snapshot));
+            AssertMatchesFullWalk(plan, memory, userData, snapshot);
+        }
+
+        Assert.True(cache.Hits >= 20, $"hits={cache.Hits} misses={cache.Misses}");
+    }
+
     [Fact]
     public void AFullGenerationKeepsRecentEntries()
     {
@@ -275,5 +596,109 @@ public sealed class ResourceMaterializationCacheTests
         // The first entry moved to the old generation and is still found.
         Assert.True(Run(cache, plan, heap, [0x1000, 0], out _, out _));
         Assert.Equal(1, cache.Hits);
+    }
+
+    private static bool RunAfterChange(ResourceMaterializationCache cache, ShaderResourcePlan plan, Heap heap, ref uint value,
+        out ResourceSnapshot snapshot)
+    {
+        value += 0x1000;
+        heap.Words[HeapBase + 0x100 + 5 * 32] = value;
+        return Run(cache, plan, heap, [0x1000, 0], out snapshot, out _);
+    }
+
+    [Fact]
+    public void WithChurnLimitedAKeyIsStoredOnItsSecondSighting()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache(limitChurn: true);
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var first, out _));
+        Assert.Equal((0, 0, 1), (cache.Hits, cache.Misses, cache.Unrecorded));
+
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var second, out _));
+        Assert.Equal((0, 1, 1), (cache.Hits, cache.Misses, cache.Unrecorded));
+        Assert.Equal(first.Images.Select(image => image.ToArray()), second.Images.Select(image => image.ToArray()));
+
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var third, out _));
+        Assert.Same(second, third);
+        Assert.Equal((1, 1, 1), (cache.Hits, cache.Misses, cache.Unrecorded));
+    }
+
+    [Fact]
+    public void WithChurnLimitedAKeyThatIsStaleOnEveryLookupStopsBeingStored()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache(limitChurn: true);
+        uint value = 0x3000;
+        for (var lookup = 0; lookup < 4; lookup++)
+        {
+            Assert.True(RunAfterChange(cache, plan, heap, ref value, out _));
+        }
+
+        Assert.Equal((0, 3, 1), (cache.Hits, cache.Misses, cache.Unrecorded));
+
+        for (var lookup = 0; lookup < 33; lookup++)
+        {
+            Assert.True(RunAfterChange(cache, plan, heap, ref value, out var snapshot));
+            var reference = new ResourceSnapshot();
+            var referenceSpecialization = new ResourceSpecialization();
+            Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], readCleanMemory: heap.Read),
+                ref reference, ref referenceSpecialization));
+            Assert.Equal(reference.Images.Select(image => image.ToArray()), snapshot.Images.Select(image => image.ToArray()));
+        }
+
+        Assert.Equal((0, 3, 34), (cache.Hits, cache.Misses, cache.Unrecorded));
+
+        Assert.True(RunAfterChange(cache, plan, heap, ref value, out _));
+        Assert.Equal((0, 4, 34), (cache.Hits, cache.Misses, cache.Unrecorded));
+        Assert.True(RunAfterChange(cache, plan, heap, ref value, out _));
+        Assert.Equal((0, 4, 35), (cache.Hits, cache.Misses, cache.Unrecorded));
+    }
+
+    [Fact]
+    public void WithChurnLimitedAVolatileKeyIsStoredAgainOnceItSettles()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache(limitChurn: true);
+        uint value = 0x3000;
+        for (var lookup = 0; lookup < 37; lookup++)
+        {
+            Assert.True(RunAfterChange(cache, plan, heap, ref value, out _));
+        }
+
+        Assert.Equal((0, 3, 34), (cache.Hits, cache.Misses, cache.Unrecorded));
+
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var stored, out _));
+        Assert.Equal((0, 4, 34), (cache.Hits, cache.Misses, cache.Unrecorded));
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var reused, out _));
+        Assert.Same(stored, reused);
+        Assert.Equal((1, 4, 34), (cache.Hits, cache.Misses, cache.Unrecorded));
+    }
+
+    [Fact]
+    public void AStoredSnapshotRevalidatesUntilItsBytesChange()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache();
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var snapshot, out _));
+        Assert.True(cache.Revalidate(snapshot, heap.ReadResident));
+        Assert.True(cache.Revalidate(snapshot, heap.ReadResident));
+        heap.Words[HeapBase + 0x100 + 5 * 32] = 0x3000;
+        Assert.False(cache.Revalidate(snapshot, heap.ReadResident));
+    }
+
+    [Fact]
+    public void AnUnrecordedSnapshotDoesNotRevalidate()
+    {
+        var plan = Plan();
+        var heap = new Heap();
+        var cache = new ResourceMaterializationCache(limitChurn: true);
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var snapshot, out _));
+        Assert.False(cache.Revalidate(snapshot, heap.ReadResident));
+        Assert.True(Run(cache, plan, heap, [0x1000, 0], out var stored, out _));
+        Assert.True(cache.Revalidate(stored, heap.ReadResident));
     }
 }

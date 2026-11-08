@@ -17,12 +17,17 @@ public sealed class WaveShuffleDeviceTests(HeadlessVulkanFixture fixture, ITestO
     : IClassFixture<HeadlessVulkanFixture>
 {
     [Theory]
-    [InlineData("Dpp8")]
-    [InlineData("Dpp16")]
-    [InlineData("Permlane16")]
-    [InlineData("Permlanex16")]
-    [InlineData("Reduction")]
-    public void Wave64Shuffle_PreservesUpperHalf(string operation)
+    [InlineData("Dpp8", false)]
+    [InlineData("Dpp16", false)]
+    [InlineData("Permlane16", false)]
+    [InlineData("Permlanex16", false)]
+    [InlineData("Reduction", false)]
+    [InlineData("Dpp8", true)]
+    [InlineData("Dpp16", true)]
+    [InlineData("Permlane16", true)]
+    [InlineData("Permlanex16", true)]
+    [InlineData("Reduction", true)]
+    public void Wave64Shuffle_PreservesUpperHalf(string operation, bool hostSubgroup32)
     {
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
@@ -80,6 +85,7 @@ public sealed class WaveShuffleDeviceTests(HeadlessVulkanFixture fixture, ITestO
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
             LocalSizeX = 8, LocalSizeY = 8, ThreadCountX = 8, ThreadCountY = 8, WaveSize = 64,
+            HostComputeSubgroup32 = hostSubgroup32,
         };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         using var harness = new ImageTestHarness(vulkan);

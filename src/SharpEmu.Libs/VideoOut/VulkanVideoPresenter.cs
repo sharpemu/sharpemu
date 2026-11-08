@@ -9,6 +9,7 @@ using SharpEmu.Libs.AvPlayer;
 using SharpEmu.Libs.Media;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
@@ -81,6 +82,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private static int _nativeSubgroupSize;
     private static int _nativeSubgroupShaderStages;
     private static int _sharedInt64AtomicsSupported;
+    private static int _imageInt64AtomicsSupported;
 
     // True when the device supports shaderSharedInt64Atomics, so LDS 64-bit
     // atomics can be emitted as real 64-bit atomics.
@@ -89,6 +91,14 @@ internal static unsafe partial class VulkanVideoPresenter
 
     private static void SetSharedInt64AtomicsCapability(bool supported) =>
         Volatile.Write(ref _sharedInt64AtomicsSupported, supported ? 1 : 0);
+
+    // True when the device supports shaderImageInt64Atomics, so an atomic on a 64-bit
+    // image texel can be compiled.
+    internal static bool ImageInt64AtomicsEnabled =>
+        Volatile.Read(ref _imageInt64AtomicsSupported) != 0;
+
+    private static void SetImageInt64AtomicsCapability(bool supported) =>
+        Volatile.Write(ref _imageInt64AtomicsSupported, supported ? 1 : 0);
 
     internal static bool GraphicsSubgroupOperationsEnabled =>
         VulkanGraphicsSubgroupPolicy.ShouldUseNativeGraphicsSubgroups(
@@ -136,22 +146,16 @@ internal static unsafe partial class VulkanVideoPresenter
             Environment.GetEnvironmentVariable("SHARPEMU_MAX_GUEST_WORK_PER_RENDER"),
             out var guestWorkPerRender) && guestWorkPerRender > 0
             ? guestWorkPerRender
-            : OperatingSystem.IsMacOS() ? 256 : 1024;
-    // On macOS the whole window loop — including Render() and its guest-work
-    // drain — runs on the process main thread, so draining a large backlog of
-    // slow guest work (heavy compute) blocks the Cocoa event pump and marks the
-    // window "Not Responding" while starving the swapchain present. Cap the
-    // wall-clock time spent draining per Render() call; leftover work stays
-    // queued for the next frame. SHARPEMU_RENDER_WORK_BUDGET_MS overrides
-    // (0 disables the cap); default 12ms keeps the macOS window interactive at
-    // ~60Hz. Windows and Linux use a dedicated render thread, so they drain
-    // without a time budget by default.
+            : 1024;
+    // Optional cap on the wall-clock time spent draining guest work per Render()
+    // call; leftover work stays queued for the next frame.
+    // SHARPEMU_RENDER_WORK_BUDGET_MS sets the cap; 0 (the default) disables it.
     private static readonly long _renderWorkBudgetTicks =
         (long.TryParse(
              Environment.GetEnvironmentVariable("SHARPEMU_RENDER_WORK_BUDGET_MS"),
              out var renderBudgetMs) && renderBudgetMs >= 0
             ? renderBudgetMs
-            : OperatingSystem.IsMacOS() ? 12L : 0L) *
+            : 0L) *
         System.Diagnostics.Stopwatch.Frequency / 1000L;
     // Diagnostic: skip every compute dispatch (mistranslated compute shaders
     // run long / GPU-hang and starve the present). Isolates whether the
@@ -220,6 +224,19 @@ internal static unsafe partial class VulkanVideoPresenter
                (Is10Bit(from) && to == Format.R8G8B8A8Unorm);
     }
 
+    // The host-owned resources of one recorded draw or dispatch, retired when its submission completes.
+    private sealed class SubmissionUploadResources
+    {
+        public string DebugName = "SharpEmu translated";
+        public TextureResource[] Textures = [];
+        public int TextureCount;
+        // Draw-local feedback copies stay alive until the GPU has consumed
+        // the descriptors that reference them.
+        public CachedImage[] FeedbackSnapshots = [];
+        // Host buffers that took uploads the stream ring could not hold; recycled with the draw.
+        public (VkBuffer Buffer, DeviceMemory Memory)[]? OverflowBuffers;
+    }
+
     private sealed partial class Presenter : IDisposable
     {
 
@@ -231,37 +248,25 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _firstFramePresented;
         private bool _firstGuestDrawPresented;
         private bool _splashPresented;
-        private bool _deviceLost;
+        internal bool _deviceLost;
         private bool _deviceLostLogged;
         private string _lastSubmitDebugName = string.Empty;
         private int _directPresentationCount;
         private readonly Dictionary<ulong, long> _presentedGuestImageTraceCounts = new();
         private readonly Dictionary<long, GuestImageResource> _guestImageVersions = new();
 
-        // The host-owned resources of one recorded draw or dispatch, retired when its submission completes.
-        private sealed class SubmissionUploadResources
-        {
-            public string DebugName = "SharpEmu translated";
-            public TextureResource[] Textures = [];
-            // Draw-local feedback copies stay alive until the GPU has consumed
-            // the descriptors that reference them.
-            public CachedImage[] FeedbackSnapshots = [];
-            // Host buffers that took uploads the stream ring could not hold; recycled with the draw.
-            public (VkBuffer Buffer, DeviceMemory Memory)[]? OverflowBuffers;
-        }
-
         private const ulong SwapchainAcquireTimeoutNs = 250_000_000;
 
         public Presenter(uint width, uint height)
         {
             _commandStream = new CommandStreamQueue(this);
+            _relay = new GpuWorkerRelay(WakeRenderThreadForRelay, _commandStream.TryEnqueueControlBarrier);
             _hostBufferPool = new VulkanHostBufferPool(
                 MaximumCachedHostBufferBytes,
                 DestroyHostBufferAllocation);
             _window = new SdlHostWindow(
                 VideoOutExports.GetWindowTitle(),
-                _videoOptions,
-                SdlGraphicsApi.Vulkan);
+                _videoOptions);
         }
 
         public void Run()
@@ -279,6 +284,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     DisposeVulkan();
                     RenderPhaseProfile.WriteFrameTrace();
                     SubmissionFlowProfile.WriteTrace();
+                    Gpu.Rendering.ScissorTrace.Instance?.Finish("presenter-exit");
                 },
                 WaitForRenderWork);
         }
@@ -360,9 +366,15 @@ internal static unsafe partial class VulkanVideoPresenter
             Check(_vk.CreateBuffer(_device, &bufferInfo, null, out var buffer), "vkCreateBuffer");
 
             _vk.GetBufferMemoryRequirements(_device, buffer, out var requirements);
+            var allocationFlags = new MemoryAllocateFlagsInfo
+            {
+                SType = StructureType.MemoryAllocateFlagsInfo,
+                Flags = MemoryAllocateFlags.DeviceAddressBit,
+            };
             var memoryInfo = new MemoryAllocateInfo
             {
                 SType = StructureType.MemoryAllocateInfo,
+                PNext = (usage & BufferUsageFlags.ShaderDeviceAddressBit) != 0 ? &allocationFlags : null,
                 AllocationSize = requirements.Size,
                 MemoryTypeIndex = FindMemoryType(
                     requirements.MemoryTypeBits,
@@ -458,7 +470,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _ => true,
             };
 
-        private static ImageSubresourceRange ColorSubresourceRange(
+        internal static ImageSubresourceRange ColorSubresourceRange(
             uint baseMipLevel = 0,
             uint levelCount = 1,
             uint layerCount = 1) =>
@@ -470,7 +482,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 LayerCount = layerCount,
             };
 
-        private static void TraceVulkanShader(string message)
+        internal static void TraceVulkanShader(string message)
         {
             if (!_traceVulkanShaderEnabled)
             {

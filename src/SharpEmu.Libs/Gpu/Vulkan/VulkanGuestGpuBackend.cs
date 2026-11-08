@@ -19,6 +19,8 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 {
     public string BackendName => "Vulkan";
 
+    public bool LinkedShaderCallsSupported => true;
+
 
     private static readonly IGuestCompiledShader DepthOnlyFragmentShader =
         new VulkanCompiledGuestShader(SpirvFixedShaders.CreateDepthOnlyFragment());
@@ -31,12 +33,17 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
             return false;
         }
 
-        shader = new VulkanCompiledGuestShader(compiled.Spirv);
+        shader = new VulkanCompiledGuestShader(compiled.Spirv) { InputLocationMask = compiled.InputLocationMask };
         return true;
     }
 
     public IGuestCompiledShader GetDepthOnlyFragmentShader() =>
         DepthOnlyFragmentShader;
+
+    public (IGuestCompiledShader Vertex, IGuestCompiledShader Control) CompileTessellationBridge(
+        SharpEmu.ShaderCompiler.Resources.BindingLayout layout, Gen5TessellationDomain domain) =>
+        (new VulkanCompiledGuestShader(SpirvFixedShaders.CreateFullscreenVertex(0)),
+         new VulkanCompiledGuestShader(Gen5TessellationBridge.CompileControl(layout, domain).Spirv));
 
     public void EnsureStarted(uint width, uint height) =>
         VulkanVideoPresenter.EnsureStarted(width, height);
@@ -65,6 +72,9 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
 
     public IdleOutcome SubmitDone(ICpuMemory memory) =>
         VulkanVideoPresenter.SubmitDone(memory);
+
+    public void RunAfterPendingCommandStreams(Action work) =>
+        VulkanVideoPresenter.RunAfterPendingCommandStreams(work);
 
     public void RegisterKnownDisplayBuffer(ulong address, uint guestFormat) =>
         VulkanVideoPresenter.RegisterKnownDisplayBuffer(address, guestFormat);

@@ -41,7 +41,8 @@ public sealed class SemaphoreSignalProfileTests
 
     [Theory]
     [InlineData(0, 2, true)]
-    [InlineData(0, 0, false)]
+    [InlineData(0, 0, true)]
+    [InlineData(1, -1, false)]
     [InlineData(1, int.MaxValue, false)]
     public void SignalKeepsTokenSemanticsAndRecordsStagesWhenEnabled(uint initial, int count, bool succeeds)
     {
@@ -61,7 +62,7 @@ public sealed class SemaphoreSignalProfileTests
             GuestThreadExecution.Scheduler = scheduler;
             SemaphoreSignalProfile.StartSession();
             var result = KernelSemaphoreCompatExports.KernelSignalSema(context, handle, count);
-            Assert.Equal(succeeds ? 0 : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT, result);
+            Assert.Equal(succeeds ? 0 : unchecked((int)0x80020016), result);
             Assert.Equal(succeeds ? 1 : 0, proxy.WakeCalls);
             if (succeeds) Assert.Equal($"sceKernelWaitSema:{handle:X8}", proxy.WakeKey);
             context[CpuRegister.Rdi] = memoryBase;

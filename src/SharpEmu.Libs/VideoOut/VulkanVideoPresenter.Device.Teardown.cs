@@ -16,6 +16,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             ShutdownScheduler();
+            _occlusionQueries?.Dispose();
+            _occlusionQueries = null;
             if (_debugUtils is not null && _debugMessenger.Handle != 0)
             {
                 _debugUtils.DestroyDebugUtilsMessenger(_instance, _debugMessenger, null);
@@ -31,9 +33,12 @@ internal static unsafe partial class VulkanVideoPresenter
             SavePipelineCache(force: true);
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
-            DestroyFeedbackSnapshotPool();
+            _recording?.DestroyFeedbackSnapshotPool();
             DestroyRenderPipelines();
+            DestroyBindlessHeap();
+            DestroyCallMarks();
             _descriptorHeap.Dispose();
+            _contentUploads.Dispose();
             _imageCache.Dispose();
             _samplerStore.Dispose();
             _bufferCache.AsyncReadback?.Dispose();

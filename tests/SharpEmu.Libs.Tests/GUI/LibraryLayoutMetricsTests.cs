@@ -37,4 +37,26 @@ public sealed class LibraryLayoutMetricsTests
         Assert.Equal(LibraryLayoutMetrics.MinimumCoverSize, metrics.CoverSize);
         Assert.Equal(124, metrics.ItemWidth);
     }
+
+    [Fact]
+    public void Calculate_RowShowsLargerCoversAndALargerSelectedCover()
+    {
+        var grid = LibraryLayoutMetrics.Calculate(1436);
+        var row = LibraryLayoutMetrics.Calculate(1436, rail: true);
+
+        Assert.True(row.CoverSize >= LibraryLayoutMetrics.MinimumRailCoverSize);
+        Assert.True(row.CoverSize > grid.CoverSize);
+        Assert.Equal(row.CoverSize * LibraryLayoutMetrics.RailSelectedScale, row.SelectedCoverSize, 6);
+        Assert.Equal(row.SelectedCoverSize + 12, row.SelectedItemWidth, 6);
+        Assert.Equal(grid.CoverSize, grid.SelectedCoverSize);
+    }
+
+    [Fact]
+    public void Calculate_TileScaleAppliesToBothViews()
+    {
+        var row = LibraryLayoutMetrics.Calculate(1920, 1.2, rail: true);
+
+        Assert.Equal(LibraryLayoutMetrics.MaximumRailCoverSize * 1.2, row.CoverSize, 6);
+        Assert.Equal(LibraryLayoutMetrics.MaximumCoverSize * 0.8, LibraryLayoutMetrics.Calculate(1920, 0.8).CoverSize, 6);
+    }
 }

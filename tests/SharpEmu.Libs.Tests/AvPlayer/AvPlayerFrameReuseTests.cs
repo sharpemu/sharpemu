@@ -8,8 +8,60 @@ using static SharpEmu.Libs.AvPlayer.AvPlayerExports;
 
 namespace SharpEmu.Libs.Tests.AvPlayer;
 
+[CollectionDefinition("AvPlayerFrameQueue", DisableParallelization = true)]
+public sealed class AvPlayerFrameQueueCollection;
+
+[Collection("AvPlayerFrameQueue")]
 public sealed class AvPlayerFrameReuseTests
 {
+    [Fact]
+    public void AFullQueueKeepsDecodingWhenTheThreadPoolIsBusy()
+    {
+        ThreadPool.GetMinThreads(out var minimumWorkers, out var minimumCompletionThreads);
+        ThreadPool.GetMaxThreads(out var maximumWorkers, out var maximumCompletionThreads);
+        using var workerEntered = new ManualResetEventSlim();
+        using var releaseWorker = new ManualResetEventSlim();
+        using var workerExited = new ManualResetEventSlim();
+        var queued = ThreadPool.QueueUserWorkItem(_ =>
+        {
+            workerEntered.Set();
+            releaseWorker.Wait();
+            workerExited.Set();
+        });
+        try
+        {
+            Assert.True(queued);
+            Assert.True(workerEntered.Wait(TimeSpan.FromSeconds(5)), "The blocking worker did not start.");
+            Assert.True(ThreadPool.SetMinThreads(1, minimumCompletionThreads));
+            Assert.True(ThreadPool.SetMaxThreads(1, maximumCompletionThreads));
+
+            using var source = new PatternStream(384, 3);
+            using var queue = new VideoFrameQueue(source, 384, 2);
+            var decoder = (Thread)typeof(VideoFrameQueue)
+                .GetField("_worker", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(queue)!;
+            Assert.True(SpinWait.SpinUntil(
+                () => (decoder.ThreadState & ThreadState.WaitSleepJoin) != 0,
+                TimeSpan.FromSeconds(5)), "The decoder did not fill the queue.");
+
+            for (var frameIndex = 0; frameIndex < 3; frameIndex++)
+            {
+                Assert.All(ReadReadyFrame(queue), value => Assert.Equal((byte)frameIndex, value));
+            }
+            WaitForWorker(queue);
+            Assert.Equal(VideoFrameReadResult.End, queue.TryRead(out _));
+        }
+        finally
+        {
+            releaseWorker.Set();
+            ThreadPool.SetMaxThreads(maximumWorkers, maximumCompletionThreads);
+            ThreadPool.SetMinThreads(minimumWorkers, minimumCompletionThreads);
+            if (queued)
+            {
+                Assert.True(workerExited.Wait(TimeSpan.FromSeconds(5)), "The blocking worker did not exit.");
+            }
+        }
+    }
+
     [Theory]
     [InlineData(2)]
     [InlineData(6)]

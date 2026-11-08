@@ -3,7 +3,6 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
@@ -28,7 +27,7 @@ public sealed class Gen5DataShareRead64Tests
 
     [Theory]
     [MemberData(nameof(PairedReadCases))]
-    public void EncodedPairedReadHasFourDestinationsAndCompilesOnBothBackends(
+    public void EncodedPairedReadHasFourDestinationsAndCompiles(
         bool global, uint firstOffset, uint secondOffset, bool readEnabled)
     {
         var program = CreatePairedReadbackProgram(global, firstOffset, secondOffset, readEnabled);
@@ -42,7 +41,6 @@ public sealed class Gen5DataShareRead64Tests
         var (plan, resources, layout) = Prepare(program);
         var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
     }
 
     public static uint[] PairedReadExpected(uint firstOffset, uint secondOffset, bool readEnabled) => readEnabled
@@ -80,7 +78,7 @@ public sealed class Gen5DataShareRead64Tests
     [InlineData(false, 0x108u)]
     [InlineData(true, 0u)]
     [InlineData(true, 0x108u)]
-    public void EncodedReadHasTwoDestinationsAndCompilesOnBothBackends(bool global, uint offset)
+    public void EncodedReadHasTwoDestinationsAndCompiles(bool global, uint offset)
     {
         var program = CreateReadbackProgram(global, offset, true);
         var read = Assert.Single(program.Instructions, instruction => instruction.Opcode == "DsReadB64");
@@ -92,7 +90,6 @@ public sealed class Gen5DataShareRead64Tests
         var (plan, resources, layout) = Prepare(program);
         var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
     }
 
     // The address is also the first result register. Both reads must use its old value.

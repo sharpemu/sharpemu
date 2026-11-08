@@ -38,7 +38,7 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     private readonly HeadlessVulkan? _vulkan;
 
     private static bool DefersGlobalBarriers =>
-        (bool)PresenterUnderTest.PresenterType.GetField("DeferGlobalBarriers", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
+        (bool)PresenterUnderTest.RecordingHostType.GetField("DeferGlobalBarriers", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!;
 
     [Fact]
     public void GlobalBarrierEndsDynamicRendering()
@@ -186,10 +186,7 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         }
 
         public GraphicsPrograms GetGraphicsPrograms(
-            VertexStageRegisters vertex,
-            PixelStageRegisters pixel,
-            ShaderInterfaceRegisters shaderInterface,
-            ContextRegisters context,
+            RegisterBanks banks,
             ReadOnlySpan<ColorComponentMap> targetExportMapping,
             bool pixelActive,
             bool depthBound)
@@ -297,7 +294,7 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         context.ColorTargets[0] = target;
         context.RenderTargetMask = 0xF;
         context.ShaderInterface.ColorShaderMask = 0xF;
-        context.ScreenViewport.Viewports[0] = new ViewportRegisters
+        context.ScreenViewport.Primary = new ViewportRegisters
         {
             XScale = Size / 2f,
             XOffset = Size / 2f,
@@ -395,10 +392,15 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     }
 
     [Theory]
-    [InlineData(true, true)]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    public void PrepareBindings_InvalidatesImagesOnlyForFormattedWrites(bool formatted, bool writable)
+    [InlineData(true, true, false)]
+    [InlineData(false, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, false, false)]
+    [InlineData(true, true, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, true)]
+    [InlineData(false, false, true)]
+    public void PrepareBindings_InvalidatesImagesAccordingToWriteTypeAndOwnership(bool formatted, bool writable, bool gpuOwned)
     {
         if (!Ready()) return;
         using var presenter = new PresenterUnderTest(_vulkan!);
@@ -412,18 +414,66 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         var snapshot = new ResourceSnapshot { Buffers = [[(uint)address, (uint)(address >> 32), 0x10000, 0]] };
         presenter.Run(() =>
         {
+            if (gpuOwned) image.MarkGpuModified();
             Assert.False(image.IsBufferModified);
             using var preparation = presenter.RenderHost.BeginPreparation();
             var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot));
             presenter.RenderHost.BindResources(prepared);
-            Assert.Equal(formatted && writable, image.IsBufferModified);
+            Assert.Equal(writable && (formatted || !gpuOwned), image.IsBufferModified);
+            Assert.Equal(gpuOwned && !(formatted && writable), image.IsGpuModified);
         });
         harness.Finish();
         harness.Shutdown();
     }
 
+    // A formatted written binding can be a window much larger than what its shader writes. A GPU-written image it
+    // covers whole without starting at it loses its ownership to the buffer, and its next acquisition uploads it from
+    // there: the buffer must hold the image's contents, with only the shader's own bytes over them.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PrepareBindings_FormattedWriteOverAWholeGpuImageKeepsTheBytesItDoesNotWrite(bool shaderWritesPart)
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        presenter.SetField("_minStorageBufferOffsetAlignment", 256UL);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var request = ImageRequestBuilders.ColorTarget(RegisterWords.Color(address + 0x8000, Size, Size), 0xF, 0, ignoreTargetMask: false)!.Value.Request;
+        var identifier = presenter.Run(() => harness.Images.FindImage(ref request));
+        var image = presenter.Run(() => harness.Images.GetImage(identifier));
+        var range = image.Description.Data;
+        Assert.True(presenter.Run(() => harness.Images.TryClearImageFromBuffer(range.Address, range.Size, 0x11111111)));
+        Assert.True(image.IsGpuModified);
+        var info = new ShaderResourceInfo { Buffers = [new BufferResource { Read = true, Written = true, Formatted = true, MaxByteExtent = 0x20000 }] };
+        var program = FixedProgramProvider.EmptyProgram(ShaderStageKind.Compute, 3, info);
+        var snapshot = new ResourceSnapshot { Buffers = [[(uint)address, (uint)(address >> 32), 0x20000, 0]] };
+        presenter.Run(() =>
+        {
+            using var preparation = presenter.RenderHost.BeginPreparation();
+            var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot));
+            presenter.RenderHost.BindResources(prepared);
+            if (shaderWritesPart)
+            {
+                var (bound, offset) = harness.Cache.ObtainBuffer(range.Address + 0x100, 4, isWritten: true, isTexelBuffer: true);
+                bound.Fill(offset, 4, 0x55667788);
+            }
+        });
+        presenter.Run(() => harness.Images.RefreshImage(identifier));
+        presenter.Run(presenter.RenderHost.ResetBindings);
+        harness.Finish();
+
+        var pixels = harness.ReadImageBytes(image);
+        var values = Enumerable.Range(0, (int)(Size * Size)).Select(index => BitConverter.ToUInt32(pixels, index * 4)).ToArray();
+        var written = shaderWritesPart ? 1 : 0;
+        Assert.Equal(written, values.Count(value => value == 0x55667788u));
+        Assert.Equal((int)(Size * Size) - written, values.Count(value => value == 0x11111111u));
+        harness.Shutdown();
+    }
+
     [Fact]
-    public void PrepareBindings_UnmappedBufferReportsItsDescriptorSource()
+    public void PrepareBindings_UnmappedBufferKeepsItsDescriptorAndBindsNull()
     {
         if (!Ready()) return;
         using var presenter = new PresenterUnderTest(_vulkan!);
@@ -441,21 +491,19 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         presenter.Run(() =>
         {
             using var preparation = presenter.RenderHost.BeginPreparation();
-            var failure = Assert.Throws<SchedulerFatalException>(() =>
-                presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot, 0x12340000)));
-            Assert.Contains("address=0x0000F00000000600", failure.Message);
-            Assert.Contains("stage=Pixel", failure.Message);
-            Assert.Contains($"hash=0x{program.Hash:X16}", failure.Message);
-            Assert.Contains("shader=0x0000000012340000", failure.Message);
-            Assert.Contains("buffer=0 source=17 pc=0x4C", failure.Message);
-            Assert.Contains("descriptor=[00000600,0000F000,00000020,00000000]", failure.Message);
-            Assert.Contains("user_data=[12345678]", failure.Message);
+            var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot, 0x12340000));
+            var sources = Assert.IsType<(BufferDescriptorWords Descriptor, ResourceSlotIdentifier Buffer, ulong MappedSize)[]>(
+                prepared.GetType().GetProperty("BufferSources")!.GetValue(prepared));
+            var source = Assert.Single(sources);
+            Assert.Equal(BufferDescriptorWords.From(snapshot.Buffers[0]), source.Descriptor);
+            Assert.Equal(default, source.Buffer);
+            Assert.Equal(0UL, source.MappedSize);
         });
         presenter.Harness.Shutdown();
     }
 
     [Fact]
-    public void PrepareBindings_InvalidAnisotropyStillFailsWithSourceDiagnostics()
+    public void PrepareBindings_ReservedAnisotropyRatioClampsInsteadOfFailing()
     {
         if (!Ready()) return;
         using var presenter = new PresenterUnderTest(_vulkan!);
@@ -473,9 +521,8 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         presenter.Run(() =>
         {
             using var preparation = presenter.RenderHost.BeginPreparation();
-            var failure = Assert.Throws<SchedulerFatalException>(() =>
-                presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot, 0x12340000)));
-            Assert.Contains("anisotropy ratio is unknown: ratio=6", failure.Message);
+            presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot, 0x12340000));
+            Assert.Empty(fatal.Messages);
         });
         presenter.Harness.Shutdown();
     }
@@ -704,7 +751,32 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     [InlineData(1, 2)]
     [InlineData(2, 2)]
     [InlineData(3, 2)]
-    public void RectangleList_ThreeCornersCoverTheRectangleWithoutFetchingAFourthVertex(int omittedCorner, int drawKind)
+    [InlineData(0, 0, true)]
+    [InlineData(1, 0, true)]
+    [InlineData(2, 0, true)]
+    [InlineData(3, 0, true)]
+    [InlineData(0, 1, true)]
+    [InlineData(1, 1, true)]
+    [InlineData(2, 1, true)]
+    [InlineData(3, 1, true)]
+    [InlineData(0, 2, true)]
+    [InlineData(1, 2, true)]
+    [InlineData(2, 2, true)]
+    [InlineData(3, 2, true)]
+    [InlineData(0, 0, false, 4u, 2u)]
+    [InlineData(0, 1, false, 4u, 2u)]
+    [InlineData(0, 2, false, 4u, 2u)]
+    [InlineData(0, 0, true, 4u, 2u)]
+    [InlineData(0, 1, true, 4u, 2u)]
+    [InlineData(0, 2, true, 4u, 2u)]
+    [InlineData(0, 0, false, 5u, 2u)]
+    [InlineData(0, 1, false, 5u, 2u)]
+    [InlineData(0, 2, false, 5u, 2u)]
+    [InlineData(0, 0, true, 5u, 2u)]
+    [InlineData(0, 1, true, 5u, 2u)]
+    [InlineData(0, 2, true, 5u, 2u)]
+    public void RectangleList_ThreeCornersCoverTheRectangleWithoutFetchingAFourthVertex(int omittedCorner, int drawKind,
+        bool geometryFallback = false, uint drawCount = 3, uint instanceCount = 1)
     {
         if (!Ready()) return;
         if (!_vulkan.SupportsFillRectangle)
@@ -714,6 +786,13 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         }
 
         using var presenter = new PresenterUnderTest(_vulkan);
+        if (geometryFallback)
+        {
+            _vulkan.Vk.GetPhysicalDeviceFeatures(_vulkan.Physical, out var features);
+            Assert.True(features.GeometryShader);
+            presenter.SetField("_supportsFillRectangle", false);
+            presenter.SetField("_supportsRectangleGeometry", true);
+        }
         presenter.LoadRenderingCommands();
         var harness = presenter.Harness;
         var target = harness.MapBacked(0x10000, ReadWrite);
@@ -729,21 +808,22 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         banks.UserConfig.PrimitiveType = 7;
         banks.Context.ShaderInterface.GeometryOutputPrimitiveType = 3;
         var executor = new RenderExecutor(presenter.RenderHost,
-            new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices));
+            new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices, vertexCount: drawCount));
         if (drawKind != 0)
         {
             var indices = harness.MapBacked(0x10000, ReadWrite);
-            harness.Write(indices, Bytes((ushort)0, (ushort)1, (ushort)2));
+            harness.Write(indices, Bytes((ushort)0, (ushort)1, (ushort)2, (ushort)3, (ushort)4));
             var indirectArguments = drawKind == 2 ? harness.MapBacked(0x10000, ReadWrite) : 0;
             if (indirectArguments != 0)
-                harness.Write(indirectArguments, Bytes(3u, 1u, 0u, 0u, 0u));
+                harness.Write(indirectArguments, Bytes(drawCount, instanceCount, 0u, 0u, 0u));
             presenter.Run(() => executor.DrawIndexed(1, banks,
-                new DrawIndexedArguments(0, 0, VertexCount, indices, 0, 1, 0, 0, DrawOffsetSource.Packet,
+                new DrawIndexedArguments(0, 0, drawCount, indices, 0, instanceCount, 0, 0, DrawOffsetSource.Packet,
                     IndirectArgumentsAddress: indirectArguments)));
         }
         else
         {
-            presenter.Run(() => executor.DrawAuto(1, banks, Draw()));
+            presenter.Run(() => executor.DrawAuto(1, banks,
+                new DrawAutoArguments(0, 0, drawCount, instanceCount, 0, 0, DrawOffsetSource.Packet)));
         }
 
         presenter.Run(() => presenter.InvokeMethod("FlushBatchedGuestCommands"));
@@ -800,8 +880,9 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         var address = harness.MapBacked(0x10000, ReadWrite);
         harness.Write(address, new byte[0x100]);
 
-        for (var preparationIndex = 0; preparationIndex < 3; preparationIndex++)
+        for (var preparationIndex = 0; preparationIndex < GuestBufferCache.StreamUsesBeforeClean + 1; preparationIndex++)
         {
+            var streamed = preparationIndex + 1 < GuestBufferCache.StreamUsesBeforeClean;
             presenter.Run(() =>
             {
                 Assert.True(stream.TryMap(stream.Size, out _));
@@ -812,8 +893,16 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
             {
                 using var preparation = presenter.RenderHost.BeginPreparation();
                 var binding = presenter.RenderHost.ObtainBuffer(address, 0x100, false);
-                Assert.Equal(stream.Handle.Handle, binding.Handle);
-                Assert.Equal(0UL, binding.Offset);
+                if (streamed)
+                {
+                    Assert.Equal(stream.Handle.Handle, binding.Handle);
+                    Assert.Equal(0UL, binding.Offset);
+                }
+                else
+                {
+                    Assert.NotEqual(stream.Handle.Handle, binding.Handle);
+                }
+
                 var transient = presenter.RenderHost.UploadTransient(new byte[0x100], 16);
                 Assert.Equal(stream.Handle.Handle, transient.Handle);
             });

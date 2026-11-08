@@ -63,14 +63,20 @@ public static class PixelStageInputResolver
         ShaderInterfaceRegisters shaderInterface,
         ReadOnlySpan<byte> targetOutputModes,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
-        uint inputCount)
+        uint inputCount,
+        uint[]? semantics = null)
     {
         var activeInputs = shaderInterface.PixelInputEnable & shaderInterface.PixelInputAddress;
         var customMask = 0u;
         var semanticCount = Math.Min(Math.Min(shader.InputSemanticsCount, inputCount), (uint)PixelInputInfo.InterpolatorCount);
         for (var index = 0u; index < semanticCount; index++)
         {
-            if (!context.TryReadUInt32(shader.InputSemanticsAddress + index * sizeof(uint), out var word))
+            uint word;
+            if (semantics is not null)
+            {
+                word = semantics[index];
+            }
+            else if (!context.TryReadUInt32(shader.InputSemanticsAddress + index * sizeof(uint), out word))
             {
                 throw SubmissionScheduler.Fatal($"The pixel input semantics are unreadable: shader=0x{shader.CodeAddress:X16} index={index}.");
             }
@@ -110,6 +116,7 @@ public static class PixelStageInputResolver
                 : PixelInputInfo.NoPerspectiveCenterRegister,
             InterpolatorSettings = interpolators,
             TargetOutputModes = outputModes,
+            TargetExportFormats = shaderInterface.TargetOutputModes.ToArray(),
             TargetExportMappings = mappings,
             ScratchDwords = shader.ScratchDwords,
             PositionX = (activeInputs & InputPositionX) != 0,

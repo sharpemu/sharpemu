@@ -9,7 +9,6 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 // One attachment of a dynamic rendering scope, with the format the pipeline must match.
 public readonly record struct RenderingAttachment(
     ImageView View,
-    ImageLayout Layout,
     Format Format,
     uint ClearWord0,
     uint ClearWord1,
@@ -19,7 +18,28 @@ public readonly record struct RenderingAttachment(
     bool HasDepth,
     bool DepthClear,
     bool HasStencil,
-    bool StencilClear);
+    bool StencilClear)
+{
+    // Compared by handle value: the generated comparison goes through the object comparer of ImageView
+    // and boxes both views, which a draw pays for every attachment it re-checks.
+    public bool Equals(RenderingAttachment other) =>
+        View.Handle == other.View.Handle &&
+        Format == other.Format &&
+        ClearWord0 == other.ClearWord0 &&
+        ClearWord1 == other.ClearWord1 &&
+        ClearWord2 == other.ClearWord2 &&
+        ClearWord3 == other.ClearWord3 &&
+        IsClear == other.IsClear &&
+        HasDepth == other.HasDepth &&
+        DepthClear == other.DepthClear &&
+        HasStencil == other.HasStencil &&
+        StencilClear == other.StencilClear;
+
+    public override int GetHashCode() => HashCode.Combine(
+        View.Handle,
+        HashCode.Combine(Format, ClearWord0, ClearWord1, ClearWord2, ClearWord3),
+        HashCode.Combine(IsClear, HasDepth, DepthClear, HasStencil, StencilClear));
+}
 
 [InlineArray(RenderingState.ColorAttachmentCapacity)]
 public struct RenderingColorAttachments
@@ -53,7 +73,7 @@ public struct RenderingState : IEquatable<RenderingState>
             return false;
         }
 
-        for (var i = 0; i < ColorAttachmentCapacity; i++)
+        for (var i = 0; i < ColorAttachmentCount; i++)
         {
             if (!ColorAttachments[i].Equals(other.ColorAttachments[i]))
             {
@@ -69,7 +89,7 @@ public struct RenderingState : IEquatable<RenderingState>
     public override readonly int GetHashCode()
     {
         var hash = HashCode.Combine(Width, Height, Layers, ColorAttachmentCount, Samples, DepthStencilAttachment);
-        for (var i = 0; i < ColorAttachmentCapacity; i++)
+        for (var i = 0; i < ColorAttachmentCount; i++)
         {
             hash = HashCode.Combine(hash, ColorAttachments[i]);
         }

@@ -97,7 +97,8 @@ public sealed class RuntimeValueValidator
             case ScalarValueKind.Undefined:
                 return false;
             case ScalarValueKind.UserData:
-                return value.UserDataRegister >= _userDataBase && value.UserDataRegister - _userDataBase < _userDataCount;
+                return value.UserDataRegister >= _userDataBase && value.UserDataRegister - _userDataBase < _userDataCount ||
+                    _graph.IsCallArgumentRegister(value.UserDataRegister);
             case ScalarValueKind.ShaderBase:
             case ScalarValueKind.MemoryAperture:
                 return true;

@@ -15,7 +15,7 @@ using System.Threading;
 
 namespace SharpEmu.Libs.Kernel;
 
-public static class KernelRuntimeCompatExports
+public static partial class KernelRuntimeCompatExports
 {
     private const ulong TlsErrnoOffset = 0x40;
     private const ulong TlsStackChkGuardBaseOffset = 0x800;
@@ -81,6 +81,13 @@ public static class KernelRuntimeCompatExports
     private delegate ulong RdtscDelegate();
 
     [SysAbiExport(
+        Nid = "uvT2iYBBnkY",
+        ExportName = "sceKernelSync",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int KernelSync(CpuContext ctx) => ctx.SetReturn(0);
+
+    [SysAbiExport(
         Nid = "1jfXLRVzisc",
         ExportName = "sceKernelUsleep",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -116,11 +123,28 @@ public static class KernelRuntimeCompatExports
             // Precise sleep: rounding microseconds up to Thread.Sleep
             // milliseconds (which itself overshoots by a scheduler quantum)
             // hard-caps games that pace their frame loop with usleep.
+            micros = Audio.AudioOut2Exports.ProducerSleepMicroseconds(micros);
             HostTiming.SleepMicroseconds((long)Math.Min(micros, long.MaxValue));
         }
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(Nid = "-ZR+hG7aDHw", ExportName = "sceKernelSleep",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
+    public static int KernelSleep(CpuContext ctx)
+    {
+        var remaining = (ulong)(uint)ctx[CpuRegister.Rdi] * 1000;
+        if (remaining != 0)
+            GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelSleep");
+        while (remaining != 0)
+        {
+            var milliseconds = (int)Math.Min(remaining, int.MaxValue);
+            Thread.Sleep(milliseconds);
+            remaining -= (uint)milliseconds;
+        }
+        return ctx.SetReturn(0);
     }
 
     private static void TraceUsleepSpin(CpuContext ctx, ulong micros)
@@ -793,6 +817,7 @@ public static class KernelRuntimeCompatExports
             _prtApertures[apertureId] = (apertureBase, apertureSize);
         }
 
+        SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.NoteLazyRange(apertureId, apertureBase, apertureSize);
         Console.Error.WriteLine(
             $"[LOADER][TRACE] set_prt_aperture: id={apertureId} base=0x{apertureBase:X16} size=0x{apertureSize:X16}");
         if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_ALLOC_IMPORTS"), "1", StringComparison.Ordinal))
@@ -1813,8 +1838,8 @@ public static class KernelRuntimeCompatExports
     // (currently 64-bit Windows); otherwise it falls back to the QPC-based Stopwatch. The
     // calibrated and CPUID frequencies both describe RDTSC, so reporting either while ReadTsc is
     // actually returning Stopwatch ticks makes sceKernelGetTscFrequency disagree with the counter,
-    // and a guest computing elapsed = readTscDelta / frequency gets the wrong time on Linux and
-    // macOS. Gate those on rdtscAvailable; otherwise report Stopwatch's own frequency so the pair
+    // and a guest computing elapsed = readTscDelta / frequency gets the wrong time on Linux. Gate
+    // those on rdtscAvailable; otherwise report Stopwatch's own frequency so the pair
     // stays consistent.
     internal static (ulong FrequencyHz, string Source) SelectKernelTscFrequency(
         bool rdtscAvailable,

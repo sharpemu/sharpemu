@@ -127,15 +127,14 @@ public sealed class GnmTilingDetileTests
         Assert.Equal((4, 8), (placements[5].TailElementX, placements[5].TailElementY));
     }
 
-    // Independent re-derivation of the 64 KiB RB+ R_X equation (swizzle mode 27,
-    // 2 bytes/element) straight from the address-bit table, so the tiled source
-    // layout does not depend on TryDetile's own internal factoring.
+    // Use the two-byte guest R_X equation to build the tiled test input.
+    // Do not use TryDetile to set its own expected addresses.
     private static readonly (uint XMask, uint YMask)[] RbPlus64KRenderX2Bpp =
     [
         (0, 0), (1u << 0, 0), (1u << 1, 0), (1u << 2, 0),
         (0, 1u << 0), (0, 1u << 1), (0, 1u << 2), (1u << 3, 0),
-        (1u << 7, (1u << 4) | (1u << 7)), (1u << 4, 1u << 4), (1u << 6, 1u << 5), (1u << 5, 1u << 6),
-        (0, 1u << 3), (1u << 6, 0), (1u << 7, 1u << 7), (1u << 8, 1u << 6),
+        (1u << 3, 1u << 3), (1u << 4, 1u << 4), (1u << 6, 1u << 5), (1u << 5, 1u << 6),
+        (0, 1u << 4), (1u << 6, 0), (0, 1u << 6), (1u << 7, 0),
     ];
 
     private static uint ReferenceOffset(uint x, uint y, (uint XMask, uint YMask)[] pattern)
@@ -275,8 +274,8 @@ public sealed class GnmTilingDetileTests
         Assert.Equal(expected, actual);
     }
 
-    // The production GnmTiling.DetileWithParams (the active CPU fallback used by
-    // the Metal path under default-on GPU detile) must equal TryDetile for every
+    // The production GnmTiling.DetileWithParams (the CPU fallback for GPU
+    // detile) must equal TryDetile for every
     // supported mode/bpp — same DetileParams addressing, no re-derived swizzle.
     [Theory]
     [InlineData(27u, 2, 384, 200)]
@@ -347,7 +346,7 @@ public sealed class GnmTilingDetileTests
                 mode, w, h, bpp));
         }
 
-        // Actual: the layer-major loop the Vulkan/Metal CPU fallbacks run.
+        // Actual: the layer-major loop the Vulkan CPU fallback runs.
         var actual = new byte[sliceLinearBytes * layers];
         for (var layer = 0; layer < layers; layer++)
         {
@@ -361,7 +360,7 @@ public sealed class GnmTilingDetileTests
     }
 
     // Reference detile driven entirely by DetileParams — the single shared
-    // addressing formula the Vulkan/Metal compute kernel will run per texel.
+    // addressing formula the Vulkan compute kernel will run per texel.
     private static byte[] DetileViaParams(byte[] tiled, DetileParams p, int w, int h, int bpp)
     {
         var linear = new byte[w * h * bpp];

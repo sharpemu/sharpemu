@@ -96,6 +96,20 @@ public sealed class GuestBufferFaultTests
             Assert.Contains("faults_resolved=4 ", GuestGpuMemoryHook.GetSummary());
             harness.Worker.Run(() => Assert.Throws<SchedulerFatalException>(() => harness.Cache.ObtainBuffer(privateRange, 0x100, isWritten: true)));
 
+            var kept = harness.MapBacked(0x10000, ReadWrite);
+            harness.Worker.Run(() => harness.Cache.ObtainBuffer(kept, 0x4100, isWritten: false));
+            harness.Write(kept + 0x40, BitConverter.GetBytes(0xCAFEUL));
+            Assert.True(harness.Store.NoteEmulatorWrite(kept + 0x40, 8));
+            Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(kept));
+            GuestWrite(kept + 0x48, 0xBEEF);
+            Assert.Equal(HostPageProtection.ReadWrite, harness.Protection(kept));
+            Assert.Equal(0xCAFEUL, GuestRead(kept + 0x40));
+            Assert.Equal(0xBEEFUL, GuestRead(kept + 0x48));
+            Assert.Contains("faults_resolved=5 ", GuestGpuMemoryHook.GetSummary());
+            var (keptBuffer, _) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(kept, 0x4100, isWritten: false));
+            Assert.Equal(0xCAFEUL, BitConverter.ToUInt64(harness.ReadBack(keptBuffer, 0x40, 8)));
+            Assert.Equal(0xBEEFUL, BitConverter.ToUInt64(harness.ReadBack(keptBuffer, 0x48, 8)));
+
             // Unrelated faults are declined at the hook the fault handler calls.
             var noAccess = harness.MapBacked(0x10000, GuestPageProtection.None);
             Assert.False(GuestGpuMemoryHook.TryResolveFault(FaultKind.Read, noAccess + 8));
@@ -113,7 +127,7 @@ public sealed class GuestBufferFaultTests
             var outcomes = guest.Race(2, write: false, raced + 8, _ => 0);
             Assert.All(outcomes, outcome => Assert.True(outcome.Ok, outcome.Error));
             Assert.All(outcomes, outcome => Assert.Equal(0x7777777777777777UL, outcome.Value));
-            Assert.Contains("faults_resolved=6 ", GuestGpuMemoryHook.GetSummary());
+            Assert.Contains("faults_resolved=7 ", GuestGpuMemoryHook.GetSummary());
             Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(raced));
 
             harness.Shutdown();

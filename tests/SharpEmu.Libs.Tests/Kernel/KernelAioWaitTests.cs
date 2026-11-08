@@ -17,6 +17,32 @@ public sealed class KernelAioWaitTests
     private const ulong StateAddress = MemoryBase + 0x300;
 
     [Theory]
+    [InlineData(Generation.Gen4, false, false)]
+    [InlineData(Generation.Gen5, false, false)]
+    [InlineData(Generation.Gen5, true, false)]
+    [InlineData(Generation.Gen5, false, true)]
+    public void PollSingleResolvesAndReportsRequestState(Generation generation, bool deleted, bool unmapped)
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(generation));
+        Assert.True(manager.TryGetExport("2pOuoWoCxdk", out var export));
+        Assert.Equal("sceKernelAioPollRequest", export.Name);
+        Assert.Equal("libKernel", export.LibraryName);
+        var context = CreateSubmission(out var submitId);
+        try
+        {
+            if (deleted) Delete(context, submitId);
+            context[CpuRegister.Rdi] = submitId;
+            context[CpuRegister.Rsi] = unmapped ? 0 : StateAddress;
+            var expected = deleted ? OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT
+                : unmapped ? OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT : OrbisGen2Result.ORBIS_GEN2_OK;
+            Assert.Equal((int)expected, export.Function(context));
+            Assert.Equal(deleted || unmapped ? 0u : 3u, ReadState(context, StateAddress));
+        }
+        finally { Delete(context, submitId); }
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void WaitSingleReportsSubmittedCompletionWithoutChangingTimeout(bool withTimeout)

@@ -6,22 +6,24 @@ namespace SharpEmu.Libs.Gpu.Scheduling;
 public sealed class TickedBufferRing
 {
     private const int GrowStep = 4;
+    private const ulong InUse = ulong.MaxValue;
 
-    private readonly IGpuTickDevice _device;
+    private readonly IGpuCommandBufferSource _source;
     private readonly TickTimeline _timeline;
     private readonly List<nint> _buffers = new();
     private readonly List<ulong> _ticks = new();
     private int _hint;
 
-    public TickedBufferRing(IGpuTickDevice device, TickTimeline timeline)
+    public TickedBufferRing(IGpuCommandBufferSource source, TickTimeline timeline)
     {
-        _device = device;
+        _source = source;
         _timeline = timeline;
     }
 
     public int Count => _buffers.Count;
 
-    // Reuse a completed buffer or allocate more buffers. Mark it with the current tick without waiting.
+    // Reuse a buffer whose submission completed or allocate more; the buffer stays in use until
+    // Submitted stamps it with the tick that carries it.
     public nint AcquireBuffer()
     {
         var gpuTick = _timeline.CompletedTick;
@@ -41,9 +43,9 @@ public sealed class TickedBufferRing
         if (found < 0)
         {
             found = AllocateMoreBuffers();
-            _ticks[found] = _timeline.CurrentTick;
         }
 
+        _ticks[found] = InUse;
         _hint = found + 1;
         if (_hint == _ticks.Count)
         {
@@ -53,13 +55,23 @@ public sealed class TickedBufferRing
         return _buffers[found];
     }
 
+    public void Submitted(nint buffer, ulong tick)
+    {
+        var index = _buffers.IndexOf(buffer);
+        if (index < 0 || _ticks[index] != InUse)
+        {
+            throw SubmissionScheduler.Fatal($"The submitted command buffer is not in use: buffer=0x{buffer:X} tick={tick}.");
+        }
+
+        _ticks[index] = tick;
+    }
+
     private int FindReusableBuffer(int begin, int end, ulong gpuTick)
     {
         for (var index = begin; index < end; index++)
         {
             if (gpuTick >= _ticks[index])
             {
-                _ticks[index] = _timeline.CurrentTick;
                 return index;
             }
         }
@@ -70,7 +82,7 @@ public sealed class TickedBufferRing
     private int AllocateMoreBuffers()
     {
         var first = _buffers.Count;
-        _buffers.AddRange(_device.AllocateBuffers(GrowStep));
+        _buffers.AddRange(_source.AllocateBuffers(GrowStep));
         _ticks.AddRange(new ulong[GrowStep]);
         return first;
     }

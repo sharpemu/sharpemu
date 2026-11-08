@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Vulkan;
@@ -20,8 +21,15 @@ internal static unsafe class VulkanSynchronization
         uint bufferMemoryBarrierCount,
         BufferMemoryBarrier2* bufferMemoryBarriers,
         uint imageMemoryBarrierCount,
-        ImageMemoryBarrier2* imageMemoryBarriers)
+        ImageMemoryBarrier2* imageMemoryBarriers,
+        BarrierSource source = BarrierSource.Other)
     {
+        if (GpuSyncProfile.Enabled)
+        {
+            GpuSyncProfile.CountBarrier(sourceStages, destinationStages, memoryBarrierCount, bufferMemoryBarrierCount, imageMemoryBarrierCount);
+            BarrierTally.Count(source, sourceStages, destinationStages);
+        }
+
         var sourceStages2 = (PipelineStageFlags2)(ulong)sourceStages;
         var destinationStages2 = (PipelineStageFlags2)(ulong)destinationStages;
         for (var index = 0u; index < memoryBarrierCount; index++)
@@ -51,6 +59,9 @@ internal static unsafe class VulkanSynchronization
             ImageMemoryBarrierCount = imageMemoryBarrierCount,
             PImageMemoryBarriers = imageMemoryBarriers,
         };
-        vk.CmdPipelineBarrier2(command, &dependencyInfo);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdPipelineBarrier2(command, &dependencyInfo);
+        }
     }
 }

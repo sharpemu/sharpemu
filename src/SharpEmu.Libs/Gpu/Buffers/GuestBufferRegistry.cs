@@ -48,6 +48,41 @@ internal sealed class GuestBufferRegistry<TBuffer> : IDisposable where TBuffer :
     public int RegisteredCount => _registered.Count;
     public ulong RegisteredBytes { get; private set; }
 
+    public long RegistrationSerial { get; private set; }
+
+    public const int RegionShift = 22;
+    public const int RegionStampSlots = 1 << 14;
+    private readonly long[] _regionStamps = new long[RegionStampSlots];
+
+    public long RegionStamp(ulong address, ulong size)
+    {
+        if (size == 0 || size - 1 > ulong.MaxValue - address)
+        {
+            return RegistrationSerial;
+        }
+
+        var first = address >> RegionShift;
+        var last = (address + size - 1) >> RegionShift;
+        if (last - first > 1)
+        {
+            return RegistrationSerial;
+        }
+
+        var stamp = Volatile.Read(ref _regionStamps[first & (RegionStampSlots - 1)]);
+        return last == first ? stamp : stamp + Volatile.Read(ref _regionStamps[last & (RegionStampSlots - 1)]);
+    }
+
+    private void BumpRegionStamps(ulong address, ulong size)
+    {
+        var first = address >> RegionShift;
+        var regions = Math.Min(((address + size - 1) >> RegionShift) - first + 1, RegionStampSlots);
+        for (var region = 0UL; region < regions; region++)
+        {
+            ref var stamp = ref _regionStamps[(first + region) & (RegionStampSlots - 1)];
+            Volatile.Write(ref stamp, stamp + 1);
+        }
+    }
+
     public ResourceSlotIdentifier AllocateBuffer(TBuffer resource, ulong address, ulong size)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -111,6 +146,8 @@ internal sealed class GuestBufferRegistry<TBuffer> : IDisposable where TBuffer :
             _pageOwners[block] ??= new Entry?[OwnersPerBlock];
         var node = entry.RecencyNode ?? new LinkedListNode<Entry>(entry);
         _registered.Add(entry.Address, entry);
+        RegistrationSerial++;
+        BumpRegionStamps(entry.Address, entry.Size);
         for (var page = firstPage; page < endPage; page++) SetPageOwner(page, entry);
         entry.LastUseTick = tick;
         entry.RecencyNode = node;
@@ -135,6 +172,8 @@ internal sealed class GuestBufferRegistry<TBuffer> : IDisposable where TBuffer :
 
         for (var page = firstPage; page < endPage; page++) SetPageOwner(page, null);
         _registered.Remove(entry.Address);
+        RegistrationSerial++;
+        BumpRegionStamps(entry.Address, entry.Size);
         _recency.Remove(entry.RecencyNode!);
         RegisteredBytes -= entry.Size;
         entry.State = BufferLifetimeState.Retiring;

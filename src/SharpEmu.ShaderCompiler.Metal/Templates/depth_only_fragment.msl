@@ -1,7 +1,0 @@
-#include <metal_stdlib>
-
-using namespace metal;
-
-fragment void depth_only_fs()
-{
-}

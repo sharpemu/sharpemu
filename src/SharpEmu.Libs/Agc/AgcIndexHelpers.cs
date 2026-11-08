@@ -31,7 +31,7 @@ internal static class AgcIndexHelpers
             _ => sizeof(ushort),
         };
 
-    /// <summary>Expand guest u8 indices to host u16 (Vulkan/Metal bindable).</summary>
+    /// <summary>Expand guest u8 indices to host u16 (Vulkan bindable).</summary>
     internal static void ExpandIndex8ToU16(ReadOnlySpan<byte> source, Span<byte> destination)
     {
         if (destination.Length < source.Length * sizeof(ushort))

@@ -47,6 +47,7 @@ public sealed class TextureTransferLayout
     public ulong SliceStride;
     public ulong SourceSliceStride;
     public TiledSurfaceLayout Surface = new();
+    public TileElementLayout Element;
     public readonly TransferMipLayout[] Mips = new TransferMipLayout[TiledSurfaceLayout.MaxLevels];
 
     private static readonly ColorComponentMap[][] RenderTargetColorMappings =
@@ -183,7 +184,8 @@ public sealed class TextureTransferLayout
         ulong uploadSize,
         bool allowDepthTile,
         bool volume,
-        string owner)
+        string owner,
+        uint rowPitch = 0)
     {
         var layout = new TextureTransferLayout();
         var description = new TiledSurfaceDescription(
@@ -233,8 +235,7 @@ public sealed class TextureTransferLayout
         layout.Pitch = TileGeometry.TexturePitch(format, width, tile);
         if (tile == GuestTileMode.Linear)
         {
-            var levelSpans = new TileLevelSpan[TiledSurfaceLayout.MaxLevels];
-            var paddedSizes = new TilePaddedSize[TiledSurfaceLayout.MaxLevels];
+            var (levelSpans, paddedSizes) = MipLayoutScratch.Rent();
             TileGeometry.TryGetTextureSize(format, width, height, levels, tile, out _, levelSpans, paddedSizes);
             for (uint level = 0; level < levels; level++)
             {
@@ -245,6 +246,14 @@ public sealed class TextureTransferLayout
                     RowLength = paddedSizes[level].Width,
                     ImageHeight = paddedSizes[level].Height,
                 };
+            }
+
+            if (levels == 1 && rowPitch >= width && rowPitch != layout.Pitch)
+            {
+                layout.Pitch = rowPitch;
+                layout.Mips[0].RowLength = rowPitch;
+                layout.Mips[0].Size = (rowPitch + (ulong)element.TexelWidth - 1) / element.TexelWidth *
+                    ((height + (ulong)element.TexelHeight - 1) / element.TexelHeight) * element.Bytes;
             }
         }
         else if (volume)
@@ -267,7 +276,33 @@ public sealed class TextureTransferLayout
             layout.SliceStride = SliceStrideOf(layout.Mips, levels, uploadSize, depth);
         }
 
+        layout.Element = element;
         return layout;
+    }
+
+    // The last byte a copy reaches in its buffer, plus one, following Vulkan's buffer addressing: rows advance
+    // by BufferRowLength and slices by BufferImageHeight.
+    public static ulong CopyFootprint(IReadOnlyList<BufferImageCopy> regions, TileElementLayout element)
+    {
+        static ulong Blocks(uint texels, uint block) => (texels + (ulong)block - 1) / block;
+        ulong end = 0;
+        foreach (var region in regions)
+        {
+            var extent = region.ImageExtent;
+            if (extent.Width == 0 || extent.Height == 0 || extent.Depth == 0 || region.ImageSubresource.LayerCount == 0)
+            {
+                continue;
+            }
+
+            var rowBlocks = Blocks(region.BufferRowLength == 0 ? extent.Width : region.BufferRowLength, element.TexelWidth);
+            var sliceRows = Blocks(region.BufferImageHeight == 0 ? extent.Height : region.BufferImageHeight, element.TexelHeight);
+            var slices = (ulong)extent.Depth * region.ImageSubresource.LayerCount;
+            var lastBlock = ((slices - 1) * sliceRows + Blocks(extent.Height, element.TexelHeight) - 1) * rowBlocks +
+                Blocks(extent.Width, element.TexelWidth);
+            end = Math.Max(end, region.BufferOffset + lastBlock * element.Bytes);
+        }
+
+        return end;
     }
 
     private static Exception UnsupportedTiledUpload(string owner, GuestPixelFormat format, GuestTileMode tile, ulong uploadSize, uint width, uint height, uint levels) =>
@@ -452,7 +487,9 @@ public sealed class TextureTransferLayout
                     transfer.Width = Math.Max((region.ImageExtent.Width + texture.TexelWidth - 1) / texture.TexelWidth, 1);
                     transfer.Height = Math.Max((logicalHeight + texture.TexelHeight - 1) / texture.TexelHeight, 1);
                     transfer.Depth = 1;
-                    transfer.SurfaceZ = block.Kind is TileBlockKind.RenderTarget64KB or TileBlockKind.Depth64KB ? region.ImageSubresource.BaseArrayLayer : 0;
+                    transfer.SurfaceZ = block.Kind is TileBlockKind.RenderTarget64KB or TileBlockKind.RenderTarget64KBGen5 or TileBlockKind.Depth64KB
+                        ? region.ImageSubresource.BaseArrayLayer
+                        : 0;
                     transfer.Pitch = Math.Max((pitch + texture.TexelWidth - 1) / texture.TexelWidth, 1);
                     transfer.Tail = tail;
                     transfer.TailX = tail ? mip.TailX : 0;

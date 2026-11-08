@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.VideoOut;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using Silk.NET.Vulkan;
@@ -17,7 +18,7 @@ public readonly record struct ReadbackPiece(GpuBuffer Source, ulong SourceOffset
 internal sealed unsafe class VulkanAsyncReadback : IDisposable
 {
     private const ulong Alignment = 16;
-    private const int SlotCount = 8;
+    private const int SlotCount = 32;
 
     private readonly GpuDeviceInfo _device;
     private readonly SubmissionScheduler _scheduler;
@@ -125,6 +126,22 @@ internal sealed unsafe class VulkanAsyncReadback : IDisposable
         return false;
     }
 
+    public void WaitForFreeSlot(int timeoutMilliseconds)
+    {
+        lock (_gate)
+        {
+            for (var index = 1; index < _slots.Length; index++)
+            {
+                if (_disposed || !_slots[index].Busy)
+                {
+                    return;
+                }
+            }
+
+            Monitor.Wait(_gate, timeoutMilliseconds);
+        }
+    }
+
     public bool IsComplete(Ticket ticket)
     {
         lock (_gate)
@@ -172,10 +189,13 @@ internal sealed unsafe class VulkanAsyncReadback : IDisposable
                 PSemaphores = &semaphore,
                 PValues = &signalValue,
             };
+            var waitStart = VideoOut.GpuWaitSiteProfile.Begin();
             using (VideoOut.RenderPhaseProfile.MeasureDetail(VideoOut.RenderPhaseProfile.Phase.GpuCompletionWait))
             {
                 Require(vk.WaitSemaphores(_device.Device, &waitInfo, ulong.MaxValue), "vkWaitSemaphores(readback)");
             }
+
+            VideoOut.GpuWaitSiteProfile.End(waitStart);
         }
         finally
         {
@@ -206,6 +226,7 @@ internal sealed unsafe class VulkanAsyncReadback : IDisposable
             finally
             {
                 ticket.Slot.Busy = false;
+                Monitor.PulseAll(_gate);
             }
         }
     }
@@ -236,7 +257,10 @@ internal sealed unsafe class VulkanAsyncReadback : IDisposable
             var piece = pieces[index];
             offset = AlignUp(offset, Alignment);
             var region = new BufferCopy(piece.SourceOffset, offset, piece.Size);
-            vk.CmdCopyBuffer(command, piece.Source.Handle, staging.Handle, 1, &region);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                vk.CmdCopyBuffer(command, piece.Source.Handle, staging.Handle, 1, &region);
+            }
             offsets[index] = offset;
             sizes[index] = piece.Size;
             offset += piece.Size;
@@ -257,7 +281,10 @@ internal sealed unsafe class VulkanAsyncReadback : IDisposable
             MemoryBarrierCount = 1,
             PMemoryBarriers = &toHost,
         };
-        vk.CmdPipelineBarrier2(command, &dependency);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            vk.CmdPipelineBarrier2(command, &dependency);
+        }
         Require(vk.EndCommandBuffer(command), "vkEndCommandBuffer(readback)");
 
         var signalValue = ++_signaled;

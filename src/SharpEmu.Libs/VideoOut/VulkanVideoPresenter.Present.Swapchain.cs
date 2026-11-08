@@ -141,6 +141,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _imageInitialized = new bool[swapchainImageCount];
             Console.Error.WriteLine(
+                $"[LOADER][INFO] Vulkan presentation: vsync={_videoOptions.VSync} " +
+                $"mode={presentMode} images={swapchainImageCount} frames_in_flight={MaxFramesInFlight}");
+            Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan output color: requested={_videoOptions.HdrMode} " +
                 $"display_hdr={hdrState.Enabled} guest_hdr_supported={hdrOutputSupported} " +
                 $"guest_hdr={guestHdrRequested} active={_hdrOutputActive} " +
@@ -287,7 +290,7 @@ internal static unsafe partial class VulkanVideoPresenter
             // frame does not quantize the frame rate down to 30/20 fps the
             // way FIFO does; the guest side is already paced by PaceFlip.
             // FIFO is the only mode guaranteed by the spec and remains the
-            // fallback (MoltenVK typically exposes FIFO + IMMEDIATE only).
+            // fallback.
             uint modeCount = 0;
             if (_surfaceApi.GetPhysicalDeviceSurfacePresentModes(
                     _physicalDevice,

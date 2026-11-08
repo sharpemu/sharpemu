@@ -3,6 +3,7 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Libs.Gpu.GpuCommands;
 
 namespace SharpEmu.Libs.Gpu.Scheduling;
 
@@ -79,6 +80,18 @@ public sealed class EndOfPipe
 
         value = wholeValue + fractionalValue;
         return true;
+    }
+
+    internal void CompleteDeferred(in EndOfPipeWrite write)
+    {
+        if (write.Kind is EndOfPipeWriteKind.Flip or EndOfPipeWriteKind.FlipWithWrite32 or
+            EndOfPipeWriteKind.FlipWithInterruptWriteBack32)
+            _flips.CompleteFlip(write.FlipRequestId);
+        if (write.Kind is EndOfPipeWriteKind.InterruptOnly or EndOfPipeWriteKind.Interrupt32 or
+            EndOfPipeWriteKind.Interrupt64 or EndOfPipeWriteKind.InterruptWriteBack32 or
+            EndOfPipeWriteKind.InterruptWriteBack64 or EndOfPipeWriteKind.FlipWithInterruptWriteBack32)
+            _sink.TriggerInterrupt(write.EventId,
+                write.Kind == EndOfPipeWriteKind.FlipWithInterruptWriteBack32 ? 0 : write.ContextId);
     }
 
     public static ulong ReadReferenceClock()
@@ -223,7 +236,7 @@ public sealed class EndOfPipe
 
     public void QueueInterruptOnCompletion(RecordingBuffer buffer, int eventId, uint contextId)
     {
-        _ = buffer.Handle;
+        RequireRecording(buffer);
         var scheduler = buffer.Owner;
         if (!scheduler.Active || buffer != scheduler.Current)
         {
@@ -240,7 +253,15 @@ public sealed class EndOfPipe
             throw SubmissionScheduler.Fatal("Cannot record an end-of-pipe write to address zero.");
         }
 
-        _ = signal.Buffer.Handle;
+        RequireRecording(signal.Buffer);
+    }
+
+    private static void RequireRecording(RecordingBuffer buffer)
+    {
+        if (buffer.IsInvalid)
+        {
+            throw SubmissionScheduler.Fatal("An end-of-pipe signal requires a recording command buffer.");
+        }
     }
 
     private static RecordedOperation GetDebugOperation(WriteAction action) => action switch

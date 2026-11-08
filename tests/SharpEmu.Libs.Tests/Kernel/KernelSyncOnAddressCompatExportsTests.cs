@@ -145,6 +145,166 @@ public sealed class KernelSyncOnAddressCompatExportsTests
             waiter.Resume());
     }
 
+    [Fact]
+    public void UmtxWaitReturnsImmediatelyWhenValueDoesNotMatch()
+    {
+        var (memory, ctx) = CreateContext();
+        WriteUInt64(memory, ValueAddress, 7);
+        ctx[CpuRegister.Rdi] = ValueAddress;
+        ctx[CpuRegister.Rsi] = 2; // UMTX_OP_WAIT
+        ctx[CpuRegister.Rdx] = 9;
+        ctx[CpuRegister.Rcx] = 0;
+        ctx[CpuRegister.R8] = 0;
+
+        RunAsGuest(0x809, () => Assert.Equal(
+            0,
+            KernelSyncOnAddressCompatExports.UmtxOp(ctx)));
+
+        Assert.False(GuestThreadExecution.TryConsumeCurrentThreadBlock(out _));
+        Assert.Equal(0UL, ctx[CpuRegister.Rax]);
+    }
+
+    [Fact]
+    public void UmtxWaitAndWakeShareTheAddressWaitRegistry()
+    {
+        var (memory, waitContext) = CreateContext();
+        var wakeContext = new CpuContext(memory, Generation.Gen5);
+        WriteUInt64(memory, ValueAddress, 0);
+
+        IGuestThreadBlockWaiter? stagedWaiter = null;
+        waitContext[CpuRegister.Rdi] = ValueAddress;
+        waitContext[CpuRegister.Rsi] = 2; // UMTX_OP_WAIT
+        waitContext[CpuRegister.Rdx] = 0;
+        waitContext[CpuRegister.Rcx] = 0;
+        waitContext[CpuRegister.R8] = 0;
+        RunAsGuest(0x80A, () =>
+        {
+            Assert.Equal(0, KernelSyncOnAddressCompatExports.UmtxOp(waitContext));
+            Assert.True(GuestThreadExecution.TryConsumeCurrentThreadBlock(
+                out var reason,
+                out _,
+                out var hasContinuation,
+                out _,
+                out var waiter,
+                out var deadline));
+            Assert.Equal("_umtx_op.wait", reason);
+            Assert.True(hasContinuation);
+            Assert.Equal(0, deadline);
+            stagedWaiter = Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(waiter);
+        });
+
+        wakeContext[CpuRegister.Rdi] = ValueAddress;
+        wakeContext[CpuRegister.Rsi] = 3; // UMTX_OP_WAKE
+        wakeContext[CpuRegister.Rdx] = 1;
+        wakeContext[CpuRegister.Rcx] = 0;
+        wakeContext[CpuRegister.R8] = 0;
+        Assert.Equal(0, KernelSyncOnAddressCompatExports.UmtxOp(wakeContext));
+
+        var resumed = Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(stagedWaiter);
+        Assert.True(resumed.TryWake());
+        Assert.Equal(0, resumed.Resume());
+    }
+
+    [Fact]
+    public void UmtxZeroTimespecReturnsMinusOneAndTimedOutErrno()
+    {
+        var (memory, ctx) = CreateContext();
+        WriteUInt64(memory, ValueAddress, 12);
+        WriteUInt64(memory, TimeoutAddress, 0);
+        WriteUInt64(memory, TimeoutAddress + sizeof(long), 0);
+        SetErrnoStorage(ctx);
+        ctx[CpuRegister.Rdi] = ValueAddress;
+        ctx[CpuRegister.Rsi] = 2; // UMTX_OP_WAIT
+        ctx[CpuRegister.Rdx] = 12;
+        ctx[CpuRegister.Rcx] = 0;
+        ctx[CpuRegister.R8] = TimeoutAddress;
+
+        Assert.Equal(-1, KernelSyncOnAddressCompatExports.UmtxOp(ctx));
+        Assert.Equal(ulong.MaxValue, ctx[CpuRegister.Rax]);
+        Assert.Equal(60, ReadInt32(memory, ctx.FsBase + 0x40)); // ETIMEDOUT
+        Assert.False(GuestThreadExecution.TryConsumeCurrentThreadBlock(out _));
+    }
+
+    [Fact]
+    public void UmtxRejectsInvalidTimespecWithEinval()
+    {
+        var (memory, ctx) = CreateContext();
+        WriteUInt64(memory, ValueAddress, 12);
+        WriteUInt64(memory, TimeoutAddress, 0);
+        WriteUInt64(memory, TimeoutAddress + sizeof(long), 1_000_000_000);
+        SetErrnoStorage(ctx);
+        ctx[CpuRegister.Rdi] = ValueAddress;
+        ctx[CpuRegister.Rsi] = 2; // UMTX_OP_WAIT
+        ctx[CpuRegister.Rdx] = 12;
+        ctx[CpuRegister.Rcx] = 0;
+        ctx[CpuRegister.R8] = TimeoutAddress;
+
+        Assert.Equal(-1, KernelSyncOnAddressCompatExports.UmtxOp(ctx));
+        Assert.Equal(22, ReadInt32(memory, ctx.FsBase + 0x40)); // EINVAL
+    }
+
+    [Fact]
+    public void UmtxLargeTimespecSaturatesWithoutOverflow()
+    {
+        var (memory, ctx) = CreateContext();
+        WriteUInt64(memory, ValueAddress, 1);
+        WriteUInt64(memory, TimeoutAddress, unchecked((ulong)long.MaxValue));
+        WriteUInt64(memory, TimeoutAddress + sizeof(long), 999_999_999);
+        ctx[CpuRegister.Rdi] = ValueAddress;
+        ctx[CpuRegister.Rsi] = 2; // UMTX_OP_WAIT
+        ctx[CpuRegister.Rdx] = 2; // Already changed, so no host wait.
+        ctx[CpuRegister.Rcx] = 0;
+        ctx[CpuRegister.R8] = TimeoutAddress;
+
+        Assert.Equal(0, KernelSyncOnAddressCompatExports.UmtxOp(ctx));
+    }
+
+    [Fact]
+    public void UmtxTimedContinuationReturnsPosixTimeout()
+    {
+        var (memory, ctx) = CreateContext();
+        WriteUInt64(memory, ValueAddress, 21);
+        WriteUInt64(memory, TimeoutAddress, 0);
+        WriteUInt64(memory, TimeoutAddress + sizeof(long), 1_000_000); // 1 ms
+        SetErrnoStorage(ctx);
+        ctx[CpuRegister.Rdi] = ValueAddress;
+        ctx[CpuRegister.Rsi] = 2; // UMTX_OP_WAIT
+        ctx[CpuRegister.Rdx] = 21;
+        ctx[CpuRegister.Rcx] = 0;
+        ctx[CpuRegister.R8] = TimeoutAddress;
+
+        IGuestThreadBlockWaiter? stagedWaiter = null;
+        RunAsGuest(0x80B, () =>
+        {
+            Assert.Equal(0, KernelSyncOnAddressCompatExports.UmtxOp(ctx));
+            Assert.True(GuestThreadExecution.TryConsumeCurrentThreadBlock(
+                out _,
+                out _,
+                out _,
+                out _,
+                out var waiter,
+                out var deadline));
+            Assert.True(deadline > 0);
+            stagedWaiter = Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(waiter);
+        });
+
+        Thread.Sleep(10);
+        var resumed = Assert.IsAssignableFrom<IGuestThreadBlockWaiter>(stagedWaiter);
+        Assert.Equal(-1, resumed.Resume());
+        Assert.Equal(60, ReadInt32(memory, ctx.FsBase + 0x40)); // ETIMEDOUT
+    }
+
+    [Fact]
+    public void UmtxExportIsRegisteredForGen5()
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+
+        Assert.True(manager.TryGetExport("04AjkP0jO9U", out var export));
+        Assert.Equal("_umtx_op", export.Name);
+        Assert.Equal("libKernel", export.LibraryName);
+    }
+
     private static (FakeCpuMemory Memory, CpuContext Context) CreateContext()
     {
         var memory = new FakeCpuMemory(BaseAddress, 0x1000);
@@ -212,5 +372,17 @@ public sealed class KernelSyncOnAddressCompatExportsTests
         Span<byte> bytes = stackalloc byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(bytes, value);
         Assert.True(memory.TryWrite(address, bytes));
+    }
+
+    private static void SetErrnoStorage(CpuContext ctx)
+    {
+        ctx.FsBase = BaseAddress + 0x700;
+    }
+
+    private static int ReadInt32(FakeCpuMemory memory, ulong address)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(int)];
+        Assert.True(memory.TryRead(address, bytes));
+        return BinaryPrimitives.ReadInt32LittleEndian(bytes);
     }
 }

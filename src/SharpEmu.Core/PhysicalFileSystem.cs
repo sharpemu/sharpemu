@@ -10,7 +10,7 @@ public sealed class PhysicalFileSystem : IFileSystem
         if (string.IsNullOrWhiteSpace(path))
             return false;
 
-        return File.Exists(path);
+        return File.Exists(SharpEmu.HLE.FileSystem.GameFileOverlay.ResolveFile(path));
     }
 
     public bool TryReadAllBytes(string path, out byte[] data)
@@ -20,6 +20,7 @@ public sealed class PhysicalFileSystem : IFileSystem
         if (string.IsNullOrWhiteSpace(path))
             return false;
 
+        path = SharpEmu.HLE.FileSystem.GameFileOverlay.ResolveFile(path);
         if (!File.Exists(path))
             return false;
 

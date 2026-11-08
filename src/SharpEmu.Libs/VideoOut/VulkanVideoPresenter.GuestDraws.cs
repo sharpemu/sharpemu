@@ -96,6 +96,7 @@ internal static unsafe partial class VulkanVideoPresenter
             (6, 7, _) or (7, 7, _) => Format.B10G11R11UfloatPack32,
             (9, _, 1) => Format.A2R10G10B10UnormPack32,
             (9, _, _) => Format.A2B10G10R10UnormPack32,
+            (10, 1, _) => Format.R8G8B8A8SNorm,
             (10, 4, _) => Format.R8G8B8A8Uint,
             (10, 5, _) => Format.R8G8B8A8Sint,
             (10, 6 or 9, 1) => Format.B8G8R8A8Srgb,
@@ -105,18 +106,25 @@ internal static unsafe partial class VulkanVideoPresenter
             (11, 4, _) => Format.R32G32Uint,
             (11, 5, _) => Format.R32G32Sint,
             (11, 7, _) => Format.R32G32Sfloat,
+            (12, 1, _) => Format.R16G16B16A16SNorm,
             (12, 4, _) => Format.R16G16B16A16Uint,
             (12, 5, _) => Format.R16G16B16A16Sint,
             (12, 7, _) => Format.R16G16B16A16Sfloat,
+            (13, 4, _) or (14, 4, _) => Format.R32G32B32A32Uint,
+            (13, 5, _) or (14, 5, _) => Format.R32G32B32A32Sint,
             (13, 7, _) or (14, 7, _) => Format.R32G32B32A32Sfloat,
             (20, 0, _) => Format.R32Uint,
             (29, 0, _) or (4, 0, _) => Format.R32Sfloat,
             (1, 0, _) or (36, 0, _) => Format.R8Unorm,
+            (1, 1, _) => Format.R8SNorm,
             (1, 4, _) or (49, 0, _) => Format.R8Uint,
             (3, 0, _) => Format.R8G8Unorm,
+            (3, 1, _) => Format.R8G8SNorm,
             (5, 0, _) => Format.R16G16Unorm,
+            (5, 1, _) => Format.R16G16SNorm,
             (7, 0, _) => Format.B10G11R11UfloatPack32,
             (12, 0, _) => Format.R16G16B16A16Unorm,
+            (16, 0, _) => Format.B5G6R5UnormPack16,
             (13, 0, _) or (14, 0, _) => Format.R32G32B32A32Sfloat,
             (22, 0, _) or (71, 0, _) => Format.R16G16B16A16Sfloat,
             (56, 0, _) or (62, 0, _) or (64, 0, _) => Format.R8G8B8A8Unorm,
@@ -138,10 +146,11 @@ internal static unsafe partial class VulkanVideoPresenter
         var outputKind = format switch
         {
             Format.R8Uint or Format.R16Uint or Format.R32Uint or Format.R16G16Uint or
-                Format.R32G32Uint or Format.R8G8B8A8Uint or Format.R16G16B16A16Uint =>
-                Gen5PixelOutputKind.Uint,
+                Format.R32G32Uint or Format.R8G8B8A8Uint or Format.R16G16B16A16Uint or
+                Format.R32G32B32A32Uint => Gen5PixelOutputKind.Uint,
             Format.R16Sint or Format.R32Sint or Format.R16G16Sint or Format.R32G32Sint or
-                Format.R8G8B8A8Sint or Format.R16G16B16A16Sint => Gen5PixelOutputKind.Sint,
+                Format.R8G8B8A8Sint or Format.R16G16B16A16Sint or Format.R32G32B32A32Sint =>
+                Gen5PixelOutputKind.Sint,
             _ => Gen5PixelOutputKind.Float,
         };
 
@@ -167,7 +176,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             1 or 2 or 4 or 20 or 29 or 36 or 49 => 1,
             3 or 5 or 11 or 75 => 2,
-            6 or 7 => 3,
+            6 or 7 or 16 => 3,
             9 or 10 or 12 or 13 or 14 or 22 or 56 or 62 or 64 or 71 => 4,
             _ => 0,
         };

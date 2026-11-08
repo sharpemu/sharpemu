@@ -28,6 +28,42 @@ internal static class DccWriterTrace
 
     private static readonly HashSet<(ulong Address, ulong Size, ulong Program)> _reported = new();
     private static readonly HashSet<(ulong Hash, string Reason)> _refusals = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, (ulong Size, ulong Program, string Kind)> _writes = new();
+    private static readonly HashSet<ulong> _syncReported = new();
+
+    [ThreadStatic]
+    public static string? CurrentKind;
+
+    public static void RecordWrite(ulong address, ulong size)
+    {
+        if (DccEnabled)
+        {
+            _writes[address] = (size, CurrentProgram, CurrentKind ?? "?");
+        }
+    }
+
+    public static void ReportSync(ulong metadataAddress, ulong size)
+    {
+        if (!DccEnabled)
+        {
+            return;
+        }
+
+        lock (_syncReported)
+        {
+            if (_syncReported.Count >= 64 || !_syncReported.Add(metadataAddress))
+            {
+                return;
+            }
+        }
+
+        var writers = _writes
+            .Where(pair => pair.Key < metadataAddress + size && metadataAddress < pair.Key + pair.Value.Size)
+            .Take(8)
+            .Select(pair => $"0x{pair.Key:X}+0x{pair.Value.Size:X}:{pair.Value.Kind}:0x{pair.Value.Program:X16}");
+        Console.Error.WriteLine(
+            $"[GPU][DCC_SYNC_WRITER] metadata=0x{metadataAddress:X16} size=0x{size:X} writers={string.Join(" ", writers)}");
+    }
 
     private static ulong ParseAddress(string? value)
     {

@@ -106,6 +106,126 @@ internal static class BufferUploadProfile
     [ThreadStatic] private static Source _source;
     internal static bool Enabled => RenderPhaseProfile.FrameTraceEnabled;
 
+    private static long _totalUploads;
+    private static long _totalCopies;
+    private static long _totalBytes;
+    private static long _totalRangeBytes;
+
+    internal static void NoteUpload(int copies, ulong bytes, ulong rangeBytes)
+    {
+        if (!RenderPhaseProfile.Enabled) return;
+        Interlocked.Increment(ref _totalUploads);
+        Interlocked.Add(ref _totalCopies, copies);
+        Interlocked.Add(ref _totalBytes, (long)bytes);
+        Interlocked.Add(ref _totalRangeBytes, (long)rangeBytes);
+    }
+
+    private static readonly long[] _shapeUploads = new long[5];
+    private static readonly long[] _shapeBytes = new long[5];
+    private static readonly string[] ShapeNames = ["le4k", "le16k", "le64k", "le256k", "gt256k"];
+    private static readonly Dictionary<(ulong, ulong), long> _lastUploadAt = new();
+    private static long _repeatUploads;
+    private static long _trackingTicks;
+    private static long _recordTicks;
+
+    internal static void NoteUploadShape(ulong address, ulong rangeSize, ulong bytes, long trackingTicks, long recordTicks)
+    {
+        if (!RenderPhaseProfile.Enabled) return;
+        var bucket = bytes <= 4096 ? 0 : bytes <= 16384 ? 1 : bytes <= 65536 ? 2 : bytes <= 262144 ? 3 : 4;
+        _shapeUploads[bucket]++;
+        _shapeBytes[bucket] += (long)bytes;
+        _trackingTicks += trackingTicks;
+        _recordTicks += recordTicks;
+        var now = Environment.TickCount64;
+        if (_lastUploadAt.TryGetValue((address, rangeSize), out var last) && now - last <= 100)
+        {
+            _repeatUploads++;
+        }
+
+        if (_lastUploadAt.Count >= 65536)
+        {
+            _lastUploadAt.Clear();
+        }
+
+        _lastUploadAt[(address, rangeSize)] = now;
+    }
+
+    private static string TakeShapeReport()
+    {
+        var parts = new List<string>();
+        for (var index = 0; index < ShapeNames.Length; index++)
+        {
+            parts.Add(ShapeNames[index] + "=" + FormattableString.Invariant($"{_shapeUploads[index]}/{_shapeBytes[index] / 1048576.0:F1}MB"));
+            _shapeUploads[index] = 0;
+            _shapeBytes[index] = 0;
+        }
+
+        var report = "shapes=" + string.Join(",", parts) + " " +
+            FormattableString.Invariant($"repeat_100ms={_repeatUploads} tracking_ms={_trackingTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} record_ms={_recordTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}");
+        _repeatUploads = 0;
+        _trackingTicks = 0;
+        _recordTicks = 0;
+        return report;
+    }
+
+    internal static string TakeDirtyTrackingReport() =>
+        "[PERF][DIRTY_TRACKING] " + Gpu.Buffers.GuestBufferCache.TakeDirtyTrackingReport() + " " + SharpEmu.HLE.GpuMemory.ProtectionCauseCounts.TakeReport() + " " +
+        Gpu.Buffers.GpuBuffer.CopyRun.TakeReport() + " " + SharpEmu.ShaderCompiler.Resources.DeviceAddressRangePlanner.TakeUnboundedReport();
+
+    internal static string TakeSyncPointReport() =>
+        "[PERF][SYNC_POINTS] " + Gpu.Scheduling.GpuWorkerRelay.TakeRelayWaitReport() + " " + Gpu.GpuCommands.GpuCommandInterpreter.TakeAcquireMemoryReport();
+
+    internal static string TakeTotalsReport() =>
+        FormattableString.Invariant($"[PERF][BUFFER_SYNC_TOTAL] uploads={Interlocked.Exchange(ref _totalUploads, 0)} copies={Interlocked.Exchange(ref _totalCopies, 0)} bytes={Interlocked.Exchange(ref _totalBytes, 0)} range_bytes={Interlocked.Exchange(ref _totalRangeBytes, 0)} ") +
+        TakeShapeReport() + " " +
+        FormattableString.Invariant($"widened={Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.WidenedUploads, 0)} widened_bytes={Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.WidenedUploadBytes, 0)} ") +
+        FormattableString.Invariant($"hot_skipped={SharpEmu.HLE.GpuMemory.TrackedRegion.TakeHotUploadsSkipped()} ") +
+        FormattableString.Invariant($"readbacks=async:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksStarted, 0)},sync:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksSynchronous, 0)},no_writer:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksNoWriter, 0)},too_large:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksTooLarge, 0)},busy:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksBusy, 0)},slot_waits:{Interlocked.Exchange(ref Gpu.Buffers.GuestBufferCache.ReadbacksSlotWaits, 0)},") +
+        TakeDirectReadReport() + " " +
+        FormattableString.Invariant($"relay_hop_us=begin:{AverageMicroseconds(Gpu.Buffers.GuestBufferCache.RelayHopBeginTicks, Gpu.Buffers.GuestBufferCache.RelayHopBegin):F1},complete:{AverageMicroseconds(Gpu.Buffers.GuestBufferCache.RelayHopCompleteTicks, Gpu.Buffers.GuestBufferCache.RelayHopComplete):F1} ") +
+        TakeGuestReadbackReport();
+
+    private static string TakeDirectReadReport() =>
+        FormattableString.Invariant($"promoted={Gpu.Buffers.GuestBufferCache.Promotions.Take()}/{Gpu.Buffers.GuestBufferCache.PromotedBufferBytes.Take()},mapped_at_create:{Gpu.Buffers.GuestBufferCache.MappedCreations.Take()},budget_full:{Gpu.Buffers.GuestBufferCache.PromotionsBudgetFull.Take()},live_bytes:{Interlocked.Read(ref Gpu.Buffers.GuestBufferCache.PromotedLiveBytes)}");
+
+    private static readonly SharpEmu.HLE.Diagnostics.ThreadCounter[] _guestFrameLead = [new(), new(), new(), new(), new()];
+
+    internal static void NoteGuestFrameLead(long lead) => _guestFrameLead[(int)Math.Clamp(lead, 0, _guestFrameLead.Length - 1)].Increment();
+
+    private static string TakeGuestReadbackReport()
+    {
+        var reads = Gpu.Buffers.GuestBufferCache.GuestReadbacks.Take();
+        var behind = Gpu.Buffers.GuestBufferCache.GuestReadbacksBehind.Take();
+        var ticksBehind = Gpu.Buffers.GuestBufferCache.GuestReadbackTicksBehind.Take();
+        var age = Gpu.Buffers.GuestBufferCache.GuestReadbackFrameAge;
+        var lead = _guestFrameLead;
+        return FormattableString.Invariant($"guest_reads={reads} read_us=queue:{PerSample(Gpu.Buffers.GuestBufferCache.GuestReadbackQueueTicks, reads):F1},begin:{PerSample(Gpu.Buffers.GuestBufferCache.GuestReadbackBeginTicks, reads):F1},gpu_wait:{PerSample(Gpu.Buffers.GuestBufferCache.GuestReadbackGpuWaitTicks, reads):F1} ") +
+            FormattableString.Invariant($"read_behind={behind}/ticks:{(behind == 0 ? 0 : (double)ticksBehind / behind):F1} read_frame_age=0:{age[0].Take()},1:{age[1].Take()},2:{age[2].Take()},3+:{age[3].Take()} ") +
+            FormattableString.Invariant($"guest_lead=0:{lead[0].Take()},1:{lead[1].Take()},2:{lead[2].Take()},3:{lead[3].Take()},4+:{lead[4].Take()} ") +
+            TakeReadWriterReport() + " " + Gpu.Scheduling.SubmissionScheduler.TakeTickLedgerReport();
+    }
+
+    private static string TakeReadWriterReport()
+    {
+        var timed = Gpu.Buffers.GuestBufferCache.WriterTimedReads.Take();
+        var held = Gpu.Buffers.GuestBufferCache.WriterHeldReads.Take();
+        return FormattableString.Invariant($"read_writer=timed:{timed},writer_age_us:{PerSample(Gpu.Buffers.GuestBufferCache.WriterAgeTicks, timed):F1},since_submit_us:{PerSample(Gpu.Buffers.GuestBufferCache.WriterSinceSubmitTicks, timed):F1},") +
+            FormattableString.Invariant($"held:{held}/us:{PerSample(Gpu.Buffers.GuestBufferCache.WriterHeldTicks, held):F1},submitted_by_read:{Gpu.Buffers.GuestBufferCache.WriterSubmittedByRead.Take()}");
+    }
+
+    private static double PerSample(SharpEmu.HLE.Diagnostics.ThreadCounter ticks, long samples)
+    {
+        var total = ticks.Take();
+        return samples == 0 ? 0 : total * 1_000_000.0 / Stopwatch.Frequency / samples;
+    }
+
+    private static double AverageMicroseconds(SharpEmu.HLE.Diagnostics.ThreadCounter ticks, SharpEmu.HLE.Diagnostics.ThreadCounter count)
+    {
+        var total = ticks.Take();
+        var samples = count.Take();
+        return samples == 0 ? 0 : total * 1_000_000.0 / Stopwatch.Frequency / samples;
+    }
+
     internal readonly struct Scope : IDisposable
     {
         private readonly Source _previousSource;

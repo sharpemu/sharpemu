@@ -127,6 +127,59 @@ public sealed class BoundedFillDetectorTests
         Assert.True(fill.Formatted);
     }
 
+    private static readonly uint[] IndexedPatternFromUserData =
+    [
+        0xBFA00001,
+        0xD7460004, 0x04010C09,
+        0x7E000204,
+        0x7E020205,
+        0x7E040206,
+        0x7E060207,
+        0x7DA80808,
+        0xBF88000D,
+        0x360A0883,
+        0xBE84047E,
+        0xBE86047E,
+        0x7E100505,
+        0x7DA40A08,
+        0xBEFC0308,
+        0x7E0C8700,
+        0x8A867E06,
+        0xBEFE0406,
+        0xBF85FFF9,
+        0xBEFE0404,
+        0xE0102000, 0x80000604,
+        0xBF810000,
+    ];
+
+    [Fact]
+    public void AnIndexedPatternFillFromUserDataIsRecognized()
+    {
+        var fill = BoundedFillDetector.Detect(Decode(IndexedPatternFromUserData));
+
+        Assert.NotNull(fill);
+        static FillWord User(uint register) => new(FillWordSource.UserData, register, 0, 0);
+        Assert.Equal(9u, fill.GroupScalarRegister);
+        Assert.Equal(User(8), fill.Count);
+        Assert.Null(fill.Start);
+        Assert.Equal(User(4), fill.Value);
+        Assert.Null(fill.PatternLength);
+        Assert.Equal([User(4), User(5), User(6), User(7)], fill.Pattern!);
+        Assert.Equal([User(0), User(1), User(2), User(3)], fill.Destination);
+        Assert.True(fill.Formatted);
+    }
+
+    [Theory]
+    [InlineData(0xBF85FFF9u, 0xBF85FFF8u)]
+    [InlineData(0x360A0883u, 0x360A0884u)]
+    [InlineData(0xBEFC0308u, 0xBEFC0309u)]
+    public void AnIndexedPatternWithAnotherLoopOrMaskIsRejected(uint original, uint replacement)
+    {
+        var words = IndexedPatternFromUserData.ToArray();
+        words[Array.IndexOf(words, original)] = replacement;
+        Assert.Null(BoundedFillDetector.Detect(Decode(words)));
+    }
+
     private static readonly uint[] DemonsSoulsModuloCopy =
     [
         0xBEFC03FF, 0xA65CD91E, 0xBF960000, 0xBFA00003, 0xD7460002, 0x04010C0C, 0xF4201A84, 0xFA000000,

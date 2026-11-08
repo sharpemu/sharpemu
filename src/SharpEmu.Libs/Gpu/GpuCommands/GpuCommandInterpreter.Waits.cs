@@ -7,6 +7,8 @@ namespace SharpEmu.Libs.Gpu.GpuCommands;
 
 public sealed partial class GpuCommandInterpreter
 {
+    internal static long RelaxedWaitHits;
+    internal static long RelaxedWaitFallbacks;
     private const uint RewindValidBit = 1u << 31;
     private const uint RewindKnownBits = 0x8100_0000u;
 
@@ -28,10 +30,31 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        var value = is64Bit ? ReadQword(address) : ReadDword(address);
+        // A deferred label is visible here at once; guest CPU threads see it after the dump before it.
+        if (!_host.TryReadDeferredLabel(QueueId, address, is64Bit ? 8UL : 4UL, out var deferred, out var value))
+        {
+            Suspend();
+            return;
+        }
+        var stale = false;
+        if (!deferred) value = ReadWaitOperand(address, is64Bit, allowStale: true, out stale);
         if (!WaitOperation.TryCompare(value, reference, mask, compareFunction, out var satisfied))
         {
             throw _host.Fatal($"The wait compare function is unknown: function={compareFunction} address=0x{address:X16}.");
+        }
+
+        if (stale)
+        {
+            if (satisfied)
+            {
+                Interlocked.Increment(ref RelaxedWaitHits);
+            }
+            else
+            {
+                Interlocked.Increment(ref RelaxedWaitFallbacks);
+                value = ReadWaitOperand(address, is64Bit, allowStale: false, out _);
+                _ = WaitOperation.TryCompare(value, reference, mask, compareFunction, out satisfied);
+            }
         }
 
         if (!satisfied && TryReadOwnWrite(address, is64Bit, out var ownValue))
@@ -55,6 +78,7 @@ public sealed partial class GpuCommandInterpreter
             case 0:
                 // Clearing predication reads no memory, so no GPU result can be outstanding.
                 PredicateSkip = false;
+                Interlocked.Increment(ref _predicationClears);
                 break;
             case 3:
             {
@@ -68,9 +92,11 @@ public sealed partial class GpuCommandInterpreter
                     // The results are outstanding while work is queued behind this packet, and
                     // the game asked for the packets to run unpredicated in that case.
                     PredicateSkip = false;
+                    Interlocked.Increment(ref _predicationBoolUnpredicated);
                     break;
                 }
 
+                Interlocked.Increment(ref _predicationBoolWaiting);
                 _host.FlushAndWait();
                 var value = ReadQword(address);
                 PredicateSkip = condition switch
@@ -79,11 +105,49 @@ public sealed partial class GpuCommandInterpreter
                     1 => value == 0,
                     _ => throw _host.Fatal($"The predication condition is unknown: condition=0x{condition:X8} address=0x{address:X16}."),
                 };
+                TracePredication(condition, waitOperation, address, value);
+                VisibilityResultTrace.Predicate(QueueId, SubmitId, address, value, condition, waitOperation, PredicateSkip);
                 break;
             }
 
             default:
                 throw _host.Fatal($"The predication operation is unknown: operation=0x{operation:X8} address=0x{address:X16}.");
+        }
+    }
+
+    private static long _predicationTraceCount;
+    private readonly Queue<(ulong Address, ulong Value, long Evaluation, long Timestamp)> _skippedPredicates = new();
+
+    // Each evaluation decides which later predicated packets run; see docs/image-clear-tracing.md.
+    private void TracePredication(uint condition, uint waitOperation, ulong address, ulong value)
+    {
+        if (!Images.ImageClearTrace.Enabled) return;
+        var evaluation = Interlocked.Increment(ref _predicationTraceCount);
+        RecheckSkippedPredicates(evaluation);
+        if (evaluation > 256) return;
+        Console.Error.WriteLine($"[GPU][TRACE] Predication address=0x{address:X16} value=0x{value:X16} condition={condition} " +
+            $"wait={waitOperation} skip={PredicateSkip} evaluation={evaluation}");
+        if (evaluation <= 32) _host.TraceWritersOf($"predicate=0x{address:X16}", address, sizeof(ulong));
+        if (PredicateSkip && _skippedPredicates.Count < 64)
+            _skippedPredicates.Enqueue((address, value, evaluation, System.Diagnostics.Stopwatch.GetTimestamp()));
+    }
+
+    // A value that changes after its evaluation shows a writer that ran too late for the skip decision.
+    private void RecheckSkippedPredicates(long evaluation)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+        for (var remaining = _skippedPredicates.Count; remaining > 0; remaining--)
+        {
+            var entry = _skippedPredicates.Dequeue();
+            var current = _host.TryReadGuest(entry.Address, bytes) ? System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(bytes) : entry.Value;
+            if (current != entry.Value)
+            {
+                var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(entry.Timestamp).TotalMilliseconds;
+                Console.Error.WriteLine($"[GPU][TRACE] PredicationChanged address=0x{entry.Address:X16} evaluated=0x{entry.Value:X16} " +
+                    $"now=0x{current:X16} evaluation={entry.Evaluation} laterEvaluations={evaluation - entry.Evaluation} elapsedMs={elapsed:F3}");
+                continue;
+            }
+            if (evaluation - entry.Evaluation < 64) _skippedPredicates.Enqueue(entry);
         }
     }
 
@@ -124,6 +188,7 @@ public sealed partial class GpuCommandInterpreter
 
     private uint WaitRegisterMemoryPacket(in PacketContext packet, ReadOnlySpan<uint> payload, bool is64Bit)
     {
+        Diagnostics.DispatchRunTally.NoteWait();
         var valueDwords = is64Bit ? 2u : 1u;
         var payloadDwords = 4u + (valueDwords * 2u);
         var opcode = is64Bit ? PacketOpcode.WaitRegisterMemory64 : PacketOpcode.WaitRegisterMemory;
@@ -167,7 +232,9 @@ public sealed partial class GpuCommandInterpreter
                 $"address=0x{address:X16} count={executeCount} remaining={packet.Remaining}.");
         }
 
-        return ReadDword(address) == 0 ? payloadDwords + executeCount : payloadDwords;
+        if (ReadDword(address) != 0) return payloadDwords;
+        TraceSkippedPackets("conditional-execute", packet.PacketAddress + (payloadDwords + 1) * sizeof(uint), executeCount, (uint)address);
+        return payloadDwords + executeCount;
     }
 
     internal uint SetPredicationPacket(in PacketContext packet, ReadOnlySpan<uint> payload)

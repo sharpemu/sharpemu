@@ -15,6 +15,8 @@ public sealed class ResourceTableReadPlanner
     private readonly ulong _hash;
     private readonly List<ResourceTableRead> _reads = [];
     private readonly List<ScalarValue> _dynamicReads = [];
+    private readonly HashSet<ScalarValue> _dynamicReadSet = [];
+    private readonly Dictionary<int, List<int>> _slotsByHash = [];
     private readonly List<(ScalarValue Read, uint Slot)> _patches = [];
     private readonly Dictionary<int, uint> _flattenedSlotByMemoryIndex = [];
     private readonly List<ScalarValue> _visiting = [];
@@ -133,7 +135,7 @@ public sealed class ResourceTableReadPlanner
         var offset = value.Operands[1];
         if (!offset.IsConstant)
         {
-            if (!_dynamicReads.Contains(value))
+            if (_dynamicReadSet.Add(value))
             {
                 _dynamicReads.Add(value);
             }
@@ -148,7 +150,14 @@ public sealed class ResourceTableReadPlanner
             return;
         }
 
-        for (var slot = 0; slot < _reads.Count; slot++)
+        var hash = _graph.StructuralHash(value);
+        if (!_slotsByHash.TryGetValue(hash, out var slots))
+        {
+            slots = [];
+            _slotsByHash.Add(hash, slots);
+        }
+
+        foreach (var slot in slots)
         {
             if (_graph.Equivalent(value, _reads[slot].Value))
             {
@@ -158,6 +167,7 @@ public sealed class ResourceTableReadPlanner
         }
 
         var newSlot = (uint)_reads.Count;
+        slots.Add((int)newSlot);
         _reads.Add(new ResourceTableRead(value, newSlot));
         _patches.Add((value, newSlot));
     }

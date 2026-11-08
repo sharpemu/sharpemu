@@ -21,8 +21,8 @@ internal sealed class PosixHostThreading : IHostThreading
         // timeBeginPeriod equivalent to request.
     }
 
-    // Thread affinity is advisory on POSIX hosts (macOS offers no
-    // pthread-level affinity API); callers treat false as "not applied".
+    // Thread affinity is advisory on POSIX hosts; callers treat false as
+    // "not applied".
     public bool TrySetCurrentThreadAffinity(nuint affinityMask)
     {
         _ = affinityMask;

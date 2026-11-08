@@ -15,6 +15,8 @@ public readonly struct CpuExecutionOptions
 
     public int ImportTraceLimit { get; init; }
 
+    public IReadOnlyList<string>? ProcessArguments { get; init; }
+
     /// <summary>
     /// An optional debugger attached to this execution session. When set, the
     /// dispatcher notifies it at each frame boundary via

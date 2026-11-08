@@ -98,6 +98,45 @@ public sealed class AvPlayerAbiTests
     }
 
     [Fact]
+    public void DefaultSyncRunsOnAtRealTimeOnceTheAudioHasEnded()
+    {
+        // A 59.94 fps clip of 1,081 frames whose audio ends after 845 blocks (18.027 s): the audio
+        // clock stops on frame 1,080, one short of the read that reports the end of the video.
+        Assert.Equal(
+            1080,
+            AvPlayerExports.CalculateExpectedDefaultSyncVideoFrame(
+                hasAudio: true,
+                deliveredAudioFrameCount: 845,
+                internalClockSeconds: 30,
+                framesPerSecond: 59.94));
+        Assert.Equal(
+            1083,
+            AvPlayerExports.CalculateExpectedDefaultSyncVideoFrame(
+                hasAudio: true,
+                deliveredAudioFrameCount: 845,
+                internalClockSeconds: 30,
+                framesPerSecond: 59.94,
+                secondsSinceAudioEnded: 0.05));
+    }
+
+    [Fact]
+    public void CurrentTimeRunsOnOnceTheAudioHasEnded()
+    {
+        // 845 blocks of 1,024 samples at 48 kHz end at 18.026 s; half a second later the time has moved on.
+        Assert.Equal(18_026UL, AvPlayerExports.DefaultSyncElapsedMilliseconds(845, secondsSinceAudioEnded: 0));
+        Assert.Equal(18_526UL, AvPlayerExports.DefaultSyncElapsedMilliseconds(845, secondsSinceAudioEnded: 0.5));
+    }
+
+    [Fact]
+    public void AudioEndIsTimedFromItsFirstFailedRead()
+    {
+        Assert.Equal(0, AvPlayerExports.SecondsSinceAudioEnded(audioEndedSeconds: -1, clockSeconds: 12));
+        Assert.Equal(0.5, AvPlayerExports.SecondsSinceAudioEnded(audioEndedSeconds: 18, clockSeconds: 18.5));
+        Assert.Equal(18, AvPlayerExports.NoteAudioEnd(audioEndedSeconds: -1, clockSeconds: 18));
+        Assert.Equal(18, AvPlayerExports.NoteAudioEnd(audioEndedSeconds: 18, clockSeconds: 25));
+    }
+
+    [Fact]
     public void DefaultVideoOnlySyncUsesTheInternalClock()
     {
         Assert.Equal(
@@ -332,5 +371,49 @@ public sealed class AvPlayerAbiTests
                 fallbackAttempted,
                 fallbackRunning,
                 hasPresentation));
+    }
+}
+
+public sealed class Videodec2PictureInfoAbiTests
+{
+    [Fact]
+    public void DimensionsPreservePitchAndAdjacentFields()
+    {
+        const ulong address = 0x100000000;
+        var memory = new FakeCpuMemory(address, 0x100);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var expected = Enumerable.Repeat((byte)0xab, 0x38).ToArray();
+        Assert.True(memory.TryWrite(address, expected));
+        Assert.True(SharpEmu.Libs.Codec.Videodec2Exports.TryWritePictureDimensions(context, address, 1920, 1080));
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(0x10), 1920);
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(0x18), 1080);
+        var actual = new byte[expected.Length];
+        Assert.True(memory.TryRead(address, actual));
+        Assert.Equal(expected, actual);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NoPicturePreservesSizeAndClearsTheReadyField(bool flush)
+    {
+        const ulong address = 0x100000000;
+        var memory = new FakeCpuMemory(address, 0x100);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var initial = Enumerable.Repeat((byte)0xab, 0x48).ToArray();
+        BinaryPrimitives.WriteUInt64LittleEndian(initial, 0x48);
+        Assert.True(memory.TryWrite(address, initial));
+        context[CpuRegister.Rdi] = ulong.MaxValue;
+        context[flush ? CpuRegister.Rdx : CpuRegister.Rcx] = address;
+        // Both calls receive the frame buffer, whose accepted flag they clear.
+        context[flush ? CpuRegister.Rsi : CpuRegister.Rdx] = address + 0x60;
+        Assert.Equal(0, flush
+            ? SharpEmu.Libs.Codec.Videodec2Exports.Videodec2Flush(context)
+            : SharpEmu.Libs.Codec.Videodec2Exports.Videodec2Decode(context));
+        var actual = new byte[initial.Length];
+        Assert.True(memory.TryRead(address, actual));
+        // No picture clears the ready flag, the error flag and the picture count.
+        initial.AsSpan(8, 4).Clear();
+        Assert.Equal(initial, actual);
     }
 }

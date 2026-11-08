@@ -12,6 +12,8 @@ public enum ShaderStage : byte
     Vertex,
     Pixel,
     Compute,
+    Mesh,
+    TessellationEvaluation,
 }
 
 public enum ImageNumericClass : byte
@@ -20,6 +22,8 @@ public enum ImageNumericClass : byte
     Float,
     Uint,
     Sint,
+    // A 64-bit unsigned view of a 64 bits per texel image; only image atomics use it.
+    Uint64,
 }
 
 public enum ImageMipMode : byte
@@ -71,6 +75,8 @@ public sealed class ImageResource
     public bool Read { get; set; }
     public bool Written { get; set; }
     public bool Atomic { get; set; }
+    // An atomic on two data dwords (compare-swap: four), which works on 64-bit texels.
+    public bool Atomic64 { get; set; }
     public bool DepthCompare { get; set; }
     // Guest compare function (0..7) evaluated in the shader for a depth-compare
     // image whose format has no Vulkan depth equivalent; -1 when not emulated.
@@ -81,6 +87,8 @@ public sealed class ImageResource
     public uint IndirectMappingOffset { get; set; }
     public uint IndirectSearchIterations { get; set; }
     public List<uint> IndirectResources { get; set; } = [];
+
+    public bool MipStatistics { get; set; }
 
     public ImageResource Clone()
     {
@@ -157,9 +165,7 @@ public sealed class BufferCandidateTableInfo
 public sealed class ShaderResourceInfo
 {
     public const int MaxBuffers = 32;
-    public const int MaxImages = 64;
-    public const int MaxSamplers = 32;
-    public const int MaxSampledPairs = 64;
+    public const int MaxIndirectImageCandidates = 64;
     public const int NoScalarRegister = -1;
 
     public List<BufferResource> Buffers { get; set; } = [];
@@ -167,6 +173,10 @@ public sealed class ShaderResourceInfo
     public List<SamplerResource> Samplers { get; set; } = [];
     public List<SampledImagePair> SampledPairs { get; set; } = [];
     public List<BufferCandidateTableInfo> BufferCandidateTables { get; set; } = [];
+    public uint[] ImageBindings { get; set; } = [];
+    public uint[] SamplerBindings { get; set; } = [];
+    public uint GetCanonicalImageBinding(uint resource) => ImageBindings.Length == 0 ? resource : ImageBindings[resource];
+    public uint SamplerBinding(uint resource) => SamplerBindings.Length == 0 ? resource : SamplerBindings[resource];
     public List<StageInput> Inputs { get; set; } = [];
     public List<StageOutput> Outputs { get; set; } = [];
     public byte[] VertexFetchComponents { get; set; } = new byte[32];
@@ -175,6 +185,18 @@ public sealed class ShaderResourceInfo
     public bool HasBitwiseExclusiveOr { get; set; }
     public bool UsesDeviceAddresses { get; set; }
 
+    // Some image access reads its image or sampler from a bindless heap through descriptor set 1.
+    public bool UsesBindlessHeap { get; set; }
+
+    // Some image access reads its image or sampler through a linked callee's record argument (see CallRecordSelector).
+    public bool UsesCallRecords { get; set; }
+
+    // A call that reaches a callee the program does not hold marks it (CallMarks).
+    public bool UsesCallMarks { get; set; }
+
+    // The program has shader calls and reads device addresses: it binds DescriptorBindingKind.DeviceAddressFallback.
+    public bool UsesDeviceAddressFallback { get; set; }
+
     public ShaderResourceInfo Clone() => new()
     {
         Buffers = Buffers.Select(buffer => buffer.Clone()).ToList(),
@@ -182,6 +204,8 @@ public sealed class ShaderResourceInfo
         Samplers = Samplers.Select(sampler => sampler.Clone()).ToList(),
         SampledPairs = SampledPairs.Select(pair => pair.Clone()).ToList(),
         BufferCandidateTables = BufferCandidateTables.Select(table => table.Clone()).ToList(),
+        ImageBindings = [.. ImageBindings],
+        SamplerBindings = [.. SamplerBindings],
         Inputs = [.. Inputs],
         Outputs = [.. Outputs],
         VertexFetchComponents = (byte[])VertexFetchComponents.Clone(),
@@ -189,6 +213,10 @@ public sealed class ShaderResourceInfo
         InstanceOffsetScalarRegister = InstanceOffsetScalarRegister,
         HasBitwiseExclusiveOr = HasBitwiseExclusiveOr,
         UsesDeviceAddresses = UsesDeviceAddresses,
+        UsesBindlessHeap = UsesBindlessHeap,
+        UsesCallRecords = UsesCallRecords,
+        UsesCallMarks = UsesCallMarks,
+        UsesDeviceAddressFallback = UsesDeviceAddressFallback,
     };
 }
 
@@ -208,6 +236,10 @@ public sealed record IndirectImageSelector(
     public uint KeyBound { get; init; }
     public WaveIndexedImageSelector? WaveIndexed { get; init; }
 
+    // The key is selected by a value the whole wave shares (a loop counter), not by a lane's value. Such an image
+    // used to read as a null image, so a table the host cannot read stays null instead of failing the program.
+    public bool SharedSelector { get; init; }
+
     // The key read's immediate offset. The hardware adds it after the 32-bit selector offset, without wrapping.
     public uint MaterialImmediate { get; init; }
 }
@@ -226,6 +258,7 @@ public sealed class DescriptorSource
     public ScalarValue[] Dwords { get; init; } = [];
     public uint DwordCount => (uint)Dwords.Length;
     public IndirectImageSelector? IndirectImage { get; init; }
+    public CallRecordSelector? CallRecord { get; init; }
 }
 
 // One immediate-offset scalar read the host evaluates into the flattened table.

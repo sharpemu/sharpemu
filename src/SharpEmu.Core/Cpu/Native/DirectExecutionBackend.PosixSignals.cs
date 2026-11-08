@@ -26,33 +26,21 @@ public sealed unsafe partial class DirectExecutionBackend
 	private const int PosixSigAbort = 6;
 	private const int PosixSigFpe = 8;
 	private const int PosixSigSegv = 11;
-	private static readonly int PosixSigBus = OperatingSystem.IsMacOS() ? 10 : 7;
+	private const int PosixSigBus = 7;
 
-	// struct sigaction: the handler pointer leads on both platforms; Darwin
-	// packs { handler(8), mask(4), flags(4) }, Linux glibc/musl packs
+	// struct sigaction: Linux glibc/musl packs
 	// { handler(8), mask(128), flags(4), restorer(8) }.
-	private static readonly int PosixSigactionSize = OperatingSystem.IsMacOS() ? 16 : 152;
-	private static readonly int PosixSigactionFlagsOffset = OperatingSystem.IsMacOS() ? 12 : 136;
+	private const int PosixSigactionSize = 152;
+	private const int PosixSigactionFlagsOffset = 136;
 
-	private static readonly int PosixSaSigInfo = OperatingSystem.IsMacOS() ? 0x0040 : 0x0004;
-	private static readonly int PosixSaNoDefer = OperatingSystem.IsMacOS() ? 0x0010 : 0x40000000;
+	private const int PosixSaSigInfo = 0x0004;
+	private const int PosixSaNoDefer = 0x40000000;
 
-	// siginfo_t.si_addr: Darwin { signo, errno, code, pid, uid, status, addr },
-	// Linux { signo, errno, code, pad32, addr }.
-	private static readonly int PosixSigInfoAddressOffset = OperatingSystem.IsMacOS() ? 24 : 16;
+	// siginfo_t.si_addr: Linux { signo, errno, code, pad32, addr }.
+	private const int PosixSigInfoAddressOffset = 16;
 
-	// Darwin ucontext_t stores a pointer to __darwin_mcontext64 at +48; the
-	// general registers live in its __ss thread state after the 16-byte
-	// exception state. Linux glibc embeds mcontext_t inline at +40 with the
-	// registers in gregs[23]. Rosetta 2 delivers the regular x86-64 layout
-	// to translated processes.
-	private const int DarwinUcontextMcontextOffset = 48;
-	private const int DarwinUserContextMachineContextSizeOffset = 40;
-	// Darwin stores vector registers at the same offset in both signal frame formats.
-	// The system headers i386/_mcontext.h and mach/i386/_structs.h define this offset.
-	private const int DarwinMachineContextVectorRegistersOffset = 352;
-	private const int DarwinMcontextErrOffset = 4;
-	private const int DarwinMcontextFaultAddressOffset = 8;
+	// Linux glibc embeds mcontext_t inline in ucontext_t at +40 with the
+	// registers in gregs[23].
 	private const int LinuxUcontextGregsOffset = 40;
 	private const int LinuxGregsErrOffset = 19 * 8;
 
@@ -73,9 +61,8 @@ public sealed unsafe partial class DirectExecutionBackend
 	// ordered to match the contiguous Win64 CONTEXT block CTX_RAX..CTX_RIP
 	// (rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8..r15, rip). Verified
 	// against the x86-64 platform headers.
-	private static readonly int[] PosixRegisterOffsets = OperatingSystem.IsMacOS()
-		? new[] { 16, 32, 40, 24, 72, 64, 56, 48, 80, 88, 96, 104, 112, 120, 128, 136, 144 }
-		: new[] { 104, 112, 96, 88, 120, 80, 72, 64, 0, 8, 16, 24, 32, 40, 48, 56, 128 };
+	private static readonly int[] PosixRegisterOffsets =
+		new[] { 104, 112, 96, 88, 120, 80, 72, 64, 0, 8, 16, 24, 32, 40, 48, 56, 128 };
 
 	private static DirectExecutionBackend? _posixSignalBackend;
 	private static bool _posixSignalHandlersInstalled;
@@ -141,25 +128,12 @@ public sealed unsafe partial class DirectExecutionBackend
 	/// Runs the signal-recovery path once with fabricated inputs before the
 	/// handlers are installed. The first entry into the handler must not
 	/// require JIT compilation (a fault can interrupt arbitrary runtime
-	/// states), and under Rosetta 2 the signal trampoline cannot enter x86
-	/// code that has never been executed (and therefore never translated): a
-	/// cold handler is silently never invoked and the faulting instruction
-	/// retries forever.
+	/// states).
 	/// </summary>
 	private void WarmUpPosixSignalPath()
 	{
 		byte* testUserContext = stackalloc byte[512];
 		new Span<byte>(testUserContext, 512).Clear();
-		byte* testMachineContext = stackalloc byte[1024];
-		new Span<byte>(testMachineContext, 1024).Clear();
-		if (OperatingSystem.IsMacOS())
-		{
-			*(byte**)(testUserContext + DarwinUcontextMcontextOffset) = testMachineContext;
-			*(ulong*)(testUserContext + DarwinUserContextMachineContextSizeOffset) = 1024;
-			// Load the Mach memory functions before the first signal uses them.
-			byte readProbe = 0;
-			_ = TryReadMacOsMemory((ulong)testMachineContext, &readProbe, 1);
-		}
 
 		_posixSignalWarmup = true;
 		try
@@ -292,7 +266,7 @@ public sealed unsafe partial class DirectExecutionBackend
 			return false;
 		}
 
-		ulong faultAddress = GetPosixFaultAddress(siginfo, registers);
+		ulong faultAddress = GetPosixFaultAddress(siginfo);
 		ulong rip = *(ulong*)(registers + PosixRegisterOffsets[16]);
 		var kind = GetPosixAccessType(registers, faultAddress, rip) switch
 		{
@@ -321,7 +295,7 @@ public sealed unsafe partial class DirectExecutionBackend
 
 		// Copy the vector registers that instruction recovery can change.
 		// Keep all other floating-point state unchanged.
-		byte* vectorRegisters = GetSignalVectorRegisterAddress(ucontext, registers);
+		byte* vectorRegisters = GetSignalVectorRegisterAddress(registers);
 		if (vectorRegisters != null)
 		{
 			Buffer.MemoryCopy(
@@ -353,7 +327,7 @@ public sealed unsafe partial class DirectExecutionBackend
 		}
 		else
 		{
-			ulong faultAddress = GetPosixFaultAddress(siginfo, registers);
+			ulong faultAddress = GetPosixFaultAddress(siginfo);
 			record.ExceptionCode = 3221225477u;
 			record.NumberParameters = 2;
 			record.ExceptionInformation[0] = GetPosixAccessType(registers, faultAddress, ReadCtxU64(contextRecord, CTX_RIP));
@@ -413,16 +387,8 @@ public sealed unsafe partial class DirectExecutionBackend
 		return true;
 	}
 
-	private static byte* GetSignalVectorRegisterAddress(nint userContextAddress, byte* machineContext)
+	private static byte* GetSignalVectorRegisterAddress(byte* machineContext)
 	{
-		if (OperatingSystem.IsMacOS())
-		{
-			var machineContextSize = *(ulong*)((byte*)userContextAddress + DarwinUserContextMachineContextSizeOffset);
-			return machineContextSize >= DarwinMachineContextVectorRegistersOffset + XmmBlockSize
-				? machineContext + DarwinMachineContextVectorRegistersOffset
-				: null;
-		}
-
 		if (OperatingSystem.IsLinux())
 		{
 			byte* floatingPointState = *(byte**)(machineContext + LinuxGregsFpstateOffset);
@@ -439,33 +405,20 @@ public sealed unsafe partial class DirectExecutionBackend
 			return null;
 		}
 
-		if (OperatingSystem.IsMacOS())
-		{
-			return *(byte**)((byte*)ucontext + DarwinUcontextMcontextOffset);
-		}
-
 		return (byte*)ucontext + LinuxUcontextGregsOffset;
 	}
 
-	private static ulong GetPosixFaultAddress(nint siginfo, byte* registers)
+	private static ulong GetPosixFaultAddress(nint siginfo)
 	{
-		ulong address = siginfo != 0 ? *(ulong*)((byte*)siginfo + PosixSigInfoAddressOffset) : 0;
-		if (address == 0 && OperatingSystem.IsMacOS())
-		{
-			address = *(ulong*)(registers + DarwinMcontextFaultAddressOffset);
-		}
-
-		return address;
+		return siginfo != 0 ? *(ulong*)((byte*)siginfo + PosixSigInfoAddressOffset) : 0;
 	}
 
 	private static ulong GetPosixAccessType(byte* registers, ulong faultAddress, ulong rip)
 	{
 		// x86 page-fault error code: bit 1 = write access, bit 4 = instruction
 		// fetch. Fall back to comparing the fault address against RIP when
-		// the error code is not populated (e.g. under Rosetta 2 translation).
-		ulong error = OperatingSystem.IsMacOS()
-			? *(uint*)(registers + DarwinMcontextErrOffset)
-			: *(ulong*)(registers + LinuxGregsErrOffset);
+		// the error code is not populated.
+		ulong error = *(ulong*)(registers + LinuxGregsErrOffset);
 		if ((error & 0x10) != 0)
 		{
 			return 8;

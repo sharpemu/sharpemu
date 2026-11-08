@@ -163,6 +163,10 @@ public static class ContextRegisterOffset
 // Shader bank offsets the write table covers.
 public static class ShaderRegisterOffset
 {
+    public const uint SpiShaderUserDataAddrLoPs = 0x002;
+    public const uint SpiShaderUserDataAddrHiPs = 0x003;
+    public const uint SpiShaderAuxiliaryTableAddrLoPs = 0x004;
+    public const uint SpiShaderAuxiliaryTableAddrHiPs = 0x005;
     public const uint SpiShaderPaceIdPs = 0x006;
     public const uint SpiGraphicsShaderControlPs = 0x007;
     public const uint SpiShaderPgmLoPs = 0x008;

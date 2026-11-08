@@ -68,11 +68,11 @@ public sealed class AgcContextStateTests
             push,
             StreamRunner.Packet(PacketOpcode.SetContextRegister, 0x113, 0x3F000000u, 0x3F000000u),
             StreamRunner.Packet(PacketOpcode.SetContextRegister, 0x8E, 0u));
-        Assert.Equal(0.5f, runner.Interpreter.TypedRegisters.Context.ScreenViewport.Viewports[0].ZOffset);
+        Assert.Equal(0.5f, runner.Interpreter.TypedRegisters.Context.ScreenViewport.Primary.ZOffset);
         runner.Run(pop);
         var restored = runner.Interpreter.TypedRegisters.Context;
-        Assert.Equal(1f, restored.ScreenViewport.Viewports[0].ZScale);
-        Assert.Equal(0f, restored.ScreenViewport.Viewports[0].ZOffset);
+        Assert.Equal(1f, restored.ScreenViewport.Primary.ZScale);
+        Assert.Equal(0f, restored.ScreenViewport.Primary.ZOffset);
         Assert.Equal(0xFu, restored.RenderTargetMask);
         Assert.False(runner.Interpreter.TypedRegisters.ContextPushed);
     }

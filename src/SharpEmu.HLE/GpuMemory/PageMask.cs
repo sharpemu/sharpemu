@@ -57,6 +57,17 @@ public struct PageMask
         return false;
     }
 
+    public bool AllInRange(int startPage, int endPage)
+    {
+        if (startPage < 0 || endPage > Bits || startPage >= endPage) return false;
+        for (var wordIndex = startPage / WordBits; wordIndex <= (endPage - 1) / WordBits; wordIndex++)
+        {
+            var range = RangeWord(wordIndex, startPage, endPage);
+            if ((_words[wordIndex] & range) != range) return false;
+        }
+        return true;
+    }
+
     public bool Get(int index) => (_words[index / WordBits] & (1UL << (index % WordBits))) != 0;
 
     public void Set(int index) => _words[index / WordBits] |= 1UL << (index % WordBits);
@@ -84,6 +95,20 @@ public struct PageMask
         for (var word = 0; word < WordCount; word++)
         {
             _words[word] &= ~RangeWord(word, start, end);
+        }
+    }
+
+    public void SetRangeAndClear(int start, int end, ref PageMask first, ref PageMask second, ref PageMask third)
+    {
+        if (start < 0 || end > Bits || start >= end) return;
+        var fullBlock = start == 0 && end == Bits;
+        for (var word = start / WordBits; word <= (end - 1) / WordBits; word++)
+        {
+            var mask = fullBlock ? ~0UL : RangeWord(word, start, end);
+            _words[word] |= mask;
+            first._words[word] &= ~mask;
+            second._words[word] &= ~mask;
+            third._words[word] &= ~mask;
         }
     }
 

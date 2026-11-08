@@ -11,6 +11,8 @@ public static class NpUniversalDataSystemExports
     private const int ErrorInvalidArgument = unchecked((int)0x80553102);
     private const int MaximumGuestStringBytes = 64 * 1024;
 
+    public static void ResetRuntimeState() => NpUniversalDataSystemState.ResetRuntimeState();
+
     [SysAbiExport(
         Nid = "sjaobBgqeB4",
         ExportName = "sceNpUniversalDataSystemInitialize",

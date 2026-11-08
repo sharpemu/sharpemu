@@ -60,6 +60,13 @@ public static class ShaderIdentity
             return declaredHash;
         }
 
+        return ComputeContent(memory, ranges, label);
+    }
+
+    // Runtime-linked fetch code is not covered by the entry shader's declared hash.
+    public static ulong ComputeContent(ICpuMemory memory, ReadOnlySpan<(ulong Address, uint SizeBytes)> ranges, string label)
+    {
+
         // Shaders without a declared hash are rehashed on every draw, so the hasher and
         // the code buffer are reused per thread instead of allocated per call.
         var hash = _hasher ??= new XxHash3();

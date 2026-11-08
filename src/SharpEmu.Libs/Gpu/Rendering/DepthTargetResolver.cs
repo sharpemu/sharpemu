@@ -63,50 +63,6 @@ public readonly record struct DepthStencilState(
 
     public bool IsReadOnly(Format format) => AttachmentWriteAspects(format) == ImageAspectFlags.None;
 
-    // The layout for an attachment the draw does not also sample: writable in every aspect the
-    // format has, so draws that toggle depth or stencil writes keep one layout (and one rendering
-    // scope). Only a sampled attachment needs the read-only layouts of AttachmentLayout.
-    public static ImageLayout WritableAttachmentLayout(Format format)
-    {
-        var available = ViewFormatRules.DepthAspects(format);
-        var hasDepth = (available & ImageAspectFlags.DepthBit) != 0;
-        var hasStencil = (available & ImageAspectFlags.StencilBit) != 0;
-        return hasDepth && hasStencil ? ImageLayout.DepthStencilAttachmentOptimal
-            : hasStencil ? ImageLayout.StencilAttachmentOptimal
-            : ImageLayout.DepthAttachmentOptimal;
-    }
-
-    public ImageLayout AttachmentLayout(Format format)
-    {
-        var available = ViewFormatRules.DepthAspects(format);
-        var writes = AttachmentWriteAspects(format);
-        var hasDepth = (available & ImageAspectFlags.DepthBit) != 0;
-        var hasStencil = (available & ImageAspectFlags.StencilBit) != 0;
-        var depthWrite = (writes & ImageAspectFlags.DepthBit) != 0;
-        var stencilWrite = (writes & ImageAspectFlags.StencilBit) != 0;
-        if (!hasStencil)
-        {
-            return depthWrite ? ImageLayout.DepthAttachmentOptimal : ImageLayout.DepthReadOnlyOptimal;
-        }
-
-        if (!hasDepth)
-        {
-            return stencilWrite ? ImageLayout.StencilAttachmentOptimal : ImageLayout.StencilReadOnlyOptimal;
-        }
-
-        if (depthWrite && stencilWrite)
-        {
-            return ImageLayout.DepthStencilAttachmentOptimal;
-        }
-
-        if (depthWrite)
-        {
-            return ImageLayout.DepthAttachmentStencilReadOnlyOptimal;
-        }
-
-        return stencilWrite ? ImageLayout.DepthReadOnlyStencilAttachmentOptimal : ImageLayout.DepthStencilReadOnlyOptimal;
-    }
-
     private bool FaceWrites(in StencilOperations operations, in StencilMasks masks)
     {
         if (masks.WriteMask == 0)

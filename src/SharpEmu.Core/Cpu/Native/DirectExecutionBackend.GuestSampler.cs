@@ -57,6 +57,12 @@ public sealed partial class DirectExecutionBackend
 	private long _guestWaitTotalSamples;
 	private long _guestRipCaptureFailures;
 	private long _guestRipSamplerErrors;
+	private readonly object _guestSamplerReportGate = new();
+	private readonly List<string> _guestSamplerReports = new();
+	private long _guestSamplerReportsDropped;
+	private bool _guestSamplerReportsClosed;
+	private readonly HashSet<(ulong Base, string Name)> _reportedHostModules = new();
+	private bool _hostModuleWarningReported;
 
 	private readonly record struct GuestRipSampleTarget(
 		string Name,
@@ -116,8 +122,9 @@ public sealed partial class DirectExecutionBackend
 			// the title workers so it observes them without becoming the bottleneck.
 			Priority = ThreadPriority.BelowNormal,
 		};
+		AppDomain.CurrentDomain.ProcessExit += WriteGuestSamplerReports;
 		sampler.Start();
-		Console.Error.WriteLine(
+		BufferGuestSamplerReport(
 			$"[PERF][GUEST] RIP sampler started: interval={_profileGuestRipIntervalMs}ms " +
 			$"report={_profileGuestRipReportSeconds}s " +
 			$"thread={_profileGuestRipThreadFilter ?? "<all>"}");
@@ -148,6 +155,8 @@ public sealed partial class DirectExecutionBackend
 					var hostThreadId = thread.HostThreadId;
 					if (hostThreadId == 0 || !sampledHostThreads.Add(hostThreadId))
 					{
+						if (hostThreadId == 0)
+							RecordMutexLocation(thread.Context, thread.Name, 0, thread.BlockReason);
 						continue;
 					}
 
@@ -158,6 +167,8 @@ public sealed partial class DirectExecutionBackend
 						continue;
 					}
 
+					RecordMutexLocation(thread.Context, thread.Name, snapshot.Rip, thread.BlockReason);
+					RecordMutexRegisters(thread.Context, thread.Name, snapshot);
 					_guestRipSamples.AddOrUpdate(snapshot.Rip, 1, static (_, value) => value + 1);
 					_guestRipThreadSamples.AddOrUpdate(
 						string.IsNullOrEmpty(thread.Name) ? "<unnamed>" : thread.Name,
@@ -211,7 +222,7 @@ public sealed partial class DirectExecutionBackend
 				// The profiler must never silently die or affect guest execution.
 				if (Interlocked.Increment(ref _guestRipSamplerErrors) == 1)
 				{
-					Console.Error.WriteLine($"[PERF][GUEST] sampler recovery: {exception.GetType().Name}: {exception.Message}");
+					BufferGuestSamplerReport($"[PERF][GUEST] sampler recovery: {exception.GetType().Name}: {exception.Message}");
 				}
 			}
 		}
@@ -252,6 +263,7 @@ public sealed partial class DirectExecutionBackend
 		{
 			return;
 		}
+		ReportHostModules();
 
 		var byRip = new List<KeyValuePair<ulong, long>>(_guestRipSamples.Count + 16);
 		foreach (var pair in _guestRipSamples)
@@ -276,11 +288,11 @@ public sealed partial class DirectExecutionBackend
 			byThread.Add(pair);
 		}
 
-		Console.Error.WriteLine(
+		BufferGuestSamplerReport(
 			$"[PERF][GUEST] window={windowSamples} in {windowSeconds:F1}s " +
 			$"capture_failures={Interlocked.Read(ref _guestRipCaptureFailures)}");
 
-		Console.Error.WriteLine(
+		BufferGuestSamplerReport(
 			"[PERF][GUEST] top_rip: " +
 			string.Join(
 				" | ",
@@ -289,7 +301,7 @@ public sealed partial class DirectExecutionBackend
 					.Select(pair =>
 						$"0x{pair.Key:X}{DescribeGuestAddress(pair.Key)}={pair.Value * 100.0 / windowSamples:F1}%")));
 
-		Console.Error.WriteLine(
+		BufferGuestSamplerReport(
 			"[PERF][GUEST] top_page: " +
 			string.Join(
 				" | ",
@@ -305,7 +317,7 @@ public sealed partial class DirectExecutionBackend
 		}
 
 		var waitTotal = Interlocked.Read(ref _guestWaitTotalSamples);
-		Console.Error.WriteLine(
+		BufferGuestSamplerReport(
 			$"[PERF][GUEST] waiting={waitTotal * 100.0 / windowSamples:F1}% of guest thread-time; top_wait: " +
 			string.Join(
 				" | ",
@@ -313,7 +325,7 @@ public sealed partial class DirectExecutionBackend
 					.Take(12)
 					.Select(pair => $"{pair.Key}={pair.Value * 100.0 / windowSamples:F1}%")));
 
-		Console.Error.WriteLine(
+		BufferGuestSamplerReport(
 			"[PERF][GUEST] thread_wait: " +
 			string.Join(
 				" | ",
@@ -330,7 +342,7 @@ public sealed partial class DirectExecutionBackend
 		// Per-thread spin/park split. The global wait share mixes the job pool in
 		// with a dozen dormant threads, which hides the number that matters:
 		// how much of a core each worker actually burns.
-		Console.Error.WriteLine(
+		BufferGuestSamplerReport(
 			"[PERF][GUEST] thread_split (running/parked): " +
 			string.Join(
 				" | ",
@@ -343,7 +355,7 @@ public sealed partial class DirectExecutionBackend
 						return $"{pair.Key}={running * 100.0 / pair.Value:F0}%/{parked * 100.0 / pair.Value:F0}%";
 					})));
 
-		Console.Error.WriteLine(
+		BufferGuestSamplerReport(
 			"[PERF][GUEST] top_thread: " +
 			string.Join(
 				" | ",
@@ -359,11 +371,60 @@ public sealed partial class DirectExecutionBackend
 		Interlocked.Exchange(ref _guestWaitTotalSamples, 0);
 	}
 
-	/// <summary>
-	/// Tags a sampled address with the region it belongs to. Guest module code
-	/// lives above the image base; anything else is emulator or system code that
-	/// the managed profiler already covers.
-	/// </summary>
+
+	private void BufferGuestSamplerReport(string message)
+	{
+		lock (_guestSamplerReportGate)
+		{
+			if (_guestSamplerReportsClosed) return;
+			if (_guestSamplerReports.Count == 4096)
+			{
+				_guestSamplerReportsDropped++;
+				return;
+			}
+			_guestSamplerReports.Add($"ticks={Stopwatch.GetTimestamp()} {message}");
+		}
+	}
+
+	private void WriteGuestSamplerReports(object? sender, EventArgs arguments)
+	{
+		string[] reports;
+		long dropped;
+		lock (_guestSamplerReportGate)
+		{
+			_guestSamplerReportsClosed = true;
+			reports = _guestSamplerReports.ToArray();
+			_guestSamplerReports.Clear();
+			dropped = _guestSamplerReportsDropped;
+		}
+		// Do not hold the buffer lock while the output stream can block.
+		Console.Error.WriteLine($"[PERF][GUEST] buffered_reports={reports.Length} dropped={dropped} frequency={Stopwatch.Frequency}");
+		foreach (var report in reports) Console.Error.WriteLine(report);
+	}
+
+	private void ReportHostModules()
+	{
+		// Enumerate after sampled threads resume. Record names, not machine-specific paths.
+		try
+		{
+			using var process = Process.GetCurrentProcess();
+			foreach (ProcessModule module in process.Modules)
+			{
+				var address = unchecked((ulong)module.BaseAddress.ToInt64());
+				var name = module.ModuleName;
+				if (!_reportedHostModules.Add((address, name))) continue;
+				BufferGuestSamplerReport($"[PERF][GUEST] host_module name={name} " +
+					$"base=0x{address:X16} size=0x{module.ModuleMemorySize:X}");
+			}
+		}
+		catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException or NotSupportedException)
+		{
+			if (_hostModuleWarningReported) return;
+			_hostModuleWarningReported = true;
+			BufferGuestSamplerReport($"[PERF][GUEST] host module map unavailable: {exception.GetType().Name}");
+		}
+	}
+
 	private string DescribeGuestAddress(ulong address)
 	{
 		

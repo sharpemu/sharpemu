@@ -138,7 +138,7 @@ public sealed class SelfLoaderTests
         Assert.Equal(["libExample.PS5"], image.ImportedModuleNames);
     }
 
-    private static byte[] CreateSelfImage(uint magic, byte version, uint keyType, ushort flags)
+    internal static byte[] CreateSelfImage(uint magic, byte version, uint keyType, ushort flags)
     {
         var imageData = new byte[SelfHeaderSize + ElfHeaderSize];
         var selfHeader = imageData.AsSpan(0, SelfHeaderSize);

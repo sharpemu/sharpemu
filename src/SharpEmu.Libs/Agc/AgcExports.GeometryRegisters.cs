@@ -1,12 +1,15 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.HLE;
 
 namespace SharpEmu.Libs.Agc;
 
 public static partial class AgcExports
 {
+
+    private const int IndirectTableStackBytes = 4096;
 
     private static void ApplySubmittedRegisters(
         CpuContext ctx,
@@ -19,7 +22,7 @@ public static partial class AgcExports
         if (operation is ItSetShReg or ItSetContextReg or ItSetUconfigReg or ItSetUconfigRegIndex)
         {
             if (packetLength < 3 ||
-                !TryReadUInt32(ctx, packetAddress + sizeof(uint), out var startRegister))
+                !TryReadPacketUInt32(ctx, packetAddress + sizeof(uint), out var startRegister))
             {
                 return;
             }
@@ -29,15 +32,15 @@ public static partial class AgcExports
                 startRegister &= 0x0FFF_FFFFu;
             }
 
-            var directDestination = operation switch
+            var directBank = operation switch
             {
-                ItSetShReg => state.ShRegisters,
-                ItSetContextReg => state.CxRegisters,
-                _ => state.UcRegisters,
+                ItSetShReg => RShRegsIndirect,
+                ItSetContextReg => RCxRegsIndirect,
+                _ => RUcRegsIndirect,
             };
             for (uint index = 0; index < packetLength - 2; index++)
             {
-                if (!TryReadUInt32(
+                if (!TryReadPacketUInt32(
                         ctx,
                         packetAddress + 8 + ((ulong)index * sizeof(uint)),
                         out var value))
@@ -45,7 +48,7 @@ public static partial class AgcExports
                     return;
                 }
 
-                directDestination[startRegister + index] = value;
+                SetSubmittedRegister(state, directBank, startRegister + index, value);
                 if (operation == ItSetContextReg &&
                     startRegister + index is DbZInfo or DbDepthSizeXy)
                 {
@@ -66,15 +69,14 @@ public static partial class AgcExports
             return;
         }
 
-        Dictionary<uint, uint> destination;
         uint registerCount;
         ulong registersAddress;
         uint indirectRegister;
         if (operation is ItSetContextRegIndirect or ItSetShRegIndirect or ItSetUconfigRegIndirect)
         {
             if (packetLength < 5 ||
-                !TryReadUInt64(ctx, packetAddress + 4, out registersAddress) ||
-                !TryReadUInt32(ctx, packetAddress + 16, out registerCount))
+                !TryReadPacketUInt64(ctx, packetAddress + 4, out registersAddress) ||
+                !TryReadPacketUInt32(ctx, packetAddress + 16, out registerCount))
             {
                 return;
             }
@@ -91,8 +93,8 @@ public static partial class AgcExports
         else if (operation == ItNop &&
                  register is RCxRegsIndirect or RShRegsIndirect or RUcRegsIndirect &&
                  packetLength >= 4 &&
-                 TryReadUInt32(ctx, packetAddress + sizeof(uint), out registerCount) &&
-                 TryReadUInt64(ctx, packetAddress + 8, out registersAddress))
+                 TryReadPacketUInt32(ctx, packetAddress + sizeof(uint), out registerCount) &&
+                 TryReadPacketUInt64(ctx, packetAddress + 8, out registersAddress))
         {
             // Accept command buffers produced by older builds. New packets use
             // the native five-dword SET_*_REG_INDIRECT encoding above.
@@ -103,19 +105,21 @@ public static partial class AgcExports
             return;
         }
 
-        destination = indirectRegister switch
-        {
-            RCxRegsIndirect => state.CxRegisters,
-            RShRegsIndirect => state.ShRegisters,
-            _ => state.UcRegisters,
-        };
+        var tableBytes = checked((int)registerCount * 8);
+        var table = tableBytes <= IndirectTableStackBytes ? stackalloc byte[tableBytes] : new byte[tableBytes];
+        var tableRead = tableBytes != 0 && ctx.Memory.TryRead(registersAddress, table);
         for (uint index = 0; index < registerCount; index++)
         {
             var entryAddress = registersAddress + ((ulong)index * 8);
             uint registerOffset;
             uint value;
-            if (!TryReadUInt32(ctx, entryAddress, out registerOffset) ||
-                !TryReadUInt32(ctx, entryAddress + sizeof(uint), out value))
+            if (tableRead)
+            {
+                registerOffset = BinaryPrimitives.ReadUInt32LittleEndian(table.Slice((int)index * 8));
+                value = BinaryPrimitives.ReadUInt32LittleEndian(table.Slice((int)index * 8 + 4));
+            }
+            else if (!TryReadPacketUInt32(ctx, entryAddress, out registerOffset) ||
+                !TryReadPacketUInt32(ctx, entryAddress + sizeof(uint), out value))
             {
                 return;
             }
@@ -132,7 +136,7 @@ public static partial class AgcExports
                 continue;
             }
 
-            destination[registerOffset] = value;
+            SetSubmittedRegister(state, indirectRegister, registerOffset, value);
             if (indirectRegister == RCxRegsIndirect)
             {
             }
@@ -140,6 +144,22 @@ public static partial class AgcExports
             {
                 ApplyUcIndexTypeIfNeeded(state, registerOffset, value);
             }
+        }
+    }
+
+    private static void SetSubmittedRegister(SubmittedDcbState state, uint bank, uint offset, uint value)
+    {
+        switch (bank)
+        {
+            case RShRegsIndirect:
+                state.ShRegisters[offset] = value;
+                break;
+            case RCxRegsIndirect:
+                state.CxRegisters[offset] = value;
+                break;
+            default:
+                state.UcRegisters[offset] = value;
+                break;
         }
     }
 
@@ -156,27 +176,27 @@ public static partial class AgcExports
         if (operation != ItSetContextReg ||
             packetLength != 10 ||
             remainingDwords < compositeDwordCount ||
-            !TryReadUInt32(ctx, packetAddress + 4, out var startRegister) ||
+            !TryReadPacketUInt32(ctx, packetAddress + 4, out var startRegister) ||
             startRegister != DbZInfo ||
-            !TryReadUInt32(ctx, packetAddress + 40, out var depthInfoHeader) ||
+            !TryReadPacketUInt32(ctx, packetAddress + 40, out var depthInfoHeader) ||
             depthInfoHeader != Pm4(3, ItSetContextReg, 0) ||
-            !TryReadUInt32(ctx, packetAddress + 44, out var depthInfoRegister) ||
+            !TryReadPacketUInt32(ctx, packetAddress + 44, out var depthInfoRegister) ||
             depthInfoRegister != DbDepthInfo ||
-            !TryReadUInt32(ctx, packetAddress + 52, out var depthViewHeader) ||
+            !TryReadPacketUInt32(ctx, packetAddress + 52, out var depthViewHeader) ||
             depthViewHeader != Pm4(3, ItSetContextReg, 0) ||
-            !TryReadUInt32(ctx, packetAddress + 56, out var depthViewRegister) ||
+            !TryReadPacketUInt32(ctx, packetAddress + 56, out var depthViewRegister) ||
             depthViewRegister != DbDepthView ||
-            !TryReadUInt32(ctx, packetAddress + 64, out var htileBaseHeader) ||
+            !TryReadPacketUInt32(ctx, packetAddress + 64, out var htileBaseHeader) ||
             htileBaseHeader != Pm4(3, ItSetContextReg, 0) ||
-            !TryReadUInt32(ctx, packetAddress + 68, out var htileBaseRegister) ||
+            !TryReadPacketUInt32(ctx, packetAddress + 68, out var htileBaseRegister) ||
             htileBaseRegister != DbHtileDataBase ||
-            !TryReadUInt32(ctx, packetAddress + 76, out var htileSurfaceHeader) ||
+            !TryReadPacketUInt32(ctx, packetAddress + 76, out var htileSurfaceHeader) ||
             htileSurfaceHeader != Pm4(3, ItSetContextReg, 0) ||
-            !TryReadUInt32(ctx, packetAddress + 80, out var htileSurfaceRegister) ||
+            !TryReadPacketUInt32(ctx, packetAddress + 80, out var htileSurfaceRegister) ||
             htileSurfaceRegister != DbHtileSurface ||
-            !TryReadUInt32(ctx, packetAddress + 88, out var extentHeader) ||
+            !TryReadPacketUInt32(ctx, packetAddress + 88, out var extentHeader) ||
             extentHeader != Pm4(2, ItNop, 0) ||
-            !TryReadUInt32(ctx, packetAddress + 92, out var sizeXy) ||
+            !TryReadPacketUInt32(ctx, packetAddress + 92, out var sizeXy) ||
             sizeXy == 0)
         {
             return;

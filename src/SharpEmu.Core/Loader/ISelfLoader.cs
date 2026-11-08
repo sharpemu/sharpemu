@@ -15,7 +15,7 @@ public interface ISelfLoader
 
     SelfImage Load(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IModuleManager moduleManager);
 
-    SelfImage Load(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IModuleManager moduleManager, IFileSystem? fs, string? mountRoot);
+    SelfImage Load(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IModuleManager moduleManager, IFileSystem? fs, string? mountRoot, string? imageName = null);
 
-    SelfImage LoadAdditional(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IModuleManager moduleManager, IFileSystem? fs, string? mountRoot);
+    SelfImage LoadAdditional(ReadOnlySpan<byte> imageData, IVirtualMemory virtualMemory, IModuleManager moduleManager, IFileSystem? fs, string? mountRoot, string? imageName = null);
 }

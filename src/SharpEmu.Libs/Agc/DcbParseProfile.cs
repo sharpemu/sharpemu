@@ -83,7 +83,7 @@ internal static class DcbParseProfile
         Interlocked.Add(ref DrawPhaseTicks[(int)phase], elapsed);
     }
 
-    private static void TryReport()
+    internal static void TryReport()
     {
         var now = Stopwatch.GetTimestamp();
         var windowStart = Volatile.Read(ref _windowStart);

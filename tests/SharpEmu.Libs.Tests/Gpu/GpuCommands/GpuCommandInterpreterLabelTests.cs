@@ -318,7 +318,7 @@ public sealed class GpuCommandInterpreterLabelTests
     {
         var runner = new StreamRunner();
 
-        runner.Run(StreamRunner.Packet(PacketOpcode.EventWrite, 0x38));
+        runner.Run(StreamRunner.Packet(PacketOpcode.EventWrite, 0x0E));
         Assert.Empty(runner.Host.Calls);
 
         Assert.Contains("event type is unknown", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.EventWrite, 0x16 | (1u << 8))).Message);
@@ -395,12 +395,66 @@ public sealed class GpuCommandInterpreterLabelTests
     }
 
     [Fact]
-    public void AcquireMemory_IsANoOp()
+    public void AcquireMemoryWithoutCacheActions_EmitsNoBarrier()
     {
         var runner = new StreamRunner();
 
-        runner.Run(StreamRunner.CustomPacket(Nop, PacketCustomCode.AcquireMemory, 0, 0, 0, 0, 0, 0, 0), StreamRunner.Packet(PacketOpcode.AcquireMemory, 0, 0, 0, 0, 0, 0));
+        runner.Run(
+            StreamRunner.CustomPacket(Nop, PacketCustomCode.AcquireMemory, 0x8000_0000u | (0x1FFu << 6), 0, 0, 0, 0, 10, (1u << 10) | (2u << 11) | (1u << 16)),
+            StreamRunner.Packet(PacketOpcode.AcquireMemory, 0x8000_0000u | (0x1FFu << 6), 0, 0, 0, 0, 10));
 
         Assert.Empty(runner.Host.Calls);
+    }
+
+    [Theory]
+    [InlineData(0u, 1u << 0)]
+    [InlineData(0u, 1u << 5)]
+    [InlineData(0u, (1u << 6) | (1u << 7))]
+    [InlineData(0u, 1u << 8)]
+    [InlineData(0u, 1u << 9)]
+    [InlineData(0u, 1u << 14)]
+    [InlineData(0u, 1u << 15)]
+    [InlineData(1u << 25, 0u)]
+    [InlineData(1u << 26, 0u)]
+    public void WrappedAcquireMemoryWithACacheAction_EmitsOneBarrier(uint cbDbOperation, uint gcrControl)
+    {
+        var runner = new StreamRunner();
+
+        runner.Run(StreamRunner.CustomPacket(Nop, PacketCustomCode.AcquireMemory, cbDbOperation, 0, 0, 0, 0, 10, gcrControl));
+
+        Assert.Equal(new[] { "barrier" }, runner.Host.Calls);
+    }
+
+    [Theory]
+    [InlineData(1u << 23)]
+    [InlineData(1u << 22)]
+    [InlineData(1u << 18)]
+    [InlineData(1u << 25)]
+    [InlineData(1u << 26)]
+    [InlineData(1u << 29)]
+    public void NativeAcquireMemoryWithACacheAction_EmitsOneBarrier(uint coherControl)
+    {
+        var runner = new StreamRunner();
+
+        runner.Run(StreamRunner.Packet(PacketOpcode.AcquireMemory, coherControl, 0, 0, 0, 0, 10));
+
+        Assert.Equal(new[] { "barrier" }, runner.Host.Calls);
+    }
+
+    [Fact]
+    public void AcquireMemoryReport_CountsPacketsAndBarriers()
+    {
+        GpuCommandInterpreter.TakeAcquireMemoryReport();
+        var runner = new StreamRunner();
+
+        runner.Run(
+            StreamRunner.CustomPacket(Nop, PacketCustomCode.AcquireMemory, 0, 0, 0, 0, 0, 0, 0),
+            StreamRunner.CustomPacket(Nop, PacketCustomCode.AcquireMemory, 0, 0, 0, 0, 0, 0, 1u << 15));
+
+        var report = System.Text.RegularExpressions.Regex.Match(GpuCommandInterpreter.TakeAcquireMemoryReport(), @"^acquire_mem=(\d+)/(\d+)$");
+        Assert.True(report.Success);
+        var packets = long.Parse(report.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+        var barriers = long.Parse(report.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture);
+        Assert.True(packets >= 2 && barriers >= 1 && packets - barriers >= 1, $"packets={packets} barriers={barriers}");
     }
 }

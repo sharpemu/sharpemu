@@ -64,14 +64,20 @@ public static partial class AgcExports
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var eventType = (uint)(ctx[CpuRegister.Rsi] & 0xFF);
         var eventAddress = ctx[CpuRegister.Rdx];
-        if (commandBufferAddress == 0 || eventType > 0x3F || eventAddress != 0)
+        if (commandBufferAddress == 0 || eventType > 0x3F)
         {
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(2, ItEventWrite, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, eventType))
+        var hasAddress = eventType is 0x38 or 0x39;
+        var packetDwords = hasAddress ? 4u : 2u;
+        var eventIndex = hasAddress ? 1u : eventType is 0x07 or 0x0F or 0x10 ? 4u : 0u;
+        Span<uint> packet = stackalloc uint[4]
+        {
+            Pm4(packetDwords, ItEventWrite, 0), eventType | (eventIndex << 8),
+            (uint)eventAddress & ~7u, (uint)(eventAddress >> 32),
+        };
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, packet[..(int)packetDwords]))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -95,14 +101,7 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 7, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(7, ItNop, RWaitFlipDone)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, videoOutHandle) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, displayBufferIndex) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, 0) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, 0) ||
-            !TryWriteUInt32(ctx, commandAddress + 20, 0) ||
-            !TryWriteUInt32(ctx, commandAddress + 24, 0))
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(7, ItNop, RWaitFlipDone), videoOutHandle, displayBufferIndex, 0, 0, 0, 0))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -128,13 +127,7 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 6, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(6, ItNop, RFlip)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, videoOutHandle) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, unchecked((uint)displayBufferIndex)) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, flipMode) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, (uint)(flipArg & 0xFFFF_FFFFUL)) ||
-            !TryWriteUInt32(ctx, commandAddress + 20, (uint)(flipArg >> 32)))
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(6, ItNop, RFlip), videoOutHandle, unchecked((uint)displayBufferIndex), flipMode, (uint)(flipArg & 0xFFFF_FFFFUL), (uint)(flipArg >> 32)))
         {
             return ReturnPointer(ctx, 0);
         }

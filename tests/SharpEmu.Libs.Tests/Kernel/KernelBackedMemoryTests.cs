@@ -51,39 +51,6 @@ public sealed class KernelBackedMemoryTests
         Assert.Equal(0x123456789ABCDEF0UL, value);
     }
 
-    [Fact]
-    public void MacOsFlexibleMappingExcludesReservedGraphicsMemory()
-    {
-        if (!OperatingSystem.IsMacOS()) return;
-
-        using var test = new BackedKernelMemory();
-        var previousPool = KernelMemoryCompatExports.SetFlexibleBackingForTests(
-            new FlexibleBackingPool(0x4000000, 0x4000000));
-        try
-        {
-            // Fail on the first search in the reserved graphics memory region.
-            test.Host.BeforeReserveHole = (address, size) =>
-                Assert.True(address >= 0x70_0000_0000 || address + size <= 0x10_0000_0000,
-                    "The allocation search entered macOS's reserved GPU window.");
-            Assert.True(test.Context.TryWriteUInt64(test.Output, 0));
-            test.Context[CpuRegister.Rdi] = test.Output;
-            test.Context[CpuRegister.Rsi] = 20 * 1024 * 1024;
-            test.Context[CpuRegister.Rdx] = 3;
-            test.Context[CpuRegister.Rcx] = 0x8000;
-
-            Assert.Equal(0, KernelMemoryCompatExports.KernelMapFlexibleMemoryInternal(test.Context));
-            Assert.True(test.Context.TryReadUInt64(test.Output, out var mapped));
-            Assert.True(test.Context.TryWriteUInt64(mapped, 0x123456789ABCDEF0));
-            Assert.True(test.Context.TryReadUInt64(mapped, out var value));
-            Assert.Equal(0x123456789ABCDEF0UL, value);
-        }
-        finally
-        {
-            KernelMemoryCompatExports.ResetBackingMappings(test.Memory);
-            KernelMemoryCompatExports.SetFlexibleBackingForTests(previousPool);
-        }
-    }
-
     [NativePageProtectionTheory]
     [InlineData(false)]
     [InlineData(true)]
@@ -252,7 +219,7 @@ public sealed class KernelBackedMemoryTests
     }
 
     [Fact]
-    public void SparseImageReadRejectsUnreservedAndOutOfApertureRanges()
+    public void SparseImageReadZeroesUnresidentApertureRangesAndRejectsOutsideIt()
     {
         using var test = new BackedKernelMemory();
         var address = SharpEmu.Libs.Tests.Memory.HostViews.HostViewTestSupport.ProbeGuestAddress(test.Host, 0x20000);
@@ -261,13 +228,14 @@ public sealed class KernelBackedMemoryTests
         try
         {
             var result = Enumerable.Repeat((byte)0xAB, 0x20000).ToArray();
-            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, result));
-            Assert.All(result, value => Assert.Equal(0xAB, value));
-            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, ulong.MaxValue, result));
+            Assert.True(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, result));
+            Assert.All(result, value => Assert.Equal(0, value));
+            var untouched = Enumerable.Repeat((byte)0xAB, 0x4000).ToArray();
+            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, ulong.MaxValue, untouched));
             Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, Span<byte>.Empty));
             SetPrtAperture(test, address, 0);
-            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, result.AsSpan(0, 0x4000)));
-            Assert.All(result, value => Assert.Equal(0xAB, value));
+            Assert.False(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, untouched));
+            Assert.All(untouched, value => Assert.Equal(0xAB, value));
         }
         finally
         {
@@ -316,6 +284,25 @@ public sealed class KernelBackedMemoryTests
         test.Allocate(0, 0x4000);
         Assert.Equal(address, test.Map(0, 0x4000, address));
         Assert.Equal((address, address + 0x4000), test.Query(address));
+    }
+
+    [Fact]
+    public void ReservationTooLargeForTheSparseApertureKeepsTheGuestHint()
+    {
+        using var test = new BackedKernelMemory();
+        const ulong hint = 0x1000000000;
+        const ulong size = 0xC000000000;
+        test.Host.FailReserveHoleWhen = (_, requestedSize) => requestedSize >= size;
+        Assert.True(test.Context.TryWriteUInt64(test.Output, hint));
+        test.Context[CpuRegister.Rdi] = test.Output;
+        test.Context[CpuRegister.Rsi] = size;
+        test.Context[CpuRegister.Rdx] = 0;
+        test.Context[CpuRegister.Rcx] = 0x200000;
+
+        Assert.Equal(0, KernelRuntimeCompatExports.KernelReserveVirtualRange(test.Context));
+        Assert.True(test.Context.TryReadUInt64(test.Output, out var address));
+        Assert.Equal(hint, address);
+        Assert.Equal((hint, hint + size), test.Query(hint));
     }
 
     [Fact]
@@ -374,9 +361,29 @@ public sealed class KernelBackedMemoryTests
             (ulong)method.Invoke(null, [ulong.MaxValue - 0x3FFF, alignment, alignment])!);
     }
 
+    [Fact]
+    public void UnhintedAddressSearchPreservesPlatformAllocationOrder()
+    {
+        using var test = new BackedKernelMemory();
+        var backing = new AddressSearchRecorder();
+        var method = typeof(KernelMemoryCompatExports).GetMethod("TrySelectBackingAddress",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        object[] arguments = [backing, 0UL, 0x4000UL, 0x4000UL, 0UL, 0UL, false];
+
+        Assert.True((bool)method.Invoke(null, arguments)!);
+        Assert.Equal(!OperatingSystem.IsWindows(), backing.PreferredOwnedReservation);
+        Assert.Single(backing.SearchStarts);
+    }
+
     private sealed class AddressSearchRecorder : IGuestBackedSpace
     {
+        public bool PreferredOwnedReservation { get; private set; }
         public List<ulong> SearchStarts { get; } = [];
+        public bool TryHoldAvailableRange(ulong searchStart, ulong size, ulong alignment, out ulong address)
+        {
+            PreferredOwnedReservation = true;
+            return TryHoldRangeAtOrAbove(searchStart, size, alignment, out address);
+        }
         public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address)
         {
             SearchStarts.Add(searchStart);

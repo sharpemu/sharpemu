@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Globalization;
-using System.Runtime.InteropServices;
 using SharpEmu.HLE;
 using Xunit;
 
@@ -28,29 +27,6 @@ internal static unsafe class NativePageProtection
             }
             Assert.Fail("The address has no native mapping.");
         }
-        else if (OperatingSystem.IsMacOS())
-        {
-            const int basicInformation64 = 9;
-            var regionAddress = address;
-            ulong regionSize = 0;
-            uint informationCount = 9;
-            var information = stackalloc int[9];
-            var task = MachTaskSelf();
-            var result = MachVmRegion(task, ref regionAddress, ref regionSize, basicInformation64,
-                information, ref informationCount, out var objectName);
-            try
-            {
-                Assert.Equal(0, result);
-                Assert.Equal(9u, informationCount);
-                Assert.True(regionAddress <= address && address - regionAddress < regionSize);
-                return ConvertProtection((information[0] & 1) != 0, (information[0] & 2) != 0,
-                    (information[0] & 4) != 0);
-            }
-            finally
-            {
-                if (objectName != 0) Assert.Equal(0, MachPortDeallocate(task, objectName));
-            }
-        }
         else
         {
             Assert.NotEqual((nuint)0, HostMemory.Query((void*)address, out var information));
@@ -69,14 +45,4 @@ internal static unsafe class NativePageProtection
             (true, false, false) => HostMemory.PAGE_READONLY,
             _ => HostMemory.PAGE_NOACCESS,
         };
-
-    [DllImport("libSystem.dylib", EntryPoint = "mach_task_self")]
-    private static extern uint MachTaskSelf();
-
-    [DllImport("libSystem.dylib", EntryPoint = "mach_vm_region")]
-    private static extern int MachVmRegion(uint task, ref ulong address, ref ulong size, int flavor,
-        int* information, ref uint informationCount, out uint objectName);
-
-    [DllImport("libSystem.dylib", EntryPoint = "mach_port_deallocate")]
-    private static extern int MachPortDeallocate(uint task, uint name);
 }

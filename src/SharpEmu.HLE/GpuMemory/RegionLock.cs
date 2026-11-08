@@ -37,6 +37,8 @@ public sealed class RegionLock
 
     public Held Hold() => new(this);
 
+    public bool IsHeldByCurrentThread => Volatile.Read(ref _owner) == Environment.CurrentManagedThreadId;
+
     public void Enter()
     {
         var thread = Environment.CurrentManagedThreadId;

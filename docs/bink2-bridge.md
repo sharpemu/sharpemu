@@ -56,8 +56,8 @@ Windows) still overrides that default normally.
 
 To use a different set of FFmpeg libraries, drop them into the build or
 published `plugins` folder yourself (matching FFmpeg's own file-naming and versioning
-conventions, e.g. `avformat-61.dll` / `libavformat.so.61` / matching
-`.dylib`) -- `FfmpegNativeBinkFrameSource` points `ffmpeg.RootPath` at that
+conventions, e.g. `avformat-61.dll` / `libavformat.so.61`) --
+`FfmpegNativeBinkFrameSource` points `ffmpeg.RootPath` at that
 folder and does not otherwise care where the files came from.
 
 If the libraries are absent or fail to load, `FfmpegNativeBinkFrameSource.TryOpen`

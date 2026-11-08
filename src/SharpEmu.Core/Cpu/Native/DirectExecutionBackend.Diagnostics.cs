@@ -431,7 +431,8 @@ public sealed partial class DirectExecutionBackend
 
 	private static bool IsPlausibleReturnAddress(ulong address)
 	{
-		return address >= 12884901888L && address < 17592186044416L && !IsUnresolvedSentinel(address);
+		var minimum = _activeCpuContext?.TargetGeneration == Generation.Gen4 ? 0x10000UL : 0x300000000UL;
+		return address >= minimum && address < 17592186044416L && !IsUnresolvedSentinel(address);
 	}
 
 	private static bool TryGetPlausibleReturnFromStack(ulong rsp, out ulong returnRip, out ulong nextRsp)

@@ -9,7 +9,7 @@ using SkiaSharp;
 
 namespace SharpEmu.Libs.Font;
 
-public static class FontExports
+public static partial class FontExports
 {
     private const ushort GlyphMagic = 0x0F03;
     private const int GlyphSize = 0x100;
@@ -33,7 +33,8 @@ public static class FontExports
         var sourceAddress = ctx[CpuRegister.Rdi];
         var textAddress = ctx[CpuRegister.Rsi];
         var textSize = (uint)ctx[CpuRegister.Rdx];
-        if (sourceAddress == 0 || textAddress > ulong.MaxValue - textSize)
+        var bounded = unchecked((int)textSize) > 0;
+        if (sourceAddress == 0 || (bounded && textAddress > ulong.MaxValue - textSize))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
@@ -41,7 +42,7 @@ public static class FontExports
         Span<byte> source = stackalloc byte[0x60];
         source.Clear();
         BinaryPrimitives.WriteUInt64LittleEndian(source[0x08..], textAddress);
-        BinaryPrimitives.WriteUInt64LittleEndian(source[0x10..], textAddress == 0 ? 0 : textAddress + textSize);
+        BinaryPrimitives.WriteUInt64LittleEndian(source[0x10..], textAddress != 0 && bounded ? textAddress + textSize : 0);
         BinaryPrimitives.WriteUInt64LittleEndian(source[0x18..], textAddress);
         BinaryPrimitives.WriteUInt64LittleEndian(source[0x20..], ctx[CpuRegister.Rcx]);
         BinaryPrimitives.WriteUInt64LittleEndian(source[0x28..], ctx[CpuRegister.R8]);
@@ -393,7 +394,7 @@ public static class FontExports
 
         var code = (uint)ctx[CpuRegister.Rsi];
         if (!IsValidCode(code)) return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
-        return WriteGlyphMetrics(ctx, metricsAddress, GetGlyph(ctx[CpuRegister.Rdi], code), GetFontScale(ctx[CpuRegister.Rdi]).Height)
+        return WriteGlyphMetrics(ctx, metricsAddress, GetGlyphMetrics(ctx[CpuRegister.Rdi], code), GetFontScale(ctx[CpuRegister.Rdi]).Height)
             ? SetSuccess(ctx)
             : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
@@ -618,9 +619,7 @@ public static class FontExports
         var height = BitConverter.UInt32BitsToSingle((uint)heightBits);
         if (float.IsFinite(height) && height > 1)
         {
-            FontScales[ctx[CpuRegister.Rdi]] = (
-                float.IsFinite(width) && width > 1 ? Math.Clamp(width, 8, 128) : Math.Clamp(height, 8, 128),
-                Math.Clamp(height, 8, 128));
+            FontScales[ctx[CpuRegister.Rdi]] = (float.IsFinite(width) && width > 1 ? width : height, height);
         }
         return SetSuccess(ctx);
     }
@@ -634,6 +633,12 @@ public static class FontExports
     {
         var scale = GetFontScale(font);
         return (FontFaces.TryGetValue(font, out var face) ? face : DefaultFont.Value).GetGlyph(code, scale.Width, scale.Height);
+    }
+
+    private static FontGlyph GetGlyphMetrics(ulong font, uint code)
+    {
+        var scale = GetFontScale(font);
+        return (FontFaces.TryGetValue(font, out var face) ? face : DefaultFont.Value).GetGlyphMetrics(code, scale.Width, scale.Height);
     }
 
     private static bool WriteGlyphMetrics(CpuContext ctx, ulong address, FontGlyph glyph, float height)

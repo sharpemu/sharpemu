@@ -13,7 +13,18 @@ public readonly record struct GuestThreadStartRequest(
     string Name,
     int Priority,
     ulong AffinityMask,
-    ulong StackSize = 0);
+    ulong StackSize = 0,
+    IGuestThreadRecycler? Recycler = null);
+
+/// <summary>
+/// Owner of a recyclable guest thread. When the thread's entry returns,
+/// the scheduler parks it instead of exiting it, then reports the return here;
+/// the owner may hand the parked thread new work with <see cref="IGuestThreadScheduler.TryRestartParkedThread"/>.
+/// </summary>
+public interface IGuestThreadRecycler
+{
+    void OnEntryReturned(ulong threadHandle, ulong returnValue);
+}
 
 public readonly record struct GuestThreadSnapshot(
     ulong ThreadHandle,
@@ -50,7 +61,32 @@ public interface IGuestThreadScheduler
     /// </summary>
     void RegisterGuestThreadContext(ulong threadHandle, CpuContext context);
 
+    /// <summary>
+    /// Returns the exact mapped guest stack owned by a scheduler thread. The
+    /// default keeps alternate/test schedulers source-compatible when they do
+    /// not own guest stack mappings.
+    /// </summary>
+    bool TryGetGuestThreadStackBounds(
+        ulong threadHandle,
+        out ulong stackBase,
+        out ulong stackSize)
+    {
+        stackBase = 0;
+        stackSize = 0;
+        return false;
+    }
+
     bool TryStartThread(CpuContext creatorContext, GuestThreadStartRequest request, out string? error);
+
+    /// <summary>
+    /// Runs a new entry on a parked recyclable thread, from a fresh frame at
+    /// the top of its stack. False when the thread is not parked.
+    /// </summary>
+    bool TryRestartParkedThread(ulong threadHandle, ulong entryPoint, ulong argument, out string? error)
+    {
+        error = "this scheduler does not recycle guest threads";
+        return false;
+    }
 
     bool TryJoinThread(
         CpuContext callerContext,
@@ -230,6 +266,9 @@ public static class GuestThreadExecution
     private static GuestCpuContinuation _pendingContextTransferTarget;
 
     [ThreadStatic]
+    private static Action<bool>? _contextTransferCompletion;
+
+    [ThreadStatic]
     private static bool _hasCurrentImportCallFrame;
 
     [ThreadStatic]
@@ -276,6 +315,7 @@ public static class GuestThreadExecution
 
     public static ulong EnterGuestThread(ulong threadHandle)
     {
+        CompleteCurrentContextTransfer(false);
         GpuMemory.GpuMemoryAccessProfile.InitializeCurrentThread();
         var previous = _currentGuestThreadHandle;
         _currentGuestThreadHandle = threadHandle;
@@ -300,6 +340,7 @@ public static class GuestThreadExecution
 
     public static void RestoreGuestThread(ulong previousThreadHandle)
     {
+        CompleteCurrentContextTransfer(false);
         _currentGuestThreadHandle = previousThreadHandle;
         GuestFastPath.BindGuestThread(previousThreadHandle);
         _pendingBlockReason = null;
@@ -533,10 +574,20 @@ public static class GuestThreadExecution
         return true;
     }
 
-    public static void RequestCurrentContextTransfer(GuestCpuContinuation target)
+    public static void RequestCurrentContextTransfer(GuestCpuContinuation target, Action<bool>? completion = null)
     {
         _pendingContextTransferTarget = target;
         _pendingContextTransfer = true;
+        _contextTransferCompletion = completion;
+    }
+
+    public static void CompleteCurrentContextTransfer(bool succeeded)
+    {
+        var completion = _contextTransferCompletion;
+        _contextTransferCompletion = null;
+        _pendingContextTransfer = false;
+        _pendingContextTransferTarget = default;
+        completion?.Invoke(succeeded);
     }
 
     public static bool TryConsumeCurrentContextTransfer(out GuestCpuContinuation target)

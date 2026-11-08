@@ -2,11 +2,22 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Diagnostics;
+using SharpEmu.HLE.Diagnostics;
+using SharpEmu.HLE.GuestMemory;
 
 namespace SharpEmu.HLE.GpuMemory;
 
 public sealed class GuestPageTracker
 {
+    [ThreadStatic]
+    private static UploadScratch? _availableUploadScratch;
+
+    private sealed class UploadScratch
+    {
+        internal readonly List<TrackedRegion> Held = new();
+        internal readonly List<(TrackedRegion Region, ulong Address, ulong Size)> Cleared = new();
+    }
+
     private const ulong BlockBytes = TrackerLayout.BlockBytes;
     private const ulong PageBytes = TrackerLayout.PageBytes;
 
@@ -19,7 +30,72 @@ public sealed class GuestPageTracker
     private readonly object _regionGate = new();
     private readonly CpuDirtySummary _cpuDirtySummary = new();
 
+    private static readonly ThreadCounter SweepBlocks = new();
+    private static readonly ThreadCounter SweepBlocksClean = new();
+    private static readonly ThreadCounter SweepBlocksTaken = new();
+    private static readonly ThreadCounter SweepPagesTaken = new();
+    private static readonly ThreadCounter EmulatorWritesKept = new();
+    private static readonly ThreadCounter EmulatorWritesOverGpuData = new();
+    private static readonly ThreadCounter GpuProtectionsDeferred = new();
+    private static readonly ThreadCounter GpuProtectionFlushes = new();
+
+    public static string TakeDirtyTrackingReport() => FormattableString.Invariant(
+        $"sweep_blocks={SweepBlocks.Take()} sweep_clean={SweepBlocksClean.Take()} sweep_taken={SweepBlocksTaken.Take()} sweep_pages={SweepPagesTaken.Take()} ") +
+        FormattableString.Invariant(
+        $"emulator_kept={EmulatorWritesKept.Take()} emulator_over_gpu={EmulatorWritesOverGpuData.Take()} gpu_protect_deferred={GpuProtectionsDeferred.Take()} gpu_protect_flushes={GpuProtectionFlushes.Take()}");
+
+    private readonly object _pendingGpuGate = new();
+    private readonly object _applyGpuGate = new();
+    private List<TrackedRegion> _pendingGpuProtections = [];
+    private List<TrackedRegion> _applyingGpuProtections = [];
+
     public GuestPageTracker(PageGuard pages) => _pages = pages;
+
+    public bool DefersGpuWriteProtection { get; set; }
+
+    internal void QueueGpuProtection(TrackedRegion region)
+    {
+        GpuProtectionsDeferred.Increment();
+        lock (_pendingGpuGate)
+        {
+            _pendingGpuProtections.Add(region);
+        }
+    }
+
+    public void ApplyPendingGpuProtections()
+    {
+        lock (_applyGpuGate)
+        {
+            List<TrackedRegion> regions;
+            lock (_pendingGpuGate)
+            {
+                if (_pendingGpuProtections.Count == 0)
+                {
+                    return;
+                }
+
+                regions = _pendingGpuProtections;
+                _pendingGpuProtections = _applyingGpuProtections;
+                _applyingGpuProtections = regions;
+            }
+
+            GpuProtectionFlushes.Increment();
+
+            foreach (var region in regions)
+            {
+                if (region.Lock.IsHeldByCurrentThread)
+                {
+                    region.ApplyGpuProtection();
+                    continue;
+                }
+
+                using var _ = region.Lock.Hold();
+                region.ApplyGpuProtection();
+            }
+
+            regions.Clear();
+        }
+    }
 
     public bool HasCpuDirtyPages(ulong vaddr, ulong size)
     {
@@ -34,6 +110,19 @@ public sealed class GuestPageTracker
             using var _ = region.Lock.Hold();
             return region.IsModified(WriteOrigin.Cpu, offset, bytes);
         });
+    }
+
+    public (ulong Address, ulong Size) ExtendCpuDirtyRun(ulong vaddr, ulong size, ulong lowerBound, ulong upperBound, bool preserveHotPages, int budgetPages)
+    {
+        ValidateRange(vaddr, size);
+        var index = vaddr / BlockBytes;
+        if (budgetPages <= 0 || (vaddr + size - 1) / BlockBytes != index || Volatile.Read(ref _regions[index]) is not { } region)
+        {
+            return (vaddr, size);
+        }
+
+        using var _ = region.Lock.Hold();
+        return region.ExtendCpuDirtyRun(vaddr, size, lowerBound, upperBound, preserveHotPages, budgetPages);
     }
 
     public bool MayHaveCpuDirtyPages(ulong vaddr, ulong size)
@@ -99,6 +188,51 @@ public sealed class GuestPageTracker
         return false;
     }
 
+    // Lock-free: whether the GPU ever wrote a page of the range, downloaded since or not.
+    public bool MayHaveGpuWrittenPages(ulong vaddr, ulong size)
+    {
+        ValidateRange(vaddr, size);
+        var remaining = size;
+        var index = vaddr / BlockBytes;
+        var offset = vaddr % BlockBytes;
+        while (remaining != 0)
+        {
+            var bytes = Math.Min(BlockBytes - offset, remaining);
+            if (Volatile.Read(ref _regions[index]) is { } region && region.WasGpuWritten(offset, bytes))
+            {
+                return true;
+            }
+
+            remaining -= bytes;
+            offset = 0;
+            index++;
+        }
+
+        return false;
+    }
+
+    public bool IsGpuOwned(ulong vaddr, ulong size)
+    {
+        ValidateRange(vaddr, size);
+        var remaining = size;
+        var index = vaddr / BlockBytes;
+        var offset = vaddr % BlockBytes;
+        while (remaining != 0)
+        {
+            var bytes = Math.Min(BlockBytes - offset, remaining);
+            if (Volatile.Read(ref _regions[index]) is not { } region || !region.IsGpuOwned(offset, bytes))
+            {
+                return false;
+            }
+
+            remaining -= bytes;
+            offset = 0;
+            index++;
+        }
+
+        return true;
+    }
+
     public bool IsCpuWriteHotRange(ulong vaddr, ulong size)
     {
         RejectUploadCallbackReentry();
@@ -146,6 +280,7 @@ public sealed class GuestPageTracker
     public void UntrackMemory(ulong vaddr, ulong size)
     {
         RejectUploadCallbackReentry();
+        ApplyPendingGpuProtections();
         var regions = AcquireRegionLocks(vaddr, size);
         try
         {
@@ -198,6 +333,14 @@ public sealed class GuestPageTracker
             if (Volatile.Read(ref _regions[index]) is { } region)
             {
                 tracked = true;
+                if (region.IsCpuWritableThroughout(offset, bytes))
+                {
+                    remaining -= bytes;
+                    offset = 0;
+                    index++;
+                    continue;
+                }
+
                 using (region.Lock.Hold())
                 {
                     if (region.IsModified(WriteOrigin.Gpu, offset, bytes))
@@ -207,6 +350,86 @@ public sealed class GuestPageTracker
                     else
                     {
                         region.MarkCpuWrite(region.BaseAddress + offset, bytes);
+                    }
+                }
+            }
+
+            remaining -= bytes;
+            offset = 0;
+            index++;
+        }
+
+        return tracked;
+    }
+
+    // After a write landed through the backing: every page the GPU does not own turns CPU-dirty, also in a
+    // block where another page of the range is GPU-dirty. GPU-dirty pages keep their owner.
+    public bool MarkLandedCpuWrite(ulong vaddr, ulong size)
+    {
+        RejectUploadCallbackReentry();
+        ValidateRange(vaddr, size);
+        var tracked = false;
+        var remaining = size;
+        var index = vaddr / BlockBytes;
+        var offset = vaddr % BlockBytes;
+        while (remaining != 0)
+        {
+            var bytes = Math.Min(BlockBytes - offset, remaining);
+            if (Volatile.Read(ref _regions[index]) is { } region)
+            {
+                tracked = true;
+                if (!region.IsCpuDirtyThroughout(offset, bytes))
+                {
+                    using (region.Lock.Hold())
+                    {
+                        for (var page = offset & ~(PageBytes - 1); page < offset + bytes; page += PageBytes)
+                        {
+                            var start = Math.Max(page, offset);
+                            var length = Math.Min(page + PageBytes, offset + bytes) - start;
+                            if (!region.IsModified(WriteOrigin.Gpu, start, length))
+                            {
+                                region.MarkCpuWrite(region.BaseAddress + start, length);
+                            }
+                        }
+                    }
+                }
+            }
+
+            remaining -= bytes;
+            offset = 0;
+            index++;
+        }
+
+        return tracked;
+    }
+
+    public bool MarkCpuWriteKeepingProtection(ulong vaddr, ulong size, out bool needsGpuFlush)
+    {
+        RejectUploadCallbackReentry();
+        ValidateRange(vaddr, size);
+        var tracked = false;
+        needsGpuFlush = false;
+        var remaining = size;
+        var index = vaddr / BlockBytes;
+        var offset = vaddr % BlockBytes;
+        while (remaining != 0)
+        {
+            var bytes = Math.Min(BlockBytes - offset, remaining);
+            if (Volatile.Read(ref _regions[index]) is { } region)
+            {
+                tracked = true;
+                if (!region.IsCpuDirtyThroughout(offset, bytes))
+                {
+                    using var _ = region.Lock.Hold();
+                    if (region.IsModified(WriteOrigin.Gpu, offset, bytes))
+                    {
+                        needsGpuFlush = true;
+                        EmulatorWritesOverGpuData.Increment();
+                    }
+                    else
+                    {
+                        region.MarkCpuWriteKeepingProtection(region.BaseAddress + offset, bytes);
+                        EmulatorWritesKept.Increment();
                     }
                 }
             }
@@ -243,53 +466,84 @@ public sealed class GuestPageTracker
     }
 
     // Region locks stay held across uploadFunc only for a written range, which turns GPU-dirty.
+    public long UploadBatch { get; set; } = -1;
+
     public void ForEachUploadRange(ulong vaddr, ulong size, bool isWritten, Action<ulong, ulong> rangeFunc, Action uploadFunc,
         bool preserveCpuWriteHotPages = true)
     {
         RejectUploadCallbackReentry();
-        VisitRegions(vaddr, size, create: true, static (_, _, _) => false);
+        if (!isWritten && !MayHaveCpuDirtyPages(vaddr, size))
+        {
+            uploadFunc();
+            return;
+        }
+
+        using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadRegionSetup) : default)
+            CreateRegions(vaddr, size);
+        var scratch = _availableUploadScratch ?? new UploadScratch();
+        // Nested uploads on another tracker must use separate storage.
+        _availableUploadScratch = null;
+        var held = scratch.Held;
+        var releasedCount = 0;
+        var cleared = scratch.Cleared;
         var previousOwner = _uploadOwner;
         _uploadOwner = this;
-        var held = new List<TrackedRegion>();
-        var cleared = new List<(TrackedRegion Region, ulong Address, ulong Size)>();
         try
         {
             using (GpuMemoryAccessProfile.Measure(GpuMemoryAccessProfile.Operation.UploadTracking, size))
             {
-                VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
+                var remaining = size;
+                var index = vaddr / BlockBytes;
+                var offset = vaddr % BlockBytes;
+                while (remaining != 0)
                 {
-                    region.Lock.Enter();
-                    held.Add(region);
-                    var address = region.BaseAddress + offset;
-                    region.ForEachCpuUploadRange(
-                        preserveHotPages: !isWritten && preserveCpuWriteHotPages,
-                        address,
-                        bytes,
-                        (runAddress, runSize) => cleared.Add((region, runAddress, runSize)),
-                        rangeFunc);
-                    if (!isWritten)
+                    var bytes = Math.Min(BlockBytes - offset, remaining);
+                    var region = Volatile.Read(ref _regions[index])!;
+                    if (!isWritten || !region.IsGpuOwned(offset, bytes))
                     {
-                        region.Lock.Exit();
-                        held.Remove(region);
+                        using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadLockWait) : default)
+                            region.Lock.Enter();
+                        held.Add(region);
+                        using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadRangeScan) : default)
+                            region.ForEachCpuUploadRange(
+                                preserveHotPages: !isWritten && preserveCpuWriteHotPages,
+                                region.BaseAddress + offset,
+                                bytes,
+                                cleared,
+                                rangeFunc,
+                                UploadBatch);
+                        if (!isWritten)
+                        {
+                            region.Lock.Exit();
+                            held.RemoveAt(held.Count - 1);
+                        }
                     }
 
-                    return false;
-                });
+                    remaining -= bytes;
+                    offset = 0;
+                    index++;
+                }
             }
-            uploadFunc();
+            using (isWritten ? GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadSource) : default)
+                uploadFunc();
             if (isWritten)
             {
-                VisitRegions(vaddr, size, create: false, (region, offset, bytes) =>
+                for (; releasedCount < held.Count; releasedCount++)
                 {
-                    region.ChangeState(WriteOrigin.Gpu, enable: true, region.BaseAddress + offset, bytes);
+                    var region = held[releasedCount];
+                    var address = Math.Max(vaddr, region.BaseAddress);
+                    var end = Math.Min(vaddr + size, region.BaseAddress + BlockBytes);
+                    using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.WrittenUploadOwnership))
+                        region.ChangeState(WriteOrigin.Gpu, enable: true, address, end - address);
                     region.Lock.Exit();
-                    held.Remove(region);
-                    return false;
-                });
+                }
             }
         }
         catch
         {
+            // Rollback must see only locks that are still held.
+            held.RemoveRange(0, releasedCount);
+            releasedCount = 0;
             // Runs the buffer never received go back to the CPU; a run another operation made
             // GPU-owned after this upload released its lock keeps that newer ownership.
             var lockedThroughout = new HashSet<TrackedRegion>(held);
@@ -328,17 +582,20 @@ public sealed class GuestPageTracker
         }
         finally
         {
-            foreach (var region in held)
+            for (var index = releasedCount; index < held.Count; index++)
             {
-                region.Lock.Exit();
+                held[index].Lock.Exit();
             }
 
             _uploadOwner = previousOwner;
+            held.Clear();
+            cleared.Clear();
+            _availableUploadScratch ??= scratch;
         }
     }
 
     [Conditional("DEBUG")]
-    public void ValidateGpuDirtyPages(SpanSet dirty, ulong vaddr, ulong size, string operation)
+    public void ValidateGpuDirtyPages(AvlSpanSet dirty, ulong vaddr, ulong size, string operation)
     {
         if (!new GuestSpan(vaddr, size).IsValid || vaddr % PageBytes != 0 || size % PageBytes != 0)
         {
@@ -355,7 +612,7 @@ public sealed class GuestPageTracker
     }
 
     [Conditional("DEBUG")]
-    public void ValidateGpuDirtyOwnership(SpanSet dirty, ulong vaddr, ulong size, string operation)
+    public void ValidateGpuDirtyOwnership(AvlSpanSet dirty, ulong vaddr, ulong size, string operation)
     {
         ValidateRange(vaddr, size);
         var end = (vaddr + size + PageBytes - 1) & ~(PageBytes - 1);
@@ -493,6 +750,159 @@ public sealed class GuestPageTracker
         }
     }
 
+    public sealed class SweepPlan
+    {
+        internal GuestSpan[] Spans { get; init; } = [];
+        internal ulong[] Blocks { get; init; } = [];
+        internal int FirstWord { get; init; }
+    }
+
+    public static SweepPlan? PlanSweep(IReadOnlyList<GuestSpan> spans)
+    {
+        if (spans.Count == 0)
+        {
+            return new SweepPlan();
+        }
+
+        var previousEnd = 0UL;
+        for (var index = 0; index < spans.Count; index++)
+        {
+            var span = spans[index];
+            if (span.Size == 0 || !span.IsValid || span.Address < previousEnd)
+            {
+                return null;
+            }
+
+            previousEnd = span.End;
+        }
+
+        var firstWord = (int)(spans[0].Address / BlockBytes / 64);
+        var lastWord = (int)((previousEnd - 1) / BlockBytes / 64);
+        var blocks = new ulong[lastWord - firstWord + 1];
+        var copy = new GuestSpan[spans.Count];
+        for (var index = 0; index < copy.Length; index++)
+        {
+            var span = spans[index];
+            copy[index] = span;
+            var last = (span.End - 1) / BlockBytes;
+            for (var block = span.Address / BlockBytes; block <= last; block++)
+            {
+                blocks[(int)(block / 64) - firstWord] |= 1UL << (int)(block % 64);
+            }
+        }
+
+        return new SweepPlan { Spans = copy, Blocks = blocks, FirstWord = firstWord };
+    }
+
+    public void ForEachCoveredCpuDirtyPageRun(SweepPlan plan, PageCoverage coverage, Action<ulong, ulong> visit, Action? blockVisited = null)
+    {
+        var nextSpan = 0;
+        for (var offset = 0; offset < plan.Blocks.Length; offset++)
+        {
+            var word = plan.FirstWord + offset;
+            var pending = plan.Blocks[offset] & coverage.BlockWord(word) &
+                (~(ulong)Volatile.Read(ref _presentRegions[word]) | _cpuDirtySummary.Word(word));
+            while (pending != 0)
+            {
+                var block = (ulong)word * 64 + (ulong)System.Numerics.BitOperations.TrailingZeroCount(pending);
+                pending &= pending - 1;
+                if (coverage.BlockAt(block) is not { } covered)
+                {
+                    continue;
+                }
+
+                SweepBlocks.Increment();
+                var region = Volatile.Read(ref _regions[block]);
+                if (region is not null)
+                {
+                    var version = region.CpuDirtyVersion;
+                    if (covered.CleanRegionVersion == version && covered.CleanCoverageVersion == covered.Version)
+                    {
+                        SweepBlocksClean.Increment();
+                        continue;
+                    }
+
+                    if (region.CpuDirtyPages(in covered.Pages).None)
+                    {
+                        covered.CleanRegionVersion = version;
+                        covered.CleanCoverageVersion = covered.Version;
+                        SweepBlocksClean.Increment();
+                        continue;
+                    }
+                }
+
+                var candidates = covered.Pages & SpanPages(plan.Spans, ref nextSpan, block);
+                if (region is not null && region.CpuDirtyPages(in candidates).None)
+                {
+                    continue;
+                }
+
+                region ??= GetOrCreateRegion(block);
+                PageMask taken;
+                using (region.Lock.Hold())
+                {
+                    taken = region.TakeCpuDirtyPages(in candidates);
+                }
+
+                if (taken.Any)
+                {
+                    SweepBlocksTaken.Increment();
+                }
+
+                try
+                {
+                    foreach (var (runStart, runEnd) in taken)
+                    {
+                        SweepPagesTaken.Add(runEnd - runStart);
+                        visit(block * BlockBytes + (ulong)runStart * PageBytes, (ulong)(runEnd - runStart) * PageBytes);
+                    }
+
+                    blockVisited?.Invoke();
+                }
+                catch
+                {
+                    using (region.Lock.Hold())
+                    {
+                        region.ReturnCpuDirtyPages(in taken);
+                    }
+
+                    throw;
+                }
+            }
+        }
+    }
+
+    private static PageMask SpanPages(GuestSpan[] spans, ref int nextSpan, ulong block)
+    {
+        var blockStart = block * BlockBytes;
+        var blockEnd = blockStart + BlockBytes;
+        var low = nextSpan;
+        var high = spans.Length;
+        while (low < high)
+        {
+            var middle = low + ((high - low) >> 1);
+            if (spans[middle].End <= blockStart)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        nextSpan = low;
+        var pages = new PageMask();
+        for (var index = low; index < spans.Length && spans[index].Address < blockEnd; index++)
+        {
+            var start = Math.Max(spans[index].Address, blockStart) - blockStart;
+            var end = Math.Min(spans[index].End, blockEnd) - blockStart;
+            pages.SetRange((int)(start / PageBytes), (int)((end + PageBytes - 1) / PageBytes));
+        }
+
+        return pages;
+    }
+
     private bool IsKnownCpuClean(ulong vaddr, ulong size)
     {
         ValidateRange(vaddr, size);
@@ -506,6 +916,19 @@ public sealed class GuestPageTracker
         }
 
         return true;
+    }
+
+    private void CreateRegions(ulong vaddr, ulong size)
+    {
+        ValidateRange(vaddr, size);
+        var last = (vaddr + size - 1) / BlockBytes;
+        for (var index = vaddr / BlockBytes; index <= last; index++)
+        {
+            if (Volatile.Read(ref _regions[index]) == null)
+            {
+                _ = GetOrCreateRegion(index);
+            }
+        }
     }
 
     // Visits (region, offset, bytes) per 4 MiB chunk; a true result stops the walk early.
@@ -546,7 +969,7 @@ public sealed class GuestPageTracker
                 return existing;
             }
 
-            var created = new TrackedRegion(_pages, index * BlockBytes, _cpuDirtySummary);
+            var created = new TrackedRegion(_pages, index * BlockBytes, _cpuDirtySummary, this);
             Volatile.Write(ref _regions[index], created);
             Interlocked.Or(ref _presentRegions[index / 64], 1L << (int)(index % 64));
             return created;

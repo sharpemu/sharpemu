@@ -3,6 +3,7 @@
 
 using System.IO.Hashing;
 using SharpEmu.HLE;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -10,9 +11,32 @@ using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
-public readonly record struct ImageAccessState(PipelineStageFlags Stage, AccessFlags Access, ImageLayout Layout)
+public readonly record struct ImageAccessState(PipelineStageFlags Stage, AccessFlags Access, ImageLayout Layout, bool Guest = false)
 {
+    public const AccessFlags GuestStorageAccess = AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit;
+
+    public const AccessFlags AttachmentAccess =
+        AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit |
+        AccessFlags.DepthStencilAttachmentReadBit | AccessFlags.DepthStencilAttachmentWriteBit;
+
+    private const AccessFlags WriteAccess = AccessFlags.TransferWriteBit | AccessFlags.ShaderWriteBit | AccessFlags.MemoryWriteBit |
+                                            AccessFlags.HostWriteBit | AccessFlags.ColorAttachmentWriteBit | AccessFlags.DepthStencilAttachmentWriteBit;
+
     public static ImageAccessState Initial => new(PipelineStageFlags.AllCommandsBit, AccessFlags.None, ImageLayout.Undefined);
+
+    public static readonly ThreadCounter Barriers = new();
+    public static readonly ThreadCounter BarriersElided = new();
+
+    public bool RepeatsGuestStorageAccess(AccessFlags access, bool guest) =>
+        guest && Guest && access == GuestStorageAccess && Access == access && Layout == ImageLayout.General;
+
+    public static bool OnlyReadsOutsideAttachments(AccessFlags access) => (access & (WriteAccess | AttachmentAccess)) == 0;
+
+    public bool ReadsAfterRead(AccessFlags access) =>
+        Layout == ImageLayout.General && OnlyReadsOutsideAttachments(Access) && OnlyReadsOutsideAttachments(access);
+
+    public bool RepeatsAttachmentAccess(AccessFlags access) =>
+        Layout == ImageLayout.General && Access == access && access != 0 && (access & ~AttachmentAccess) == 0;
 }
 
 public struct ImageUses
@@ -73,10 +97,15 @@ public sealed unsafe partial class CachedImage : IDisposable
     private bool _bufferHoldsGpuContents;
 
     public ImageDescription Description;
+    internal SurfaceMetadata? MetadataRegistration;
     public readonly ImageBacking Backing = new();
     public readonly List<CachedImageView> Views = new();
+    private CachedImageView[] _viewSnapshot = [];
     public ImageUses Uses;
     public ImageBindingState Binding;
+
+    // Set while descriptor set 1 holds a view of this image: told when its layout, contents or registration change.
+    public Action<CachedImage>? HeapChanged;
     public bool Registered;
     public uint QueryEpoch;
     public ulong WatchBegin;
@@ -84,9 +113,11 @@ public sealed unsafe partial class CachedImage : IDisposable
     public ResourceSlotIdentifier DepthOwner;
     public ulong LastAccessTick;
     public int RecencyEntryIndex;
+    public bool Parked;
+    public ulong ParkedTick;
 
     public CachedImage(GpuDeviceInfo device, SubmissionScheduler scheduler, IGuestBackedSpace guestBacking, in ImageDescription description,
-        ImageBackingPool? pool = null)
+        ImageBackingPool? pool = null, Action? reportAllocationFailure = null)
     {
         _device = device;
         _scheduler = scheduler;
@@ -105,7 +136,7 @@ public sealed unsafe partial class CachedImage : IDisposable
         Backing.Extent = Description.Extent;
         Backing.GuestPitch = Description.Pitch;
         Backing.Layers = Description.IsVolume ? 1 : Description.Resources.Layers;
-        Backing.MipLevels = Description.Resources.Levels;
+        Backing.MipLevels = Math.Min(Description.Resources.Levels, MipChainLevels(Backing.ImageType, Backing.Extent));
         Backing.Samples = Description.Samples;
         Backing.Flags = CreateFlags(Description);
         Backing.Usage = UsageFlags(device, Description);
@@ -125,7 +156,7 @@ public sealed unsafe partial class CachedImage : IDisposable
             SharingMode = SharingMode.Exclusive,
             Samples = ImageDescription.VulkanSampleCount(Backing.Samples),
         };
-        if (!TrySelectSupportedImageConfiguration(device, ref create, allowCompressedImageFallback: OperatingSystem.IsMacOS()))
+        if (!TrySelectSupportedImageConfiguration(device, ref create))
         {
             throw SubmissionScheduler.Fatal(
                 $"The image format does not support the required usage: format={(int)create.Format} type={(int)create.ImageType} usage=0x{(uint)create.Usage:x} flags=0x{(uint)create.Flags:x} samples={Backing.Samples}.");
@@ -141,10 +172,11 @@ public sealed unsafe partial class CachedImage : IDisposable
         }
 
         var vk = device.Vk;
-        var createResult = vk.CreateImage(device.Device, &create, null, out Backing.Handle);
-        if (createResult != Result.Success)
+        var creationResult = vk.CreateImage(device.Device, &create, null, out Backing.Handle);
+        if (creationResult != Result.Success)
         {
-            throw CreateFailure(create, "vkCreateImage", createResult, 0);
+            reportAllocationFailure?.Invoke();
+            throw CreateFailure(create, "vkCreateImage", creationResult);
         }
 
         vk.GetImageMemoryRequirements(device.Device, Backing.Handle, out var requirements);
@@ -154,6 +186,7 @@ public sealed unsafe partial class CachedImage : IDisposable
             AllocationSize = requirements.Size,
         };
         var allocated = Result.ErrorOutOfDeviceMemory;
+        var allocationAttempted = false;
         for (uint index = 0; index < device.MemoryTypeCount; index++)
         {
             if ((requirements.MemoryTypeBits & (1u << (int)index)) == 0 ||
@@ -163,6 +196,7 @@ public sealed unsafe partial class CachedImage : IDisposable
             }
 
             allocateInfo.MemoryTypeIndex = index;
+            allocationAttempted = true;
             allocated = device.AllocateMemory(allocateInfo, out Backing.Memory);
             if (allocated == Result.Success)
             {
@@ -170,35 +204,33 @@ public sealed unsafe partial class CachedImage : IDisposable
             }
         }
 
-        if (allocated != Result.Success)
+        var bindingResult = allocated == Result.Success
+            ? vk.BindImageMemory(device.Device, Backing.Handle, Backing.Memory, 0)
+            : allocated;
+        if (bindingResult != Result.Success)
         {
             vk.DestroyImage(device.Device, Backing.Handle, null);
             device.FreeMemory(Backing.Memory);
             Backing.Handle = default;
             Backing.Memory = default;
-            throw CreateFailure(create, "vkAllocateMemory", allocated, requirements.Size);
-        }
-
-        var bindResult = vk.BindImageMemory(device.Device, Backing.Handle, Backing.Memory, 0);
-        if (bindResult != Result.Success)
-        {
-            vk.DestroyImage(device.Device, Backing.Handle, null);
-            device.FreeMemory(Backing.Memory);
-            Backing.Handle = default;
-            Backing.Memory = default;
-            throw CreateFailure(create, "vkBindImageMemory", bindResult, requirements.Size);
+            reportAllocationFailure?.Invoke();
+            throw CreateFailure(create, !allocationAttempted ? "select_device_local_memory_type" :
+                allocated != Result.Success ? "vkAllocateMemory" : "vkBindImageMemory",
+                bindingResult, requirements.Size, requirements.MemoryTypeBits);
         }
 
         Backing.AllocationSize = requirements.Size;
     }
 
-    private static Exception CreateFailure(in ImageCreateInfo create, string operation, Result result, ulong requiredBytes) =>
+    private static Exception CreateFailure(in ImageCreateInfo create, string operation, Result result,
+        ulong allocationSize = 0, uint memoryTypeBits = 0) =>
         SubmissionScheduler.Fatal(
-            $"The image could not be created: operation={operation} result={result} required_bytes={requiredBytes} " +
+            $"The image could not be created: operation={operation} result={result} result_code={(int)result} " +
             $"extent={create.Extent.Width}x{create.Extent.Height}x{create.Extent.Depth} format={create.Format}({(int)create.Format}) " +
-            $"layers={create.ArrayLayers} levels={create.MipLevels} usage=0x{(uint)create.Usage:X} flags=0x{(uint)create.Flags:X}.");
+            $"layers={create.ArrayLayers} levels={create.MipLevels} usage=0x{(uint)create.Usage:X} flags=0x{(uint)create.Flags:X} " +
+            $"samples={create.Samples} allocation_bytes={allocationSize} memory_type_bits=0x{memoryTypeBits:X}.");
 
-    internal static bool TrySelectSupportedImageConfiguration(IImageFormatSupport device, ref ImageCreateInfo configuration, bool allowCompressedImageFallback)
+    internal static bool TrySelectSupportedImageConfiguration(IImageFormatSupport device, ref ImageCreateInfo configuration)
     {
         static bool SupportsImageConfiguration(IImageFormatSupport device, in ImageCreateInfo configuration) =>
             device.TryGetImageFormatProperties(configuration.Format, configuration.ImageType, configuration.Tiling, configuration.Usage, configuration.Flags, out var properties) &&
@@ -224,23 +256,21 @@ public sealed unsafe partial class CachedImage : IDisposable
             }
         }
 
-        if (!allowCompressedImageFallback || (configuration.Flags & ImageCreateFlags.CreateBlockTexelViewCompatibleBit) == 0)
+        return false;
+    }
+
+    // Vulkan allows only the levels of the extent's full mip chain. An uncompressed view of a block-compressed
+    // image keeps the compressed image's level count but measures its extent in blocks, so its last levels
+    // (smaller than one block) have no host level; copying into them wrote past the image's memory.
+    internal static uint MipChainLevels(ImageType type, in Extent3D extent)
+    {
+        var largest = Math.Max(extent.Width, extent.Height);
+        if (type == ImageType.Type3D)
         {
-            return false;
+            largest = Math.Max(largest, extent.Depth);
         }
 
-        // Remove block views and their storage usage when MoltenVK rejects them.
-        // Use the new configuration only if the device supports it.
-        var fallbackConfiguration = configuration;
-        fallbackConfiguration.Flags &= ~ImageCreateFlags.CreateBlockTexelViewCompatibleBit;
-        fallbackConfiguration.Usage &= ~ImageUsageFlags.StorageBit;
-        if (!SupportsImageConfiguration(device, fallbackConfiguration))
-        {
-            return false;
-        }
-
-        configuration = fallbackConfiguration;
-        return true;
+        return (uint)(32 - System.Numerics.BitOperations.LeadingZeroCount(Math.Max(largest, 1u)));
     }
 
     private static ImageType HostImageType(GuestImageType type) => type switch
@@ -343,6 +373,12 @@ public sealed unsafe partial class CachedImage : IDisposable
         {
             _maybeCpuDirty = true;
         }
+        else
+        {
+            return;
+        }
+
+        HeapChanged?.Invoke(this);
     }
 
     public bool IsCpuDirty => _cpuDirty || _maybeCpuDirty;
@@ -357,6 +393,8 @@ public sealed unsafe partial class CachedImage : IDisposable
         {
             _maybeCpuDirty = true;
         }
+
+        HeapChanged?.Invoke(this);
     }
 
     public bool NeedsMaybeCpuHash => _maybeCpuDirty && !_maybeHashValid;
@@ -422,12 +460,20 @@ public sealed unsafe partial class CachedImage : IDisposable
     // The write sequence of the mip tail block image last copied into this chain's tail mips.
     public long MergedTailSequence;
 
+    // A raw buffer binding over the image may have written its bytes after the GPU last wrote the image.
+    // The image keeps its contents, but they are no longer known to be newer than the buffer's.
+    public bool RawWriteAfterGpuWrite { get; private set; }
+
+    public void MarkRawWriteAfterGpuWrite() => RawWriteAfterGpuWrite = true;
+
     public void MarkGpuModified()
     {
+        RawWriteAfterGpuWrite = false;
         _gpuModified = true;
         _bufferHoldsGpuContents = false;
         GpuWriteSequence = Interlocked.Increment(ref _gpuWriteCounter);
         _guestPieceHashes = null;
+        HeapChanged?.Invoke(this);
     }
 
     public void ClearGpuModified() => _gpuModified = false;
@@ -522,6 +568,23 @@ public sealed unsafe partial class CachedImage : IDisposable
         return aspect != 0 && (aspect & ~supported) == 0;
     }
 
+    // A view of guest levels past the host mip chain (see MipChainLevels) views the last host level instead.
+    // A range outside the guest's levels stays as it is and is refused.
+    internal static ImageViewDescription ClampToHostLevels(in ImageViewDescription view, uint hostLevels, uint guestLevels)
+    {
+        if (hostLevels == 0 || hostLevels >= guestLevels || view.LevelCount == 0 ||
+            view.BaseLevel >= guestLevels || view.LevelCount > guestLevels - view.BaseLevel)
+        {
+            return view;
+        }
+
+        var clamped = view.BaseLevel >= hostLevels ? view with { BaseLevel = hostLevels - 1, LevelCount = 1 }
+            : view.LevelCount > hostLevels - view.BaseLevel ? view with { LevelCount = hostLevels - view.BaseLevel } : view;
+        // The minimum LOD stays inside the view: past the host chain it reads the last host level, as the guest levels there do.
+        var lastLevel = clamped.BaseLevel + clamped.LevelCount - 1;
+        return clamped.MinLod > lastLevel ? clamped with { MinLod = lastLevel } : clamped;
+    }
+
     // Returns the cached view for the normalized description, creating it on first use.
     public ImageView GetOrCreateView(in ImageViewDescription requested)
     {
@@ -540,6 +603,7 @@ public sealed unsafe partial class CachedImage : IDisposable
         }
 
         normalized = normalized with { Usage = isStorage ? ImageUsageFlags.StorageBit : 0 };
+        normalized = ClampToHostLevels(normalized, image.MipLevels, Description.Resources.Levels);
         var formatCompatible = normalized.Format != Format.Undefined && ViewFormatRules.AreImageViewFormatsCompatible(image.Format, normalized.Format, image.Flags);
         var usageValid = !isStorage || (image.Usage & ImageUsageFlags.StorageBit) != 0;
         var sliceView = image.ImageType == ImageType.Type3D && normalized.Type is ImageViewType.Type2D or ImageViewType.Type2DArray;
@@ -560,14 +624,28 @@ public sealed unsafe partial class CachedImage : IDisposable
                 $"exists={image.Exists} formatValid={formatCompatible} usageValid={usageValid} rangesValid={rangesValid} mappingValid={mappingValid} typeValid={typeValid} aspectValid={aspectValid}.");
         }
 
-        foreach (var cached in Views)
+        foreach (var cached in Volatile.Read(ref _viewSnapshot))
         {
-            if (cached.Description.Equals(normalized))
-            {
-                return cached.View;
-            }
+            if (cached.Description.Equals(normalized)) return cached.View;
         }
 
+        lock (Views)
+        {
+            foreach (var cached in Views)
+            {
+                if (cached.Description.Equals(normalized))
+                {
+                    return cached.View;
+                }
+            }
+
+            return CreateView(in requested, in normalized, isStorage);
+        }
+    }
+
+    private ImageView CreateView(in ImageViewDescription requested, in ImageViewDescription normalized, bool isStorage)
+    {
+        var image = Backing;
         var minLod = new ImageViewMinLodCreateInfoEXT
         {
             SType = StructureType.ImageViewMinLodCreateInfoExt,
@@ -598,12 +676,14 @@ public sealed unsafe partial class CachedImage : IDisposable
         }
 
         Views.Add(new CachedImageView(normalized, view));
+        Volatile.Write(ref _viewSnapshot, Views.ToArray());
         return view;
     }
 
     // Immediate destruction; the owner waits for GPU work before disposing.
     public void Dispose()
     {
+        Volatile.Write(ref _viewSnapshot, []);
         foreach (var cached in Views)
         {
             _device.Vk.DestroyImageView(_device.Device, cached.View, null);

@@ -257,6 +257,74 @@ public sealed partial class GuestImageCacheTests : IClassFixture<HeadlessVulkanF
         harness.Shutdown();
     }
 
+    // An array and a volume of the same size: two layers 512 bytes apart, four slices 256 bytes apart. The volume takes
+    // the array's two layers and keeps the guest bytes of the slices past them.
+    [Fact]
+    public void ArrayToDeeperVolumeOverlap_CopiesOnlyTheLayersOfTheArray()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        const ulong slice = 256;
+        uint[] guest = [0x10203040u, 0x50607080u, 0x11223344u, 0x55667788u];
+        for (var index = 0; index < guest.Length; index++)
+        {
+            harness.Write(address + (ulong)index * slice, Bytes(guest[index]));
+        }
+
+        var array = LinearRequest(address, 4 * slice, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new Extent3D(1, 1, 1), 2, 4, 1);
+        var arrayId = harness.Acquire(ref array);
+        Assert.Equal(Bytes(guest[0], guest[2]), harness.ReadImageBytes(harness.Image(arrayId)));
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, 4 * slice, 0x0a0b0c0du)));
+
+        var volume = array;
+        volume.Description.Type = GuestImageType.Color3D;
+        volume.Description.Extent = new Extent3D(1, 1, 4);
+        volume.Description.Resources = SubresourceCount.Single;
+        volume.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = slice, Pitch = 1, Height = 1 };
+        volume.View = volume.View with { Type = ImageViewType.Type3D, LayerCount = 1 };
+        var volumeId = harness.Find(ref volume);
+        Assert.True(volumeId.IsValid);
+        Assert.Equal(4u, harness.Image(volumeId).Backing.Extent.Depth);
+        Assert.Equal(Bytes(0x0a0b0c0du, 0x0a0b0c0du, guest[2], guest[3]), harness.ReadImageBytes(harness.Image(volumeId)));
+        harness.Shutdown();
+    }
+
+    // A tiled volume records one slab in its mip layout, whatever its depth, so a deeper volume at the same address
+    // shares the layout of the slices the shallower one had.
+    [Fact]
+    public void VolumeDepthGrowth_KeepsTheContentsOfTheSharedSlices()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        // A linear 1x1 slice occupies one padded 256-byte slab.
+        const ulong slab = 256;
+        harness.Write(address + 2 * slab, Bytes(0x10203040u));
+        harness.Write(address + 3 * slab, Bytes(0x50607080u));
+        var shallow = SlabVolume(address, 2, slab);
+        var shallowId = harness.Acquire(ref shallow);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, 2 * slab, 0x0a0b0c0du)));
+        Assert.True(harness.Image(shallowId).IsGpuModified);
+
+        var deep = SlabVolume(address, 4, slab);
+        var deepId = harness.Find(ref deep);
+        Assert.True(deepId.IsValid);
+        Assert.NotEqual(shallowId, deepId);
+        Assert.False(harness.Images.Contains(shallowId));
+        Assert.Equal(4u, harness.Image(deepId).Backing.Extent.Depth);
+        Assert.True(harness.Image(deepId).IsGpuModified);
+        Assert.Equal(Bytes(0x0a0b0c0du, 0x0a0b0c0du, 0x10203040u, 0x50607080u), harness.ReadImageBytes(harness.Image(deepId)));
+        harness.Shutdown();
+    }
+
+    private static ImageRequest SlabVolume(ulong address, uint depth, ulong slab)
+    {
+        var request = LinearRequest(address, depth * slab, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color3D, new Extent3D(1, 1, depth), 1, 4, 1);
+        request.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = slab, Pitch = 1, Height = 1 };
+        return request;
+    }
+
     [Fact]
     public void EqualSizeTileModeAlias_KeepsSeparateBackings()
     {

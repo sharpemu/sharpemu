@@ -35,6 +35,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 _imageCache.RunGarbageCollector(endsFrame);
             }
 
+            if (_imageCache.HoldsManyDestroyedImages && _scheduler.CurrentTick > 1 && !_scheduler.InsideTickCallback)
+            {
+                _imageCache.NoteDestroyedImageReclaim();
+                _scheduler.Wait(_scheduler.CurrentTick - 1);
+                _scheduler.RunCompletedOperations();
+            }
+
             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.BufferCollect))
             {
                 _bufferCache.RunGarbageCollector();
@@ -46,38 +53,50 @@ internal static unsafe partial class VulkanVideoPresenter
             using var profileScope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Idle);
             var gpuWorkInFlight = _pendingGuestSubmissions.Count > 0 ||
                 Array.Exists(_frameInFlight, static pending => pending);
-            var blockedRetryWait = BlockedRetryWaitMilliseconds();
-            lock (_gate)
+            // The command stream thread retries its blocked heads itself and wakes this thread for its
+            // items; before it starts, queued submissions start it on the next tick.
+            var commandThread = _commandThread;
+            if (commandThread is not null)
             {
-                if (_closed ||
-                    Volatile.Read(ref _presenterCloseRequested) ||
-                    _relay.HasPendingCommands ||
-                    (_vulkanReady && _commandStream.HasUnblockedPending) ||
-                    blockedRetryWait == 0 ||
-                    HasReadyPresentationLocked())
-                {
-                    return;
-                }
+                commandThread.ConsumerIdle = true;
+            }
 
-                var waitMilliseconds = gpuWorkInFlight ? 1 : 8;
-                if (blockedRetryWait is { } retryWait)
+            try
+            {
+                lock (_gate)
                 {
-                    waitMilliseconds = Math.Min(waitMilliseconds, retryWait);
-                }
+                    if (_closed ||
+                        Volatile.Read(ref _presenterCloseRequested) ||
+                        _relay.HasPendingCommands ||
+                        (commandThread is not null ? commandThread.HasWork : _vulkanReady && _commandStream.HasPending) ||
+                        HasReadyPresentationLocked())
+                    {
+                        return;
+                    }
 
-                var waitPhase = _commandStream.HasPending
-                    ? RenderPhaseProfile.Phase.IdleBlockedCommands
-                    : _pendingGuestImagePresentations.Count > 0 || _pendingVideoPresentations.Count > 0 ||
-                        (_latestPresentation is { } latest && latest.Sequence != _presentedSequence)
-                        ? RenderPhaseProfile.Phase.IdlePendingPresentation
-                        : RenderPhaseProfile.Phase.IdleNoQueuedWork;
-                using var waitProfile = RenderPhaseProfile.MeasureDetail(waitPhase);
-                SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.WaitStarted,
-                    detail: waitMilliseconds);
-                var signaled = System.Threading.Monitor.Wait(_gate, waitMilliseconds);
-                // The result describes the monitor wait, not the arrival of runnable guest work.
-                SubmissionFlowProfile.Record(signaled ? SubmissionFlowProfile.EventKind.WaitSignaled
-                    : SubmissionFlowProfile.EventKind.WaitTimedOut, detail: (int)waitPhase);
+                    var waitMilliseconds = gpuWorkInFlight || _batchDrawCount > 0 ? 1 : 8;
+
+                    var waitPhase = _commandStream.HasPending
+                        ? RenderPhaseProfile.Phase.IdleBlockedCommands
+                        : _pendingGuestImagePresentations.Count > 0 || _pendingVideoPresentations.Count > 0 ||
+                            (_latestPresentation is { } latest && latest.Sequence != _presentedSequence)
+                            ? RenderPhaseProfile.Phase.IdlePendingPresentation
+                            : RenderPhaseProfile.Phase.IdleNoQueuedWork;
+                    using var waitProfile = RenderPhaseProfile.MeasureDetail(waitPhase);
+                    SubmissionFlowProfile.Record(SubmissionFlowProfile.EventKind.WaitStarted,
+                        detail: waitMilliseconds);
+                    var signaled = System.Threading.Monitor.Wait(_gate, waitMilliseconds);
+                    // The result describes the monitor wait, not the arrival of runnable guest work.
+                    SubmissionFlowProfile.Record(signaled ? SubmissionFlowProfile.EventKind.WaitSignaled
+                        : SubmissionFlowProfile.EventKind.WaitTimedOut, detail: (int)waitPhase);
+                }
+            }
+            finally
+            {
+                if (commandThread is not null)
+                {
+                    commandThread.ConsumerIdle = false;
+                }
             }
         }
 
@@ -144,11 +163,14 @@ internal static unsafe partial class VulkanVideoPresenter
             var renderWorkDeadline = _renderWorkBudgetTicks > 0
                 ? System.Diagnostics.Stopwatch.GetTimestamp() + _renderWorkBudgetTicks
                 : long.MaxValue;
-            RunCommandStreamSlices(renderWorkDeadline);
+            RunCommandStreamSlices(renderWorkDeadline, yieldForPresentation: true);
 
-            using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Flush))
+            if (BatchShouldFlush)
             {
-                FlushBatchedGuestCommands();
+                using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Flush))
+                {
+                    FlushBatchedGuestCommands();
+                }
             }
 
             PerfOverlay.SetGuestCacheStatistics(
@@ -248,9 +270,12 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             byte[]? pixels = null;
+            var shaderCacheProgress = presentation.IsSplash ? Volatile.Read(ref _shaderCacheProgress) : null;
             if (presentation.Pixels is { } sourcePixels)
             {
-                pixels = presentation.Width == _extent.Width && presentation.Height == _extent.Height
+                pixels = shaderCacheProgress is not null
+                    ? DrawShaderCacheSplash(in presentation, shaderCacheProgress)
+                    : presentation.Width == _extent.Width && presentation.Height == _extent.Height
                     ? sourcePixels
                     : ScaleBgra(
                         sourcePixels,
@@ -380,16 +405,30 @@ internal static unsafe partial class VulkanVideoPresenter
                     ClearValueCount = 1,
                     PClearValues = &clearValue,
                 };
-                _vk.CmdBeginRenderPass(
-                    _commandBuffer,
-                    &renderPassInfo,
-                    SubpassContents.Inline);
-                _vk.CmdBindPipeline(
-                    _commandBuffer,
-                    PipelineBindPoint.Graphics,
-                    _barycentricPipeline);
-                _vk.CmdDraw(_commandBuffer, 3, 1, 0, 0);
-                _vk.CmdEndRenderPass(_commandBuffer);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdBeginRenderPass(
+                        _commandBuffer,
+                        &renderPassInfo,
+                        SubpassContents.Inline);
+                }
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdBindPipeline(
+                        _commandBuffer,
+                        PipelineBindPoint.Graphics,
+                        _barycentricPipeline);
+                }
+                SharpEmu.Libs.Gpu.Vulkan.GraphicsDynamicStateEpoch.Advance();
+                SharpEmu.Libs.Gpu.Vulkan.NativeBindingEpoch.Advance();
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdDraw(_commandBuffer, 3, 1, 0, 0);
+                }
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdEndRenderPass(_commandBuffer);
+                }
                 waitStage = PipelineStageFlags.ColorAttachmentOutputBit;
             }
             else if (presentedGuestImage is not null)
@@ -466,6 +505,7 @@ internal static unsafe partial class VulkanVideoPresenter
             CollectCompletedGuestSubmissions(waitForOldest: false);
             _imageInitialized[imageIndex] = true;
             _currentFrameSlot = (frameSlot + 1) % MaxFramesInFlight;
+            NoteShaderCacheSplashPresented(shaderCacheProgress is not null && presentation.Pixels is not null);
             CompletePresentation(in presentation, presented: true);
             if (presentation.IsSplash && !_splashPresented)
             {

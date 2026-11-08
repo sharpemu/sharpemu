@@ -145,6 +145,23 @@ public sealed class Gen5ImageTests
     }
 
     [Fact]
+    public void ImageGatherWithALevelOfDetailSamplesTheFourTexelsOfThatLevel()
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation("ImageGather4L", dimension: 1, unifiedFormat: 22u));
+
+        // OpImageGather has no level operand and would read the base level.
+        Assert.DoesNotContain(instructions, item => item.Opcode == SpirvOp.ImageGather);
+        var size = Assert.Single(instructions, item => item.Opcode == SpirvOp.ImageQuerySizeLod);
+        var samples = instructions.Where(item => item.Opcode == SpirvOp.ImageSampleExplicitLod).ToArray();
+        Assert.Equal(4, samples.Length);
+        // Result type, result id, sampled image, coordinates, the Lod operand mask and the level.
+        Assert.All(samples, sample => Assert.Equal(2u, sample.Operands[4]));
+        var level = Assert.Single(samples.Select(sample => sample.Operands[5]).Distinct());
+        Assert.Equal(size.Operands[3], FindResult(instructions, SpirvOp.ConvertSToF, level).Operands[2]);
+    }
+
+    [Fact]
     public void ImageGatherCompareLzUsesNativeDepthGather()
     {
         var instructions = ReadSpirvInstructions(
@@ -225,6 +242,22 @@ public sealed class Gen5ImageTests
         uint? descriptorType = null,
         bool arrayed = false)
     {
+        var request = ImageOperationRequest(opcode, dimension, dmask, dstSelect, unifiedFormat, samplerWord0, samplerWord2, descriptorType, arrayed);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        return shader.Spirv;
+    }
+
+    private static ShaderCompileRequest ImageOperationRequest(
+        string opcode,
+        uint dimension,
+        uint dmask = 0xF,
+        uint dstSelect = Gen5ShaderTranslator.IdentityImageDstSelect,
+        uint unifiedFormat = 71u,
+        uint samplerWord0 = 0u,
+        uint samplerWord2 = 0u,
+        uint? descriptorType = null,
+        bool arrayed = false)
+    {
         var coordinateCount = dimension == 2 || arrayed ? 3 : 2;
         var addressCount = coordinateCount +
             (opcode.Contains("SampleC", StringComparison.Ordinal) ? 1 : 0);
@@ -282,9 +315,7 @@ public sealed class Gen5ImageTests
         var layout = BindingLayout.Allocate(resources.Info,
             BindingLayout.CollectUserDataRegisters(program, 0, 20), false,
             ShaderCompileRequest.RequiresFlattenedTable(plan, resources), false);
-        var request = new ShaderCompileRequest(plan, resources, layout);
-        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
-        return shader.Spirv;
+        return new ShaderCompileRequest(plan, resources, layout);
     }
 
     private static int[] GetStoredVgprRegisters(byte[] spirv)

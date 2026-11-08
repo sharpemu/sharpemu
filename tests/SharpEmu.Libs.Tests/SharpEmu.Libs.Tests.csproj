@@ -12,6 +12,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\SharpEmu.Core\SharpEmu.Core.csproj" />
+    <ProjectReference Include="..\..\src\SharpEmu.GnmMode\SharpEmu.GnmMode.csproj" />
     <ProjectReference Include="..\..\src\SharpEmu.Libs\SharpEmu.Libs.csproj" />
     <ProjectReference Include="..\..\src\SharpEmu.HLE\SharpEmu.HLE.csproj" />
     <ProjectReference Include="..\..\src\SharpEmu.GUI\SharpEmu.GUI.csproj" />
@@ -23,5 +24,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../docs/guest-ownership-trace.md" LogicalName="GuestOwnershipTraceGuide" />
   </ItemGroup>
 </Project>

@@ -15,6 +15,110 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 public sealed partial class GuestImageCacheTests
 {
     [Fact]
+    public void GarbageCollector_KeepsReusableImagesBelowDefaultPressure()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Bytes(0x12345678u));
+        var request = Color32(address);
+        var identifier = harness.Acquire(ref request);
+        harness.Worker.Run(() =>
+        {
+            for (var pass = 0; pass < 100; pass++)
+                harness.Images.RunGarbageCollector();
+        });
+        Assert.True(harness.Images.Contains(identifier));
+        Assert.Equal(identifier, harness.Acquire(ref request));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void GarbageCollector_StopsWhenUsageFallsBelowCollectionThreshold()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var first = Color32(address);
+        var second = Color32(address + 0x8000);
+        var firstIdentifier = harness.Acquire(ref first);
+        var secondIdentifier = harness.Acquire(ref second);
+        var threshold = harness.Image(firstIdentifier).AccountedSize + 1;
+        harness.Worker.Run(() =>
+        {
+            harness.Images.SetCollectionThresholds(threshold, threshold, ulong.MaxValue, 81);
+            harness.Images.ResetRecency(new[] { firstIdentifier, secondIdentifier }, 81);
+            harness.Images.RunGarbageCollector();
+        });
+        Assert.False(harness.Images.Contains(firstIdentifier));
+        Assert.True(harness.Images.Contains(secondIdentifier));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void GarbageCollector_KeepsGpuContentsWhenBufferOverlapBlocksReadback()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Bytes(0x12345678u));
+        var request = Color32(address);
+        var identifier = harness.Acquire(ref request);
+        harness.Worker.Run(() =>
+        {
+            Assert.NotNull(harness.Cache.ObtainBuffer(address, 4, isWritten: true).Buffer);
+        });
+        harness.MarkGpuWritten(identifier);
+        Assert.True(harness.Cache.HasGpuDirtyBytes(address, 4));
+        Assert.True(harness.Image(identifier).SafeToDownload);
+        harness.Worker.Run(() =>
+        {
+            harness.Images.SetCollectionThresholds(0, 0, ulong.MaxValue, 81);
+            harness.Images.ResetRecency(new[] { identifier }, 81);
+            harness.Images.RunGarbageCollector();
+        });
+        Assert.True(harness.Images.Contains(identifier));
+        Assert.True(harness.Image(identifier).IsGpuModified);
+        harness.Shutdown();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GarbageCollector_ResolvesSamePageWritesBeforeDiscardingGpuContents(bool imageBytesChanged)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var imageAddress = address + 0x8000;
+        harness.Write(imageAddress, Bytes(0x12345678u));
+        var request = Color32(imageAddress);
+        var identifier = harness.Acquire(ref request);
+        harness.MarkGpuWritten(identifier);
+        Assert.True(harness.WriteFault(address + 0x8080));
+        Assert.True(harness.Image(identifier).IsMaybeCpuDirty);
+        Assert.False(harness.Image(identifier).NeedsMaybeCpuHash);
+        if (imageBytesChanged)
+            harness.Write(imageAddress, Bytes(0x87654321u));
+
+        harness.Worker.Run(() =>
+        {
+            harness.Images.SetCollectionThresholds(0, ulong.MaxValue, ulong.MaxValue, 17);
+            harness.Images.ResetRecency(new[] { identifier }, 17);
+            harness.Images.RunGarbageCollector();
+        });
+
+        Assert.Equal(!imageBytesChanged, harness.Images.Contains(identifier));
+        if (!imageBytesChanged)
+        {
+            Assert.True(harness.Image(identifier).IsGpuModified);
+            Assert.False(harness.Image(identifier).IsCpuDirty);
+            Assert.Equal(Bytes(0x12345678u), harness.ReadImageBytes(harness.Image(identifier)));
+        }
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void GarbageCollector_RetiresUnderPressureAndPublishesInOneTick()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
@@ -462,6 +566,188 @@ public sealed partial class GuestImageCacheTests
             Assert.Same(download, harness.Cache.GetUtilityBuffer(GpuBufferUsage.Download));
         }
 
+        harness.Shutdown();
+    }
+
+    // A readback lands in guest memory when its tick completes. A guest store into those bytes after the
+    // readback was queued is newer than the image's contents and keeps its page; the other pages land. The
+    // store needs no notification: an evicted image no longer watches its pages.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CpuWriteDuringReadback_SurvivesTheLanding(bool evicted)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var request = Color32(address, 8192);
+        var imageIdentifier = harness.Acquire(ref request);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, 0x8000, 0x11111111u)));
+        if (evicted)
+        {
+            harness.Worker.Run(() =>
+            {
+                harness.Images.SetCollectionThresholds(0, 0, ulong.MaxValue, 81);
+                harness.Images.ResetRecency(new[] { imageIdentifier }, 81);
+                harness.Images.RunGarbageCollector();
+            });
+            Assert.False(harness.Images.Contains(imageIdentifier));
+        }
+        else
+        {
+            Assert.True(harness.Worker.Run(() => harness.Images.TryDownloadForTest(imageIdentifier)));
+        }
+
+        var store = address + 0x5000;
+        harness.Write(store, Bytes(0x44444444u, 0x45454545u));
+        harness.Finish();
+
+        Assert.Equal(0x11111111u, harness.ReadUInt32(address));
+        Assert.Equal(0x44444444u, harness.ReadUInt32(store));
+        Assert.Equal(0x45454545u, harness.ReadUInt32(store + 4));
+        Assert.Equal(0x11111111u, harness.ReadUInt32(address + 0x7ffc));
+        harness.Shutdown();
+    }
+
+    // Readbacks over the same bytes land in the order they were queued: what one landing writes is no guest
+    // store to the other.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OverlappingReadbacks_LandInQueueOrder(bool innerFirst)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var outer = Color32(address, 8192);
+        var inner = Color32(address + 0x2000, 2048);
+        var outerIdentifier = harness.Acquire(ref outer);
+        var innerIdentifier = harness.Acquire(ref inner);
+        Assert.NotEqual(outerIdentifier, innerIdentifier);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, 0x8000, 0x11111111u)));
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address + 0x2000, 0x2000, 0x22222222u)));
+
+        harness.Worker.Run(() =>
+        {
+            Assert.True(harness.Images.TryDownloadForTest(innerFirst ? innerIdentifier : outerIdentifier));
+            Assert.True(harness.Images.TryDownloadForTest(innerFirst ? outerIdentifier : innerIdentifier));
+        });
+        harness.Finish();
+
+        var expected = innerFirst ? 0x11111111u : 0x22222222u;
+        Assert.Equal(0x11111111u, harness.ReadUInt32(address));
+        Assert.Equal(expected, harness.ReadUInt32(address + 0x2000));
+        Assert.Equal(expected, harness.ReadUInt32(address + 0x3ffc));
+        Assert.Equal(0x11111111u, harness.ReadUInt32(address + 0x4000));
+        harness.Shutdown();
+    }
+
+    // A store the guest reports, through a write fault or a managed write, keeps its page over the readback even
+    // when it leaves the bytes as they were, such as zeros over memory that was zero. The other pages land. The
+    // first store unwatches the image, so a later one elsewhere goes unreported and the page comparison keeps it.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReportedStoreDuringReadback_KeepsItsPageEvenWithUnchangedBytes(bool fault)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var request = Color32(address, 8192);
+        var imageIdentifier = harness.Acquire(ref request);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, 0x8000, 0x11111111u)));
+        Assert.True(harness.Worker.Run(() => harness.Images.TryDownloadForTest(imageIdentifier)));
+
+        var store = address + 0x5000;
+        if (fault)
+        {
+            Assert.True(harness.WriteFault(store));
+        }
+        else
+        {
+            harness.Gpu.MarkCpuWrite(store, 8);
+        }
+
+        harness.Write(store, Bytes(0u, 0u));
+        harness.Write(address + 0x6000, Bytes(0x66666666u));
+        harness.Finish();
+
+        Assert.Equal(0x11111111u, harness.ReadUInt32(address));
+        Assert.Equal(0u, harness.ReadUInt32(store));
+        Assert.Equal(0x66666666u, harness.ReadUInt32(address + 0x6000));
+        Assert.Equal(0x11111111u, harness.ReadUInt32(address + 0x7ffc));
+        harness.Shutdown();
+    }
+
+    // Write faults report stores to the pending readbacks, so reporting one allocates nothing. The image was
+    // evicted: it owns no pages, and the store goes no further than its readback.
+    [Fact]
+    public void StoreReportedToAnEvictedImagesReadback_AllocatesNothing()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var request = Color32(address, 8192);
+        var imageIdentifier = harness.Acquire(ref request);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, 0x8000, 0x11111111u)));
+        harness.Worker.Run(() =>
+        {
+            harness.Images.SetCollectionThresholds(0, 0, ulong.MaxValue, 81);
+            harness.Images.ResetRecency(new[] { imageIdentifier }, 81);
+            harness.Images.RunGarbageCollector();
+        });
+        Assert.False(harness.Images.Contains(imageIdentifier));
+
+        var store = address + 0x5000;
+        Assert.False(harness.ImageStore.MarkCpuWrite(store + 0x800, 8));
+        var allocated = GC.GetAllocatedBytesForCurrentThread();
+        Assert.False(harness.ImageStore.MarkCpuWrite(store, 8));
+        Assert.Equal(allocated, GC.GetAllocatedBytesForCurrentThread());
+        harness.Write(store, Bytes(0u, 0u));
+        harness.Finish();
+
+        Assert.Equal(0x11111111u, harness.ReadUInt32(address));
+        Assert.Equal(0u, harness.ReadUInt32(store));
+        harness.Shutdown();
+    }
+
+    // A store reported while a readback is landing waits for the landing and lands after it, as it would after
+    // the GPU's own write. It waits before it takes the image lock, so the cache stays usable meanwhile.
+    [Fact]
+    public async Task CpuWriteWhileReadbackLands_LandsAfterTheReadback()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var request = Color32(address, 8192);
+        var imageIdentifier = harness.Acquire(ref request);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, 0x8000, 0x11111111u)));
+
+        var store = address + 0x5000;
+        Task? storing = null;
+        var storedWhileLanding = true;
+        var cacheUsableWhileWaiting = false;
+        harness.Images.LandingDecidedForTest = () =>
+        {
+            storing = Task.Run(() =>
+            {
+                harness.Gpu.MarkCpuWrite(store, 8);
+                harness.Write(store, Bytes(0x44444444u, 0x45454545u));
+            });
+            storedWhileLanding = storing.Wait(200);
+            cacheUsableWhileWaiting = Task.Run(() => harness.ImagesInRange(address, 0x8000)).Wait(5000);
+        };
+        Assert.True(harness.Worker.Run(() => harness.Images.TryDownloadForTest(imageIdentifier)));
+        harness.Images.LandingDecidedForTest = null;
+        harness.Finish();
+
+        Assert.NotNull(storing);
+        await storing!.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(0x11111111u, harness.ReadUInt32(address));
+        Assert.Equal(0x44444444u, harness.ReadUInt32(store));
+        Assert.Equal(0x45454545u, harness.ReadUInt32(store + 4));
+        Assert.False(storedWhileLanding);
+        Assert.True(cacheUsableWhileWaiting);
         harness.Shutdown();
     }
 }

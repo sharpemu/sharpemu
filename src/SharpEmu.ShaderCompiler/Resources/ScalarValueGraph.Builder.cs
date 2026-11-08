@@ -35,6 +35,9 @@ public sealed partial class ScalarValueGraph
         private readonly Stack<RegisterState> _spareStates = new();
         private bool _recording;
 
+        // The index of each call entry's argument in Gen5ShaderCallLinker.CallEntryArguments, when it is read from user data.
+        private readonly Dictionary<uint, uint> _callEntries = [];
+
         public void Run()
         {
             var controlFlow = _graph.ControlFlow;
@@ -59,6 +62,24 @@ public sealed partial class ScalarValueGraph
             }
 
             _graph.Accesses = new MemoryAccessBinding?[_graph.Memory.Count];
+            if (_graph.CallArgumentRegisters != 0)
+            {
+                var arguments = new Dictionary<ulong, uint>();
+                foreach (var instruction in _program.Instructions)
+                {
+                    if (instruction.Control is ShaderCallEntryControl { Argument: not 0 } call)
+                    {
+                        if (!arguments.TryGetValue(call.Argument, out var index))
+                        {
+                            index = (uint)arguments.Count;
+                            arguments.Add(call.Argument, index);
+                        }
+
+                        _callEntries.Add(instruction.Pc, index);
+                    }
+                }
+            }
+
             if (blockCount == 0)
             {
                 return;
@@ -172,7 +193,9 @@ public sealed partial class ScalarValueGraph
             for (uint index = 0; index < _graph.UserDataCount; index++)
             {
                 var register = _graph.UserDataBase + index;
-                if (register < ScalarRegisterCount)
+                if (register < ScalarRegisterCount &&
+                    (register >= 64 || (_graph.ExcludedUserDataRegisters & (1UL << (int)register)) == 0) &&
+                    index != (uint)_graph.DynamicUserData)
                 {
                     state.Scalars[register] = _graph.UserData(register);
                 }
@@ -223,20 +246,23 @@ public sealed partial class ScalarValueGraph
             }
 
             _uniformJoin = pending ? null : FindUniformJoin(block, visited);
+            _phiSources = null;
+            Array.Clear(_mergeUndefined);
 
             for (var register = 0; register < ScalarRegisterCount; register++)
             {
-                merged.Scalars[register] = MergeSlot(block, register, visited, pending, state => state.Scalars[register]);
+                merged.Scalars[register] = MergeSlot(block, register, visited, pending, static (state, slot) => state.Scalars[slot]);
             }
 
             for (var register = 0; register < VectorRegisterCount; register++)
             {
-                merged.Vectors[register] = MergeSlot(block, ScalarRegisterCount + register, visited, pending, state => state.Vectors[register]);
+                merged.Vectors[register] = MergeSlot(block, ScalarRegisterCount + register, visited, pending,
+                    static (state, slot) => state.Vectors[slot - ScalarRegisterCount]);
             }
 
-            merged.Exec = MergeSlot(block, RegisterState.ExecSlot, visited, pending, state => state.Exec);
-            merged.Vcc = MergeSlot(block, RegisterState.VccSlot, visited, pending, state => state.Vcc);
-            merged.Scc = MergeSlot(block, RegisterState.SccSlot, visited, pending, state => state.Scc);
+            merged.Exec = MergeSlot(block, RegisterState.ExecSlot, visited, pending, static (state, _) => state.Exec);
+            merged.Vcc = MergeSlot(block, RegisterState.VccSlot, visited, pending, static (state, _) => state.Vcc);
+            merged.Scc = MergeSlot(block, RegisterState.SccSlot, visited, pending, static (state, _) => state.Scc);
 
             var laneKeys = new HashSet<(uint Register, uint Lane)>(visited[0].State.Lanes.Keys);
             foreach (var (_, state) in visited.Skip(1))
@@ -246,7 +272,7 @@ public sealed partial class ScalarValueGraph
 
             foreach (var key in laneKeys)
             {
-                var value = MergeSlot(block, RegisterState.LaneSlot(key.Register, key.Lane), visited, pending, state => state.Lanes[key]);
+                var value = MergeSlot(block, RegisterState.LaneSlot(key.Register, key.Lane), visited, pending, (state, _) => state.Lanes[key]);
                 if (!value.IsUndefined)
                 {
                     merged.Lanes[key] = value;
@@ -261,7 +287,7 @@ public sealed partial class ScalarValueGraph
 
             foreach (var key in maskKeys)
             {
-                var value = MergeSlot(block, RegisterState.MaskSlot(key), visited, pending, state => state.ThreadBits[key]);
+                var value = MergeSlot(block, RegisterState.MaskSlot(key), visited, pending, (state, _) => state.ThreadBits[key]);
                 if (!value.IsUndefined)
                 {
                     merged.ThreadBits[key] = value;
@@ -337,41 +363,41 @@ public sealed partial class ScalarValueGraph
             return taken.IsUndefined || taken.IsConstant ? null : (taken, takenPredecessor);
         }
 
+        // A block's instructions are in program order, so its terminator is the last one. Scanning the whole program for
+        // it cost a linked ray-tracing shader (889K instructions, 5,800 two-way joins) most of its 17 s graph build.
         private bool TryGetTerminator(int block, out Gen5ShaderInstruction terminator)
         {
-            var range = _graph.ControlFlow.Blocks[block];
-            terminator = null!;
-            foreach (var instruction in _program.Instructions)
-            {
-                if (instruction.Pc >= range.StartPc && instruction.Pc < range.EndPc)
-                {
-                    terminator = instruction;
-                }
-            }
-
+            var instructions = _blockInstructions[block];
+            terminator = instructions.Length != 0 ? instructions[^1] : null!;
             return terminator is not null;
         }
 
         private static uint BranchTarget(Gen5ShaderInstruction branch) =>
             (uint)(branch.Pc + 4 + (short)(branch.Words[0] & 0xFFFF) * 4);
 
+        // The undefined value of each type for the merge in progress. A merge applies no instruction, so every undefined
+        // slot of one merge is charged to the same one; interning it once per slot made the 90,000 single-predecessor
+        // merges of a linked ray-tracing shader cost 32 us each.
+        private readonly ScalarValue?[] _mergeUndefined = new ScalarValue?[3];
+
         // Equal incoming values pass through; differing or still unknown ones meet in a
         // phi owned by this block and register. Any undefined input stays undefined.
+        // The reader takes the slot, so the registers' readers are static and nothing is allocated per slot.
         private ScalarValue MergeSlot(
             int block,
             int slot,
             List<(int Block, RegisterState State)> visited,
             bool pending,
-            Func<RegisterState, ScalarValue> read)
+            Func<RegisterState, int, ScalarValue> read)
         {
-            var first = read(visited[0].State);
+            var first = read(visited[0].State, slot);
             var same = true;
             foreach (var (_, state) in visited)
             {
-                var value = read(state);
+                var value = read(state, slot);
                 if (value.IsUndefined)
                 {
-                    return _graph.Undefined(first.Type);
+                    return _mergeUndefined[(int)first.Type] ??= _graph.Undefined(first.Type);
                 }
 
                 same &= ReferenceEquals(value, first);
@@ -384,9 +410,7 @@ public sealed partial class ScalarValueGraph
 
             if (_uniformJoin is { } join)
             {
-                var taken = read(visited.First(entry => entry.Block == join.TakenPredecessor).State);
-                var other = read(visited.First(entry => entry.Block != join.TakenPredecessor).State);
-                return _graph.Select(join.Taken, taken, other);
+                return UniformJoinSelect(join, visited, slot, read);
             }
 
             if (!_phis.TryGetValue((block, slot), out var phi))
@@ -395,17 +419,49 @@ public sealed partial class ScalarValueGraph
                 _phis[(block, slot)] = phi;
             }
 
-            var predecessors = _graph.ControlFlow.Predecessors[block];
-            var order = block == 0 ? new[] { -1 }.Concat(predecessors).ToArray() : predecessors.ToArray();
+            var (order, sources) = _phiSources ??= PhiSources(block, visited);
             var operands = new ScalarValue[order.Length];
             for (var index = 0; index < order.Length; index++)
             {
-                var source = visited.FirstOrDefault(entry => entry.Block == order[index]);
-                operands[index] = source.State is null ? phi : read(source.State);
+                operands[index] = sources[index] is { } source ? read(source, slot) : phi;
             }
 
             phi.SetPhiOperands(order, operands);
             return phi;
+        }
+
+        // Its own method: the lambdas capture the join, and a capture in MergeSlot allocated a closure on every slot of
+        // every merge, half of what a large graph allocated.
+        private ScalarValue UniformJoinSelect((ScalarValue Taken, int TakenPredecessor) join,
+            List<(int Block, RegisterState State)> visited, int slot, Func<RegisterState, int, ScalarValue> read)
+        {
+            var taken = read(visited.First(entry => entry.Block == join.TakenPredecessor).State, slot);
+            var other = read(visited.First(entry => entry.Block != join.TakenPredecessor).State, slot);
+            return _graph.Select(join.Taken, taken, other);
+        }
+
+        // The predecessor order of one merge's phis and the state each operand comes from (null while the predecessor is
+        // pending). The phis of a merge share them: matching every operand of every slot by a search of the predecessors
+        // took a join of 600 call records 250 ms per visit.
+        private (int[] Order, RegisterState?[] Sources)? _phiSources;
+
+        private (int[] Order, RegisterState?[] Sources) PhiSources(int block, List<(int Block, RegisterState State)> visited)
+        {
+            var predecessors = _graph.ControlFlow.Predecessors[block];
+            var order = block == 0 ? new[] { -1 }.Concat(predecessors).ToArray() : predecessors.ToArray();
+            var states = new Dictionary<int, RegisterState>(visited.Count);
+            foreach (var (predecessor, state) in visited)
+            {
+                states.TryAdd(predecessor, state);
+            }
+
+            var sources = new RegisterState?[order.Length];
+            for (var index = 0; index < order.Length; index++)
+            {
+                sources[index] = states.GetValueOrDefault(order[index]);
+            }
+
+            return (order, sources);
         }
 
         private RegisterState Transfer(int block, RegisterState state)
@@ -422,6 +478,32 @@ public sealed partial class ScalarValueGraph
         {
             // Lets ScalarValueGraph.Undefined record which instruction gave up.
             _graph.BuilderInstruction = (instruction.Pc, instruction.Opcode);
+            if (instruction.Control is ShaderCallEntryControl call)
+            {
+                state.WritePair(call.ReturnRegister, _graph.Constant((uint)call.ReturnAddress), _graph.Constant((uint)(call.ReturnAddress >> 32)));
+                if (call.RuntimeArgument)
+                {
+                    // The record's argument stays the caller's value; the descriptors read through it are call records.
+                    if (_recording)
+                    {
+                        _graph.CallRecordArguments[instruction.Pc] = (state.Read(call.ArgumentRegister), state.Read(call.ArgumentRegister + 1));
+                    }
+
+                    return;
+                }
+
+                if (_callEntries.TryGetValue(instruction.Pc, out var entry))
+                {
+                    var register = CallArgumentRegisterBase + entry * 2;
+                    state.WritePair(call.ArgumentRegister, _graph.UserData(register), _graph.UserData(register + 1));
+                }
+                else
+                {
+                    state.WritePair(call.ArgumentRegister, _graph.Constant((uint)call.Argument), _graph.Constant((uint)(call.Argument >> 32)));
+                }
+
+                return;
+            }
             switch (instruction.Encoding)
             {
                 case Gen5ShaderEncoding.Sop1:
@@ -482,13 +564,6 @@ public sealed partial class ScalarValueGraph
                 case "SMovB32":
                     state.WriteScalar(destinationRegister, Read(instruction.Sources[0], state));
                     return;
-                case "SBitreplicateB64B32":
-                {
-                    var replicated = Read(instruction.Sources[0], state);
-                    state.WriteScalar(destinationRegister, replicated);
-                    state.WriteScalar(destinationRegister + 1, replicated);
-                    return;
-                }
                 case "SMovkI32":
                     state.WriteScalar(destinationRegister, _graph.Constant(unchecked((uint)(short)instruction.Sources[0].Value)));
                     return;
@@ -511,6 +586,20 @@ public sealed partial class ScalarValueGraph
                 case "SMovB64":
                     ApplyMovePair(instruction, state, destinationRegister);
                     return;
+                case "SCmovB64":
+                {
+                    var (sourceLow, sourceHigh) = ReadPair(instruction.Sources[0], state);
+                    var (destinationLow, destinationHigh) = ReadPair(Gen5Operand.Scalar(destinationRegister), state);
+                    var sourceMask = MaskOf(instruction.Sources[0], state);
+                    var destinationMask = MaskOf(Gen5Operand.Scalar(destinationRegister), state);
+                    WriteMaskPair(
+                        state,
+                        destinationRegister,
+                        _graph.Select(state.Scc, sourceLow, destinationLow),
+                        _graph.Select(state.Scc, sourceHigh, destinationHigh),
+                        _graph.Select(state.Scc, sourceMask, destinationMask));
+                    return;
+                }
                 case "SCselectB32":
                     state.WriteScalar(destinationRegister, _graph.Select(state.Scc, Read(instruction.Sources[0], state), Read(instruction.Sources[1], state)));
                     return;
@@ -593,7 +682,7 @@ public sealed partial class ScalarValueGraph
                 return;
             }
 
-            if (opcode is "SBcnt1I32B64" or "SFF1I32B64" or "SWqmB64" or "SBfeI64")
+            if (opcode is "SBcnt1I32B64" or "SFF1I32B64" or "SFlbitI32B64" or "SWqmB64" or "SBfeI64")
             {
                 var (low, high) = ReadPair(instruction.Sources[0], state);
                 switch (opcode)
@@ -616,6 +705,15 @@ public sealed partial class ScalarValueGraph
                         var highLsb = Binary(ScalarOperation.IAdd32, Unary(ScalarOperation.FindLowestBit32, high), _graph.Constant(32u));
                         var result = _graph.Select(Bool(ScalarOperation.INotEqual32, low, _graph.Constant(0u)), lowLsb,
                             _graph.Select(Bool(ScalarOperation.INotEqual32, high, _graph.Constant(0u)), highLsb, _graph.Constant(uint.MaxValue)));
+                        state.WriteScalar(destinationRegister, result);
+                        break;
+                    }
+                    case "SFlbitI32B64":
+                    {
+                        var highIndex = Binary(ScalarOperation.ISub32, _graph.Constant(31u), Unary(ScalarOperation.FindHighestBit32, high));
+                        var lowIndex = Binary(ScalarOperation.ISub32, _graph.Constant(63u), Unary(ScalarOperation.FindHighestBit32, low));
+                        var result = _graph.Select(Bool(ScalarOperation.INotEqual32, high, _graph.Constant(0u)), highIndex,
+                            _graph.Select(Bool(ScalarOperation.INotEqual32, low, _graph.Constant(0u)), lowIndex, _graph.Constant(uint.MaxValue)));
                         state.WriteScalar(destinationRegister, result);
                         break;
                     }
@@ -657,12 +755,32 @@ public sealed partial class ScalarValueGraph
                 case "SBrevB32":
                     state.WriteScalar(destinationRegister, Unary(ScalarOperation.BitReverse32, left));
                     return;
+                case "SBitreplicateB64B32":
+                    for (uint half = 0; half < 2; half++)
+                    {
+                        var expanded = _graph.Constant(0u);
+                        for (uint bit = 0; bit < 16; bit++)
+                        {
+                            var selected = Binary(ScalarOperation.And32,
+                                Binary(ScalarOperation.ShiftRightLogical32, left, _graph.Constant(half * 16 + bit)), _graph.Constant(1u));
+                            var pair = Binary(ScalarOperation.IMul32, selected, _graph.Constant(3u));
+                            expanded = Binary(ScalarOperation.Or32, expanded,
+                                Binary(ScalarOperation.ShiftLeft32, pair, _graph.Constant(bit * 2)));
+                        }
+                        state.WriteScalar(destinationRegister + half, expanded);
+                    }
+                    return;
                 case "SBcnt1I32B32":
                     state.WriteScalar(destinationRegister, Unary(ScalarOperation.BitCount32, left));
                     state.Scc = NotZero(state.Scalars[destinationRegister]);
                     return;
                 case "SFF1I32B32":
                     state.WriteScalar(destinationRegister, _graph.FindLowestSetBit(left, instruction.Pc));
+                    return;
+                case "SFlbitI32B32":
+                    state.WriteScalar(destinationRegister, _graph.Select(NotZero(left),
+                        Binary(ScalarOperation.ISub32, _graph.Constant(31u), Unary(ScalarOperation.FindHighestBit32, left)),
+                        _graph.Constant(uint.MaxValue)));
                     return;
                 case "SBitset0B32":
                 {
@@ -1193,6 +1311,9 @@ public sealed partial class ScalarValueGraph
                  sdwa.DestinationSelect == 7 || sdwa.Source0Select == 7 || sdwa.Source1Select == 7 || sdwa.DestinationUnused == 3)) ||
                 instruction.Control is Gen5DppControl or Gen5Dpp8Control or Gen5Vop3pControl;
             var value = hasModifiers ? _graph.Undefined(ScalarValueType.U32) : VectorResult(instruction, state);
+            if (_recording && opcode == "VMed3U32" && !hasModifiers && instruction.Sources.Count == 3)
+                _graph.UnsignedMedianSources[instruction.Pc] = instruction.Sources
+                    .Select(source => ReadVectorOperand(source, state)).ToArray();
             if (instruction.Control is Gen5Vop3Control { ScalarDestination: { } carryDestination } && !hasModifiers &&
                 opcode is "VAddCoU32" or "VSubCoU32" or "VSubrevCoU32" or "VAddCoCiU32" or "VSubCoCiU32" or "VSubrevCoCiU32" or "VMadU64U32")
             {
@@ -1212,6 +1333,8 @@ public sealed partial class ScalarValueGraph
                     var result = instruction.Control is Gen5SdwaControl destinationSdwa
                         ? ApplySdwaDestination(destinationSdwa, value, state.ReadVector(destination.Value))
                         : value;
+                    if (_recording && opcode == "VCndmaskB32" && instruction.Control is Gen5SdwaControl)
+                        _graph.ConditionalMaskResults[instruction.Pc] = result;
                     state.WriteVector(destination.Value, result);
                     // Multi-dword results are not modelled; the second dword is undefined.
                     value = _graph.Undefined(ScalarValueType.U32);
@@ -1464,6 +1587,13 @@ public sealed partial class ScalarValueGraph
 
         private ScalarValue ApplySdwaDestination(Gen5SdwaControl control, ScalarValue value, ScalarValue previous)
         {
+            if (value.Kind == ScalarValueKind.Select && value.Operands.Length == 3)
+            {
+                return _graph.Select(value.Operands[0],
+                    ApplySdwaDestination(control, value.Operands[1], previous),
+                    ApplySdwaDestination(control, value.Operands[2], previous));
+            }
+
             if (control.DestinationSelect == 6)
             {
                 return value;
@@ -1478,6 +1608,8 @@ public sealed partial class ScalarValueGraph
             var shift = control.DestinationSelect <= 3 ? control.DestinationSelect * 8u : (control.DestinationSelect - 4u) * 16u;
             var lowMask = width == 8 ? 0xFFu : 0xFFFFu;
             var fieldMask = lowMask << (int)shift;
+            var upperStart = shift + width;
+            var upperMask = upperStart < 32 ? uint.MaxValue << (int)upperStart : 0u;
             var positioned = Binary(ScalarOperation.ShiftLeft32,
                 Binary(ScalarOperation.And32, value, _graph.Constant(lowMask)), _graph.Constant(shift));
 
@@ -1487,7 +1619,7 @@ public sealed partial class ScalarValueGraph
                 1 => Binary(ScalarOperation.Or32, positioned,
                     _graph.Select(NotZero(Binary(ScalarOperation.And32, positioned,
                         _graph.Constant(1u << (int)(shift + width - 1)))),
-                        _graph.Constant(uint.MaxValue << (int)(shift + width)), _graph.Constant(0u))),
+                        _graph.Constant(upperMask), _graph.Constant(0u))),
                 2 => Binary(ScalarOperation.Or32,
                     Binary(ScalarOperation.And32, previous, _graph.Constant(~fieldMask)), positioned),
                 _ => _graph.Undefined(ScalarValueType.U32),
@@ -1839,6 +1971,7 @@ public sealed partial class ScalarValueGraph
             Reset();
         }
 
+        [System.Diagnostics.CodeAnalysis.MemberNotNull(nameof(Exec), nameof(Vcc), nameof(Scc), nameof(CarryOut))]
         public void Reset()
         {
             var undefined = _graph.Undefined(ScalarValueType.U32);
@@ -1919,9 +2052,13 @@ public sealed partial class ScalarValueGraph
                 return;
             }
 
-            foreach (var key in Lanes.Keys.Where(key => key.Register == register).ToArray())
+            // Removing while enumerating is allowed and removes in the same order, without a copy of the keys per write.
+            foreach (var key in Lanes.Keys)
             {
-                Lanes.Remove(key);
+                if (key.Register == register)
+                {
+                    Lanes.Remove(key);
+                }
             }
         }
 

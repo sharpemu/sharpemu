@@ -7,9 +7,11 @@ using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 using Silk.NET.Vulkan;
+using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 
@@ -30,7 +32,18 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 {
     private ulong _nextHandle = 1;
 
+    public int ImageNormalizations { get; private set; }
+
+    public uint[] NormalizeImageDescriptor(IShaderFrontend frontend, ReadOnlySpan<uint> words,
+        ShaderStage stage, ulong shaderHash, string source)
+    {
+        ImageNormalizations++;
+        return frontend.NormalizeImageForResolution(words, stage, shaderHash, source, true);
+    }
+
     public List<(ShaderStage Stage, ulong Hash, ulong ProgramId)> Modules { get; } = new();
+
+    public List<IGuestCompiledShader> CompiledShaders { get; } = new();
 
     public List<GraphicsPipelineDescription> GraphicsPipelines { get; } = new();
 
@@ -45,6 +58,24 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     public bool GraphicsSubgroupOperationsEnabled => true;
 
     public bool SharedInt64AtomicsEnabled => false;
+
+    public bool CallMarksSupported { get; set; }
+
+    public long CallMarkSnapshots { get; set; }
+
+    public Dictionary<uint, long> MarkedBits { get; } = [];
+
+    public long CallMarkedAt(uint bit) => MarkedBits.GetValueOrDefault(bit);
+
+    public bool ImageInt64AtomicsEnabled { get; set; }
+    public bool MeshShadersSupported { get; set; }
+
+    public MeshShaderLimits MeshLimits { get; set; }
+    public uint MeshSubgroupSize { get; set; } = 32;
+
+    public bool TableBlocks { get; set; }
+
+    public bool ShaderSignedZeroInfNanPreserveFloat32Supported { get; set; }
 
     public ShaderPrewarmList? ShaderPrewarm { get; set; }
 
@@ -70,11 +101,58 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
         return true;
     }
 
-    public bool TryReadCleanGuestWord(ulong address, out uint word) => TryReadGuestWord(address, out word);
+    // Addresses whose clean reads are refused, as for bytes a GPU image or buffer may still own.
+    public Func<ulong, bool>? RefuseCleanRead { get; set; }
+
+    public bool TryReadCleanGuestWord(ulong address, out uint word)
+    {
+        if (RefuseCleanRead?.Invoke(address) == true)
+        {
+            word = 0;
+            return false;
+        }
+
+        return TryReadGuestWord(address, out word);
+    }
+
+    // Off by default: with resident reads the resource cache starts serving hits.
+    public bool ResidentReads { get; set; }
+
+    // A range the test names here stands for bytes the GPU still owns.
+    public (ulong Address, ulong Size) GpuOwned { get; set; }
+
+    public bool TryReadResidentGuestBytes(ulong address, Span<byte> destination, bool clean) =>
+        ResidentReads && !CpuWriteNeedsGpuData(address, (ulong)destination.Length) && memory.TryRead(address, destination);
+
+    // A pending known write the test names here; a read it covers whole is served from it.
+    public (ulong Address, uint[] Words) Shadow { get; set; }
+
+    public bool TryPeekResidentGuestBytes(ulong address, Span<byte> destination)
+    {
+        var (shadowAddress, words) = Shadow;
+        var shadowBytes = words is null ? 0ul : (ulong)words.Length * sizeof(uint);
+        if (shadowBytes != 0 && address >= shadowAddress && address + (ulong)destination.Length <= shadowAddress + shadowBytes)
+        {
+            System.Runtime.InteropServices.MemoryMarshal.AsBytes(words.AsSpan()).Slice((int)(address - shadowAddress), destination.Length).CopyTo(destination);
+            return true;
+        }
+
+        return TryReadResidentGuestBytes(address, destination, clean: false);
+    }
+
+    public bool CpuWriteNeedsGpuData(ulong address, ulong size) =>
+        GpuOwned.Size != 0 && address + size > GpuOwned.Address && address < GpuOwned.Address + GpuOwned.Size;
+
+    // Null keeps every evaluated dispatch on the GPU.
+    public FakeKernelWriteStream? KernelWriteStream { get; set; }
+
+    public KernelWriteRefusal TryPostKernelWrite(ulong address, ReadOnlySpan<uint> words) =>
+        KernelWriteStream is { } stream ? KernelWritePolicy.TryPost(stream, address, words) : KernelWriteRefusal.Unsupported;
 
     public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
     {
         Modules.Add((stage, hash, programId));
+        CompiledShaders.Add(shader);
         return _nextHandle++;
     }
 
@@ -125,6 +203,8 @@ internal sealed class FakeShaderCompiler(Func<ShaderCompileRequest, byte[]>? com
 
     public string BackendName => "Fake";
 
+    public bool LinkedShaderCallsSupported { get; set; } = true;
+
 
     public bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error)
     {
@@ -170,6 +250,57 @@ internal sealed class FakeShaderCompiler(Func<ShaderCompileRequest, byte[]>? com
     public (long Draws, double DrawMs, long Pipelines, long ShaderCompilations) ReadAndResetPerfCounters() => throw Unsupported();
 
     public void RequestClose() => throw Unsupported();
+}
+
+// A command stream in miniature: queued items run in order, and a queued store lands when its turn comes.
+internal sealed class FakeKernelWriteStream(ICpuMemory memory) : IKernelWriteStream
+{
+    private sealed record Item(string Name, ulong Address, ulong Size, bool GpuWrite, byte[]? Store);
+
+    private readonly List<Item> _queued = new();
+
+    public List<string> Ran { get; } = new();
+
+    public bool OnStreamThread { get; set; } = true;
+
+    public bool InCrossQueueOrderWindow { get; set; }
+
+    public (ulong Address, ulong Size) ImageBytes { get; set; }
+
+    public (ulong Address, ulong Size) SurfaceMetadata { get; set; }
+
+    public void QueueGpuWrite(string name, ulong address, ulong size) => _queued.Add(new Item(name, address, size, true, null));
+
+    public void QueueGpuRead(string name, ulong address, ulong size) => _queued.Add(new Item(name, address, size, false, null));
+
+    public void RunAll()
+    {
+        foreach (var item in _queued)
+        {
+            Ran.Add(item.Name);
+            if (item.Store is { } store)
+            {
+                Assert.True(memory.TryWrite(item.Address, store));
+            }
+        }
+
+        _queued.Clear();
+    }
+
+    public bool HasPendingPublication(ulong address, ulong size) => false;
+
+    public bool HasPendingRange(ulong address, ulong size) => false;
+
+    public bool HasPendingGpuWrite(ulong address, ulong size) =>
+        _queued.Any(item => item.GpuWrite && address < item.Address + item.Size && item.Address < address + size);
+
+    public bool HasImageBytes(ulong address, ulong size) =>
+        ImageBytes.Size != 0 && address < ImageBytes.Address + ImageBytes.Size && ImageBytes.Address < address + size;
+
+    public bool HasSurfaceMetadata(ulong address, ulong size) =>
+        SurfaceMetadata.Size != 0 && address < SurfaceMetadata.Address + SurfaceMetadata.Size && SurfaceMetadata.Address < address + size;
+
+    public void PostWrite(ulong address, ReadOnlySpan<byte> data) => _queued.Add(new Item("store", address, (ulong)data.Length, false, data.ToArray()));
 }
 
 // Guest memory with registered shader code and headers, and the caches over it.
@@ -229,6 +360,7 @@ internal sealed class PipelineTestGuest
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan((int)InputSemanticsCountOffset), inputSemanticsCount);
         Write(headerAddress, header);
         _headers[codeAddress] = headerAddress;
+        ShaderHeaderRegistry.NoteRegistration();
     }
 
     public void Write(ulong address, byte[] bytes)

@@ -45,6 +45,8 @@ internal static class NpUniversalDataSystemState
     private const ulong ArrayHandleBase = 0xC000_0000_0000_0000;
 
     private static readonly object Gate = new();
+    private static readonly bool TraceEvents =
+        Environment.GetEnvironmentVariable("SHARPEMU_TRACE_UDS") == "1";
     private static readonly Dictionary<int, UdsContext> Contexts = [];
     private static readonly Dictionary<int, UdsServiceHandle> ServiceHandles = [];
     private static readonly Dictionary<ulong, UdsEvent> Events = [];
@@ -64,9 +66,14 @@ internal static class NpUniversalDataSystemState
     {
         lock (Gate)
         {
-            ResetLocked();
-            _initialized = true;
+            if (!_initialized)
+            {
+                ResetLocked();
+                _initialized = true;
+            }
+
             _poolSize = poolSize;
+            UpdateMaximumInUseLocked();
             return true;
         }
     }
@@ -85,8 +92,7 @@ internal static class NpUniversalDataSystemState
         {
             if (!_initialized)
             {
-                context = 0;
-                return false;
+                _initialized = true;
             }
 
             context = NextPositiveId(ref _nextContext);
@@ -425,6 +431,8 @@ internal static class NpUniversalDataSystemState
 
     internal static bool PostEvent(int context, int handle, ulong eventHandle, ulong options)
     {
+        string postedName;
+        UdsObjectNode postedRoot;
         lock (Gate)
         {
             if (!_initialized ||
@@ -444,10 +452,28 @@ internal static class NpUniversalDataSystemState
             }
 
             PostedEvents.Enqueue(new UdsPostedEvent(udsEvent.Name, clone));
+            if (TraceEvents)
+            {
+                Console.Error.WriteLine($"[LOADER][TRACE] uds.post name={udsEvent.Name} {FormatNode(clone)}");
+            }
+
             _ = options;
-            return true;
+            postedName = udsEvent.Name;
+            postedRoot = clone;
         }
+
+        TrophyService.OnUdsEvent(postedName, postedRoot);
+        return true;
     }
+
+    private static string FormatNode(UdsNode node) => node switch
+    {
+        UdsObjectNode obj => "{" + string.Join(", ", obj.Values.Select(v => $"{v.Key}={FormatValue(v.Value)}")) + "}",
+        UdsArrayNode array => "[" + string.Join(", ", array.Values.Select(FormatValue)) + "]",
+        _ => string.Empty,
+    };
+
+    private static string FormatValue(UdsValue value) => value.Value is UdsNode child ? FormatNode(child) : $"{value.Value}";
 
     internal static UdsMemoryStat GetMemoryStat()
     {
@@ -480,13 +506,15 @@ internal static class NpUniversalDataSystemState
         }
     }
 
-    internal static void ResetForTests()
+    internal static void ResetRuntimeState()
     {
         lock (Gate)
         {
             ResetLocked();
         }
     }
+
+    internal static void ResetForTests() => ResetRuntimeState();
 
     private static ulong CreateObjectLocked(UdsObjectNode node)
     {

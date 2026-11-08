@@ -40,7 +40,7 @@ public struct DepthAttachmentState
         MetadataClear = false;
     }
 
-    public readonly bool HasTarget => Image.IsValid && Target.Target.Format != Format.Undefined;
+    public readonly bool HasTarget => Target.Target.Format != Format.Undefined;
 
     // The attachment loads a clear when the registers or the metadata say so.
     public readonly bool LoadClear => Target.State.DepthClearEnabled || MetadataClear;

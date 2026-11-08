@@ -79,7 +79,6 @@ jobs:
             const platforms = [
               { key: 'win-x64', label: 'Windows (win-x64)' },
               { key: 'linux-x64', label: 'Linux (linux-x64)' },
-              { key: 'osx-x64', label: 'macOS (osx-x64)' },
             ];
             const rows = [];
             for (const platform of platforms) {

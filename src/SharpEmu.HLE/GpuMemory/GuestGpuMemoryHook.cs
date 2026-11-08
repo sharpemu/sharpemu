@@ -79,6 +79,45 @@ public static class GuestGpuMemoryHook
         }
 
         _current = memory;
+        if (memory != null)
+        {
+            (ulong Address, ulong Size)[] lazy;
+            lock (_lazyRanges)
+            {
+                lazy = _lazyRanges.Values.ToArray();
+            }
+
+            foreach (var (address, size) in lazy)
+            {
+                memory.RegisterLazyRange(address, size);
+            }
+        }
+    }
+
+    private static readonly Dictionary<int, (ulong Address, ulong Size)> _lazyRanges = new();
+
+    // A lazily backed aperture; size zero forgets the aperture again.
+    public static void NoteLazyRange(int id, ulong address, ulong size)
+    {
+        (ulong Address, ulong Size) previous = default;
+        lock (_lazyRanges)
+        {
+            _lazyRanges.Remove(id, out previous);
+            if (size != 0 && IsWithinGpuAddressSpace(address, size))
+            {
+                _lazyRanges[id] = (address, size);
+            }
+        }
+
+        if (previous.Size != 0)
+        {
+            _current?.UnregisterLazyRange(previous.Address, previous.Size);
+        }
+
+        if (size != 0 && IsWithinGpuAddressSpace(address, size))
+        {
+            _current?.RegisterLazyRange(address, size);
+        }
     }
 
     public static bool IsWithinGpuAddressSpace(ulong address, ulong size)
@@ -101,6 +140,17 @@ public static class GuestGpuMemoryHook
     // True when the manager applied the protection itself; the caller then does not protect.
     public static bool NoteProtected(ulong address, ulong size, GuestPageProtection protection) =>
         _current != null && IsWithinGpuAddressSpace(address, size) && _current.NoteProtected(address, size, protection);
+
+    // A thread runs on the range as its stack until the owner releases it (CpuStackRanges).
+    public static void NoteStack(ulong owner, ulong address, ulong size)
+    {
+        if (_current != null && IsWithinGpuAddressSpace(address, size))
+        {
+            _current.NoteStack(owner, address, size);
+        }
+    }
+
+    public static void NoteStackReleased(ulong owner) => _current?.NoteStackReleased(owner);
 
     public static bool OverlapsRegistered(ulong address, ulong size) =>
         _current != null && IsWithinGpuAddressSpace(address, size) && _current.OverlapsRegistered(address, size);
@@ -141,6 +191,33 @@ public static class GuestGpuMemoryHook
         _ = current.MarkCpuWrite(address, size);
     }
 
+    // Notify the stores after a managed write has changed guest memory.
+    public static void MarkCpuWriteLanded(ulong address, ulong size)
+    {
+        if (size == 0 || _current is not { } current)
+        {
+            return;
+        }
+
+        current.MarkCpuWriteLanded(address, size);
+    }
+
+    public static void PrepareEmulatorWrite(ulong address, ulong size)
+    {
+        if (size != 0 && _current is { } current)
+        {
+            current.PrepareEmulatorWrite(address, size);
+        }
+    }
+
+    public static void NoteEmulatorWrite(ulong address, ulong size)
+    {
+        if (size != 0 && _current is { } current)
+        {
+            current.NoteEmulatorWrite(address, size);
+        }
+    }
+
     // Shutdown can skip disposal. Report the counts once for each attached session.
     public static bool TryTakeShutdownSummary(out string summary)
     {
@@ -156,5 +233,6 @@ public static class GuestGpuMemoryHook
     }
 
     public static string GetSummary() =>
-        $"gpu_memory: mapped={Interlocked.Read(ref _mapped)} unmapped={Interlocked.Read(ref _unmapped)} faults_resolved={Interlocked.Read(ref _faultsResolved)} faults_declined={Interlocked.Read(ref _faultsDeclined)}";
+        $"gpu_memory: mapped={Interlocked.Read(ref _mapped)} unmapped={Interlocked.Read(ref _unmapped)} faults_resolved={Interlocked.Read(ref _faultsResolved)} faults_declined={Interlocked.Read(ref _faultsDeclined)} " +
+        $"mapped_content_invalidations={GuestGpuMemory.MappedContentInvalidations} mapped_content_owned={GuestGpuMemory.MappedContentOwned} lazy_covered_writes={GuestGpuMemory.LazyCoveredWrites}";
 }

@@ -16,7 +16,7 @@ Open **Options → Rendering**, globally or for one game.
 
 F1 toggles the display for the current run. F2 cycles clockwise through the
 screen corners. Neither key changes saved settings. The next run uses the saved
-options again. Command+F1 retains its separate Metal HUD shortcut.
+options again.
 
 `SHARPEMU_OVERLAY=0` starts the display hidden, even when the saved option is on.
 F1 can still show it. RenderDoc's F12 hint remains in the title when available.
@@ -32,6 +32,10 @@ emulator path is configured:
 ```
 
 ## Usage values
+
+FPS and the frame graph count each accepted guest VideoOut flip once. Capturing
+that flip's image on the GPU does not count another frame. The `submitted_fps`
+log uses the same submission event; `presented_fps` counts host presentations.
 
 The panel dimensions are separate constants in `PerfOverlay.cs`:
 `PanelWidth` / `PanelHeight` for Full, and

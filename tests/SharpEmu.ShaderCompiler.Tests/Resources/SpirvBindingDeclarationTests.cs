@@ -363,8 +363,6 @@ public sealed class SpirvBindingDeclarationTests
         Assert.Equal(secondImageType, snapshot.Images[2][3] >> 28);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         Assert.Contains((ushort)SpirvOp.Select, new SpirvModuleInspector(shader.Spirv).Opcodes);
-        Assert.False(SharpEmu.ShaderCompiler.Metal.Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError));
-        Assert.False(string.IsNullOrWhiteSpace(metalError));
     }
 
     [Theory]
@@ -406,6 +404,25 @@ public sealed class SpirvBindingDeclarationTests
         var module = new SpirvModuleInspector(shader.Spirv);
         Assert.Contains((ushort)SpirvOp.GroupNonUniformShuffle, module.Opcodes);
         Assert.Contains((uint)SpirvCapability.GroupNonUniformShuffle, module.Capabilities);
+    }
+
+    [Fact]
+    public void PixelAppendStartsWithoutHelperLanes()
+    {
+        var appending = Program(
+            MoveScalar(0, 124, 64),
+            DataShare(8, "DsAppend", gds: true, [Gen5Operand.Scalar(124)], [1]),
+            EndProgram(16));
+        var plain = Program(
+            MoveScalar(0, 124, 64),
+            EndProgram(8));
+
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(appending, ShaderStage.Pixel), out var appendShader, out var error), error);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(plain, ShaderStage.Pixel), out var plainShader, out error), error);
+
+        Gen5MipStatisticsTests.ValidateWhenAvailable(appendShader.Spirv);
+        Assert.Contains("helperInvocation", new SpirvModuleInspector(appendShader.Spirv).Names.Values);
+        Assert.DoesNotContain("helperInvocation", new SpirvModuleInspector(plainShader.Spirv).Names.Values);
     }
 
     [Fact]

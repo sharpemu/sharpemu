@@ -46,11 +46,8 @@ public static class BoundedFillDetector
 
     public static BoundedCopy? DetectCopy(Gen5ShaderProgram program)
     {
-        var instructions = program.Instructions
-            .Where(instruction => instruction.Opcode is not ("SWaitcnt" or "STtraceData" or "SInstPrefetch") &&
-                !(instruction.Opcode == "SMovB32" && instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister, Value: MarkerRegister }]))
-            .ToArray();
-        if (!instructions.Select(instruction => instruction.Opcode).SequenceEqual(ModuloCopyOpcodes))
+        var instructions = ShaderOpcodePattern.Match(program.Instructions, ModuloCopyOpcodes, ignoreMarkers: true);
+        if (instructions is null)
         {
             return null;
         }
@@ -147,15 +144,112 @@ public static class BoundedFillDetector
         "VMovB32", "BufferStoreFormatX", "SEndpgm",
     ];
 
-    public static BoundedFill? Detect(Gen5ShaderProgram program) => DetectRange(program) ?? DetectPattern(program);
+    public static BoundedFill? Detect(Gen5ShaderProgram program) => DetectRange(program) ?? DetectPattern(program) ?? DetectIndexedPattern(program);
+
+    private const uint ExecRegister = 126;
+    private const uint IndexedPatternLength = 4;
+
+    private static readonly string[] IndexedPatternOpcodes =
+    [
+        "VLshlAddU32", "VMovB32", "VMovB32", "VMovB32", "VMovB32", "VCmpxGtU32", "SCbranchExecz",
+        "VAndB32", "SMovB64", "SMovB64",
+        "VReadfirstlaneB32", "VCmpxEqU32", "SMovB32", "VMovrelsB32", "SAndn2B64", "SMovB64", "SCbranchScc1",
+        "SMovB64", "BufferStoreFormatX", "SEndpgm",
+    ];
+
+    private static BoundedFill? DetectIndexedPattern(Gen5ShaderProgram program)
+    {
+        var filtered = program.Instructions.Where(static instruction => instruction.Opcode is not ("STtraceData" or "SInstPrefetch")).ToArray();
+        var instructions = ShaderOpcodePattern.Match(filtered, IndexedPatternOpcodes, ignoreMarkers: false);
+        if (instructions is null ||
+            instructions[0].Destinations is not [{ Kind: Gen5OperandKind.VectorRegister } index] ||
+            instructions[0].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } group, { Kind: Gen5OperandKind.EncodedConstant, Value: Shift64 },
+                { Kind: Gen5OperandKind.VectorRegister, Value: ThreadIndexRegister }])
+        {
+            return null;
+        }
+
+        var patternRegisters = new uint[IndexedPatternLength];
+        uint? patternBase = null;
+        for (var position = 0; position < IndexedPatternLength; position++)
+        {
+            var move = instructions[1 + position];
+            if (move.Destinations is not [{ Kind: Gen5OperandKind.VectorRegister } moved] ||
+                move.Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } pattern] ||
+                moved.Value == index.Value ||
+                (patternBase ??= moved.Value) + (uint)position != moved.Value ||
+                WrittenScalars(instructions, 1 + position).Contains(pattern.Value))
+            {
+                return null;
+            }
+
+            patternRegisters[position] = pattern.Value;
+        }
+
+        var lane = instructions[7];
+        var readLane = instructions[10];
+        var select = instructions[13];
+        var store = instructions[18];
+        if (instructions[5].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } count, { Kind: Gen5OperandKind.VectorRegister } compared] ||
+            compared.Value != index.Value || WrittenScalars(instructions, 5).Contains(count.Value) ||
+            lane.Destinations is not [{ Kind: Gen5OperandKind.VectorRegister } laneIndex] ||
+            lane.Sources is not [{ Kind: Gen5OperandKind.EncodedConstant, Value: ZeroConstant + IndexedPatternLength - 1 },
+                { Kind: Gen5OperandKind.VectorRegister } masked] ||
+            masked.Value != index.Value ||
+            instructions[8].Destinations is not [{ Kind: Gen5OperandKind.ScalarRegister } saved] ||
+            instructions[8].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister, Value: ExecRegister }] ||
+            instructions[9].Destinations is not [{ Kind: Gen5OperandKind.ScalarRegister } remaining] ||
+            instructions[9].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister, Value: ExecRegister }] ||
+            readLane.Destinations is not [{ Kind: Gen5OperandKind.ScalarRegister } uniform] ||
+            readLane.Sources is not [{ Kind: Gen5OperandKind.VectorRegister } readSource] || readSource.Value != laneIndex.Value ||
+            instructions[11].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } equalScalar, { Kind: Gen5OperandKind.VectorRegister } equalVector] ||
+            equalScalar.Value != uniform.Value || equalVector.Value != laneIndex.Value ||
+            instructions[12].Destinations is not [{ Kind: Gen5OperandKind.ScalarRegister, Value: MarkerRegister }] ||
+            instructions[12].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } relative] || relative.Value != uniform.Value ||
+            select.Destinations is not [{ Kind: Gen5OperandKind.VectorRegister } data] ||
+            select.Sources is not [{ Kind: Gen5OperandKind.VectorRegister } selectBase, { Kind: Gen5OperandKind.ScalarRegister, Value: MarkerRegister }] ||
+            selectBase.Value != patternBase ||
+            instructions[14].Destinations is not [{ Kind: Gen5OperandKind.ScalarRegister } cleared] || cleared.Value != remaining.Value ||
+            instructions[14].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } clearedSource, { Kind: Gen5OperandKind.ScalarRegister, Value: ExecRegister }] ||
+            clearedSource.Value != remaining.Value ||
+            instructions[15].Destinations is not [{ Kind: Gen5OperandKind.ScalarRegister, Value: ExecRegister }] ||
+            instructions[15].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } nextExec] || nextExec.Value != remaining.Value ||
+            instructions[17].Destinations is not [{ Kind: Gen5OperandKind.ScalarRegister, Value: ExecRegister }] ||
+            instructions[17].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } restored] || restored.Value != saved.Value ||
+            store.Control is not Gen5BufferMemoryControl { DwordCount: 1, OffsetBytes: 0, IndexEnabled: true, OffsetEnabled: false, Typed: false } control ||
+            store.Sources is not [_, _, { Kind: Gen5OperandKind.EncodedConstant, Value: ZeroConstant }] ||
+            control.VectorAddress != index.Value || control.VectorData != data.Value ||
+            data.Value == index.Value || laneIndex.Value == index.Value)
+        {
+            return null;
+        }
+
+        if (BranchTarget(instructions[6]) != instructions[^1].Pc || BranchTarget(instructions[16]) != readLane.Pc ||
+            WrittenScalars(instructions[9..17], 8).Contains(saved.Value) ||
+            Enumerable.Range(0, 4).Select(word => control.ScalarResource + (uint)word).Any(WrittenScalars(instructions, instructions.Length).Contains))
+        {
+            return null;
+        }
+
+        FillWord User(uint register) => new(FillWordSource.UserData, register, 0, 0);
+        return new BoundedFill(
+            group.Value,
+            User(count.Value),
+            null,
+            null,
+            User(patternRegisters[0]),
+            [.. Enumerable.Range(0, 4).Select(word => User(control.ScalarResource + (uint)word))],
+            true,
+            [.. patternRegisters.Select(User)]);
+    }
+
+    private static uint BranchTarget(Gen5ShaderInstruction branch) =>
+        branch.Pc + sizeof(uint) + (uint)((short)(branch.Words[0] & 0xFFFF) * sizeof(uint));
 
     private static BoundedFill? DetectPattern(Gen5ShaderProgram program)
     {
-        var instructions = program.Instructions
-            .Where(instruction => instruction.Opcode is not ("SWaitcnt" or "STtraceData" or "SInstPrefetch") &&
-                !(instruction.Opcode == "SMovB32" && instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister, Value: MarkerRegister }]))
-            .ToArray();
-        if (!instructions.Select(instruction => instruction.Opcode).SequenceEqual(PatternFillOpcodes))
+        var instructions = ShaderOpcodePattern.Match(program.Instructions, PatternFillOpcodes, ignoreMarkers: true);
+        if (instructions is null)
         {
             return null;
         }

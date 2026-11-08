@@ -1,92 +1,78 @@
 <!--
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
-Shared navigation for global and per-game options
+Shared navigation for global and per-game options.
+
+Two independent states:
+  selected  - the section being shown: a tinted fill (optionsNavIndicator) that
+              only moves when the section changes, never on hover or focus.
+  focused   - where the D-pad/keyboard is: the shared white ring (Focus.axaml).
 -->
 
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <Style Selector="Border.optionsNavSurface">
-    <Setter Property="Width" Value="244" />
-    <Setter Property="Padding" Value="0" />
-    <Setter Property="Background" Value="Transparent" />
-    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Width" Value="260" />
+    <Setter Property="Padding" Value="12" />
+    <Setter Property="Background" Value="{StaticResource PaneGlassBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BoxShadow" Value="{StaticResource GlassShadow}" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+    <!-- A compact menu: it hugs its rows and sits level with the section title. The
+         scroller inside overhangs the surface by 28 pt, so the last row's ring still
+         has room. -->
     <Setter Property="VerticalAlignment" Value="Top" />
   </Style>
 
   <Style Selector="Border.optionsNavIndicator">
-    <Setter Property="Height" Value="54" />
-    <Setter Property="Margin" Value="0,3,0,0" />
-    <Setter Property="CornerRadius" Value="12" />
-    <Setter Property="Background" Value="#13FFFFFF" />
-    <Setter Property="BorderBrush" Value="#E6FFFFFF" />
-    <Setter Property="BorderThickness" Value="2" />
-    <Setter Property="BoxShadow" Value="0 8 24 0 #24000000" />
+    <Setter Property="Height" Value="52" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
+    <Setter Property="BorderThickness" Value="0" />
   </Style>
 
   <Style Selector="Button.optionsNav">
-    <Setter Property="Height" Value="61" />
+    <Setter Property="Height" Value="52" />
     <Setter Property="HorizontalAlignment" Value="Stretch" />
-    <Setter Property="Padding" Value="16,0" />
+    <Setter Property="Padding" Value="18,0" />
     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
-    <Setter Property="CornerRadius" Value="12" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Foreground" Value="#8FFFFFFF" />
-    <Setter Property="FontSize" Value="14" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
     <Setter Property="FontWeight" Value="Medium" />
-    <Setter Property="FocusAdorner" Value="{x:Null}" />
-    <Setter Property="RenderTransform" Value="none" />
   </Style>
 
   <Style Selector="Button.optionsNav /template/ ContentPresenter#PART_ContentPresenter">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
-    <Setter Property="Foreground" Value="#8FFFFFFF" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
   </Style>
 
-  <Style Selector="Button.optionsNav:pointerover /template/ ContentPresenter#PART_ContentPresenter,
-                   Button.optionsNav:focus-visible /template/ ContentPresenter#PART_ContentPresenter,
+  <!-- Hover: a faint fill and brighter text; it does not touch the selected fill. -->
+  <Style Selector="Button.optionsNav:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource HoverOverlayBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="Button.optionsNav:focus-visible /template/ ContentPresenter#PART_ContentPresenter,
                    Button.optionsNav.active /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="Transparent" />
-    <Setter Property="BorderBrush" Value="Transparent" />
-    <Setter Property="Foreground" Value="White" />
-  </Style>
-
-  <Style Selector="Button.optionsNav:pressed">
-    <Setter Property="RenderTransform" Value="none" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 
   <Style Selector="TextBlock.optionsNavIcon">
-    <Setter Property="Width" Value="20" />
-    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="Width" Value="24" />
     <Setter Property="HorizontalAlignment" Value="Left" />
-    <Setter Property="Padding" Value="0,0,0,5" />
-    <Setter Property="Foreground" Value="#8FFFFFFF" />
-    <Setter Property="Transitions">
-      <Transitions>
-        <BrushTransition Property="Foreground"
-                         Duration="0:0:0.18"
-                         Easing="CubicEaseOut" />
-      </Transitions>
-    </Setter>
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
   </Style>
 
   <Style Selector="TextBlock.optionsNavLabel">
-    <Setter Property="FontSize" Value="14" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
     <Setter Property="FontWeight" Value="Medium" />
-    <Setter Property="LineHeight" Value="20" />
     <Setter Property="VerticalAlignment" Value="Center" />
-    <Setter Property="Padding" Value="0,0,0,4" />
-    <Setter Property="Foreground" Value="#8FFFFFFF" />
-    <Setter Property="Transitions">
-      <Transitions>
-        <BrushTransition Property="Foreground"
-                         Duration="0:0:0.18"
-                         Easing="CubicEaseOut" />
-      </Transitions>
-    </Setter>
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
   </Style>
 
   <Style Selector="Button.optionsNav:pointerover TextBlock.optionsNavIcon,
@@ -95,6 +81,6 @@ Shared navigation for global and per-game options
                    Button.optionsNav:pointerover TextBlock.optionsNavLabel,
                    Button.optionsNav:focus-visible TextBlock.optionsNavLabel,
                    Button.optionsNav.active TextBlock.optionsNavLabel">
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
   </Style>
 </Styles>

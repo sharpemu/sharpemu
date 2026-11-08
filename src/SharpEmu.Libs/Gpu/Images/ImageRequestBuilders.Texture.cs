@@ -4,27 +4,72 @@
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler.Resources;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
+
+// A descriptor the texture builder rejected inside ImageRequestBuilders.RejectInvalidDescriptors.
+public sealed class TextureDescriptorRejectedException(string message) : Exception(message);
 
 // A texture request built from the descriptor words and the shape the shader was compiled with.
 public readonly record struct TextureRequestResolution(ImageRequest Request, bool ExactFormat, Format ViewFormat, uint Swizzle);
 
 public static partial class ImageRequestBuilders
 {
+    [ThreadStatic] private static int _rejectInvalidDescriptors;
+
+    // Inside this scope a descriptor the builder cannot turn into a texture request throws TextureDescriptorRejectedException
+    // instead of stopping the GPU: a call record holds whatever the game last wrote there.
+    public static RejectionScope RejectInvalidDescriptors()
+    {
+        _rejectInvalidDescriptors++;
+        return default;
+    }
+
+    public readonly struct RejectionScope : IDisposable
+    {
+        public void Dispose() => _rejectInvalidDescriptors--;
+    }
+
+    private static Exception InvalidDescriptor(string message) =>
+        _rejectInvalidDescriptors > 0 ? new TextureDescriptorRejectedException(message) : SubmissionScheduler.Fatal(message);
+    internal static ShaderImageShape ShapeOf(ImageResource image) => new(
+        Volume: image.Dimension == ImageDimension.Dim3D,
+        Arrayed: image.Cube || image.Dimension is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray or ImageDimension.Dim2DMsaaArray,
+        Cube: image.Cube,
+        Storage: image.ResourceClass == ImageResourceClass.Storage,
+        DynamicMip: image.MipMode == ImageMipMode.DynamicStorage,
+        NumericClass: NumericClassOf(image),
+        OneDimensional: image.Dimension is ImageDimension.Dim1D or ImageDimension.Dim1DArray,
+        R128: image.R128,
+        Multisampled: image.Dimension is ImageDimension.Dim2DMsaa or ImageDimension.Dim2DMsaaArray,
+        DepthCompare: image.DepthCompare,
+        Atomic: image.Atomic,
+        Atomic64: image.NumericClass == ImageNumericClass.Uint64);
+
+    private static TextureNumericClass NumericClassOf(ImageResource image) => image.NumericClass switch
+    {
+        ImageNumericClass.Uint or ImageNumericClass.Uint64 => TextureNumericClass.Uint,
+        ImageNumericClass.Sint => TextureNumericClass.Sint,
+        _ => TextureNumericClass.Float,
+    };
+
     // A null descriptor binds a one-texel image of the numeric class the shader expects.
     public static ImageRequest NullTexture(in ShaderImageShape shape)
     {
         var numericClass = shape.NumericClass;
         var storage = shape.Storage;
-        var (format, guestFormat) = numericClass switch
-        {
-            TextureNumericClass.Float => (Format.R32Sfloat, GuestPixelFormat.Bits32Float),
-            TextureNumericClass.Uint => (Format.R32Uint, GuestPixelFormat.Bits32UInt),
-            TextureNumericClass.Sint => (Format.R32Sint, GuestPixelFormat.Bits32SInt),
-            _ => throw SubmissionScheduler.Fatal($"A null image needs a supported numeric class: class={numericClass}."),
-        };
+        // An atomic on 64-bit texels declares an R64 image, which a 32-bit placeholder cannot stand in for.
+        var (format, guestFormat) = shape.Atomic64
+            ? (Format.R64Uint, GuestPixelFormat.Bits32_32UInt)
+            : numericClass switch
+            {
+                TextureNumericClass.Float => (Format.R32Sfloat, GuestPixelFormat.Bits32Float),
+                TextureNumericClass.Uint => (Format.R32Uint, GuestPixelFormat.Bits32UInt),
+                TextureNumericClass.Sint => (Format.R32Sint, GuestPixelFormat.Bits32SInt),
+                _ => throw SubmissionScheduler.Fatal($"A null image needs a supported numeric class: class={numericClass}."),
+            };
         // Depth-reference sampling needs a depth view even for the placeholder.
         var depthCompare = shape.DepthCompare && numericClass == TextureNumericClass.Float && !storage;
         if (depthCompare)
@@ -40,7 +85,7 @@ public static partial class ImageRequestBuilders
             : shape.OneDimensional ? GuestImageType.Color1D : GuestImageType.Color2D;
         description.Extent = new Extent3D(1, 1, 1);
         description.Resources = SubresourceCount.Single;
-        description.BytesPerBlock = 4;
+        description.BytesPerBlock = shape.Atomic64 ? 8u : 4u;
         description.Samples = shape.Multisampled ? 4u : 1u;
         description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = 0, Pitch = 1, Height = 1 };
         var view = ImageViewDescription.Default with
@@ -75,7 +120,7 @@ public static partial class ImageRequestBuilders
                 description.Extent.Width, description.Extent.Height, description.Extent.Depth, description.Resources.Levels, 1);
             if (!TileGeometry.TryGetTiledTextureLayout(surfaceDescription, out var surface))
             {
-                throw SubmissionScheduler.Fatal(
+                throw InvalidDescriptor(
                     $"The volume texture layout is not supported: format={(uint)description.GuestFormat} tile={(uint)description.TileMode} " +
                     $"extent={description.Extent.Width}x{description.Extent.Height}x{description.Extent.Depth} levels={description.Resources.Levels}.");
             }
@@ -89,8 +134,7 @@ public static partial class ImageRequestBuilders
             return;
         }
 
-        var spans = new TileLevelSpan[TiledSurfaceLayout.MaxLevels];
-        var padded = new TilePaddedSize[TiledSurfaceLayout.MaxLevels];
+        var (spans, padded) = MipLayoutScratch.Rent();
         TileGeometry.TryGetTextureSize(
             description.GuestFormat, description.Extent.Width, description.Extent.Height, description.Resources.Levels, description.TileMode,
             out _, spans, padded);
@@ -112,7 +156,8 @@ public static partial class ImageRequestBuilders
 
     // The view follows the compiled module: a volume, a layer window to the last layer, or one layer.
     private static ImageViewDescription TextureView(
-        in TextureDescriptorWords descriptor, in ShaderImageShape shape, Format format, bool shaderConversion, uint viewLevels, uint imageLayers)
+        in TextureDescriptorWords descriptor, in ShaderImageShape shape, Format format, bool shaderConversion, uint viewLevels, uint imageLayers,
+        ulong shaderHash, int imageIndex)
     {
         var mapping = shape.Storage || shaderConversion ? default : ViewFormatRules.ComponentMapping(DestinationSwizzle(descriptor));
         var usage = shape.Storage ? ImageUsageFlags.StorageBit : ImageUsageFlags.SampledBit;
@@ -124,7 +169,11 @@ public static partial class ImageRequestBuilders
         var baseLayer = descriptor.BaseArray;
         if (baseLayer >= imageLayers)
         {
-            throw SubmissionScheduler.Fatal($"The texture base layer is outside the image: baseLayer={baseLayer} layers={imageLayers} address=0x{descriptor.BaseAddress:X16}.");
+            var words = new uint[8];
+            for (var index = 0; index < words.Length; index++) words[index] = descriptor[index];
+            throw InvalidDescriptor($"The texture base layer is outside the image: baseLayer={baseLayer} layers={imageLayers} address=0x{descriptor.BaseAddress:X16}. " +
+                $"shaderHash=0x{shaderHash:X16} image={imageIndex} type={descriptor.Type} depth={descriptor.Depth} " +
+                $"shape={shape} words={string.Join(',', words.Select(word => word.ToString("X8")))}");
         }
 
         var layerCount = shape.Arrayed ? imageLayers - baseLayer : 1;
@@ -174,7 +223,8 @@ public static partial class ImageRequestBuilders
     private static Dictionary<TextureKey, TextureRequestResolution>? _textureCache;
 
     // Builds the request for a sampled or storage texture; the words are the eight T# dwords.
-    public static TextureRequestResolution Texture(ReadOnlySpan<uint> words, in ShaderImageShape shape)
+    public static TextureRequestResolution Texture(ReadOnlySpan<uint> words, in ShaderImageShape shape,
+        ulong shaderHash = 0, int imageIndex = -1)
     {
         Span<uint> key = stackalloc uint[8];
         words[..Math.Min(words.Length, 8)].CopyTo(key);
@@ -185,7 +235,7 @@ public static partial class ImageRequestBuilders
             return cached;
         }
 
-        var resolution = BuildTexture(key, shape);
+        var resolution = BuildTexture(key, shape, shaderHash, imageIndex);
         if (cache.Count >= TextureCacheLimit)
         {
             cache.Clear();
@@ -195,11 +245,14 @@ public static partial class ImageRequestBuilders
         return resolution;
     }
 
-    private static TextureRequestResolution BuildTexture(ReadOnlySpan<uint> words, in ShaderImageShape shape)
+    private static TextureRequestResolution BuildTexture(ReadOnlySpan<uint> words, in ShaderImageShape shape,
+        ulong shaderHash, int imageIndex)
     {
         Span<uint> padded = stackalloc uint[8];
         words[..Math.Min(words.Length, 8)].CopyTo(padded);
         var descriptor = new TextureDescriptorWords(padded);
+        if (ImageClearTrace.Enabled && descriptor.Type == GuestImageType.Color3D)
+            ImageClearTrace.Write($"volume-descriptor address=0x{descriptor.BaseAddress:X16} words={Convert.ToHexString(System.Runtime.InteropServices.MemoryMarshal.AsBytes(padded))}");
         var storage = shape.Storage;
         if (descriptor.BaseAddress == 0)
         {
@@ -232,7 +285,7 @@ public static partial class ImageRequestBuilders
              (baseLevel != 0 || lastLevel == 0 || lastLevel > 3 || maxMip != lastLevel || !msaaTile || (descriptor.MsaaDepth && !depthTile) ||
               (!msaaArray && (descriptor.Depth != 0 || descriptor.BaseArray != 0)))))
         {
-            throw SubmissionScheduler.Fatal(
+            throw InvalidDescriptor(
                 $"The texture mip view is not supported: address=0x{address:X16} type={(uint)type} baseLevel={baseLevel} lastLevel={lastLevel} maxMip={maxMip} " +
                 $"levels={levels} tile={(uint)tile} depth={descriptor.Depth} baseArray={descriptor.BaseArray} msaaDepth={descriptor.MsaaDepth} storage={storage}.");
         }
@@ -246,12 +299,14 @@ public static partial class ImageRequestBuilders
         var volume = type == GuestImageType.Color3D;
         var layered = type is GuestImageType.Color1DArray or GuestImageType.Color2DArray or GuestImageType.Color2DMsaaArray;
         var imageLayers = layered ? depth : 1;
+        // Cube image_load/store can address a face subset. Our 2D-array views need
+        // valid slice bounds, not the six-face alignment required by native cube views.
         if (shape.Cube &&
-            (volume || multisampled || width != height || descriptor.BaseArray > descriptor.Depth ||
-             (descriptor.Depth - descriptor.BaseArray + 1) % 6 != 0))
+            (volume || multisampled || width != height || descriptor.BaseArray > descriptor.Depth))
         {
-            throw SubmissionScheduler.Fatal(
-                $"The cubemap view is invalid: address=0x{address:X16} extent={width}x{height} layers={imageLayers} baseArray={descriptor.BaseArray} samples={samples}.");
+            throw InvalidDescriptor(
+                $"The cubemap view is invalid: address=0x{address:X16} extent={width}x{height} layers={imageLayers} baseArray={descriptor.BaseArray} samples={samples} " +
+                $"type={descriptor.Type} shape={shape} shaderHash=0x{shaderHash:X16} image={imageIndex} words={Convert.ToHexString(System.Runtime.InteropServices.MemoryMarshal.AsBytes(padded))}.");
         }
         uint pitch;
         TileSizeAndAlignment size;
@@ -261,7 +316,7 @@ public static partial class ImageRequestBuilders
             pitch = depthTile ? TileGeometry.DepthPitch(width, bytes, lastLevel) : TileGeometry.RenderTargetPitch(width, bytes, lastLevel);
             if (pitch == 0 || !TileGeometry.TryGetRenderTargetSize(width, height, pitch, bytes, out size, lastLevel) || size.Size > uint.MaxValue / imageLayers)
             {
-                throw SubmissionScheduler.Fatal(
+                throw InvalidDescriptor(
                     $"The multisample texture layout is not supported: address=0x{address:X16} extent={width}x{height} bytes={bytes} pitch={pitch} samplesLog2={lastLevel} layers={imageLayers}.");
             }
 
@@ -275,7 +330,7 @@ public static partial class ImageRequestBuilders
 
         if (size.Size == 0 || size.Align == 0 || (address & (size.Align - 1UL)) != 0)
         {
-            throw SubmissionScheduler.Fatal(
+            throw InvalidDescriptor(
                 $"The texture footprint or alignment is invalid: address=0x{address:X16} size=0x{size.Size:X} align=0x{size.Align:X} format={(uint)format} tile={(uint)tile}.");
         }
 
@@ -285,8 +340,11 @@ public static partial class ImageRequestBuilders
         {
             pixelFormat = depthFormat.DepthAttachmentFormat;
         }
-        // Atomic storage images are declared as UINT in SPIR-V, including float atomics.
-        var storageViewFormat = storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? Format.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
+        // Atomic storage images are declared as UINT in SPIR-V, including float atomics; an atomic on a
+        // 64-bit texel (32_32 UINT) is declared R64 and views the same texels as one 64-bit integer.
+        var storageViewFormat = storage && shape.Atomic64
+            ? Format.R64Uint
+            : storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? Format.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
         var viewFormat = storage && storageViewFormat != Format.Undefined ? storageViewFormat : pixelFormat;
         var blockBytes = GuestPixelFormats.BlockCompressedBytes(format);
         var description = ImageDescription.Create();
@@ -300,12 +358,15 @@ public static partial class ImageRequestBuilders
         description.BytesPerBlock = blockBytes != 0 ? blockBytes : GuestPixelFormats.BytesPerElement(format);
         description.Samples = samples;
         description.TileMode = tile;
-        var metadataAddress = descriptor.MetadataAddress << 8;
-        if (!storage && type == GuestImageType.Color2D && samples == 1 && levels == 1 && tile == GuestTileMode.RenderTarget && descriptor.MetadataCompress &&
-            metadataAddress != 0 && metadataAddress < TrackerLayout.SpaceBytes)
+        if (!shape.R128 && words.Length >= 8 && descriptor.MetadataCompress &&
+            tile != GuestTileMode.Depth && !description.IsDepth)
         {
+            _ = TileGeometry.TryGetDccSize(
+                width, height, volume ? depth : imageLayers, description.BytesPerBlock, levels, tile,
+                out var metadataSize, (uint)System.Numerics.BitOperations.TrailingZeroCount(samples));
             description.Metadata.Kind = MetadataKind.Dcc;
-            description.Metadata.Range = new GuestSpan(metadataAddress, 0);
+            description.Metadata.Range = new GuestSpan(descriptor.MetadataAddress << 8, metadataSize.Size);
+            description.Metadata.DccAlphaMsb = descriptor.DccAlphaMsb;
         }
 
         if (samples > 1)
@@ -317,15 +378,41 @@ public static partial class ImageRequestBuilders
             PopulateTextureMipLayout(ref description);
         }
 
-        var view = TextureView(descriptor, shape, viewFormat, shaderConversion, viewLevels, description.Resources.Layers);
+        var view = TextureView(descriptor, shape, viewFormat, shaderConversion, viewLevels, description.Resources.Layers,
+            shaderHash, imageIndex);
+        if (!shape.R128 && descriptor.MetadataCompress && !description.IsDepth && !shaderConversion &&
+            tile == GuestTileMode.RenderTarget && levels == 1 && samples == 1 &&
+            type is GuestImageType.Color2D or GuestImageType.Color2DArray or GuestImageType.Color3D &&
+            NativeColorClear.TryDecode(0x40, viewFormat, !descriptor.DccAlphaOnMostSignificantBits, out _))
+        {
+            var clearMetadataAddress = descriptor.MetadataAddress << 8;
+            var sliceSize = NativeColorClear.SliceSize(width, height, description.BytesPerBlock);
+            var metadataSize = sliceSize * description.TransferLayers;
+            if (clearMetadataAddress != 0 && (clearMetadataAddress & 4095) == 0 && sliceSize != 0 &&
+                metadataSize <= ulong.MaxValue - clearMetadataAddress)
+            {
+                description.Metadata.Kind = MetadataKind.Dcc;
+                description.Metadata.Range = new GuestSpan(clearMetadataAddress, metadataSize);
+                description.Metadata.NativeColorClear = true;
+                description.Metadata.ColorAlphaOnLeastSignificantBits = !descriptor.DccAlphaOnMostSignificantBits;
+                description.Metadata.ColorMetadataBaseLayer = volume ? 0 : view.BaseLayer;
+            }
+        }
         var request = new ImageRequest(description, view, storage ? ImageRole.StorageImage : ImageRole.Texture);
+        if (ImageClearTrace.Enabled && volume)
+        {
+            request.TraceTextureMetadataAddress = descriptor.MetadataAddress << 8;
+            request.TraceMetadataCompress = descriptor.MetadataCompress;
+            request.TraceWriteCompress = descriptor.WriteCompress;
+            request.TraceTextureDescriptor = string.Join(",", ((ReadOnlySpan<uint>)descriptor.Fields).ToArray().Select(word => word.ToString("X8")));
+        }
         return new TextureRequestResolution(request, shaderConversion, pixelFormat, DestinationSwizzle(descriptor));
     }
 
     // After the lookup: a stencil association redirects to its depth owner; the view rules run on the owner.
     public static ResourceSlotIdentifier ValidateTextureOwner(GuestImageCache cache, ResourceSlotIdentifier imageIdentifier, in TextureRequestResolution resolution)
     {
-        var image = cache.GetImage(imageIdentifier);
+        var image = cache.PeekImage(imageIdentifier) ?? throw SubmissionScheduler.Fatal($"The texture owner was released: image={imageIdentifier.Index}.");
         if (image.DepthOwner.IsValid)
         {
             return image.DepthOwner;

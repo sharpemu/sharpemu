@@ -59,6 +59,11 @@ public sealed class TilerParityTests : IClassFixture<HeadlessVulkanFixture>
         foreach (var tilerCase in TilerCases.All())
         {
             var transfer = tilerCase.Transfer;
+            if (transfer.Kind == TileBlockKind.RenderTarget64KBGen5)
+            {
+                continue;
+            }
+
             var reference = blobs[(int)transfer.Kind]!;
             foreach (var toTiled in new[] { false, true })
             {

@@ -3,7 +3,6 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -59,13 +58,11 @@ public sealed class Gen5XorAddTests
     [InlineData(3u, false)]
     [InlineData(4u, false)]
     [InlineData(6u, false)]
-    public void BothBackendsCompileOverlappingAndMaskedDestinations(uint destination, bool operationEnabled)
+    public void CompileOverlappingAndMaskedDestinations(uint destination, bool operationEnabled)
     {
         var (plan, resources, layout) = Prepare(CreateReadbackProgram(destination, operationEnabled));
         var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out var metalShader, out var metalError), metalError);
-        Assert.Contains("^", metalShader.Source);
     }
 
     [Theory]

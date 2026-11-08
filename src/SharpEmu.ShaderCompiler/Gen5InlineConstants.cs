@@ -14,31 +14,44 @@ public static class Gen5InlineConstants
     public const uint PrivateBase = 237;
     public const uint PrivateLimit = 238;
 
-    // The PS5 FLAT apertures, as title shaders hard-code them: a high dword of
-    // 0x7xxxxxxx selects LDS and 0x8xxxxxxx scratch. Guest device addresses fit in
-    // 40 bits and never reach them.
-    public const uint SharedApertureHigh = 0x7000_0000;
-    public const uint PrivateApertureHigh = 0x8000_0000;
+    // Generated addresses use virtual segments outside global memory.
+    public const ulong SharedApertureBase = 1ul << 48;
+    public const ulong PrivateApertureBase = 2ul << 48;
 
-    // Each aperture is the window of high dwords sharing its top nibble.
+    // Guest literal tags are distinct from the generated segments.
+    public const uint SharedApertureHigh = 0x8000_0000;
+    public const uint PrivateApertureHigh = 0x7000_0000;
+    public const ulong SharedFlatApertureBase = (ulong)SharedApertureHigh << 32;
+    public const ulong PrivateFlatApertureBase = (ulong)PrivateApertureHigh << 32;
     public const int ApertureShift = 28;
 
-    public static bool IsSharedApertureHigh(uint high) => high >> ApertureShift == SharedApertureHigh >> ApertureShift;
+    public static bool IsSharedApertureHigh(uint high) =>
+        high >> ApertureShift == SharedApertureHigh >> ApertureShift;
 
-    public static bool IsPrivateApertureHigh(uint high) => high >> ApertureShift == PrivateApertureHigh >> ApertureShift;
+    public static bool IsPrivateApertureHigh(uint high) =>
+        high >> ApertureShift == PrivateApertureHigh >> ApertureShift;
 
     public static bool IsAperture(uint encoded) => encoded is >= SharedBase and <= PrivateLimit;
 
     public static bool IsSharedAperture(uint encoded) => encoded is SharedBase or SharedLimit;
 
-    // The 64-bit aperture value: a base has a zero low dword, a limit spans the
-    // whole 32-bit offset range. A 32-bit read returns the high dword.
-    public static ulong DecodeAperture64(uint encoded)
+    public static bool TryDecodeAperture(uint encoded, out ulong value)
     {
-        var high = IsSharedAperture(encoded) ? SharedApertureHigh : PrivateApertureHigh;
-        var low = encoded is SharedLimit or PrivateLimit ? uint.MaxValue : 0u;
-        return ((ulong)high << 32) | low;
+        value = encoded switch
+        {
+            SharedBase => SharedApertureBase,
+            SharedLimit => SharedApertureBase | uint.MaxValue,
+            PrivateBase => PrivateApertureBase,
+            PrivateLimit => PrivateApertureBase | uint.MaxValue,
+            _ => 0,
+        };
+        return IsAperture(encoded);
     }
+
+    public static ulong DecodeAperture64(uint encoded) =>
+        TryDecodeAperture(encoded, out var value)
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(encoded));
 
     public static bool TryDecode(uint encoded, out uint value)
     {

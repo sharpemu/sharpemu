@@ -249,11 +249,7 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 4, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(4, ItIndirectBuffer, RZero)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, (uint)(target & 0xFFFF_FFFFUL)) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, (uint)((target >> 32) & 0xFFFFUL)) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, (uint)targetDwords & 0xFFFFFu))
+        if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(4, ItIndirectBuffer, RZero), (uint)(target & 0xFFFF_FFFFUL), (uint)((target >> 32) & 0xFFFFUL), (uint)targetDwords & 0xFFFFFu))
         {
             return ReturnPointer(ctx, 0);
         }

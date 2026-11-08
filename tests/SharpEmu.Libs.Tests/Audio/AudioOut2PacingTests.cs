@@ -19,6 +19,21 @@ public sealed class AudioOut2PacingTests
         Assert.Equal(expected, AudioOut2Exports.DeviceSlotFreeThreshold(grainSamples, frequency, queueDepth), 3);
     }
 
+    [Theory]
+    [InlineData(5000ul, 20, 2500ul)]
+    [InlineData(5000ul, 34, 2500ul)]
+    [InlineData(5000ul, 35, 5000ul)]
+    [InlineData(5000ul, 60, 5000ul)]
+    [InlineData(5000ul, -1, 5000ul)]
+    [InlineData(10000ul, 0, 5000ul)]
+    [InlineData(11000ul, 0, 11000ul)]
+    [InlineData(100000ul, 0, 100000ul)]
+    public void AProducerSleepBetweenGrainsIsHalvedOnlyWhileTheDeviceRunsShort(
+        ulong microseconds, int queuedMilliseconds, ulong expected)
+    {
+        Assert.Equal(expected, AudioOut2Exports.ShortenedProducerSleep(microseconds, 256, 48000, queuedMilliseconds));
+    }
+
     [Fact]
     public void TheThresholdStaysFarBelowTheHostQueueCap()
     {

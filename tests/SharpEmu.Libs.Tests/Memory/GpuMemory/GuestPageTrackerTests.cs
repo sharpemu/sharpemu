@@ -25,9 +25,15 @@ public sealed class GuestPageTrackerTests : IDisposable
     private sealed class LoggingSpace(PhysicalVirtualMemory memory) : IGuestAddressSpace
     {
         public List<(ulong Address, ulong Size, GuestPageProtection Protection)> Protects { get; } = new();
+        public ulong? FailGpuProtectionAt { get; set; }
 
         public bool TryProtect(ulong address, ulong size, GuestPageProtection protection)
         {
+            if (FailGpuProtectionAt == address && protection == GuestPageProtection.None)
+            {
+                FailGpuProtectionAt = null;
+                throw new InvalidOperationException("ownership publication");
+            }
             lock (Protects)
             {
                 Protects.Add((address, size, protection));
@@ -154,6 +160,22 @@ public sealed class GuestPageTrackerTests : IDisposable
     }
 
     [NativePageProtectionFact]
+    public void ADirtyRunExtendsAroundTheRequestWithinTheBoundsAndTheBudget()
+    {
+        var address = Allocate(8);
+        Assert.True(_tracker.HasCpuDirtyPages(address, Page * 8));
+        _tracker.ForEachUploadRange(address + Page * 6, Page * 2, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+
+        Assert.Equal((address, Page * 6), _tracker.ExtendCpuDirtyRun(address + Page * 2, Page, address, address + Page * 8, false, 64));
+        Assert.Equal((address + Page, Page * 5), _tracker.ExtendCpuDirtyRun(address + Page * 2, Page, address + Page, address + Page * 8, false, 64));
+        Assert.Equal((address, Page * 3), _tracker.ExtendCpuDirtyRun(address + Page * 2, Page, address, address + Page * 8, false, 2));
+        Assert.Equal((address + Page * 7, Page), _tracker.ExtendCpuDirtyRun(address + Page * 7, Page, address + Page * 6, address + Page * 8, false, 64));
+
+        _tracker.UntrackMemory(address, Page * 8);
+        Release(address, Page * 8);
+    }
+
+    [NativePageProtectionFact]
     public void LockFreeCpuDirtyQueryAgreesWithTheLockedQuery()
     {
         var address = Allocate(2);
@@ -262,6 +284,120 @@ public sealed class GuestPageTrackerTests : IDisposable
         Assert.Equal([(address + Region * 2, Region * 63)], Runs(address, Region * 65));
         _tracker.UntrackMemory(address, Region * 2);
         Release(address, Region * 2);
+    }
+
+    [NativePageProtectionFact]
+    public void TheCoveredPageRunWalkVisitsTheDirtyPagesTheCoverageHolds()
+    {
+        const ulong size = Region * 6;
+        var address = AllocateAligned(size, Region);
+        GuestSpan[] spans =
+        [
+            new(address + Page, Page * 3),
+            new(address + Page * 8, Region - Page * 8),
+            new(address + Region, Region * 2 + Page),
+            new(address + Region * 3 + Page * 4, Page),
+            new(address + Region * 3 + Page * 9, Page * 2),
+            new(address + Region * 4 + Page, Region + Page * 5),
+        ];
+        var plan = GuestPageTracker.PlanSweep(spans);
+        Assert.NotNull(plan);
+        var covered = new List<(ulong Address, ulong Size)>
+        {
+            (address + Page * 2, Page * 4),
+            (address + Page * 8, Page * 8),
+            (address + Region - Page * 2, Page * 4),
+            (address + Region * 3, Page * 16),
+            (address + Region * 4 + Page * 3, Region),
+        };
+        var coverage = new PageCoverage();
+        foreach (var (start, bytes) in covered)
+        {
+            coverage.Set(start, bytes, covered: true);
+        }
+
+        List<(ulong Page, int Span)> Walk()
+        {
+            var pages = new List<(ulong Page, int Span)>();
+            _tracker.ForEachCoveredCpuDirtyPageRun(plan, coverage, (runAddress, runSize) =>
+            {
+                var span = Array.FindIndex(spans, candidate => runAddress >= candidate.Address && runAddress < candidate.End);
+                Assert.True(span >= 0);
+                Assert.True(runAddress >= spans[span].Address && runAddress + runSize <= spans[span].End);
+                for (var page = runAddress; page < runAddress + runSize; page += Page)
+                {
+                    pages.Add((page, span));
+                }
+            });
+            return pages;
+        }
+
+        List<(ulong Page, int Span)> Expected()
+        {
+            var pages = new List<(ulong Page, int Span)>();
+            for (var page = address; page < address + size; page += Page)
+            {
+                var span = Array.FindIndex(spans, candidate => page >= candidate.Address && page < candidate.End);
+                if (span >= 0 && covered.Any(range => page >= range.Address && page < range.Address + range.Size) &&
+                    _tracker.MayHaveCpuDirtyPages(page, Page))
+                {
+                    pages.Add((page, span));
+                }
+            }
+
+            return pages;
+        }
+
+        // No block has a region yet, so every covered page inside a span is visited.
+        Assert.NotEmpty(Expected());
+        Assert.Equal(Expected(), Walk());
+
+        _tracker.ForEachUploadRange(address, size, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        Assert.Empty(Walk());
+        Assert.Empty(Walk());
+
+        // A covered page in a span, an uncovered page, and a covered page outside every span.
+        _tracker.MarkCpuDirtyPages(address + Page * 9, 8);
+        _tracker.MarkCpuDirtyPages(address + Page * 6, 8);
+        _tracker.MarkCpuDirtyPages(address + Page * 5, 8);
+        _tracker.MarkCpuDirtyPages(address + Region * 4 + Page * 4, 8);
+        Assert.Equal([(address + Page * 9, 1), (address + Region * 4 + Page * 4, 5)], Walk());
+        Assert.Equal(Expected(), Walk());
+
+        _tracker.ForEachUploadRange(address, size, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        Assert.Empty(Walk());
+
+        // A block found clean is looked at again once one of its pages turns dirty.
+        _tracker.MarkCpuDirtyPages(address + Region * 5 + Page * 2, 8);
+        Assert.Equal([(address + Region * 5 + Page * 2, 5)], Walk());
+
+        // A dirty page the coverage does not hold is skipped until the coverage gains it.
+        _tracker.ForEachUploadRange(address, size, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        _tracker.MarkCpuDirtyPages(address + Region * 5 + Page * 4, 8);
+        Assert.Empty(Walk());
+        coverage.Set(address + Region * 5 + Page * 4, Page, covered: true);
+        covered.Add((address + Region * 5 + Page * 4, Page));
+        Assert.Equal([(address + Region * 5 + Page * 4, 5)], Walk());
+        Assert.Equal(Expected(), Walk());
+        coverage.Set(address + Region * 5 + Page * 4, Page, covered: false);
+        Assert.Empty(Walk());
+
+        Assert.True(coverage.Complete);
+        coverage.Set(TrackerLayout.SpaceBytes, Page, covered: true);
+        Assert.False(coverage.Complete);
+        _tracker.UntrackMemory(address, size);
+        Release(address, size);
+    }
+
+    [Fact]
+    public void ASweepPlanNeedsSortedDisjointSpansInsideTheTrackedSpace()
+    {
+        Assert.NotNull(GuestPageTracker.PlanSweep([]));
+        Assert.NotNull(GuestPageTracker.PlanSweep([new GuestSpan(Region, Page), new GuestSpan(Region + Page, Page)]));
+        Assert.Null(GuestPageTracker.PlanSweep([new GuestSpan(Region * 2, Page), new GuestSpan(Region, Page)]));
+        Assert.Null(GuestPageTracker.PlanSweep([new GuestSpan(Region, Page * 2), new GuestSpan(Region + Page, Page)]));
+        Assert.Null(GuestPageTracker.PlanSweep([new GuestSpan(Region, 0)]));
+        Assert.Null(GuestPageTracker.PlanSweep([new GuestSpan(TrackerLayout.SpaceBytes, Page)]));
     }
 
     [NativePageProtectionFact]
@@ -628,6 +764,42 @@ public sealed class GuestPageTrackerTests : IDisposable
     }
 
     [NativePageProtectionFact]
+    public void AWrittenUploadLeavesBlocksTheGpuOwnsAloneAndStillMarksTheRest()
+    {
+        var address = AllocateAligned(Region * 2, Region);
+        var range = Region + Page * 4;
+        Assert.False(_tracker.IsGpuOwned(address, range));
+        _tracker.ForEachUploadRange(address, range, true, NoRange, NoUpload);
+        Assert.True(_tracker.IsGpuOwned(address, range));
+        Assert.False(_tracker.IsGpuOwned(address, range + Page));
+
+        // Nothing is reported or re-marked while the GPU owns every page.
+        var ranges = 0;
+        var callbacks = 0;
+        ResetLog();
+        _tracker.ForEachUploadRange(address, range, true, (_, _) => ranges++, () => callbacks++);
+        Assert.Equal(0, ranges);
+        Assert.Equal(1, callbacks);
+        Assert.Empty(_space.Protects);
+
+        // One page of the second block goes back to the CPU and is written there: only that
+        // block is walked again, the page is uploaded and the GPU owns the range once more.
+        var returned = address + Region + Page;
+        _tracker.ClearGpuDirtyPages(returned, Page);
+        Assert.False(_tracker.IsGpuOwned(address, range));
+        _tracker.MarkCpuDirtyPages(returned, Page);
+        var uploaded = new List<(ulong Address, ulong Size)>();
+        _tracker.ForEachUploadRange(address, range, true, (start, bytes) => uploaded.Add((start, bytes)), NoUpload);
+        Assert.Equal([(returned, Page)], uploaded);
+        Assert.True(_tracker.IsGpuOwned(address, range));
+        Assert.False(_tracker.HasCpuDirtyPages(address, range));
+
+        _tracker.ClearGpuDirtyPages(address, Region * 2);
+        _tracker.UntrackMemory(address, Region * 2);
+        Release(address, Region * 2);
+    }
+
+    [NativePageProtectionFact]
     public void RepeatedCpuWritesKeepReadOnlyHotPagesWritableAndDirty()
     {
         var address = Allocate(1);
@@ -739,6 +911,38 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Page);
     }
 
+    [NativePageProtectionFact]
+    public void NestedTrackerUploadKeepsSeparateRollbackStorage()
+    {
+        using var inner = new GuestPageTrackerTests();
+        var address = Allocate(1);
+        var innerAddress = inner.Allocate(1);
+
+        Assert.Throws<InvalidOperationException>(() => _tracker.ForEachUploadRange(
+            address, Page, true, NoRange, () =>
+            {
+                inner._tracker.ForEachUploadRange(innerAddress, Page, true, NoRange, NoUpload);
+                throw new InvalidOperationException("outer upload");
+            }));
+
+        Assert.True(_tracker.HasCpuDirtyPages(address, Page));
+        Assert.False(_tracker.HasGpuDirtyPages(address, Page));
+        Assert.True(IsWritable(address));
+        Assert.False(inner._tracker.HasCpuDirtyPages(innerAddress, Page));
+        Assert.True(inner._tracker.HasGpuDirtyPages(innerAddress, Page));
+        _tracker.ForEachUploadRange(address, Page, true, NoRange, NoUpload);
+        Assert.True(_tracker.HasGpuDirtyPages(address, Page));
+
+        _tracker.ClearGpuDirtyPages(address, Page);
+        _tracker.MarkCpuDirtyPages(address, Page);
+        _tracker.UntrackMemory(address, Page);
+        Release(address, Page);
+        inner._tracker.ClearGpuDirtyPages(innerAddress, Page);
+        inner._tracker.MarkCpuDirtyPages(innerAddress, Page);
+        inner._tracker.UntrackMemory(innerAddress, Page);
+        inner.Release(innerAddress, Page);
+    }
+
     [NativePageProtectionTheory]
     [InlineData(false, true)]
     [InlineData(true, true)]
@@ -815,6 +1019,32 @@ public sealed class GuestPageTrackerTests : IDisposable
     }
 
     [NativePageProtectionFact]
+    public void FailedOwnershipPublicationPreservesReleasedRegionsAndUnlocksTheRest()
+    {
+        var address = AllocateAligned(Region * 2, Region);
+        var boundary = address + Region;
+        _space.FailGpuProtectionAt = boundary;
+        var failure = Assert.Throws<InvalidOperationException>(() =>
+            _tracker.ForEachUploadRange(boundary - Page, Page * 2, true, NoRange, NoUpload));
+        Assert.Equal("ownership publication", failure.Message);
+        Assert.True(_tracker.HasGpuDirtyPages(boundary - Page, Page));
+        Assert.False(_tracker.HasCpuDirtyPages(boundary - Page, Page));
+        Assert.False(_tracker.HasGpuDirtyPages(boundary, Page));
+        Assert.True(_tracker.HasCpuDirtyPages(boundary, Page));
+        Assert.True(IsWritable(boundary));
+
+        _tracker.ClearGpuDirtyPages(boundary - Page, Page);
+        _tracker.MarkCpuDirtyPages(boundary - Page, Page);
+        var retried = 0;
+        _tracker.ForEachUploadRange(boundary - Page, Page * 2, true, (_, _) => retried++, NoUpload);
+        Assert.Equal(2, retried);
+        _tracker.ClearGpuDirtyPages(boundary - Page, Page * 2);
+        _tracker.MarkCpuDirtyPages(boundary - Page, Page * 2);
+        _tracker.UntrackMemory(address, Region * 2);
+        Release(address, Region * 2);
+    }
+
+    [NativePageProtectionFact]
     public void UntrackingGpuDirtyMemoryIsFatal()
     {
         var address = Allocate(1);
@@ -827,6 +1057,229 @@ public sealed class GuestPageTrackerTests : IDisposable
         _tracker.MarkCpuDirtyPages(address, Page);
         _tracker.UntrackMemory(address, Page);
         Release(address, Page);
+    }
+
+    [NativePageProtectionFact]
+    public void AnEmulatorWriteKeepsTheWriteWatchUntilTheGuestWritesThePage()
+    {
+        var address = Allocate(2);
+        _tracker.ForEachUploadRange(address, Page * 2, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        ResetLog();
+
+        Assert.True(_tracker.MarkCpuWriteKeepingProtection(address + 16, 8, out var needsGpuFlush));
+        Assert.False(needsGpuFlush);
+        Assert.Empty(_space.Protects);
+        Assert.True(_tracker.HasCpuDirtyPages(address, Page));
+        Assert.True(_tracker.MayHaveCpuDirtyPages(address, Page));
+        Assert.False(_tracker.HasCpuDirtyPages(address + Page, Page));
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address));
+
+        Assert.True(_tracker.InvalidateRegion(address + 16, 8, out needsGpuFlush));
+        Assert.False(needsGpuFlush);
+        Assert.True(IsWritable(address));
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address + Page));
+
+        _tracker.ForEachUploadRange(address, Page * 2, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address));
+        ResetLog();
+        var ranges = 0;
+        Assert.True(_tracker.MarkCpuWriteKeepingProtection(address, Page * 2, out _));
+        _tracker.ForEachUploadRange(address, Page * 2, false, (_, _) => ranges++, NoUpload, preserveCpuWriteHotPages: false);
+        Assert.Equal(1, ranges);
+        Assert.Empty(_space.Protects);
+        Assert.False(_tracker.HasCpuDirtyPages(address, Page * 2));
+
+        Assert.True(_tracker.MarkCpuWriteKeepingProtection(address, Page, out _));
+        _tracker.UntrackMemory(address, Page * 2);
+        Assert.True(IsWritable(address));
+        Assert.True(IsWritable(address + Page));
+        Release(address, Page * 2);
+    }
+
+    [NativePageProtectionFact]
+    public void AnEmulatorWriteToAWritablePageLeavesItWritable()
+    {
+        var address = Allocate(1);
+        Assert.True(_tracker.HasCpuDirtyPages(address, Page));
+        Assert.True(IsWritable(address));
+        ResetLog();
+
+        Assert.True(_tracker.MarkCpuWriteKeepingProtection(address, 8, out _));
+        Assert.True(IsWritable(address));
+        Assert.Empty(_space.Protects);
+        _tracker.UntrackMemory(address, Page);
+        Release(address, Page);
+    }
+
+    [NativePageProtectionFact]
+    public void AnEmulatorWriteOverGpuDataAsksForTheDownloadFirst()
+    {
+        var address = Allocate(2);
+        _tracker.ForEachUploadRange(address, Page, true, NoRange, NoUpload);
+        _tracker.ForEachUploadRange(address + Page, Page, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+
+        Assert.True(_tracker.MarkCpuWriteKeepingProtection(address, Page * 2, out var needsGpuFlush));
+        Assert.True(needsGpuFlush);
+        Assert.True(_tracker.HasGpuDirtyPages(address, Page));
+        Assert.False(_tracker.HasCpuDirtyPages(address, Page));
+        Assert.False(_tracker.MarkCpuWriteKeepingProtection(Region * 7, Page, out needsGpuFlush));
+        Assert.False(needsGpuFlush);
+
+        _tracker.ClearGpuDirtyPages(address, Page);
+        _tracker.UntrackMemory(address, Page * 2);
+        Release(address, Page * 2);
+    }
+
+    [NativePageProtectionFact]
+    public void TheSweepSeesAnEmulatorWriteToABlockItFoundClean()
+    {
+        var address = AllocateAligned(Region, Region);
+        var plan = GuestPageTracker.PlanSweep([new GuestSpan(address, Region)]);
+        Assert.NotNull(plan);
+        var coverage = new PageCoverage();
+        coverage.Set(address, Region, covered: true);
+        _tracker.ForEachUploadRange(address, Region, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        var visited = new List<(ulong Address, ulong Size)>();
+        _tracker.ForEachCoveredCpuDirtyPageRun(plan, coverage, (runAddress, runSize) => visited.Add((runAddress, runSize)));
+        Assert.Empty(visited);
+
+        Assert.True(_tracker.MarkCpuWriteKeepingProtection(address + Page * 7 + 4, 4, out _));
+        _tracker.ForEachCoveredCpuDirtyPageRun(plan, coverage, (runAddress, runSize) => visited.Add((runAddress, runSize)));
+        Assert.Equal([(address + Page * 7, Page)], visited);
+
+        _tracker.UntrackMemory(address, Region);
+        Release(address, Region);
+    }
+
+    [NativePageProtectionFact]
+    public void TheSweepTakesTheDirtyPagesOfABlockAndProtectsThemBeforeItVisitsThem()
+    {
+        var address = AllocateAligned(Region, Region);
+        var plan = GuestPageTracker.PlanSweep([new GuestSpan(address, Page * 64)]);
+        Assert.NotNull(plan);
+        var coverage = new PageCoverage();
+        coverage.Set(address, Page * 32, covered: true);
+        coverage.Set(address + Page * 40, Page * 32, covered: true);
+        _tracker.ForEachUploadRange(address, Region, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        foreach (var page in new ulong[] { 1, 5, 9, 33, 41, 50, 70 })
+        {
+            _tracker.MarkCpuDirtyPages(address + Page * page, 8);
+        }
+
+        var visited = new List<(ulong Address, ulong Size)>();
+        _tracker.ForEachCoveredCpuDirtyPageRun(plan, coverage, (runAddress, runSize) =>
+        {
+            Assert.False(_tracker.MayHaveCpuDirtyPages(runAddress, runSize));
+            Assert.Equal(HostPageProtection.ReadOnly, Protection(runAddress));
+            visited.Add((runAddress, runSize));
+        });
+
+        Assert.Equal([(address + Page, Page), (address + Page * 5, Page), (address + Page * 9, Page), (address + Page * 41, Page), (address + Page * 50, Page)], visited);
+        Assert.True(_tracker.HasCpuDirtyPages(address + Page * 33, Page));
+        Assert.True(_tracker.HasCpuDirtyPages(address + Page * 70, Page));
+        Assert.True(IsWritable(address + Page * 70));
+
+        _tracker.MarkCpuDirtyPages(address + Page * 5, 8);
+        _tracker.MarkCpuDirtyPages(address + Page * 9, 8);
+        var calls = 0;
+        Assert.Throws<InvalidOperationException>(() => _tracker.ForEachCoveredCpuDirtyPageRun(plan, coverage, (_, _) =>
+        {
+            if (++calls == 2)
+            {
+                throw new InvalidOperationException("upload failed");
+            }
+        }));
+        Assert.True(_tracker.HasCpuDirtyPages(address + Page * 5, Page));
+        Assert.True(_tracker.HasCpuDirtyPages(address + Page * 9, Page));
+        Assert.True(IsWritable(address + Page * 5));
+        Assert.True(IsWritable(address + Page * 9));
+
+        _tracker.UntrackMemory(address, Region);
+        Release(address, Region);
+    }
+
+    [NativePageProtectionFact]
+    public void DeferredGpuWriteProtectionAppliesAtTheFlushAndReleasesImmediately()
+    {
+        var address = Allocate(3);
+        _tracker.DefersGpuWriteProtection = true;
+        _tracker.ForEachUploadRange(address, Page, true, NoRange, NoUpload);
+        _tracker.ForEachUploadRange(address + Page, Page, true, NoRange, NoUpload);
+        Assert.True(_tracker.HasGpuDirtyPages(address, Page * 2));
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address));
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address + Page));
+
+        _tracker.ForEachDownloadRange(address + Page, Page, clear: true, null, NoRange);
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address + Page));
+        ResetLog();
+        _tracker.ApplyPendingGpuProtections();
+        Assert.Equal(new[] { (address, Page, GuestPageProtection.None) }, _space.Protects);
+        Assert.Equal(HostPageProtection.NoAccess, Protection(address));
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address + Page));
+        ResetLog();
+        _tracker.ApplyPendingGpuProtections();
+        Assert.Empty(_space.Protects);
+
+        _tracker.ClearGpuDirtyPages(address, Page);
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address));
+        _tracker.ForEachUploadRange(address + Page * 2, Page, true, NoRange, NoUpload);
+        Assert.Equal(HostPageProtection.ReadOnly, Protection(address + Page * 2));
+        _tracker.ClearGpuDirtyPages(address + Page * 2, Page);
+        _tracker.ForEachUploadRange(address + Page * 2, Page, true, NoRange, NoUpload);
+        _tracker.ClearGpuDirtyPages(address + Page * 2, Page);
+        _tracker.UntrackMemory(address, Page * 3);
+        Assert.True(IsWritable(address));
+        Assert.True(IsWritable(address + Page * 2));
+        Release(address, Page * 3);
+    }
+
+    [NativePageProtectionFact]
+    public void UploadOfACleanRangeAllocatesNothingAndStillRunsTheUploadCallback()
+    {
+        var address = Allocate(2);
+        _tracker.ForEachUploadRange(address, Page * 2, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        var uploads = 0;
+        var ranges = 0;
+        Action<ulong, ulong> countRange = (_, _) => ranges++;
+        Action countUpload = () => uploads++;
+
+        var allocated = AllocationMeasurement.SteadyState(
+            () => _tracker.ForEachUploadRange(address, Page * 2, false, countRange, countUpload),
+            () => _tracker.ForEachUploadRange(address, Page * 2, false, countRange, countUpload));
+
+        Assert.Equal(0, allocated);
+        Assert.Equal(0, ranges);
+        Assert.True(uploads >= 2);
+        _tracker.UntrackMemory(address, Page * 2);
+        Release(address, Page * 2);
+    }
+
+    [NativePageProtectionFact]
+    public void UploadOfDirtyPagesAllocatesNothingBeyondTheCallbacks()
+    {
+        var address = Allocate(2);
+        _tracker.ForEachUploadRange(address, Page * 2, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        var least = long.MaxValue;
+        var ranges = 0;
+        Action<ulong, ulong> countRange = (_, _) => ranges++;
+        var thread = new Thread(() =>
+        {
+            for (var round = 0; round < 6; round++)
+            {
+                _tracker.MarkCpuDirtyPages(address, Page * 2);
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                _tracker.ForEachUploadRange(address, Page * 2, false, countRange, NoUpload, preserveCpuWriteHotPages: false);
+                least = Math.Min(least, GC.GetAllocatedBytesForCurrentThread() - before);
+            }
+        });
+        thread.Start();
+        thread.Join();
+
+        Assert.Equal(0, least);
+        Assert.Equal(6, ranges);
+        Assert.False(_tracker.HasCpuDirtyPages(address, Page * 2));
+        _tracker.UntrackMemory(address, Page * 2);
+        Release(address, Page * 2);
     }
 
     private static void NoRange(ulong address, ulong size)

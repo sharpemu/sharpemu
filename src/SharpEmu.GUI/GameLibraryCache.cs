@@ -26,7 +26,7 @@ internal static class GameLibraryCache
     };
 
     internal static string CachePath =>
-        Path.Combine(AppContext.BaseDirectory, "user", "library_cache.json");
+        Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "library_cache.json");
 
     internal sealed class CachedGame
     {
@@ -37,6 +37,7 @@ internal static class GameLibraryCache
         public long SizeBytes { get; set; }
         public string? CoverPath { get; set; }
         public string? BackgroundPath { get; set; }
+        public bool CompatibilityMode { get; set; }
     }
 
     internal sealed class CacheDocument
@@ -88,7 +89,8 @@ internal static class GameLibraryCache
                     cached.Path,
                     cached.SizeBytes,
                     Existing(cached.CoverPath),
-                    Existing(cached.BackgroundPath)));
+                    Existing(cached.BackgroundPath),
+                    cached.CompatibilityMode));
             }
         }
         catch (Exception exception)
@@ -99,6 +101,33 @@ internal static class GameLibraryCache
         }
 
         return games;
+    }
+
+    /// <summary>
+    /// Every settings key in the cache, whatever folders it was written for and whether or not
+    /// the games are still reachable: a library on an unmounted drive still names its games.
+    /// </summary>
+    internal static IReadOnlyList<string> CachedSettingsKeys()
+    {
+        try
+        {
+            if (!File.Exists(CachePath))
+            {
+                return [];
+            }
+
+            var document = JsonSerializer.Deserialize<CacheDocument>(
+                File.ReadAllText(CachePath),
+                SerializerOptions);
+            return document?.Games
+                .Where(game => !string.IsNullOrWhiteSpace(game.TitleId) || !string.IsNullOrWhiteSpace(game.Path))
+                .Select(game => PerGameSettings.KeyFor(game.TitleId, game.Path))
+                .ToList() ?? [];
+        }
+        catch (Exception)
+        {
+            return [];
+        }
     }
 
     internal static void Save(IReadOnlyList<string> folders, IReadOnlyList<GameEntry> games)
@@ -128,6 +157,7 @@ internal static class GameLibraryCache
                     SizeBytes = game.SizeBytes,
                     CoverPath = game.CoverPath,
                     BackgroundPath = game.BackgroundPath,
+                    CompatibilityMode = game.CompatibilityMode,
                 });
             }
 

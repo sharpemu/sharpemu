@@ -14,6 +14,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <InternalsVisibleTo Include="SharpEmu.Core" />
+    <InternalsVisibleTo Include="SharpEmu.Libs" />
     <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
   </ItemGroup>
 
@@ -23,6 +24,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
   <ItemGroup>
     <PackageReference Include="ppy.SDL3-CS" />
+    <PackageReference Include="ZstdSharp.Port" />
   </ItemGroup>
 
   <ItemGroup>

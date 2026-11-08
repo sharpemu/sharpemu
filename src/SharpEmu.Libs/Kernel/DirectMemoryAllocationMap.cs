@@ -8,7 +8,7 @@ internal sealed class DirectMemoryAllocationMap
 {
     internal readonly record struct Allocation(ulong Start, ulong Length, int MemoryType);
 
-    private readonly SortedList<ulong, Allocation> _allocations = new();
+    private readonly DirectAllocationTree _allocations = new();
     private readonly SortedList<ulong, ulong> _freeRanges = new();
     private readonly ulong _capacity;
 
@@ -54,7 +54,8 @@ internal sealed class DirectMemoryAllocationMap
                 _freeRanges.Add(rangeStart, candidate - rangeStart);
             if (candidate + length < rangeEnd)
                 _freeRanges.Add(candidate + length, rangeEnd - candidate - length);
-            _allocations.Add(candidate, new Allocation(candidate, length, memoryType));
+            if (!_allocations.Add(new Allocation(candidate, length, memoryType)))
+                throw new InvalidOperationException("The physical allocation already exists.");
             AvailableBytes -= length;
             address = candidate;
             return true;
@@ -89,17 +90,16 @@ internal sealed class DirectMemoryAllocationMap
 
     public bool TryFindAllocation(ulong address, bool findNext, out Allocation allocation)
     {
-        var index = FindLastIndexAtOrBelow(_allocations.Keys, address);
-        if (index >= 0)
+        allocation = _allocations.FindAtOrBelow(address);
+        if (allocation.Length != 0)
         {
-            allocation = _allocations.Values[index];
             if (address - allocation.Start < allocation.Length)
                 return true;
         }
-        if (findNext && index + 1 < _allocations.Count)
+        if (findNext)
         {
-            allocation = _allocations.Values[index + 1];
-            return true;
+            allocation = _allocations.FindAtOrAbove(address);
+            return allocation.Length != 0;
         }
         allocation = default;
         return false;
@@ -109,17 +109,13 @@ internal sealed class DirectMemoryAllocationMap
     {
         if (length == 0 || address > _capacity || length > _capacity - address)
             return false;
-        var index = FindLastIndexAtOrBelow(_allocations.Keys, address);
-        if (index < 0)
-            return false;
-
         var current = address;
         var end = address + length;
-        for (; index < _allocations.Count; index++)
+        while (current < end)
         {
-            var allocation = _allocations.Values[index];
+            var allocation = _allocations.FindAtOrBelow(current);
             var allocationEnd = allocation.Start + allocation.Length;
-            if (allocation.Start > current || allocationEnd <= current)
+            if (allocation.Length == 0 || allocation.Start > current || allocationEnd <= current)
                 return false;
             current = Math.Min(end, allocationEnd);
             if (current == end)
@@ -129,7 +125,12 @@ internal sealed class DirectMemoryAllocationMap
     }
 
     public void SetMemoryType(ulong allocationStart, int memoryType)
-        => _allocations[allocationStart] = _allocations[allocationStart] with { MemoryType = memoryType };
+    {
+        var allocation = _allocations.FindAtOrBelow(allocationStart);
+        if (allocation.Length == 0 || allocation.Start != allocationStart)
+            throw new KeyNotFoundException();
+        _allocations[allocationStart] = allocation with { MemoryType = memoryType };
+    }
 
     // Host aliases must be removed before their physical storage becomes available.
     public void ReleaseRange(ulong address, ulong length)
@@ -138,24 +139,22 @@ internal sealed class DirectMemoryAllocationMap
             throw new InvalidOperationException("The physical release range is not fully allocated.");
 
         var end = address + length;
-        var index = FindLastIndexAtOrBelow(_allocations.Keys, address);
-        while (index < _allocations.Count)
+        var current = address;
+        while (current < end)
         {
-            var allocation = _allocations.Values[index];
-            if (allocation.Start >= end)
-                break;
+            var allocation = _allocations.FindAtOrBelow(current);
             var allocationEnd = allocation.Start + allocation.Length;
-            _allocations.RemoveAt(index);
+            _allocations.Remove(allocation);
             if (allocation.Start < address)
             {
-                _allocations.Add(allocation.Start, allocation with { Length = address - allocation.Start });
-                index++;
+                _allocations.Add(allocation with { Length = address - allocation.Start });
             }
             if (end < allocationEnd)
             {
-                _allocations.Add(end, allocation with { Start = end, Length = allocationEnd - end });
+                _allocations.Add(allocation with { Start = end, Length = allocationEnd - end });
                 break;
             }
+            current = allocationEnd;
         }
         AddFreeRange(address, length);
         AvailableBytes += length;

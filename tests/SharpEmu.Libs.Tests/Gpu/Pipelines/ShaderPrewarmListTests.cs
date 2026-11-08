@@ -32,39 +32,80 @@ public sealed class ShaderPrewarmListTests : IDisposable
         return shader.Spirv;
     }
 
-    private static (IShaderPipelineHost Host, byte[] Spirv) CompileAtRuntime(ShaderPrewarmList list, uint format)
+    private static (IShaderPipelineHost Host, byte[] Spirv) CompileAtRuntime(ShaderPrewarmList list, uint format, bool ieeeMode = false,
+        bool imageInt64Atomics = false)
     {
-        var guest = new PipelineTestGuest(Compile);
+        var guest = new PipelineTestGuest(request =>
+        {
+            Assert.Equal(ieeeMode, request.IeeeMode);
+            Assert.Equal(imageInt64Atomics, request.SupportsImageInt64Atomics);
+            return Compile(request);
+        });
         guest.Host.ShaderPrewarm = list;
+        guest.Host.ImageInt64AtomicsEnabled = imageInt64Atomics;
         guest.RegisterProgram(CodeAddress, HeaderAddress, PipelineTestGuest.FormatLoadProgram);
         var userData = PipelineTestGuest.BufferDescriptor(BufferAddress, 4, 64, format);
         var cursor = 0u;
+        var options = PipelineTestGuest.ComputeOptions(threadsX: 64);
+        options.ComputeInfo!.IeeeMode = ieeeMode;
         guest.Programs.GetOrCompile(
-            guest.Source(CodeAddress, ShaderStage.Compute, userData), PipelineTestGuest.ComputeOptions(threadsX: 64), ref cursor, out _);
+            guest.Source(CodeAddress, ShaderStage.Compute, userData), options, ref cursor, out _);
         return (guest.Host, Assert.Single(guest.Compiler.Shaders).Spirv);
     }
 
     private ShaderPrewarmList Open() => ShaderPrewarmList.Open(_directory) ?? throw new InvalidOperationException("The list did not open.");
 
-    [Fact]
-    public void ARecordedComputeProgramCompilesToTheSameSpirvAfterReload()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [InlineData(false, true)]
+    public void ARecordedComputeProgramCompilesToTheSameSpirvAfterReload(bool ieeeMode, bool imageInt64Atomics = false)
     {
         byte[] runtime;
         IShaderPipelineHost host;
         using (var list = Open())
         {
-            (host, runtime) = CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+            (host, runtime) = CompileAtRuntime(list, BufferDescriptorWords.Format32UInt, ieeeMode, imageInt64Atomics);
         }
 
         using var reloaded = Open();
         var (record, code) = Assert.Single(reloaded.LoadedComputes());
+        Assert.Equal(ieeeMode, record.Info.IeeeMode);
+        var compiler = new FakeShaderCompiler(request =>
+        {
+            Assert.Equal(ieeeMode, request.IeeeMode);
+            Assert.Equal(imageInt64Atomics, request.SupportsImageInt64Atomics);
+            return Compile(request);
+        });
         Assert.True(
             ShaderProgramCache.TryCompilePrewarm(
-                record, code, new FakeShaderCompiler(Compile), host.SharedInt64AtomicsEnabled, host.ExecGuardElisionEnabled,
-                out var compiled, out var layout, out var error),
+                record, code, compiler, host.SharedInt64AtomicsEnabled, host.ExecGuardElisionEnabled,
+                host.ShaderSignedZeroInfNanPreserveFloat32Supported, out var compiled, out var layout, out var error,
+                imageInt64Atomics: host.ImageInt64AtomicsEnabled),
             error);
         Assert.NotNull(layout);
+        Assert.False(layout.UsesMeshDrawParameters);
         Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
+    }
+
+    [Fact]
+    public void OlderFormatRecordsAreRejectedBeforeAppending()
+    {
+        using (var list = Open())
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+        var path = Path.Combine(_directory, ShaderPrewarmList.FileName);
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Write))
+        {
+            stream.Position = sizeof(uint);
+            stream.Write(BitConverter.GetBytes(1u));
+        }
+        using (var list = Open())
+        {
+            Assert.Empty(list.LoadedComputes());
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt, true);
+        }
+        using var reloaded = Open();
+        Assert.True(Assert.Single(reloaded.LoadedComputes()).Record.Info.IeeeMode);
     }
 
     [Fact]
@@ -75,11 +116,12 @@ public sealed class ShaderPrewarmListTests : IDisposable
             CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
             CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
             CompileAtRuntime(list, BufferDescriptorWords.Format32x4UInt);
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt, true);
         }
 
         using var reloaded = Open();
         var loaded = reloaded.LoadedComputes();
-        Assert.Equal(2, loaded.Count);
+        Assert.Equal(3, loaded.Count);
         Assert.Same(loaded[0].Code.Ranges, loaded[1].Code.Ranges);
     }
 
@@ -110,6 +152,42 @@ public sealed class ShaderPrewarmListTests : IDisposable
     }
 
     [Fact]
+    public void ReloadKeepsSeparateContinuationsAtTheSameEntryAddress()
+    {
+        using (var list = Open())
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+        using (var list = Open())
+        {
+            var (original, code) = Assert.Single(list.LoadedComputes());
+            foreach (var offset in new ulong[] { 0x100, 0x1_0000_0000 })
+            {
+                var capture = new ShaderCodeCapture
+                {
+                    Hash = code.Hash, CodeSize = code.CodeSize, Address = code.Address,
+                    Generation = code.Generation, Ranges = code.Ranges,
+                    Fused = new FusedCodeParts(HeaderAddress, code.Address + offset, HeaderAddress + offset),
+                };
+                list.RecordCompute(capture, new ComputePrewarmRecord
+                {
+                    Hash = original.Hash, CodeSize = original.CodeSize, Address = original.Address,
+                    ContinuationAddressOffset = offset, UserDataBase = original.UserDataBase,
+                    UserDataCount = original.UserDataCount, PushDataCursor = original.PushDataCursor,
+                    Info = original.Info, SystemRegisters = original.SystemRegisters,
+                    Specialization = original.Specialization,
+                });
+            }
+        }
+        using var reloaded = Open();
+        var records = reloaded.LoadedComputes();
+        Assert.Equal(3, records.Count);
+        Assert.Equal(new ulong[] { 0, 0x100, 0x1_0000_0000 },
+            records.Select(entry => entry.Record.ContinuationAddressOffset));
+        foreach (var (record, code) in records)
+            Assert.Equal(record.ContinuationAddressOffset,
+                code.Fused is { } fused ? unchecked(fused.ContinuationAddress - code.Address) : 0);
+    }
+
+    [Fact]
     public void TheStampMatchesOnlyTheTextLastWritten()
     {
         using var list = Open();
@@ -117,6 +195,48 @@ public sealed class ShaderPrewarmListTests : IDisposable
         list.WriteStamp("build-a");
         Assert.True(list.IsStampCurrent("build-a"));
         Assert.False(list.IsStampCurrent("build-b"));
+    }
+
+    [Fact]
+    public void Coverage_UsesLoadedRecordsAndDoesNotCertifyConcurrentAppends()
+    {
+        using (var list = Open())
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+
+        string coverage;
+        using (var list = Open())
+        {
+            coverage = list.CoverageStamp("build");
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+            Assert.Equal(coverage, list.CoverageStamp("build"));
+        }
+        using (var list = Open())
+        {
+            Assert.Equal(coverage, list.CoverageStamp("build"));
+            CompileAtRuntime(list, BufferDescriptorWords.Format32x4UInt);
+            Assert.Equal(coverage, list.CoverageStamp("build"));
+            list.WriteStamp(ShaderPrewarmList.CacheStamp(coverage, new byte[] { 1, 2, 3 }));
+        }
+        using var reloaded = Open();
+        Assert.NotEqual(coverage, reloaded.CoverageStamp("build"));
+        Assert.False(reloaded.IsStampCurrent(ShaderPrewarmList.CacheStamp(
+            reloaded.CoverageStamp("build"), new byte[] { 1, 2, 3 })));
+    }
+
+    [Fact]
+    public void Coverage_RejectsAReplacedRecordingWithTheSameRecordCount()
+    {
+        using (var list = Open())
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+        string coverage;
+        using (var list = Open())
+            coverage = list.CoverageStamp("build");
+        File.Delete(Path.Combine(_directory, ShaderPrewarmList.FileName));
+        using (var list = Open())
+            CompileAtRuntime(list, BufferDescriptorWords.Format32x4UInt);
+        using var reloaded = Open();
+        Assert.Equal(1, reloaded.LoadedComputeCount);
+        Assert.NotEqual(coverage, reloaded.CoverageStamp("build"));
     }
 
     [Fact]

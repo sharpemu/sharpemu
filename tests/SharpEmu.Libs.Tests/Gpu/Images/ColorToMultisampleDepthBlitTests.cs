@@ -107,12 +107,12 @@ internal sealed unsafe class MultisampleDepthSampleReader : IDisposable
         {
             output.Fill(0, output.Size, 0xFFFFFFFF);
             var command = new CommandBuffer(_scheduler.Current.Handle);
-            depth.Transition(ImageLayout.ShaderReadOnlyOptimal, AccessFlags.ShaderReadBit, null, command);
+            depth.Transition(AccessFlags.ShaderReadBit, null, command);
             var view = depth.GetOrCreateView(ImageViewDescription.Default with { Format = depth.Backing.Format, Aspect = ImageAspectFlags.DepthBit, Usage = ImageUsageFlags.SampledBit });
             var setLayout = _setLayout;
             var allocateInfo = new DescriptorSetAllocateInfo { SType = StructureType.DescriptorSetAllocateInfo, DescriptorPool = _pool, DescriptorSetCount = 1, PSetLayouts = &setLayout };
             Require(vk.AllocateDescriptorSets(device, &allocateInfo, out var set));
-            var imageInfo = new DescriptorImageInfo { ImageView = view, ImageLayout = ImageLayout.ShaderReadOnlyOptimal };
+            var imageInfo = new DescriptorImageInfo { ImageView = view, ImageLayout = ImageLayout.General };
             var bufferInfo = new DescriptorBufferInfo(output.Handle, 0, output.Size);
             var writes = stackalloc WriteDescriptorSet[2];
             writes[0] = new WriteDescriptorSet { SType = StructureType.WriteDescriptorSet, DstSet = set, DstBinding = 0, DescriptorCount = 1, DescriptorType = DescriptorType.SampledImage, PImageInfo = &imageInfo };

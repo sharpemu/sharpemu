@@ -16,7 +16,16 @@ public static partial class AgcExports
     #pragma warning disable SHEM006
     [SysAbiExport(Nid = "Ikfdt-rIqCE", ExportName = "sceAgcUnknownIkfdt",
         Target = Generation.Gen5, LibraryName = "libSceAgc")]
-    public static int UnknownIkfdt(CpuContext ctx)
+    public static int UnknownIkfdt(CpuContext ctx) => PatchIndirectBufferTarget(ctx);
+
+    // Uncatalogued name; the NID and import library identify this AGC export.
+    // Observed ABI: the one of sceAgcUnknownIkfdt. A title calls it with the packet sceAgcCbBranch returned,
+    // right after writing the NOP it points the branch at.
+    [SysAbiExport(Nid = "7Wa3aeJgeVU", ExportName = "sceAgcUnknown7Wa3ae",
+        Target = Generation.Gen5, LibraryName = "libSceAgc")]
+    public static int Unknown7Wa3ae(CpuContext ctx) => PatchIndirectBufferTarget(ctx);
+
+    private static int PatchIndirectBufferTarget(CpuContext ctx)
     {
         var packet = ctx[CpuRegister.Rdi];
         var cachePolicy = (uint)ctx[CpuRegister.Rsi];
@@ -631,8 +640,7 @@ public static partial class AgcExports
         addressOffset = 0;
         countOffset = 0;
         countMask = 0;
-        if (!TryGetPacketIdentity(ctx, commandAddress, out var op, out var register) ||
-            !TryReadUInt32(ctx, commandAddress, out var header))
+        if (!TryGetPacketIdentity(ctx, commandAddress, out var op, out var register, out var header))
         {
             return false;
         }
@@ -674,11 +682,20 @@ public static partial class AgcExports
         CpuContext ctx,
         ulong commandAddress,
         out uint op,
-        out uint register)
+        out uint register) =>
+        TryGetPacketIdentity(ctx, commandAddress, out op, out register, out _);
+
+    private static bool TryGetPacketIdentity(
+        CpuContext ctx,
+        ulong commandAddress,
+        out uint op,
+        out uint register,
+        out uint header)
     {
         op = 0;
         register = 0;
-        if (commandAddress == 0 || !TryReadUInt32(ctx, commandAddress, out var header))
+        header = 0;
+        if (commandAddress == 0 || !TryReadUInt32(ctx, commandAddress, out header))
         {
             return false;
         }

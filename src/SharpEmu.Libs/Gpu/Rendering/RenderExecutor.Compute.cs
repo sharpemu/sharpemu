@@ -3,6 +3,7 @@
 
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.VideoOut;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using ResourceSnapshot = SharpEmu.ShaderCompiler.Resources.ResourceSnapshot;
@@ -25,14 +26,12 @@ public sealed partial class RenderExecutor
 
     public void Dispatch(ulong submitId, RegisterBanks banks, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
     {
-        if (!_host.IsRecording)
-        {
-            throw _host.Fatal("A dispatch has no recording command buffer.");
-        }
-
-        _host.RunPendingOperations();
         var compute = banks.Shader.Compute;
-        _host.SetDebugInformation(RecordedOperation.DispatchDirect, submitId, groupsX, groupsY, groupsZ, dispatchInitiator, compute.Address);
+        var record = _pool.RentDispatch();
+        record.Debug = new DebugInformation(RecordedOperation.DispatchDirect, submitId, groupsX, groupsY, groupsZ, dispatchInitiator, compute.Address);
+        record.Skipped = true;
+        record.SubmitId = submitId;
+        record.ShaderAddress = compute.Address;
         if (compute.Address == 0)
         {
             if (RenderTrace.Enabled && RenderTrace.NullComputeShader())
@@ -40,6 +39,7 @@ public sealed partial class RenderExecutor
                 RenderTrace.Write($"Ignoring a dispatch with no compute shader: groups={groupsX}x{groupsY}x{groupsZ} initiator=0x{dispatchInitiator:X8}");
             }
 
+            Record(record);
             return;
         }
 
@@ -51,9 +51,39 @@ public sealed partial class RenderExecutor
         }
 
         var useThreadDimensions = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0;
-        var computeProgram = _pipelines.GetComputeProgram(compute, banks.Context.ShaderInterface, dispatchInitiator, groupsX, groupsY, groupsZ);
+        if ((indirectArgumentsAddress == 0 || useThreadDimensions) && IsEmptyDispatch(compute, useThreadDimensions, groupsX, groupsY, groupsZ))
+        {
+            if (RenderTrace.Enabled && RenderTrace.ZeroDispatch())
+            {
+                RenderTrace.Write($"Skipping a zero-sized dispatch: groups={groupsX}x{groupsY}x{groupsZ} initiator=0x{dispatchInitiator:X8} shader=0x{compute.Address:X16}");
+            }
+
+            Interlocked.Increment(ref ZeroGroupSkips);
+            Record(record);
+            return;
+        }
+
+        ComputeProgram computeProgram;
+        using (VideoOut.RenderPhaseProfile.MeasureDetail(VideoOut.RenderPhaseProfile.Phase.DrawProgramResolution))
+        {
+            computeProgram = _pipelines.GetComputeProgram(banks, dispatchInitiator, groupsX, groupsY, groupsZ, indirectArgumentsAddress != 0);
+        }
+
+        if (computeProgram.ImageCopy is not null)
+        {
+            record.Program = computeProgram;
+            record.Skipped = false;
+            record.GroupsX = groupsX;
+            record.GroupsY = groupsY;
+            record.GroupsZ = groupsZ;
+            record.IndirectArgumentsAddress = indirectArgumentsAddress;
+            Record(record);
+            return;
+        }
+
         if (computeProgram.Consumed)
         {
+            Record(record);
             return;
         }
 
@@ -64,6 +94,7 @@ public sealed partial class RenderExecutor
                 RenderTrace.Write($"Skipping a dispatch without a program: shader=0x{compute.Address:X16} groups={groupsX}x{groupsY}x{groupsZ}");
             }
 
+            Record(record);
             return;
         }
 
@@ -72,6 +103,7 @@ public sealed partial class RenderExecutor
         if (Diagnostics.DccWriterTrace.Enabled)
         {
             Diagnostics.DccWriterTrace.CurrentProgram = program.Hash;
+            Diagnostics.DccWriterTrace.CurrentKind = "compute";
         }
 
         if (RenderTrace.Enabled)
@@ -83,40 +115,18 @@ public sealed partial class RenderExecutor
                 $"buffers={program.Buffers.Length} images={program.Images.Length} samplers={program.SamplerCount}");
         }
 
-        if (indirectArgumentsAddress == 0 && TryConsumeMetadataClear(input))
+        if (indirectArgumentsAddress == 0)
         {
-            _host.ResetBindings();
-            return;
-        }
-
-        if (indirectArgumentsAddress == 0 && TryConsumeConstantFill(input, groupsX, groupsY, groupsZ))
-        {
-            _host.ResetBindings();
-            return;
-        }
-
-        if (indirectArgumentsAddress == 0 && TryConsumeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator))
-        {
-            _host.ResetBindings();
-            return;
-        }
-
-        if (indirectArgumentsAddress == 0 && TryConsumeBoundedCopy(input, groupsX, groupsY, groupsZ, dispatchInitiator))
-        {
-            _host.ResetBindings();
-            return;
-        }
-
-        if (indirectArgumentsAddress == 0 && TryConsumeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator))
-        {
-            _host.ResetBindings();
-            return;
+            record.MetadataClear = DecodeMetadataClear(input);
+            record.MetadataClearHasExclusiveOr = program.HasBitwiseExclusiveOr;
+            record.ConstantFill = DecodeConstantFill(input, groupsX, groupsY, groupsZ);
+            record.BoundedFill = DecodeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator);
+            record.BoundedCopy = DecodeBoundedCopy(input, groupsX, groupsY, groupsZ, dispatchInitiator);
+            record.ImageClear = TryDecodeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator);
         }
 
         if (useThreadDimensions)
         {
-            // The indirect buffer carries thread counts in this mode, while Vulkan indirect
-            // dispatch consumes workgroup counts. Use the CPU-resolved counts after conversion.
             indirectArgumentsAddress = 0;
             var threadsX = groupsX;
             var threadsY = groupsY;
@@ -132,80 +142,69 @@ public sealed partial class RenderExecutor
             }
         }
 
-        if (indirectArgumentsAddress == 0 && (groupsX == 0 || groupsY == 0 || groupsZ == 0))
+        if (SkipWhileLinkedModuleCompiles(input, computeProgram.Program, program))
         {
-            if (RenderTrace.Enabled && RenderTrace.ZeroDispatch())
-            {
-                RenderTrace.Write($"Skipping a zero-sized dispatch: groups={groupsX}x{groupsY}x{groupsZ} initiator=0x{dispatchInitiator:X8} shader=0x{compute.Address:X16}");
-            }
-
+            Record(record);
             return;
         }
 
-        _host.EndRendering();
-        using (_host.BeginPreparation())
+        if (indirectArgumentsAddress == 0 && (groupsX == 0 || groupsY == 0 || groupsZ == 0) && RenderTrace.Enabled && RenderTrace.ZeroDispatch())
         {
-            // The host may compile this program off the command-stream thread and report that
-            // the pipeline is not ready yet. The dispatch waits for it rather than being
-            // dropped: a guest that does not replay a one-shot dispatch deadlocks, because
-            // the dispatch can feed a label a later packet waits on. Asking again keeps the
-            // wait outside the pipeline cache's lock, so other queues can create their own
-            // pipelines while this program compiles.
-            PipelineHandle pipeline;
-            while (!_pipelines.TryCreateComputePipeline(input, computeProgram.Program, out pipeline))
-            {
-                Thread.Sleep(1);
-            }
-
-            var bindings = PrepareBindings(input.Stage);
-            if (program.UsesDeviceAddresses)
-            {
-                _host.PrepareDeviceAddresses();
-            }
-
-            _host.BindResources(bindings);
-            Span<IPreparedBindings> stages = [bindings];
-            _host.CommitBindings(PipelineBindPoint.Compute, in pipeline, stages);
-            var hasStorageWrites = HasBufferWrites(input.Stage);
-            foreach (var image in program.Images)
-            {
-                hasStorageWrites |= image.Written && image.Class == ImageResourceClass.Storage;
-            }
-
-            if (hasStorageWrites)
-            {
-                // Every earlier read of the written resources completes before this dispatch writes.
-                _host.ShaderWriteHazardBarrier();
-            }
-
-            _host.BindPipeline(PipelineBindPoint.Compute, in pipeline);
-            // The shader's local workgroup axes may have been remapped at compile time
-            // (see Gen5SpirvTranslator.ComputeWorkgroupAxisOrder) so the largest NUM_THREAD
-            // axis lands on a physical axis Vulkan actually allows it on. The dispatch group
-            // counts must be permuted the same way, or vkCmdDispatch would hand group counts
-            // for the wrong physical axis to the pipeline it built with the remapped sizes.
-            var axisOrder = Gen5SpirvTranslator.ComputeWorkgroupAxisOrder(
-                input.ThreadsX,
-                input.ThreadsY,
-                input.ThreadsZ);
-            var logicalGroups = new[] { groupsX, groupsY, groupsZ };
-            var physicalGroups = new uint[3];
-            for (var logical = 0; logical < 3; logical++)
-            {
-                physicalGroups[axisOrder[logical]] = logicalGroups[logical];
-            }
-
-            if (indirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(indirectArgumentsAddress))
-            {
-                _host.Dispatch(physicalGroups[0], physicalGroups[1], physicalGroups[2]);
-            }
-            _host.ShaderAccessBarrier();
+            RenderTrace.Write($"Skipping a zero-sized dispatch: groups={groupsX}x{groupsY}x{groupsZ} initiator=0x{dispatchInitiator:X8} shader=0x{compute.Address:X16}");
         }
 
-        _host.ResetBindings();
+        var hasStorageWrites = HasBufferWrites(input.Stage);
+        foreach (var image in program.Images)
+        {
+            hasStorageWrites |= image.Written && image.Class == ImageResourceClass.Storage;
+        }
+
+        record.Skipped = false;
+        record.Program = computeProgram;
+        record.GroupsX = groupsX;
+        record.GroupsY = groupsY;
+        record.GroupsZ = groupsZ;
+        record.IndirectArgumentsAddress = indirectArgumentsAddress;
+        record.HasStorageWrites = hasStorageWrites;
+        var resources = input.Stage.Resources;
+        Diagnostics.DispatchRunTally.NoteResolved(computeProgram.Program.Id, resources.Images, resources.Samplers, program.Bindings?.UsesTableBlock == true,
+            program.Bindings?.Find(ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare) is not null,
+            record.MetadataClear is not null || record.ConstantFill is not null || record.BoundedFill is not null || record.BoundedCopy is not null || record.ImageClear is not null,
+            computeProgram.KnownWrite is not null);
+        Record(record);
+    }
+
+    // A program linked with the callees of its hit-group tables can take the driver minutes to compile, and the game
+    // adds callees as it streams. Such programs are ray-traced passes that run every frame, so their dispatches are left
+    // out while the module compiles instead of holding every queue behind it: the pass's output is stale for those
+    // frames.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, long> LinkedCompileSkips = new();
+
+    private bool SkipWhileLinkedModuleCompiles(ComputeInputInfo input, ShaderProgram handle, ShaderProgramInfo program)
+    {
+        if (program.Bindings is not { CallTargetCount: not 0 } ||
+            _pipelines.TryCreateComputePipeline(input, handle, out _)) return false;
+        var skipped = LinkedCompileSkips.AddOrUpdate(program.Hash, 1, static (_, count) => count + 1);
+        if ((skipped & (skipped - 1)) == 0)
+            Console.Error.WriteLine($"[GPU][WARN][LINKED_COMPILE] Dispatches of a linked program are skipped while its module compiles: hash=0x{program.Hash:X16} skipped={skipped}.");
+        return true;
     }
 
     // The dispatch counts threads; the host counts groups of the shader's thread size.
+    public static long ZeroGroupSkips;
+
+    private static bool IsEmptyDispatch(ComputeStageRegisters compute, bool useThreadDimensions, uint groupsX, uint groupsY, uint groupsZ)
+    {
+        if (useThreadDimensions)
+        {
+            groupsX = GroupsFromThreads(groupsX, compute.ThreadsX);
+            groupsY = GroupsFromThreads(groupsY, compute.ThreadsY);
+            groupsZ = GroupsFromThreads(groupsZ, compute.ThreadsZ);
+        }
+
+        return groupsX == 0 || groupsY == 0 || groupsZ == 0;
+    }
+
     public static uint GroupsFromThreads(uint threads, uint groupSize)
     {
         if (threads == 0)
@@ -228,8 +227,7 @@ public sealed partial class RenderExecutor
         return BufferDescriptorWords.From(words);
     }
 
-    // A full overwrite of registered metadata by a compute shader becomes a tracked clear.
-    private bool TryConsumeMetadataClear(ComputeInputInfo input)
+    private MetadataBufferProbe[] DecodeMetadataClear(ComputeInputInfo input)
     {
         var program = input.Stage.Program!;
         var resources = input.Stage.Resources;
@@ -238,37 +236,14 @@ public sealed partial class RenderExecutor
             throw _host.Fatal($"The compute buffer count does not match the program: descriptors={resources.Buffers.Length} program={program.Buffers.Length}.");
         }
 
+        var probes = new MetadataBufferProbe[program.Buffers.Length];
         for (var i = 0; i < program.Buffers.Length; i++)
         {
             var resource = program.Buffers[i];
-            var descriptor = DecodeBufferDescriptor(resources, i);
-            // Metadata that is also read is not a proven overwrite; the dispatch runs as written.
-            if (_host.IsMetadata(descriptor.Address) && (!resource.Written || resource.Read))
-            {
-                return false;
-            }
+            probes[i] = new MetadataBufferProbe(DecodeBufferDescriptor(resources, i).Address, resource.Written, resource.Read);
         }
 
-        if (program.HasBitwiseExclusiveOr)
-        {
-            return false;
-        }
-
-        for (var i = 0; i < program.Buffers.Length; i++)
-        {
-            if (!program.Buffers[i].Written)
-            {
-                continue;
-            }
-
-            var descriptor = DecodeBufferDescriptor(resources, i);
-            if (_host.ClearMetadata(descriptor.Address))
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return probes;
     }
 
     // Recognizes a dispatch that fills one formatted buffer with a single value over every record.
@@ -420,14 +395,12 @@ public sealed partial class RenderExecutor
         return new ComputeImageClear(descriptor, clear, size);
     }
 
-    // A constant fill that covers a whole image or DCC metadata becomes a clear. Anything
-    // else, including a fill of plain buffer memory, runs as the guest wrote it.
-    private bool TryConsumeConstantFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ)
+    private ConstantFillCandidate? DecodeConstantFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ)
     {
         var program = input.Stage.Program!;
         if (program.ConstantFill is not { } fill || program.UserDataBase != 0)
         {
-            return false;
+            return null;
         }
 
         var userData = input.Stage.Resources.UserData;
@@ -435,7 +408,7 @@ public sealed partial class RenderExecutor
             input.ThreadsX != ImageClearWaveSize || input.ThreadsY != 1 || input.ThreadsZ != 1 || groupsY != 1 || groupsZ != 1 ||
             fill.DestinationScalarResource + 4 > userData.Length || fill.SourceScalarResource + 4 > userData.Length)
         {
-            return false;
+            return null;
         }
 
         var destination = BufferDescriptorWords.From(userData.AsSpan((int)fill.DestinationScalarResource, 4).ToArray());
@@ -445,38 +418,30 @@ public sealed partial class RenderExecutor
             (ulong)groupsX * input.ThreadsX != destination.RecordCount || source.RecordCount == 0 ||
             !_host.TryReadGuest(source.Address, valueBytes))
         {
-            return false;
+            return null;
         }
 
         var value = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(valueBytes);
-        var size = (ulong)destination.RecordCount * sizeof(uint);
-        var consumed = _host.TryClearImageFromBuffer(destination.Address, size, value) ||
-                       _host.TryAbsorbDccFill(destination.Address, size, value);
-        if (RenderTrace.Enabled && RenderTrace.MetadataClear())
-        {
-            RenderTrace.Write($"Constant fill: shader=0x{program.Hash:X16} address=0x{destination.Address:X16} size=0x{size:X} value=0x{value:X8} consumed={consumed}");
-        }
-
-        return consumed;
+        return new ConstantFillCandidate(destination.Address, (ulong)destination.RecordCount * sizeof(uint), value);
     }
 
     private const uint Format32SInt = 21;
     private const uint Format32Float = 22;
     private const ulong DescriptorAddressMask = 0x0000_FFFF_FFFF_FFFFul;
 
-    private bool TryConsumeBoundedFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
+    private ConstantFillCandidate? DecodeBoundedFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
     {
         var program = input.Stage.Program!;
         if (program.BoundedFill is not { } fill)
         {
-            return false;
+            return null;
         }
 
         if (program.UserDataBase != 0 || fill.GroupScalarRegister != (uint)input.WorkgroupRegister || !input.GroupIdX || input.GroupIdY || input.GroupIdZ ||
             input.ThreadIdCount < 1 || input.ThreadsX != ImageClearWaveSize || input.ThreadsY != 1 || input.ThreadsZ != 1 ||
             groupsX == 0 || groupsY != 1 || groupsZ != 1)
         {
-            return RefuseBoundedFill(program,
+            return Refuse<ConstantFillCandidate>(program,
                 $"shape group=s{fill.GroupScalarRegister}/s{input.WorkgroupRegister} ids={input.GroupIdX}{input.GroupIdY}{input.GroupIdZ} tid={input.ThreadIdCount} " +
                 $"local={input.ThreadsX}x{input.ThreadsY}x{input.ThreadsZ} dispatch={groupsX}x{groupsY}x{groupsZ} base={program.UserDataBase}");
         }
@@ -487,7 +452,7 @@ public sealed partial class RenderExecutor
         {
             if (!TryResolveFillWord(fill.Destination[word], userData, out destinationWords[word]))
             {
-                return RefuseBoundedFill(program, $"destination word {word} unreadable");
+                return Refuse<ConstantFillCandidate>(program, $"destination word {word} unreadable");
             }
         }
 
@@ -497,7 +462,7 @@ public sealed partial class RenderExecutor
         if (!TryResolveFillWord(fill.Count, userData, out var count) ||
             (fill.Start is { } startWord && !TryResolveFillWord(startWord, userData, out start)))
         {
-            return RefuseBoundedFill(program, "range unreadable");
+            return Refuse<ConstantFillCandidate>(program, "range unreadable");
         }
 
         if (fill.ConstantValue is { } constant)
@@ -506,21 +471,22 @@ public sealed partial class RenderExecutor
         }
         else if (fill.Value is not { } valueWord || !TryResolveFillWord(valueWord, userData, out value))
         {
-            return RefuseBoundedFill(program, "value unreadable");
+            return Refuse<ConstantFillCandidate>(program, "value unreadable");
         }
 
-        if (fill.PatternLength is { } lengthWord)
+        if (fill.Pattern is { } pattern)
         {
-            if (fill.Pattern is not { } pattern || !TryResolveFillWord(lengthWord, userData, out var length) || length == 0 || length > pattern.Length)
+            var length = (uint)pattern.Length;
+            if (fill.PatternLength is { } lengthWord && (!TryResolveFillWord(lengthWord, userData, out length) || length == 0 || length > pattern.Length))
             {
-                return RefuseBoundedFill(program, "pattern length");
+                return Refuse<ConstantFillCandidate>(program, "pattern length");
             }
 
             for (var word = 1; word < length; word++)
             {
                 if (!TryResolveFillWord(pattern[word], userData, out var repeated) || repeated != value)
                 {
-                    return RefuseBoundedFill(program, $"pattern length={length} varies");
+                    return Refuse<ConstantFillCandidate>(program, $"pattern length={length} varies");
                 }
             }
         }
@@ -529,7 +495,7 @@ public sealed partial class RenderExecutor
             destination.Type != 0 || (destination.Address & 3) != 0 ||
             (fill.Formatted && destination.Format is not (Format32UInt or Format32SInt or Format32Float)))
         {
-            return RefuseBoundedFill(program,
+            return Refuse<ConstantFillCandidate>(program,
                 $"descriptor stride={destination.Stride} swizzle={destination.SwizzleEnabled} tid={destination.AddThreadId} oob={destination.OutOfBounds} " +
                 $"type={destination.Type} format={destination.Format} address=0x{destination.Address:X}");
         }
@@ -538,39 +504,31 @@ public sealed partial class RenderExecutor
         var written = Math.Min(count, threads);
         if (threads > uint.MaxValue || (ulong)start + written > uint.MaxValue)
         {
-            return RefuseBoundedFill(program, $"overflow threads={threads} start={start} count={count}");
+            return Refuse<ConstantFillCandidate>(program, $"overflow threads={threads} start={start} count={count}");
         }
 
         var end = Math.Min((ulong)start + written, destination.RecordCount);
         if (end <= start)
         {
-            return false;
+            return null;
         }
 
-        var address = destination.Address + (ulong)start * sizeof(uint);
-        var size = (end - start) * sizeof(uint);
-        var consumed = _host.TryFillDccMetadata(address, size, value);
-        if (RenderTrace.Enabled && RenderTrace.MetadataClear())
-        {
-            RenderTrace.Write($"Bounded fill: shader=0x{program.Hash:X16} address=0x{address:X16} size=0x{size:X} value=0x{value:X8} consumed={consumed}");
-        }
-
-        return consumed;
+        return new ConstantFillCandidate(destination.Address + (ulong)start * sizeof(uint), (end - start) * sizeof(uint), value);
     }
 
-    private bool TryConsumeBoundedCopy(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
+    private BoundedCopyCandidate? DecodeBoundedCopy(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
     {
         var program = input.Stage.Program!;
         if (program.BoundedCopy is not { } copy || !BoundedCopyEnabled)
         {
-            return false;
+            return null;
         }
 
         if (program.UserDataBase != 0 || copy.GroupScalarRegister != (uint)input.WorkgroupRegister || !input.GroupIdX || input.GroupIdY || input.GroupIdZ ||
             input.ThreadIdCount < 1 || input.ThreadsX != ImageClearWaveSize || input.ThreadsY != 1 || input.ThreadsZ != 1 ||
             groupsX == 0 || groupsY != 1 || groupsZ != 1)
         {
-            return RefuseBoundedFill(program, $"copy shape dispatch={groupsX}x{groupsY}x{groupsZ} local={input.ThreadsX}x{input.ThreadsY}x{input.ThreadsZ}");
+            return Refuse<BoundedCopyCandidate>(program, $"copy shape dispatch={groupsX}x{groupsY}x{groupsZ} local={input.ThreadsX}x{input.ThreadsY}x{input.ThreadsZ}");
         }
 
         var userData = input.Stage.Resources.UserData;
@@ -581,13 +539,13 @@ public sealed partial class RenderExecutor
             if (!TryResolveFillWord(copy.Source[word], userData, out sourceWords[word]) ||
                 !TryResolveFillWord(copy.Destination[word], userData, out destinationWords[word]))
             {
-                return RefuseBoundedFill(program, $"copy descriptor word {word} unreadable");
+                return Refuse<BoundedCopyCandidate>(program, $"copy descriptor word {word} unreadable");
             }
         }
 
         if (!TryResolveFillWord(copy.Count, userData, out var count) || !TryResolveFillWord(copy.Modulus, userData, out var modulus))
         {
-            return RefuseBoundedFill(program, "copy range unreadable");
+            return Refuse<BoundedCopyCandidate>(program, "copy range unreadable");
         }
 
         var source = BufferDescriptorWords.From(sourceWords);
@@ -595,7 +553,7 @@ public sealed partial class RenderExecutor
         if (!IsPlainWordBuffer(source) || !IsPlainWordBuffer(destination) || source.Format != destination.Format ||
             modulus == 0 || modulus > source.RecordCount)
         {
-            return RefuseBoundedFill(program,
+            return Refuse<BoundedCopyCandidate>(program,
                 $"copy src=0x{source.Address:X}/{source.Format}/{source.Stride}/{source.OutOfBounds} dst=0x{destination.Address:X}/{destination.Format}/{destination.Stride}/{destination.OutOfBounds} " +
                 $"modulus={modulus} records={source.RecordCount}");
         }
@@ -604,17 +562,10 @@ public sealed partial class RenderExecutor
         var words = Math.Min(Math.Min((ulong)count, threads), destination.RecordCount);
         if (words == 0)
         {
-            return false;
+            return null;
         }
 
-        var consumed = _host.TryCopyWordsOnHost(destination.Address, source.Address, modulus, words);
-        if (RenderTrace.Enabled)
-        {
-            RenderTrace.Write(
-                $"Bounded copy: shader=0x{program.Hash:X16} src=0x{source.Address:X16} dst=0x{destination.Address:X16} words={words} modulus={modulus} consumed={consumed}");
-        }
-
-        return consumed || RefuseBoundedFill(program, $"copy refused by the host dst=0x{destination.Address:X} words={words} modulus={modulus}");
+        return new BoundedCopyCandidate(destination.Address, source.Address, modulus, words);
     }
 
     private static readonly bool BoundedCopyEnabled = Environment.GetEnvironmentVariable("SHARPEMU_HOST_BOUNDED_COPY") != "0";
@@ -623,10 +574,11 @@ public sealed partial class RenderExecutor
         descriptor.Stride == sizeof(uint) && !descriptor.SwizzleEnabled && !descriptor.AddThreadId && descriptor.OutOfBounds == 0 &&
         descriptor.Type == 0 && (descriptor.Address & 3) == 0 && descriptor.Format is Format32UInt or Format32SInt or Format32Float;
 
-    private static bool RefuseBoundedFill(ShaderProgramInfo program, string reason)
+    private static T? Refuse<T>(ShaderProgramInfo program, string reason)
+        where T : struct
     {
         Diagnostics.DccWriterTrace.Refuse(program.Hash, reason);
-        return false;
+        return null;
     }
 
     private bool TryResolveFillWord(Pipelines.FillWord word, ReadOnlySpan<uint> userData, out uint value)
@@ -703,33 +655,4 @@ public sealed partial class RenderExecutor
         return true;
     }
 
-    private bool TryConsumeImageClear(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
-    {
-        if (TryDecodeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator) is not { } clear)
-        {
-            return false;
-        }
-
-        var address = clear.Descriptor.Address;
-        var hash = input.Stage.Program!.Hash;
-        if (!_host.TryClearImageFromBuffer(address, clear.Size, clear.PackedClear))
-        {
-            // A metadata fill may run before its target is bound; the store keeps it pending and the dispatch runs.
-            var registered = _host.TryAbsorbDccFill(address, clear.Size, clear.PackedClear);
-            if (RenderTrace.Enabled && RenderTrace.MetadataClear())
-            {
-                RenderTrace.Write(
-                    $"{(registered ? "Tracked" : "Deferred")} a metadata clear: shader=0x{hash:X16} address=0x{address:X16} size=0x{clear.Size:X16} value=0x{clear.PackedClear:X8}");
-            }
-
-            return registered;
-        }
-
-        if (RenderTrace.Enabled && RenderTrace.ImageClear())
-        {
-            RenderTrace.Write($"Consumed a compute image clear: shader=0x{hash:X16} address=0x{address:X16} size=0x{clear.Size:X16} value=0x{clear.PackedClear:X8}");
-        }
-
-        return true;
-    }
 }

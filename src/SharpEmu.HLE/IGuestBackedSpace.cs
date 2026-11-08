@@ -9,6 +9,8 @@ public interface IGuestBackedSpace
 {
     bool TryHoldRange(ulong address, ulong size);
     bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address);
+    bool TryHoldAvailableRange(ulong searchStart, ulong size, ulong alignment, out ulong address) =>
+        TryHoldRangeAtOrAbove(searchStart, size, alignment, out address);
     bool TryMapBacked(ulong address, ulong size, ulong backingOffset, GuestPageProtection protection, out HostViewFailure failure);
     bool TryUnmapBacked(ulong address, ulong size);
     bool TryClearBacking(ulong offset, ulong size);

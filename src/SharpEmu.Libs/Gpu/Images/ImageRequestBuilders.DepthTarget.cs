@@ -58,11 +58,37 @@ public static partial class ImageRequestBuilders
         return Format.Undefined;
     }
 
-    private static bool HtileStencilCompatible(bool hasStencil, bool hasHtile, bool htileStencilDisabled) => !hasStencil || !hasHtile || htileStencilDisabled;
-
     // Builds the request for the bound depth target. Null when no depth or stencil state is active.
-    public static DepthTargetResolution? DepthTarget(in DepthTargetWords depthWords, IImageFormatSupport device) =>
-        DepthTargetCore(in depthWords, device, copyMode: false, writeBuffer: false);
+    // Reused while the words and the device are the same, as ColorTarget's requests are.
+    public static DepthTargetResolution? DepthTarget(in DepthTargetWords depthWords, IImageFormatSupport device)
+    {
+        if (Rendering.RenderTrace.Enabled)
+        {
+            return DepthTargetCore(in depthWords, device, copyMode: false, writeBuffer: false);
+        }
+
+        if (_depthTargetMemo is { } memo && ReferenceEquals(memo.Device, device) && memo.Words.Equals(depthWords))
+        {
+            return memo.Result;
+        }
+
+        var result = DepthTargetCore(in depthWords, device, copyMode: false, writeBuffer: false);
+        var kept = _depthTargetMemo ??= new DepthTargetMemo();
+        kept.Words = depthWords;
+        kept.Device = device;
+        kept.Result = result;
+        return result;
+    }
+
+    private sealed class DepthTargetMemo
+    {
+        public DepthTargetWords Words;
+        public IImageFormatSupport? Device;
+        public DepthTargetResolution? Result;
+    }
+
+    [ThreadStatic]
+    private static DepthTargetMemo? _depthTargetMemo;
 
     // Builds the source or destination image used by DB_RENDER_OVERRIDE depth/stencil copies.
     public static DepthTargetResolution? DepthTargetCopy(in DepthTargetWords depthWords, IImageFormatSupport device, bool writeBuffer) =>
@@ -116,8 +142,10 @@ public static partial class ImageRequestBuilders
             throw SubmissionScheduler.Fatal($"The depth view is invalid: base={depthWords.SliceStart} last={depthWords.SliceMax}.");
         }
 
-        if (depthWords.CopyDepthToColor || depthWords.CopyStencilToColor || depthWords.CopyCentroid || depthWords.CopySample != 0 || depthWords.ZExpClear || depthWords.StencilExpClear ||
-            depthWords.ZPartiallyResident || depthWords.StencilPartiallyResident || depthWords.MaxMip != 0 || depthWords.ViewMipLevel != 0 || unsupportedShadingRate ||
+        // EXPCLEAR only changes how the hardware reads the state of a tile in HTILE; the image cache keeps a clear flag per
+        // slice and no per-tile HTILE state, so the bits do not change what is rendered.
+        if (depthWords.CopyDepthToColor || depthWords.CopyStencilToColor || depthWords.CopyCentroid || depthWords.CopySample != 0 ||
+            depthWords.MaxMip != 0 || depthWords.ViewMipLevel != 0 || unsupportedShadingRate ||
             depthAddress == 0 || (!copyMode && !depthWords.DepthWriteDisabled && depthWords.ZWriteBase != depthWords.ZReadBase) || (depthAddress & 0xFFFF) != 0 || depthWords.DepthCompare > 7)
         {
             throw SubmissionScheduler.Fatal(
@@ -127,7 +155,7 @@ public static partial class ImageRequestBuilders
 
         if (hasStencil)
         {
-            if (depthWords.StencilFormat != GuestStencilFormat.Stencil8UInt || !HtileStencilCompatible(hasStencil, hasHtile, depthWords.HtileStencilDisabled) ||
+            if (depthWords.StencilFormat != GuestStencilFormat.Stencil8UInt ||
                 stencilAddress == 0 || (!copyMode && !depthWords.StencilWriteDisabled && depthWords.StencilWriteBase != depthWords.StencilReadBase) || (stencilAddress & 0xFFFF) != 0)
             {
                 throw SubmissionScheduler.Fatal(

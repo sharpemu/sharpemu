@@ -16,6 +16,24 @@ public sealed class ResourceBranchTests
 
     private static uint[] UserData(uint condition) => [0x1000, 0, 256, 0, 0x2000, 0, 256, 0, condition];
 
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(1u)]
+    public void EmptySourceEvaluationPreservesBranchActivity(uint condition)
+    {
+        var plan = Extract(ConditionalBuffers());
+        plan.CompileEvaluatorNow();
+        Assert.NotNull(plan.CompiledTableTransaction);
+        var inputs = Inputs(UserData(condition), readCleanMemory: CleanRead);
+        Assert.True(RuntimeValueEvaluator.EvaluateSources(plan, [], inputs, plan.CleanFlatSlots,
+            true, out _, out var table, out var activity));
+        Assert.NotEmpty(activity);
+        Assert.Contains(false, activity);
+        Assert.Contains(true, activity);
+        Assert.True(ResourceMaterializer.TryEvaluateTable(plan, inputs, out var refreshed));
+        Assert.Equal(table, refreshed);
+    }
+
     private static bool CleanRead(ulong address, out uint word) { word = 0; return false; }
 
     private static ResourceSnapshot Materialize(ShaderResourcePlan plan, uint[] userData, GuestWordReader? cleanReader)
@@ -104,7 +122,11 @@ public sealed class ResourceBranchTests
         bool GeneralRead(ulong address, out uint word) { generalReads++; word = 1; return true; }
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
-        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, GeneralRead, CleanRead), ref snapshot, ref specialization));
+        using (MaterializationProgramCheck.Suspend())
+        {
+            Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, GeneralRead, CleanRead), ref snapshot, ref specialization));
+        }
+
         Assert.Equal(0x1000u, snapshot.Buffers[0][0]);
         Assert.Equal(0x2000u, snapshot.Buffers[1][0]);
         // Flattened reads still use their original reader after the predicate check declines.

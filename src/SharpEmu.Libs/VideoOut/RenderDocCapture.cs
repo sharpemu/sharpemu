@@ -123,7 +123,7 @@ public static unsafe class RenderDocCapture
         try
         {
             var directory = Path.Combine(
-                AppContext.BaseDirectory,
+                SharpEmuPaths.DataRoot,
                 "user",
                 "logs",
                 "capture_logs",

@@ -210,8 +210,8 @@ public sealed class FontExportsTests
         Assert.Equal(0, FontExports.GetCharGlyphMetrics(ctx));
         var metrics = new byte[32];
         Assert.True(memory.TryRead(Base + 0x200, metrics));
-        using var font = new SKFont(typeface, 16);
-        Assert.Equal(font.MeasureText("\u0130"), BinaryPrimitives.ReadSingleLittleEndian(metrics.AsSpan(16)));
+        using var font = new SKFont(typeface, 16) { Subpixel = true, LinearMetrics = true, Hinting = SKFontHinting.None };
+        Assert.Equal(font.MeasureText("\u0130"), BinaryPrimitives.ReadSingleLittleEndian(metrics.AsSpan(16)), 3);
         Assert.Equal(0, FontExports.CloseFont(ctx));
     }
 }

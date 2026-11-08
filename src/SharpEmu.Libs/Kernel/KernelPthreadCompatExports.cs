@@ -142,6 +142,8 @@ public static class KernelPthreadCompatExports
         public required bool Cooperative { get; set; }
         public ManualResetEventSlim? HostSignal { get; set; }
         public LinkedListNode<PthreadMutexWaiter>? Node { get; set; }
+        public long DeadlineTimestamp { get; set; }
+        public bool TimedOut { get; set; }
         public int Granted;
     }
 
@@ -368,6 +370,14 @@ public static class KernelPthreadCompatExports
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
     public static int PthreadMutexLock(CpuContext ctx) => PthreadMutexLockCore(ctx, ctx[CpuRegister.Rdi], tryOnly: false);
+
+    internal static int PthreadMutexRelativeTimedlock(CpuContext ctx)
+    {
+        var now = Stopwatch.GetTimestamp();
+        var ticks = (UInt128)ctx[CpuRegister.Rsi] * (ulong)Stopwatch.Frequency / 1_000_000;
+        var deadline = ticks >= (UInt128)(long.MaxValue - now) ? long.MaxValue : now + (long)ticks;
+        return PthreadMutexLockCore(ctx, ctx[CpuRegister.Rdi], tryOnly: false, deadline);
+    }
 
     [SysAbiExport(
         Nid = "upoVrzMHFeE",
@@ -891,7 +901,7 @@ public static class KernelPthreadCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    private static int PthreadMutexLockCore(CpuContext ctx, ulong mutexAddress, bool tryOnly)
+    private static int PthreadMutexLockCore(CpuContext ctx, ulong mutexAddress, bool tryOnly, long deadlineTimestamp = 0)
     {
         if (mutexAddress == 0)
         {
@@ -912,7 +922,8 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        if (state.OwnerThreadId == currentThreadId)
+        if (state.OwnerThreadId == currentThreadId &&
+            (deadlineTimestamp == 0 || state.Type is MutexTypeRecursive or MutexTypeErrorCheck))
         {
             if (state.Type == MutexTypeRecursive)
             {
@@ -946,9 +957,8 @@ public static class KernelPthreadCompatExports
                     return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
                 }
 
-                state.IncrementRecursion();
-                TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
-                return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                TracePthreadMutex(ctx, "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
             }
 
             var ownedResult = tryOnly
@@ -966,7 +976,8 @@ public static class KernelPthreadCompatExports
         var acquiredWhileQueueing = false;
         lock (state.SyncRoot)
         {
-            if (state.OwnerThreadId == currentThreadId)
+            if (state.OwnerThreadId == currentThreadId &&
+                (deadlineTimestamp == 0 || state.Type is MutexTypeRecursive or MutexTypeErrorCheck))
             {
                 if (state.Type == MutexTypeRecursive)
                 {
@@ -1043,6 +1054,7 @@ public static class KernelPthreadCompatExports
             }
 
             waiter = EnqueueMutexWaiterLocked(state, currentThreadId, canCooperativelyBlock);
+            waiter.DeadlineTimestamp = deadlineTimestamp;
             acquiredWhileQueueing = TryGrantMutexWaiterLocked(state, waiter);
         }
 
@@ -1053,13 +1065,21 @@ public static class KernelPthreadCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
+        if (waiter!.TimedOut)
+        {
+            waiter.HostSignal?.Dispose();
+            WakeFirstMutexWaiter(state);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
+        }
+
         if (canCooperativelyBlock && waiter is not null &&
             GuestThreadExecution.RequestCurrentThreadBlock(
                 ctx,
                 "pthread_mutex_lock",
                 waiter.WakeKey,
                 () => CompleteBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter),
-                () => TryGrantBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter)))
+                () => TryGrantBlockedMutexLock(ctx, mutexAddress, resolvedAddress, state, waiter),
+                deadlineTimestamp))
         {
             TracePthreadMutex(ctx, "lock-block", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
@@ -2229,6 +2249,20 @@ public static class KernelPthreadCompatExports
             return true;
         }
 
+        if (waiter.TimedOut)
+            return false;
+        if (waiter.DeadlineTimestamp != 0 && Stopwatch.GetTimestamp() >= waiter.DeadlineTimestamp)
+        {
+            if (waiter.Node is not null)
+            {
+                state.Waiters.Remove(waiter.Node);
+                state.WaiterRemovedLocked();
+                waiter.Node = null;
+            }
+            waiter.TimedOut = true;
+            return false;
+        }
+
         if (state.OwnerThreadId != 0 ||
             waiter.Node is null ||
             !ReferenceEquals(state.Waiters.First, waiter.Node))
@@ -2308,10 +2342,15 @@ public static class KernelPthreadCompatExports
                         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                     }
 
+                    if (waiter.TimedOut)
+                        return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
+
                     hostSignal.Reset();
                 }
 
-                if (!hostSignal.Wait(10))
+                var timeout = waiter.DeadlineTimestamp == 0 ? 10 :
+                    Math.Clamp((waiter.DeadlineTimestamp - Stopwatch.GetTimestamp()) * 1000.0 / Stopwatch.Frequency, 0, 10);
+                if (!hostSignal.Wait(TimeSpan.FromMilliseconds(timeout)))
                 {
                     // Deliver the exception outside the mutex lock, then resume the wait.
                     GuestThreadExecution.Scheduler?.DeliverPendingGuestExceptionIfReady(ctx);
@@ -2321,6 +2360,8 @@ public static class KernelPthreadCompatExports
         finally
         {
             hostSignal?.Dispose();
+            if (waiter.TimedOut)
+                WakeFirstMutexWaiter(state);
         }
     }
 
@@ -2345,7 +2386,9 @@ public static class KernelPthreadCompatExports
             state,
             waiter.ThreadId,
             granted ? (int)OrbisGen2Result.ORBIS_GEN2_OK : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY);
-        return granted;
+        if (waiter.TimedOut)
+            WakeFirstMutexWaiter(state);
+        return granted || waiter.TimedOut;
     }
 
     private static int CompleteBlockedMutexLock(
@@ -2356,6 +2399,16 @@ public static class KernelPthreadCompatExports
         PthreadMutexWaiter waiter)
     {
         var currentThreadId = KernelPthreadState.GetCurrentThreadHandle();
+        if (waiter.DeadlineTimestamp != 0 && Volatile.Read(ref waiter.Granted) == 0)
+        {
+            lock (state.SyncRoot)
+                TryGrantMutexWaiterLocked(state, waiter);
+            if (waiter.TimedOut)
+            {
+                WakeFirstMutexWaiter(state);
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
+            }
+        }
         if (Volatile.Read(ref waiter.Granted) == 1)
         {
             TracePthreadMutex(ctx, "lock-resume", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);

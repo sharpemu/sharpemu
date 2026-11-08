@@ -9,4 +9,11 @@ public enum GpuBufferUsage : byte
     Upload,
     Download,
     Stream,
+    HostCachedStream,
+    MappedDeviceLocal,
+}
+
+public static class GpuMemoryPlacement
+{
+    public const GpuBufferUsage StreamRing = GpuBufferUsage.Stream;
 }

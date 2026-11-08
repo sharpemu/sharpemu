@@ -39,7 +39,7 @@ public sealed class ResourceMaterializerTests
         var previousSpecialization = specialization;
         var success = ResourceMaterializer.Materialize(plan, Inputs(userData, readCleanMemory: memory.Read),
             ref snapshot, ref specialization, out var failure);
-        Assert.Equal(distinctCount <= ShaderResourceInfo.MaxImages, success);
+        Assert.Equal(distinctCount <= ShaderResourceInfo.MaxIndirectImageCandidates, success);
         if (success)
         {
             Assert.Equal(ResourceMaterializationFailure.None, failure);
@@ -50,6 +50,52 @@ public sealed class ResourceMaterializerTests
             Assert.Equal(ResourceMaterializationFailure.ImageCapacityExceeded, failure);
             Assert.Same(previousSnapshot, snapshot);
             Assert.Same(previousSpecialization, specialization);
+        }
+    }
+
+    [Theory]
+    [InlineData(20u, 1u, true)]
+    [InlineData(62u, 3u, true)]
+    [InlineData(62u, 1u, false)]
+    [InlineData(20u, 3u, false)]
+    public void AtomicImageOfAnUnsupportedFormatIsRejected(uint format, uint dmask, bool supported)
+    {
+        // One data dword is an atomic on a 32 bit texel (format 20, R32_UINT); two are an atomic on a 64 bit texel
+        // (format 62, 32_32_UINT). A width and a format that do not match have no lowering.
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        uint[] words = [0x1000, format << 20, 3 | (3 << 14), 0xFAC | (1u << 16) | (ImageType2D << 28), 0, 0, 0, 0];
+        for (uint dword = 0; dword < 8; dword++)
+        {
+            instructions.Add(MoveScalar(pc, 16 + dword, words[dword]));
+            pc += 8;
+        }
+
+        for (uint register = 1; register <= 3; register++)
+        {
+            instructions.Add(MoveVector(pc, register, 0));
+            pc += 8;
+        }
+
+        instructions.Add(Image(pc, "ImageAtomicUmax", 16, vectorAddress: 1, dmask: dmask));
+        pc += 8;
+        instructions.Add(EndProgram(pc));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        var success = ResourceMaterializer.Materialize(
+            plan, Inputs([]), ref snapshot, ref specialization, out var failure);
+
+        Assert.Equal(supported, success);
+        Assert.Equal(
+            supported ? ResourceMaterializationFailure.None : ResourceMaterializationFailure.Other,
+            failure);
+        if (supported)
+        {
+            Assert.Equal(
+                dmask == 3 ? ImageNumericClass.Uint64 : ImageNumericClass.Uint,
+                Assert.Single(specialization.Images).NumericClass);
         }
     }
 
@@ -175,6 +221,38 @@ public sealed class ResourceMaterializerTests
     }
 
     [Fact]
+    public void MaterialKeysTheCleanReaderRefusesAreReadThroughTheSynchronizedReader()
+    {
+        var plan = Extract(ResourceTrackerTests.IndirectImageProgram(false));
+        uint[] userData = [0x1000, 224 << 16, 2, 0, 0x10000, 16 << 16, 4, 0, 7];
+        var memory = new TestWordMemory { Words = new uint[0x11000 / 4] };
+        for (var index = 0; index < 2; index++)
+        {
+            memory.At(0x1000 + (ulong)index * 224 + 4) = (uint)index;
+            var descriptor = ResourceTrackerTests.ImageDescriptor();
+            descriptor[0] += (uint)index;
+            ResourceTrackerTests.WriteImage(memory, 0x10000 + (ulong)index * 32, descriptor);
+        }
+
+        var synchronizedReads = 0;
+        var inputs = Inputs(
+            userData,
+            readMemory: (ulong address, out uint word) => { synchronizedReads++; return memory.Read(address, out word); },
+            readCleanMemory: (ulong address, out uint word) =>
+            {
+                word = 0;
+                return address >= 0x1000 + 224 && address < 0x1000 + 2 * 224 ? false : memory.Read(address, out word);
+            });
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out var failure));
+        Assert.Equal(ResourceMaterializationFailure.None, failure);
+        Assert.Equal(2, snapshot.Images.Length);
+        Assert.NotEqual(0, synchronizedReads);
+    }
+
+    [Fact]
     public void MappedTable_UsesTheDirectReaderByDefault()
     {
         var plan = Extract(Program(
@@ -193,6 +271,39 @@ public sealed class ResourceMaterializerTests
         Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
         Assert.Equal(0, cleanReads);
         Assert.Equal([0x12345678u], snapshot.FlattenedResourceTable);
+    }
+
+    // A shader that loads through an absolute address it carries itself reads a table of the system that no guest mapping
+    // backs (not data of the title): those words read as zero instead of failing the dispatch.
+    [Fact]
+    public void ScalarLoadAtAnUnmappedAbsoluteAddress_ReadsZero()
+    {
+        var plan = Extract(Program(
+            MoveScalar(0, 4, 0xE0040000),
+            MoveScalar(8, 5, 0xF),
+            ScalarLoad(16, 4, destination: 6),
+            EndProgram(24)));
+        var reads = 0;
+        var inputs = Inputs([], readMemory: (ulong address, out uint word) => { reads++; word = 0xDEADBEEF; return false; });
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        Assert.True(reads > 0);
+        Assert.Equal([0u], snapshot.FlattenedResourceTable);
+    }
+
+    // Only an address the shader carries is a platform table: a pointer the title passes in user data that nothing maps
+    // is still a failure.
+    [Fact]
+    public void ScalarLoadThroughAnUnmappedUserDataPointer_StillFails()
+    {
+        var plan = Extract(Program(ScalarLoad(0, 4, destination: 6), EndProgram(8)));
+        var inputs = Inputs([0, 0, 0, 0, 0xE0040000, 0xF], readMemory: (ulong address, out uint word) => { word = 0xDEADBEEF; return false; });
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
     }
 
     [Fact]
@@ -244,6 +355,15 @@ public sealed class ResourceMaterializerTests
         Assert.Equal(3, snapshot.Samplers.Length);
         Assert.Equal(snapshot.Samplers[1], snapshot.Samplers[2]);
         Assert.NotEqual(snapshot.Samplers[0], snapshot.Samplers[2]);
+        var previous = snapshot;
+        var expected = specialization.Clone();
+        var guard = Assert.IsType<ResourceMaterializer.SpecializationGuard>(plan.SpecializationGuard);
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([]), ref snapshot, ref specialization));
+        Assert.Same(guard, plan.SpecializationGuard);
+        Assert.Equal(expected, specialization);
+        Assert.Equal(3, snapshot.Samplers.Length);
+        Assert.Equal(snapshot.Samplers[1], snapshot.Samplers[2]);
+        Assert.NotSame(previous.Samplers[1], snapshot.Samplers[2]);
     }
 
     [Fact]

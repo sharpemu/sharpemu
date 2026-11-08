@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Runtime.InteropServices;
+using SharpEmu.HLE.GuestMemory;
 
 namespace SharpEmu.HLE.Host.Windows;
 
@@ -57,8 +58,10 @@ internal sealed unsafe partial class WindowsHostMemory : IHostMemory
 
     public bool Query(ulong address, out HostRegionInfo info)
     {
+        var started = ReservationDiagnostics.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
         if (VirtualQuery((void*)address, out var mbi, (nuint)sizeof(MemoryBasicInformation64)) == 0)
         {
+            ReservationDiagnostics.Record("page-query-failed", address, started: started);
             info = default;
             return false;
         }
@@ -72,12 +75,40 @@ internal sealed unsafe partial class WindowsHostMemory : IHostMemory
             ToHostProtection(mbi.Protect),
             mbi.Protect,
             mbi.AllocationProtect);
+        ReservationDiagnostics.Record("page-query", address, regionBase: mbi.BaseAddress,
+            regionSize: mbi.RegionSize, state: mbi.State, success: true, started: started);
         return true;
     }
 
     public void FlushInstructionCache(ulong address, ulong size)
     {
         FlushInstructionCache(GetCurrentProcess(), (void*)address, (nuint)size);
+    }
+
+    public bool TryQueryAllocation(ulong address, out HostAddressRange range)
+    {
+        range = default;
+        try
+        {
+            var started = ReservationDiagnostics.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            var success = QueryVirtualMemoryInformation(GetCurrentProcess(), (void*)address, 0,
+                out var info, (nuint)sizeof(MemoryRegionInformation), null);
+            var error = success ? 0 : Marshal.GetLastPInvokeError();
+            ReservationDiagnostics.Record(success ? "allocation-query-success" : "allocation-query-failed", address, regionBase: info.AllocationBase,
+                regionSize: info.RegionSize, error: error, success: success, started: started);
+            if (!success ||
+                info.RegionSize == 0 || info.AllocationBase > address ||
+                info.RegionSize > ulong.MaxValue - info.AllocationBase ||
+                address - info.AllocationBase >= info.RegionSize)
+                return false;
+            range = new HostAddressRange(info.AllocationBase, info.RegionSize);
+            return true;
+        }
+        catch (EntryPointNotFoundException)
+        {
+            ReservationDiagnostics.Record("allocation-query-unavailable", address, error: 127);
+            return false;
+        }
     }
 
     private static uint ToNativeProtection(HostPageProtection protection) => protection switch
@@ -149,5 +180,19 @@ internal sealed unsafe partial class WindowsHostMemory : IHostMemory
         public uint Protect;
         public uint Type;
         public uint Alignment2;
+    }
+
+    [LibraryImport("kernelbase.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool QueryVirtualMemoryInformation(void* process, void* address,
+        int informationClass, out MemoryRegionInformation info, nuint size, nuint* returned);
+
+    private struct MemoryRegionInformation
+    {
+        public ulong AllocationBase;
+        public uint AllocationProtect;
+        public uint Flags;
+        public ulong RegionSize;
+        public ulong CommitSize;
     }
 }

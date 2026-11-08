@@ -23,7 +23,7 @@ public sealed partial class ScalarValueGraph
     private readonly List<ScalarValue> _values = [];
 
     private ScalarValueGraph(Gen5ShaderProgram program, IrControlFlowGraph controlFlow, MemoryAccessTable memory, uint userDataBase, uint userDataCount,
-        uint waveSize)
+        uint waveSize, ulong excludedUserDataRegisters, int dynamicUserData)
     {
         Program = program;
         WaveSize = waveSize;
@@ -31,13 +31,36 @@ public sealed partial class ScalarValueGraph
         Memory = memory;
         UserDataBase = userDataBase;
         UserDataCount = userDataCount;
+        ExcludedUserDataRegisters = excludedUserDataRegisters;
+        CallArgumentRegisters = CountCallArgumentRegisters(program);
+        DynamicUserData = dynamicUserData;
     }
+
+    // The call entries of a linked program (Gen5ShaderCallLinker.Link) write their record's argument as a pair of
+    // user-data registers from CallArgumentRegisterBase, one pair per distinct nonzero argument in the order the entries
+    // first name them (Gen5ShaderCallLinker.CallEntryArguments), instead of constants. A game rebuilds its hit-group
+    // tables at new addresses as often as every frame; the plan then stays valid for a table whose argument blocks
+    // moved, and each dispatch supplies the arguments (ResourceRuntimeInputs.WithCallArguments). A null argument stays
+    // the constant, so the callee's null checks still fold.
+    public const uint CallArgumentRegisterBase = 256;
+
+    public uint CallArgumentRegisters { get; }
+
+    // A program linked with run-time record arguments has one pair, which holds the record the host evaluates a callee's
+    // values for (CallRecordPlanner.AddRecordRanges).
+    public static uint CountCallArgumentRegisters(Gen5ShaderProgram program) =>
+        CallRecordPlanner.HasRuntimeEntries(program) ? 2 : 2 * (uint)Gen5ShaderCallLinker.CallEntryArguments(program).Length;
+
+    public bool IsCallArgumentRegister(uint register) =>
+        register >= CallArgumentRegisterBase && register - CallArgumentRegisterBase < CallArgumentRegisters;
 
     public Gen5ShaderProgram Program { get; }
     public IrControlFlowGraph ControlFlow { get; }
     public MemoryAccessTable Memory { get; }
     public uint UserDataBase { get; }
     public uint UserDataCount { get; }
+    public ulong ExcludedUserDataRegisters { get; }
+    public int DynamicUserData { get; }
     // A wave32 lane mask fills one SGPR; wave64 fills an aligned pair.
     public uint WaveSize { get; }
 
@@ -48,7 +71,16 @@ public sealed partial class ScalarValueGraph
 
     internal Dictionary<uint, ScalarValue> BranchConditions { get; } = [];
 
+    // The argument pair each call entry with a run-time argument keeps (ShaderCallEntryControl.RuntimeArgument), by the
+    // entry's pc.
+    internal Dictionary<uint, (ScalarValue Low, ScalarValue High)> CallRecordArguments { get; } = [];
+    internal Dictionary<uint, ScalarValue> ConditionalMaskResults { get; } = [];
+    internal Dictionary<uint, ScalarValue[]> UnsignedMedianSources { get; } = [];
+
     public bool Equivalent(ScalarValue left, ScalarValue right) => ScalarValueEquivalence.Equivalent(Memory, left, right);
+
+    // Equivalent values hash equally (see ScalarValueEquivalence.StructuralHash).
+    public int StructuralHash(ScalarValue value) => ScalarValueEquivalence.StructuralHash(Memory, value, 4);
 
     // The graph is complete once built, so a phi's invariant value never changes; the
     // resource evaluator asks for it on every draw.
@@ -60,11 +92,11 @@ public sealed partial class ScalarValueGraph
             : _invariantPhis.GetOrAdd(value, static (phi, memory) => ScalarValueEquivalence.ResolveInvariantPhi(memory, phi), Memory);
 
     public static ScalarValueGraph Build(Gen5ShaderProgram program, uint userDataBase, uint userDataCount,
-        IReadOnlySet<uint>? fixedFunctionVertexLoads = null, uint waveSize = 64)
+        IReadOnlySet<uint>? fixedFunctionVertexLoads = null, uint waveSize = 64, ulong excludedUserDataRegisters = 0, int dynamicUserData = -1)
     {
         var controlFlow = IrControlFlowGraph.Build(program.Instructions, Gen5IrBranchResolver.Instance);
         var graph = new ScalarValueGraph(program, controlFlow, MemoryAccessTable.Build(program, fixedFunctionVertexLoads), userDataBase, userDataCount,
-            waveSize);
+            waveSize, excludedUserDataRegisters, dynamicUserData);
         new Builder(graph).Run();
         return graph;
     }

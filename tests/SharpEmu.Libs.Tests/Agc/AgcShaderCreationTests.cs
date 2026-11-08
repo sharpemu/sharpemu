@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
+using SharpEmu.ShaderCompiler;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
@@ -18,6 +19,49 @@ public sealed class AgcShaderCreationTests
     private const ulong CodeAddress = 0xAB_3456_789A00;
     private const ulong DestinationSentinel = 0x1122_3344_5566_7788;
     private const int IncompleteRegistersResult = unchecked((int)0x8A6C0005);
+
+    [Fact]
+    public void UnregisterFusedProgram_MissingEntryPreservesOtherEntries()
+    {
+        var context = CreateContext(1, 0, out _);
+        Gen5ShaderTranslator.RegisterFusedProgram(context, CodeAddress, HeaderAddress, CodeAddress + 0x100, HeaderAddress + 0x100);
+
+        Assert.False(Gen5ShaderTranslator.UnregisterFusedProgram(context, CodeAddress + 0x200));
+        Assert.True(Gen5ShaderTranslator.TryGetFusedProgramParts(context, CodeAddress, out var continuation, out _));
+        Assert.Equal(CodeAddress + 0x100, continuation);
+        Assert.True(Gen5ShaderTranslator.UnregisterFusedProgram(context, CodeAddress));
+        Assert.False(Gen5ShaderTranslator.UnregisterFusedProgram(context, CodeAddress));
+        Assert.False(Gen5ShaderTranslator.TryGetFusedProgramParts(context, CodeAddress, out _, out _));
+    }
+
+    [Fact]
+    public void CreateShader_ReplacesFusedEntryWithOrdinaryProgram()
+    {
+        var context = CreateContext(1, 2, out var memory);
+        var code = BaseAddress + 0x1000;
+        context[CpuRegister.Rdx] = code;
+        WriteRegister(memory, 0, 0x8, 0);
+        WriteRegister(memory, 1, 0x9, 0);
+        WriteUInt32(memory, HeaderAddress + 0x44, 4);
+        WriteUInt32(memory, code, 0xBF810000);
+        Gen5ShaderTranslator.RegisterFusedProgram(context, code, BaseAddress + 0x200, code + 0x100, BaseAddress + 0x300);
+
+        Assert.Equal(0, AgcExports.CreateShader(context));
+        Assert.False(Gen5ShaderTranslator.TryGetFusedProgramParts(context, code, out _, out _));
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, code, out var program, out var error), error);
+        Assert.Equal("SEndpgm", Assert.Single(program.Instructions).Opcode);
+    }
+
+    [Fact]
+    public void CreateShader_FailedReplacementPreservesFusedEntry()
+    {
+        var context = CreateContext(1, 0, out var memory);
+        Gen5ShaderTranslator.RegisterFusedProgram(context, CodeAddress, HeaderAddress, CodeAddress + 0x100, HeaderAddress + 0x100);
+
+        AssertFailure(context, memory, IncompleteRegistersResult);
+        Assert.True(Gen5ShaderTranslator.TryGetFusedProgramParts(context, CodeAddress, out var continuation, out _));
+        Assert.Equal(CodeAddress + 0x100, continuation);
+    }
 
     [Theory]
     [InlineData(0, 0x20C)]

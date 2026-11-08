@@ -50,6 +50,20 @@ public sealed class Gen5ScalarAddImmediateTests
         }
     }
 
+    [Theory]
+    [InlineData(0x80u)]
+    [InlineData(0x81u)]
+    public void BitReverseLeavesSccAlone(uint source)
+    {
+        var word = 0xBE840B00u | source;
+        Assert.Equal("SBrevB32", DecodeProgram(word, SEndpgm).Instructions[0].Opcode);
+        var reversed = CompiledOpcodes(word);
+        var moved = CompiledOpcodes(0xBE840300u | source);
+        Assert.Equal(1, Count(reversed, SpirvOp.BitReverse));
+        Assert.Equal(Count(moved, SpirvOp.Store), Count(reversed, SpirvOp.Store));
+        Assert.Equal(Count(moved, SpirvOp.INotEqual), Count(reversed, SpirvOp.INotEqual));
+    }
+
     private static int Count(IReadOnlyList<ushort> opcodes, SpirvOp opcode)
     {
         var total = 0;

@@ -3,6 +3,7 @@
 
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 
@@ -88,8 +89,8 @@ public sealed class Gen5VertexInputSpirvTests
     public void AliasedFetchInstructionsShareOneAttributeLocation()
     {
         // Fetches for one stream view share one location to preserve the attribute budget.
-        var firstFetch = CreateVertexFetch(0);
-        var secondFetch = CreateVertexFetch(4);
+        var firstFetch = CreateVertexFetch(0, 0);
+        var secondFetch = CreateVertexFetch(4, 8);
         var end = new Gen5ShaderInstruction(
             8,
             Gen5ShaderEncoding.Sopp,
@@ -111,14 +112,24 @@ public sealed class Gen5VertexInputSpirvTests
             .ToArray();
         var inputVariable = Assert.Single(locations).Operands[0];
 
-        // Both fetches must read that variable; an unaliased second fetch would
-        // fall through to the generic buffer path and leave only one load.
         Assert.Equal(
-            2,
+            1,
             module.Count(candidate =>
                 candidate.Opcode == SpirvOp.Load &&
                 candidate.Operands.Length >= 3 &&
                 candidate.Operands[2] == inputVariable));
+
+        var names = new SpirvModuleInspector(shaderBytes).Names;
+        for (var component = 0; component < 4; component++)
+        {
+            var firstRegister = Assert.Single(names, entry => entry.Value == $"v{component}").Key;
+            var secondRegister = Assert.Single(names, entry => entry.Value == $"v{component + 8}").Key;
+            var firstValue = module.Last(instruction => instruction.Opcode == SpirvOp.Store &&
+                instruction.Operands[0] == firstRegister).Operands[1];
+            var secondValue = module.Last(instruction => instruction.Opcode == SpirvOp.Store &&
+                instruction.Operands[0] == secondRegister).Operands[1];
+            Assert.Equal(firstValue, secondValue);
+        }
     }
 
     [Fact]
@@ -176,7 +187,7 @@ public sealed class Gen5VertexInputSpirvTests
         return shader.Spirv;
     }
 
-    private static Gen5ShaderInstruction CreateVertexFetch(uint pc) =>
+    private static Gen5ShaderInstruction CreateVertexFetch(uint pc, uint destination) =>
         new(
             pc,
             Gen5ShaderEncoding.Mubuf,
@@ -187,7 +198,7 @@ public sealed class Gen5VertexInputSpirvTests
             new Gen5BufferMemoryControl(
                 4,
                 5,
-                0,
+                destination,
                 0,
                 0,
                 IndexEnabled: true,

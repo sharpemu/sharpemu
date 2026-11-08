@@ -42,6 +42,7 @@ internal sealed class PresenterUnderTest : IDisposable
 {
     public const BindingFlags InstanceMembers = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     public static readonly Type PresenterType = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
+    public static readonly Type RecordingHostType = typeof(VulkanVideoPresenter).GetNestedType("RecordingHost", BindingFlags.NonPublic)!;
 
     public PresenterUnderTest(HeadlessVulkan vulkan, bool startScheduler = true)
     {
@@ -55,19 +56,28 @@ internal sealed class PresenterUnderTest : IDisposable
         SetField("_device", vulkan.Device);
         SetField("_supportsFragmentShaderBarycentric", vulkan.SupportsFragmentShaderBarycentric);
         SetField("_supportsFillRectangle", vulkan.SupportsFillRectangle);
+        SetField("_supportsShaderClipDistance", vulkan.SupportsClipDistance);
+        SetField("_supportsTessellation", vulkan.SupportsTessellation);
         SetField("_deviceInfo", vulkan.DeviceInfo);
         SetField("_scheduler", Harness.Scheduler);
+        SetField("_guestPublications", new PendingGuestPublications());
+        Harness.Cache.CompleteGuestPublications = (address, size, access) =>
+            InvokeMethod("CompleteOverlappingPublications", address, size, access == GuestBufferCache.PublicationAccess.Write,
+                access == GuestBufferCache.PublicationAccess.OverlaidRead);
+        Harness.Cache.OverlayGuestPublications = (buffer, offset, address, size) =>
+            InvokeMethod("OverlayPendingDumps", buffer, offset, address, size);
         SetField("_relay", Harness.Worker.Relay);
         SetField("_bufferCache", Harness.Cache);
         SetField("_imageCache", Harness.Images);
         SetField("_guestBacking", Harness.Memory);
         SetField("_guestMemory", Harness.Memory);
         SetField("_samplerStore", Samplers);
-        SetField("_trackedImageBindings", new List<ResourceSlotIdentifier>());
         SetField("_submissionContext", new SubmissionContext { QueueName = "presenter.test", SubmissionId = 1 });
         SetField("_commandStream", new CommandStreamQueue((ICommandStreamHost)Instance));
         SetField("_descriptorHeap", new DescriptorHeap(vulkan.DeviceInfo, Harness.Scheduler));
         SetField("_maxPushDescriptors", vulkan.MaxPushDescriptors);
+        vulkan.Vk.GetPhysicalDeviceProperties(vulkan.Physical, out var deviceProperties);
+        SetField("_shaderDescriptorLimits", deviceProperties.Limits);
         SetField("_noAttachmentSampleCounts", SampleCountFlags.Count1Bit);
         HostBuffers = new VulkanHostBufferPool(128UL * 1024 * 1024, allocation => InvokeMethod("DestroyHostBufferAllocation", allocation));
         SetField("_hostBufferPool", HostBuffers);
@@ -77,8 +87,7 @@ internal sealed class PresenterUnderTest : IDisposable
         {
             "_batchResources", "_batchRetireBuffers", "_pendingGuestSubmissions",
             "_deferredGuestImageVersionDestroys",
-            "_pipelineEntries", "_shaderModules", "_shaderModuleSpirvBytes",
-            "_preparedTextures", "_barriersAfterRendering", "_feedbackSnapshotPool",
+            "_pipelineEntries", "_shaderModules", "_shaderModuleSpirvBytes", "_rectangleStageCode",
         })
         {
             var field = PresenterType.GetField(name, InstanceMembers)!;
@@ -99,22 +108,39 @@ internal sealed class PresenterUnderTest : IDisposable
 
     public object Instance { get; }
 
-    public IRenderHost RenderHost => (IRenderHost)Instance;
+    public object Recording => PresenterType.GetProperty("Recording", InstanceMembers)!.GetValue(Instance)!;
+
+    public IRenderHost RenderHost => (IRenderHost)Recording;
 
     public CommandBuffer Command => new(Harness.Scheduler.Current.Handle);
 
     // Loads the dynamic rendering commands the render host records with; the device must carry the extensions.
     public void LoadRenderingCommands() => InvokeMethod("LoadRenderingCommands", false, Harness.Vulkan.DeviceName);
 
-    public void SetField(string name, object value) => PresenterType.GetField(name, InstanceMembers)!.SetValue(Instance, value);
+    public void SetField(string name, object value)
+    {
+        var (field, target) = Field(name);
+        field.SetValue(target, value);
+    }
 
-    public T GetField<T>(string name) => (T)PresenterType.GetField(name, InstanceMembers)!.GetValue(Instance)!;
+    public T GetField<T>(string name)
+    {
+        var (field, target) = Field(name);
+        return (T)field.GetValue(target)!;
+    }
+
+    private (FieldInfo Field, object Target) Field(string name) =>
+        PresenterType.GetField(name, InstanceMembers) is { } field
+            ? (field, Instance)
+            : (RecordingHostType.GetField(name, InstanceMembers)!, Recording);
 
     public object? InvokeMethod(string name, params object?[] arguments)
     {
         try
         {
-            return PresenterType.GetMethod(name, InstanceMembers | BindingFlags.Static)!.Invoke(Instance, arguments);
+            return PresenterType.GetMethod(name, InstanceMembers | BindingFlags.Static) is { } method
+                ? method.Invoke(Instance, arguments)
+                : RecordingHostType.GetMethod(name, InstanceMembers | BindingFlags.Static)!.Invoke(Recording, arguments);
         }
         catch (TargetInvocationException exception) when (exception.InnerException is not null)
         {
@@ -141,6 +167,7 @@ internal sealed class PresenterUnderTest : IDisposable
                 }
 
                 InvokeMethod("WaitForAllGuestSubmissions");
+                GetField<SharpEmu.Libs.Gpu.Vulkan.VulkanOcclusionQueries?>("_occlusionQueries")?.Dispose();
                 DestroyPipelineResources();
                 Samplers.Dispose();
                 HostBuffers.Dispose();

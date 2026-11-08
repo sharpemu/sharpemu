@@ -48,10 +48,8 @@ public sealed partial class DirectExecutionBackend
 
     // Fiber switches replace the guest stack without passing through a guest-entry stub, so the
     // context-transfer stub keeps the Windows TEB bounds in sync from the target state in R11
-    // (stack top at +160, bottom at +168). Only Windows keeps stack bounds at gs:[8]/gs:[16]: on
-    // macOS gs addresses the pthread TSD, where those slots hold errno's address and another key.
-    // Writing a fiber's bounds there nulled errno, and the next failed libc call on the thread
-    // crashed reading it (Demon's Souls, about 10 s into boot).
+    // (stack top at +160, bottom at +168). Only Windows keeps stack bounds at gs:[8]/gs:[16]; other
+    // hosts do not address a TEB through gs, so the sync is emitted on Windows only.
     private static unsafe void EmitFiberStackBounds(byte* code, ref int offset)
     {
         if (!OperatingSystem.IsWindows()) return;

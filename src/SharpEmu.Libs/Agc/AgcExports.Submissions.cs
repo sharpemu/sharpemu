@@ -69,6 +69,17 @@ public static partial class AgcExports
             // The prepass shadows geometry state in submit order; the worker owns the interpreter's banks.
             SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.GeometryCaptureStarted,
                 0, gpuState.SubmissionSequence + 1, commandAddress, dwordCount);
+            if (dwordCount > 0xF_FFFF)
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            var commandLength = (int)dwordCount * sizeof(uint);
+            var commandBytes = System.Buffers.ArrayPool<byte>.Shared.Rent(commandLength);
+            if (commandLength != 0 && !ctx.Memory.TryRead(commandAddress, commandBytes.AsSpan(0, commandLength)))
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(commandBytes);
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            var registerTables = CaptureSubmittedTables(ctx, commandAddress, commandBytes.AsSpan(0, commandLength));
             var snapshots = CaptureSubmittedGeometry(ctx, gpuState, commandAddress, dwordCount);
             SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.GeometryCaptureFinished,
                 0, gpuState.SubmissionSequence + 1, commandAddress, dwordCount);
@@ -83,7 +94,7 @@ public static partial class AgcExports
                 commandAddress,
                 dwordCount,
                 ++gpuState.SubmissionSequence,
-                snapshots))
+                new SubmittedCommandBuffer(commandBytes, snapshots, registerTables) { Length = commandLength, Pooled = true }))
             {
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
             }
@@ -135,6 +146,17 @@ public static partial class AgcExports
             $"addr=0x{commandAddress:X16} dwords={dwordCount} " +
             $"end=0x{commandAddress + ((ulong)dwordCount * sizeof(uint)):X16}");
 
+        return SubmitComputeCommands(ctx, ownerHandle, commandAddress, dwordCount);
+    }
+
+    public static int SubmitGraphicsCommands(CpuContext ctx, ulong commandAddress, uint dwordCount, PacketHandler?[] packetHandlers) =>
+        SubmitComputeCommands(ctx, 0, commandAddress, dwordCount, static () => { }, packetHandlers);
+
+    public static int SubmitComputeCommands(CpuContext ctx, uint ownerHandle, ulong commandAddress, uint dwordCount,
+        Action? consumed = null, PacketHandler?[]? packetHandlers = null)
+    {
+        if (HostSessionControl.IsShutdownRequested)
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
         SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.SubmitEntered,
             ownerHandle, 0, commandAddress, dwordCount);
         (GuestGpu.Current as IGuestImageSnapshotBackend)?.AttachGuestMemory(ctx.Memory);
@@ -148,7 +170,7 @@ public static partial class AgcExports
                 commandAddress,
                 dwordCount,
                 ++gpuState.SubmissionSequence,
-                null))
+                consumed is null ? null : new CommandStreamCompletion(consumed, packetHandlers)))
             {
                 return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
             }
@@ -190,6 +212,9 @@ public static partial class AgcExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    public static void WaitForAcceptedCommandStreams() =>
+        GuestGpu.Current.RunAfterPendingCommandStreams(static () => { });
 
     // Synthetic label for an uncatalogued NID (the Unknown* convention); the NID is authoritative.
     #pragma warning disable SHEM006
@@ -328,6 +353,38 @@ public static partial class AgcExports
 
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static Dictionary<ulong, byte[]>? CaptureSubmittedTables(CpuContext ctx, ulong address, ReadOnlySpan<byte> commands)
+    {
+        var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(commands);
+        Dictionary<ulong, byte[]>? tables = null;
+        var remainingBytes = 64 * 1024 * 1024;
+        for (var offset = 0; offset < words.Length;)
+        {
+            var header = words[offset];
+            if (header == PacketHeader.FillerHeader) { offset++; continue; }
+            var length = (int)PacketHeader.Length(header);
+            if (PacketHeader.PacketType(header) != 3 || length > words.Length - offset) break;
+            var opcode = PacketHeader.Opcode(header);
+            if (length == 5 && opcode is PacketOpcode.SetContextRegisterIndirect or PacketOpcode.SetShaderRegisterIndirect or PacketOpcode.SetUserConfigRegisterIndirect)
+            {
+                var target = (words[offset + 1] & ~3u) | ((ulong)words[offset + 2] << 32);
+                var count = words[offset + 4] & 0x3FFFu;
+                var size = (int)count * 8;
+                if (size != 0 && size <= remainingBytes)
+                {
+                    var table = new byte[size];
+                    if (ctx.Memory.TryRead(target, table))
+                    {
+                        (tables ??= [])[address + (ulong)offset * 4] = table;
+                        remainingBytes -= size;
+                    }
+                }
+            }
+            offset += length;
+        }
+        return tables;
     }
 
     private static bool TrySubmitCommandStream(

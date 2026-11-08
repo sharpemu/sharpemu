@@ -26,6 +26,7 @@ internal sealed class CompiledResourceEvaluator
         nameof(RuntimeValueEvaluator.StoreCompiled), nameof(RuntimeValueEvaluator.EvaluateCompiled),
         nameof(RuntimeValueEvaluator.EvaluateCompiledSpecial), nameof(RuntimeValueEvaluator.IsCompiledActiveMask),
         nameof(RuntimeValueEvaluator.ReadUserData), nameof(RuntimeValueEvaluator.ReadShaderBase), nameof(RuntimeValueEvaluator.ReadRawWord),
+        nameof(RuntimeValueEvaluator.GetCompiledReadNode),
     }.ToDictionary(name => name, name => typeof(RuntimeValueEvaluator).GetMethod(name, BindingFlags.NonPublic | BindingFlags.Instance)!);
     private static readonly MethodInfo EvaluateOperation = typeof(ScalarOperationSemantics)
         .GetMethod(nameof(ScalarOperationSemantics.TryEvaluateFixed), BindingFlags.NonPublic | BindingFlags.Static)!;
@@ -288,7 +289,11 @@ internal sealed class CompiledResourceEvaluator
                     if (buffer) Load(3);
                     else Constant(0);
                     Constant(unchecked((ulong)(long)(int)plan.Memory[value.MemoryIndex].Offset));
+                    il.Emit(RuntimeValueEvaluator.IsAbsoluteAddress(value.Kind, handle) ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0);
                     il.Emit(OpCodes.Ldloca, result);
+                    il.Emit(OpCodes.Ldarg_0);
+                    il.Emit(OpCodes.Ldc_I4, index);
+                    Call(nameof(RuntimeValueEvaluator.GetCompiledReadNode));
                     Call(nameof(RuntimeValueEvaluator.ReadRawWord));
                     il.Emit(OpCodes.Brfalse, failed);
                     break;

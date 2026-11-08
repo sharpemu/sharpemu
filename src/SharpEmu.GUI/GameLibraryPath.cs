@@ -6,12 +6,12 @@ namespace SharpEmu.GUI;
 internal static class GameLibraryPath
 {
     public static StringComparer Comparer { get; } =
-        OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+        OperatingSystem.IsWindows()
             ? StringComparer.OrdinalIgnoreCase
             : StringComparer.Ordinal;
 
     public static StringComparison Comparison { get; } =
-        OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+        OperatingSystem.IsWindows()
             ? StringComparison.OrdinalIgnoreCase
             : StringComparison.Ordinal;
 }

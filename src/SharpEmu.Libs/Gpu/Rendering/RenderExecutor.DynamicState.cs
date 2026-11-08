@@ -29,19 +29,50 @@ public sealed partial class RenderExecutor
     }
 
     // The dynamic state of a draw from the context bank and the resolved targets.
-    private DynamicDrawState BuildDynamicState(ContextRegisters context, in DrawState state)
+    private DynamicDrawState ResolveDynamicState(RegisterBanks banks, in DrawState state, uint writtenColors, ulong submitId, ulong packetAddress)
+    {
+        var resolution = _drawResolution;
+        var boundSlots = 0u;
+        for (var remaining = writtenColors; remaining != 0; remaining &= remaining - 1)
+        {
+            boundSlots |= 1u << (int)state.Colors[System.Numerics.BitOperations.TrailingZeroCount(remaining)].Slot;
+        }
+
+        var colorCount = (uint)System.Numerics.BitOperations.PopCount(writtenColors);
+
+        var key = new DynamicStateKey(
+            banks.ContextStamp,
+            banks.Stamp(RegisterStamp.ContextDynamic),
+            resolution.TargetVersion,
+            colorCount,
+            boundSlots,
+            colorCount > 0,
+            state.Depth.HasTarget);
+        if (key == resolution.DynamicKey && ScissorTrace.Instance is not { Active: true })
+        {
+            return resolution.Dynamic;
+        }
+
+        resolution.Dynamic = BuildDynamicState(banks, in state, writtenColors, submitId, packetAddress);
+        resolution.DynamicKey = key;
+        return resolution.Dynamic;
+    }
+
+    private DynamicDrawState BuildDynamicState(RegisterBanks banks, in DrawState state, uint writtenColors, ulong submitId, ulong packetAddress)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawDynamicStatePreparation);
+        var context = banks.Context;
         var viewportRegisters = context.ScreenViewport;
         var limits = _host.Limits;
         uint framebufferWidth;
         uint framebufferHeight;
-        if (state.ColorCount > 0 && state.Colors[0].Image.IsValid)
+        if (writtenColors != 0)
         {
-            framebufferWidth = state.Colors[0].Resolution.Extent.Width;
-            framebufferHeight = state.Colors[0].Resolution.Extent.Height;
+            ref readonly var first = ref state.Colors[System.Numerics.BitOperations.TrailingZeroCount(writtenColors)];
+            framebufferWidth = first.Resolution.Extent.Width;
+            framebufferHeight = first.Resolution.Extent.Height;
         }
-        else if (state.Depth.Image.IsValid)
+        else if (state.Depth.HasTarget)
         {
             framebufferWidth = state.Depth.Target.Target.Width;
             framebufferHeight = state.Depth.Target.Target.Height;
@@ -52,8 +83,8 @@ public sealed partial class RenderExecutor
             framebufferHeight = limits.MaxFramebufferHeight;
         }
 
-        var scissor = ResolveScissor(viewportRegisters, context.ScanMode, framebufferWidth, framebufferHeight);
-        ref readonly var viewport = ref viewportRegisters.Viewports[0];
+        var scissor = ResolveScissor(viewportRegisters, context.ScanMode, framebufferWidth, framebufferHeight, recoverStaleWindow: true);
+        ref readonly var viewport = ref viewportRegisters.Primary;
         float viewportX;
         float viewportY;
         float viewportWidth;
@@ -103,16 +134,17 @@ public sealed partial class RenderExecutor
         }
 
         byte colorWriteMask = 0;
-        for (var i = 0; i < state.ColorCount; i++)
+        var position = 0;
+        for (var remaining = writtenColors; remaining != 0; remaining &= remaining - 1, position++)
         {
-            if (context.RenderTargetMaskForSlot(state.Colors[i].Slot) != 0)
+            if (context.RenderTargetMaskForSlot(state.Colors[System.Numerics.BitOperations.TrailingZeroCount(remaining)].Slot) != 0)
             {
-                colorWriteMask |= (byte)(1 << i);
+                colorWriteMask |= (byte)(1 << position);
             }
         }
 
         var blend = context.BlendColor;
-        return new DynamicDrawState(
+        var dynamicState = new DynamicDrawState(
             viewportX,
             viewportY,
             viewportWidth,
@@ -135,12 +167,22 @@ public sealed partial class RenderExecutor
             depthState.StencilTestEnabled,
             depthState.FrontMasks,
             depthState.BackMasks,
-            state.ColorCount,
-            colorWriteMask);
+            (uint)position,
+            colorWriteMask,
+            context.DepthCountControl,
+            depthState.DepthBoundsTestEnabled,
+            depthState.DepthMinBounds,
+            depthState.DepthMaxBounds);
+        if (ScissorTrace.Instance is { Active: true } trace)
+            trace.Draw(banks, submitId, packetAddress, framebufferWidth, framebufferHeight,
+                state.ColorCount > 0 ? state.Colors[0].Resolution.BaseAddress : 0,
+                state.Depth.HasTarget ? state.Depth.Target.Target.DepthAddress : 0, in dynamicState);
+        return dynamicState;
     }
 
     // The screen, window, generic, viewport and clip rectangles intersected and clamped to the extent.
-    public static ScissorRectangle ResolveScissor(ScreenViewportRegisters viewport, in ScanModeRegisters scanMode, uint width, uint height)
+    public static ScissorRectangle ResolveScissor(ScreenViewportRegisters viewport, in ScanModeRegisters scanMode, uint width, uint height,
+        bool recoverStaleWindow = false)
     {
         var screen = new ScissorRectangle(viewport.ScreenScissorLeft, viewport.ScreenScissorTop, viewport.ScreenScissorRight, viewport.ScreenScissorBottom);
         var final = screen;
@@ -154,7 +196,10 @@ public sealed partial class RenderExecutor
         }
 
         var window = new ScissorRectangle(viewport.WindowScissorLeft, viewport.WindowScissorTop, viewport.WindowScissorRight, viewport.WindowScissorBottom);
-        if (window.IsSet)
+        // Some AGC submissions restore a full-target viewport after a smaller offscreen pass
+        // without rewriting PA_SC_WINDOW_SCISSOR. The stale window can be smaller in only
+        // one dimension (e.g. 75% of the target height), so check both axes independently.
+        if (window.IsSet && !(recoverStaleWindow && IsStaleOffscreenWindow(viewport, in scanMode, width, height, in window)))
         {
             if (viewport.WindowScissorWindowOffsetEnable)
             {
@@ -175,7 +220,7 @@ public sealed partial class RenderExecutor
             final = final.Intersect(in generic);
         }
 
-        ref readonly var first = ref viewport.Viewports[0];
+        ref readonly var first = ref viewport.Primary;
         var viewportScissor = new ScissorRectangle(first.ScissorLeft, first.ScissorTop, first.ScissorRight, first.ScissorBottom);
         if (scanMode.ViewportScissorEnable && viewportScissor.IsSet)
         {
@@ -218,6 +263,26 @@ public sealed partial class RenderExecutor
         }
 
         return ClampScissor(final, width, height);
+    }
+
+    private static bool IsStaleOffscreenWindow(ScreenViewportRegisters viewport, in ScanModeRegisters scanMode,
+        uint width, uint height, in ScissorRectangle window)
+    {
+        if (!scanMode.ViewportScissorEnable || viewport.WindowScissorWindowOffsetEnable ||
+            width == 0 || height == 0 || window.Left != 0 || window.Top != 0 ||
+            window.Right <= 0 || window.Bottom <= 0 ||
+            window.Right >= width && window.Bottom >= height)
+        {
+            return false;
+        }
+
+        ref readonly var active = ref viewport.Primary;
+        return !active.ScissorWindowOffsetEnable &&
+            active.ScissorLeft == 0 && active.ScissorTop == 0 &&
+            active.ScissorRight == width && active.ScissorBottom == height &&
+            MathF.Abs(active.XScale * 2f) >= width && MathF.Abs(active.YScale * 2f) >= height &&
+            MathF.Abs(active.XOffset - active.XScale) < 1f &&
+            MathF.Abs(active.YOffset - MathF.Abs(active.YScale)) < 1f;
     }
 
     private static ScissorRectangle ClampScissor(ScissorRectangle rectangle, uint width, uint height)

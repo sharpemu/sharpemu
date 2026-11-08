@@ -41,18 +41,18 @@ public sealed class RegisterBanksTests
     {
         var banks = NewBanks();
         banks.Context.RenderTargetMask = 0xF;
-        banks.Context.ScreenViewport.Viewports[2].XScale = 4f;
+        banks.Context.ScreenViewport.Viewport(2).XScale = 4f;
         banks.CompositeDepthSizeXy = 9;
 
         banks.ApplyContextState(ContextStateOperation.Push);
         banks.Context.RenderTargetMask = 0x1;
-        banks.Context.ScreenViewport.Viewports[2].XScale = 8f;
+        banks.Context.ScreenViewport.Viewport(2).XScale = 8f;
         banks.CompositeDepthSizeXy = null;
         Assert.True(banks.ContextPushed);
         banks.ApplyContextState(ContextStateOperation.Pop);
 
         Assert.Equal(0xFu, banks.Context.RenderTargetMask);
-        Assert.Equal(4f, banks.Context.ScreenViewport.Viewports[2].XScale);
+        Assert.Equal(4f, banks.Context.ScreenViewport.Viewport(2).XScale);
         Assert.Equal(9u, banks.CompositeDepthSizeXy);
         Assert.False(banks.ContextPushed);
     }

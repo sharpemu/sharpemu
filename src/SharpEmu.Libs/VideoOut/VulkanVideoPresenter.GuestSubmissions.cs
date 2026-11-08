@@ -15,12 +15,13 @@ internal static unsafe partial class VulkanVideoPresenter
         // This partial owns guest GPU submission execution and lifetime.
 
         // Batched submissions each carry up to a frame's worth of work, so a cap of
-        // 8 made draw preparation wait on the GPU once per frame; 32 keeps the CPU
-        // ahead. SHARPEMU_MAX_INFLIGHT_SUBMISSIONS overrides it.
+        // 8 made draw preparation wait on the GPU once per frame; at 32 a title that
+        // submits a few hundred times a frame still waited about twice a frame, so
+        // the cap is 64. SHARPEMU_MAX_INFLIGHT_SUBMISSIONS overrides it.
         private static readonly int MaxInFlightGuestSubmissions =
             int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_MAX_INFLIGHT_SUBMISSIONS"), out var inFlight) && inFlight > 0
                 ? inFlight
-                : 32;
+                : 64;
         // Scheduler ticks: the last submitted tick and the highest tick known retired.
         private ulong _submitTimeline;
         private ulong _completedTimeline;
@@ -39,28 +40,75 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // Translated draws are recorded into the scheduler's current buffer and
         // submitted once per drained work batch (one vkQueueSubmit per batch).
-        private bool _batchOpen;
-        private int _batchDrawCount;
-        private readonly List<SubmissionUploadResources> _batchResources = new();
+        internal bool _batchOpen;
+        internal const int MinimumFlushDraws = 32;
+        private static readonly long BatchGraceTicks = System.Diagnostics.Stopwatch.Frequency * 3 / 1000;
+        internal int _batchDrawCount;
+        internal long _batchOpenedAt;
+
+        private bool ProducerActive => _commandThread is { IsAlive: true } thread && (thread.HasWork || _commandStream.HasPending);
+
+        private bool BatchShouldFlush =>
+            _batchDrawCount >= MinimumFlushDraws ||
+            _commandThread is null || _window.IsMinimized || _commandStream.BlockedQueueCount != 0 ||
+            (_pendingGuestSubmissions.Count == 0 &&
+             (!ProducerActive || System.Diagnostics.Stopwatch.GetTimestamp() - _batchOpenedAt >= BatchGraceTicks));
+        internal readonly List<SubmissionUploadResources> _batchResources = new();
+        private const int MaxSpareSubmissionResources = 4096;
+        internal Stack<SubmissionUploadResources>? _spareSubmissionResources;
 
 
-        private CommandBuffer BeginBatchedGuestCommands()
+        internal CommandBuffer BeginBatchedGuestCommands()
         {
             var commandBuffer = CurrentRecordingBuffer();
+            OpenGuestBatch();
+            return commandBuffer;
+        }
+
+        // Opens the batch without asking for the native handle, so a deferred barrier stays deferred
+        // until a command is actually recorded.
+        internal void EnsureBatchedGuestCommands()
+        {
+            _ = CurrentRecording();
+            OpenGuestBatch();
+        }
+
+        internal CommandBuffer BeginBatchedGuestStateCommands()
+        {
+            var recording = CurrentRecording();
+            OpenGuestBatch();
+            return new CommandBuffer(recording.StateHandle);
+        }
+
+        internal CommandBuffer BeginBatchedGuestTransferCommands()
+        {
+            var recording = CurrentRecording();
+            OpenGuestBatch();
+            return new CommandBuffer(recording.TransferHandle);
+        }
+
+        internal void RequestGuestMemoryBarrier(in MemoryBarrierRequest request)
+        {
+            var recording = CurrentRecording();
+            OpenGuestBatch();
+            _scheduler.MemoryBarrierRecorder ??= RecordRequestedMemoryBarrier;
+            recording.RequestMemoryBarrier(request);
+        }
+
+        internal void OpenGuestBatch()
+        {
             if (!_batchOpen)
             {
                 _batchOpen = true;
                 _batchDrawCount = 0;
             }
-
-            return commandBuffer;
         }
 
         // Submits the current recording buffer with everything the batch lists own.
         // Returns the timeline tick that contains the commands this call submitted, so a
         // caller that must wait for its own recording does not read the shared
         // _submitTimeline field, which the presenter thread also writes.
-        private ulong FlushBatchedGuestCommands()
+        internal ulong FlushBatchedGuestCommands()
         {
             if (!_batchOpen)
             {
@@ -76,7 +124,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private void PrepareGuestSubmission(SubmitBundle bundle)
         {
             _ = bundle;
-            EndRendering();
+            _recording?.EndRendering();
+            _occlusionQueries?.Submit(_scheduler);
             if (!_batchOpen)
             {
                 return;
@@ -108,9 +157,23 @@ internal static unsafe partial class VulkanVideoPresenter
                     retireBuffers));
         }
 
-        private void EnsureGuestSubmissionCapacity()
+        // Collecting completed submissions polls the GPU timeline twice and may wait for the priority
+        // worker. Every draw used to pay that; completed work only frees resources and runs deferred
+        // callbacks, so a collection a few hundred microseconds later changes nothing but how long
+        // those resources stay reserved. A full in-flight queue still collects, and waits, at once.
+        private static readonly long CollectIntervalTicks = System.Diagnostics.Stopwatch.Frequency / 4000;
+        private long _lastCollectTicks;
+
+        internal void EnsureGuestSubmissionCapacity(bool collectNow = false)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.SubmissionCapacity);
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (!collectNow && _pendingGuestSubmissions.Count < MaxInFlightGuestSubmissions && now - _lastCollectTicks < CollectIntervalTicks)
+            {
+                return;
+            }
+
+            _lastCollectTicks = now;
             CollectCompletedGuestSubmissions(waitForOldest: false);
             if (_pendingGuestSubmissions.Count >= MaxInFlightGuestSubmissions)
             {
@@ -149,6 +212,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _commandStream.NotifyCompletedGpuTick(_scheduler.Timeline.CompletedTick);
+            PublishLodStatistics();
 
             ProcessDeferredTextureDestroys();
         }
@@ -163,6 +227,13 @@ internal static unsafe partial class VulkanVideoPresenter
             foreach (var resources in submission.Resources)
             {
                 RecycleSubmissionUploads(resources);
+                resources.FeedbackSnapshots = [];
+                resources.OverflowBuffers = null;
+                var spare = _spareSubmissionResources ??= new Stack<SubmissionUploadResources>();
+                if (spare.Count < MaxSpareSubmissionResources)
+                {
+                    spare.Push(resources);
+                }
             }
 
             foreach (var (buffer, memory) in submission.RetireBuffers)

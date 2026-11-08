@@ -17,13 +17,9 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
     private const int MAP_PRIVATE = 0x02;
     private const int MAP_FIXED = 0x10;
     private const int MAP_FIXED_NOREPLACE = 0x100000;
-    private const int O_RDWR = 0x2;
-    private static readonly int MAP_ANON = OperatingSystem.IsMacOS() ? 0x1000 : 0x20;
-    private static readonly int MAP_NORESERVE = OperatingSystem.IsMacOS() ? 0 : 0x4000;
-    private static readonly int O_CREAT = OperatingSystem.IsMacOS() ? 0x200 : 0x40;
-    private static readonly int O_EXCL = OperatingSystem.IsMacOS() ? 0x800 : 0x80;
+    private const int MAP_ANON = 0x20;
+    private const int MAP_NORESERVE = 0x4000;
     private static readonly nint MAP_FAILED = -1;
-    private static int _sharedObjectCounter;
 
     public ulong PageSize { get; } = (ulong)Environment.SystemPageSize;
 
@@ -38,7 +34,7 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
             return false;
         }
 
-        var descriptor = OperatingSystem.IsMacOS() ? OpenSharedObject() : memfd_create("SharpEmuBacking", 0);
+        var descriptor = memfd_create("SharpEmuBacking", 0);
         if (descriptor < 0)
         {
             return false;
@@ -80,7 +76,7 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
             return 0;
         }
 
-        var flags = MAP_PRIVATE | MAP_ANON | MAP_NORESERVE | (OperatingSystem.IsLinux() ? MAP_FIXED_NOREPLACE : 0);
+        var flags = MAP_PRIVATE | MAP_ANON | MAP_NORESERVE | MAP_FIXED_NOREPLACE;
         var ptr = mmap((nint)address, (nuint)size, PROT_NONE, flags, -1, 0);
         if (ptr == MAP_FAILED)
         {
@@ -258,18 +254,6 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
         }
     }
 
-    private static int OpenSharedObject()
-    {
-        var name = $"/sharpemu-{Environment.ProcessId}-{Interlocked.Increment(ref _sharedObjectCounter)}";
-        var descriptor = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0x180);
-        if (descriptor >= 0)
-        {
-            shm_unlink(name);
-        }
-
-        return descriptor;
-    }
-
     private static void ReleaseBackingObject(HostBackingObject backing)
     {
         munmap((nint)backing.AliasBase, (nuint)backing.Size);
@@ -305,10 +289,4 @@ internal sealed unsafe partial class PosixHostViews : IHostViewMemory
 
     [LibraryImport("libc", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
     private static partial int memfd_create(string name, uint flags);
-
-    [LibraryImport("libc", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
-    private static partial int shm_open(string name, int flags, int mode);
-
-    [LibraryImport("libc", SetLastError = true, StringMarshalling = StringMarshalling.Utf8)]
-    private static partial int shm_unlink(string name);
 }

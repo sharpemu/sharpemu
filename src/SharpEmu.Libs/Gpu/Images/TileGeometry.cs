@@ -21,6 +21,24 @@ public struct TileLevelSpan
 
 public readonly record struct TilePaddedSize(uint Width, uint Height);
 
+// The per-level output arrays of the layout queries, kept per thread: every draw that resolves a
+// target or a texture needs them for a moment and reads them before the next query.
+internal static class MipLayoutScratch
+{
+    [ThreadStatic] private static TileLevelSpan[]? _spans;
+    [ThreadStatic] private static TilePaddedSize[]? _padded;
+
+    // Zeroed, as a new array would be, so a level the query leaves out reads as empty.
+    public static (TileLevelSpan[] Spans, TilePaddedSize[] Padded) Rent()
+    {
+        var spans = _spans ??= new TileLevelSpan[TiledSurfaceLayout.MaxLevels];
+        var padded = _padded ??= new TilePaddedSize[TiledSurfaceLayout.MaxLevels];
+        Array.Clear(spans);
+        Array.Clear(padded);
+        return (spans, padded);
+    }
+}
+
 public enum TileBlockKind : uint
 {
     Standard256B,
@@ -32,6 +50,8 @@ public enum TileBlockKind : uint
     Prt64KB3D,
     RenderTarget64KB,
     Depth64KB,
+    RenderTarget64KBGen5,
+    GcnThin1D,
 }
 
 public readonly record struct TileBlockLayout(TileBlockKind Kind, uint BytesPerElement, uint BlockSize, uint BlockWidth, uint BlockHeight, uint BlockDepth)
@@ -98,6 +118,9 @@ public static partial class TileGeometry
 
     private readonly record struct BlockKindFacts(uint BlockSize, Log2BlockDimensions[] Dimensions, uint MaxBytesPerElement);
 
+    private const uint GcnMicroTileSide = 8;
+    private const uint GcnMicroTileMaxBytes = 16;
+
     private static readonly BlockKindFacts[] BlockKinds =
     [
         new(256, Thin256B, 16),
@@ -109,6 +132,7 @@ public static partial class TileGeometry
         new(65536, Thick64KB, 16),
         new(65536, Thin64KB, 16),
         new(65536, Thin64KB, 8),
+        new(65536, Thin64KB, 16),
     ];
 
     private static readonly Log2BlockDimensions[][] MsaaBlocks =
@@ -247,6 +271,7 @@ public static partial class TileGeometry
             case TileBlockKind.Standard64KB:
             case TileBlockKind.Prt64KB:
             case TileBlockKind.RenderTarget64KB:
+            case TileBlockKind.RenderTarget64KBGen5:
                 rule = new MipTailRule(TailThin64KB[index], block.BlockWidth >> 1, block.BlockHeight);
                 return true;
             default:
@@ -297,7 +322,7 @@ public static partial class TileGeometry
                 kind = TileBlockKind.Depth64KB;
                 break;
             case GuestTileMode.RenderTarget:
-                kind = TileBlockKind.RenderTarget64KB;
+                kind = TileBlockKind.RenderTarget64KBGen5;
                 break;
             default:
                 return false;
@@ -308,7 +333,7 @@ public static partial class TileGeometry
             return false;
         }
 
-        if (kind is TileBlockKind.Depth64KB or TileBlockKind.RenderTarget64KB &&
+        if (kind is TileBlockKind.Depth64KB or TileBlockKind.RenderTarget64KB or TileBlockKind.RenderTarget64KBGen5 &&
             GuestPixelFormats.RenderTargetBytesPerElement(format) != element.Bytes)
         {
             return false;
@@ -480,6 +505,18 @@ public static partial class TileGeometry
     public static bool TryGetBlockLayout(TileBlockKind kind, uint bytesPerElement, out TileBlockLayout layout)
     {
         layout = default;
+        if (kind == TileBlockKind.GcnThin1D)
+        {
+            if (!BitOperations.IsPow2(bytesPerElement) || bytesPerElement > GcnMicroTileMaxBytes)
+            {
+                return false;
+            }
+
+            layout = new TileBlockLayout(kind, bytesPerElement, GcnMicroTileSide * GcnMicroTileSide * bytesPerElement,
+                GcnMicroTileSide, GcnMicroTileSide, 1);
+            return true;
+        }
+
         if ((uint)kind >= BlockKinds.Length || !BitOperations.IsPow2(bytesPerElement))
         {
             return false;
@@ -602,6 +639,39 @@ public static partial class TileGeometry
         }
 
         totalSize = new TileSizeAndAlignment((uint)size, 65536);
+        return true;
+    }
+
+    public static bool TryGetDccSize(
+        uint width,
+        uint height,
+        uint slices,
+        uint bytesPerElement,
+        uint levels,
+        GuestTileMode tile,
+        out TileSizeAndAlignment totalSize,
+        uint fragmentsLog2 = 0)
+    {
+        totalSize = default;
+        if (width == 0 || height == 0 || slices == 0 || levels != 1 || fragmentsLog2 != 0 ||
+            !BitOperations.IsPow2(bytesPerElement) || bytesPerElement > 16 ||
+            tile is not (GuestTileMode.RenderTarget or GuestTileMode.Depth))
+        {
+            return false;
+        }
+
+        var coverageBits = 20 - BitOperations.TrailingZeroCount(bytesPerElement);
+        var blockWidth = 1u << ((coverageBits + 1) / 2);
+        var blockHeight = 1u << (coverageBits / 2);
+        var blocksX = ((ulong)width + blockWidth - 1) / blockWidth;
+        var blocksY = ((ulong)height + blockHeight - 1) / blockHeight;
+        var blocks = blocksX * blocksY;
+        if (blocks == 0 || blocks > uint.MaxValue / 4096u / slices)
+        {
+            return false;
+        }
+
+        totalSize = new TileSizeAndAlignment((uint)(blocks * slices * 4096u), 4096);
         return true;
     }
 

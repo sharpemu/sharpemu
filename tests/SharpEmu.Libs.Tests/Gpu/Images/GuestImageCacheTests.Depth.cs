@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
+using SharpEmu.Libs.Tests.Gpu.Scheduling;
+using SharpEmu.Libs.Tests.Memory.GuestMemory;
 using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
@@ -14,6 +17,134 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 // Depth and stencil overlaps, buffer synchronization from images, and layered conversions.
 public sealed unsafe partial class GuestImageCacheTests
 {
+    [Theory]
+    [InlineData(8ul, 4u, 1u)]
+    [InlineData(4ul, 2u, 2u)]
+    public void StencilAssociation_SeparatesChangedRangeOrExtent(ulong stencilSize, uint width, uint height)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var stencilAddress = address + 0x10000;
+        var original = AsDepthTarget(LinearRequest(address, 16, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new Extent3D(4, 1, 1), 1, 4, 1), Format.D32SfloatS8Uint);
+        original.Description.Stencil = new GuestSpan(stencilAddress, 4);
+        original.View = original.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        var originalIdentifier = harness.Acquire(ref original);
+        harness.MarkGpuWritten(originalIdentifier);
+        var originalAssociation = harness.ProxyAt(stencilAddress, 4);
+        var originalRecord = harness.Image(originalAssociation);
+        Assert.True(originalRecord.IsWatched);
+
+        var replacement = AsDepthTarget(LinearRequest(address + 0x4000, 16, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new Extent3D(width, height, 1), 1, 4, 1), Format.D32SfloatS8Uint);
+        replacement.Description.Stencil = new GuestSpan(stencilAddress, stencilSize);
+        replacement.View = replacement.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        var replacementIdentifier = harness.Find(ref replacement);
+        harness.Worker.Run(() => harness.Images.AssociateStencilForTest(replacementIdentifier, replacement.Description.Stencil));
+        var associations = harness.Images.FindImagesInRangeForTest(stencilAddress, stencilSize, false);
+        var replacementAssociation = Assert.Single(associations, identifier =>
+            harness.Image(identifier).DepthOwner == replacementIdentifier);
+
+        Assert.NotEqual(originalAssociation, replacementAssociation);
+        Assert.Equal(originalIdentifier, originalRecord.DepthOwner);
+        Assert.Equal(original.Description.Stencil, originalRecord.Description.Data);
+        Assert.True(originalRecord.IsWatched);
+        Assert.Equal(replacement.Description.Stencil, harness.Image(replacementAssociation).Description.Data);
+        Assert.Equal(replacement.Description.Extent, harness.Image(replacementAssociation).Description.Extent);
+    }
+
+    [Fact]
+    public void StencilAssociation_ReleasesFormerImageWriteProtection()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var stencilAddress = address + 0x10000;
+        var color = LinearRequest(stencilAddress, 4, Format.R32Uint, GuestPixelFormat.Bits32UInt,
+            GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var colorIdentifier = harness.Acquire(ref color);
+        var colorImage = harness.Image(colorIdentifier);
+        var colorBacking = colorImage.Backing.Handle;
+        Assert.True(colorImage.IsWatched);
+
+        var depth = AsDepthTarget(LinearRequest(address, 4, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1), Format.D32SfloatS8Uint);
+        depth.Description.Stencil = new GuestSpan(stencilAddress, 4);
+        depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        var depthIdentifier = harness.Find(ref depth);
+        harness.Worker.Run(() => harness.Images.AssociateStencilForTest(depthIdentifier, depth.Description.Stencil));
+
+        var association = harness.ProxyAt(stencilAddress, 4);
+        Assert.True(association.IsValid);
+        Assert.Equal(colorIdentifier, association);
+        Assert.Equal(depthIdentifier, colorImage.DepthOwner);
+        Assert.Equal(colorBacking, colorImage.Backing.Handle);
+        Assert.False(colorImage.IsWatched);
+        Assert.Equal(SharpEmu.HLE.Host.HostPageProtection.ReadWrite, harness.Protection(stencilAddress));
+        harness.Worker.Run(() => harness.Images.AssociateStencilForTest(depthIdentifier, depth.Description.Stencil));
+        Assert.Equal(association, harness.ProxyAt(stencilAddress, 4));
+
+        Assert.False(colorImage.IsWatched);
+        Assert.Equal(SharpEmu.HLE.Host.HostPageProtection.ReadWrite, harness.Protection(stencilAddress));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void StencilAssociation_PreservesActiveWatchOnReuse(bool changeDepthOwner)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        var views = new FailingHostViews(HostViewMemory.Create());
+        using var harness = new CacheHarness(_vulkan, viewHost: views);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var stencilAddress = address + 0x10000;
+        harness.Write(address, Bytes(0.25f, 0.5f, 0.75f, 1.0f));
+        harness.Write(stencilAddress, [0x01, 0x02, 0x03, 0x04]);
+        var depth = AsDepthTarget(LinearRequest(address, 16, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new Extent3D(4, 1, 1), 1, 4, 1), Format.D32SfloatS8Uint);
+        depth.Description.Stencil = new GuestSpan(stencilAddress, 4);
+        depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        var depthIdentifier = harness.Acquire(ref depth);
+        harness.MarkGpuWritten(depthIdentifier);
+        var association = harness.ProxyAt(stencilAddress, 4);
+        var record = harness.Image(association);
+        Assert.True(record.IsWatched);
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(stencilAddress));
+
+        if (changeDepthOwner)
+        {
+            var previousDepthIdentifier = depthIdentifier;
+            depth.Description.Data = new GuestSpan(address + 0x4000, 16);
+            depthIdentifier = harness.Acquire(ref depth);
+            harness.MarkGpuWritten(depthIdentifier);
+            Assert.NotEqual(previousDepthIdentifier, depthIdentifier);
+        }
+
+        var protectionCalls = views.Log.Count(operation => operation == FailingHostViews.Op.ChangeAccess);
+        for (var index = 0; index < 16; index++)
+        {
+            harness.Worker.Run(() => harness.Images.AssociateStencilForTest(depthIdentifier, depth.Description.Stencil));
+            Assert.True(record.IsWatched);
+            Assert.Equal(depthIdentifier, record.DepthOwner);
+            Assert.Equal(association, harness.ProxyAt(stencilAddress, 4));
+            Assert.Equal(depthIdentifier, harness.Acquire(ref depth));
+            harness.MarkGpuWritten(depthIdentifier);
+        }
+
+        Assert.Equal(protectionCalls, views.Log.Count(operation => operation == FailingHostViews.Op.ChangeAccess));
+        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(stencilAddress));
+        harness.Write(stencilAddress, [0x05, 0x06, 0x07, 0x08]);
+        Assert.True(harness.WriteFault(stencilAddress));
+        Assert.False(record.IsWatched);
+        Assert.True(record.IsDefinitelyCpuDirty);
+        Assert.Equal(depthIdentifier, harness.Acquire(ref depth));
+        Assert.True(record.IsWatched);
+        Assert.Equal(new byte[] { 0x05, 0x06, 0x07, 0x08 },
+            harness.ReadImageBytes(harness.Image(depthIdentifier), ImageAspectFlags.StencilBit)[..4]);
+        harness.Shutdown();
+    }
+
     [Fact]
     public void BufferSynchronization_CopiesFittingMipsVolumesAndWholeDepthOnly()
     {
@@ -96,6 +227,115 @@ public sealed unsafe partial class GuestImageCacheTests
         harness.Shutdown();
     }
 
+    // A tiled array's mip layout ends before its tile plan does: each level spans its size times the layer count from
+    // its offset in the first slice, while every 64 KiB slice holds a whole chain with the base level last. A buffer
+    // over the whole image takes every tile; a buffer that ends inside the last tile keeps the guest bytes.
+    [Fact]
+    public unsafe void BufferSynchronization_CoversTheWholeTilePlanOfAnArray()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var fatal = new FatalScope();
+        using var harness = new CacheHarness(_vulkan);
+        const uint width = 128, levels = 8, layers = 64;
+        const GuestPixelFormat guestFormat = GuestPixelFormat.Bits32_32_32_32UInt;
+        var size = TileGeometry.TextureTotalSize(guestFormat, width, width, layers, levels, GuestTileMode.Standard64KB, false).Size;
+        var address = harness.MapBacked(size, ReadWrite);
+        var request = LinearRequest(address, size, Format.R32G32B32A32Uint, guestFormat, GuestImageType.Color2D, new Extent3D(width, width, 1), layers, 16, 1);
+        request.Description.TileMode = GuestTileMode.Standard64KB;
+        request.Description.Pitch = TileGeometry.TexturePitch(guestFormat, width, GuestTileMode.Standard64KB);
+        request.Description.Resources = new SubresourceCount(levels, layers);
+        request.View = request.View with { LevelCount = levels };
+        ImageRequestBuilders.PopulateTextureMipLayout(ref request.Description);
+        var layoutEnd = 0UL;
+        for (var level = 0; level < levels; level++)
+        {
+            layoutEnd = Math.Max(layoutEnd, request.Description.MipLayout[level].Offset + request.Description.MipLayout[level].Size);
+        }
+
+        // The layout of the image whose download aborted the process: tiles of layers 43-63 lay past 0x1020000.
+        Assert.Equal(0x1800000UL, size);
+        Assert.Equal(0x1020000UL, layoutEnd);
+        var identifier = harness.Acquire(ref request);
+        var image = harness.Image(identifier);
+        uint[] texel = [0x11223344, 0x55667788, 0x99aabbcc, 0xddeeff00];
+        harness.Worker.Run(() =>
+        {
+            var command = new CommandBuffer(harness.Scheduler.Current.Handle);
+            image.Transition(AccessFlags.TransferWriteBit, null, command);
+            var clear = new ClearColorValue { Uint32_0 = texel[0], Uint32_1 = texel[1], Uint32_2 = texel[2], Uint32_3 = texel[3] };
+            var range = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, levels, 0, layers);
+            harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.General, &clear, 1, &range);
+        });
+        harness.MarkGpuWritten(identifier);
+        harness.Worker.Run(() =>
+        {
+            using var partial = new GpuBuffer(harness.Vulkan.DeviceInfo, harness.Scheduler, GpuBufferUsage.DeviceLocal, address, GpuBuffer.AllFlags, size - 16);
+            Assert.False(harness.Images.TrySynchronizeBufferFromImage(partial, address, size - 16));
+            using var full = new GpuBuffer(harness.Vulkan.DeviceInfo, harness.Scheduler, GpuBufferUsage.DeviceLocal, address, GpuBuffer.AllFlags, size);
+            Assert.True(harness.Images.TrySynchronizeBufferFromImage(full, address, size));
+            var lastTile = harness.CopyFromDevice(full.Handle, size - 0x40000, 0x40000);
+            Assert.Equal(Bytes(Enumerable.Range(0, 0x4000).SelectMany(_ => texel).ToArray()), lastTile);
+        });
+        Assert.Empty(fatal.Messages);
+        harness.Shutdown();
+    }
+
+    // A linear array's copy regions follow its slice stride, past the end of its mip layout (each level spans its
+    // size times the layer count from its offset in the first slice). A buffer over the whole image takes every slice;
+    // a buffer that holds only the mip layout keeps the guest bytes instead of a copy past its end.
+    [Fact]
+    public unsafe void BufferSynchronization_CoversTheCopyRegionsOfALinearArray()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var fatal = new FatalScope();
+        using var harness = new CacheHarness(_vulkan);
+        const uint width = 64, levels = 7, layers = 4;
+        const GuestPixelFormat guestFormat = GuestPixelFormat.Bits8_8_8_8UNorm;
+        var size = TileGeometry.TextureTotalSize(guestFormat, width, width, layers, levels, GuestTileMode.Linear, false).Size;
+        var address = harness.MapBacked((size + 0xFFFF) & ~0xFFFFUL, ReadWrite);
+        var request = LinearRequest(address, size, Format.R8G8B8A8Unorm, guestFormat, GuestImageType.Color2D, new Extent3D(width, width, 1), layers, 4, 1);
+        request.Description.TileMode = GuestTileMode.Linear;
+        request.Description.Pitch = TileGeometry.TexturePitch(guestFormat, width, GuestTileMode.Linear);
+        request.Description.Resources = new SubresourceCount(levels, layers);
+        request.View = request.View with { LevelCount = levels };
+        ImageRequestBuilders.PopulateTextureMipLayout(ref request.Description);
+        var layoutEnd = 0UL;
+        for (var level = 0; level < levels; level++)
+        {
+            layoutEnd = Math.Max(layoutEnd, request.Description.MipLayout[level].Offset + request.Description.MipLayout[level].Size);
+        }
+
+        Assert.True(layoutEnd < size);
+        var identifier = harness.Acquire(ref request);
+        var image = harness.Image(identifier);
+        harness.Worker.Run(() =>
+        {
+            var command = new CommandBuffer(harness.Scheduler.Current.Handle);
+            image.Transition(AccessFlags.TransferWriteBit, null, command);
+            var clear = new ClearColorValue { Uint32_0 = 0, Uint32_1 = 0, Uint32_2 = 0, Uint32_3 = 0 };
+            clear.Float32_0 = 1f;
+            var range = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, levels, 0, layers);
+            harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.General, &clear, 1, &range);
+        });
+        harness.MarkGpuWritten(identifier);
+        harness.Worker.Run(() =>
+        {
+            using var partial = new GpuBuffer(harness.Vulkan.DeviceInfo, harness.Scheduler, GpuBufferUsage.DeviceLocal, address, GpuBuffer.AllFlags, layoutEnd);
+            Assert.False(harness.Images.TrySynchronizeBufferFromImage(partial, address, layoutEnd));
+            using var full = new GpuBuffer(harness.Vulkan.DeviceInfo, harness.Scheduler, GpuBufferUsage.DeviceLocal, address, GpuBuffer.AllFlags, size);
+            Assert.True(harness.Images.TrySynchronizeBufferFromImage(full, address, size));
+            // The base level of the last layer, where the transfer layout puts it: every texel is (1, 0, 0, 0).
+            var layout = TextureTransferLayout.Compute(guestFormat, width, width, levels, layers, GuestTileMode.Linear, size,
+                allowDepthTile: false, volume: false, "test");
+            Assert.True(layout.Mips[0].Offset + (layers - 1) * layout.SliceStride + width * width * 4 > layoutEnd);
+            var lastLayer = harness.CopyFromDevice(full.Handle, layout.Mips[0].Offset + (layers - 1) * layout.SliceStride, width * width * 4);
+            Assert.All(Enumerable.Range(0, (int)(width * width)), texel =>
+                Assert.Equal(0x000000FFu, BitConverter.ToUInt32(lastLayer, texel * 4)));
+        });
+        Assert.Empty(fatal.Messages);
+        harness.Shutdown();
+    }
+
     [Fact]
     public void RawD16UintTexture_RecreatesAnIntegerBacking()
     {
@@ -130,10 +370,10 @@ public sealed unsafe partial class GuestImageCacheTests
         {
             var image = harness.Image(layeredColorId);
             var command = new CommandBuffer(harness.Scheduler.Current.Handle);
-            image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            image.Transition(AccessFlags.TransferWriteBit, null, command);
             var clear = new ClearColorValue { Float32_0 = 1.0f };
             var range = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, 0, 6);
-            harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clear, 1, &range);
+            harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.General, &clear, 1, &range);
         });
         harness.MarkGpuWritten(layeredColorId);
 
@@ -183,12 +423,12 @@ public sealed unsafe partial class GuestImageCacheTests
         {
             var image = harness.Image(colorIdentifier);
             var command = new CommandBuffer(harness.Scheduler.Current.Handle);
-            image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, null, command);
+            image.Transition(AccessFlags.TransferWriteBit, null, command);
             for (uint layer = 0; layer < layers; layer++)
             {
                 var clear = new ClearColorValue { Float32_0 = (layer + 1) / 8f };
                 var range = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, layer, 1);
-                harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clear, 1, &range);
+                harness.Vulkan.Vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.General, &clear, 1, &range);
             }
         });
         harness.MarkGpuWritten(colorIdentifier);
@@ -227,6 +467,48 @@ public sealed unsafe partial class GuestImageCacheTests
         var refreshed = harness.ReadImageBytes(owner, ImageAspectFlags.DepthBit);
         for (var layer = 0; layer < layers; layer++)
             Assert.Equal(0.75f, BitConverter.ToSingle(refreshed, layer * (int)sliceSize));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void PartialDepthViewOfStencilTarget_KeepsTheStencilPlaneOfEveryLayer()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const uint layers = 6;
+        const ulong depthSlice = 16;
+        const ulong stencilSlice = 4;
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var stencilAddress = address + 0x10000;
+        var stencilBytes = new byte[stencilSlice * layers];
+        for (var index = 0; index < stencilBytes.Length; index++)
+            stencilBytes[index] = (byte)(0x10 + index);
+        harness.Write(stencilAddress, stencilBytes);
+        var layered = AsDepthTarget(LinearRequest(address, depthSlice * layers, Format.R32Sfloat, GuestPixelFormat.Bits32Float,
+            GuestImageType.Color2D, new Extent3D(4, 1, 1), layers, 4, 1), Format.D32SfloatS8Uint);
+        layered.Description.Stencil = new GuestSpan(stencilAddress, stencilSlice * layers);
+        layered.View = layered.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        var layeredIdentifier = harness.Acquire(ref layered);
+        var owner = harness.Image(layeredIdentifier);
+
+        // A view of the first slice names one layer's depth and stencil. The cached owner keeps its six layers,
+        // and its stencil association keeps the plane of every layer.
+        var first = layered;
+        first.Description.Data = new GuestSpan(address, depthSlice);
+        first.Description.Resources = SubresourceCount.Single;
+        first.Description.MipLayout[0].Size = depthSlice;
+        first.Description.Stencil = new GuestSpan(stencilAddress, stencilSlice);
+        first.View = first.View with { Type = ImageViewType.Type2D, LayerCount = 1 };
+        Assert.Equal(layeredIdentifier, harness.Acquire(ref first));
+        Assert.Equal(layered.Description.Stencil, owner.Description.Stencil);
+        Assert.Equal(stencilBytes, harness.ReadImageBytes(owner, ImageAspectFlags.StencilBit)[..stencilBytes.Length]);
+
+        // A guest store into the plane refreshes the stencil of every layer through the view of the first slice.
+        var replacement = stencilBytes.Select(value => (byte)(value + 0x40)).ToArray();
+        harness.Write(stencilAddress, replacement);
+        Assert.True(harness.WriteFault(stencilAddress));
+        Assert.Equal(layeredIdentifier, harness.Acquire(ref first));
+        Assert.Equal(replacement, harness.ReadImageBytes(owner, ImageAspectFlags.StencilBit)[..replacement.Length]);
         harness.Shutdown();
     }
 
@@ -281,7 +563,7 @@ public sealed unsafe partial class GuestImageCacheTests
         Assert.NotEqual(0UL, depthView.Handle);
         var depthImage = harness.Image(depthId);
         Assert.Equal(2u, depthImage.Backing.Samples);
-        Assert.Equal(ImageLayout.DepthStencilAttachmentOptimal, depthImage.Backing.State.Layout);
+        Assert.Equal(ImageLayout.General, depthImage.Backing.State.Layout);
         Assert.True(depthImage.IsGpuModified);
         Assert.Equal(0u, depthImage.Description.HtileClearMask);
         Assert.Equal(depth.Description.Metadata.Range, depthImage.Description.Metadata.Range);

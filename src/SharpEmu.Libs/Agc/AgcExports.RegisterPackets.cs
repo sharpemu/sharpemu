@@ -109,12 +109,9 @@ public static partial class AgcExports
         ulong commandAddress;
         using (AgcRegisterPacketProfile.Measure(AgcRegisterPacketProfile.Phase.PacketSetup))
         {
-            if (!TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var markerAddress) ||
-                !TryWriteUInt32(ctx, markerAddress, Pm4(2, ItNop, RZero)) ||
-                !TryWriteUInt32(ctx, markerAddress + 4, CbSetShRegisterRangeMarker) ||
+            if (!TryEmitCommandDwords(ctx, commandBufferAddress, out _, Pm4(2, ItNop, RZero), CbSetShRegisterRangeMarker) ||
                 !TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out commandAddress) ||
-                !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItSetShReg, 0)) ||
-                !TryWriteUInt32(ctx, commandAddress + 4, offset))
+                !TryWriteCommandDwords(ctx, commandAddress, Pm4(packetDwords, ItSetShReg, 0), offset))
             {
                 AgcRegisterPacketProfile.RecordResult(false);
                 return ReturnPointer(ctx, 0);
@@ -215,12 +212,28 @@ public static partial class AgcExports
         DcbSetRegistersIndirect(ctx, RCxRegsIndirect, "cx");
 
     [SysAbiExport(
+        Nid = "GBCh3zCihoU",
+        ExportName = "sceAgcDcbSetCxRegistersIndirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetCxRegistersIndirectGetSize(CpuContext ctx) =>
+        DcbSetRegistersIndirectGetSize(ctx);
+
+    [SysAbiExport(
         Nid = "-HOOCn0JY48",
         ExportName = "sceAgcDcbSetShRegistersIndirect",
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
     public static int DcbSetShRegistersIndirect(CpuContext ctx) =>
         DcbSetRegistersIndirect(ctx, RShRegsIndirect, "sh");
+
+    [SysAbiExport(
+        Nid = "nNlUtdDDvZ0",
+        ExportName = "sceAgcDcbSetShRegistersIndirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetShRegistersIndirectGetSize(CpuContext ctx) =>
+        DcbSetRegistersIndirectGetSize(ctx);
 
     [SysAbiExport(
         Nid = "pFLArOT53+w",
@@ -250,6 +263,14 @@ public static partial class AgcExports
         DcbSetRegistersIndirect(ctx, RUcRegsIndirect, "uc");
 
     [SysAbiExport(
+        Nid = "UQGTw4xRlcM",
+        ExportName = "sceAgcDcbSetUcRegistersIndirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetUcRegistersIndirectGetSize(CpuContext ctx) =>
+        DcbSetRegistersIndirectGetSize(ctx);
+
+    [SysAbiExport(
         Nid = "w4-d0n60hdo",
         ExportName = "sceAgcDcbSetUcRegisterDirect",
         Target = Generation.Gen5,
@@ -268,6 +289,9 @@ public static partial class AgcExports
         ctx[CpuRegister.Rax] = 3u * sizeof(uint);
         return (int)ctx[CpuRegister.Rax];
     }
+
+    // DcbSetRegistersIndirect writes the same five dwords for every register space.
+    private static int DcbSetRegistersIndirectGetSize(CpuContext ctx) => ctx.SetReturn(5 * sizeof(uint));
 
     private static int DcbSetRegistersIndirect(CpuContext ctx, uint packetRegister, string registerSpace)
     {
@@ -288,17 +312,21 @@ public static partial class AgcExports
             _ => 0u,
         };
         if (op == 0 ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, 5, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(5, op, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, (uint)(registersAddress & 0xFFFF_FFFCUL)) ||
-            !TryWriteUInt32(ctx, commandAddress + 8, (uint)(registersAddress >> 32)) ||
-            !TryWriteUInt32(ctx, commandAddress + 12, 0x8000_0000u) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, registerCount & 0x3FFFu))
+            !TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(5, op, 0), (uint)(registersAddress & 0xFFFF_FFFCUL), (uint)(registersAddress >> 32), 0x8000_0000u, registerCount & 0x3FFFu))
         {
             return ReturnPointer(ctx, 0);
         }
 
         TraceAgc($"agc.dcb_set_{registerSpace}_indirect buf=0x{commandBufferAddress:X16} cmd=0x{commandAddress:X16} regs=0x{registersAddress:X16} count={registerCount}");
+        if (_traceAgc && (registerCount & 0x3FFFu) != 0)
+        {
+            Span<byte> tableSnapshot = stackalloc byte[(int)Math.Min(registerCount & 0x3FFFu, 16u) * 8];
+            var tableAddress = registersAddress & ~3UL;
+            var captured = ctx.Memory.TryRead(tableAddress, tableSnapshot);
+            TraceAgc($"agc.register_table_created cmd=0x{commandAddress:X16} bank={registerSpace} " +
+                $"table=0x{tableAddress:X16} count={registerCount & 0x3FFFu} captured={captured} " +
+                $"bytes={(captured ? Convert.ToHexString(tableSnapshot) : string.Empty)}");
+        }
         return ReturnPointer(ctx, commandAddress);
     }
 

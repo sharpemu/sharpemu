@@ -43,27 +43,89 @@ public static partial class ImageRequestBuilders
 
     public static uint SampleCount(uint encodedLog2) => encodedLog2 <= 3 ? 1u << (int)encodedLog2 : 0;
 
+    private static bool DccAlphaOnMsb(in ColorTargetWords words)
+    {
+        switch (words.Layout)
+        {
+            case ChannelLayout.Bits10_10_10_2:
+            case ChannelLayout.Bits10_10_10_2Float:
+            case ChannelLayout.Bits5_5_5_1:
+                return true;
+            case ChannelLayout.Bits2_10_10_10:
+            case ChannelLayout.Bits1_5_5_5:
+                return false;
+        }
+
+        var components = GuestPixelFormats.ResolveRenderTargetEncoding(words.Layout, words.NumberType).Components;
+        if (components == 1)
+        {
+            return words.Order != ChannelOrder.Standard;
+        }
+
+        return components == 3 || words.Order is ChannelOrder.Standard or ChannelOrder.Alternate;
+    }
+
     // DCC clears use the target's packed clear word; the fixed-clear set is a format allow-list.
     private static (bool Supported, bool FixedSupported, ClearColorValue Value) DccClearInfo(Format format, bool hasDcc, uint packedClear)
     {
         ClearColorValue value = default;
         var supported = hasDcc && PackedClearValue.TryDecodeColor(format, packedClear, out value);
-        var fixedSupported = hasDcc && SupportsDccFixedClear(format);
+        var fixedSupported = hasDcc && PackedClearValue.SupportsDccFixedColor(format);
         return (supported, fixedSupported, supported ? value : default);
     }
 
-    public static bool SupportsDccFixedClear(Format format) => format switch
+    public static bool SupportsDccFixedClear(Format format) => PackedClearValue.SupportsDccFixedColor(format);
+
+    // Every draw rebuilds its targets' requests (a whole mip layout) from the same register words,
+    // twice: once for the attachments and once for the pixel outputs. The build reads nothing but
+    // its arguments, so a result is reused while they are equal.
+    private struct ColorTargetMemo
     {
-        Format.R8Unorm or Format.R8G8Unorm or Format.R8G8B8A8Unorm or Format.R8G8B8A8Srgb or Format.B8G8R8A8Unorm or Format.B8G8R8A8Srgb or
-        Format.A2B10G10R10UnormPack32 or Format.A2R10G10B10UnormPack32 or Format.R5G6B5UnormPack16 or Format.A1R5G5B5UnormPack16 or
-        Format.R4G4B4A4UnormPack16 or Format.R16Unorm or Format.R16G16Unorm or Format.R16G16B16A16Unorm or Format.R16Sfloat or
-        Format.R16G16Sfloat or Format.R16G16B16A16Sfloat or Format.R32Sfloat or Format.R32G32Sfloat or Format.R32G32B32A32Sfloat or
-        Format.B10G11R11UfloatPack32 => true,
-        _ => false,
-    };
+        public bool Valid;
+        public ColorTargetWords Words;
+        public uint TargetMask;
+        public uint DrawLayerOffset;
+        public bool IgnoreTargetMask;
+        public ColorTargetResolution? Result;
+    }
+
+    private const int TargetMemoCount = 8;
+
+    [ThreadStatic]
+    private static ColorTargetMemo[]? _colorTargetMemos;
+
+    private static int TargetMemoSlot(ulong address) => (int)((address >> 12) ^ (address >> 20)) & (TargetMemoCount - 1);
 
     // Builds the request for a bound color target. Null when the slot carries no target.
     public static ColorTargetResolution? ColorTarget(in ColorTargetWords words, uint targetMask, uint drawLayerOffset, bool ignoreTargetMask)
+    {
+        if (Rendering.RenderTrace.Enabled)
+        {
+            return ColorTargetCore(in words, targetMask, drawLayerOffset, ignoreTargetMask);
+        }
+
+        var memos = _colorTargetMemos ??= new ColorTargetMemo[TargetMemoCount];
+        ref var memo = ref memos[TargetMemoSlot(words.BaseAddress)];
+        if (memo.Valid && memo.TargetMask == targetMask && memo.DrawLayerOffset == drawLayerOffset &&
+            memo.IgnoreTargetMask == ignoreTargetMask && memo.Words.Equals(words))
+        {
+            return memo.Result;
+        }
+
+        var result = ColorTargetCore(in words, targetMask, drawLayerOffset, ignoreTargetMask);
+        memo = new ColorTargetMemo
+        {
+            Valid = true,
+            Words = words,
+            TargetMask = targetMask,
+            DrawLayerOffset = drawLayerOffset,
+            IgnoreTargetMask = ignoreTargetMask,
+            Result = result,
+        };
+        return result;
+    }
+
+    private static ColorTargetResolution? ColorTargetCore(in ColorTargetWords words, uint targetMask, uint drawLayerOffset, bool ignoreTargetMask)
     {
         var mask = targetMask & 0xF;
         if (ignoreTargetMask && words.BaseAddress != 0 && mask == 0)
@@ -81,7 +143,7 @@ public static partial class ImageRequestBuilders
         }
 
         var samples = SampleCount(words.FragmentsLog2);
-        if (samples == 0 || words.SamplesLog2 != words.FragmentsLog2)
+        if (samples == 0 || words.SamplesLog2 < words.FragmentsLog2)
         {
             throw SubmissionScheduler.Fatal($"The render-target sample configuration is not supported: samples={words.SamplesLog2} fragments={words.FragmentsLog2}.");
         }
@@ -216,11 +278,12 @@ public static partial class ImageRequestBuilders
         }
         else
         {
-            pitch = width;
+            // A linear color buffer uses the same 256-byte row alignment as a linear texture of the same memory;
+            // an unaligned pitch made the target and a later texture view of it two different cached images.
+            pitch = TileGeometry.TexturePitch(transferFormat, width, GuestTileMode.Linear);
         }
 
-        var mipSpans = new TileLevelSpan[TiledSurfaceLayout.MaxLevels];
-        var mipPadded = new TilePaddedSize[TiledSurfaceLayout.MaxLevels];
+        var (mipSpans, mipPadded) = MipLayoutScratch.Rent();
         TiledSurfaceLayout? volumeLayout = null;
         ulong size;
         ulong backingSize = 0;
@@ -308,6 +371,11 @@ public static partial class ImageRequestBuilders
         {
             throw SubmissionScheduler.Fatal($"The 3D render-target view starts past the mip depth: base={view.BaseLayer} count={view.LayerCount} depth={viewDepth} mip={words.MipLevel}.");
         }
+        if (volume)
+        {
+            // The slice window does not increase the storage depth of a volume.
+            view = view with { LayerCount = Math.Min(view.LayerCount, viewDepth - view.BaseLayer) };
+        }
 
         var description = ImageDescription.Create();
         description.Data = new GuestSpan(words.BaseAddress, backingSize);
@@ -324,8 +392,14 @@ public static partial class ImageRequestBuilders
         if (hasDcc)
         {
             // DCC lives in its own allocation; the address lets the cache match fills seen before the target.
+            _ = TileGeometry.TryGetDccSize(
+                width, height, volume ? depth : view.ImageLayers, bytesPerElement, levels, tileMode,
+                out var metadataSize, words.FragmentsLog2);
             description.Metadata.Kind = MetadataKind.Dcc;
-            description.Metadata.Range = new GuestSpan(words.DccAddress, 0);
+            description.Metadata.Range = new GuestSpan(words.DccAddress, metadataSize.Size);
+            description.Metadata.DccClearWord = words.ClearWord0;
+            description.Metadata.DccClearRegisterValid = true;
+            description.Metadata.DccAlphaMsb = DccAlphaOnMsb(words);
         }
 
         for (var level = 0; level < levels; level++)
@@ -350,6 +424,52 @@ public static partial class ImageRequestBuilders
             targetFormat.HostFormat, viewType, ImageAspectFlags.ColorBit, words.MipLevel, 1, view.BaseLayer, view.LayerCount, default, ImageUsageFlags.ColorAttachmentBit);
         var request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
         var (clearSupported, fixedClearSupported, clearValue) = DccClearInfo(targetFormat.HostFormat, hasDcc, words.ClearWord0);
+        if (hasDcc && fixedClearSupported && words.Order == ChannelOrder.Standard &&
+            !is1D && levels == 1 && samples == 1 && tileMode == GuestTileMode.RenderTarget)
+        {
+            var sliceSize = NativeColorClear.SliceSize(width, height, bytesPerElement);
+            var metadataSize = sliceSize * description.TransferLayers;
+            if (sliceSize != 0 && (words.DccAddress & 4095) == 0 &&
+                metadataSize <= ulong.MaxValue - words.DccAddress)
+            {
+                description.Metadata.Range = new GuestSpan(words.DccAddress, metadataSize);
+                description.Metadata.NativeColorClear = true;
+                description.Metadata.ColorAlphaOnLeastSignificantBits = words.Layout is
+                    ChannelLayout.Bits8 or ChannelLayout.Bits16 or ChannelLayout.Bits32 or
+                    ChannelLayout.Bits2_10_10_10 or ChannelLayout.Bits1_5_5_5;
+                description.Metadata.ColorMetadataBaseLayer = view.BaseLayer;
+                description.Metadata.PackedColorClearSupported = clearSupported;
+                description.Metadata.PackedColorClear = clearValue;
+                request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
+            }
+        }
+        // DCC takes precedence. CMASK register clears apply only to single-sample color targets.
+        if (!words.DccEnabled && words.FastClear && words.CmaskAddress != 0 &&
+            !words.FmaskCompression && !words.WriteVrsRateHintToCmask &&
+            !is1D && levels == 1 && samples == 1 && tileMode == GuestTileMode.RenderTarget &&
+            PackedClearValue.TryDecodeColor(targetFormat.HostFormat, words.ClearWord0, out var cmaskClear))
+        {
+            var sliceSize = NativeColorClear.CmaskSliceSize(width, height);
+            var metadataSize = sliceSize * description.TransferLayers;
+            if (sliceSize != 0 && (words.CmaskAddress & 4095) == 0 &&
+                metadataSize <= ulong.MaxValue - words.CmaskAddress)
+            {
+                description.Metadata.Kind = MetadataKind.Cmask;
+                description.Metadata.Range = new GuestSpan(words.CmaskAddress, metadataSize);
+                description.Metadata.NativeColorClear = true;
+                description.Metadata.ColorMetadataBaseLayer = view.BaseLayer;
+                description.Metadata.PackedColorClearSupported = true;
+                description.Metadata.PackedColorClear = cmaskClear;
+                request = new ImageRequest(description, viewDescription, ImageRole.ColorTarget);
+            }
+        }
+        if (ImageClearTrace.Enabled)
+        {
+            ImageClearTrace.Write($"target image=0x{words.BaseAddress:X16} extent={width}x{height} format={targetFormat.HostFormat} " +
+                $"metadata=0x{words.DccAddress:X16} enabled={hasDcc} mip={words.MipLevel} layer={view.BaseLayer} layers={view.LayerCount} " +
+                $"info=0x{words.Info:X8} control=0x{words.DccControl:X8} clear0=0x{words.ClearWord0:X8} " +
+                $"packedSupported={clearSupported} fixedSupported={fixedClearSupported}");
+        }
         return new ColorTargetResolution(
             request, words.BaseAddress, backingSize, viewExtent, words.MipLevel, view.BaseLayer, samples, targetFormat.ExportMapping,
             clearSupported, fixedClearSupported, clearValue);

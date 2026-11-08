@@ -55,13 +55,13 @@ public sealed class VulkanCommandProfileTests(HeadlessVulkanFixture fixture) : I
             device.BeginBuffer(buffer);
             for (var index = 0; index < VulkanCommandProfile.QueryCapacity * 2; index++)
                 profile.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
-            device.EndBuffer(buffer);
+            device.EndBuffer(buffer, hostRead: true);
             Assert.Equal(0UL, profile.CollectedIntervals);
             SubmitAndWait(device, buffer, 1);
             device.BeginBuffer(buffer);
             Assert.Equal((ulong)VulkanCommandProfile.QueryCapacity - 1, profile.CollectedIntervals);
             Assert.Equal(1, profile.ProfiledBufferCount);
-            device.EndBuffer(buffer);
+            device.EndBuffer(buffer, hostRead: true);
             SubmitAndWait(device, buffer, 2);
         }
         Assert.Equal((ulong)VulkanCommandProfile.QueryCapacity, profile.CollectedIntervals);
@@ -88,8 +88,10 @@ public sealed class VulkanCommandProfileTests(HeadlessVulkanFixture fixture) : I
             device.CommandProfile!.PerCommandMarkers = true;
             device.CommandProfile.WriteMarker(command, VulkanCommandProfile.IntervalKind.Preparation);
             device.CommandProfile.WriteMarker(command, VulkanCommandProfile.IntervalKind.Draw, 1, 3, 1);
+            device.CommandProfile.WriteMarker(command, VulkanCommandProfile.IntervalKind.MeshDraw, 2, 3, 2, 1,
+                new VulkanCommandProfile.MeshDrawState(1, 1, 1, 1, 1, 1, true, false));
             vulkan.Vk.CmdEndRendering(command);
-            device.EndBuffer(buffer);
+            device.EndBuffer(buffer, hostRead: true);
             SubmitAndWait(device, buffer, 1);
         }
         vulkan.AssertNoValidationMessages();
@@ -106,7 +108,7 @@ public sealed class VulkanCommandProfileTests(HeadlessVulkanFixture fixture) : I
         {
             var buffer = device.AllocateBuffers(1)[0];
             device.BeginBuffer(buffer);
-            device.EndBuffer(buffer);
+            device.EndBuffer(buffer, hostRead: true);
         }
         Assert.Equal(0UL, profile.CollectedIntervals);
         vulkan.AssertNoValidationMessages();
@@ -117,7 +119,7 @@ public sealed class VulkanCommandProfileTests(HeadlessVulkanFixture fixture) : I
         var submission = new SubmitBundle();
         submission.AddSignal(device.TimelineHandle, tick);
         lock (device.QueueGate)
-            Assert.True(device.TrySubmit(buffer, submission, out var submitFailure), submitFailure);
+            Assert.True(device.TrySubmit([buffer], submission, out var submitFailure), submitFailure);
         Assert.True(device.TryWaitTimeline(tick, out var waitFailure), waitFailure);
     }
 }

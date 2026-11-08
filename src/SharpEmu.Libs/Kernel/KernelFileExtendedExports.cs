@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.HLE.FileSystem;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Threading;
@@ -34,11 +35,37 @@ public static partial class KernelMemoryCompatExports
     private static long _nextAioSubmitId = 1;
     private static readonly ConcurrentDictionary<uint, int> _aioResults = new();
 
-    private static FileStream? GetOpenFile(int fd)
+    private static Stream? GetOpenFile(int fd)
     {
         lock (_fdGate)
         {
             return _openFiles.TryGetValue(fd, out var stream) ? stream : null;
+        }
+    }
+
+    // A descriptor is a host file or a read-only file served from a mounted archive.
+    private static int ReadOpenFileAt(Stream stream, Span<byte> buffer, long offset) => stream switch
+    {
+        FileStream file => RandomAccess.Read(file.SafeFileHandle, buffer, offset),
+        ZArchiveFileStream archived => archived.ReadAt(buffer, offset),
+        _ => throw new IOException("The descriptor does not support positional reads."),
+    };
+
+    private static void WriteOpenFileAt(Stream stream, ReadOnlySpan<byte> payload, long offset)
+    {
+        if (stream is not FileStream file)
+        {
+            throw new IOException("The descriptor is read-only.");
+        }
+
+        RandomAccess.Write(file.SafeFileHandle, payload, offset);
+    }
+
+    private static void FlushOpenFileToDisk(Stream stream)
+    {
+        if (stream is FileStream file)
+        {
+            file.Flush(flushToDisk: true);
         }
     }
 
@@ -79,7 +106,7 @@ public static partial class KernelMemoryCompatExports
         int read;
         try
         {
-            read = RandomAccess.Read(stream.SafeFileHandle, buffer, offset);
+            read = ReadOpenFileAt(stream, buffer, offset);
         }
         catch (IOException)
         {
@@ -134,7 +161,7 @@ public static partial class KernelMemoryCompatExports
 
         try
         {
-            RandomAccess.Write(stream.SafeFileHandle, payload, offset);
+            WriteOpenFileAt(stream, payload, offset);
         }
         catch (IOException)
         {
@@ -180,7 +207,7 @@ public static partial class KernelMemoryCompatExports
 
         try
         {
-            stream.Flush(flushToDisk: true);
+            FlushOpenFileToDisk(stream);
         }
         catch (IOException)
         {
@@ -198,7 +225,7 @@ public static partial class KernelMemoryCompatExports
         {
             foreach (var stream in _openFiles.Values)
             {
-                try { stream.Flush(flushToDisk: true); } catch (IOException) { }
+                try { FlushOpenFileToDisk(stream); } catch (IOException) { }
             }
         }
 
@@ -274,7 +301,7 @@ public static partial class KernelMemoryCompatExports
 
         try
         {
-            using var stream = new FileStream(hostPath, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+            using var stream = new FileStream(hostPath, FileMode.Open, FileAccess.Write, GuestFileShare);
             stream.SetLength(length);
         }
         catch (FileNotFoundException)
@@ -597,11 +624,11 @@ public static partial class KernelMemoryCompatExports
                     return -1;
                 }
 
-                RandomAccess.Write(stream.SafeFileHandle, scratch, offset);
+                WriteOpenFileAt(stream, scratch, offset);
                 return nbyte;
             }
 
-            var read = RandomAccess.Read(stream.SafeFileHandle, scratch, offset);
+            var read = ReadOpenFileAt(stream, scratch, offset);
             if (read > 0 && !ctx.Memory.TryWrite(buf, scratch.AsSpan(0, read)))
             {
                 return -1;
@@ -619,6 +646,10 @@ public static partial class KernelMemoryCompatExports
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
     public static int KernelAioPollRequests(CpuContext ctx) => KernelAioComplete(ctx);
 
+    [SysAbiExport(Nid = "2pOuoWoCxdk", ExportName = "sceKernelAioPollRequest",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
+    public static int KernelAioPollRequest(CpuContext ctx) => KernelAioGetRequestState(ctx);
+
     [SysAbiExport(Nid = "lgK+oIWkJyA", ExportName = "sceKernelAioWaitRequests",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
     public static int KernelAioWaitRequests(CpuContext ctx)
@@ -633,7 +664,9 @@ public static partial class KernelMemoryCompatExports
 
     [SysAbiExport(Nid = "KOF-oJbQVvc", ExportName = "sceKernelAioWaitRequest",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
-    public static int KernelAioWaitRequest(CpuContext ctx)
+    public static int KernelAioWaitRequest(CpuContext ctx) => KernelAioGetRequestState(ctx);
+
+    private static int KernelAioGetRequestState(CpuContext ctx)
     {
         var submitId = unchecked((uint)ctx[CpuRegister.Rdi]);
         if (!_aioResults.TryGetValue(submitId, out var completedState))

@@ -254,4 +254,40 @@ public sealed class GuestBufferRegistryTests
         registry.VisitRetirementCandidates(10, identifier => { visited.Add(identifier); return false; });
         Assert.Equal(new[] { first }, visited);
     }
+
+    [Fact]
+    public void RegionStampsMoveOnlyForRegionsARegistrationOrRetirementOverlaps()
+    {
+        const ulong Region = 1UL << GuestBufferRegistry<TestBuffer>.RegionShift;
+        using var registry = new GuestBufferRegistry<TestBuffer>(0x1000, 1UL << 28);
+        var near = registry.RegionStamp(Region + 0x100, 0x100);
+        var far = registry.RegionStamp(5 * Region, 0x100);
+        var straddling = registry.RegionStamp(2 * Region - 0x100, 0x200);
+
+        var identifier = registry.AllocateBuffer(new TestBuffer(), Region, 0x2000);
+        registry.RegisterBuffer(identifier, 0);
+        var registeredNear = registry.RegionStamp(Region + 0x100, 0x100);
+        Assert.NotEqual(near, registeredNear);
+        Assert.NotEqual(straddling, registry.RegionStamp(2 * Region - 0x100, 0x200));
+        Assert.Equal(far, registry.RegionStamp(5 * Region, 0x100));
+
+        var other = registry.AllocateBuffer(new TestBuffer(), 5 * Region, 0x1000);
+        registry.RegisterBuffer(other, 1);
+        Assert.Equal(registeredNear, registry.RegionStamp(Region + 0x100, 0x100));
+        Assert.NotEqual(far, registry.RegionStamp(5 * Region, 0x100));
+
+        registry.BeginRetirement(identifier);
+        Assert.NotEqual(registeredNear, registry.RegionStamp(Region + 0x100, 0x100));
+    }
+
+    [Fact]
+    public void RangesOverMoreThanTwoRegionsUseTheRegistrationSerial()
+    {
+        const ulong Region = 1UL << GuestBufferRegistry<TestBuffer>.RegionShift;
+        using var registry = new GuestBufferRegistry<TestBuffer>(0x1000, 1UL << 28);
+        var identifier = registry.AllocateBuffer(new TestBuffer(), 10 * Region, 0x1000);
+        registry.RegisterBuffer(identifier, 0);
+
+        Assert.Equal(registry.RegistrationSerial, registry.RegionStamp(Region, 3 * Region));
+    }
 }

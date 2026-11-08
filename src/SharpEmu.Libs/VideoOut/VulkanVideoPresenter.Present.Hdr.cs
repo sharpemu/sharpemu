@@ -349,28 +349,45 @@ internal static unsafe partial class VulkanVideoPresenter
                 ClearValueCount = 1,
                 PClearValues = &clearValue,
             };
-            _vk.CmdBeginRenderPass(
-                _commandBuffer,
-                &renderPassInfo,
-                SubpassContents.Inline);
-            _vk.CmdBindPipeline(
-                _commandBuffer,
-                PipelineBindPoint.Graphics,
-                isHdr ? _hdrPqPipeline : _hdrPipeline);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdBeginRenderPass(
+                    _commandBuffer,
+                    &renderPassInfo,
+                    SubpassContents.Inline);
+            }
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdBindPipeline(
+                    _commandBuffer,
+                    PipelineBindPoint.Graphics,
+                    isHdr ? _hdrPqPipeline : _hdrPipeline);
+            }
+            SharpEmu.Libs.Gpu.Vulkan.GraphicsDynamicStateEpoch.Advance();
+            SharpEmu.Libs.Gpu.Vulkan.NativeBindingEpoch.Advance();
             var descriptorSet = isHdr
                 ? _hdrPqDescriptorSets[imageIndex]
                 : _hdrDescriptorSets[imageIndex];
-            _vk.CmdBindDescriptorSets(
-                _commandBuffer,
-                PipelineBindPoint.Graphics,
-                _hdrPipelineLayout,
-                0,
-                1,
-                &descriptorSet,
-                0,
-                null);
-            _vk.CmdDraw(_commandBuffer, 3, 1, 0, 0);
-            _vk.CmdEndRenderPass(_commandBuffer);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdBindDescriptorSets(
+                    _commandBuffer,
+                    PipelineBindPoint.Graphics,
+                    _hdrPipelineLayout,
+                    0,
+                    1,
+                    &descriptorSet,
+                    0,
+                    null);
+            }
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdDraw(_commandBuffer, 3, 1, 0, 0);
+            }
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _vk.CmdEndRenderPass(_commandBuffer);
+            }
         }
     }
 }

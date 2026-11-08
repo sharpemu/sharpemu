@@ -8,7 +8,7 @@ using static Iced.Intel.AssemblerRegisters;
 namespace SharpEmu.Core.Loader;
 
 // Rewrite SHA extension instructions into general-register code when the host CPU lacks them.
-// Rosetta 2 and some x86 hosts raise #UD for them, and a signal per instruction is far too slow
+// Hosts without the SHA extensions raise #UD for them, and a signal per instruction is far too slow
 // for titles that hash whole files. The expansion keeps every register except the destination
 // XMM register and keeps the flags. It runs inside the trampoline, after the red zone is skipped.
 internal static class ShaInstructionRewrite

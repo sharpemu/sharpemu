@@ -200,6 +200,62 @@ public sealed class GpuCommandInterpreterRegisterTests
     }
 
     [Fact]
+    public void PixelTableAddresses_AcceptDirectNativeAndWrappedWrites()
+    {
+        var runner = new StreamRunner();
+        runner.Run(StreamRunner.Packet(PacketOpcode.SetShaderRegister,
+            ShaderRegisterOffset.SpiShaderUserDataAddrLoPs, 0x528E9280, 1, 0x76543210, 0x43));
+        Assert.Equal(0x1528E9280ul, runner.Interpreter.TypedRegisters.Shader.Pixel.UserDataAddress);
+        Assert.Equal(0x4376543210ul, runner.Interpreter.TypedRegisters.Shader.Pixel.AuxiliaryTableAddress);
+        var snapshot = runner.Interpreter.TypedRegisters.Snapshot();
+
+        runner.Host.WriteWords(Table, Pairs(
+            (ShaderRegisterOffset.SpiShaderUserDataAddrHiPs, 0x42),
+            (ShaderRegisterOffset.SpiShaderUserDataAddrLoPs, 0x12345678),
+            (ShaderRegisterOffset.SpiShaderPgmLoPs, 0x100),
+            (ShaderRegisterOffset.SpiShaderUserDataPs0, 7)));
+        runner.Run(Table5(PacketOpcode.SetShaderRegisterIndirect, Table, 4));
+        var pixel = runner.Interpreter.TypedRegisters.Shader.Pixel;
+        Assert.Equal(0x4212345678ul, pixel.UserDataAddress);
+        Assert.Equal(0x4376543210ul, pixel.AuxiliaryTableAddress);
+        Assert.Equal(0x10000ul, pixel.Address);
+        Assert.Equal(7u, pixel.UserScalars.Values[0]);
+        Assert.Equal(0x1528E9280ul, snapshot.Shader.Pixel.UserDataAddress);
+
+        runner.Host.WriteWords(Table, Pairs(
+            (ShaderRegisterOffset.SpiShaderAuxiliaryTableAddrHiPs, 0),
+            (ShaderRegisterOffset.SpiShaderAuxiliaryTableAddrLoPs, 0),
+            (ShaderRegisterOffset.SpiShaderUserDataAddrLoPs, 0),
+            (ShaderRegisterOffset.SpiShaderUserDataAddrHiPs, 0)));
+        runner.Run(StreamRunner.CustomPacket(Nop, PacketCustomCode.ShaderRegisterTable,
+            4, StreamRunner.Low(Table), StreamRunner.High(Table)));
+        pixel = runner.Interpreter.TypedRegisters.Shader.Pixel;
+        Assert.Equal(0ul, pixel.UserDataAddress);
+        Assert.Equal(0ul, pixel.AuxiliaryTableAddress);
+        Assert.Equal(0x10000ul, pixel.Address);
+        Assert.Equal(7u, pixel.UserScalars.Values[0]);
+        Assert.Equal(0x4376543210ul, snapshot.Shader.Pixel.AuxiliaryTableAddress);
+    }
+
+    [Fact]
+    public void HullTableAddress_PreservesByteAddressAndSnapshotAcrossDirectAndIndirectWrites()
+    {
+        var runner = new StreamRunner();
+        runner.Run(StreamRunner.Packet(PacketOpcode.SetShaderRegister,
+            ShaderRegisterOffset.SpiShaderUserDataAddrLoHs, 0x12345678, 0xABCD0042));
+        Assert.Equal(0x4212345678ul, runner.Interpreter.TypedRegisters.Shader.Vertex.HullUserDataAddress);
+        var snapshot = runner.Interpreter.TypedRegisters.Snapshot();
+
+        runner.Host.WriteWords(Table, Pairs(
+            (ShaderRegisterOffset.SpiShaderUserDataAddrHiHs, 0x77),
+            (ShaderRegisterOffset.SpiShaderUserDataAddrLoHs, 0x87654321)));
+        runner.Run(Table5(PacketOpcode.SetShaderRegisterIndirect, Table, 2));
+
+        Assert.Equal(0x7787654321ul, runner.Interpreter.TypedRegisters.Shader.Vertex.HullUserDataAddress);
+        Assert.Equal(0x4212345678ul, snapshot.Shader.Vertex.HullUserDataAddress);
+    }
+
+    [Fact]
     public void WrappedTables_CarryTheCountFirst()
     {
         var runner = new StreamRunner();

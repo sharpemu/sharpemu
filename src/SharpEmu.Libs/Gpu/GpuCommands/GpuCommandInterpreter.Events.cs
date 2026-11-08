@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
@@ -16,7 +17,7 @@ public sealed partial class GpuCommandInterpreter
         var eventIndex = (payload[0] >> 8) & 0x7u;
         var eventType = payload[0] & 0x3Fu;
         ulong eventAddress = 0;
-        if (eventType == 0x39)
+        if (eventType is 0x38 or 0x39)
         {
             if (packet.Length != 4)
             {
@@ -24,6 +25,11 @@ public sealed partial class GpuCommandInterpreter
             }
 
             eventAddress = Address(payload[1], payload[2]);
+        }
+
+        if (eventType == 0x3A && packet.Length != 2)
+        {
+            throw _host.Fatal($"The occlusion reset packet length is not supported: length={packet.Length} address=0x{packet.PacketAddress:X16}.");
         }
 
         RaiseEvent(eventType, eventIndex, eventAddress);
@@ -130,19 +136,44 @@ public sealed partial class GpuCommandInterpreter
         return 7;
     }
 
+    private const uint AcquireCbDbActionMask = (1u << 25) | (1u << 26);
+    private const uint AcquireGcrCacheActionMask = 0x3u | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) |
+        (1u << 13) | (1u << 14) | (1u << 15);
+    private const uint AcquireCoherCacheActionMask = (1u << 3) | (1u << 4) | (1u << 5) | (1u << 15) | (1u << 18) | (1u << 22) |
+        (1u << 23) | AcquireCbDbActionMask | (1u << 27) | (1u << 28) | (1u << 29) | (1u << 30);
+
+    private static readonly ThreadCounter _acquireMemoryPackets = new();
+    private static readonly ThreadCounter _acquireMemoryBarriers = new();
+
+    public static string TakeAcquireMemoryReport() =>
+        FormattableString.Invariant($"acquire_mem={_acquireMemoryPackets.Take()}/{_acquireMemoryBarriers.Take()}");
+
     internal uint AcquireMemoryPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
     {
         if (packet.Header == PacketHeader.Make(8, PacketOpcode.Nop, PacketCustomCode.AcquireMemory))
         {
+            AcquireMemory((payload[0] & AcquireCbDbActionMask) != 0 || (payload[6] & AcquireGcrCacheActionMask) != 0);
             return 7;
         }
 
         if (packet.Header == PacketHeader.Make(7, PacketOpcode.AcquireMemory))
         {
+            AcquireMemory((payload[0] & AcquireCoherCacheActionMask) != 0);
             return 6;
         }
 
         throw _host.Fatal($"The acquire-memory header is not supported: header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16}.");
+    }
+
+    private void AcquireMemory(bool cacheAction)
+    {
+        _acquireMemoryPackets.Increment();
+        if (cacheAction)
+        {
+            _acquireMemoryBarriers.Increment();
+            Diagnostics.DispatchRunTally.NoteSync();
+            _host.EmitGlobalBarrier();
+        }
     }
 
     internal uint NopPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
@@ -238,7 +269,10 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The clear-state flags are not supported: flags=0x{payload[0]:X8} address=0x{packet.PacketAddress:X16}.");
         }
 
+        var before = TypedRegisters.Context;
         TypedRegisters.ApplyContextState(ContextStateOperation.Clear);
+        if (Rendering.ScissorTrace.Instance is { Active: true } trace)
+            trace.ContextOperation(SubmitId, QueueId, packet.PacketAddress, $"ClearState(flags=0x{payload[0]:X8})", TypedRegisters, before);
         return 1;
     }
 
@@ -249,20 +283,30 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The context-state packet is not supported: length={packet.Length} operation={payload[0]} address=0x{packet.PacketAddress:X16}.");
         }
 
-        TypedRegisters.ApplyContextState((ContextStateOperation)payload[0]);
+        var before = TypedRegisters.Context;
+        var operation = (ContextStateOperation)payload[0];
+        TypedRegisters.ApplyContextState(operation);
+        if (Rendering.ScissorTrace.Instance is { Active: true } trace)
+            trace.ContextOperation(SubmitId, QueueId, packet.PacketAddress, operation.ToString(), TypedRegisters, before);
         return packet.Length - 1;
     }
 
     internal uint DispatchResetPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
     {
         RequireHeader(packet, PacketHeader.Make(2, PacketOpcode.Nop, PacketCustomCode.DispatchReset));
+        var before = TypedRegisters.Context;
         ResetForQueueReset();
+        if (Rendering.ScissorTrace.Instance is { Active: true } trace)
+            trace.ContextOperation(SubmitId, QueueId, packet.PacketAddress, "DispatchReset", TypedRegisters, before);
         return 1;
     }
 
     internal uint DrawResetPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
     {
+        var before = TypedRegisters.Context;
         ResetForQueueReset();
+        if (Rendering.ScissorTrace.Instance is { Active: true } trace)
+            trace.ContextOperation(SubmitId, QueueId, packet.PacketAddress, "DrawReset", TypedRegisters, before);
         return packet.Length - 1;
     }
 

@@ -96,6 +96,26 @@ public static class NpEntitlementAccessExports
     }
 
     [SysAbiExport(
+        Nid = "y7JD1gfwyfA",
+        ExportName = "sceNpEntitlementAccessGetGameTrialsFlag",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessGetGameTrialsFlag(CpuContext ctx)
+    {
+        var flagAddress = ctx[CpuRegister.Rdi];
+        if (flagAddress == 0)
+        {
+            return ctx.SetReturn(NpEntitlementAccessErrorParameter);
+        }
+
+        Span<byte> flagBytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(flagBytes, 0);
+        return ctx.Memory.TryWrite(flagAddress, flagBytes)
+            ? ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK)
+            : ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
         Nid = "TFyU+KFBv54",
         ExportName = "sceNpEntitlementAccessGetAddcontEntitlementInfoList",
         Target = Generation.Gen4 | Generation.Gen5,

@@ -3,7 +3,6 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
-using SharpEmu.ShaderCompiler.Metal;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
@@ -100,12 +99,11 @@ public sealed class Gen5ScalarAbsoluteTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void QuadmaskCompilesOnBothBackends(bool wide)
+    public void QuadmaskCompiles(bool wide)
     {
         var (plan, resources, layout) = Prepare(CreateQuadmaskReadbackProgram(wide, false, true));
         var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
     }
 
     [Theory]
@@ -153,12 +151,11 @@ public sealed class Gen5ScalarAbsoluteTests
     }
 
     [Fact]
-    public void CompilesOnBothBackends()
+    public void Compiles()
     {
         var (plan, resources, layout) = Prepare(CreateReadbackProgram(false, false));
         var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
-        Assert.True(Gen5MslTranslator.TryCompileProgram(request, out _, out var metalError), metalError);
     }
 
     [Theory]
@@ -189,6 +186,11 @@ public sealed class Gen5ScalarAbsoluteTests
             MoveVectorFromScalar(20, 7, 9),
             BufferAccess(24, "BufferStoreDwordx2", 4, dwords: 2, vectorData: 6), EndProgram(32));
     }
+
+    // S_ABSDIFF_I32 is SOP2 opcode 44 (0x2C): s_absdiff_i32 s0, s1, s2.
+    [Fact]
+    public void AbsoluteDifferenceDecodesFromItsSop2Opcode() =>
+        Assert.Equal("SAbsdiffI32", Decode(0x80000000u | (0x2Cu << 23) | (2u << 8) | 1u).Opcode);
 
     private static Gen5ShaderInstruction Decode(params uint[] instructionWords)
     {

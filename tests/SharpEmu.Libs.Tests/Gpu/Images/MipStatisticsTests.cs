@@ -113,4 +113,57 @@ public sealed class MipStatisticsTests
 
         Assert.All(report, static value => Assert.Equal(0, value));
     }
+
+    [Fact]
+    public void WrittenReport_PointsAFullReportAtItsCounters()
+    {
+        var statistics = new MipStatistics();
+        statistics.NoteSampled(Texture(slot: 3));
+        var report = new byte[MipStatistics.ReportBytes];
+
+        statistics.WriteReport(report);
+
+        Assert.Equal(MipStatistics.FirstCounterOffset, BinaryPrimitives.ReadUInt32LittleEndian(report));
+        Assert.Equal((0x10000u, 3u, 0x10000u, 0u), Counter(report, 3));
+    }
+
+    [Fact]
+    public void WrittenReport_MarksAShortBufferValidWithoutCounters()
+    {
+        var statistics = new MipStatistics();
+        var report = new byte[16];
+
+        statistics.WriteReport(report);
+
+        Assert.Equal(MipStatistics.ReportWithoutCounters, BinaryPrimitives.ReadUInt32LittleEndian(report));
+        Assert.All(report[sizeof(uint)..], value => Assert.Equal(0, value));
+    }
+
+    [Fact]
+    public void ImageField_CarriesTheCounterBaseLevelAndMinimumLod()
+    {
+        uint[] texture = [0, 0x280u << 8, 0, 3u << 12, 0, CounterEnabled, 0x2A, 0];
+
+        Assert.Equal(0x2Au | (3u << 8) | (0x280u << 16), MipStatistics.ImageField(texture));
+        texture[5] = 0;
+        Assert.Equal(MipStatistics.NoCounterField, MipStatistics.ImageField(texture));
+    }
+
+    [Fact]
+    public void PackedGpuReport_ReportsTheFinestMipAndTheClampedSamples()
+    {
+        var words = new uint[2 * MipStatistics.CounterWords];
+        Array.Fill(words, uint.MaxValue, 0, (int)MipStatistics.CounterWords);
+        words[5] = 2;
+        words[MipStatistics.CounterWords + 5] = 40;
+        words[9] = 0;
+        var report = new byte[MipStatistics.ReportBytes];
+
+        MipStatistics.PackReport(words, report);
+
+        Assert.Equal(MipStatistics.FirstCounterOffset, BinaryPrimitives.ReadUInt32LittleEndian(report));
+        Assert.Equal((40u, 5u, 0u, 2u), Counter(report, 5));
+        Assert.Equal((0u, 9u, 0u, 0u), Counter(report, 9));
+        Assert.Equal((0u, 6u, 0u, MipStatistics.NoMipSampled), Counter(report, 6));
+    }
 }

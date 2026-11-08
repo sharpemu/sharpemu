@@ -80,6 +80,13 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public List<string> Calls { get; } = new();
 
+    public bool SupportsTessellation { get; set; }
+
+    public List<(string Disposition, ulong Address, ulong PixelShader, ulong VertexShader)> DrawTargets { get; } = new();
+
+    public void TraceDrawTarget(string disposition, ulong address, ulong pixelShaderAddress, ulong vertexShaderAddress) =>
+        DrawTargets.Add((disposition, address, pixelShaderAddress, vertexShaderAddress));
+
     public List<RenderingState> BegunRenderings { get; } = new();
 
     public List<DynamicDrawState> DynamicStates { get; } = new();
@@ -90,11 +97,31 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public RenderHostLimits Limits { get; set; } = new(16384, 8192, 16384, 16384);
 
+    public bool SupportsNativeRectangles { get; set; }
+
+    public bool SupportsIndirectMeshDraw { get; set; }
+
+    public IndirectMeshDrawRequest? IndirectMeshRequest { get; private set; }
+
+    public IIndirectMeshDraw PrepareIndirectMeshDraw(in IndirectMeshDrawRequest request)
+    {
+        Assert.True(PreparationDepth > 0);
+        IndirectMeshRequest = request;
+        Calls.Add("acquire_indirect_mesh");
+        return new IndirectMesh(this);
+    }
+
+    private sealed class IndirectMesh(RecordingRenderHost owner) : IIndirectMeshDraw
+    {
+        public ulong ParametersAddress => 0x9000;
+        public void Prepare() => owner.Calls.Add("prepare_indirect_mesh");
+        public void Draw() => owner.Calls.Add("draw_indirect_mesh");
+        public void Dispose() => owner.Calls.Add("dispose_indirect_mesh");
+    }
+
     public IImageFormatSupport FormatSupport { get; } = new AcceptingFormatSupport();
 
     public bool IsRecording => Recording;
-
-    public ImageLayout ColorLayout { get; set; } = ImageLayout.ColorAttachmentOptimal;
 
     public Dictionary<ulong, uint> ImageSamples { get; } = new();
 
@@ -107,6 +134,9 @@ internal sealed class RecordingRenderHost : IRenderHost
     public HashSet<ulong> ClearableMetadata { get; } = new();
 
     public HashSet<ulong> RegisteredDcc { get; } = new();
+
+    // Metadata the host knows and fills itself although its surface is not registered yet.
+    public HashSet<ulong> HostFillableDcc { get; } = new();
 
     public HashSet<ulong> ClearableImages { get; } = new();
 
@@ -147,6 +177,16 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public BufferBinding NullBuffer => new(NullHandle, 0);
 
+    public uint[]? MeshIndices { get; private set; }
+
+    public ulong UploadMeshVertexIndices(ReadOnlySpan<uint> indices)
+    {
+        Assert.True(PreparationDepth > 0);
+        MeshIndices = indices.ToArray();
+        Calls.Add("upload_mesh_indices");
+        return 0x8000;
+    }
+
     public void RunPendingOperations() => Calls.Add("pending");
 
     public void SetDebugInformation(RecordedOperation operation, ulong submitId, uint argument0, uint argument1, uint argument2, uint argument3, ulong argument4) =>
@@ -179,6 +219,12 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void ResetBindings() => Calls.Add("reset_bindings");
 
+    public DrawScopeToken Scope { get; set; }
+
+    public DrawScopeToken DrawScope => Scope;
+
+    public void KeepDepthAttachment(in DepthAttachmentState depth) => Calls.Add($"keep_depth {depth.Image.Index}");
+
     public ColorAttachmentAcquisition AcquireColorAttachment(in ColorTargetState target)
     {
         var address = target.Resolution.BaseAddress;
@@ -188,7 +234,6 @@ internal sealed class RecordingRenderHost : IRenderHost
         return new ColorAttachmentAcquisition(
             target.Image,
             new ImageView(0x1000 + target.Image.Index),
-            ColorLayout,
             ImageSamples.TryGetValue(address, out var samples) ? samples : target.Resolution.Samples,
             metadataClear,
             clearValue);
@@ -204,8 +249,8 @@ internal sealed class RecordingRenderHost : IRenderHost
             DepthMetadataClear);
     }
 
-    public void TransitionDepthAttachment(in DepthAttachmentState depth, ImageLayout layout, ImageAspectFlags writeAspects) =>
-        Calls.Add($"transition_depth {depth.Image.Index} {layout} {writeAspects} loadClear={depth.LoadClear}");
+    public void TransitionDepthAttachment(in DepthAttachmentState depth, ImageAspectFlags writeAspects) =>
+        Calls.Add($"transition_depth {depth.Image.Index} {writeAspects} loadClear={depth.LoadClear}");
 
     // Marks the pages the guest wrote so the next obtain re-uploads them.
     public void WriteGuest(ulong address, ReadOnlySpan<byte> data)
@@ -325,15 +370,52 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void DrawIndexedIndirect(BufferBinding arguments) =>
         Calls.Add($"draw_indexed_indirect {arguments.Handle:X}:{arguments.Offset:X}");
 
+    public void DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ) =>
+        Calls.Add($"draw_mesh {groupCountX} {groupCountY} {groupCountZ}");
+
     public void Dispatch(uint groupsX, uint groupsY, uint groupsZ) => Calls.Add($"dispatch {groupsX} {groupsY} {groupsZ}");
 
-    public bool TryDispatchIndirect(ulong argumentsAddress) => false;
+    public bool TryDispatchIndirect(ulong argumentsAddress, ReadOnlySpan<int> physicalAxisOfLogical) => false;
 
     public void ShaderWriteBarrier(PipelineStageFlags sourceStages) => Calls.Add($"write_barrier {sourceStages}");
 
     public void ShaderWriteHazardBarrier() => Calls.Add("write_hazard_barrier");
 
     public void ShaderAccessBarrier() => Calls.Add("access_barrier");
+
+    public bool DeferBarriers { get; set; }
+
+    public long Promotions { get; set; }
+
+    bool IRenderHost.TryDeferShaderAccessBarrier()
+    {
+        if (!DeferBarriers)
+        {
+            ShaderAccessBarrier();
+            return false;
+        }
+
+        Calls.Add("defer_access_barrier");
+        return true;
+    }
+
+    void IRenderHost.BeginCheckedDispatch()
+    {
+        if (DeferBarriers)
+        {
+            Calls.Add("checked_begin");
+        }
+    }
+
+    void IRenderHost.EndCheckedDispatch()
+    {
+        if (DeferBarriers)
+        {
+            Calls.Add("checked_end");
+        }
+    }
+
+    long IRenderHost.DeferredBarrierPromotions => Promotions;
 
     public bool RetainTargetlessDraws { get; set; }
 
@@ -391,7 +473,7 @@ internal sealed class RecordingRenderHost : IRenderHost
     public bool TryFillDccMetadata(ulong address, ulong size, uint fillValue)
     {
         Calls.Add($"fill_dcc {address:X} {size:X} {fillValue:X8}");
-        return RegisteredDcc.Contains(address);
+        return RegisteredDcc.Contains(address) || HostFillableDcc.Contains(address);
     }
 
     public bool HostCopyAccepted { get; set; } = true;
@@ -410,6 +492,25 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
 {
     public GraphicsPrograms Graphics { get; set; } = RenderExecutorFixtures.Programs();
 
+    public bool MeshShadersSupported { get; set; }
+
+    public uint MeshPrimitiveType { get; private set; }
+
+    public bool MeshDepthBound { get; private set; }
+
+    public GraphicsPrograms GetMeshGraphicsPrograms(
+        RegisterBanks banks,
+        UserConfigRegisters userConfig,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound)
+    {
+        Calls.Add($"get_mesh_programs pixelActive={pixelActive}");
+        MeshPrimitiveType = userConfig.PrimitiveType;
+        MeshDepthBound = depthBound;
+        return Graphics;
+    }
+
     public ComputeProgram Compute { get; set; } = RenderExecutorFixtures.ComputeProgram();
 
     public List<string> Calls { get; } = new();
@@ -423,10 +524,7 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
     public List<ColorComponentMap[]> ExportMappings { get; } = new();
 
     public GraphicsPrograms GetGraphicsPrograms(
-        VertexStageRegisters vertex,
-        PixelStageRegisters pixel,
-        ShaderInterfaceRegisters shaderInterface,
-        ContextRegisters context,
+        RegisterBanks banks,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound)
@@ -481,6 +579,29 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         Calls.Add("create_compute_pipeline");
         return new PipelineHandle(0xC1, 0xD1, false);
     }
+
+    public Task? PendingComputeCompletion { get; set; }
+    public Action? CompletionRequested { get; set; }
+    public int ComputePipelineAttempts { get; private set; }
+
+    public Task? GetComputePipelineCompletion(ShaderProgram program)
+    {
+        CompletionRequested?.Invoke();
+        return PendingComputeCompletion;
+    }
+
+    public bool TryCreateComputePipeline(ComputeInputInfo input, ShaderProgram program, out PipelineHandle handle)
+    {
+        ComputePipelineAttempts++;
+        if (PendingComputeCompletion is { } completion &&
+            (ComputePipelineAttempts == 1 || !completion.IsCompletedSuccessfully))
+        {
+            handle = default;
+            return false;
+        }
+        handle = CreateComputePipeline(input, program);
+        return true;
+    }
 }
 
 // Register banks and programs for a draw that renders into one 64x64 color target.
@@ -507,7 +628,7 @@ internal static class RenderExecutorFixtures
         context.ColorTargets[0] = RegisterWords.Color(ColorBase, 64, 64);
         context.RenderTargetMask = 0xF;
         context.ShaderInterface.ColorShaderMask = 0xF;
-        context.ScreenViewport.Viewports[0] = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = -32, YOffset = 32, ZScale = 0.5f, ZOffset = 0.5f, MaxDepth = 1 };
+        context.ScreenViewport.Primary = new ViewportRegisters { XScale = 32, XOffset = 32, YScale = -32, YOffset = 32, ZScale = 0.5f, ZOffset = 0.5f, MaxDepth = 1 };
         if (withDepth)
         {
             context.DepthTarget = RegisterWords.Depth(DepthBase, 64, 64);

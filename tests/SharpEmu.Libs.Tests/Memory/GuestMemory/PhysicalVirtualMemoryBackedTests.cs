@@ -4,6 +4,7 @@
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 using SharpEmu.HLE.Host;
 using Xunit;
 using static SharpEmu.Libs.Tests.Memory.HostViews.HostViewTestSupport;
@@ -13,9 +14,53 @@ namespace SharpEmu.Libs.Tests.Memory.GuestMemory;
 [Collection(GuestMemoryStateCollection.Name)]
 public sealed unsafe class PhysicalVirtualMemoryBackedTests
 {
+    [Fact]
+    public void DefaultHostForwardsAllocationQueriesAndReusesReleasedLowerGap()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var host = HostViewMemory.Create();
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var runtimeHost = (IHostMemory)typeof(PhysicalVirtualMemory)
+            .GetField("_hostMemory", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(memory)!;
+        var size = host.Granularity;
+        var start = ProbeGuestAddress(host, 4 * size);
+        Assert.Equal(start, PlatformMemory.Reserve(start, size, HostPageProtection.NoAccess));
+        var foreignHeld = true;
+        try
+        {
+            Assert.True(runtimeHost.TryQueryAllocation(start + 4096, out var allocation));
+            Assert.Equal(new HostAddressRange(start, size), allocation);
+            Assert.True(memory.TryHoldRangeAtOrAbove(start, size, size, out var selected));
+            Assert.Equal(start + size, selected);
+            Assert.True(PlatformMemory.Free(start));
+            foreignHeld = false;
+            Assert.False(runtimeHost.TryQueryAllocation(start, out _));
+            Assert.True(memory.TryHoldRangeAtOrAbove(start, size, size, out selected));
+            Assert.Equal(start, selected);
+        }
+        finally
+        {
+            if (foreignHeld) Assert.True(PlatformMemory.Free(start));
+        }
+    }
+
     private sealed class QueryCountingHostMemory(IHostMemory inner) : IHostMemory
     {
         public int QueryCount { get; set; }
+        public int AllocationQueryCount { get; set; }
+        public int AllocationQueryMode { get; init; }
+        public bool TryQueryAllocation(ulong address, out HostAddressRange range)
+        {
+            AllocationQueryCount++;
+            range = default;
+            if (AllocationQueryMode == 2)
+            {
+                range = new HostAddressRange(address, ulong.MaxValue);
+                return true;
+            }
+            return AllocationQueryMode == 1 && inner.TryQueryAllocation(address, out range);
+        }
         public bool RejectExecutableProtection { get; init; }
         public ulong Allocate(ulong address, ulong size, HostPageProtection protection) => inner.Allocate(address, size, protection);
         public ulong Reserve(ulong address, ulong size, HostPageProtection protection) => inner.Reserve(address, size, protection);
@@ -180,6 +225,42 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
     }
 
     [Fact]
+    public void ProtectFindsItsRegionsAmongManyLowerRegions()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var memory = new PhysicalVirtualMemory(hostMemory: PlatformMemory);
+        const ulong size = 0x10000;
+        var regions = new List<ulong>();
+        for (var index = 0; index < 32; index++)
+        {
+            Assert.True(memory.TryAllocateAtOrAbove(0x2_0000_0000 + (ulong)index * size * 2, size, executable: false, size, out var address));
+            regions.Add(address);
+        }
+
+        var target = regions[20];
+        Assert.True(memory.TryProtect(target + 0x1000, 0x1000, GuestPageProtection.Read));
+        Assert.Equal(HostPageProtection.ReadOnly, ProtectionOf(target + 0x1000));
+        Assert.Equal(HostPageProtection.ReadWrite, ProtectionOf(target));
+        Assert.Equal(HostPageProtection.ReadWrite, ProtectionOf(target + 0x2000));
+        Assert.Equal(HostPageProtection.ReadWrite, ProtectionOf(regions[19] + size - 0x1000));
+
+        var last = regions[^1];
+        var start = regions[^2] + size - 0x1000;
+        Assert.True(memory.TryProtect(start, last + 0x2000 - start, GuestPageProtection.Read));
+        Assert.Equal(HostPageProtection.ReadOnly, ProtectionOf(start));
+        Assert.Equal(HostPageProtection.ReadOnly, ProtectionOf(last));
+        Assert.Equal(HostPageProtection.ReadOnly, ProtectionOf(last + 0x1000));
+        Assert.Equal(HostPageProtection.ReadWrite, ProtectionOf(last + 0x2000));
+        Assert.Equal(HostPageProtection.ReadWrite, ProtectionOf(regions[^2]));
+
+        static HostPageProtection ProtectionOf(ulong address)
+        {
+            Assert.True(PlatformMemory.Query(address, out var info));
+            return info.Protection;
+        }
+    }
+
+    [Fact]
     public void ClearKeepsTheSameMemoryObjectUsable()
     {
         if (!Supported) return;
@@ -230,6 +311,63 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         Assert.True(memory.TryCopy(privateRange, first, 0x100));
         Assert.True(memory.TryCopy(second + 0x200, privateRange, 0x100));
         Assert.Equal(((byte*)first)[7], ((byte*)second)[0x207]);
+    }
+
+    // Stands in for the GPU thread: each CPU-write notification is answered by an upload that copies
+    // the pages and leaves them clean before the managed write lands, a race a real upload can win.
+    private sealed class RacingUploadStore(PhysicalVirtualMemory memory, ulong address, int size) : IGuestBufferStore
+    {
+        public byte[] Uploaded { get; } = new byte[size];
+
+        public bool CpuDirty { get; private set; }
+
+        public bool MarkCpuWrite(ulong writeAddress, ulong writeSize)
+        {
+            Assert.True(memory.TryReadBacking(address, Uploaded));
+            CpuDirty = false;
+            return true;
+        }
+
+        public void MarkCpuWriteLanded(ulong writeAddress, ulong writeSize) => CpuDirty = true;
+
+        public bool DownloadToCpu(ulong downloadAddress, ulong downloadSize) => true;
+    }
+
+    [NativePageProtectionFact]
+    public void ManagedWritesMarkTheGpuStoresAgainOnceTheBytesLand()
+    {
+        if (!Supported) return;
+        const GuestPageProtection readWrite = GuestPageProtection.Read | GuestPageProtection.Write;
+        var host = HostViewMemory.Create();
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var source = Hold(memory, host);
+        var destination = Hold(memory, host);
+        Assert.True(memory.TryMapBacked(source, Segment, 0, readWrite, out _));
+        Assert.True(memory.TryMapBacked(destination, Segment, 2 * Segment, readWrite, out _));
+        var copied = Enumerable.Range(1, 0x100).Select(value => (byte)value).ToArray();
+        Assert.True(memory.TryWrite(source, copied));
+        using var gpu = new GuestGpuMemory(memory);
+        gpu.Register(destination, Segment, readWrite);
+        var store = new RacingUploadStore(memory, destination, copied.Length);
+        gpu.AttachStores(store, null);
+        GuestGpuMemoryHook.Attach(gpu);
+        try
+        {
+            // memcpy: the upload took the bytes from before the copy, so the store must hear of it again.
+            Assert.True(memory.TryCopy(destination, source, (ulong)copied.Length));
+            Assert.DoesNotContain(store.Uploaded, value => value != 0);
+            Assert.True(store.CpuDirty, "copy");
+
+            // memset and every other managed write.
+            var written = Enumerable.Repeat((byte)0xA5, copied.Length).ToArray();
+            Assert.True(memory.TryWrite(destination, written));
+            Assert.Equal(copied, store.Uploaded);
+            Assert.True(store.CpuDirty, "write");
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+        }
     }
 
     [Fact]
@@ -306,6 +444,77 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         Assert.True(memory.TryHoldRange(higherAddress, size));
         Assert.True(memory.TryHoldRangeAtOrAbove(lowerAddress, size, size, out var selectedAddress));
         Assert.Equal(lowerAddress, selectedAddress);
+    }
+
+    [Fact]
+    public void AvailableRangeReusesOwnedSpaceWithoutHostQueries()
+    {
+        if (!Supported) return;
+        var host = HostViewMemory.Create();
+        var size = HoleSize(host);
+        var memoryHost = new QueryCountingHostMemory(PlatformMemory);
+        using var memory = new PhysicalVirtualMemory(memoryHost, host, BackingSize);
+        var lowerAddress = ProbeGuestAddress(host, 4 * size);
+        var higherAddress = lowerAddress + 2 * size;
+        Assert.True(memory.TryHoldRange(higherAddress, 2 * size));
+        Assert.True(memory.TryMapBacked(higherAddress, size, 0, GuestPageProtection.Read, out _));
+        memoryHost.QueryCount = 0;
+
+        Assert.True(memory.TryHoldAvailableRange(lowerAddress, size, host.Granularity, out var selectedAddress));
+        Assert.Equal(higherAddress + size, selectedAddress);
+        Assert.Equal(0, memoryHost.QueryCount);
+        Assert.Equal(0UL, selectedAddress % host.Granularity);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void ForeignAllocationSearchPreservesLowerGapAfterRelease(int queryMode)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var host = HostViewMemory.Create();
+        var memoryHost = new QueryCountingHostMemory(PlatformMemory) { AllocationQueryMode = queryMode };
+        using var memory = new PhysicalVirtualMemory(memoryHost, host, BackingSize);
+        var size = host.Granularity;
+        var start = ProbeGuestAddress(host, 4 * size);
+        Assert.Equal(start, PlatformMemory.Reserve(start, size, HostPageProtection.NoAccess));
+        var foreignHeld = true;
+        try
+        {
+            Assert.True(memory.TryHoldRangeAtOrAbove(start, size, size, out var selected));
+            Assert.Equal(start + size, selected);
+            Assert.True(memoryHost.AllocationQueryCount > 0);
+            if (queryMode == 1)
+                Assert.Equal(0, memoryHost.QueryCount);
+            else
+                Assert.True(memoryHost.QueryCount > 0);
+            Assert.True(PlatformMemory.Free(start));
+            foreignHeld = false;
+            Assert.True(memory.TryHoldRangeAtOrAbove(start, size, size, out selected));
+            Assert.Equal(start, selected);
+        }
+        finally
+        {
+            if (foreignHeld) Assert.True(PlatformMemory.Free(start));
+        }
+    }
+
+    [Fact]
+    public void OrderedSearchReusesLowerGapAfterPartialUnmap()
+    {
+        if (!Supported) return;
+        var host = HostViewMemory.Create();
+        var size = HoleSize(host);
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var address = ProbeGuestAddress(host, 4 * size);
+        Assert.True(memory.TryHoldRange(address, 4 * size));
+        Assert.True(memory.TryMapBacked(address, 3 * size, 0, GuestPageProtection.Read, out _));
+        Assert.True(memory.TryHoldRangeAtOrAbove(address, size, size, out var tail));
+        Assert.Equal(address + 3 * size, tail);
+        Assert.True(memory.TryUnmapBacked(address + size, size));
+        Assert.True(memory.TryHoldRangeAtOrAbove(address, size, size, out var lower));
+        Assert.Equal(address + size, lower);
     }
 
     [Fact]

@@ -28,7 +28,9 @@ public static class RegisterWriteTable
 
     public static uint WriteContextPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values)
     {
+        banks.PrepareContextWrite();
         var consumed = WritePacket(banks, in packet, offset, values, Context, ContextIndirect, "context", emptyIsHandled: true);
+        banks.MarkWritten(RegisterStamps.ContextBitsFor(offset, consumed));
         if (Rendering.RenderTrace.Enabled)
         {
             for (var index = 0; index < values.Length && index < consumed; index++)
@@ -43,7 +45,9 @@ public static class RegisterWriteTable
     // A shader packet without values has no writer; the other banks accept it.
     public static uint WriteShaderPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values)
     {
+        banks.PrepareShaderWrite(offset, (uint)values.Length);
         var consumed = WritePacket(banks, in packet, offset, values, Shader, ShaderIndirect, "shader", emptyIsHandled: false);
+        banks.MarkWritten(RegisterStamps.ShaderBitsFor(offset, consumed));
         if (Rendering.RenderTrace.Enabled)
         {
             for (var index = 0; index < values.Length && index < consumed; index++)
@@ -52,21 +56,28 @@ public static class RegisterWriteTable
         return consumed;
     }
 
-    public static uint WriteUserConfigPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
-        WritePacket(banks, in packet, offset, values, UserConfig, UserConfigIndirect, "user-config", emptyIsHandled: true);
+    public static uint WriteUserConfigPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values)
+    {
+        banks.PrepareUserConfigWrite();
+        var consumed = WritePacket(banks, in packet, offset, values, UserConfig, UserConfigIndirect, "user-config", emptyIsHandled: true);
+        banks.MarkWritten(RegisterStamps.UserConfigBits);
+        return consumed;
+    }
 
     public static void WriteContextEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress)
     {
+        banks.PrepareContextWrite();
         if (offset < ContextIndirect.Length && ContextIndirect[offset] is null)
         {
             // Keep unknown in-bank table values so a later renderer implementation can decode them.
-            banks.Context.UnmodeledTableRegisters[offset] = value;
+            banks.UnmodeledTableRegistersForWrite[offset] = value;
         }
         else
         {
             WriteEntry(banks, offset, value, ContextIndirect, "context", tableAddress);
         }
 
+        banks.MarkWritten(RegisterStamps.ContextBitsFor(offset, 1));
         if (Rendering.RenderTrace.Enabled)
         {
             TraceDepthStateWrite(offset, value, tableAddress, "table");
@@ -88,7 +99,9 @@ public static class RegisterWriteTable
 
     public static void WriteShaderEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress)
     {
+        banks.PrepareShaderWrite(offset, 1);
         WriteEntry(banks, offset, value, ShaderIndirect, "shader", tableAddress);
+        banks.MarkWritten(RegisterStamps.ShaderBitsFor(offset, 1));
         if (Rendering.RenderTrace.Enabled)
             TracePixelRegisterWrite(banks, offset, value, tableAddress, "table");
     }
@@ -104,8 +117,22 @@ public static class RegisterWriteTable
             $"value=0x{value:X8} shader=0x{banks.Shader.Pixel.Address:X16}");
     }
 
-    public static void WriteUserConfigEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress) =>
-        WriteEntry(banks, offset, value, UserConfigIndirect, "user-config", tableAddress);
+    public static void WriteUserConfigEntry(RegisterBanks banks, uint offset, uint value, ulong tableAddress,
+        PacketContext packet = default, uint entryIndex = 0, uint entryCount = 0, uint rawOffset = 0,
+        ReadOnlySpan<uint> payload = default)
+    {
+        banks.PrepareUserConfigWrite();
+        if (offset >= UserConfigIndirect.Length || UserConfigIndirect[offset] is null)
+        {
+            throw banks.Fatal($"The user-config table register is not supported: offset=0x{offset:X4} value=0x{value:X8} " +
+                $"table=0x{tableAddress:X16} raw=0x{rawOffset:X8} entry={entryIndex} count={entryCount} " +
+                $"header=0x{packet.Header:X8} packet=0x{packet.PacketAddress:X16} " +
+                $"payload={string.Join(',', payload.ToArray().Select(word => word.ToString("X8")))}.");
+        }
+
+        UserConfigIndirect[offset]!(banks, offset, value);
+        banks.MarkWritten(RegisterStamps.UserConfigBits);
+    }
 
     private static uint WritePacket(
         RegisterBanks banks,

@@ -57,9 +57,7 @@ public sealed class Gen5MoveRelativeSpirvTests
     [Fact]
     public void Movrelsd2B32_TranslatesWithoutDroppingShader()
     {
-        // s_mov_b32 m0, 2 ; v_movrelsd_2_b32 v5, v3, which splits m0 into two
-        // 10-bit halves (source index in [9:0], destination index in [25:16]).
-        var spirv = Compile([SMovM0, Vop1 | (5u << 17) | (0x48u << 9) | (256u + 3u)]);
+        var spirv = Compile([SMovM0FromUserData, Vop1 | (5u << 17) | (0x48u << 9) | (256u + 3u)]);
 
         AssertResolvesRelativeRegistersWithSelects(spirv, "V_MOVRELSD_2_B32");
     }
@@ -68,6 +66,7 @@ public sealed class Gen5MoveRelativeSpirvTests
     [InlineData(0x43u)]
     [InlineData(0x42u)]
     [InlineData(0x44u)]
+    [InlineData(0x48u)]
     public void RelativeMovesWithAKnownM0_UseConstantRegisterNumbers(uint opcode)
     {
         // s_mov_b32 m0, 2 lets the translator pick the register directly, so the VGPR

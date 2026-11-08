@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Scheduling;
+using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Buffers;
 
@@ -61,8 +62,8 @@ public sealed class GpuRingBuffer : GpuBuffer
         }
     }
 
-    public GpuRingBuffer(GpuDeviceInfo device, SubmissionScheduler scheduler, GpuBufferUsage usage, ulong size)
-        : base(device, scheduler, usage, 0, AllFlags, size)
+    public GpuRingBuffer(GpuDeviceInfo device, SubmissionScheduler scheduler, GpuBufferUsage usage, ulong size, BufferUsageFlags flags = AllFlags)
+        : base(device, scheduler, usage, 0, flags, size)
     {
     }
 
