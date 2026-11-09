@@ -11,7 +11,6 @@ namespace SharpEmu.Libs.Ime;
 public static class ImeDialogExports
 {
     private const int StatusNone = 0;
-    private const int StatusRunning = 1;
     private const int StatusFinished = 2;
 
     private const int EndStatusOk = 0;

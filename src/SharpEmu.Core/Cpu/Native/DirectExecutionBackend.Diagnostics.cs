@@ -88,6 +88,14 @@ public sealed partial class DirectExecutionBackend
 					return $"{kvp.Key}: {cores:F2}cores {seconds:F1}s n={callCount} {perCallUs:F2}us/call";
 				});
 			System.Console.Error.WriteLine($"[PERF][HLE] cost: {string.Join(" | ", top)}");
+
+			if (SharpEmu.HLE.GuestFastPath.Enabled)
+			{
+				var fastPath = SharpEmu.HLE.GuestFastPath.SnapshotCounters();
+				System.Console.Error.WriteLine(
+					$"[PERF][HLE] fast_path: self_hits={fastPath.SelfHits} " +
+					$"getspecific_hits={fastPath.GetspecificHits} blocks={fastPath.Blocks}");
+			}
 		}
 	}
 
@@ -423,7 +431,8 @@ public sealed partial class DirectExecutionBackend
 
 	private static bool IsPlausibleReturnAddress(ulong address)
 	{
-		return address >= 12884901888L && address < 17592186044416L && !IsUnresolvedSentinel(address);
+		var minimum = _activeCpuContext?.TargetGeneration == Generation.Gen4 ? 0x10000UL : 0x300000000UL;
+		return address >= minimum && address < 17592186044416L && !IsUnresolvedSentinel(address);
 	}
 
 	private static bool TryGetPlausibleReturnFromStack(ulong rsp, out ulong returnRip, out ulong nextRsp)
@@ -461,6 +470,29 @@ public sealed partial class DirectExecutionBackend
 			}
 		}
 		return false;
+	}
+
+	// The committed readable run of host pages that contains address.
+	private unsafe static bool TryQueryReadableRange(ulong address, out ulong start, out ulong end)
+	{
+		start = 0;
+		end = 0;
+		if (address <= 65536 || address >= 140737488355328L ||
+			VirtualQuery((void*)address, out var info, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0)
+		{
+			return false;
+		}
+
+		var regionEnd = info.BaseAddress + info.RegionSize;
+		if (regionEnd < info.BaseAddress || address > regionEnd - 8 ||
+			info.State != 4096 || !IsReadableProtection(info.Protect))
+		{
+			return false;
+		}
+
+		start = info.BaseAddress;
+		end = regionEnd;
+		return true;
 	}
 
 	private unsafe static bool TryReadStackU64(ulong address, out ulong value)

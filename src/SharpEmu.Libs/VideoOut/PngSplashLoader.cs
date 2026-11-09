@@ -17,7 +17,8 @@ internal static class PngSplashLoader
     ];
 
     public static bool TryLoad(out byte[] pixels, out uint width, out uint height)
-        => TryLoad("pic0.png", requestRgba: false, out pixels, out width, out height);
+        => TryLoad("pic0.png", requestRgba: false, out pixels, out width, out height) ||
+           TryLoad("pic1.png", requestRgba: false, out pixels, out width, out height);
 
     public static bool TryLoadIcon(out byte[] pixels, out uint width, out uint height)
         => TryLoad("icon0.png", requestRgba: true, out pixels, out width, out height);
@@ -41,7 +42,7 @@ internal static class PngSplashLoader
                 return false;
             }
 
-            var path = Path.Combine(app0Root, "sce_sys", fileName);
+            var path = SharpEmu.HLE.FileSystem.GameFileOverlay.ResolveFile(Path.Combine(app0Root, "sce_sys", fileName));
             if (!File.Exists(path))
             {
                 return false;

@@ -7,6 +7,9 @@ namespace SharpEmu.Libs.Np;
 
 public static class NpSessionSignalingExports
 {
+    private const int NpErrorSignedOut = unchecked((int)0x80550006);
+    private static int _nextContextId;
+
     [SysAbiExport(
         Nid = "ysmw6J-P8Ak",
         ExportName = "sceNpSessionSignalingInitialize",
@@ -17,4 +20,30 @@ public static class NpSessionSignalingExports
         ctx[CpuRegister.Rax] = 0;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
+
+    [SysAbiExport(
+        Nid = "aBuX0PX-T7I",
+        ExportName = "sceNpSessionSignalingCreateContext2",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpSessionSignaling")]
+    public static int NpSessionSignalingCreateContext2(CpuContext ctx)
+    {
+        var contextId = Interlocked.Increment(ref _nextContextId);
+        ctx[CpuRegister.Rax] = unchecked((ulong)contextId);
+        return contextId;
+    }
+
+    [SysAbiExport(
+        Nid = "r8mVMwlafF8",
+        ExportName = "sceNpSessionSignalingRequestPrepare",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpSessionSignaling")]
+    public static int NpSessionSignalingRequestPrepare(CpuContext ctx) => ctx.SetReturn(NpErrorSignedOut);
+
+    [SysAbiExport(
+        Nid = "Z9Q9LzQDXf0",
+        ExportName = "sceNpSessionSignalingDestroyContext",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpSessionSignaling")]
+    public static int NpSessionSignalingDestroyContext(CpuContext ctx) => ctx.SetReturn(0);
 }

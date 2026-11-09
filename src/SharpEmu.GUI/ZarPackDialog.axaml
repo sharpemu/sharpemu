@@ -1,0 +1,57 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<local:SheetView xmlns="https://github.com/avaloniaui"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:local="clr-namespace:SharpEmu.GUI"
+                 x:Class="SharpEmu.GUI.ZarPackDialog"
+                 SheetWidth="560">
+  <StackPanel Margin="28" Spacing="12">
+    <TextBlock x:Name="HeadingText"
+               FontSize="20"
+               FontWeight="Bold"
+               TextWrapping="Wrap" />
+
+    <TextBlock TextWrapping="Wrap"
+               Text="{Binding [Library.Pack.Explanation], Source={x:Static local:Localization.Instance}}" />
+
+    <TextBlock x:Name="DestinationText"
+               Foreground="{StaticResource MutedBrush}"
+               TextWrapping="Wrap" />
+
+    <ProgressBar x:Name="PackProgress"
+                 Minimum="0"
+                 Maximum="1"
+                 Height="8"
+                 Margin="0,8,0,0" />
+
+    <TextBlock x:Name="StatusText"
+               Foreground="{StaticResource MutedBrush}"
+               TextWrapping="Wrap" />
+
+    <!-- Shown only once the finished archive is checked to hold the whole folder. -->
+    <StackPanel x:Name="DeleteSourcePanel" Spacing="6" IsVisible="False">
+      <TextBlock Foreground="{StaticResource DangerBrush}"
+                 TextWrapping="Wrap"
+                 Text="{Binding [Library.Pack.DeleteSourceWarning], Source={x:Static local:Localization.Instance}}" />
+      <Button x:Name="DeleteSourceButton"
+              Classes="ghost"
+              Content="{Binding [Library.Pack.DeleteSource], Source={x:Static local:Localization.Instance}}" />
+    </StackPanel>
+
+    <Grid Margin="0,8,0,0" ColumnDefinitions="Auto,*,Auto">
+      <ToggleButton x:Name="MuteMusicButton"
+                    Grid.Column="0"
+                    Classes="ghost"
+                    Padding="10,4"
+                    ToolTip.Tip="{Binding [Library.Pack.MuteMusic], Source={x:Static local:Localization.Instance}}"
+                    Content="🔊" />
+      <Button x:Name="CloseButton"
+              Grid.Column="2"
+              Classes="ghost"
+              Content="{Binding [Common.Cancel], Source={x:Static local:Localization.Instance}}" />
+    </Grid>
+  </StackPanel>
+</local:SheetView>

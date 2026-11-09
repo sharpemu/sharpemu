@@ -4,7 +4,9 @@
 using Avalonia.Controls;
 using Avalonia.Data;
 using SharpEmu.GUI;
+using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.GUI;
@@ -63,8 +65,8 @@ public sealed class LocalizationTests : IDisposable
     {
         var localization = new Localization(_languagesDirectory);
         var choice = LocalizedChoice.FromKey(
-            "Native",
-            "Options.CpuEngine.Native");
+            "Fit",
+            "Options.Scaling.Fit");
         var changedProperties = new List<string?>();
         choice.PropertyChanged += (_, args) =>
             changedProperties.Add(args.PropertyName);
@@ -76,10 +78,50 @@ public sealed class LocalizationTests : IDisposable
         localization.Load("ru");
         choice.Refresh(localization);
 
-        Assert.Equal("Native", choice.Value);
+        Assert.Equal("Fit", choice.Value);
         Assert.NotEqual(englishLabel, choice.Label);
-        Assert.Equal(localization.Get("Options.CpuEngine.Native"), choice.Label);
+        Assert.Equal(localization.Get("Options.Scaling.Fit"), choice.Label);
         Assert.Contains(nameof(LocalizedChoice.Label), changedProperties);
+    }
+
+    [Fact]
+    public void DiscordButtonContentUpdatesWhenLanguageChanges()
+    {
+        var localization = new Localization(_languagesDirectory);
+        localization.Load("en");
+        var englishLabel = localization.Get("About.DiscordButton");
+        var button = new Button();
+        button.Bind(
+            Button.ContentProperty,
+            new Binding("[About.DiscordButton]") { Source = localization });
+
+        Assert.Equal(englishLabel, button.Content);
+
+        localization.Load("ru");
+
+        Assert.NotEqual(englishLabel, localization.Get("About.DiscordButton"));
+        Assert.Equal(localization.Get("About.DiscordButton"), button.Content);
+    }
+
+    [Fact]
+    public void EmbeddedLanguagesProvideDiscordButtonLabels()
+    {
+        var assembly = typeof(Localization).Assembly;
+        var resourceNames = assembly.GetManifestResourceNames()
+            .Where(name =>
+                name.StartsWith("Languages.", StringComparison.Ordinal) &&
+                name.EndsWith(".json", StringComparison.Ordinal))
+            .ToArray();
+        Assert.NotEmpty(resourceNames);
+
+        foreach (var resourceName in resourceNames)
+        {
+            var language = ReadEmbeddedLanguage(assembly, resourceName);
+            Assert.True(language.TryGetValue("About.DiscordButton", out var label),
+                $"{resourceName} has no Discord button label.");
+            Assert.False(string.IsNullOrWhiteSpace(label));
+            Assert.DoesNotContain("About.DiscordComingSoon", language.Keys);
+        }
     }
 
     [Fact]
@@ -87,8 +129,8 @@ public sealed class LocalizationTests : IDisposable
     {
         var localization = new Localization(_languagesDirectory);
         var choice = LocalizedChoice.FromKey(
-            "Native",
-            "Options.CpuEngine.Native");
+            "Fit",
+            "Options.Scaling.Fit");
         localization.Load("en");
         choice.Refresh(localization);
         var comboBox = new ComboBox
@@ -103,7 +145,7 @@ public sealed class LocalizationTests : IDisposable
         choice.Refresh(localization);
 
         Assert.Same(choice, comboBox.SelectionBoxItem);
-        Assert.Equal(localization.Get("Options.CpuEngine.Native"), choice.Label);
+        Assert.Equal(localization.Get("Options.Scaling.Fit"), choice.Label);
     }
 
     [Fact]
@@ -141,6 +183,62 @@ public sealed class LocalizationTests : IDisposable
             Assert.True(
                 empty.Length == 0,
                 $"{resourceName} has empty option values: {string.Join(", ", empty)}");
+        }
+    }
+
+    // A catalog switch without strings shows its raw key in Game options.
+    [Fact]
+    public void EmbeddedLanguages_LabelEveryEnvironmentSetting()
+    {
+        var assembly = typeof(Localization).Assembly;
+        var keys = new List<string>();
+        foreach (var setting in EnvironmentSettings.All)
+        {
+            keys.Add($"Setting.{setting.Id}.Label");
+            keys.Add($"Setting.{setting.Id}.Desc");
+            keys.AddRange((setting.Choices ?? [])
+                .Where(choice => choice.Label is null)
+                .Select(choice => $"Setting.{setting.Id}.{choice.Value}"));
+        }
+
+        var resourceNames = assembly.GetManifestResourceNames()
+            .Where(name =>
+                name.StartsWith("Languages.", StringComparison.Ordinal) &&
+                name.EndsWith(".json", StringComparison.Ordinal));
+        foreach (var resourceName in resourceNames)
+        {
+            var language = ReadEmbeddedLanguage(assembly, resourceName);
+            var missing = keys
+                .Where(key => !language.TryGetValue(key, out var value) || string.IsNullOrWhiteSpace(value))
+                .ToArray();
+            Assert.True(
+                missing.Length == 0,
+                $"{resourceName} has no text for: {string.Join(", ", missing)}");
+        }
+    }
+
+    [Fact]
+    public void EmbeddedLanguages_ContainEveryPatchKeyAndPreserveFormatArguments()
+    {
+        var assembly = typeof(Localization).Assembly;
+        var english = ReadEmbeddedLanguage(assembly, "Languages.en.json");
+        var patchKeys = english.Keys.Where(key => key == "Library.Context.Patches" ||
+            key.StartsWith("Library.Patches.", StringComparison.Ordinal)).ToArray();
+        Assert.NotEmpty(patchKeys);
+
+        foreach (var resourceName in assembly.GetManifestResourceNames().Where(name =>
+            name.StartsWith("Languages.", StringComparison.Ordinal) && name.EndsWith(".json", StringComparison.Ordinal)))
+        {
+            var language = ReadEmbeddedLanguage(assembly, resourceName);
+            foreach (var key in patchKeys)
+            {
+                Assert.True(language.TryGetValue(key, out var value), $"{resourceName} is missing {key}.");
+                Assert.False(string.IsNullOrWhiteSpace(value), $"{resourceName} has an empty value for {key}.");
+                var expected = Regex.Matches(english[key], @"\{\d+\}").Select(match => match.Value).Order().ToArray();
+                var actual = Regex.Matches(value, @"\{\d+\}").Select(match => match.Value).Order().ToArray();
+                Assert.True(expected.SequenceEqual(actual), $"{resourceName} has different format arguments for {key}.");
+                _ = string.Format(CultureInfo.InvariantCulture, value, "1.4.0", 10);
+            }
         }
     }
 

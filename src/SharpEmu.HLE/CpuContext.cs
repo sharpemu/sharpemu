@@ -12,6 +12,8 @@ public sealed class CpuContext(ICpuMemory memory, Generation generation)
     private readonly ulong[] _registers = new ulong[16];
     private readonly ulong[] _xmmRegisters = new ulong[32];
     private readonly ulong[] _ymmUpperRegisters = new ulong[32];
+    private readonly ulong[] _importStackArguments = new ulong[6];
+    private int _importStackArgumentCount;
     private bool _raxWritten;
 
     public ICpuMemory Memory { get; } = memory ?? throw new ArgumentNullException(nameof(memory));
@@ -60,6 +62,40 @@ public sealed class CpuContext(ICpuMemory memory, Generation generation)
     }
 
     public bool WasRaxWritten => _raxWritten;
+
+    public void SetImportStackArguments(
+        ulong arg0,
+        ulong arg1,
+        ulong arg2,
+        ulong arg3,
+        ulong arg4,
+        ulong arg5)
+    {
+        _importStackArguments[0] = arg0;
+        _importStackArguments[1] = arg1;
+        _importStackArguments[2] = arg2;
+        _importStackArguments[3] = arg3;
+        _importStackArguments[4] = arg4;
+        _importStackArguments[5] = arg5;
+        _importStackArgumentCount = _importStackArguments.Length;
+    }
+
+    public void ClearImportStackArguments()
+    {
+        _importStackArgumentCount = 0;
+    }
+
+    public bool TryGetImportStackArgument(int index, out ulong value)
+    {
+        if ((uint)index < (uint)_importStackArgumentCount)
+        {
+            value = _importStackArguments[index];
+            return true;
+        }
+
+        value = 0;
+        return false;
+    }
 
     public void GetXmmRegister(int registerIndex, out ulong low, out ulong high)
     {

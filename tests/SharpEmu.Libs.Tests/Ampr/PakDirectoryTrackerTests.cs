@@ -72,6 +72,23 @@ public sealed class PakDirectoryTrackerTests
         Assert.Equal(0x1000UL + (runLen * 2), third);
     }
 
+    [Fact]
+    public void ResolveSequentialOffset_UniqueEntryCanBeReadAgain()
+    {
+        const uint fileId = 0x5AA5_0003;
+        const uint size = 15903;
+        var memory = new FakeCpuMemory(0x1_0000_0000, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        LoadDirectory(ctx, fileId, memory, 0x1_0000_0000, dirFileOffset: 0x400, new[]
+        {
+            new PakEntry("bots/characters.txt", FilePos: 0xF81CF, FileLen: size),
+        });
+
+        Assert.Equal(0xF81CFUL, PakDirectoryTracker.ResolveSequentialOffset(fileId, size));
+        PakDirectoryTracker.OnReadCompleted(ctx, fileId, destination: 0x1_0000_0000, fileOffset: 0xF81CF, bytesRead: size);
+        Assert.Equal(0xF81CFUL, PakDirectoryTracker.ResolveSequentialOffset(fileId, size));
+    }
+
     // Feeds the tracker a synthetic PACK header + directory table exactly as the AMPR read path does:
     // first the 12-byte header (which arms directory parsing), then the directory records themselves.
     private static void LoadDirectory(

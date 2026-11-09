@@ -17,6 +17,7 @@ public sealed class PthreadSemaphoreSemanticsTests
     [InlineData("C36iRE0F5sE", "scePthreadSemWait")]
     [InlineData("aishVAiFaYM", "scePthreadSemPost")]
     [InlineData("H2a+IN9TP0E", "scePthreadSemTrywait")]
+    [InlineData("fjN6NQHhK8k", "scePthreadSemTimedwait")]
     [InlineData("GEnUkDZoUwY", "scePthreadSemInit")]
     [InlineData("Vwc+L05e6oE", "scePthreadSemDestroy")]
     public void RegistryResolvesPthreadSemaphoreExports(string nid, string exportName)
@@ -63,6 +64,41 @@ public sealed class PthreadSemaphoreSemanticsTests
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN,
             KernelSemaphoreCompatExports.PthreadSemTryWait(context));
         Assert.Equal(unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN),
+            context[CpuRegister.Rax]);
+
+        DestroySemaphore(context);
+    }
+
+    [Fact]
+    public void PthreadSemTimedWaitTreatsSecondArgumentAsRelativeMicroseconds()
+    {
+        var context = CreateContext();
+        InitializeSemaphore(context, initialCount: 1);
+
+        context[CpuRegister.Rdi] = SemaphoreAddress;
+        context[CpuRegister.Rsi] = 250_000;
+
+        Assert.Equal(0, KernelSemaphoreCompatExports.PthreadSemTimedWait(context));
+        Assert.Equal(0UL, context[CpuRegister.Rax]);
+        Assert.Equal(0, ReadSemaphoreValue(context));
+
+        DestroySemaphore(context);
+    }
+
+    [Fact]
+    public void PthreadSemTimedWaitWithZeroTimeoutReturnsTimedOutWhenEmpty()
+    {
+        var context = CreateContext();
+        InitializeSemaphore(context, initialCount: 0);
+
+        context[CpuRegister.Rdi] = SemaphoreAddress;
+        context[CpuRegister.Rsi] = 0;
+
+        Assert.Equal(
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT,
+            KernelSemaphoreCompatExports.PthreadSemTimedWait(context));
+        Assert.Equal(
+            unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT),
             context[CpuRegister.Rax]);
 
         DestroySemaphore(context);

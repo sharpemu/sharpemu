@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 
@@ -14,10 +15,105 @@ public sealed class Gen5Float16ArithmeticTests
     private const uint SEndpgm = 0xBF810000;
 
     [Fact]
+    public void LogicalLeftShift64DecodesAndCompiles()
+    {
+        var program = Decode([0xD6FF0021u, 0x00010303u, SEndpgm]);
+        Assert.Equal("VLshlrevB64", program.Instructions[0].Opcode);
+        Assert.Equal(2u, program.Instructions[0].DestinationWidth);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+    }
+
+    [Fact]
+    public void ScalarLeadingZeroCountDecodesAndCompiles()
+    {
+        var program = Decode([0xBEEA156Au, SEndpgm]);
+        var instruction = program.Instructions[0];
+        Assert.Equal("SFlbitI32B32", instruction.Opcode);
+        Assert.Equal(1u, instruction.DestinationWidth);
+        Assert.Equal(106u, instruction.Destinations[0].Value);
+        Assert.Equal(106u, instruction.Sources[0].Value);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+    }
+
+    [Fact]
+    public void ScalarBitReplicationDecodesLiteralAndCompiles()
+    {
+        var program = Decode([0xBEEA3BFFu, 0x80010001u, SEndpgm]);
+        var instruction = program.Instructions[0];
+        Assert.Equal("SBitreplicateB64B32", instruction.Opcode);
+        Assert.Equal(2u, instruction.DestinationWidth);
+        Assert.Equal(106u, instruction.Destinations[0].Value);
+        Assert.Equal(0x80010001u, instruction.Sources[0].Value);
+        Assert.Equal(8u, program.Instructions[1].Pc);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+    }
+
+    [Fact]
+    public void ScalarQuadMaskDecodesAndCompiles()
+    {
+        var program = Decode([0xBEEA2D6Au, SEndpgm]);
+        var instruction = program.Instructions[0];
+        Assert.Equal("SQuadmaskB64", instruction.Opcode);
+        Assert.Equal(2u, instruction.DestinationWidth);
+        Assert.Equal(106u, instruction.Destinations[0].Value);
+        Assert.Equal(106u, instruction.Sources[0].Value);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+    }
+
+    [Fact]
+    public void Float16FusedAddLiteralConsumesLiteralAndCompiles()
+    {
+        var program = Decode([0x700608F5u, 0xDEAD3800u, SEndpgm]);
+        var instruction = program.Instructions[0];
+        Assert.Equal("VFmaAkF16", instruction.Opcode);
+        Assert.Equal(3, instruction.Sources.Count);
+        Assert.Equal(Gen5OperandKind.LiteralConstant, instruction.Sources[2].Kind);
+        Assert.Equal(0xDEAD3800u, instruction.Sources[2].Value);
+        Assert.Equal(8u, program.Instructions[1].Pc);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+    }
+
+    [Fact]
+    public void Float16MinimumThreeDecodesSelectedHalvesAndCompiles()
+    {
+        var program = Decode([0xD751280Au, 0x044A2B09u, SEndpgm]);
+        Assert.Equal("VMin3F16", program.Instructions[0].Opcode);
+        Assert.Equal(5u, Assert.IsType<Gen5Vop3Control>(program.Instructions[0].Control).OperandSelect);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error), error);
+    }
+
+    [Theory]
+    [InlineData(false, 0x57u, "VLogF16")]
+    [InlineData(false, 0x54u, "VRcpF16")]
+    [InlineData(false, 0x55u, "VSqrtF16")]
+    [InlineData(true, 0x55u, "VSqrtF16")]
+    [InlineData(true, 0x54u, "VRcpF16")]
+    [InlineData(true, 0x57u, "VLogF16")]
+    [InlineData(false, 0x58u, "VExpF16")]
+    [InlineData(true, 0x58u, "VExpF16")]
+    public void Float16TranscendentalDecodesAndCompiles(bool extended, uint opcode, string name)
+    {
+        var program = Decode(extended
+            ? [(0x35u << 26) | ((0x180u + opcode) << 16), 257u, SEndpgm]
+            : [0x7E000101u | (opcode << 9), SEndpgm]);
+        Assert.Equal(name, program.Instructions[0].Opcode);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
+    }
+
+    [Fact]
     public void CompactFloat16ArithmeticDecodesAndCompilesWithoutNativeFloat16()
     {
         var program = Decode(
         [
+            0x7E00AD01, // v_rsq_f16 v0, v1
             0x64000501, // v_add_f16 v0, v1, v2
             0x66060B04, // v_sub_f16 v3, v4, v5
             0x680C1107, // v_subrev_f16 v6, v7, v8
@@ -28,24 +124,14 @@ public sealed class Gen5Float16ArithmeticTests
         ]);
 
         Assert.Equal(
-            ["VAddF16", "VSubF16", "VSubrevF16", "VMulF16", "VMaxF16", "VMinF16", "SEndpgm"],
+            ["VRsqF16", "VAddF16", "VSubF16", "VSubrevF16", "VMulF16", "VMaxF16", "VMinF16", "SEndpgm"],
             program.Instructions.Select(instruction => instruction.Opcode));
 
-        var state = new Gen5ShaderState(program, [], null);
-        var scalarRegisters = new uint[256];
-        var evaluation = new Gen5ShaderEvaluation(
-            scalarRegisters,
-            scalarRegisters,
-            [],
-            []);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
 
         Assert.True(
-            Gen5SpirvTranslator.TryCompileComputeShader(
-                state,
-                evaluation,
-                1,
-                1,
-                1,
+            Gen5SpirvTranslator.TryCompileProgram(
+                request,
                 out var shader,
                 out var error),
             error);
@@ -54,8 +140,121 @@ public sealed class Gen5Float16ArithmeticTests
         Assert.Contains((ushort)SpirvOp.FAdd, opcodes);
         Assert.Contains((ushort)SpirvOp.FSub, opcodes);
         Assert.Contains((ushort)SpirvOp.FMul, opcodes);
-        Assert.True(opcodes.Count(opcode => opcode == (ushort)SpirvOp.ExtInst) >= 2);
+        Assert.True(opcodes.Count(opcode => opcode == (ushort)SpirvOp.ExtInst) >= 3);
         Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
+    }
+
+    [Theory]
+    [InlineData(0x54u, "VRcpF16")]
+    [InlineData(0x55u, "VSqrtF16")]
+    [InlineData(0x57u, "VLogF16")]
+    [InlineData(0x58u, "VExpF16")]
+    [InlineData(0x5Bu, "VFloorF16")]
+    [InlineData(0x5Cu, "VCeilF16")]
+    [InlineData(0x5Du, "VTruncF16")]
+    [InlineData(0x5Eu, "VRndneF16")]
+    [InlineData(0x5Fu, "VFractF16")]
+    [InlineData(0x60u, "VSinF16")]
+    [InlineData(0x61u, "VCosF16")]
+    public void Float16UnaryDecodesAndCompilesInBothEncodings(uint opcode, string name)
+    {
+        // VOP1 v0, v1 (Silent Hill f: v_log_f16), then the VOP3 form v2, v3.
+        var program = Decode(
+        [
+            0x7E000000u | (opcode << 9) | 257u,
+            (0x35u << 26) | ((0x180u + opcode) << 16) | 2u,
+            259u,
+            SEndpgm,
+        ]);
+
+        Assert.Equal([name, name, "SEndpgm"], program.Instructions.Select(instruction => instruction.Opcode));
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
+    }
+
+    [Theory]
+    [InlineData(0x50u, "VCvtF16U16", SpirvOp.ConvertUToF)]
+    [InlineData(0x51u, "VCvtF16I16", SpirvOp.ConvertSToF)]
+    [InlineData(0x53u, "VCvtI16F16", SpirvOp.ConvertFToS)]
+    public void Float16IntegerConversionsDecodeAndCompileInBothEncodings(
+        uint opcode,
+        string name,
+        SpirvOp conversion)
+    {
+        // VOP1 v0, v1, then the VOP3 form v2, v3.
+        var program = Decode(
+        [
+            0x7E000000u | (opcode << 9) | 257u,
+            (0x35u << 26) | ((0x180u + opcode) << 16) | 2u,
+            259u,
+            SEndpgm,
+        ]);
+
+        Assert.Equal([name, name, "SEndpgm"], program.Instructions.Select(instruction => instruction.Opcode));
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.Contains((ushort)conversion, ReadOpcodes(shader.Spirv));
+        Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
+    }
+
+    [Theory]
+    [InlineData(0x351u, "VMin3F16")]
+    [InlineData(0x354u, "VMax3F16")]
+    [InlineData(0x357u, "VMed3F16")]
+    public void Vop3Float16ThreeOperandMinMaxDecodesAndCompiles(uint opcode, string name)
+    {
+        // Silent Hill's pixel shaders use v_min3_f16.
+        var program = Decode(
+        [
+            (0x35u << 26) | (opcode << 16) | 122u,
+            261u | (262u << 9) | (263u << 18),
+            SEndpgm,
+        ]);
+
+        Assert.Equal(name, program.Instructions[0].Opcode);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
+    }
+
+    [Fact]
+    public void Vop3Float16FmaDecodesAndCompiles()
+    {
+        var program = Decode(
+        [
+            (0x35u << 26) | (0x34Bu << 16) | 122u,
+            261u | (262u << 9) | (263u << 18),
+            SEndpgm,
+        ]);
+
+        Assert.Equal("VFmaF16", program.Instructions[0].Opcode);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error),
+            error);
+        Assert.Contains((ushort)SpirvOp.ExtInst, ReadOpcodes(shader.Spirv));
+        Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
+    }
+
+    [Fact]
+    public void PackedFloat16MultiplyAcceptsLiteralOperand()
+    {
+        var program = Decode(
+        [
+            (0x33u << 26) | (0x10u << 16) | 1u,
+            0xFFu | (258u << 9),
+            0x00002C00u,
+            SEndpgm,
+        ]);
+
+        Assert.Equal("VPkMulF16", program.Instructions[0].Opcode);
+        Assert.Equal(Gen5OperandKind.LiteralConstant, program.Instructions[0].Sources[0].Kind);
+        Assert.Equal(0x00002C00u, program.Instructions[0].Sources[0].Value);
+        var request = ResourceTestProgram.Request(program, userDataCount: 0);
+        Assert.True(
+            Gen5SpirvTranslator.TryCompileProgram(request, out _, out var error),
+            error);
     }
 
     private static Gen5ShaderProgram Decode(IReadOnlyList<uint> words)

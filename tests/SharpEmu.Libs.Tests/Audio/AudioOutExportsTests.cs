@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Diagnostics;
 using SharpEmu.HLE;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Audio;
@@ -57,6 +58,23 @@ public sealed class AudioOutExportsTests : IDisposable
         Assert.Equal(2, result);
         Assert.Equal(2UL, _ctx[CpuRegister.Rax]);
         Assert.Equal(source.ToArray(), Assert.Single(_streams[0].Submissions));
+    }
+
+    [Fact]
+    public void Output_PacesAfterShutdownWithoutUsingDisposedStream()
+    {
+        var handle = OpenPort(bufferLength: 4800);
+        var stream = Assert.Single(_streams);
+        AudioOutExports.ShutdownAllPorts();
+
+        Assert.Equal(0, SubmitSingle(handle, sourceAddress: 0));
+        var timer = Stopwatch.StartNew();
+        var result = SubmitSingle(handle, sourceAddress: 0);
+
+        Assert.Equal(0, result);
+        Assert.True(timer.Elapsed >= TimeSpan.FromMilliseconds(50));
+        Assert.True(stream.IsDisposed);
+        Assert.Empty(stream.Submissions);
     }
 
     [Fact]
@@ -180,7 +198,29 @@ public sealed class AudioOutExportsTests : IDisposable
             Assert.True(manager.TryGetExport("w3PdaSTSwGE", out var export));
             Assert.Equal("sceAudioOutOutputs", export.Name);
             Assert.Equal("libSceAudioOut", export.LibraryName);
+            Assert.True(manager.TryGetExport("QOQtbeDqsT4", out var singleExport));
+            Assert.Equal("sceAudioOutOutput", singleExport.Name);
+            Assert.Equal("libSceAudioOut", singleExport.LibraryName);
         }
+    }
+
+    [Theory]
+    [InlineData(Generation.Gen4)]
+    [InlineData(Generation.Gen5)]
+    public void OutputExportSubmitsThroughTheSharedHostAudioPath(Generation generation)
+    {
+        var handle = OpenPort(bufferLength: 2);
+        byte[] samples = [1, 0, 2, 0, 3, 0, 4, 0];
+        Assert.True(_memory.TryWrite(FirstSourceAddress, samples));
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(generation));
+        var context = new CpuContext(_memory, generation);
+        context[CpuRegister.Rdi] = (ulong)handle;
+        context[CpuRegister.Rsi] = FirstSourceAddress;
+
+        Assert.True(manager.TryDispatch("QOQtbeDqsT4", context, out var result));
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.Equal(samples, Assert.Single(Assert.Single(_streams).Submissions));
     }
 
     public void Dispose() => AudioOutExports.ResetForTests();
@@ -203,6 +243,13 @@ public sealed class AudioOutExportsTests : IDisposable
         return AudioOutExports.AudioOutOutputs(_ctx);
     }
 
+    private int SubmitSingle(int handle, ulong sourceAddress)
+    {
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+        _ctx[CpuRegister.Rsi] = sourceAddress;
+        return AudioOutExports.AudioOutOutput(_ctx);
+    }
+
     private void WriteDescriptor(int index, int handle, ulong sourceAddress)
     {
         Span<byte> descriptor = stackalloc byte[16];
@@ -217,15 +264,18 @@ public sealed class AudioOutExportsTests : IDisposable
     private sealed class RecordingAudioStream : IHostAudioStream
     {
         public List<byte[]> Submissions { get; } = [];
+        public bool IsDisposed { get; private set; }
 
         public bool Submit(ReadOnlySpan<byte> stereoPcm16)
         {
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
             Submissions.Add(stereoPcm16.ToArray());
             return true;
         }
 
         public void Dispose()
         {
+            IsDisposed = true;
         }
     }
 }

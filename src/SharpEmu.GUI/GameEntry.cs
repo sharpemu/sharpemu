@@ -5,6 +5,7 @@ using System.ComponentModel;
 using Avalonia;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
+using Avalonia.Threading;
 
 namespace SharpEmu.GUI;
 
@@ -39,6 +40,8 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
     private string _name;
     private string? _titleId;
     private string? _version;
+    private int _versionCount = 1;
+    private bool _compatibilityMode;
     private string? _coverPath;
     private string? _backgroundPath;
     private string _initials;
@@ -47,11 +50,12 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
 
     public GameEntry(
         string name, string? titleId, string? version, string path, long sizeBytes,
-        string? coverPath, string? backgroundPath)
+        string? coverPath, string? backgroundPath, bool compatibilityMode = false)
     {
         _name = name;
         _titleId = titleId;
         _version = version;
+        _compatibilityMode = compatibilityMode;
         Path = path;
         _sizeBytes = sizeBytes;
         _coverPath = coverPath;
@@ -71,6 +75,9 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
     public string? Version => _version;
 
     public string Path { get; }
+
+    // Keep an archive's type while the library watcher catches up with a moved or removed file.
+    public bool IsArchive => Path.EndsWith(".zar", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Total size of the game. Initially the eboot's own size from the scan;
@@ -132,10 +139,24 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
 
     public bool HasTitleId => TitleId is not null;
 
-    /// <summary>Badge text shown in the launch bar, e.g. "v01.000.000".</summary>
-    public string? VersionText => Version is null ? null : $"v{Version}";
+    /// <summary>The installed version, or the number of versions available to choose from.</summary>
+    public string? VersionText => HasMultipleVersions
+        ? Localization.Instance.Format("Library.Versions.Count", _versionCount)
+        : Version is null ? null : $"v{Version}";
 
-    public bool HasVersion => Version is not null;
+    public bool HasVersion => HasMultipleVersions || Version is not null;
+
+    public bool HasMultipleVersions => _versionCount > 1;
+
+    internal void SetVersionCount(int count)
+    {
+        _versionCount = count;
+        RaisePropertyChanged(nameof(VersionText));
+        RaisePropertyChanged(nameof(HasVersion));
+        RaisePropertyChanged(nameof(HasMultipleVersions));
+    }
+
+    public bool CompatibilityMode => _compatibilityMode;
 
     /// <summary>Formatted install size badge shown in the launch bar.</summary>
     public string SizeText => FormatSize(SizeBytes);
@@ -180,6 +201,13 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
             changes |= GameEntryChanges.Metadata;
         }
 
+        if (_compatibilityMode != scanned.CompatibilityMode)
+        {
+            _compatibilityMode = scanned.CompatibilityMode;
+            RaisePropertyChanged(nameof(CompatibilityMode));
+            changes |= GameEntryChanges.Metadata;
+        }
+
         if (!string.Equals(_coverPath, scanned.CoverPath, StringComparison.Ordinal)
             || _coverStamp != scanned._coverStamp)
         {
@@ -187,7 +215,7 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
             _coverStamp = scanned._coverStamp;
             var previousCover = Cover;
             Cover = null;
-            previousCover?.Dispose();
+            DisposeAfterRender(previousCover);
             changes |= GameEntryChanges.Cover;
         }
 
@@ -198,7 +226,7 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
             _backgroundStamp = scanned._backgroundStamp;
             var previousBackground = Background;
             Background = null;
-            previousBackground?.Dispose();
+            DisposeAfterRender(previousBackground);
             changes |= GameEntryChanges.Background;
         }
 
@@ -241,7 +269,7 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
         };
     }
 
-    private static string FormatSize(long bytes)
+    internal static string FormatSize(long bytes)
     {
         return bytes switch
         {
@@ -274,6 +302,16 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
             {
                 return default;
             }
+        }
+    }
+
+    // The renderer can still draw a replaced image in the frame it is composing; freeing it
+    // at once threw ObjectDisposedException there. Free it once that frame is long gone.
+    private static void DisposeAfterRender(Bitmap? image)
+    {
+        if (image is not null)
+        {
+            DispatcherTimer.RunOnce(image.Dispose, TimeSpan.FromSeconds(1));
         }
     }
 }

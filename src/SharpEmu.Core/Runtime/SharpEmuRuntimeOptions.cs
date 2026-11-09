@@ -10,9 +10,15 @@ public readonly struct SharpEmuRuntimeOptions
 {
     public CpuExecutionEngine CpuEngine { get; init; }
 
+    public int? SystemLanguage { get; init; }
+
     public bool StrictDynlibResolution { get; init; }
 
     public int ImportTraceLimit { get; init; }
+
+    public bool AdoptStartupAddressReservations { get; init; }
+
+    public string? ModsDirectory { get; init; }
 
     /// <summary>
     /// An optional debugger to attach to guest execution. Flows through to

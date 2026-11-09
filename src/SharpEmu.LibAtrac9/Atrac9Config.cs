@@ -21,6 +21,7 @@ namespace LibAtrac9
         public int SampleRateIndex { get; }
         /// <summary>
         /// A 3-bit value specifying one of 6 substream channel mappings.
+        /// Always 0 for streams with independent mono channels.
         /// </summary>
         public int ChannelConfigIndex { get; }
         /// <summary>
@@ -70,6 +71,12 @@ namespace LibAtrac9
         /// The number of samples in one superframe.
         /// </summary>
         public int SuperframeSamples { get; }
+        /// <summary>
+        /// Non-zero for streams whose config header is 0x30: every channel is
+        /// an independent mono stream with this many bytes per superframe,
+        /// and the channels are interleaved frame by frame.
+        /// </summary>
+        public int IndependentBlockSuperframeBytes { get; }
 
         /// <summary>
         /// Reads ATRAC9 configuration data and calculates the stream parameters from it.
@@ -82,16 +89,33 @@ namespace LibAtrac9
                 throw new InvalidDataException("Config data must be 4 bytes long");
             }
 
-            ReadConfigData(configData, out int a, out int b, out int c, out int d);
+            ReadConfigData(configData, out int a, out int b, out int c, out int d, out int independentChannels);
             SampleRateIndex = a;
             ChannelConfigIndex = b;
-            FrameBytes = c;
             SuperframeIndex = d;
             ConfigData = configData;
 
+            if (independentChannels > 0)
+            {
+                // The frame size field holds one channel's share; the frame as
+                // a whole carries one mono block per channel.
+                ChannelConfig = ChannelConfig.CreateIndependentMono(independentChannels);
+                IndependentBlockSuperframeBytes = c << SuperframeIndex;
+                FrameBytes = c * independentChannels;
+            }
+            else
+            {
+                if (ChannelConfigIndex >= Tables.ChannelConfig.Length)
+                {
+                    throw new InvalidDataException("ATRAC9 Config Data is invalid");
+                }
+
+                ChannelConfig = Tables.ChannelConfig[ChannelConfigIndex];
+                FrameBytes = c;
+            }
+
             FramesPerSuperframe = 1 << SuperframeIndex;
             SuperframeBytes = FrameBytes << SuperframeIndex;
-            ChannelConfig = Tables.ChannelConfig[ChannelConfigIndex];
 
             ChannelCount = ChannelConfig.ChannelCount;
             SampleRate = Tables.SampleRates[SampleRateIndex];
@@ -101,21 +125,36 @@ namespace LibAtrac9
             SuperframeSamples = FrameSamples * FramesPerSuperframe;
         }
 
-        private static void ReadConfigData(byte[] configData, out int sampleRateIndex, out int channelConfigIndex, out int frameBytes, out int superframeIndex)
+        private static void ReadConfigData(byte[] configData, out int sampleRateIndex, out int channelConfigIndex, out int frameBytes, out int superframeIndex, out int independentChannels)
         {
             var reader = new BitReader(configData);
 
             int header = reader.ReadInt(8);
             sampleRateIndex = reader.ReadInt(4);
-            channelConfigIndex = reader.ReadInt(3);
+            channelConfigIndex = 0;
+            independentChannels = 0;
+            if (header == IndependentMonoHeader)
+            {
+                // PS5 multichannel streams (ambisonics: 4, 9 or 16 channels)
+                // replace the 3-bit channel mapping with a 6-bit channel count.
+                independentChannels = reader.ReadInt(6) + 1;
+            }
+            else
+            {
+                channelConfigIndex = reader.ReadInt(3);
+            }
+
             int validationBit = reader.ReadInt(1);
             frameBytes = reader.ReadInt(11) + 1;
             superframeIndex = reader.ReadInt(2);
 
-            if (header != 0xFE || validationBit != 0)
+            if ((header != StandardHeader && header != IndependentMonoHeader) || validationBit != 0)
             {
                 throw new InvalidDataException("ATRAC9 Config Data is invalid");
             }
         }
+
+        private const int StandardHeader = 0xFE;
+        private const int IndependentMonoHeader = 0x30;
     }
 }

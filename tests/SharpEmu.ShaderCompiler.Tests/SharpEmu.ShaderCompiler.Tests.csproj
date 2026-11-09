@@ -15,6 +15,11 @@ SPDX-License-Identifier: GPL-2.0-or-later
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The device tests reuse the resource-plan program builders. -->
+    <InternalsVisibleTo Include="SharpEmu.Libs.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />
     <PackageReference Include="xunit.runner.visualstudio" />

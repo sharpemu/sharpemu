@@ -16,6 +16,8 @@ internal static class WindowsFaultCodes
     public const uint FastFail = 0xC0000409u;                // 3221226505
     public const uint StackOverflow = 0xC00000FDu;
     public const uint ClrManagedException = 0xE0434352u;
+    public const uint DebugOutputAnsi = 0x40010006u;
+    public const uint DebugOutputUnicode = 0x4001000Au;
 
     // EXCEPTION_RECORD.ExceptionInformation[0] for access violations.
     public const ulong AccessRead = 0;

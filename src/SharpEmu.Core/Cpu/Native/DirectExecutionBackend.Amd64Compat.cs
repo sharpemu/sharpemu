@@ -7,23 +7,8 @@ using SharpEmu.Core.Cpu.Emulation;
 
 namespace SharpEmu.Core.Cpu.Native;
 
-// General software fallback for the AMD-only instructions PS5 titles occasionally emit that a
-// Zen 2-only host implements but Intel hosts (and Rosetta 2 on Apple Silicon) do not:
-//   - SSE4a EXTRQ/INSERTQ, immediate form
-//   - MONITORX/MWAITX
-//
-// This is a direct port of Kyty's Loader::X64InstructionEmulator (TryEmulateSse4a /
-// TryEmulateMonitorxMwaitx). SharpEmu already special-cases exactly one compiled EXTRQ+VPBLENDD
-// byte sequence at load time (Sse4aExtrqBlendPatch), which only helps the one idiom it was
-// reverse-engineered from. This file is a general, fault-time fallback that engages for any
-// immediate-form EXTRQ/INSERTQ or MONITORX/MWAITX the narrower patch (or a title using a
-// different compiler/register allocation) does not cover, complementing rather than replacing
-// it: the load-time patch still avoids paying the fault-and-recover cost on the hot path it was
-// built for, while this method is the safety net for everything else.
-//
-// This is deliberately additive: DirectExecutionBackend.IllegalInstruction.cs (the BMI1/BMI2/ABM
-// fallback) is untouched, and this method is only reached from VectoredHandler after that one
-// has already declined to handle the fault.
+// Recover supported instructions only after an illegal-instruction fault.
+// Leave native instructions and unrelated register values unchanged.
 public sealed partial class DirectExecutionBackend
 {
     // Byte offset of Xmm0 within the Win64 CONTEXT record: FltSave (the XMM_SAVE_AREA32/FXSAVE
@@ -46,16 +31,8 @@ public sealed partial class DirectExecutionBackend
             return true;
         }
 
-        // MONITORX/MWAITX above only ever reads guest code memory and rewrites RIP, both of
-        // which the POSIX signal bridge (DirectExecutionBackend.PosixSignals.cs) faithfully
-        // round-trips through the real ucontext, so it works on every supported OS. EXTRQ/
-        // INSERTQ additionally read and write an XMM register: on Windows contextRecord is the
-        // live CONTEXT the OS resumes the thread from, so touching the Xmm0.. slots is visible
-        // to the guest, and on Linux the bridge copies the mcontext's FXSAVE image into the
-        // Xmm0.. slots and writes them back through sigreturn (_posixXmmContextBridged). On
-        // Darwin the XMM area is still a zeroed scratch buffer - running this there would
-        // silently compute a result from stale bytes and then discard whatever it "wrote", so
-        // the recovery declines until that bridge exists.
+        // EXTRQ and INSERTQ need the current vector register values.
+        // Use recovery only when the signal context contains these values.
         return (OperatingSystem.IsWindows() || _posixXmmContextBridged) &&
             TryRecoverSse4aExtractInsert(contextRecord, rip);
     }
@@ -65,7 +42,7 @@ public sealed partial class DirectExecutionBackend
         // MONITORX (0F 01 FA) and MWAITX (0F 01 FB) are fixed 3-byte encodings with no
         // ModRM/SIB/displacement/immediate, so a raw byte compare is sufficient and unambiguous.
         var opcode = new byte[3];
-        if (!TryReadHostBytes(rip, opcode) ||
+        if (!TryReadExecutableBytes(rip, opcode) ||
             opcode[0] != 0x0F || opcode[1] != 0x01 || (opcode[2] != 0xFA && opcode[2] != 0xFB))
         {
             return false;
@@ -111,7 +88,10 @@ public sealed partial class DirectExecutionBackend
             return false;
         }
 
-        if (isExtrq && instruction.OpCount != 3 || isInsertq && instruction.OpCount != 4)
+        var isImmediateExtrq = isExtrq && instruction.OpCount == 3;
+        var isRegisterExtrq = isExtrq && instruction.OpCount == 2;
+        var isImmediateInsertq = isInsertq && instruction.OpCount == 4;
+        if (!isImmediateExtrq && !isRegisterExtrq && !isImmediateInsertq)
         {
             return false;
         }
@@ -125,11 +105,26 @@ public sealed partial class DirectExecutionBackend
         var destLow = ReadCtxU64(contextRecord, destOffset);
         if (isExtrq)
         {
-            var length = (int)instruction.GetImmediate(1);
-            var index = (int)instruction.GetImmediate(2);
-            if (!Sse4aBitFieldEmulator.IsValidBitField(length, index))
+            int length;
+            int index;
+            if (isRegisterExtrq)
             {
-                return false;
+                if (instruction.GetOpKind(1) != OpKind.Register ||
+                    !TryGetXmmOffset(instruction.GetOpRegister(1), out var controlOffset))
+                {
+                    return false;
+                }
+
+                // AMD defines the register form's field length in xmm2[5:0] and its start
+                // index in xmm2[13:8]. Other control bits do not affect the instruction.
+                var control = ReadCtxU64(contextRecord, controlOffset);
+                length = (int)(control & 0x3F);
+                index = (int)((control >> 8) & 0x3F);
+            }
+            else
+            {
+                length = (int)instruction.GetImmediate(1);
+                index = (int)instruction.GetImmediate(2);
             }
 
             WriteCtxU64(contextRecord, destOffset, Sse4aBitFieldEmulator.ExtractBitField(destLow, length, index));
@@ -145,11 +140,6 @@ public sealed partial class DirectExecutionBackend
 
             var length = (int)instruction.GetImmediate(2);
             var index = (int)instruction.GetImmediate(3);
-            if (!Sse4aBitFieldEmulator.IsValidBitField(length, index))
-            {
-                return false;
-            }
-
             WriteCtxU64(contextRecord, destOffset, Sse4aBitFieldEmulator.InsertBitField(
                 destLow, ReadCtxU64(contextRecord, srcOffset), length, index));
             WriteCtxU64(contextRecord, destOffset + 8, 0);

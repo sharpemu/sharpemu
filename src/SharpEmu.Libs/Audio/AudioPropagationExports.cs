@@ -17,9 +17,21 @@ public static class AudioPropagationExports
 {
     private const int Ok = 0;
 
-    // QueryMemory reports the working-set size the caller must allocate before
-    // SystemCreate. rsi points at the out size/alignment; write a modest,
-    // aligned block so the caller's allocation succeeds.
+    // ABI: int32_t sceAudioPropagationSystemQueryMemory(
+    //   const SceAudioPropagationSystemOption *pOptions,
+    //   SceAudioPropagationSystemMemory *pOutMemorySize).
+    // SceAudioPropagationSystemMemory is NOT a {size, alignment} pair: it is
+    //   +0x00 SceAudioPropagationStructDescriptor desc { uint32 id; size_t size; }
+    //   +0x10 void  *pCpuMem      (the caller allocates and fills this)
+    //   +0x18 size_t sizeCpuMem
+    //   +0x20 void  *pGpuMem      (the caller allocates and fills this)
+    //   +0x28 size_t sizeGpuMem
+    // so only the two size fields belong to this call. Writing {size, alignment}
+    // at +0x00/+0x08 overwrote the descriptor the caller had already initialized.
+    private const int SystemMemoryCpuSizeOffset = 0x18;
+    private const int SystemMemoryGpuSizeOffset = 0x28;
+    private const ulong SystemMemoryCpuBytes = 0x10_0000;
+
     [SysAbiExport(
         Nid = "7xyAxrusLko",
         ExportName = "sceAudioPropagationSystemQueryMemory",
@@ -28,13 +40,15 @@ public static class AudioPropagationExports
     public static int SystemQueryMemory(CpuContext ctx)
     {
         var outAddress = ctx[CpuRegister.Rsi];
-        if (outAddress != 0)
+        if (outAddress == 0)
         {
-            // {size, alignment} — 1 MiB / 256 B covers the caller's allocation.
-            ctx.TryWriteUInt64(outAddress, 0x10_0000);
-            ctx.TryWriteUInt64(outAddress + sizeof(ulong), 0x100);
+            // SCE_AUDIO_PROPAGATION_ERROR_INVALID_POINTER.
+            return ctx.SetReturn(unchecked((int)0x8A70_0003));
         }
 
+        // No GPU (Acm) propagation path exists here, so the GPU working set is 0.
+        ctx.TryWriteUInt64(outAddress + SystemMemoryCpuSizeOffset, SystemMemoryCpuBytes);
+        ctx.TryWriteUInt64(outAddress + SystemMemoryGpuSizeOffset, 0);
         return ctx.SetReturn(Ok);
     }
 

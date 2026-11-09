@@ -49,4 +49,19 @@ public sealed class SysAbiRegistryTests
         Assert.Equal("sceKernelWaitSema", export.Name);
         Assert.Equal("libKernel", export.LibraryName);
     }
+
+    [Fact]
+    public void RegistryResolvesStorageCompatibilityExports()
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+
+        Assert.True(manager.TryGetExport("SaKib2Ug0yI", out var temporarySpace));
+        Assert.Equal("sceAppContentTemporaryDataGetAvailableSpaceKb", temporarySpace.Name);
+        Assert.Equal("libSceAppContent", temporarySpace.LibraryName);
+
+        Assert.True(manager.TryGetExport("X4MYzukPc3g", out var saveSearch));
+        Assert.Equal("sceSaveDataDirNameSearchPs4", saveSearch.Name);
+        Assert.Equal("libSceSaveData", saveSearch.LibraryName);
+    }
 }

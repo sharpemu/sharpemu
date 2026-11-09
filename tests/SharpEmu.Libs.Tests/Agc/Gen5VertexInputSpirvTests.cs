@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 
@@ -42,42 +44,11 @@ public sealed class Gen5VertexInputSpirvTests
             [],
             [],
             null);
-        var state = new Gen5ShaderState(
+        var shaderBytes = CompileVertexProgram(
             new Gen5ShaderProgram(0, [instruction, end]),
-            [],
-            null);
-        var registers = new uint[256];
-        var data = new byte[16];
-        var evaluation = new Gen5ShaderEvaluation(
-            registers,
-            registers,
-            [],
-            [],
-            VertexInputs:
-            [
-                new Gen5VertexInputBinding(
-                    0,
-                    0,
-                    4,
-                    10,
-                    numberFormat,
-                    0x1000,
-                    4,
-                    0,
-                    data,
-                    data.Length,
-                    DataPooled: false),
-            ]);
+            new ShaderVertexInput(0, 0, 4, numberFormat, false, []));
 
-        Assert.True(
-            Gen5SpirvTranslator.TryCompileVertexShader(
-                state,
-                evaluation,
-                out var shader,
-                out var error),
-            error);
-
-        var module = ParseModule(shader.Spirv);
+        var module = ParseModule(shaderBytes);
         var inputVariable = module.Single(candidate =>
             candidate.Opcode == SpirvOp.Decorate &&
             candidate.Operands.Length >= 3 &&
@@ -117,11 +88,9 @@ public sealed class Gen5VertexInputSpirvTests
     [Fact]
     public void AliasedFetchInstructionsShareOneAttributeLocation()
     {
-        // Metal caps a vertex function at 31 attributes, so every fetch that
-        // reads one guest stream view must resolve to that view's single
-        // location instead of declaring its own.
-        var firstFetch = CreateVertexFetch(0);
-        var secondFetch = CreateVertexFetch(4);
+        // Fetches for one stream view share one location to preserve the attribute budget.
+        var firstFetch = CreateVertexFetch(0, 0);
+        var secondFetch = CreateVertexFetch(4, 8);
         var end = new Gen5ShaderInstruction(
             8,
             Gen5ShaderEncoding.Sopp,
@@ -130,43 +99,11 @@ public sealed class Gen5VertexInputSpirvTests
             [],
             [],
             null);
-        var state = new Gen5ShaderState(
+        var shaderBytes = CompileVertexProgram(
             new Gen5ShaderProgram(0, [firstFetch, secondFetch, end]),
-            [],
-            null);
-        var registers = new uint[256];
-        var data = new byte[16];
-        var evaluation = new Gen5ShaderEvaluation(
-            registers,
-            registers,
-            [],
-            [],
-            VertexInputs:
-            [
-                new Gen5VertexInputBinding(
-                    0,
-                    0,
-                    4,
-                    10,
-                    0,
-                    0x1000,
-                    4,
-                    0,
-                    data,
-                    data.Length,
-                    DataPooled: false,
-                    AliasPcs: [4u]),
-            ]);
+            new ShaderVertexInput(0, 0, 4, 0, false, [4u]));
 
-        Assert.True(
-            Gen5SpirvTranslator.TryCompileVertexShader(
-                state,
-                evaluation,
-                out var shader,
-                out var error),
-            error);
-
-        var module = ParseModule(shader.Spirv);
+        var module = ParseModule(shaderBytes);
         var locations = module
             .Where(candidate =>
                 candidate.Opcode == SpirvOp.Decorate &&
@@ -175,17 +112,82 @@ public sealed class Gen5VertexInputSpirvTests
             .ToArray();
         var inputVariable = Assert.Single(locations).Operands[0];
 
-        // Both fetches must read that variable; an unaliased second fetch would
-        // fall through to the generic buffer path and leave only one load.
         Assert.Equal(
-            2,
+            1,
             module.Count(candidate =>
                 candidate.Opcode == SpirvOp.Load &&
                 candidate.Operands.Length >= 3 &&
                 candidate.Operands[2] == inputVariable));
+
+        var names = new SpirvModuleInspector(shaderBytes).Names;
+        for (var component = 0; component < 4; component++)
+        {
+            var firstRegister = Assert.Single(names, entry => entry.Value == $"v{component}").Key;
+            var secondRegister = Assert.Single(names, entry => entry.Value == $"v{component + 8}").Key;
+            var firstValue = module.Last(instruction => instruction.Opcode == SpirvOp.Store &&
+                instruction.Operands[0] == firstRegister).Operands[1];
+            var secondValue = module.Last(instruction => instruction.Opcode == SpirvOp.Store &&
+                instruction.Operands[0] == secondRegister).Operands[1];
+            Assert.Equal(firstValue, secondValue);
+        }
     }
 
-    private static Gen5ShaderInstruction CreateVertexFetch(uint pc) =>
+    [Fact]
+    public void FormattedFetchZeroFillsMissingComponents()
+    {
+        var fetch = new Gen5ShaderInstruction(
+            0,
+            Gen5ShaderEncoding.Mubuf,
+            "BufferLoadFormatXyz",
+            [],
+            [],
+            [],
+            new Gen5BufferMemoryControl(
+                3,
+                5,
+                0,
+                0,
+                0,
+                IndexEnabled: true,
+                OffsetEnabled: false,
+                Glc: false,
+                Slc: false));
+        var end = new Gen5ShaderInstruction(
+            4,
+            Gen5ShaderEncoding.Sopp,
+            "SEndpgm",
+            [],
+            [],
+            [],
+            null);
+        var shaderBytes = CompileVertexProgram(
+            new Gen5ShaderProgram(0, [fetch, end]),
+            new ShaderVertexInput(0, 0, 2, 7, false, []));
+
+        var module = ParseModule(shaderBytes);
+        Assert.Contains(
+            module,
+            instruction =>
+                instruction.Opcode == SpirvOp.Constant &&
+                instruction.Operands.Length == 3 &&
+                instruction.Operands[2] == 0);
+    }
+
+    private static byte[] CompileVertexProgram(Gen5ShaderProgram program, ShaderVertexInput vertexInput)
+    {
+        var replacedFetchOffsets = vertexInput.AliasPcs.Append(vertexInput.Pc).ToHashSet();
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Vertex, 1, 0, 0, replacedFetchOffsets);
+        var resources = ResourceMaterializer.ApplyTo(plan, ResourceSpecialization.Default(plan.Info));
+        var layout = BindingLayout.Allocate(resources.Info, [], false, false, false, 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            VertexInputs = [vertexInput],
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        return shader.Spirv;
+    }
+
+    private static Gen5ShaderInstruction CreateVertexFetch(uint pc, uint destination) =>
         new(
             pc,
             Gen5ShaderEncoding.Mubuf,
@@ -196,7 +198,7 @@ public sealed class Gen5VertexInputSpirvTests
             new Gen5BufferMemoryControl(
                 4,
                 5,
-                0,
+                destination,
                 0,
                 0,
                 IndexEnabled: true,

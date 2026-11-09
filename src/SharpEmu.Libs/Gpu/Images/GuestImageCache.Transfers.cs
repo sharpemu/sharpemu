@@ -1,0 +1,1102 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.Vulkan;
+using SharpEmu.Libs.Kernel;
+using Silk.NET.Vulkan;
+
+using SharpEmu.Libs.VideoOut;
+
+namespace SharpEmu.Libs.Gpu.Images;
+
+// Guest-to-image uploads, image-to-guest downloads and the buffer/image hand-overs.
+public sealed unsafe partial class GuestImageCache
+{
+    private enum TransferDirection
+    {
+        Upload,
+        Download,
+    }
+
+    private sealed class ColorTransferPlan
+    {
+        public TextureTransferLayout Layout = null!;
+        public List<BufferImageCopy> Regions = new();
+        public List<TileTransfer> Tiles = new();
+        public ulong LinearSize;
+        public bool Tiled;
+        public bool SwapBgra16;
+        public bool Valid;
+    }
+
+    private sealed class ImageDownloadPlan
+    {
+        public ColorTransferPlan Color = new();
+        public bool Depth;
+        public bool Valid;
+    }
+
+    private static ulong LinearSizeOf(List<TileTransfer> tiles)
+    {
+        ulong size = 0;
+        foreach (var tile in tiles)
+        {
+            size = Math.Max(size, tile.LinearOffset + tile.LinearSize);
+        }
+
+        return size;
+    }
+
+    private static ColorTransferPlan PlanColorTransfer(CachedImage image, ImageRole role, TransferDirection direction)
+    {
+        ref readonly var info = ref image.Description;
+        var format = info.GuestFormat;
+        var layers = info.TransferLayers;
+        var volume = info.IsVolume;
+        var allowDepthTile = direction == TransferDirection.Upload;
+        var owner = direction == TransferDirection.Upload ? "texture upload" : "image readback";
+        var plan = new ColorTransferPlan();
+        if (direction == TransferDirection.Upload)
+        {
+            switch (role)
+            {
+                case ImageRole.Texture:
+                    break;
+                case ImageRole.StorageImage:
+                    owner = "storage image upload";
+                    break;
+                case ImageRole.ColorTarget:
+                    if (info.Resources.Layers == 0 || info.Data.Size % info.Resources.Layers != 0 || info.Samples != 1 || image.Backing.Samples != 1)
+                    {
+                        throw InvalidAttachmentUpload(info, image);
+                    }
+
+                    format = ImageDescription.RenderTargetTransferFormat(info.BytesPerBlock);
+                    allowDepthTile = true;
+                    plan.SwapBgra16 = info.Bgra16;
+                    owner = "color target upload";
+                    break;
+                case ImageRole.DisplaySurface:
+                    if (info.Resources.Layers == 0 || info.Data.Size % info.Resources.Layers != 0 || info.Samples != 1 || image.Backing.Samples != 1 ||
+                        info.Metadata.Compression != DisplayCompression.Uncompressed)
+                    {
+                        throw InvalidAttachmentUpload(info, image);
+                    }
+
+                    format = info.GuestFormat;
+                    layers = info.Resources.Layers;
+                    volume = false;
+                    allowDepthTile = false;
+                    plan.SwapBgra16 = info.Bgra16;
+                    owner = "display surface upload";
+                    break;
+                case ImageRole.DepthTarget:
+                    return plan;
+            }
+        }
+        else
+        {
+            if (role == ImageRole.DepthTarget)
+            {
+                return plan;
+            }
+
+            format = role == ImageRole.ColorTarget ? ImageDescription.RenderTargetTransferFormat(info.BytesPerBlock) : info.GuestFormat;
+            allowDepthTile = role is ImageRole.StorageImage or ImageRole.ColorTarget;
+            plan.SwapBgra16 = info.Bgra16;
+        }
+
+        var rowPitch = direction == TransferDirection.Upload && role == ImageRole.Texture ? info.Pitch : 0u;
+        plan.Layout = TextureTransferLayout.Compute(format, info.Extent.Width, info.Extent.Height, info.Resources.Levels, layers, info.TileMode, info.Data.Size, allowDepthTile, volume, owner, rowPitch);
+        plan.Regions = plan.Layout.BuildCopies();
+        if (info.IsDepth)
+        {
+            for (var index = 0; index < plan.Regions.Count; index++)
+            {
+                var region = plan.Regions[index];
+                region.ImageSubresource.AspectMask = ImageAspectFlags.DepthBit;
+                plan.Regions[index] = region;
+            }
+        }
+        plan.Tiled = plan.Layout.Surface.Description.TileMode != GuestTileMode.Linear;
+        if (plan.Tiled)
+        {
+            if (!plan.Layout.TryBuildTileTransfers(info.Data.Size, plan.Regions, info.Resources.Levels, out var tiles))
+            {
+                return plan;
+            }
+
+            plan.Tiles = tiles;
+        }
+
+        // Guest levels past the host mip chain (CachedImage.MipChainLevels) have no host level to move:
+        // an upload leaves them out, a download leaves their guest bytes as they are.
+        DropLevelsWithoutHostLevel(plan, image.Backing.MipLevels);
+        if (plan.Tiled)
+        {
+            plan.LinearSize = LinearSizeOf(plan.Tiles);
+        }
+
+        plan.Valid = true;
+        return plan;
+    }
+
+    // The regions run level by level, so the levels to drop are the last ones. A tile starts at the linear
+    // offset of its first region (a volume tile spans several slices of one level).
+    private static void DropLevelsWithoutHostLevel(ColorTransferPlan plan, uint hostLevels)
+    {
+        var kept = plan.Regions.Count;
+        while (kept > 0 && plan.Regions[kept - 1].ImageSubresource.MipLevel >= hostLevels)
+        {
+            kept--;
+        }
+
+        if (kept == plan.Regions.Count)
+        {
+            return;
+        }
+
+        plan.Regions.RemoveRange(kept, plan.Regions.Count - kept);
+        if (!plan.Tiled)
+        {
+            return;
+        }
+
+        var offsets = new HashSet<ulong>(plan.Regions.Count);
+        foreach (var region in plan.Regions)
+        {
+            offsets.Add(region.BufferOffset);
+        }
+
+        plan.Tiles.RemoveAll(tile => !offsets.Contains(tile.LinearOffset));
+    }
+
+    private static Exception InvalidAttachmentUpload(in ImageDescription info, CachedImage image) =>
+        SubmissionScheduler.Fatal(
+            $"The color-attachment upload is invalid: address=0x{info.Data.Address:X16} size=0x{info.Data.Size:X} layers={info.Resources.Layers} samples={info.Samples} backingSamples={image.Backing.Samples} compression={info.Metadata.Compression}.");
+
+    private static ImageDownloadPlan PlanDownload(CachedImage image)
+    {
+        ref readonly var info = ref image.Description;
+        var plan = new ImageDownloadPlan { Depth = info.IsDepth };
+        if (info.Samples != 1 || image.Backing.Samples != 1)
+        {
+            return plan;
+        }
+
+        if (plan.Depth)
+        {
+            plan.Valid = info.IsSupportedDepthPlaneReadback && info.Resources.Layers != 0 && info.Data.Size % info.Resources.Layers == 0 &&
+                         GuestPixelFormats.BytesPerElement(info.GuestFormat) == info.BytesPerBlock;
+            return plan;
+        }
+
+        if (info.Metadata.Compression != DisplayCompression.Uncompressed)
+        {
+            return plan;
+        }
+
+        plan.Color = PlanColorTransfer(image, UploadRole(image), TransferDirection.Download);
+        plan.Valid = plan.Color.Valid;
+        return plan;
+    }
+
+    private static List<TileTransfer> DepthTileTransfers(in ImageDescription info, in TileBlockLayout block, ulong fullSliceSize)
+    {
+        var tiles = new List<TileTransfer>((int)info.Resources.Layers);
+        for (uint layer = 0; layer < info.Resources.Layers; layer++)
+        {
+            var offset = fullSliceSize * layer;
+            tiles.Add(new TileTransfer
+            {
+                Kind = block.Kind,
+                BytesPerElement = block.BytesPerElement,
+                LinearOffset = offset,
+                LinearSize = fullSliceSize,
+                TiledOffset = offset,
+                TiledSize = fullSliceSize,
+                LinearSliceStride = 0,
+                Width = info.Extent.Width,
+                Height = info.Extent.Height,
+                Depth = 1,
+                Pitch = info.Pitch,
+                SurfaceZ = layer,
+            });
+        }
+
+        return tiles;
+    }
+
+    private static BufferImageCopy[] DepthCopies(in ImageDescription info, ulong sliceSize, ImageAspectFlags aspect = ImageAspectFlags.DepthBit)
+    {
+        var copies = new BufferImageCopy[info.Resources.Layers];
+        for (uint layer = 0; layer < info.Resources.Layers; layer++)
+        {
+            copies[layer] = new BufferImageCopy
+            {
+                BufferOffset = sliceSize * layer,
+                BufferRowLength = info.Pitch,
+                BufferImageHeight = info.Extent.Height,
+                ImageSubresource = new ImageSubresourceLayers(aspect, 0, layer, 1),
+                ImageExtent = new Extent3D(info.Extent.Width, info.Extent.Height, 1),
+            };
+        }
+
+        return copies;
+    }
+
+    private static TileBlockLayout DepthBlock(in ImageDescription info)
+    {
+        if (!TileGeometry.TryGetBlockLayout(TileBlockKind.Depth64KB, info.BytesPerBlock, out var block))
+        {
+            throw SubmissionScheduler.Fatal($"The depth tile layout is not supported: bytesPerBlock={info.BytesPerBlock}.");
+        }
+
+        return block;
+    }
+
+    private static void UploadRegions(CachedImage image, List<BufferImageCopy> copies, TilerBufferSpan linear)
+    {
+        for (var index = 0; index < copies.Count; index++)
+        {
+            var copy = copies[index];
+            copy.BufferOffset += linear.Offset;
+            copies[index] = copy;
+        }
+
+        image.UploadFromBuffer(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(copies), linear.Buffer, linear.Offset, linear.Size);
+    }
+
+    private static ImageDescription StencilPlaneDescription(CachedImage association, CachedImage destination)
+    {
+        var info = destination.Description;
+        info.Data = association.Description.Data;
+        info.GuestFormat = GuestPixelFormat.Bits8UInt;
+        info.BytesPerBlock = 1;
+        if (info.IsTiled)
+        {
+            info.Pitch = TileGeometry.DepthPitch(info.Extent.Width, 1);
+        }
+
+        if (info.Samples != 1 || destination.Backing.Samples != 1 || info.Resources.Layers == 0 || info.Data.Size % info.Resources.Layers != 0)
+        {
+            throw SubmissionScheduler.Fatal(
+                $"The stencil transfer is invalid: address=0x{info.Data.Address:X16} size=0x{info.Data.Size:X} layers={info.Resources.Layers} samples={info.Samples} backingSamples={destination.Backing.Samples}.");
+        }
+
+        var fullSliceSize = info.Data.Size / info.Resources.Layers;
+        var rowHeight = info.IsTiled ? DepthBlock(info).BlockHeight : 1u;
+        var rowBytes = (ulong)info.Pitch * rowHeight;
+        var fittingHeight = rowBytes == 0 ? 0 : fullSliceSize / rowBytes * rowHeight;
+        if (fittingHeight == 0)
+        {
+            throw SubmissionScheduler.Fatal(
+                $"The stencil plane is smaller than one row: address=0x{info.Data.Address:X16} size=0x{info.Data.Size:X} pitch={info.Pitch} layers={info.Resources.Layers}.");
+        }
+
+        if (fittingHeight < info.Extent.Height)
+        {
+            info.Extent.Height = (uint)fittingHeight;
+        }
+
+        return info;
+    }
+
+    private void UploadStencilPlane(CachedImage association, GpuBuffer source, ulong sourceOffset)
+    {
+        var destination = _slots[association.DepthOwner];
+        var info = StencilPlaneDescription(association, destination);
+        var fullSliceSize = info.Data.Size / info.Resources.Layers;
+        var copies = DepthCopies(info, fullSliceSize, ImageAspectFlags.StencilBit);
+        var linear = new TilerBufferSpan(source.Handle, sourceOffset, source.Size - sourceOffset);
+        if (info.IsTiled)
+        {
+            var tiles = DepthTileTransfers(info, DepthBlock(info), fullSliceSize);
+            linear = _tiler.Detile(source.Handle, sourceOffset, info.Data.Size, info.Data.Size, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(tiles));
+        }
+
+        UploadRegions(destination, copies.ToList(), linear);
+    }
+
+    private bool TryDownloadStencilToBuffer(CachedImage association, GpuBuffer buffer)
+    {
+        var depth = _slots.TryGet(association.DepthOwner);
+        if (depth == null || !depth.Backing.Exists || depth.Description.Metadata.StencilCompressed ||
+            depth.Description.Samples != 1 || depth.Backing.Samples != 1 ||
+            !buffer.IsInBounds(association.Description.Data.Address, association.Description.Data.Size))
+            return false;
+
+        var info = StencilPlaneDescription(association, depth);
+        var fullSliceSize = info.Data.Size / info.Resources.Layers;
+        var copies = DepthCopies(info, fullSliceSize, ImageAspectFlags.StencilBit);
+        var offset = buffer.Offset(info.Data.Address);
+        if (info.IsTiled)
+        {
+            var tiles = DepthTileTransfers(info, DepthBlock(info), fullSliceSize);
+            _tiler.TileImage(depth, copies, buffer.Handle, offset, info.Data.Size, info.Data.Size,
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(tiles));
+        }
+        else
+        {
+            for (var index = 0; index < copies.Length; index++) copies[index].BufferOffset += offset;
+            depth.DownloadToBuffer(copies, buffer.Handle, offset, info.Data.Size);
+        }
+
+        association.MarkBufferHoldsGpuContents();
+        return true;
+    }
+
+    private void UploadFromBuffer(CachedImage image, in ImageRequest request, GpuBuffer source, ulong sourceOffset, byte[]? backingBytes = null, uint firstLayer = 0)
+    {
+        if (image.DepthOwner.IsValid)
+        {
+            UploadStencilPlane(image, source, sourceOffset);
+            return;
+        }
+
+        ref readonly var info = ref image.Description;
+        if (request.Role != ImageRole.DepthTarget)
+        {
+            var plan = PlanColorTransfer(image, request.Role, TransferDirection.Upload);
+            if (ImageClearTrace.Enabled && info.IsVolume) ReportVolumeProvenance(image);
+            if (ImageClearTrace.Enabled && IsTracedImage(info))
+            {
+                TraceVolumeState("upload", image, request,
+                    $"sourceBuffer=0x{source.Handle.Handle:X} sourceOffset=0x{sourceOffset:X} tiled={plan.Tiled} linearSize=0x{plan.LinearSize:X} regions={plan.Regions.Count} tiles={plan.Tiles.Count}");
+                foreach (var region in plan.Regions)
+                    TraceVolumeState("upload-region", image, request,
+                        $"offset=0x{region.BufferOffset:X} rowLength={region.BufferRowLength} imageHeight={region.BufferImageHeight} mip={region.ImageSubresource.MipLevel} depth={region.ImageExtent.Depth}");
+            }
+            if (!plan.Valid)
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"The color upload is invalid: role={request.Role} address=0x{info.Data.Address:X16} size=0x{info.Data.Size:X16} format={(uint)info.GuestFormat} tile={(uint)info.TileMode} " +
+                    $"kind={(uint)plan.Layout.Surface.Texture.Block.Kind} extent={info.Extent.Width}x{info.Extent.Height}x{info.Extent.Depth} pitch={info.Pitch} levels={info.Resources.Levels} layers={info.Resources.Layers} samples={info.Samples}.");
+            }
+
+            if (firstLayer != 0)
+            {
+                if (info.Resources.Levels != 1 || firstLayer >= info.Resources.Layers ||
+                    plan.Regions.Count != info.Resources.Layers || (plan.Tiled && plan.Tiles.Count != plan.Regions.Count))
+                    throw SubmissionScheduler.Fatal("The partial array upload layout is invalid.");
+                // Keep the original offsets and slice indices for the tiling equations.
+                plan.Regions.RemoveRange(0, checked((int)firstLayer));
+                if (plan.Tiled) plan.Tiles.RemoveRange(0, checked((int)firstLayer));
+            }
+
+            var linear = new TilerBufferSpan(source.Handle, sourceOffset, info.Data.Size);
+            if (plan.Tiled)
+            {
+                linear = _tiler.Detile(source.Handle, sourceOffset, info.Data.Size, plan.LinearSize, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(plan.Tiles));
+            }
+
+            if (plan.SwapBgra16)
+            {
+                linear = _tiler.SwapBgra16(linear);
+            }
+
+            DumpVolumeUpload(image, source, sourceOffset, linear, plan, backingBytes);
+            UploadRegions(image, plan.Regions, linear);
+            return;
+        }
+
+        if (info.Samples != 1 || image.Backing.Samples != 1 || info.Resources.Layers == 0 || info.Data.Size % info.Resources.Layers != 0 ||
+            GuestPixelFormats.BytesPerElement(info.GuestFormat) != info.BytesPerBlock)
+        {
+            throw SubmissionScheduler.Fatal(
+                $"The depth upload is invalid: address=0x{info.Data.Address:X16} size=0x{info.Data.Size:X} layers={info.Resources.Layers} samples={info.Samples} backingSamples={image.Backing.Samples} guestFormat={(uint)info.GuestFormat} bytesPerBlock={info.BytesPerBlock}.");
+        }
+
+        var block = DepthBlock(info);
+        var layers = info.Resources.Layers;
+        var fullSliceSize = info.Data.Size / layers;
+        var copies = DepthCopies(info, fullSliceSize);
+        var depthLinear = new TilerBufferSpan(source.Handle, sourceOffset, source.Size - sourceOffset);
+        if (info.TileMode != GuestTileMode.Linear)
+        {
+            var tiles = DepthTileTransfers(info, block, fullSliceSize);
+            depthLinear = _tiler.Detile(source.Handle, sourceOffset, info.Data.Size, info.Data.Size, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(tiles));
+        }
+
+        var transferBytes = DepthFormatRule.AspectTransferBytes(info.PixelFormat);
+        if (transferBytes != info.BytesPerBlock)
+        {
+            var texelsPerSlice = (ulong)info.Pitch * info.Extent.Height;
+            if (info.BytesPerBlock != sizeof(ushort) || transferBytes != sizeof(uint) || texelsPerSlice > uint.MaxValue || texelsPerSlice > ulong.MaxValue / transferBytes)
+            {
+                throw SubmissionScheduler.Fatal($"The depth upload conversion is not supported: bytesPerBlock={info.BytesPerBlock} transferBytes={transferBytes} texelsPerSlice={texelsPerSlice}.");
+            }
+
+            var transferSlice = texelsPerSlice * transferBytes;
+            if (transferSlice > ulong.MaxValue / layers)
+            {
+                throw SubmissionScheduler.Fatal($"The depth upload conversion size overflows: transferSlice={transferSlice} layers={layers}.");
+            }
+
+            var widened = _tiler.GetScratchBuffer(transferSlice * layers);
+            _tiler.ConvertDepth16(depthLinear, widened, DepthConversionDirection.Widen, info.PixelFormat == Format.D32SfloatS8Uint, new DepthConversionLayout
+            {
+                Width = info.Extent.Width,
+                Height = info.Extent.Height,
+                Layers = layers,
+                SourceRowStride = (ulong)info.Pitch * sizeof(ushort),
+                TargetRowStride = (ulong)info.Pitch * sizeof(uint),
+                SourceSliceStride = fullSliceSize,
+                TargetSliceStride = transferSlice,
+            });
+            depthLinear = widened;
+            for (uint layer = 0; layer < layers; layer++)
+            {
+                copies[layer].BufferOffset = transferSlice * layer;
+            }
+        }
+
+        UploadRegions(image, copies.ToList(), depthLinear);
+    }
+
+    // Uploads the guest bytes when the guest or a buffer owns them; watches the image first.
+    private void PopulateFromGuest(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, string uploadPath, uint firstLayer = 0)
+    {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageUpload);
+        var image = _slots[imageIdentifier];
+        if (ImageDescription.IsEmptyRange(image.Description.Data))
+        {
+            return;
+        }
+
+        var measureUpload = RenderPhaseProfile.ImageUploadDetailsEnabled;
+        ReportImageLifetime(image, "populate-attempt");
+        var watchStarted = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        WatchImage(imageIdentifier);
+        var watchFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        if (image.Description.Metadata.Compression != DisplayCompression.Uncompressed)
+        {
+            if (image.IsCpuDirty)
+            {
+                image.RefreshComplete();
+            }
+
+            return;
+        }
+
+        if (image.Description.Samples > 1)
+        {
+            return;
+        }
+
+        var dataImported = false;
+        var upload = image.IsBufferModified || image.IsCpuDirty;
+        if (upload)
+        {
+            if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("image-upload", image.Description.Data.Address, image.Description.Data.Size, $"cpuDirty={image.IsCpuDirty} bufferDirty={image.IsBufferModified}");
+            var reason = image.IsBufferModified
+                ? (image.IsCpuDirty ? "buffer-and-cpu-dirty" : "buffer-dirty")
+                : (image.IsMaybeCpuDirty ? "maybe-cpu-dirty" : "cpu-dirty");
+            var sourceStarted = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            dataImported = true;
+            long sourceFinished;
+            if (firstLayer == 0 && TryUploadChangedPieces(image, request))
+            {
+                sourceFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            }
+            else
+            {
+                // Hash before staging: a write racing the copy then shows up as a changed piece next time.
+                var piecePlan = firstLayer == 0 && !image.IsBufferModified && !_bufferCache.HasGpuDirtyBytes(image.Description.Data.Address, image.Description.Data.Size)
+                    ? PieceHashPlan(image, request)
+                    : null;
+                var pieceHashes = piecePlan != null ? HashGuestPieces(image.Description.Data, piecePlan.Tiles) : null;
+                var backingBytes = SnapshotVolumeBacking(image);
+                var (source, sourceOffset) = _bufferCache.ObtainBufferForImage(image.Description.Data.Address, image.Description.Data.Size);
+                sourceFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+                UploadFromBuffer(image, request, source, sourceOffset, backingBytes, firstLayer);
+                image.SetGuestPieceHashes(pieceHashes);
+            }
+
+            if (measureUpload)
+            {
+                RenderPhaseProfile.RecordImageUpload(image.Description, reason,
+                    watchFinished - watchStarted, sourceFinished - sourceStarted,
+                    System.Diagnostics.Stopwatch.GetTimestamp() - sourceFinished,
+                    uploadPath, image.LastCpuWriteAddress, image.LastCpuWriteSize);
+            }
+        }
+
+        if (dataImported)
+        {
+            image.ClearBufferModified();
+        }
+
+        if (image.IsCpuDirty)
+        {
+            image.RefreshComplete();
+        }
+    }
+
+    // A maybe-dirty image resolves through its edge hash first; a dirty one is populated again.
+    private void RefreshFromGuest(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
+    {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageRefresh);
+        WatchImage(imageIdentifier);
+        var image = _slots[imageIdentifier];
+        if (image.IsMaybeCpuDirty)
+        {
+            var hash = image.HashGuestEdges();
+            if (image.NeedsMaybeCpuHash)
+            {
+                image.SetMaybeCpuHash(hash);
+                return;
+            }
+
+            _ = image.ResolveMaybeCpuHash(hash);
+        }
+
+        var cpuDirty = image.IsBufferModified || image.IsDefinitelyCpuDirty;
+        if (image.Description.Metadata.Compression != DisplayCompression.Uncompressed)
+        {
+            if (cpuDirty)
+            {
+                throw SubmissionScheduler.Fatal($"A compressed guest image cannot be refreshed from guest memory: address=0x{image.Description.Data.Address:X16} bufferModified={image.IsBufferModified} cpuDirty={image.IsDefinitelyCpuDirty}.");
+            }
+
+            return;
+        }
+
+        if (!cpuDirty)
+        {
+            return;
+        }
+
+        PopulateFromGuest(imageIdentifier, request, "refresh");
+    }
+
+    private void DownloadDepthToBuffer(CachedImage image, GpuBuffer destination, ulong destinationOffset)
+    {
+        ref readonly var info = ref image.Description;
+        var layers = info.Resources.Layers;
+        var fullSliceSize = info.Data.Size / layers;
+        var transferBytes = DepthFormatRule.AspectTransferBytes(info.PixelFormat);
+        var texelsPerSlice = (ulong)info.Pitch * info.Extent.Height;
+        if (transferBytes == 0 || texelsPerSlice > uint.MaxValue || texelsPerSlice > ulong.MaxValue / transferBytes || texelsPerSlice > ulong.MaxValue / info.BytesPerBlock)
+        {
+            throw SubmissionScheduler.Fatal($"The depth readback layout is not supported: transferBytes={transferBytes} texelsPerSlice={texelsPerSlice} bytesPerBlock={info.BytesPerBlock}.");
+        }
+
+        var transferSlice = texelsPerSlice * transferBytes;
+        var guestSlice = texelsPerSlice * info.BytesPerBlock;
+        if (transferSlice > ulong.MaxValue / layers)
+        {
+            throw SubmissionScheduler.Fatal($"The depth readback size overflows: transferSlice={transferSlice} layers={layers}.");
+        }
+
+        var transferSize = transferSlice * layers;
+        if (guestSlice > fullSliceSize)
+        {
+            throw SubmissionScheduler.Fatal($"The depth readback slice exceeds the guest slice: guestSlice={guestSlice} fullSlice={fullSliceSize}.");
+        }
+
+        var copies = DepthCopies(info, fullSliceSize);
+        if (transferBytes == info.BytesPerBlock)
+        {
+            if (!info.IsTiled)
+            {
+                for (var index = 0; index < copies.Length; index++)
+                {
+                    copies[index].BufferOffset += destinationOffset;
+                }
+
+                image.DownloadToBuffer(copies, destination.Handle, destinationOffset, info.Data.Size);
+                return;
+            }
+
+            var tiledTiles = DepthTileTransfers(info, DepthBlock(info), fullSliceSize);
+            _tiler.TileImage(image, copies, destination.Handle, destinationOffset, info.Data.Size, info.Data.Size, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(tiledTiles));
+            return;
+        }
+
+        if (info.BytesPerBlock != sizeof(ushort) || transferBytes != sizeof(uint))
+        {
+            throw SubmissionScheduler.Fatal($"The depth readback conversion is not supported: bytesPerBlock={info.BytesPerBlock} transferBytes={transferBytes}.");
+        }
+
+        for (uint layer = 0; layer < layers; layer++)
+        {
+            copies[layer].BufferOffset = transferSlice * layer;
+        }
+
+        var hostLinear = _tiler.GetScratchBuffer(transferSize);
+        image.DownloadToBuffer(copies, hostLinear.Buffer, 0, hostLinear.Size);
+        var tiled = info.IsTiled;
+        var guestLinear = tiled ? _tiler.GetScratchBuffer(info.Data.Size) : new TilerBufferSpan(destination.Handle, destinationOffset, destination.Size - destinationOffset);
+        _tiler.ConvertDepth16(hostLinear, guestLinear, DepthConversionDirection.Narrow, DepthFormatRule.AspectTransferFormat(info.PixelFormat) == Format.D32Sfloat, new DepthConversionLayout
+        {
+            Width = info.Extent.Width,
+            Height = info.Extent.Height,
+            Layers = layers,
+            SourceRowStride = (ulong)info.Pitch * sizeof(uint),
+            TargetRowStride = (ulong)info.Pitch * sizeof(ushort),
+            SourceSliceStride = transferSlice,
+            TargetSliceStride = fullSliceSize,
+        });
+        if (!tiled)
+        {
+            return;
+        }
+
+        var tiles = DepthTileTransfers(info, DepthBlock(info), fullSliceSize);
+        _tiler.Tile(guestLinear.Buffer, guestLinear.Offset, info.Data.Size, destination.Handle, destinationOffset, info.Data.Size, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(tiles));
+    }
+
+    private void DownloadToBuffer(CachedImage image, GpuBuffer destination, ulong destinationOffset, ulong destinationSize, ImageDownloadPlan plan)
+    {
+        if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("image-to-buffer", image.Description.Data.Address, image.Description.Data.Size, $"destinationOffset=0x{destinationOffset:X} destinationSize=0x{destinationSize:X}");
+        if (!plan.Valid)
+        {
+            throw SubmissionScheduler.Fatal($"The image download plan is invalid: address=0x{image.Description.Data.Address:X16} size=0x{image.Description.Data.Size:X}.");
+        }
+
+        if (plan.Depth)
+        {
+            if (destinationSize != image.Description.Data.Size)
+            {
+                throw SubmissionScheduler.Fatal($"A partial depth image download is not supported: requested=0x{destinationSize:X} image=0x{image.Description.Data.Size:X}.");
+            }
+
+            DownloadDepthToBuffer(image, destination, destinationOffset);
+            return;
+        }
+
+        var color = plan.Color;
+        var swap = color.SwapBgra16 ? ColorChannelSwap.SwapBgra16 : ColorChannelSwap.None;
+        if (!color.Tiled)
+        {
+            if (swap == ColorChannelSwap.SwapBgra16)
+            {
+                var linear = _tiler.GetScratchBuffer(destinationSize);
+                image.DownloadToBuffer(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(color.Regions), linear.Buffer, 0, linear.Size);
+                _tiler.SwapBgra16(linear, new TilerBufferSpan(destination.Handle, destinationOffset, destinationSize));
+                return;
+            }
+
+            for (var index = 0; index < color.Regions.Count; index++)
+            {
+                var copy = color.Regions[index];
+                copy.BufferOffset += destinationOffset;
+                color.Regions[index] = copy;
+            }
+
+            image.DownloadToBuffer(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(color.Regions), destination.Handle, destinationOffset, destinationSize);
+            return;
+        }
+
+        _tiler.TileImage(image, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(color.Regions), destination.Handle, destinationOffset, destinationSize, color.LinearSize, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(color.Tiles), swap);
+    }
+
+    // Copies image data into the buffer without transferring GPU ownership to the buffer.
+    public bool MayHaveImageBytes(ulong address, ulong size) => _pageOwners.MayHaveOwners(address, size);
+
+    public bool TrySynchronizeBufferFromImage(GpuBuffer buffer, ulong address, ulong size)
+    {
+        if (!_pageOwners.MayHaveOwners(address, size))
+        {
+            return false;
+        }
+
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageDownload);
+        using var held = _lock.Hold();
+        var matches = new List<ResourceSlotIdentifier>();
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+        {
+            var owner = _slots.TryGet(imageIdentifier);
+            if (owner == null || owner.Description.Data.Address != address)
+            {
+                continue;
+            }
+
+            if (owner != null && CanReadBack(owner))
+            {
+                matches.Add(imageIdentifier);
+            }
+        }
+
+        var selected = ResourceSlotIdentifier.Invalid;
+        if (matches.Count == 1)
+        {
+            selected = matches[0];
+        }
+        else
+        {
+            foreach (var imageIdentifier in matches)
+            {
+                if (_slots[imageIdentifier].Description.Data.Size == size)
+                {
+                    selected = imageIdentifier;
+                    break;
+                }
+            }
+        }
+
+        if (!selected.IsValid)
+        {
+            return false;
+        }
+
+        return TryDownloadImageToBuffer(_slots[selected], buffer);
+    }
+
+    // Copies the levels of an image that fit into the buffer over the image's own range.
+    private bool TryDownloadImageToBuffer(CachedImage image, GpuBuffer buffer)
+    {
+        if (image.DepthOwner.IsValid)
+            return TryDownloadStencilToBuffer(image, buffer);
+
+        ref readonly var info = ref image.Description;
+        if (!buffer.IsInBounds(info.Data.Address, 1))
+        {
+            return false;
+        }
+
+        var bufferOffset = buffer.Offset(info.Data.Address);
+        var available = buffer.Size - bufferOffset;
+        uint levels = 0;
+        ulong copySize = 0;
+        if (info.IsVolume)
+        {
+            // Volume mips hold strided block slices; only a whole image proves every slice fits.
+            if (!buffer.IsInBounds(info.Data.Address, info.Data.Size))
+            {
+                return false;
+            }
+
+            levels = info.Resources.Levels;
+            copySize = info.Data.Size;
+        }
+        else
+        {
+            for (; levels < info.Resources.Levels; levels++)
+            {
+                var mip = info.MipLayout[(int)levels];
+                if (mip.Size == 0 || mip.Offset > available || mip.Size > available - mip.Offset)
+                {
+                    break;
+                }
+
+                copySize = Math.Max(copySize, mip.Offset + mip.Size);
+            }
+        }
+
+        if (copySize == 0)
+        {
+            return false;
+        }
+
+        var plan = PlanDownload(image);
+        if (!plan.Valid || (plan.Depth && copySize != info.Data.Size))
+        {
+            return false;
+        }
+
+        if (!plan.Depth && levels < info.Resources.Levels)
+        {
+            var color = plan.Color;
+            var limit = levels;
+            color.Regions.RemoveAll(region => region.ImageSubresource.MipLevel >= limit);
+            if (color.Regions.Count == 0)
+            {
+                return false;
+            }
+
+            if (color.Tiled)
+            {
+                if (!color.Layout.TryBuildTileTransfers(copySize, color.Regions, levels, out var tiles))
+                {
+                    return false;
+                }
+
+                color.Tiles = tiles;
+                color.LinearSize = LinearSizeOf(color.Tiles);
+            }
+        }
+
+        // A linear array's copy regions follow its slice stride and can end past the mip layout as well: cover
+        // them when the buffer holds them; otherwise keep the guest bytes.
+        if (!plan.Depth && !plan.Color.Tiled)
+        {
+            var linearEnd = TextureTransferLayout.CopyFootprint(plan.Color.Regions, plan.Color.Layout.Element);
+            if (linearEnd > copySize)
+            {
+                if (linearEnd > available)
+                {
+                    return false;
+                }
+
+                copySize = linearEnd;
+            }
+        }
+
+        // The mip layout can end before the tile plan does (Silent Hill: a 128x128 slice planned at
+        // the exact end of the mip chain aborted the process). Cover the whole plan when the buffer
+        // holds it; otherwise keep the guest bytes instead of copying a partial image.
+        if (!plan.Depth && plan.Color.Tiled)
+        {
+            var tiledEnd = TiledEndOf(plan.Color.Tiles);
+            if (tiledEnd > copySize)
+            {
+                if (tiledEnd > available)
+                {
+                    return false;
+                }
+
+                copySize = tiledEnd;
+            }
+        }
+
+        DownloadToBuffer(image, buffer, bufferOffset, copySize, plan);
+        image.MarkBufferHoldsGpuContents();
+        return true;
+    }
+
+    private static ulong TiledEndOf(List<TileTransfer> tiles)
+    {
+        var end = 0UL;
+        foreach (var tile in tiles)
+        {
+            end = Math.Max(end, tile.TiledOffset + tile.TiledSize);
+        }
+
+        return end;
+    }
+
+    // Publishes a GPU-owned image to guest memory after its tick completes; false when it cannot.
+    // A guest store into the range before then is newer than the readback and keeps its page.
+    private bool TryDownloadToGuest(ResourceSlotIdentifier imageIdentifier)
+    {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageDownload);
+        var image = _slots[imageIdentifier];
+        if (image.DepthOwner.IsValid)
+        {
+            return false;
+        }
+
+        var plan = PlanDownload(image);
+        if (!plan.Valid || !CanReadBack(image))
+        {
+            return false;
+        }
+
+        var range = image.Description.Data;
+        var ring = _bufferCache.GetUtilityBuffer(GpuBufferUsage.Download);
+        GpuBuffer download = ring;
+        if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("image-to-guest-planned", range.Address, range.Size, "");
+        if (ring.TryMap(range.Size, out var offset, Math.Max(image.Description.BytesPerBlock, 4u)))
+        {
+            ring.Commit();
+        }
+        else
+        {
+            download = new GpuBuffer(_device, _scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, range.Size);
+        }
+
+        if (!_backing.TryReadBacking(range.Address, download.Mapped.Slice((int)offset, (int)range.Size)))
+        {
+            if (download != ring) download.Dispose();
+            return false;
+        }
+
+        var landing = _readbackLandings.Queue(range.Address, download.Mapped.Slice((int)offset, (int)range.Size));
+        download.Flush(offset, range.Size);
+        DownloadToBuffer(image, download, offset, range.Size, plan);
+        var barrier = new BufferMemoryBarrier2
+        {
+            SType = StructureType.BufferMemoryBarrier2,
+            SrcAccessMask = AccessFlags2.MemoryWriteBit | AccessFlags2.TransferWriteBit | AccessFlags2.ShaderWriteBit,
+            DstAccessMask = AccessFlags2.HostReadBit,
+            SrcQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
+            Buffer = download.Handle,
+            Offset = offset,
+            Size = range.Size,
+        };
+        _scheduler.EndRendering();
+        VulkanSynchronization.PipelineBarrier(_device.Vk,new CommandBuffer(_scheduler.Current.Handle), PipelineStageFlags.AllCommandsBit, PipelineStageFlags.HostBit, 0, 0, null, 1, &barrier, 0, null, BarrierSource.Download);
+        var backing = _backing;
+        var landingDecided = LandingDecidedForTest;
+        _scheduler.QueuePriorityCompletionAction(() =>
+        {
+            download.Invalidate(offset, range.Size);
+            var published = download.Mapped.Slice((int)offset, (int)range.Size);
+            // A range that lost resident pages since it was queued cannot be compared page by page; its resident pages
+            // take the readback whole, as before the landing.
+            if (!landing.TryLand(backing, published, landingDecided) &&
+                !KernelMemoryCompatExports.TryWritePrtBacking(backing, range.Address, published))
+            {
+                throw SubmissionScheduler.Fatal($"The image readback could not be written to guest memory: address=0x{range.Address:X16} size=0x{range.Size:X}.");
+            }
+            if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("image-published", range.Address, range.Size, "completion-callback=true");
+        });
+        // Completion actions wait for the priority readback before freeing spill buffers.
+        if (download != ring) _scheduler.QueueCompletionAction(download.Dispose);
+        return true;
+    }
+
+    // Clears the one image that owns exactly this range; false when no single owner or clear value fits.
+    public bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear)
+    {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("image clear");
+        }
+
+        var command = _scheduler.Current;
+        if (command.IsInvalid || !IsValidRange(address, size))
+        {
+            throw SubmissionScheduler.Fatal($"The image clear is invalid: address=0x{address:X16} size=0x{size:X16} recording={!command.IsInvalid}.");
+        }
+
+        using var held = _lock.Hold();
+        var selected = ResourceSlotIdentifier.Invalid;
+        ImageAspectFlags aspect = 0;
+        uint firstLayer = 0;
+        uint layerCount = 0;
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false, includeParked: true))
+        {
+            var owner = _slots.TryGet(imageIdentifier);
+            if (owner == null)
+            {
+                continue;
+            }
+
+            ImageAspectFlags candidate = 0;
+            var candidateId = imageIdentifier;
+            uint candidateFirstLayer = 0;
+            uint candidateLayerCount = 0;
+            if (owner.DepthOwner.IsValid && owner.Description.Data.Address == address && owner.Description.Data.Size == size)
+            {
+                candidate = ImageAspectFlags.StencilBit;
+                candidateId = owner.DepthOwner;
+                owner = _slots.TryGet(candidateId);
+                if (owner == null || !owner.Backing.Exists || !owner.Description.HasStencil)
+                {
+                    continue;
+                }
+            }
+            else if (!owner.DepthOwner.IsValid && owner.Description.Data.Address == address && owner.Description.Data.Size == size)
+            {
+                candidate = owner.Description.IsDepth ? ImageAspectFlags.DepthBit : ImageAspectFlags.ColorBit;
+            }
+            else if (TryFindClearedLayers(owner, address, size, out candidateFirstLayer, out candidateLayerCount))
+            {
+                candidate = ImageAspectFlags.ColorBit;
+            }
+
+            if (candidate == 0)
+            {
+                continue;
+            }
+
+            if (selected.IsValid && selected != candidateId)
+            {
+                return false;
+            }
+
+            selected = candidateId;
+            aspect = candidate;
+            firstLayer = candidateFirstLayer;
+            layerCount = candidateLayerCount;
+        }
+
+        if (!selected.IsValid)
+        {
+            return false;
+        }
+
+        var image = _slots[selected];
+        var colorClear = default(ClearColorValue);
+        var depthClear = 0.0f;
+        byte stencilClear = 0;
+        if (aspect == ImageAspectFlags.ColorBit)
+        {
+            if (!PackedClearValue.TryDecodeBufferColor(image.Description.PixelFormat, packedClear, out colorClear))
+            {
+                return false;
+            }
+        }
+        else if ((aspect == ImageAspectFlags.DepthBit && !PackedClearValue.TryDecodeDepth(image.Description.PixelFormat, packedClear, out depthClear)) ||
+                 (aspect == ImageAspectFlags.StencilBit && !PackedClearValue.TryDecodeStencil(packedClear, out stencilClear)))
+        {
+            return false;
+        }
+
+        if (aspect == ImageAspectFlags.ColorBit && layerCount == 0)
+        {
+            // The full color clear replaces all texels. Keep the watch without copying old data.
+            WatchImage(selected);
+        }
+        else if (image.IsBufferModified || image.IsCpuDirty)
+        {
+            PopulateFromGuest(selected, RefreshRequest(image), "before-clear");
+            if (image.Description.Samples == 1 && (image.IsBufferModified || image.IsCpuDirty))
+            {
+                throw SubmissionScheduler.Fatal($"The image clear left guest ownership in place: address=0x{address:X16} bufferModified={image.IsBufferModified} cpuDirty={image.IsCpuDirty}.");
+            }
+        }
+
+        command.EndRendering();
+        var native = new CommandBuffer(command.Handle);
+        image.Transition(AccessFlags.TransferWriteBit, null, native);
+        var range = layerCount == 0
+            ? new ImageSubresourceRange(aspect, 0, Vk.RemainingMipLevels, 0, image.Backing.Layers)
+            : new ImageSubresourceRange(aspect, 0, 1, firstLayer, layerCount);
+        if (aspect == ImageAspectFlags.ColorBit)
+        {
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _device.Vk.CmdClearColorImage(native, image.Backing.Handle, ImageLayout.General, &colorClear, 1, &range);
+            }
+        }
+        else
+        {
+            var clear = new ClearDepthStencilValue(depthClear, stencilClear);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _device.Vk.CmdClearDepthStencilImage(native, image.Backing.Handle, ImageLayout.General, &clear, 1, &range);
+            }
+        }
+
+        TakeGpuOwnership(image);
+        if (aspect == ImageAspectFlags.StencilBit)
+        {
+            TakeStencilOwnership(selected, image);
+        }
+
+        return true;
+    }
+
+    private static bool TryFindClearedLayers(CachedImage image, ulong address, ulong size, out uint firstLayer, out uint layerCount)
+    {
+        firstLayer = 0;
+        layerCount = 0;
+        ref readonly var description = ref image.Description;
+        var layers = description.Resources.Layers;
+        if (image.DepthOwner.IsValid || description.IsDepth || description.IsVolume || description.HasMetadata ||
+            description.Resources.Levels != 1 || description.Samples != 1 || layers < 2 || description.Data.Size % layers != 0 ||
+            address < description.Data.Address || size > description.Data.End - address)
+        {
+            return false;
+        }
+
+        var layerSize = description.Data.Size / layers;
+        var offset = address - description.Data.Address;
+        if (offset % layerSize != 0 || size % layerSize != 0 || size == description.Data.Size)
+        {
+            return false;
+        }
+
+        firstLayer = (uint)(offset / layerSize);
+        layerCount = (uint)(size / layerSize);
+        return true;
+    }
+}

@@ -15,6 +15,57 @@ public sealed class NetExportsTests
     private readonly CpuContext _ctx = new(new FakeCpuMemory(0x1_0000_0000, 0x1000), Generation.Gen5);
 
     [Fact]
+    public void SocketDescriptorsFitGuestFdSet()
+    {
+        _ctx[CpuRegister.Rsi] = 2; // AF_INET
+        _ctx[CpuRegister.Rdx] = 2; // SOCK_DGRAM
+        _ctx[CpuRegister.Rcx] = 17; // UDP
+
+        Assert.Equal(0, NetExports.NetSocket(_ctx));
+        var first = _ctx[CpuRegister.Rax];
+        Assert.Equal(0, NetExports.NetSocket(_ctx));
+        var second = _ctx[CpuRegister.Rax];
+
+        try
+        {
+            Assert.InRange(first, 256UL, 1023UL);
+            Assert.InRange(second, 256UL, 1023UL);
+            Assert.NotEqual(first, second);
+        }
+        finally
+        {
+            _ctx[CpuRegister.Rdi] = first;
+            NetExports.NetSocketClose(_ctx);
+            _ctx[CpuRegister.Rdi] = second;
+            NetExports.NetSocketClose(_ctx);
+        }
+    }
+
+    [Fact]
+    public void NonblockingReceiveWithoutDataReturnsWouldBlock()
+    {
+        _ctx[CpuRegister.Rsi] = 2;
+        _ctx[CpuRegister.Rdx] = 2;
+        _ctx[CpuRegister.Rcx] = 17;
+        Assert.Equal(0, NetExports.NetSocket(_ctx));
+        var socket = _ctx[CpuRegister.Rax];
+
+        try
+        {
+            _ctx[CpuRegister.Rdi] = socket;
+            _ctx[CpuRegister.Rsi] = 0x1_0000_0000;
+            _ctx[CpuRegister.Rdx] = 1;
+            _ctx[CpuRegister.Rcx] = 0x80;
+            Assert.Equal(unchecked((int)0x80410123), NetExports.NetRecv(_ctx));
+        }
+        finally
+        {
+            _ctx[CpuRegister.Rdi] = socket;
+            NetExports.NetSocketClose(_ctx);
+        }
+    }
+
+    [Fact]
     public void Htonl_SwapsAllFourBytes()
     {
         _ctx[CpuRegister.Rdi] = 0x01020304;

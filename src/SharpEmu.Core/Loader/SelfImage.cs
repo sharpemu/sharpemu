@@ -27,7 +27,8 @@ public sealed class SelfImage
         string? version = null,
         uint tlsModuleId = 0,
         ulong tlsMemorySize = 0,
-        ulong tlsStaticOffset = 0)
+        ulong tlsStaticOffset = 0,
+        IReadOnlyList<string>? importedModuleNames = null)
     {
         ArgumentNullException.ThrowIfNull(programHeaders);
         ArgumentNullException.ThrowIfNull(mappedRegions);
@@ -50,6 +51,7 @@ public sealed class SelfImage
         TlsModuleId = tlsModuleId;
         TlsMemorySize = tlsMemorySize;
         TlsStaticOffset = tlsStaticOffset;
+        ImportedModuleNames = importedModuleNames ?? Array.Empty<string>();
     }
 
     public bool IsSelf { get; }
@@ -88,4 +90,6 @@ public sealed class SelfImage
 
     /// <summary>Variant II distance from the thread pointer to this module's static TLS base.</summary>
     public ulong TlsStaticOffset { get; }
+
+    public IReadOnlyList<string> ImportedModuleNames { get; }
 }

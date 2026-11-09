@@ -16,6 +16,14 @@ namespace SharpEmu.HLE;
 /// </summary>
 public static unsafe class HostMemory
 {
+    private static long _mappingGeneration;
+
+    // Changes whenever a POSIX mapping or its protection changes, so callers can cache a
+    // query result until the address space changes.
+    public static long MappingGeneration => Volatile.Read(ref _mappingGeneration);
+
+    internal static void OnMappingChanged() => Interlocked.Increment(ref _mappingGeneration);
+
     public const uint MEM_COMMIT = 0x1000;
     public const uint MEM_RESERVE = 0x2000;
     public const uint MEM_RELEASE = 0x8000;
@@ -82,6 +90,8 @@ public static unsafe class HostMemory
             return Win32VirtualQuery(address, out info, (nuint)sizeof(BasicInfo));
         }
 
+        if (Host.Posix.PosixViewRegions.TryQuery((ulong)address, out info))
+            return (nuint)sizeof(BasicInfo);
         return Posix.Query(address, out info);
     }
 
@@ -94,9 +104,7 @@ public static unsafe class HostMemory
         }
 
         // The emulator only executes x86-64 guest code, so a non-Windows host
-        // is either x86-64 (including Rosetta 2 translation) with a coherent
-        // instruction cache, or would need sys_icache_invalidate for a future
-        // arm64 recompiler. Nothing to do today.
+        // is x86-64 with a coherent instruction cache. Nothing to do today.
     }
 
     [DllImport("kernel32.dll", EntryPoint = "VirtualAlloc", SetLastError = true)]
@@ -128,11 +136,10 @@ public static unsafe class HostMemory
         private const int PROT_EXEC = 0x4;
 
         private const int MAP_PRIVATE = 0x02;
-        private const int MAP_FIXED = 0x10;
-        private static readonly int MAP_ANON = OperatingSystem.IsMacOS() ? 0x1000 : 0x20;
-        private static readonly int MAP_NORESERVE = OperatingSystem.IsMacOS() ? 0 : 0x4000;
+        private const int MAP_ANON = 0x20;
+        private const int MAP_NORESERVE = 0x4000;
 
-        // Linux-only: fail instead of clobbering an existing mapping.
+        // Fail instead of clobbering an existing mapping.
         private const int MAP_FIXED_NOREPLACE = 0x100000;
 
         private static readonly nint MAP_FAILED = -1;
@@ -216,22 +223,18 @@ public static unsafe class HostMemory
                 {
                     // Win32 maps at exactly the requested address or fails
                     // without touching existing mappings. Fail up front on
-                    // any overlap we track, then place the mapping: Linux
-                    // gets MAP_FIXED_NOREPLACE (fails cleanly on host
-                    // mappings too). Darwin lacks NOREPLACE and plain
-                    // MAP_FIXED would silently clobber untracked host
-                    // memory (dyld, the runtime's JIT heap, Rosetta), so
-                    // pass the address as a hint instead -- the kernel
-                    // honors it when the range is free and relocates the
-                    // mapping otherwise, which we treat as failure.
+                    // any overlap we track, then place the mapping with
+                    // MAP_FIXED_NOREPLACE (fails cleanly on host mappings
+                    // too). A kernel that ignores the flag treats the
+                    // address as a hint and may relocate the mapping,
+                    // which we treat as failure.
                     if (OverlapsTrackedRegionLocked((ulong)address, alignedSize))
                     {
                         Trace($"exact overlap: addr=0x{(ulong)address:X16} size=0x{alignedSize:X}");
                         return null;
                     }
 
-                    var exactFlags = OperatingSystem.IsMacOS() ? flags : flags | MAP_FIXED_NOREPLACE;
-                    result = mmap((nint)address, (nuint)alignedSize, posixProtect, exactFlags, -1, 0);
+                    result = mmap((nint)address, (nuint)alignedSize, posixProtect, flags | MAP_FIXED_NOREPLACE, -1, 0);
                     if (result == MAP_FAILED || (ulong)result != (ulong)address)
                     {
                         Trace($"exact mmap failed: addr=0x{(ulong)address:X16} got=0x{(ulong)result:X16} size=0x{alignedSize:X} errno={Marshal.GetLastPInvokeError()}");
@@ -253,6 +256,7 @@ public static unsafe class HostMemory
                     }
                 }
 
+                HostMemory.OnMappingChanged();
                 Regions[(ulong)result] = new Region
                 {
                     Base = (ulong)result,
@@ -276,6 +280,7 @@ public static unsafe class HostMemory
                     return false;
                 }
 
+                HostMemory.OnMappingChanged();
                 Regions.Remove((ulong)address);
                 return munmap((nint)address, (nuint)region.Size) == 0;
             }
@@ -438,6 +443,7 @@ public static unsafe class HostMemory
 
         private static void SetProtectRangeLocked(Region region, ulong start, ulong size, uint protect)
         {
+            HostMemory.OnMappingChanged();
             if (start == region.Base && size >= region.Size)
             {
                 region.DefaultProtect = protect;

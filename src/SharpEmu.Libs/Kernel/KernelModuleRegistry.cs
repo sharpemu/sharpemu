@@ -4,6 +4,7 @@
 using System.Linq;
 using System.Collections.Generic;
 using System.IO;
+using SharpEmu.HLE;
 
 namespace SharpEmu.Libs.Kernel;
 
@@ -22,6 +23,7 @@ public static class KernelModuleRegistry
     private static readonly Dictionary<string, int> _handleByPath = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, int> _handleByName = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<int, int> _sysmoduleHandleById = new();
+    private static Func<string, ModuleLoadResult>? _moduleLoader;
     private static int _nextHandle = 1;
 
     private static readonly Dictionary<int, string[]> KnownSysmoduleNames = new()
@@ -48,6 +50,13 @@ public static class KernelModuleRegistry
         bool IsMain,
         bool IsSystemModule);
 
+    public readonly record struct ModuleLoadResult(bool Succeeded, int Handle, int Error)
+    {
+        public static ModuleLoadResult Success(int handle) => new(true, handle, 0);
+
+        public static ModuleLoadResult Failure(int error) => new(false, 0, error);
+    }
+
     public static void Reset()
     {
         lock (_gate)
@@ -57,8 +66,30 @@ public static class KernelModuleRegistry
             _handleByPath.Clear();
             _handleByName.Clear();
             _sysmoduleHandleById.Clear();
+            _moduleLoader = null;
             _nextHandle = 1;
         }
+    }
+
+    public static void ConfigureModuleLoader(Func<string, ModuleLoadResult>? moduleLoader)
+    {
+        lock (_gate)
+        {
+            _moduleLoader = moduleLoader;
+        }
+    }
+
+    public static ModuleLoadResult LoadModule(string modulePath)
+    {
+        Func<string, ModuleLoadResult>? moduleLoader;
+        lock (_gate)
+        {
+            moduleLoader = _moduleLoader;
+        }
+
+        return moduleLoader is null
+            ? ModuleLoadResult.Failure((int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_IMPLEMENTED)
+            : moduleLoader(modulePath);
     }
 
     public static int RegisterModule(
@@ -353,6 +384,22 @@ public static class KernelModuleRegistry
         }
 
         return false;
+    }
+
+    public static bool TryFindByExactPath(string? modulePath, out ModuleEntry module)
+    {
+        module = default;
+        var normalizedPath = NormalizePath(modulePath);
+        if (string.IsNullOrWhiteSpace(normalizedPath))
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            return _handleByPath.TryGetValue(normalizedPath, out var handle) &&
+                   _modulesByHandle.TryGetValue(handle, out module);
+        }
     }
 
     public static int[] GetModuleHandles(bool includeSystemModules)

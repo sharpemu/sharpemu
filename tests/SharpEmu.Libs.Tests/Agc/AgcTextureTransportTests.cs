@@ -1,14 +1,33 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Reflection;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu;
+using SharpEmu.Libs.Gpu.Images;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Agc;
 
 public sealed class AgcTextureTransportTests
 {
+    [Theory]
+    [InlineData(0u, false)]
+    [InlineData(1u, false)]
+    [InlineData(7u, false)]
+    [InlineData(8u, true)]
+    [InlineData(9u, true)]
+    [InlineData(15u, true)]
+    public void TextureDecoderRejectsNonImageResourceTypes(uint resourceType, bool expected)
+    {
+        uint[] words = [0xCD606800, 0x00100045, 0x169, 0x4DFAC | (resourceType << 28),
+            0x3F800000, 0, 0, 0];
+        object?[] arguments = [words, null];
+        var decoder = typeof(AgcExports).GetMethod("TryDecodeTextureDescriptor",
+            BindingFlags.Static | BindingFlags.NonPublic)!;
+        Assert.Equal(expected, Assert.IsType<bool>(decoder.Invoke(null, arguments)));
+    }
+
     [Theory]
     [InlineData(10u, 4u, 4u)]
     [InlineData(10u, 0u, 1u)]
@@ -100,7 +119,27 @@ public sealed class AgcTextureTransportTests
             DstSelect: 0xFAC,
             TileMode: 0,
             Pitch: 8,
-            Sampler: default,
             Type: type,
             Depth: depth);
+
+    [Fact]
+    public void TextureContentIdentity_DoesNotContainSamplerState()
+    {
+        var fields = typeof(TextureContentIdentity)
+            .GetProperties()
+            .Select(static property => property.Name);
+
+        Assert.DoesNotContain(nameof(GuestDrawTexture.Sampler), fields);
+    }
+
+    [Fact]
+    public void TextureCacheLookupIdentity_DistinguishesSamplerBindings()
+    {
+        var content = CreateIdentity(type: 9, depth: 1);
+        var first = new TextureCacheLookupIdentity(content, new GuestSampler(1, 2, 3, 4));
+        var second = new TextureCacheLookupIdentity(content, new GuestSampler(1, 2, 3, 5));
+
+        Assert.NotEqual(first, second);
+        Assert.Equal(first.Content, second.Content);
+    }
 }

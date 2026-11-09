@@ -101,6 +101,13 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
 
     public bool Query(ulong address, out HostRegionInfo info)
     {
+        if (PosixViewRegions.TryQuery(address, out var view))
+        {
+            info = new HostRegionInfo(view.BaseAddress, view.AllocationBase, view.RegionSize,
+                view.State == HostMemory.MEM_RESERVE ? HostRegionState.Reserved : HostRegionState.Committed,
+                view.State, ToHostProtection(view.Protect), view.Protect, view.AllocationProtect);
+            return true;
+        }
         if (Posix.Query((void*)address, out var nativeInfo) == 0)
         {
             info = default;
@@ -128,7 +135,7 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
     {
         _ = address;
         _ = size;
-        // The supported POSIX process is x86-64 (including Rosetta 2), whose
+        // The supported POSIX process is x86-64, whose
         // instruction cache is coherent. A future arm64 backend must call the
         // platform instruction-cache invalidation API here.
     }
@@ -163,17 +170,11 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
         private const int PROT_EXEC = 0x4;
 
         private const int MAP_PRIVATE = 0x02;
-        private static readonly int MAP_ANON = OperatingSystem.IsMacOS() ? 0x1000 : 0x20;
-        private static readonly int MAP_NORESERVE = OperatingSystem.IsMacOS() ? 0 : 0x4000;
+        private const int MAP_ANON = 0x20;
+        private const int MAP_NORESERVE = 0x4000;
 
-        // Linux-only: fail instead of clobbering an existing mapping.
+        // Fail instead of clobbering an existing mapping.
         private const int MAP_FIXED_NOREPLACE = 0x100000;
-
-        private const int KERN_SUCCESS = 0;
-
-        // On Darwin fixed placement is represented by the absence of
-        // VM_FLAGS_ANYWHERE. Do not add VM_FLAGS_OVERWRITE: overlap must fail.
-        private const int VM_FLAGS_FIXED = 0;
 
         private static readonly nint MAP_FAILED = -1;
 
@@ -186,7 +187,6 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
             public ulong Size;
             public uint DefaultProtect;
             public Dictionary<ulong, uint>? PageProtects;
-            public bool UsesMachAllocation;
 
             public ulong End => Base + Size;
 
@@ -257,47 +257,26 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
                 }
 
                 nint result;
-                var usesMachAllocation = false;
                 if (address != null)
                 {
                     // Win32 maps at exactly the requested address or fails
                     // without touching existing mappings. Fail up front on
-                    // any overlap we track, then place the mapping: Linux
-                    // gets MAP_FIXED_NOREPLACE (fails cleanly on host
-                    // mappings too). Darwin lacks NOREPLACE and plain
-                    // MAP_FIXED would silently clobber untracked host
-                    // memory (dyld, the runtime's JIT heap, Rosetta), so
-                    // pass the address as a hint instead -- the kernel
-                    // honors it when the range is free and relocates the
-                    // mapping otherwise, which we treat as failure.
+                    // any overlap we track, then place the mapping with
+                    // MAP_FIXED_NOREPLACE (fails cleanly on host mappings
+                    // too). A kernel that ignores the flag treats the
+                    // address as a hint and may relocate the mapping,
+                    // which we treat as failure.
                     if (OverlapsTrackedRegionLocked((ulong)address, alignedSize))
                     {
                         Trace($"exact overlap: addr=0x{(ulong)address:X16} size=0x{alignedSize:X}");
                         return null;
                     }
 
-                    var exactFlags = OperatingSystem.IsMacOS() ? flags : flags | MAP_FIXED_NOREPLACE;
-                    result = mmap((nint)address, (nuint)alignedSize, posixProtect, exactFlags, -1, 0);
+                    result = mmap((nint)address, (nuint)alignedSize, posixProtect, flags | MAP_FIXED_NOREPLACE, -1, 0);
                     if (result != MAP_FAILED && (ulong)result != (ulong)address)
                     {
                         munmap(result, (nuint)alignedSize);
                         result = MAP_FAILED;
-                    }
-
-                    if (result == MAP_FAILED && OperatingSystem.IsMacOS())
-                    {
-                        // The hint-only attempt above didn't land at the requested
-                        // address. mach_vm_allocate with fixed placement and no
-                        // overwrite flag atomically maps the requested range or
-                        // fails if any host mapping already owns it. Unlike
-                        // MAP_FIXED, it cannot clobber CLR, dyld, JIT, or Rosetta
-                        // memory that is absent from our shadow table.
-                        Trace($"exact mmap hint failed, retrying with fixed Mach allocation: addr=0x{(ulong)address:X16}");
-                        result = AllocateDarwinFixed(
-                            (nint)address,
-                            alignedSize,
-                            posixProtect);
-                        usesMachAllocation = result != MAP_FAILED;
                     }
 
                     if (result == MAP_FAILED || (ulong)result != (ulong)address)
@@ -321,12 +300,12 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
                     }
                 }
 
+                HostMemory.OnMappingChanged();
                 Regions[(ulong)result] = new Region
                 {
                     Base = (ulong)result,
                     Size = alignedSize,
                     DefaultProtect = protect,
-                    UsesMachAllocation = usesMachAllocation,
                 };
 
                 return (void*)result;
@@ -345,12 +324,11 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
                     return false;
                 }
 
-                var released = region.UsesMachAllocation
-                    ? mach_vm_deallocate(mach_task_self(), (ulong)address, region.Size) == KERN_SUCCESS
-                    : munmap((nint)address, (nuint)region.Size) == 0;
+                var released = munmap((nint)address, (nuint)region.Size) == 0;
                 if (released)
                 {
-                    Regions.Remove((ulong)address);
+                    HostMemory.OnMappingChanged();
+                Regions.Remove((ulong)address);
                 }
 
                 return released;
@@ -485,6 +463,7 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
 
         private static void SetProtectRangeLocked(Region region, ulong start, ulong size, uint protect)
         {
+            HostMemory.OnMappingChanged();
             if (start == region.Base && size >= region.Size)
             {
                 region.DefaultProtect = protect;
@@ -521,40 +500,6 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
             };
         }
 
-        private static nint AllocateDarwinFixed(nint requestedAddress, ulong size, int posixProtect)
-        {
-            var address = (ulong)requestedAddress;
-            var result = mach_vm_allocate(
-                mach_task_self(),
-                ref address,
-                size,
-                VM_FLAGS_FIXED);
-            if (result != KERN_SUCCESS || address != (ulong)requestedAddress)
-            {
-                if (result == KERN_SUCCESS)
-                {
-                    _ = mach_vm_deallocate(mach_task_self(), address, size);
-                }
-
-                Trace(
-                    $"fixed Mach allocation failed: addr=0x{(ulong)requestedAddress:X16} " +
-                    $"size=0x{size:X} kern_return={result}");
-                return MAP_FAILED;
-            }
-
-            if (mprotect((nint)address, (nuint)size, posixProtect) == 0)
-            {
-                return (nint)address;
-            }
-
-            var error = Marshal.GetLastPInvokeError();
-            _ = mach_vm_deallocate(mach_task_self(), address, size);
-            Trace(
-                $"fixed Mach allocation protection failed: addr=0x{address:X16} " +
-                $"size=0x{size:X} errno={error}");
-            return MAP_FAILED;
-        }
-
         private static void Trace(string message)
         {
             if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_VMEM"), "1", StringComparison.Ordinal))
@@ -575,14 +520,5 @@ internal sealed unsafe class PosixHostMemory : IHostMemory
 
         [DllImport("libc", SetLastError = true)]
         private static extern int mprotect(nint addr, nuint length, int prot);
-
-        [DllImport("libSystem.B.dylib")]
-        private static extern uint mach_task_self();
-
-        [DllImport("libSystem.B.dylib")]
-        private static extern int mach_vm_allocate(uint target, ref ulong address, ulong size, int flags);
-
-        [DllImport("libSystem.B.dylib")]
-        private static extern int mach_vm_deallocate(uint target, ulong address, ulong size);
     }
 }

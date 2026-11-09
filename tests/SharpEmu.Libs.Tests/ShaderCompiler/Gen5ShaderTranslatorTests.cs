@@ -3,7 +3,9 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.ShaderCompiler;
@@ -11,6 +13,149 @@ namespace SharpEmu.Libs.Tests.ShaderCompiler;
 public sealed class Gen5ShaderTranslatorTests
 {
     private const ulong ProgramAddress = 0x1_0000_0000;
+
+    [Fact]
+    public void Vop2OpcodeZeroDecodesAsNoop()
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        WriteWords(memory, ProgramAddress, 0x00000000u, 0xBF810000u);
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal(Gen5ShaderEncoding.Vop2, instruction.Encoding);
+        Assert.Equal("VNop", instruction.Opcode);
+        Assert.Equal(0u, instruction.Pc);
+    }
+
+    // MUBUF keeps opcode bit 7 at bit 25 (MIMG keeps it at bit 0); bit 0 is the low bit of OFFSET. A byte load at an odd
+    // offset (BUFFER_LOAD_UBYTE v1, v9, s[8:11] idxen offset:1, from a BVH build kernel) decoded as MubufRaw88 and lost
+    // its destination.
+    [Fact]
+    public void MubufOddOffsetKeepsItsOpcode()
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        WriteWords(memory, ProgramAddress, 0xE0202001u, 0x80020109u, 0xBF810000u);
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal(Gen5ShaderEncoding.Mubuf, instruction.Encoding);
+        Assert.Equal("BufferLoadUbyte", instruction.Opcode);
+        Assert.Equal([Gen5Operand.Vector(1)], instruction.Destinations);
+    }
+
+    // MUBUF opcodes 128-135 (bit 25 set) are the D16 format forms; a D16 register holds two components, so XY takes one
+    // register and XYZW two.
+    [Theory]
+    [InlineData(0xE2101000u, 0x80010100u, "BufferStoreFormatD16X", 1)]
+    [InlineData(0xE20C1000u, 0x80010200u, "BufferLoadFormatD16Xyzw", 2)]
+    [InlineData(0xE2041000u, 0x80010200u, "BufferLoadFormatD16Xy", 1)]
+    public void MubufD16FormatOpcodesDecodeWithTheirRegisters(uint word, uint extra, string opcode, int registers)
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        WriteWords(memory, ProgramAddress, word, extra, 0xBF810000u);
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, ProgramAddress, out var program, out var error), error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal(opcode, instruction.Opcode);
+        Assert.Equal((uint)registers, Assert.IsType<Gen5BufferMemoryControl>(instruction.Control).DwordCount);
+    }
+
+    [Fact]
+    public void Vop2FmamkF16ConsumesLiteralDword()
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        WriteWords(memory, ProgramAddress, 0x6F104E10u, 0x3C003C00u, 0xBF810000u);
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal(Gen5ShaderEncoding.Vop2, instruction.Encoding);
+        Assert.Equal("VFmaMkF16", instruction.Opcode);
+        Assert.Equal(2, instruction.Words.Count);
+        Assert.Equal(3, instruction.Sources.Count);
+        Assert.Equal(Gen5OperandKind.LiteralConstant, instruction.Sources[1].Kind);
+        Assert.Equal(0x3C003C00u, instruction.Sources[1].Value);
+    }
+
+    [Fact]
+    public void Sop2ScalarFloatSubtractDecodes()
+    {
+        const uint instructionWord =
+            (2u << 30) | (0x41u << 23) | (3u << 16) | (2u << 8) | 1u;
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        WriteWords(memory, ProgramAddress, instructionWord, 0xBF810000u);
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal(Gen5ShaderEncoding.Sop2, instruction.Encoding);
+        Assert.Equal("SSubF32", instruction.Opcode);
+        Assert.Equal(3u, instruction.Destinations[0].Value);
+    }
+
+    [Fact]
+    public void ScalarScratchStoreDwordx2DecodesAsStore()
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        WriteWords(memory, ProgramAddress, 0xC59B2040u, 0xBF810000u);
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal(Gen5ShaderEncoding.Smrd, instruction.Encoding);
+        Assert.Equal("ScratchStoreDwordx2", instruction.Opcode);
+        Assert.Empty(instruction.Destinations);
+        Assert.Equal(4, instruction.Sources.Count);
+        Assert.Equal(32u, instruction.Sources[0].Value);
+        Assert.Equal(54u, instruction.Sources[1].Value);
+        Assert.Equal(55u, instruction.Sources[2].Value);
+        Assert.Equal(64u, instruction.Sources[3].Value);
+        var control = Assert.IsType<Gen5GlobalMemoryControl>(instruction.Control);
+        Assert.Equal(2u, control.DwordCount);
+        Assert.Equal(32u, control.ScalarAddress);
+        Assert.Equal(54u, control.SourceVectorRegister);
+        Assert.Equal(64u, control.DynamicOffsetRegister);
+        Assert.True(control.SourceIsScalar);
+    }
 
     [Theory]
     [InlineData(0xD7600005u, 5u)]
@@ -48,5 +193,286 @@ public sealed class Gen5ShaderTranslatorTests
         Assert.Equal(1u, instruction.Sources[0].Value);
         Assert.Equal(Gen5OperandKind.ScalarRegister, instruction.Sources[1].Kind);
         Assert.Equal(2u, instruction.Sources[1].Value);
+    }
+
+    [Theory]
+    [InlineData(0xBF970001u, "SCbranchCdbgsys")]
+    [InlineData(0xBF980001u, "SCbranchCdbguser")]
+    [InlineData(0xBF990001u, "SCbranchCdbgsysOrUser")]
+    [InlineData(0xBF9A0001u, "SCbranchCdbgsysAndUser")]
+    public void DebugConditionBranchesDecode(uint instructionWord, string expectedOpcode)
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        Span<byte> code = stackalloc byte[3 * sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(code, instructionWord);
+        BinaryPrimitives.WriteUInt32LittleEndian(code[sizeof(uint)..], 0xBF800000u);
+        BinaryPrimitives.WriteUInt32LittleEndian(code[(2 * sizeof(uint))..], 0xBF810000u);
+        Assert.True(memory.TryWrite(ProgramAddress, code));
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        Assert.Equal(expectedOpcode, program.Instructions[0].Opcode);
+    }
+
+    [Theory]
+    [InlineData(0xBBFD0000u)]
+    [InlineData(0xBC7D0000u)]
+    [InlineData(0xBCFD0000u)]
+    [InlineData(0xBD7D0000u)]
+    public void SopkWaitCounterFormsDecodeWithoutScalarDestination(uint instructionWord)
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        Span<byte> code = stackalloc byte[2 * sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(code, instructionWord);
+        BinaryPrimitives.WriteUInt32LittleEndian(code[sizeof(uint)..], 0xBF810000u);
+        Assert.True(memory.TryWrite(ProgramAddress, code));
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal(Gen5ShaderEncoding.Sopk, instruction.Encoding);
+        Assert.Equal("SWaitcnt", instruction.Opcode);
+        Assert.Empty(instruction.Destinations);
+        Assert.Single(instruction.Sources);
+        Assert.Equal(Gen5OperandKind.EncodedConstant, instruction.Sources[0].Kind);
+    }
+
+    [Fact]
+    public void SopkSetregB32DecodesScalarSourceWithoutDestination()
+    {
+        var memory = new FakeCpuMemory(ProgramAddress, 0x100);
+        Span<byte> code = stackalloc byte[2 * sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(code, 0xB9851234u);
+        BinaryPrimitives.WriteUInt32LittleEndian(code[sizeof(uint)..], 0xBF810000u);
+        Assert.True(memory.TryWrite(ProgramAddress, code));
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        var instruction = program.Instructions[0];
+        Assert.Equal(Gen5ShaderEncoding.Sopk, instruction.Encoding);
+        Assert.Equal("SSetregB32", instruction.Opcode);
+        Assert.Empty(instruction.Destinations);
+        Assert.Equal(2, instruction.Sources.Count);
+        Assert.Equal(Gen5OperandKind.ScalarRegister, instruction.Sources[0].Kind);
+        Assert.Equal(5u, instruction.Sources[0].Value);
+        Assert.Equal(Gen5OperandKind.EncodedConstant, instruction.Sources[1].Kind);
+        Assert.Equal(0x1234u, instruction.Sources[1].Value);
+    }
+
+    [Fact]
+    public void FusedProgramContinuesAfterSetProgramCounter()
+    {
+        const ulong continuationAddress = ProgramAddress + 0x100;
+        const ulong entryHeaderAddress = ProgramAddress + 0x400;
+        const ulong continuationHeaderAddress = ProgramAddress + 0x500;
+        var memory = new FakeCpuMemory(ProgramAddress, 0x1000);
+
+        WriteWords(memory, ProgramAddress, 0xBF800000u, 0xBE802000u);
+        WriteWords(memory, continuationAddress, 0xBF800000u, 0xBF810000u);
+        WriteUInt32(memory, entryHeaderAddress + 0x44, 2 * sizeof(uint));
+        WriteUInt32(memory, continuationHeaderAddress + 0x44, 2 * sizeof(uint));
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Gen5ShaderTranslator.RegisterFusedProgram(
+            context,
+            ProgramAddress,
+            entryHeaderAddress,
+            continuationAddress,
+            continuationHeaderAddress);
+
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(
+                context,
+                ProgramAddress,
+                out var program,
+                out var error),
+            error);
+
+        Assert.Equal(
+            ["SNop", "SNop", "SNop", "SEndpgm"],
+            program.Instructions.Select(static instruction => instruction.Opcode));
+        Assert.Equal(
+            [0u, 4u, 0x100u, 0x104u],
+            program.Instructions.Select(static instruction => instruction.Pc));
+        Assert.All(program.Instructions, static instruction => Assert.Null(instruction.AddressOffset));
+        Assert.True(program.IsFusedProgram);
+        Assert.Throws<InvalidOperationException>(() => Gen5ShaderCallLinker.Link(program, []));
+    }
+
+    // An entry can leave with S_SWAPPC_B64 that writes the return address to NULL (SGPR 125): the swap discards where it came from, so it jumps
+    // like S_SETPC_B64 does. What follows it in the entry (a data word, the code object's footer) is not code.
+    [Fact]
+    public void FusedProgramContinuesAfterASwapProgramCounterThatDropsTheReturnAddress()
+    {
+        const ulong continuationAddress = ProgramAddress + 0x100;
+        const ulong entryHeaderAddress = ProgramAddress + 0x400;
+        const ulong continuationHeaderAddress = ProgramAddress + 0x500;
+        var memory = new FakeCpuMemory(ProgramAddress, 0x1000);
+
+        // s_nop, s_swappc_b64 null, s[6:7], then a data word, "barefoot" and a word that is no instruction.
+        WriteWords(memory, ProgramAddress, 0xBF800000u, 0xBEFD2106u, 0x30306C73u, 0x65726162u, 0x746F6F66u, 0xE58B50C0u);
+        WriteWords(memory, continuationAddress, 0xBF800000u, 0xBF810000u);
+        WriteUInt32(memory, entryHeaderAddress + 0x44, 6 * sizeof(uint));
+        WriteUInt32(memory, continuationHeaderAddress + 0x44, 2 * sizeof(uint));
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Gen5ShaderTranslator.RegisterFusedProgram(context, ProgramAddress, entryHeaderAddress, continuationAddress, continuationHeaderAddress);
+
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, ProgramAddress, out var program, out var error), error);
+        Assert.Equal(["SNop", "SNop", "SNop", "SEndpgm"], program.Instructions.Select(static instruction => instruction.Opcode));
+        Assert.Equal([0u, 4u, 0x100u, 0x104u], program.Instructions.Select(static instruction => instruction.Pc));
+    }
+
+    // A swap that keeps the return address is a call: the entry goes on to the S_SETPC_B64 that leaves it.
+    [Fact]
+    public void FusedProgramKeepsDecodingPastASwapProgramCounterThatSavesTheReturnAddress()
+    {
+        const ulong continuationAddress = ProgramAddress + 0x100;
+        const ulong entryHeaderAddress = ProgramAddress + 0x400;
+        const ulong continuationHeaderAddress = ProgramAddress + 0x500;
+        var memory = new FakeCpuMemory(ProgramAddress, 0x1000);
+
+        // s_swappc_b64 s[2:3], s[6:7], s_setpc_b64 s[0:1]
+        WriteWords(memory, ProgramAddress, 0xBE822106u, 0xBE802000u);
+        WriteWords(memory, continuationAddress, 0xBF800000u, 0xBF810000u);
+        WriteUInt32(memory, entryHeaderAddress + 0x44, 2 * sizeof(uint));
+        WriteUInt32(memory, continuationHeaderAddress + 0x44, 2 * sizeof(uint));
+
+        var context = new CpuContext(memory, Generation.Gen5);
+        Gen5ShaderTranslator.RegisterFusedProgram(context, ProgramAddress, entryHeaderAddress, continuationAddress, continuationHeaderAddress);
+
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, ProgramAddress, out var program, out var error), error);
+        Assert.Equal(["SSwappcB64", "SNop", "SNop", "SEndpgm"], program.Instructions.Select(static instruction => instruction.Opcode));
+        Assert.Equal([0u, 4u, 0x100u, 0x104u], program.Instructions.Select(static instruction => instruction.Pc));
+    }
+
+    private sealed class TwoRegionMemory(FakeCpuMemory first, FakeCpuMemory second) : ICpuMemory
+    {
+        public bool TryRead(ulong virtualAddress, Span<byte> destination) =>
+            first.TryRead(virtualAddress, destination) || second.TryRead(virtualAddress, destination);
+
+        public bool TryWrite(ulong virtualAddress, ReadOnlySpan<byte> source) =>
+            first.TryWrite(virtualAddress, source) || second.TryWrite(virtualAddress, source);
+    }
+
+    [Theory]
+    [InlineData(0x1_8000_0000L)]
+    [InlineData(-0x1000L)]
+    public void FusedProgramKeepsAFarContinuationsAddressForGetPc(long distance)
+    {
+        var continuationAddress = unchecked(ProgramAddress + (ulong)distance);
+        const ulong entryHeaderAddress = ProgramAddress + 0x400;
+        var continuationHeaderAddress = continuationAddress + 0x400;
+        var entry = new FakeCpuMemory(ProgramAddress, 0x800);
+        var continuation = new FakeCpuMemory(continuationAddress, 0x800);
+        WriteWords(entry, ProgramAddress, 0xBF800000u, 0xBE802000u);
+        WriteWords(continuation, continuationAddress, 0xBE801F00u, 0xBF810000u);
+        WriteUInt32(entry, entryHeaderAddress + 0x44, 2 * sizeof(uint));
+        WriteUInt32(continuation, continuationHeaderAddress + 0x44, 2 * sizeof(uint));
+
+        var context = new CpuContext(new TwoRegionMemory(entry, continuation), Generation.Gen5);
+        Gen5ShaderTranslator.RegisterFusedProgram(context, ProgramAddress, entryHeaderAddress, continuationAddress, continuationHeaderAddress);
+
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(context, ProgramAddress, out var program, out var error), error);
+        Assert.Equal(["SNop", "SNop", "SGetpcB64", "SEndpgm"], program.Instructions.Select(static instruction => instruction.Opcode));
+        Assert.Equal([0u, 4u, 0x100u, 0x104u], program.Instructions.Select(static instruction => instruction.Pc));
+        Assert.Equal((ulong)distance, program.Instructions[2].ProgramOffset);
+        Assert.Equal(unchecked((ulong)distance + 4), program.Instructions[3].ProgramOffset);
+        Assert.Equal(continuationAddress, unchecked(program.Address + program.Instructions[2].ProgramOffset));
+        Assert.True(program.IsFusedProgram);
+        Assert.Throws<InvalidOperationException>(() => Gen5ShaderCallLinker.Link(
+            program with { Instructions = program.Instructions.Where(instruction => instruction.Opcode != "SGetpcB64").ToArray() }, []));
+    }
+
+    [Fact]
+    public void FusedProgramKeepsGuestAddressWhenCodeBodiesAreFarApart()
+    {
+        const ulong continuationAddress = ProgramAddress + 0x1_C003_2000;
+        const ulong entryHeaderAddress = ProgramAddress + 0x400;
+        const ulong continuationHeaderAddress = continuationAddress + 0x400;
+        var entryMemory = new FakeCpuMemory(ProgramAddress, 0x1000);
+        var continuationMemory = new FakeCpuMemory(continuationAddress, 0x1000);
+
+        WriteWords(entryMemory, ProgramAddress, 0xBF800000u, 0xBE802000u);
+        WriteWords(continuationMemory, continuationAddress, 0xBE801F00u, 0xBF810000u);
+        WriteUInt32(entryMemory, entryHeaderAddress + 0x44, 2 * sizeof(uint));
+        WriteUInt32(continuationMemory, continuationHeaderAddress + 0x44, 2 * sizeof(uint));
+
+        var memory = new SeparatedShaderMemory(entryMemory, continuationMemory);
+        var context = new CpuContext(memory, Generation.Gen5);
+        Gen5ShaderTranslator.RegisterFusedProgram(
+            context,
+            ProgramAddress,
+            entryHeaderAddress,
+            continuationAddress,
+            continuationHeaderAddress);
+
+        Assert.True(
+            Gen5ShaderTranslator.TryDecodeProgram(context, ProgramAddress, out var program, out var error),
+            error);
+        Assert.Equal([0u, 4u, 0x100u, 0x104u], program.Instructions.Select(static instruction => instruction.Pc));
+        Assert.Equal("SGetpcB64", program.Instructions[2].Opcode);
+        Assert.Equal(
+            continuationAddress + sizeof(uint) - ProgramAddress,
+            unchecked(program.Instructions[2].ProgramOffset + sizeof(uint)));
+    }
+
+    [Fact]
+    public void FusedProgramCacheKeysSeparateDifferentGuestAddressGaps()
+    {
+        var nearContinuationKey = new ProgramKey(ShaderStage.Vertex, 1, 0, 16, 0x100, []);
+        var distantContinuationKey = new ProgramKey(ShaderStage.Vertex, 1, 0, 16, 0x1_C003_2000, []);
+
+        Assert.NotEqual(nearContinuationKey, distantContinuationKey);
+    }
+
+    private sealed class SeparatedShaderMemory(FakeCpuMemory entry, FakeCpuMemory continuation) : ICpuMemory
+    {
+        public bool TryRead(ulong address, Span<byte> destination) =>
+            entry.TryRead(address, destination) || continuation.TryRead(address, destination);
+
+        public bool TryWrite(ulong address, ReadOnlySpan<byte> source) =>
+            entry.TryWrite(address, source) || continuation.TryWrite(address, source);
+    }
+
+    private static void WriteWords(FakeCpuMemory memory, ulong address, params uint[] words)
+    {
+        var bytes = new byte[words.Length * sizeof(uint)];
+        for (var index = 0; index < words.Length; index++)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(
+                bytes.AsSpan(index * sizeof(uint), sizeof(uint)),
+                words[index]);
+        }
+
+        Assert.True(memory.TryWrite(address, bytes));
+    }
+
+    private static void WriteUInt32(FakeCpuMemory memory, ulong address, uint value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        Assert.True(memory.TryWrite(address, bytes));
     }
 }

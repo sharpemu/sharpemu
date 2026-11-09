@@ -10,7 +10,19 @@ SPDX-License-Identifier: GPL-2.0-or-later
 </p>
 
 <p align="center">
-  An experimental PlayStation 5 emulator for Windows, Linux and macOS.  
+  An experimental PlayStation 5 emulator for Windows and Linux, with experimental backward compatibility support for PlayStation 4 games.
+</p>
+
+---
+
+<p align="center">
+  <a href="https://discord.gg/zdTuUU9Uwn">
+    <img src="https://img.shields.io/badge/Discord-Join%20our%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join our Discord">
+  </a>
+</p>
+
+<p align="center">
+  <strong>Join our official Discord server for development updates, compatibility discussions, support, and community chat.</strong>
 </p>
 
 ---
@@ -23,14 +35,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 ---
 
+> [!IMPORTANT]
+> **Official channels:** Only **sharpemu.app** and the links listed in this GitHub repository are affiliated with SharpEmu. Any other websites, accounts, or donation pages are unofficial and unauthorized.
+
 > [!NOTE]  
-> SharpEmu supports Windows x64, Linux x64, and macOS x64. Apple Silicon Macs
-> can run the macOS x64 build through Rosetta 2, and Windows on ARM devices
+> SharpEmu supports Windows x64 and Linux x64. Windows on ARM devices
 > (e.g. Snapdragon) can run the Windows x64 build through Windows' built-in
-> x64 emulation.
+> x64 emulation. macOS support is maintained separately in
+> [sharpemu/sharpemu-mac](https://github.com/sharpemu/sharpemu-mac).
 
 > [!WARNING]  
-> SharpEmu is an experimental PS5 emulator developed from scratch in C#. The current focus is on accuracy and infrastructure setup rather than game-specific compatibility.
+> SharpEmu is an experimental PS5 and support backwards mode for PS4 emulator developed from scratch in C#. The current focus is on accuracy and infrastructure setup rather than game-specific compatibility.
 
 ## Info
 
@@ -38,65 +53,71 @@ SharpEmu is an emulator project currently in its early stages of development.
 
 This project is developed purely for research and educational purposes. There are no commercial goals associated with it. We enjoy learning about system architecture and reverse engineering.
 
-SharpEmu focuses exclusively on the PlayStation 5.  
-Our goal is **not** to emulate PS4 games, as there is already an excellent emulator dedicated to that platform: **ShadPS4**.
+SharpEmu focuses exclusively on the PlayStation 5 and there is a backward compatibility mode for PS4 games.
 
-## Games Tested
+## Selected Games
 
-|               Demons Souls Remake                   |                     Dreaming Sarah                         |
+A selection of games tested with SharpEmu. This is not an exhaustive list of supported titles.
+
+|               Demon's Souls Remake                   |                     ASTRO BOT                        |
 | :-----------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
-| ![Bloodborne screenshot](./.github/images/demons-souls.jpg) | ![Dreaming Sarah](./.github/images/dreaming-sarah.jpg) |
+| ![DeS screenshot](./.github/images/demons-souls.jpg) | ![Astro Bot](./.github/images/astro-bot.jpg) |
 
-|                  Void Terrarium                     |                 Dead Cells                    |
+|                  ASTRO's PLAYROOM                    |                 Gran Turismo 7                    |
 | :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Void Terrarium](./.github/images/void-terrarium.jpg) | ![Dead Cells](./.github/images/dead-cells.jpg) |
+| ![Astro's Playroom](./.github/images/astros-playroom.jpg) | ![GT7](./.github/images/gt7.jpg) |
+
+|                  God of War: Sons of Sparta                    |                 Tomb Raider V Remastered                    |
+| :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
+| ![GoW SOS](./.github/images/gow-sos.jpg) | ![Tomb Raider V](./.github/images/tomb-raider-v-remastered.jpg) |
+
+<p align="center">
+  <a href="https://sharpemu.app/compatibility/" target="_blank"><strong><i>And more..</i></strong></a>
+</p>
+
+### Experimental backward compatibility mode
+
+|               Bloodborne                   |                     Uncharted The Nathan Drake Collection                        |
+| :-----------------------------------------------------------: | :--------------------------------------------------------------------------------------------: |
+| ![BB](./.github/images/bloodborne.jpg) | ![Astro Bot](./.github/images/uncharted-1.jpg) |
 
 ## Status
 
-The emulator can currently load the `eboot.bin` of real games, execute native CPU instructions, and partially handle kernel-related functionality. However, several critical components are still missing.
+The emulator can currently load the `eboot.bin` of real games, execute native CPU instructions, and partially handle gpu-related functionality. Included 3D games.
 
-Current capabilities include:
-
-* Loading `eboot.bin` and `.elf` files
-* Executing native CPU instructions
-* Reading basic game metadata (title, version, etc.)
-* Loading system modules (`prx` / `sys_module`)
-* Partial support for some kernel functions  
-* `Fiber` and `AMPR` exports
-* PlayGo scenarios
-* Initial loading game files
-* Shader/resource submits and AGC initial
-* Video outputs in some games
-
-Some games have reached like `sceVideoOut` and AGC stages.
-
-SharpEmu supports Windows, Linux, and macOS hosts. Video output uses Vulkan on
-Windows and Linux, and MoltenVK on macOS. Platform support is still experimental,
-so compatibility and performance vary by game, operating system, and GPU driver.
+SharpEmu supports Windows and Linux hosts, with video output through Vulkan.
+Platform support is still experimental, so compatibility and performance vary by
+game, operating system, and GPU driver. For macOS, see
+[sharpemu/sharpemu-mac](https://github.com/sharpemu/sharpemu-mac).
 
 ## Using
 
 Download the release archive for your operating system, extract it, and launch
 SharpEmu with the path to a legally obtained game's `eboot.bin`.
 
+Or command line;
+
 Windows PowerShell:
 
 ```powershell
-.\SharpEmu.exe "C:\path\to\game\eboot.bin" 2>&1 |
-  Tee-Object -FilePath "SharpEmu.log"
+.\SharpEmu.exe "C:\path\to\game\eboot.bin" --log-to-file
 ```
 
-Linux and macOS:
+Linux:
 
 ```bash
 chmod +x ./SharpEmu
 
-./SharpEmu "/path/to/game/eboot.bin" 2>&1 |
-  tee SharpEmu.log
+./SharpEmu "/path/to/game/eboot.bin" --log-to-file
 ```
 
-A Vulkan-capable GPU and current graphics driver are required. The macOS
-release includes the MoltenVK Vulkan implementation.
+SharpEmu supports environment variables that can be configured from the GUI. Undocumented variables are listed here: [docs/sharpemu-gui-undocumented-env-vars.md](docs/sharpemu-gui-undocumented-env-vars.md)
+
+You can set them per game or globally in the GUI, or pass them directly through the CLI.
+
+A Vulkan-capable GPU and current graphics driver are required.
+
+See [Game patches](docs/patches.md) for downloading, enabling and writing game patches.
 
 > [!IMPORTANT]  
 > This project does **not** support or condone piracy.  
@@ -129,6 +150,9 @@ One of the few PS5 emulator projects available and very useful for studying nati
 
 * **Ryujinx**  
 Provided valuable references for filesystem handling and low-level C# implementation patterns.
+
+* **[OpenGNM](https://github.com/PS4-OpenGNM/opengnm)**
+Used as a reference for the general GCN architecture.
 
 # License
 

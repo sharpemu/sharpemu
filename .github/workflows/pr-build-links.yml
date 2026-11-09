@@ -26,7 +26,7 @@ permissions:
 jobs:
   comment:
     name: Post artifact links
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # Only for successful PR builds — artifacts exist only when the build passed.
     if: >-
       github.event.workflow_run.event == 'pull_request' &&
@@ -79,7 +79,6 @@ jobs:
             const platforms = [
               { key: 'win-x64', label: 'Windows (win-x64)' },
               { key: 'linux-x64', label: 'Linux (linux-x64)' },
-              { key: 'osx-x64', label: 'macOS (osx-x64)' },
             ];
             const rows = [];
             for (const platform of platforms) {

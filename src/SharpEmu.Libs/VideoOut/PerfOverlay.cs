@@ -5,17 +5,17 @@ using System.Diagnostics;
 
 namespace SharpEmu.Libs.VideoOut;
 
-/// <summary>
-/// In-window performance HUD. The panel is rasterized on the CPU into a
-/// small BGRA buffer each frame (embedded 5x7 font, no assets) and the
-/// presenter blits it onto the swapchain image, so it needs no pipelines,
-/// descriptors or blending state. Toggled with F1; SHARPEMU_OVERLAY=0
-/// starts it hidden.
-/// </summary>
+// Draws performance statistics without changing guest or presentation timing.
 public static class PerfOverlay
 {
-    public const int PanelWidth = 376;
-    public const int PanelHeight = 176;
+    public const int PanelWidth = 390;
+    public const int PanelHeight = 194;
+    public const int MinimalPanelWidth = 300;
+    public const int MinimalPanelHeight = 48;
+
+    // The shared pixel buffer must hold either panel without changing its row stride.
+    public const int PixelBufferWidth = PanelWidth > MinimalPanelWidth ? PanelWidth : MinimalPanelWidth;
+    public const int PixelBufferHeight = PanelHeight > MinimalPanelHeight ? PanelHeight : MinimalPanelHeight;
 
     private const int GlyphColumns = 5;
     private const int GlyphRows = 7;
@@ -24,10 +24,8 @@ public static class PerfOverlay
     private const int LineHeight = (GlyphRows + 2) * Scale;
     private const int FrameHistorySize = 128;
 
-    private static volatile bool _enabled = !string.Equals(
-        Environment.GetEnvironmentVariable("SHARPEMU_OVERLAY"),
-        "0",
-        StringComparison.Ordinal);
+    private static readonly PerformanceOverlayState DisplayState = new();
+    private static WindowsGpuUsage? _gpuUsage;
 
     private static long _lastPresentTimestamp;
     private static long _lastSubmitTimestamp;
@@ -38,13 +36,17 @@ public static class PerfOverlay
     private static long _submittedInWindow;
     private static long _drawsInWindow;
     private static long _guestBufferCacheBytes;
+    private static long _guestImageCacheBytes;
+    private static int _liveDeviceAllocations;
+    private static int _peakDeviceAllocations;
 
     // Refreshed once per second so per-frame fills never allocate.
     private static long _statsWindowStart = Stopwatch.GetTimestamp();
     // Headline FPS tracks guest VideoOut flips (RecordSubmit), not host
-    // swapchain presents. Metal's free-running present timer hits ~120 Hz on
-    // ProMotion even while the guest is stalled on GPU waits.
+    // swapchain presents, which can keep running while the guest is stalled
+    // on GPU waits.
     private static double _fps;
+    private static readonly FrameRateAverage _fpsAverage = new();
     private static double _presentFps;
     private static double _drawsPerSecond;
     private static double _averageFrameMs;
@@ -63,10 +65,46 @@ public static class PerfOverlay
     private static string _line3 = string.Empty;
     private static string _line4 = string.Empty;
     private static string _line5 = string.Empty;
+    private static string _line6 = string.Empty;
+    private static string _minimalLine1 = string.Empty;
+    private static string _minimalLine2 = string.Empty;
+    private static string _minimalSummary = "FPS 0.0 | CPU 0% | GPU N/A | TIME 00:00:00";
 
-    public static bool Enabled => _enabled;
+    public static bool Enabled => DisplayState.Enabled;
+    public static bool DrawOnScreen => DisplayState.DrawOnScreen;
+    public static int DisplayWidth => DisplayState.DisplayWidth;
+    public static int DisplayHeight => DisplayState.DisplayHeight;
 
-    public static void Toggle() => _enabled = !_enabled;
+    internal static void Configure(HostVideoOptions options)
+    {
+        _gpuUsage?.Dispose();
+        _gpuUsage = new WindowsGpuUsage();
+        DisplayState.Configure(options,
+            string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_OVERLAY"), "0", StringComparison.Ordinal));
+        _sessionStartTimestamp = Stopwatch.GetTimestamp();
+    }
+
+    internal static void Shutdown()
+    {
+        _gpuUsage?.Dispose();
+        _gpuUsage = null;
+    }
+
+    public static void Toggle() => DisplayState.Toggle();
+    public static void CycleCorner() => DisplayState.CycleCorner();
+
+    internal static OverlayRectangle GetRectangle(int width, int height) => DisplayState.GetRectangle(width, height);
+
+    internal static string GetTitleBarSummary()
+    {
+        if (!Enabled || DisplayState.Mode != PerformanceOverlayMode.TitleBar)
+        {
+            return string.Empty;
+        }
+
+        RefreshStatsIfDue(0, 0);
+        return _minimalSummary;
+    }
 
     /// <summary>Called by the presenter after each successful host present.</summary>
     public static void RecordPresent()
@@ -95,11 +133,16 @@ public static class PerfOverlay
     /// <summary>Called per translated draw/dispatch executed.</summary>
     public static void RecordDraw() => Interlocked.Increment(ref _drawsInWindow);
 
-    public static void SetGuestBufferCacheBytes(ulong bytes) =>
-        Interlocked.Exchange(ref _guestBufferCacheBytes, checked((long)bytes));
+    public static void SetGuestCacheStatistics(ulong bufferBytes, ulong imageBytes, int liveDeviceAllocations, int peakDeviceAllocations)
+    {
+        Interlocked.Exchange(ref _guestBufferCacheBytes, checked((long)bufferBytes));
+        Interlocked.Exchange(ref _guestImageCacheBytes, checked((long)imageBytes));
+        Interlocked.Exchange(ref _liveDeviceAllocations, liveDeviceAllocations);
+        Interlocked.Exchange(ref _peakDeviceAllocations, peakDeviceAllocations);
+    }
 
     /// <summary>
-    /// Rasterizes the panel into a BGRA byte span of PanelWidth x PanelHeight.
+    /// Rasterizes the panel into a BGRA byte span of PixelBufferWidth x PixelBufferHeight.
     /// Runs on the render thread.
     /// </summary>
     public static void Fill(Span<byte> bgra, int pendingWork, int inFlightSubmissions)
@@ -115,6 +158,13 @@ public static class PerfOverlay
             bgra[i + 3] = 0xFF;
         }
 
+        if (DisplayState.Mode != PerformanceOverlayMode.Full)
+        {
+            DrawString(bgra, 8, 6, _minimalLine1, 0x60, 0xFF, 0x60);
+            DrawString(bgra, 8, 6 + LineHeight, _minimalLine2, 0xFF, 0xD0, 0x80);
+            return;
+        }
+
         var y = 6;
         DrawString(bgra, 8, y, _line1, 0x60, 0xFF, 0x60);
         y += LineHeight;
@@ -124,7 +174,9 @@ public static class PerfOverlay
         y += LineHeight;
         DrawString(bgra, 8, y, _line4, 0xB0, 0xB0, 0xB0);
         y += LineHeight;
-        DrawString(bgra, 8, y, _line5, 0xFF, 0xD0, 0x80);
+        DrawString(bgra, 8, y, _line5, 0xB0, 0xB0, 0xB0);
+        y += LineHeight;
+        DrawString(bgra, 8, y, _line6, 0xFF, 0xD0, 0x80);
         y += LineHeight + 4;
         DrawFrameGraph(bgra, 8, y, PanelWidth - 16, PanelHeight - y - 6);
     }
@@ -137,7 +189,10 @@ public static class PerfOverlay
         {
             var seconds = (double)elapsedTicks / Stopwatch.Frequency;
             _statsWindowStart = now;
-            _fps = Interlocked.Exchange(ref _submittedInWindow, 0) / seconds;
+            var windowFrames = Interlocked.Exchange(ref _submittedInWindow, 0);
+            // A one-second window holds 0, 1 or 2 frames at the rates a heavy title runs
+            // at, so the published value is averaged over the last few windows.
+            _fps = _fpsAverage.Add(windowFrames, seconds);
             _presentFps = Interlocked.Exchange(ref _presentedInWindow, 0) / seconds;
             _drawsPerSecond = Interlocked.Exchange(ref _drawsInWindow, 0) / seconds;
 
@@ -150,11 +205,11 @@ public static class PerfOverlay
             // (FPS 0 + 8000 MS) even after the stall ended.
             var lastSubmit = Interlocked.Read(ref _lastSubmitTimestamp);
             string msLabel;
-            if (_fps > 0)
+            if (windowFrames > 0)
             {
                 var lastIndex = (_frameHistoryIndex - 1 + FrameHistorySize) % FrameHistorySize;
                 var lastInterval = _frameMilliseconds[lastIndex];
-                _averageFrameMs = lastInterval > 0 ? lastInterval : 1000.0 / _fps;
+                _averageFrameMs = lastInterval > 0 ? lastInterval : seconds * 1000.0 / windowFrames;
                 msLabel = $"{_averageFrameMs:0.0} MS";
             }
             else if (lastSubmit != 0)
@@ -195,7 +250,7 @@ public static class PerfOverlay
                 Environment.ProcessorCount;
             _lastCpuTime = cpuTime;
 
-            var drawsPerFrame = _fps > 0 ? _drawsPerSecond / _fps : 0;
+            var drawsPerFrame = windowFrames > 0 ? _drawsPerSecond * seconds / windowFrames : 0;
             var sessionStart = Interlocked.Read(ref _sessionStartTimestamp);
             var elapsedSeconds = sessionStart == 0
                 ? 0L
@@ -208,15 +263,55 @@ public static class PerfOverlay
             _line3 = $"ALLOC {_allocatedMbPerSecond:0.0} MB/S  GC {_gen0PerWindow}/{_gen1PerWindow}/{_gen2PerWindow}";
             var heapMb = GC.GetTotalMemory(false) / (1024 * 1024);
             var guestBufferMb = Interlocked.Read(ref _guestBufferCacheBytes) / (1024 * 1024);
-            _line4 = $"MEM {heapMb}M BUF {guestBufferMb}M CPU {_cpuPercent:0}%";
-            _line5 = $"TIME {elapsedHours:00}:{elapsedMinutes:00}:{elapsedRemainingSeconds:00}";
+            var guestImageMemoryInMiB = Interlocked.Read(ref _guestImageCacheBytes) / (1024 * 1024);
+            var liveAllocations = Volatile.Read(ref _liveDeviceAllocations);
+            var peakAllocations = Volatile.Read(ref _peakDeviceAllocations);
+            var gpuPercent = _gpuUsage?.Percent ?? double.NaN;
+            _gpuUsage?.RequestSample();
+            var gpuLabel = FormatUsage(gpuPercent);
+            var timeLabel = $"{elapsedHours:00}:{elapsedMinutes:00}:{elapsedRemainingSeconds:00}";
+            _line4 = $"MEM {heapMb}M BUF {guestBufferMb}M IMG {guestImageMemoryInMiB}M";
+            _line5 = $"CPU {_cpuPercent:0}%  GPU {gpuLabel}";
+            _line6 = $"TIME {timeLabel}  VKALLOC {liveAllocations}/{peakAllocations}";
+            _minimalLine1 = $"FPS {_fps:0.0}  CPU {_cpuPercent:0}%";
+            _minimalLine2 = $"GPU {gpuLabel}  TIME {timeLabel}";
+            _minimalSummary = $"FPS {_fps:0.0} | CPU {_cpuPercent:0}% | GPU {gpuLabel} | TIME {timeLabel}";
         }
     }
+
+    internal static string FormatUsage(double percent) =>
+        double.IsFinite(percent) ? $"{Math.Clamp(percent, 0, 100):0}%" : "N/A";
 
     private static TimeSpan GetProcessCpuTime()
     {
         var usage = Environment.CpuUsage;
         return usage.UserTime + usage.PrivilegedTime;
+    }
+
+    /// <summary>Frames per second over the last few statistics windows.</summary>
+    internal sealed class FrameRateAverage
+    {
+        public const int WindowCount = 4;
+
+        private readonly long[] _frames = new long[WindowCount];
+        private readonly double[] _seconds = new double[WindowCount];
+        private int _next;
+
+        public double Add(long frames, double seconds)
+        {
+            _frames[_next] = frames;
+            _seconds[_next] = seconds;
+            _next = (_next + 1) % WindowCount;
+            long totalFrames = 0;
+            var totalSeconds = 0.0;
+            for (var index = 0; index < WindowCount; index++)
+            {
+                totalFrames += _frames[index];
+                totalSeconds += _seconds[index];
+            }
+
+            return totalSeconds > 0 ? totalFrames / totalSeconds : 0;
+        }
     }
 
     private static void DrawFrameGraph(Span<byte> bgra, int x, int y, int width, int height)
@@ -324,7 +419,7 @@ public static class PerfOverlay
             }
 
             penX += CellWidth;
-            if (penX + CellWidth > PanelWidth)
+            if (penX + CellWidth > DisplayWidth)
             {
                 break;
             }
@@ -333,12 +428,12 @@ public static class PerfOverlay
 
     private static void SetPixel(Span<byte> bgra, int x, int y, byte r, byte g, byte b)
     {
-        if ((uint)x >= PanelWidth || (uint)y >= PanelHeight)
+        if ((uint)x >= DisplayWidth || (uint)y >= DisplayHeight)
         {
             return;
         }
 
-        var offset = (y * PanelWidth + x) * 4;
+        var offset = (y * PixelBufferWidth + x) * 4;
         bgra[offset] = b;
         bgra[offset + 1] = g;
         bgra[offset + 2] = r;

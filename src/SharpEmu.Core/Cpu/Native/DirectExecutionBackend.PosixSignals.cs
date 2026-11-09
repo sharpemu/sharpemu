@@ -5,6 +5,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Threading;
 using SharpEmu.HLE;
+using SharpEmu.HLE.GpuMemory;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -23,30 +24,23 @@ public sealed unsafe partial class DirectExecutionBackend
 	private const int PosixSigIll = 4;
 	private const int PosixSigTrap = 5;
 	private const int PosixSigAbort = 6;
+	private const int PosixSigFpe = 8;
 	private const int PosixSigSegv = 11;
-	private static readonly int PosixSigBus = OperatingSystem.IsMacOS() ? 10 : 7;
+	private const int PosixSigBus = 7;
 
-	// struct sigaction: the handler pointer leads on both platforms; Darwin
-	// packs { handler(8), mask(4), flags(4) }, Linux glibc/musl packs
+	// struct sigaction: Linux glibc/musl packs
 	// { handler(8), mask(128), flags(4), restorer(8) }.
-	private static readonly int PosixSigactionSize = OperatingSystem.IsMacOS() ? 16 : 152;
-	private static readonly int PosixSigactionFlagsOffset = OperatingSystem.IsMacOS() ? 12 : 136;
+	private const int PosixSigactionSize = 152;
+	private const int PosixSigactionFlagsOffset = 136;
 
-	private static readonly int PosixSaSigInfo = OperatingSystem.IsMacOS() ? 0x0040 : 0x0004;
-	private static readonly int PosixSaNoDefer = OperatingSystem.IsMacOS() ? 0x0010 : 0x40000000;
+	private const int PosixSaSigInfo = 0x0004;
+	private const int PosixSaNoDefer = 0x40000000;
 
-	// siginfo_t.si_addr: Darwin { signo, errno, code, pid, uid, status, addr },
-	// Linux { signo, errno, code, pad32, addr }.
-	private static readonly int PosixSigInfoAddressOffset = OperatingSystem.IsMacOS() ? 24 : 16;
+	// siginfo_t.si_addr: Linux { signo, errno, code, pad32, addr }.
+	private const int PosixSigInfoAddressOffset = 16;
 
-	// Darwin ucontext_t stores a pointer to __darwin_mcontext64 at +48; the
-	// general registers live in its __ss thread state after the 16-byte
-	// exception state. Linux glibc embeds mcontext_t inline at +40 with the
-	// registers in gregs[23]. Rosetta 2 delivers the regular x86-64 layout
-	// to translated processes.
-	private const int DarwinUcontextMcontextOffset = 48;
-	private const int DarwinMcontextErrOffset = 4;
-	private const int DarwinMcontextFaultAddressOffset = 8;
+	// Linux glibc embeds mcontext_t inline in ucontext_t at +40 with the
+	// registers in gregs[23].
 	private const int LinuxUcontextGregsOffset = 40;
 	private const int LinuxGregsErrOffset = 19 * 8;
 
@@ -67,12 +61,12 @@ public sealed unsafe partial class DirectExecutionBackend
 	// ordered to match the contiguous Win64 CONTEXT block CTX_RAX..CTX_RIP
 	// (rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8..r15, rip). Verified
 	// against the x86-64 platform headers.
-	private static readonly int[] PosixRegisterOffsets = OperatingSystem.IsMacOS()
-		? new[] { 16, 32, 40, 24, 72, 64, 56, 48, 80, 88, 96, 104, 112, 120, 128, 136, 144 }
-		: new[] { 104, 112, 96, 88, 120, 80, 72, 64, 0, 8, 16, 24, 32, 40, 48, 56, 128 };
+	private static readonly int[] PosixRegisterOffsets =
+		new[] { 104, 112, 96, 88, 120, 80, 72, 64, 0, 8, 16, 24, 32, 40, 48, 56, 128 };
 
 	private static DirectExecutionBackend? _posixSignalBackend;
 	private static bool _posixSignalHandlersInstalled;
+	private static nint _posixSignalTrampoline;
 	private static bool _posixRawRecoveryEnabled;
 	private static bool _posixSignalWarmup;
 	private static readonly nint[] _posixPreviousActions = new nint[32];
@@ -84,12 +78,8 @@ public sealed unsafe partial class DirectExecutionBackend
 	[ThreadStatic]
 	private static int _posixSignalHandlerDepth;
 
-	// True while the current thread's in-flight POSIX fault carries the real
-	// XMM registers in the CONTEXT scratch buffer and writes to them will
-	// reach the mcontext on resume. Gates recovery paths (SSE4a EXTRQ/
-	// INSERTQ) that would otherwise compute results from a zeroed XMM area
-	// and silently discard what they "wrote". Darwin is not bridged yet, so
-	// the flag stays false there.
+	// True when the signal context contains the current vector register values.
+	// Copy changes back to these registers before the guest continues.
 	[ThreadStatic]
 	private static bool _posixXmmContextBridged;
 
@@ -104,6 +94,7 @@ public sealed unsafe partial class DirectExecutionBackend
 		_posixSignalBackend = this;
 		if (_posixSignalHandlersInstalled)
 		{
+			PublishSignalStackState();
 			return;
 		}
 
@@ -117,43 +108,37 @@ public sealed unsafe partial class DirectExecutionBackend
 		WarmUpPosixSignalPath();
 		SharpEmu.HLE.GuestImageWriteTracker.WarmUp();
 
+		_posixSignalTrampoline = CreatePosixSignalTrampoline();
+		PublishSignalStackState();
 		if (!InstallPosixSignalHandler(PosixSigSegv) ||
 			!InstallPosixSignalHandler(PosixSigBus) ||
 			!InstallPosixSignalHandler(PosixSigIll) ||
 			!InstallPosixSignalHandler(PosixSigTrap) ||
-			!InstallPosixSignalHandler(PosixSigAbort))
+			!InstallPosixSignalHandler(PosixSigAbort) ||
+			!InstallPosixSignalHandler(PosixSigFpe))
 		{
 			throw new InvalidOperationException("Failed to install POSIX fault signal handlers");
 		}
 
 		_posixSignalHandlersInstalled = true;
-		Console.Error.WriteLine("[LOADER][INFO] POSIX signal exception bridge installed (SIGSEGV/SIGBUS/SIGILL)");
+		Console.Error.WriteLine("[LOADER][INFO] POSIX signal exception bridge installed (SIGSEGV/SIGBUS/SIGILL/SIGFPE)");
 	}
 
 	/// <summary>
 	/// Runs the signal-recovery path once with fabricated inputs before the
 	/// handlers are installed. The first entry into the handler must not
 	/// require JIT compilation (a fault can interrupt arbitrary runtime
-	/// states), and under Rosetta 2 the signal trampoline cannot enter x86
-	/// code that has never been executed (and therefore never translated): a
-	/// cold handler is silently never invoked and the faulting instruction
-	/// retries forever.
+	/// states).
 	/// </summary>
 	private void WarmUpPosixSignalPath()
 	{
-		byte* fakeUcontext = stackalloc byte[512];
-		new Span<byte>(fakeUcontext, 512).Clear();
-		byte* fakeMcontext = stackalloc byte[512];
-		new Span<byte>(fakeMcontext, 512).Clear();
-		if (OperatingSystem.IsMacOS())
-		{
-			*(byte**)(fakeUcontext + DarwinUcontextMcontextOffset) = fakeMcontext;
-		}
+		byte* testUserContext = stackalloc byte[512];
+		new Span<byte>(testUserContext, 512).Clear();
 
 		_posixSignalWarmup = true;
 		try
 		{
-			((delegate* unmanaged<int, nint, nint, void>)&HandlePosixSignal)(PosixSigSegv, 0, (nint)fakeUcontext);
+			((delegate* unmanaged<int, nint, nint, void>)&HandlePosixSignal)(PosixSigSegv, 0, (nint)testUserContext);
 
 			// Warm the branches the fabricated fault above skips without
 			// spamming diagnostics: the benign-exception path through
@@ -187,7 +172,7 @@ public sealed unsafe partial class DirectExecutionBackend
 	{
 		byte* action = stackalloc byte[PosixSigactionSize];
 		new Span<byte>(action, PosixSigactionSize).Clear();
-		*(nint*)action = (nint)(delegate* unmanaged<int, nint, nint, void>)&HandlePosixSignal;
+		*(nint*)action = _posixSignalTrampoline;
 		// No SA_ONSTACK: the runtime's alternate stacks are far too small for
 		// the recovery/diagnostic path (JIT compilation of cold handler code
 		// can run inside the signal frame). Guest faults deliver onto the 2MB
@@ -234,9 +219,21 @@ public sealed unsafe partial class DirectExecutionBackend
 			// address (safe for host and guest threads alike) and must resume
 			// the faulting write immediately after restoring write access.
 			if (signal != PosixSigIll &&
+				signal != PosixSigFpe &&
 				siginfo != 0 &&
 				SharpEmu.HLE.GuestImageWriteTracker.TryHandleWriteFault(
 					*(ulong*)((byte*)siginfo + PosixSigInfoAddressOffset)))
+			{
+				return;
+			}
+
+			// GPU-tracked pages fault on every first CPU access after the GPU or an upload used them,
+			// thousands of times a second in a frame. Resolving them needs only the address and the
+			// access kind, so they skip the Win64 context conversion and the other handlers.
+			if (PosixGpuFaultFastPath && !_posixSignalWarmup &&
+				(signal == PosixSigSegv || signal == PosixSigBus) &&
+				siginfo != 0 &&
+				TryResolvePosixGpuFault(siginfo, ucontext))
 			{
 				return;
 			}
@@ -258,6 +255,28 @@ public sealed unsafe partial class DirectExecutionBackend
 		ChainPreviousPosixAction(signal, siginfo, ucontext);
 	}
 
+	private static readonly bool PosixGpuFaultFastPath =
+		Environment.GetEnvironmentVariable("SHARPEMU_POSIX_GPU_FAULT_FAST_PATH") != "0";
+
+	private static bool TryResolvePosixGpuFault(nint siginfo, nint ucontext)
+	{
+		byte* registers = GetPosixRegisterBase(ucontext);
+		if (registers == null)
+		{
+			return false;
+		}
+
+		ulong faultAddress = GetPosixFaultAddress(siginfo);
+		ulong rip = *(ulong*)(registers + PosixRegisterOffsets[16]);
+		var kind = GetPosixAccessType(registers, faultAddress, rip) switch
+		{
+			0 => FaultKind.Read,
+			1 => FaultKind.Write,
+			_ => FaultKind.Unknown,
+		};
+		return kind != FaultKind.Unknown && GuestGpuMemoryHook.TryResolveFault(kind, faultAddress);
+	}
+
 	private static bool TryHandlePosixFault(int signal, nint siginfo, nint ucontext)
 	{
 		byte* registers = GetPosixRegisterBase(ucontext);
@@ -274,25 +293,18 @@ public sealed unsafe partial class DirectExecutionBackend
 			WriteCtxU64(contextRecord, CTX_RAX + i * 8, *(ulong*)(registers + offsets[i]));
 		}
 
-		// Bridge the XMM registers alongside the GPRs where the layout is
-		// known: on Linux the fpstate pointer and FXSAVE image are kernel
-		// ABI, so recovery paths that read or write XMM state (SSE4a
-		// EXTRQ/INSERTQ) see the live registers and their writes reach the
-		// guest through sigreturn.
-		byte* fpstate = null;
-		if (OperatingSystem.IsLinux())
+		// Copy the vector registers that instruction recovery can change.
+		// Keep all other floating-point state unchanged.
+		byte* vectorRegisters = GetSignalVectorRegisterAddress(registers);
+		if (vectorRegisters != null)
 		{
-			fpstate = *(byte**)(registers + LinuxGregsFpstateOffset);
-			if (fpstate != null)
-			{
-				Buffer.MemoryCopy(
-					fpstate + FxsaveXmmOffset,
-					contextRecord + Win64ContextXmm0Offset,
-					XmmBlockSize,
-					XmmBlockSize);
-			}
+			Buffer.MemoryCopy(
+				vectorRegisters,
+				contextRecord + Win64ContextXmm0Offset,
+				XmmBlockSize,
+				XmmBlockSize);
 		}
-		_posixXmmContextBridged = fpstate != null;
+		_posixXmmContextBridged = vectorRegisters != null;
 
 		EXCEPTION_RECORD record = default;
 		record.ExceptionAddress = (void*)ReadCtxU64(contextRecord, CTX_RIP);
@@ -308,9 +320,14 @@ public sealed unsafe partial class DirectExecutionBackend
 		{
 			record.ExceptionCode = 1073741845u;
 		}
+		else if (signal == PosixSigFpe)
+		{
+			// STATUS_INTEGER_DIVIDE_BY_ZERO: #DE from div/idiv (zero divisor or quotient overflow).
+			record.ExceptionCode = 3221225620u;
+		}
 		else
 		{
-			ulong faultAddress = GetPosixFaultAddress(siginfo, registers);
+			ulong faultAddress = GetPosixFaultAddress(siginfo);
 			record.ExceptionCode = 3221225477u;
 			record.NumberParameters = 2;
 			record.ExceptionInformation[0] = GetPosixAccessType(registers, faultAddress, ReadCtxU64(contextRecord, CTX_RIP));
@@ -359,15 +376,26 @@ public sealed unsafe partial class DirectExecutionBackend
 		{
 			*(ulong*)(registers + offsets[i]) = ReadCtxU64(contextRecord, CTX_RAX + i * 8);
 		}
-		if (fpstate != null)
+		if (vectorRegisters != null)
 		{
 			Buffer.MemoryCopy(
 				contextRecord + Win64ContextXmm0Offset,
-				fpstate + FxsaveXmmOffset,
+				vectorRegisters,
 				XmmBlockSize,
 				XmmBlockSize);
 		}
 		return true;
+	}
+
+	private static byte* GetSignalVectorRegisterAddress(byte* machineContext)
+	{
+		if (OperatingSystem.IsLinux())
+		{
+			byte* floatingPointState = *(byte**)(machineContext + LinuxGregsFpstateOffset);
+			return floatingPointState != null ? floatingPointState + FxsaveXmmOffset : null;
+		}
+
+		return null;
 	}
 
 	private static byte* GetPosixRegisterBase(nint ucontext)
@@ -377,33 +405,20 @@ public sealed unsafe partial class DirectExecutionBackend
 			return null;
 		}
 
-		if (OperatingSystem.IsMacOS())
-		{
-			return *(byte**)((byte*)ucontext + DarwinUcontextMcontextOffset);
-		}
-
 		return (byte*)ucontext + LinuxUcontextGregsOffset;
 	}
 
-	private static ulong GetPosixFaultAddress(nint siginfo, byte* registers)
+	private static ulong GetPosixFaultAddress(nint siginfo)
 	{
-		ulong address = siginfo != 0 ? *(ulong*)((byte*)siginfo + PosixSigInfoAddressOffset) : 0;
-		if (address == 0 && OperatingSystem.IsMacOS())
-		{
-			address = *(ulong*)(registers + DarwinMcontextFaultAddressOffset);
-		}
-
-		return address;
+		return siginfo != 0 ? *(ulong*)((byte*)siginfo + PosixSigInfoAddressOffset) : 0;
 	}
 
 	private static ulong GetPosixAccessType(byte* registers, ulong faultAddress, ulong rip)
 	{
 		// x86 page-fault error code: bit 1 = write access, bit 4 = instruction
 		// fetch. Fall back to comparing the fault address against RIP when
-		// the error code is not populated (e.g. under Rosetta 2 translation).
-		ulong error = OperatingSystem.IsMacOS()
-			? *(uint*)(registers + DarwinMcontextErrOffset)
-			: *(ulong*)(registers + LinuxGregsErrOffset);
+		// the error code is not populated.
+		ulong error = *(ulong*)(registers + LinuxGregsErrOffset);
 		if ((error & 0x10) != 0)
 		{
 			return 8;

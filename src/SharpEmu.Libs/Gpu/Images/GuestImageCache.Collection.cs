@@ -1,0 +1,327 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using SharpEmu.Libs.Gpu.Buffers;
+
+namespace SharpEmu.Libs.Gpu.Images;
+
+// Garbage collection by recency and memory pressure, and the scheduled readback flush.
+public sealed partial class GuestImageCache
+{
+    public void RunGarbageCollector() => RunGarbageCollector(endsFrame: true);
+
+    // Image ages are counted in frames. Collection also runs after guest submissions, so memory
+    // pressure is relieved during long stretches without a flip, but only a frame advances the
+    // age: a title submits dozens of command buffers per frame, and counting those made every
+    // texture it samples once per frame look stale, so it was deleted and uploaded again.
+    public void RunGarbageCollector(bool endsFrame)
+    {
+        using var held = _lock.Hold();
+        var tick = endsFrame ? _collectionTick++ : _collectionTick;
+        if (endsFrame && SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled && tick % 300 == 0)
+            ReportImageMemory("collection", true, tick);
+        ExpireParkedImages(tick);
+        if (_totalUsedMemory < _collectionStartBytes)
+        {
+            return;
+        }
+
+        Collect(tick, allowAggressive: false);
+        if (_totalUsedMemory >= _criticalMemoryBytes)
+        {
+            Collect(tick, allowAggressive: true);
+        }
+    }
+
+    private void Collect(ulong tick, bool allowAggressive)
+    {
+        var pressured = _totalUsedMemory >= _memoryPressureBytes;
+        var aggressive = allowAggressive && _totalUsedMemory >= _criticalMemoryBytes;
+        var profile = SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled;
+        var age = aggressive ? 160UL : pressured ? 80UL : 16UL;
+        if (tick < age && !pressured && !aggressive)
+        {
+            return;
+        }
+
+        age = Math.Min(age, tick);
+        var deletions = aggressive ? 40 : pressured ? 20 : 10;
+        var candidates = new List<ResourceSlotIdentifier>(deletions);
+        // Deleting a depth image also deletes its stencil association, so the recency walk ends first.
+        _recencyQueue.CollectNextAtOrBeforeTick(tick - age, deletions, candidates);
+        foreach (var imageIdentifier in candidates)
+        {
+            if (deletions == 0 || _totalUsedMemory < _collectionStartBytes)
+            {
+                break;
+            }
+
+            deletions--;
+            if (profile) _collectionCandidates++;
+            var owner = _slots.TryGet(imageIdentifier);
+            if (owner == null || !owner.Registered || owner.DepthOwner.IsValid)
+            {
+                if (profile && owner?.DepthOwner.IsValid == true) _collectionAssociations++;
+                continue;
+            }
+
+            if (owner.IsGpuModified)
+            {
+                if (owner.IsMaybeCpuDirty)
+                {
+                    if (owner.NeedsMaybeCpuHash)
+                        continue;
+                    _ = owner.ResolveMaybeCpuHash(owner.HashGuestEdges());
+                }
+
+                var safe = CanReadBack(owner);
+                // A dirty buffer overlap does not prove that it replaces the image contents.
+                if (!safe && owner.SafeToDownload)
+                {
+                    if (profile) _collectionBufferOverlapRetentions++;
+                    continue;
+                }
+                if (safe && owner.Description.IsTiled)
+                {
+                    if (profile) _collectionTiledRetentions++;
+                    continue;
+                }
+
+                if (safe && !pressured)
+                {
+                    if (profile) _collectionUnpressuredRetentions++;
+                    continue;
+                }
+
+                if (safe && !TryDownloadToGuest(imageIdentifier))
+                {
+                    if (profile) _collectionReadbackFailures++;
+                    continue;
+                }
+
+                ReportImageLifetime(owner, safe ? "collect-readback-queued" : "collect-unreadable-gpu", deletion: true);
+                owner.ClearGpuModified();
+            }
+            else
+            {
+                ReportImageLifetime(owner, "collect-no-gpu-ownership", deletion: true);
+            }
+
+            DeleteImage(imageIdentifier);
+            if (profile) _collectionDeletions++;
+            if (_totalUsedMemory < _criticalMemoryBytes && aggressive)
+            {
+                deletions >>= 2;
+                aggressive = false;
+            }
+
+            if (_totalUsedMemory < _memoryPressureBytes && pressured)
+            {
+                deletions >>= 1;
+                pressured = false;
+            }
+        }
+    }
+
+    // Publishes every scheduled linear GPU-written image to guest memory.
+    public void FlushScheduledReadbacks()
+    {
+        using var held = _lock.Hold();
+        foreach (var imageIdentifier in _scheduledReadbacks)
+        {
+            var owner = _slots.TryGet(imageIdentifier);
+            if (owner != null && owner.Registered && owner.IsGpuModified)
+            {
+                _ = TryDownloadToGuest(imageIdentifier);
+            }
+        }
+
+        _scheduledReadbacks.Clear();
+    }
+
+    private long _pendingDestroyBytes;
+
+    private long _destroyedImageReclaims;
+
+    public void NoteDestroyedImageReclaim() => Interlocked.Increment(ref _destroyedImageReclaims);
+
+    public bool HoldsManyDestroyedImages => (ulong)Math.Max(0, Volatile.Read(ref _pendingDestroyBytes)) >= _memoryPressureBytes;
+
+    // Test seams: thresholds, the recency order and the private state the tests inspect.
+    internal void SetCollectionThresholds(ulong trigger, ulong pressure, ulong critical, ulong tick)
+    {
+        _collectionStartBytes = trigger;
+        _memoryPressureBytes = pressure;
+        _criticalMemoryBytes = critical;
+        _collectionTick = tick;
+    }
+
+    internal void ResetRecency(ReadOnlySpan<ResourceSlotIdentifier> oldest, ulong tick)
+    {
+        var live = new List<ResourceSlotIdentifier>();
+        _recencyQueue = new RecencyQueue<ResourceSlotIdentifier>();
+        _slots.ForEach((imageIdentifier, image) =>
+        {
+            if (image.Registered)
+            {
+                image.LastAccessTick = _scheduler.CurrentTick;
+                live.Add(imageIdentifier);
+            }
+        });
+        foreach (var imageIdentifier in oldest)
+        {
+            var owner = _slots.TryGet(imageIdentifier);
+            if (owner != null && owner.Registered)
+            {
+                owner.LastAccessTick = 0;
+                owner.RecencyEntryIndex = _recencyQueue.Insert(imageIdentifier, 0);
+            }
+        }
+
+        foreach (var imageIdentifier in live)
+        {
+            if (oldest.IndexOf(imageIdentifier) < 0)
+            {
+                _slots[imageIdentifier].RecencyEntryIndex = _recencyQueue.Insert(imageIdentifier, tick);
+            }
+        }
+    }
+
+    internal bool Contains(ResourceSlotIdentifier imageIdentifier) => _slots.TryGet(imageIdentifier) is { Registered: true };
+
+    internal CachedImage? Owner(ResourceSlotIdentifier imageIdentifier) => _slots.TryGet(imageIdentifier);
+
+    internal bool IsReadbackScheduled(ResourceSlotIdentifier imageIdentifier) => _scheduledReadbacks.Contains(imageIdentifier);
+
+    internal int NullImageCount => _nullImages.Count;
+
+    internal void SetLinearReadback(bool enabled) => _readbackLinearImages = enabled;
+
+    // Runs inside a readback's landing once it has decided which pages to write, before it writes them.
+    internal Action? LandingDecidedForTest { get; set; }
+
+    internal List<ResourceSlotIdentifier> FindImagesInRangeForTest(ulong address, ulong size, bool pageOverlap)
+    {
+        using var held = _lock.Hold();
+        var result = new List<ResourceSlotIdentifier>();
+        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap)) result.Add(imageIdentifier);
+        return result;
+    }
+
+    internal int PageOwnerCount(ulong address)
+    {
+        using var held = _lock.Hold();
+        return _pageOwners.Find(address >> ImagePageOwnerTable.PageBits)?.Count ?? 0;
+    }
+
+    internal int OwnedPageCount(ulong address, ulong size, ResourceSlotIdentifier imageIdentifier)
+    {
+        using var held = _lock.Hold();
+        if (!ImagePageOwnerTable.TryGetPageRange(address, size, out var first, out var lastExclusive))
+        {
+            return 0;
+        }
+
+        var count = 0;
+        for (var page = first; page < lastExclusive; page++)
+        {
+            count += _pageOwners.Find(page)?.Contains(imageIdentifier) == true ? 1 : 0;
+        }
+
+        return count;
+    }
+
+    internal void AddPageOwner(ulong address, ResourceSlotIdentifier imageIdentifier)
+    {
+        using var held = _lock.Hold();
+        var page = address >> ImagePageOwnerTable.PageBits;
+        InvalidateLookups(page << ImagePageOwnerTable.PageBits, (page + 1) << ImagePageOwnerTable.PageBits);
+        _pageOwners.GetOrCreate(page).Add(imageIdentifier);
+    }
+
+    internal bool RemovePageOwner(ulong address, ResourceSlotIdentifier imageIdentifier)
+    {
+        using var held = _lock.Hold();
+        var page = address >> ImagePageOwnerTable.PageBits;
+        InvalidateLookups(page << ImagePageOwnerTable.PageBits, (page + 1) << ImagePageOwnerTable.PageBits);
+        return _pageOwners.Find(page)?.Remove(imageIdentifier) == true;
+    }
+
+    internal uint QueryEpoch
+    {
+        get
+        {
+            using var held = _lock.Hold();
+            return _queryEpoch;
+        }
+        set
+        {
+            using var held = _lock.Hold();
+            _queryEpoch = value;
+        }
+    }
+
+    internal ResourceSlotIdentifier InsertImageForTest(in ImageDescription description)
+    {
+        using var held = _lock.Hold();
+        return InsertImage(description);
+    }
+
+    internal void DeleteImageForTest(ResourceSlotIdentifier imageIdentifier)
+    {
+        using var held = _lock.Hold();
+        DeleteImage(imageIdentifier);
+    }
+
+    internal void ScheduleReadbackForTest(ResourceSlotIdentifier imageIdentifier)
+    {
+        using var held = _lock.Hold();
+        ScheduleReadback(imageIdentifier, _slots[imageIdentifier]);
+    }
+
+    internal void AssociateStencilForTest(ResourceSlotIdentifier depth, HLE.GpuMemory.GuestSpan stencil)
+    {
+        using var held = _lock.Hold();
+        AssociateStencilRange(depth, stencil);
+    }
+
+    internal bool TryDownloadForTest(ResourceSlotIdentifier imageIdentifier) => TryDownloadToGuest(imageIdentifier);
+
+    internal GpuTiler TilerForTest => _tiler;
+
+    internal void RegisterHtileMetadataForTest(ulong address)
+    {
+        using var held = _lock.Hold();
+        IncludeMetadataWriteRange(address, 1);
+        if (!_surfaceMetadata.TryGetValue(address, out var metadata))
+        {
+            metadata = new SurfaceMetadata();
+            _surfaceMetadata.Add(address, metadata);
+        }
+
+        metadata.Kind = SurfaceMetadataKind.HTile;
+        metadata.ClearMask = 0;
+    }
+
+    internal void RegisterDccMetadataForTest(ulong address, ulong size)
+    {
+        using var held = _lock.Hold();
+        IncludeMetadataWriteRange(address, size);
+        _surfaceMetadata[address] = new SurfaceMetadata { Kind = SurfaceMetadataKind.Dcc, Size = size };
+    }
+
+    internal RegionLockScope HoldLockForTest() => new(_lock);
+
+    internal readonly struct RegionLockScope : IDisposable
+    {
+        private readonly HLE.GpuMemory.SpinReadWriteLock _lock;
+
+        public RegionLockScope(HLE.GpuMemory.SpinReadWriteLock cacheLock)
+        {
+            _lock = cacheLock;
+            cacheLock.EnterWrite();
+        }
+
+        public void Dispose() => _lock.ExitWrite();
+    }
+}

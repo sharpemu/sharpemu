@@ -136,6 +136,30 @@ public sealed class GuestMemoryAllocatorTests
         Assert.True(memory.IsAccessible(baseAddress, 0x10000));
     }
 
+    [Theory]
+    [InlineData(0x0000UL, 0x6000UL)]
+    [InlineData(0x1000UL, 0x2000UL)]
+    [InlineData(0x5000UL, 0x2000UL)]
+    public void FixedAllocationRejectsCommittedOverlap(ulong offset, ulong size)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var memory = new PhysicalVirtualMemory(new GranularityAwareHostMemory());
+        const ulong baseAddress = 0x0000008001600000;
+        memory.AllocateAt(baseAddress, 0x6000, executable: true, allowAlternative: false);
+
+        Assert.Throws<InvalidOperationException>(() =>
+            memory.AllocateAt(baseAddress + offset, size, executable: true, allowAlternative: false));
+        Assert.False(memory.TryAllocateAtExact(baseAddress + offset, size, true, out var actualAddress));
+        Assert.Equal(0UL, actualAddress);
+        Assert.Single(memory.SnapshotRegions());
+        Assert.True(memory.IsAccessible(baseAddress + 0x5000, 8));
+        Assert.False(memory.IsAccessible(baseAddress + 0x6000, 1));
+    }
+
     [Fact]
     public void TryBackFixedRangeSharesAHostGranuleAcrossCallsOnWindows()
     {
@@ -154,13 +178,8 @@ public sealed class GuestMemoryAllocatorTests
     }
 
     [Fact]
-    public void AlignedAllocationDoesNotRetainOverallocatedMappingsOutsideMacOS()
+    public void AlignedAllocationDoesNotRetainOverallocatedMappings()
     {
-        if (OperatingSystem.IsMacOS())
-        {
-            return;
-        }
-
         const ulong desiredAddress = 0x00005000_0000_0123;
         const ulong alignment = 0x10000;
         const ulong alignedAddress = 0x00005000_0001_0000;
@@ -177,6 +196,32 @@ public sealed class GuestMemoryAllocatorTests
             ],
             host.AllocationCalls);
         Assert.Equal([alignedAddress + 0x1000], host.FreedAddresses);
+    }
+
+    [Theory]
+    [InlineData(HostRegionState.Committed)]
+    [InlineData(HostRegionState.Reserved)]
+    public void AddressSearchSkipsLargeHostView(HostRegionState state)
+    {
+        const ulong viewStart = 0x1_0000_0000;
+        const ulong viewSize = 0x4_0000_0000;
+        using var memory = new PhysicalVirtualMemory(new FakeHostMemory(viewStart, viewSize, state));
+
+        Assert.True(memory.TryAllocateAtOrAbove(viewStart, 0x1000, false, 0x1000, out var address));
+        Assert.Equal(viewStart + viewSize, address);
+    }
+
+    [Fact]
+    public void AddressSearchUsesOwnedReservedTail()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        const ulong start = 0x0000008001600000;
+        using var memory = new PhysicalVirtualMemory(new GranularityAwareHostMemory());
+        Assert.True(memory.TryAllocateAtExact(start, 0x1000, false, out _));
+        Assert.True(memory.TryAllocateAtOrAbove(start, 0x2000, false, 0x1000, out var address));
+        Assert.Equal(start + 0x1000, address);
     }
 
     [Fact]
@@ -419,10 +464,12 @@ public sealed class GuestMemoryAllocatorTests
         public void Dispose() { }
     }
 
-    private sealed class FakeHostMemory : IHostMemory
+    private sealed class FakeHostMemory(ulong occupiedStart = 0, ulong occupiedSize = 0,
+        HostRegionState occupiedState = HostRegionState.Committed) : IHostMemory
     {
         public ulong Allocate(ulong desiredAddress, ulong size, HostPageProtection protection) =>
-            desiredAddress != 0 ? desiredAddress : 0x00007000_0000_0000;
+            occupiedSize != 0 && desiredAddress >= occupiedStart && desiredAddress - occupiedStart < occupiedSize
+                ? 0 : desiredAddress != 0 ? desiredAddress : 0x00007000_0000_0000;
 
         public ulong Reserve(ulong desiredAddress, ulong size, HostPageProtection protection) =>
             Allocate(desiredAddress, size, protection);
@@ -445,6 +492,12 @@ public sealed class GuestMemoryAllocatorTests
 
         public bool Query(ulong address, out HostRegionInfo info)
         {
+            if (occupiedSize != 0 && address >= occupiedStart && address - occupiedStart < occupiedSize)
+            {
+                info = new HostRegionInfo(occupiedStart, occupiedStart, occupiedSize,
+                    occupiedState, 0x1000, HostPageProtection.ReadWrite, 4, 4);
+                return true;
+            }
             info = default;
             return false;
         }

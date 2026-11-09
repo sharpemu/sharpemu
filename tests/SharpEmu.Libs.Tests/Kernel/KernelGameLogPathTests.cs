@@ -28,7 +28,7 @@ public sealed class KernelGameLogPathTests : IDisposable
         KernelMemoryCompatExports.ConfigureApplicationInfo(null);
 
         var testRoot = Path.Combine(
-            AppContext.BaseDirectory,
+            SharpEmuPaths.DataRoot,
             "user",
             "game_logs",
             "PPSA_01_342");
@@ -45,7 +45,7 @@ public sealed class KernelGameLogPathTests : IDisposable
 
         Assert.Equal(
             Path.GetFullPath(Path.Combine(
-                AppContext.BaseDirectory,
+                SharpEmuPaths.DataRoot,
                 "user",
                 "game_logs",
                 "PPSA_01_342",
@@ -62,7 +62,7 @@ public sealed class KernelGameLogPathTests : IDisposable
 
         Assert.Equal(
             Path.GetFullPath(Path.Combine(
-                AppContext.BaseDirectory,
+                SharpEmuPaths.DataRoot,
                 "user",
                 "game_logs",
                 "PPSA_01_342",

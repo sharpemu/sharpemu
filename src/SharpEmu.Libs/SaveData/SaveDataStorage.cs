@@ -22,7 +22,7 @@ public static class SaveDataStorage
     {
         var configured = overrideDir ?? Environment.GetEnvironmentVariable("SHARPEMU_SAVEDATA_DIR");
         var root = string.IsNullOrWhiteSpace(configured)
-            ? Path.Combine(AppContext.BaseDirectory, "user", "savedata")
+            ? Path.Combine(SharpEmuPaths.DataRoot, "user", "savedata")
             : configured;
         return Path.GetFullPath(root);
     }
@@ -173,6 +173,9 @@ public sealed record SaveDataMetadata
 
     [JsonPropertyName("userParam")]
     public uint UserParam { get; init; }
+
+    [JsonPropertyName("blocks")]
+    public ulong Blocks { get; init; }
 
     public static SaveDataMetadata CreateDefault(string dirName) =>
         new() { Title = string.IsNullOrWhiteSpace(dirName) ? "Saved Data" : dirName };

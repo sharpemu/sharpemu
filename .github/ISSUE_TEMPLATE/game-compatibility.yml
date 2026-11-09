@@ -20,6 +20,7 @@ body:
         - Test the game on a **fresh build from `main`**, not an old release.
         - Copy the **exact commit SHA** shown at the top of the log.
         - `DEBUG` and `TRACE` lines are diagnostic context, not errors by themselves; report the last milestone or the first `WARNING`, `ERROR`, or `CRITICAL` line connected to the stop.
+        - macOS builds are maintained in [sharpemu/sharpemu-mac](https://github.com/sharpemu/sharpemu-mac); report macOS results there.
 
   - type: input
     id: game_name
@@ -100,7 +101,6 @@ body:
         - Windows 11
         - Windows 10
         - Linux
-        - macOS
         - Other
     validations:
       required: true

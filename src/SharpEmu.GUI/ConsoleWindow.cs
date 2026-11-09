@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Collections;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
 using Avalonia.Data;
 using Avalonia.Input.Platform;
@@ -21,51 +23,38 @@ public sealed class ConsoleWindow : Window
     private readonly AvaloniaList<LogLine> _visibleLines = new();
     private readonly ListBox _list;
     private readonly TextBox _searchBox;
-    private readonly CheckBox _autoScrollCheck;
+    private readonly ToggleButton _autoScrollCheck;
+    private readonly GuiSettings _settings;
+    private bool _placementRestored;
 
     public ConsoleWindow(
         AvaloniaList<LogLine> lines,
         Action clear,
-        bool autoScroll)
+        bool autoScroll,
+        GuiSettings settings)
     {
         var loc = Localization.Instance;
 
         _sourceLines = lines;
+        _settings = settings;
         Title = loc.Get("Console.WindowTitle");
-        Width = 980;
-        Height = 620;
+        Width = settings.ConsoleWindowWidth;
+        Height = settings.ConsoleWindowHeight;
         MinWidth = 520;
         MinHeight = 320;
-        Background = new SolidColorBrush(Color.Parse("#0D1017"));
+        Background = LauncherThemes.Brush("CardBrush");
         Icon = new WindowIcon(AssetLoader.Open(new Uri("avares://SharpEmu.GUI/Assets/SharpEmu.ico")));
 
+        // Same toolbar and log surface as the console panel docked in the launcher.
         _searchBox = new TextBox
         {
+            Classes = { "consoleSearch" },
             PlaceholderText = loc.Get("Console.SearchWatermark"),
-            Width = 320,
-            Margin = new Thickness(0, 0, 12, 0),
+            Margin = new Thickness(0, 0, 6, 0),
         };
-        _autoScrollCheck = new CheckBox
-        {
-            Content = loc.Get("Console.AutoScroll"),
-            IsChecked = autoScroll,
-            FontSize = 12,
-            Margin = new Thickness(0, 0, 12, 0),
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-        var copyButton = new Button
-        {
-            Classes = { "ghost" },
-            Content = loc.Get("Console.Copy"),
-            Padding = new Thickness(10, 4),
-            Margin = new Thickness(0, 0, 8, 0),
-        };
-        var clearButton = new Button
-        {
-            Classes = { "ghost" },
-            Content = loc.Get("Console.Clear"),
-            Padding = new Thickness(10, 4),
-        };
+        _autoScrollCheck = ConsoleControls.Tool(new ToggleButton { IsChecked = autoScroll }, "vertical_align_bottom", loc.Get("Console.AutoScroll"));
+        var copyButton = ConsoleControls.Tool(new Button(), "content_copy", loc.Get("Console.Copy"));
+        var clearButton = ConsoleControls.Tool(new Button(), "delete_sweep", loc.Get("Console.Clear"));
         copyButton.Click += async (_, _) => await CopyAsync();
         clearButton.Click += (_, _) => clear();
         _searchBox.TextChanged += (_, _) => RefreshVisibleLines();
@@ -74,8 +63,6 @@ public sealed class ConsoleWindow : Window
         {
             Classes = { "console" },
             ItemsSource = _visibleLines,
-            BorderThickness = new Thickness(1),
-            BorderBrush = new SolidColorBrush(Color.Parse("#232B3A")),
             ItemTemplate = new FuncDataTemplate<LogLine>((_, _) =>
             {
                 var text = new TextBlock { TextWrapping = TextWrapping.NoWrap };
@@ -87,26 +74,26 @@ public sealed class ConsoleWindow : Window
 
         Content = new Grid
         {
-            Margin = new Thickness(12),
             RowDefinitions = new RowDefinitions("Auto,*"),
             Children =
             {
                 new Grid
                 {
-                    Margin = new Thickness(0, 0, 0, 8),
-                    ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto"),
+                    Margin = new Thickness(18, 10, 10, 10),
+                    ColumnDefinitions = new ColumnDefinitions("*,Auto"),
                     Children =
                     {
                         new TextBlock
                         {
-                            Classes = { "sectionTitle" },
+                            Classes = { "consoleTitle" },
                             Text = loc.Get("Console.Title"),
-                            VerticalAlignment = VerticalAlignment.Center,
                         },
-                        _searchBox.WithGridColumn(1),
-                        _autoScrollCheck.WithGridColumn(2),
-                        copyButton.WithGridColumn(3),
-                        clearButton.WithGridColumn(4),
+                        new StackPanel
+                        {
+                            Orientation = Orientation.Horizontal,
+                            Spacing = 4,
+                            Children = { _searchBox, _autoScrollCheck, copyButton, clearButton },
+                        }.WithGridColumn(1),
                     },
                 },
                 _list.WithGridRow(1),
@@ -115,7 +102,64 @@ public sealed class ConsoleWindow : Window
 
         lines.CollectionChanged += OnLinesChanged;
         Closed += (_, _) => lines.CollectionChanged -= OnLinesChanged;
+        Opened += (_, _) => RestorePlacement();
+        PositionChanged += (_, _) => RememberNormalBounds();
+        SizeChanged += (_, _) => RememberNormalBounds();
+        PropertyChanged += (_, change) =>
+        {
+            if (_placementRestored && change.Property == WindowStateProperty && WindowState != WindowState.Minimized)
+                _settings.ConsoleWindowMaximized = WindowState == WindowState.Maximized;
+        };
+        Closing += (_, _) =>
+        {
+            RememberNormalBounds();
+            if (WindowState != WindowState.Minimized)
+                _settings.ConsoleWindowMaximized = WindowState == WindowState.Maximized;
+            _settings.Save();
+        };
         RefreshVisibleLines();
+    }
+
+    private void RestorePlacement()
+    {
+        if (_settings.ConsoleWindowLeft is { } left && _settings.ConsoleWindowTop is { } top)
+        {
+            var savedPosition = new PixelPoint(left, top);
+            var screen = Screens.ScreenFromPoint(savedPosition) ?? Screens.ScreenFromWindow(Owner ?? this) ?? Screens.Primary;
+            if (screen is not null)
+            {
+                Width = Math.Min(Width, Math.Max(MinWidth, screen.WorkingArea.Width / screen.Scaling));
+                Height = Math.Min(Height, Math.Max(MinHeight, screen.WorkingArea.Height / screen.Scaling));
+                Position = ConstrainPosition(savedPosition, screen.WorkingArea, new Size(Width, Height), screen.Scaling);
+            }
+        }
+        _placementRestored = true;
+        RememberNormalBounds();
+        if (_settings.ConsoleWindowMaximized)
+            WindowState = WindowState.Maximized;
+    }
+
+    private void RememberNormalBounds()
+    {
+        if (!_placementRestored || !IsVisible || WindowState != WindowState.Normal)
+            return;
+
+        _settings.ConsoleWindowLeft = Position.X;
+        _settings.ConsoleWindowTop = Position.Y;
+        if (ClientSize.Width >= MinWidth && ClientSize.Height >= MinHeight)
+        {
+            _settings.ConsoleWindowWidth = ClientSize.Width;
+            _settings.ConsoleWindowHeight = ClientSize.Height;
+        }
+    }
+
+    internal static PixelPoint ConstrainPosition(PixelPoint position, PixelRect workingArea, Size size, double scaling)
+    {
+        var maximumLeft = workingArea.Right - (int)Math.Ceiling(size.Width * scaling);
+        var maximumTop = workingArea.Bottom - (int)Math.Ceiling(size.Height * scaling);
+        return new PixelPoint(
+            Math.Clamp(position.X, workingArea.X, Math.Max(workingArea.X, maximumLeft)),
+            Math.Clamp(position.Y, workingArea.Y, Math.Max(workingArea.Y, maximumTop)));
     }
 
     private void OnLinesChanged(object? sender, NotifyCollectionChangedEventArgs e)
@@ -147,7 +191,7 @@ public sealed class ConsoleWindow : Window
     }
 }
 
-file static class GridExtensions
+file static class ConsoleControls
 {
     public static T WithGridColumn<T>(this T control, int column) where T : Control
     {
@@ -159,5 +203,15 @@ file static class GridExtensions
     {
         Grid.SetRow(control, row);
         return control;
+    }
+
+    public static T Tool<T>(T button, string symbol, string name)
+        where T : Button
+    {
+        button.Classes.Add("consoleTool");
+        button.Content = new TextBlock { Classes = { "materialSymbol", "compact" }, Text = symbol };
+        ToolTip.SetTip(button, name);
+        AutomationProperties.SetName(button, name);
+        return button;
     }
 }

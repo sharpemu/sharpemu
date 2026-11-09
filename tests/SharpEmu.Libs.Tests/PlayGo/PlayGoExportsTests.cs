@@ -18,6 +18,7 @@ public sealed class PlayGoStateCollection
 public sealed class PlayGoExportsTests : IDisposable
 {
     private const int BadChunkId = unchecked((int)0x80B2000C);
+    private const string DisableMetadataFallbackVariable = "SHARPEMU_PLAYGO_DISABLE_METADATA_FALLBACK";
     private const byte LocusNotDownloaded = 0;
     private const byte LocusLocalFast = 3;
     private const ulong MemoryBase = 0x1_0000_0000;
@@ -28,6 +29,7 @@ public sealed class PlayGoExportsTests : IDisposable
     private const ulong LociAddress = MemoryBase + 0x400;
 
     private readonly string? _originalApp0Root;
+    private readonly string? _originalDisableMetadataFallback;
     private readonly string _app0Root;
     private readonly FakeCpuMemory _memory = new(MemoryBase, 0x10000);
     private readonly CpuContext _ctx;
@@ -35,6 +37,8 @@ public sealed class PlayGoExportsTests : IDisposable
     public PlayGoExportsTests()
     {
         _originalApp0Root = Environment.GetEnvironmentVariable("SHARPEMU_APP0_DIR");
+        _originalDisableMetadataFallback = Environment.GetEnvironmentVariable(DisableMetadataFallbackVariable);
+        Environment.SetEnvironmentVariable(DisableMetadataFallbackVariable, null);
         _app0Root = Path.Combine(Path.GetTempPath(), $"sharpemu-playgo-{Guid.NewGuid():N}");
         Directory.CreateDirectory(_app0Root);
         Environment.SetEnvironmentVariable("SHARPEMU_APP0_DIR", _app0Root);
@@ -64,6 +68,48 @@ public sealed class PlayGoExportsTests : IDisposable
 
         Assert.Equal(BadChunkId, GetLocus(handle, [2, 3], 0xCC));
         Assert.Equal(new byte[] { LocusLocalFast, LocusNotDownloaded }, ReadLoci(2));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Open_MetadataFallbackDisabledWithoutMetadata_ReturnsUnsupportedWithoutWritingHandle(bool app0Unset)
+    {
+        Environment.SetEnvironmentVariable(DisableMetadataFallbackVariable, "1");
+        if (app0Unset)
+        {
+            Environment.SetEnvironmentVariable("SHARPEMU_APP0_DIR", null);
+        }
+        else
+        {
+            File.WriteAllBytes(Path.Combine(_app0Root, "pakchunk7-ps5.pak"), []);
+        }
+
+        Initialize();
+        byte[] originalHandle = [0xA5, 0xA5, 0xA5, 0xA5];
+        Assert.True(_memory.TryWrite(HandleAddress, originalHandle));
+        _ctx[CpuRegister.Rdi] = HandleAddress;
+        _ctx[CpuRegister.Rsi] = 0;
+
+        Assert.Equal(unchecked((int)0x80B2000E), PlayGoExports.PlayGoOpen(_ctx));
+        Span<byte> handleBytes = stackalloc byte[sizeof(uint)];
+        Assert.True(_memory.TryRead(HandleAddress, handleBytes));
+        Assert.Equal(originalHandle, handleBytes.ToArray());
+        Assert.Equal(unchecked((int)0x80B20009), GetLocus(1, [0]));
+    }
+
+    [Fact]
+    public void Open_MetadataFallbackDisabledWithChunkDefinitions_PreservesMetadata()
+    {
+        Environment.SetEnvironmentVariable(DisableMetadataFallbackVariable, "1");
+        File.WriteAllText(
+            Path.Combine(_app0Root, "playgo-chunkdefs.xml"),
+            "<playgo><chunk id=\"7\"/></playgo>");
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [7]));
+        Assert.Equal(new byte[] { LocusLocalFast }, ReadLoci(1));
+        Assert.Equal(BadChunkId, GetLocus(handle, [8]));
     }
 
     [Theory]
@@ -134,10 +180,11 @@ public sealed class PlayGoExportsTests : IDisposable
     {
         PlayGoExports.ResetForTests();
         Environment.SetEnvironmentVariable("SHARPEMU_APP0_DIR", _originalApp0Root);
+        Environment.SetEnvironmentVariable(DisableMetadataFallbackVariable, _originalDisableMetadataFallback);
         Directory.Delete(_app0Root, recursive: true);
     }
 
-    private uint InitializeAndOpen()
+    private void Initialize()
     {
         Span<byte> initParams = stackalloc byte[16];
         BinaryPrimitives.WriteUInt64LittleEndian(initParams, InitBufferAddress);
@@ -148,7 +195,11 @@ public sealed class PlayGoExportsTests : IDisposable
         Assert.Equal(
             (int)OrbisGen2Result.ORBIS_GEN2_OK,
             PlayGoExports.PlayGoInitialize(_ctx));
+    }
 
+    private uint InitializeAndOpen()
+    {
+        Initialize();
         _ctx[CpuRegister.Rdi] = HandleAddress;
         _ctx[CpuRegister.Rsi] = 0;
         Assert.Equal(

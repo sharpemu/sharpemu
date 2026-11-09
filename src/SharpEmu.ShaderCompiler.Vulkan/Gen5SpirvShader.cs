@@ -13,11 +13,13 @@ public enum Gen5SpirvStage
     Vertex,
     Pixel,
     Compute,
+    Mesh,
+    TessellationEvaluation,
 }
 
 public sealed record Gen5SpirvShader(
     byte[] Spirv,
-    IReadOnlyList<Gen5GlobalMemoryBinding> GlobalMemoryBindings,
-    IReadOnlyList<Gen5ImageBinding> ImageBindings,
-    uint AttributeCount,
-    IReadOnlyList<Gen5VertexInputBinding> VertexInputs);
+    uint AttributeCount)
+{
+    public uint? InputLocationMask { get; init; }
+}

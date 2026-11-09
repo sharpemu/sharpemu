@@ -13,6 +13,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageVersion Include="Avalonia.Themes.Fluent" Version="12.1.0" />
     <PackageVersion Include="FFmpeg.AutoGen" Version="7.1.1" />
     <PackageVersion Include="Iced" Version="1.21.0" />
+    <PackageVersion Include="ZstdSharp.Port" Version="0.8.5" />
     <PackageVersion Include="Microsoft.Build.Framework" Version="17.14.8" />
     <PackageVersion Include="Microsoft.CodeAnalysis.Analyzers" Version="3.11.0" />
     <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="4.12.0" />
@@ -22,6 +23,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageVersion Include="Silk.NET.Vulkan" Version="2.23.0" />
     <PackageVersion Include="Silk.NET.Vulkan.Extensions.EXT" Version="2.23.0" />
     <PackageVersion Include="Silk.NET.Vulkan.Extensions.KHR" Version="2.23.0" />
+    <!-- Reuse the font rasterizer already shipped with Avalonia.Skia. -->
+    <PackageVersion Include="SkiaSharp" Version="3.119.4" />
+    <PackageVersion Include="SkiaSharp.NativeAssets.Linux" Version="3.119.4" />
+    <PackageVersion Include="System.IO.Hashing" Version="10.0.0" />
     <!-- Transitive of Avalonia.Desktop; pinned. Avalonia 12 requires 0.94.1+. -->
     <PackageVersion Include="Tmds.DBus.Protocol" Version="0.94.1" />
     <PackageVersion Include="xunit" Version="2.9.3" />

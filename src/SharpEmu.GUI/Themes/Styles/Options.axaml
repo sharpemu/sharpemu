@@ -1,24 +1,37 @@
 <!--
 Copyright (C) 2026 SharpEmu Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
-Options page section transitions and content layout
+Options page section transitions and content layout.
+
+Settings content is one column: a section header (title and one-line summary)
+followed by inset lists. Each Border.optionsGroup is one glass container holding
+rows separated by hairlines. Each section scroller extends 28 pt past the column on
+every side and pads its content by the same amount, so a focused control's ring and
+glow outside a group are never clipped.
 -->
 
 <Styles xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:SharpEmu.GUI"
         xmlns:settingsControls="using:SharpEmu.GUI.Controls.Settings">
   <Style Selector="Border.optionsContentSurface">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="ClipToBounds" Value="True" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
   </Style>
 
   <Style Selector="ScrollViewer.optionsSectionPanel">
     <Setter Property="Opacity" Value="0" />
     <Setter Property="RenderTransform" Value="translateY(22px)" />
+    <!-- 28 pt on every side is room for the focus ring's glow, so a focused row at
+         the top or bottom of the list is never clipped by the scroll viewport. The
+         room is a margin on the content, not ScrollViewer padding: padding is left
+         out of the scroll extent, so the last rows could never be scrolled into view. -->
+    <Setter Property="Margin" Value="-28" />
     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     <Setter Property="HorizontalScrollBarVisibility" Value="Disabled" />
-    <Setter Property="VerticalScrollBarVisibility" Value="Auto" />
+    <!-- Scrolls by wheel and D-pad; the edge fade (EdgeFade.cs) shows there is more. -->
+    <Setter Property="VerticalScrollBarVisibility" Value="Hidden" />
     <Setter Property="Transitions">
       <Transitions>
         <DoubleTransition Property="Opacity"
@@ -31,58 +44,93 @@ Options page section transitions and content layout
     </Setter>
   </Style>
 
+  <Style Selector="ScrollViewer.optionsSectionPanel > StackPanel">
+    <Setter Property="Margin" Value="28" />
+    <Setter Property="Spacing" Value="12" />
+  </Style>
+
   <Style Selector="ScrollViewer.optionsSectionPanel.active">
     <Setter Property="Opacity" Value="1" />
     <Setter Property="RenderTransform" Value="translateY(0px)" />
   </Style>
 
+  <!-- Section header: the section's name large, with a one-line summary under it. -->
+  <Style Selector="StackPanel.optionsSectionHeader">
+    <Setter Property="Spacing" Value="4" />
+    <Setter Property="Margin" Value="4,0,0,8" />
+  </Style>
+  <Style Selector="TextBlock.optionsSectionTitle">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeTitle}" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="TextBlock.optionsSectionDesc">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+    <Setter Property="Foreground" Value="{StaticResource SettingsDescriptionBrush}" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+  </Style>
+
+  <!-- One glass container per list: rows inside lose their own card and are separated
+       by hairlines. The clip keeps row highlights inside the rounded corners. -->
   <Style Selector="Border.optionsGroup">
-    <Setter Property="Background" Value="Transparent" />
-    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="Background" Value="{StaticResource PaneGlassBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BoxShadow" Value="{StaticResource GlassShadow}" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
+    <Setter Property="ClipToBounds" Value="True" />
     <Setter Property="Padding" Value="0" />
   </Style>
+  <Style Selector="Border.optionsGroup > StackPanel, Border.optionsGroup > StackPanel > StackPanel">
+    <Setter Property="Spacing" Value="0" />
+  </Style>
 
+  <!-- The first visible line of a group has nothing above it to separate from.
+       MainWindow.OptionGroups.cs marks it, since rows are hidden per platform and added
+       at run time (:nth-child would count hidden rows). -->
+  <Style Selector="local|SettingRow.groupFirst /template/ Border#PART_Divider">
+    <Setter Property="IsVisible" Value="False" />
+  </Style>
+
+  <!-- Small label above a group. -->
   <Style Selector="TextBlock.optionsGroupHeader">
-    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeDescription}" />
     <Setter Property="FontWeight" Value="SemiBold" />
-    <Setter Property="Foreground" Value="#8CFFFFFF" />
-    <Setter Property="Margin" Value="2,0,0,10" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+    <Setter Property="Margin" Value="6,12,0,-4" />
   </Style>
 
-  <Style Selector="Border.optionsGroupDivider">
-    <Setter Property="Height" Value="1" />
-    <Setter Property="Margin" Value="0,18,0,18" />
-    <Setter Property="HorizontalAlignment" Value="Stretch" />
-    <Setter Property="Background">
-      <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
-        <GradientStop Offset="0" Color="#00FFFFFF" />
-        <GradientStop Offset="0.06" Color="#2EFFFFFF" />
-        <GradientStop Offset="0.55" Color="#14FFFFFF" />
-        <GradientStop Offset="1" Color="#00FFFFFF" />
-      </LinearGradientBrush>
-    </Setter>
-  </Style>
-
+  <!-- A non-SettingRow line in a group (About): the same row geometry, a top hairline. -->
   <Style Selector="Border.optionsInfoRow">
-    <Setter Property="MinHeight" Value="70" />
-    <Setter Property="Padding" Value="18,12" />
-    <Setter Property="CornerRadius" Value="14" />
-    <Setter Property="Background" Value="#06FFFFFF" />
-    <Setter Property="BorderBrush" Value="#0AFFFFFF" />
-    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="MinHeight" Value="{StaticResource RowHeight}" />
+    <Setter Property="Padding" Value="24,14" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="0,1,0,0" />
+  </Style>
+  <Style Selector="Border.optionsInfoRow.groupFirst">
+    <Setter Property="BorderThickness" Value="0" />
+  </Style>
+  <!-- The group clips, so a focused button inside it draws its ring inside. -->
+  <Style Selector="Border.optionsInfoRow Button:focus-visible">
+    <Setter Property="RenderTransform" Value="none" />
+  </Style>
+  <Style Selector="Border.optionsInfoRow Button:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="BoxShadow" Value="{DynamicResource FocusRingInsetShadow}" />
   </Style>
 
+  <!-- Every value control in the right-hand column shares one width and height. -->
   <Style Selector="ComboBox.optionValue, settingsControls|SplitNumericUpDown.optionValue, TextBox.optionValue">
-    <Setter Property="Width" Value="190" />
-    <Setter Property="MinHeight" Value="44" />
-    <Setter Property="CornerRadius" Value="14" />
-    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="Width" Value="260" />
+    <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
   </Style>
 
   <Style Selector="TextBox.optionValue">
-    <Setter Property="Padding" Value="17,0" />
+    <Setter Property="Padding" Value="16,0" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="HorizontalContentAlignment" Value="Stretch" />
     <Setter Property="TextAlignment" Value="Left" />
@@ -91,20 +139,61 @@ Options page section transitions and content layout
   </Style>
 
   <Style Selector="TextBox.optionValue /template/ Border#PART_BorderElement">
-    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
     <Setter Property="ClipToBounds" Value="True" />
-    <Setter Property="Background" Value="#12FFFFFF" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
   </Style>
 
-  <!-- The outer split-input surface owns hover and focus animation -->
+  <!-- The outer split-input surface owns hover and focus -->
   <Style Selector="TextBox.splitNumericTextBox /template/ Border#PART_BorderElement,
                    TextBox.splitNumericTextBox:pointerover /template/ Border#PART_BorderElement,
                    TextBox.splitNumericTextBox:focus /template/ Border#PART_BorderElement">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="BorderBrush" Value="Transparent" />
     <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="BoxShadow" Value="none" />
+  </Style>
+
+  <!-- Custom theme colour rows: round swatches with a ring on the chosen one, and a
+       short monospace hex field. -->
+  <Style Selector="Button.swatch">
+    <Setter Property="Width" Value="32" />
+    <Setter Property="Height" Value="32" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="CornerRadius" Value="16" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+    <Setter Property="BorderThickness" Value="2" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.swatch:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                   Button.swatch:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderBrush" Value="{StaticResource MutedBrush}" />
+  </Style>
+  <Style Selector="Button.swatch.selected /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="BorderBrush" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="Slider.appearanceSlider">
+    <Setter Property="Width" Value="210" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="TextBlock.sliderValue">
+    <Setter Property="MinWidth" Value="48" />
+    <Setter Property="TextAlignment" Value="Right" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="TextBox.hexField">
+    <Setter Property="Width" Value="116" />
+    <Setter Property="MaxLength" Value="7" />
+    <Setter Property="FontFamily" Value="Menlo, Consolas, monospace" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeDescription}" />
+    <Setter Property="VerticalAlignment" Value="Center" />
   </Style>
 
   <Style Selector="ToggleSwitch.optionToggle">
@@ -112,38 +201,23 @@ Options page section transitions and content layout
     <Setter Property="VerticalAlignment" Value="Center" />
   </Style>
 
+  <!-- Button inside a settings row (About links, environment actions). -->
   <Style Selector="Button.optionAction">
-    <Setter Property="MinWidth" Value="156" />
-    <Setter Property="MinHeight" Value="44" />
-    <Setter Property="Padding" Value="18,0" />
+    <Setter Property="MinWidth" Value="160" />
+    <Setter Property="MinHeight" Value="{StaticResource ControlHeight}" />
+    <Setter Property="Padding" Value="20,0" />
     <Setter Property="HorizontalContentAlignment" Value="Center" />
     <Setter Property="VerticalContentAlignment" Value="Center" />
     <Setter Property="VerticalAlignment" Value="Center" />
-    <Setter Property="CornerRadius" Value="12" />
-    <Setter Property="Background" Value="#12FFFFFF" />
-    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="CornerRadius" Value="{StaticResource RadiusMd}" />
+    <Setter Property="Background" Value="{StaticResource FieldBrush}" />
     <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Foreground" Value="White" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
     <Setter Property="FontWeight" Value="Medium" />
-    <Setter Property="FocusAdorner" Value="{x:Null}" />
   </Style>
 
-  <Style Selector="Button.optionAction /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#12FFFFFF" />
-    <Setter Property="BorderBrush" Value="Transparent" />
-    <Setter Property="BorderThickness" Value="0" />
-    <Setter Property="Transitions">
-      <Transitions>
-        <BrushTransition Property="Background"
-                         Duration="0:0:0.18"
-                         Easing="CubicEaseOut" />
-      </Transitions>
-    </Setter>
-  </Style>
-
-  <Style Selector="Button.optionAction:pointerover /template/ ContentPresenter#PART_ContentPresenter,
-                   Button.optionAction:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
-    <Setter Property="Background" Value="#20FFFFFF" />
-    <Setter Property="BorderBrush" Value="Transparent" />
+  <Style Selector="Button.optionAction:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource FieldHoverBrush}" />
   </Style>
 </Styles>

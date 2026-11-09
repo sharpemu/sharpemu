@@ -201,7 +201,7 @@ public sealed partial class DirectExecutionBackend
         foreach (var attempt in DecodeWindowSizes)
         {
             var buffer = new byte[attempt];
-            if (!TryReadHostBytes(rip, buffer))
+            if (!TryReadExecutableBytes(rip, buffer))
             {
                 continue;
             }

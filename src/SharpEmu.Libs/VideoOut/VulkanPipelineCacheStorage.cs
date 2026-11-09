@@ -7,6 +7,12 @@ internal static class VulkanPipelineCacheStorage
 {
     private const string CacheFileName = "vulkan-pipeline-cache.bin";
 
+    // A guest shader can produce many different native modules as translation
+    // and specialization change. Importing their shared driver blob recompiles
+    // obsolete MSL on MoltenVK, so native cache buckets identify emitted code.
+    internal static string CompiledShaderIdentity(ReadOnlySpan<byte> spirv) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(spirv));
+
     internal static string ResolvePath(string? titleId, string? configuredPath)
     {
         if (!string.IsNullOrWhiteSpace(configuredPath))
@@ -16,21 +22,19 @@ internal static class VulkanPipelineCacheStorage
         }
 
         return Path.GetFullPath(Path.Combine(
-            AppContext.BaseDirectory,
+            SharpEmuPaths.DataRoot,
             "user",
             "pipeline_cache",
             SanitizeTitleId(titleId),
             CacheFileName));
     }
 
+    // The directory of the linked programs' pipeline caches and kept callees (ShaderCallUnionStore), beside the cache file.
+    internal static string LinkedDirectory(string? titleId, string? configuredPath) => ResolvePath(titleId, configuredPath) + ".linked";
+
     internal static string GetLegacyPath()
     {
-        var root = OperatingSystem.IsMacOS()
-            ? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                "Library",
-                "Caches")
-            : Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         return Path.Combine(root, "SharpEmu", CacheFileName);
     }
 

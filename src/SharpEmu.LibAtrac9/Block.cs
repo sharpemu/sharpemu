@@ -14,6 +14,7 @@ namespace LibAtrac9
 
         public bool FirstInSuperframe { get; set; }
         public bool ReuseBandParams { get; set; }
+        public int SuperframeBytesUsed { get; set; }
 
         public int BandCount { get; set; }
         public int StereoBand { get; set; }

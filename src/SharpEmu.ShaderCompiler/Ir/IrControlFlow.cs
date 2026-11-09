@@ -36,6 +36,28 @@ public sealed class IrControlFlowGraph
 
     public bool HasControlFlow => Blocks.Count > 1;
 
+    // Blocks are sorted by start and each ends where the next begins.
+    public int BlockOf(uint pc) => BlockOf(Blocks, pc);
+
+    private static int BlockOf(IReadOnlyList<IrBlockRange> blocks, uint pc)
+    {
+        var low = 0;
+        var high = blocks.Count - 1;
+        while (low <= high)
+        {
+            var middle = low + ((high - low) >> 1);
+            var range = blocks[middle];
+            if (pc < range.StartPc)
+                high = middle - 1;
+            else if (pc >= range.EndPc)
+                low = middle + 1;
+            else
+                return middle;
+        }
+
+        return -1;
+    }
+
     public static IrControlFlowGraph Build(
         IReadOnlyList<Gen5ShaderInstruction> instructions,
         IIrBranchResolver resolver)
@@ -86,12 +108,17 @@ public sealed class IrControlFlowGraph
             predecessors.Add([]);
         }
 
+        var lastByBlock = new Gen5ShaderInstruction?[ranges.Count];
+        foreach (var instruction in instructions)
+        {
+            var block = BlockOf(ranges, instruction.Pc);
+            if (block >= 0)
+                lastByBlock[block] = instruction;
+        }
+
         for (var blockIndex = 0; blockIndex < ranges.Count; blockIndex++)
         {
-            var range = ranges[blockIndex];
-            var last = instructions
-                .Where(candidate => candidate.Pc >= range.StartPc && candidate.Pc < range.EndPc)
-                .LastOrDefault();
+            var last = lastByBlock[blockIndex];
             if (last is null)
             {
                 continue;

@@ -29,14 +29,19 @@ public static class HostPlatform
             return new WindowsHostPlatform();
         }
 
-        if ((OperatingSystem.IsLinux() || OperatingSystem.IsMacOS()) &&
-            RuntimeInformation.ProcessArchitecture == Architecture.X64)
+        if (OperatingSystem.IsLinux() && RuntimeInformation.ProcessArchitecture == Architecture.X64)
         {
             return new PosixHostPlatform();
         }
 
+        if (OperatingSystem.IsMacOS())
+        {
+            throw new PlatformNotSupportedException(
+                "SharpEmu supports Windows and Linux (x86-64). macOS is supported by the separate fork " +
+                "https://github.com/sharpemu/sharpemu-mac.");
+        }
+
         throw new PlatformNotSupportedException(
-            "SharpEmu native guest execution requires an x86-64 process on Windows, Linux, or macOS. " +
-            "On Apple Silicon, use the osx-x64 build under Rosetta 2.");
+            "SharpEmu native guest execution requires an x86-64 process on Windows or Linux.");
     }
 }

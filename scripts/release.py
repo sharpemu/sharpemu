@@ -35,6 +35,8 @@ def run_git(
             cwd=cwd,
             check=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=capture_output,
         )
     except FileNotFoundError:
@@ -435,6 +437,9 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> int:
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
+
     arguments = parse_arguments()
 
     try:

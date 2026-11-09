@@ -115,6 +115,52 @@ public static class ShareExports
         return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
+    [SysAbiExport(
+        Nid = "5wjxESwX68I",
+        ExportName = "sceShareFeatureProhibit",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceShareUtility")]
+    public static int ShareFeatureProhibit(CpuContext ctx)
+    {
+        TraceShare("feature_prohibit");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "T64o-315wbg",
+        ExportName = "sceShareSetScreenshotOverlayImage",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceShareUtility")]
+    public static int ShareSetScreenshotOverlayImage(CpuContext ctx)
+    {
+        TraceShare(
+            $"set_screenshot_overlay_image arg0=0x{ctx[CpuRegister.Rdi]:X16} " +
+            $"arg1=0x{ctx[CpuRegister.Rsi]:X16} arg2=0x{ctx[CpuRegister.Rdx]:X16}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "crFxyW3HdK0",
+        ExportName = "sceShareGetRunningStatus",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceShareUtility")]
+    public static int ShareGetRunningStatus(CpuContext ctx)
+    {
+        var featureFlagsAddress = ctx[CpuRegister.Rdi];
+        if (featureFlagsAddress == 0)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (!ctx.TryWriteUInt32(featureFlagsAddress, 0))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        TraceShare("get_running_status flags=0");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
     private static bool TryReadNullTerminatedUtf8(CpuContext ctx, ulong address, int maxLength, out string value)
     {
         Span<byte> bytes = stackalloc byte[maxLength];

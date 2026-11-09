@@ -1,0 +1,164 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+Glass treatment for the controls that sit over the library key art: tinted,
+mostly opaque fills rather than clear macOS-style glass, so labels stay readable.
+
+Add the "glass" class to a Button, ToggleButton, TextBox or Border. Fills are white at low
+alpha so the art shows through, the rim is lit from the top, and fill changes
+ease in instead of snapping. Included before Focus.axaml so the focus ring still
+replaces the glass shadow.
+-->
+
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Style Selector="Border.glass">
+    <Setter Property="Background" Value="{StaticResource GlassBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BoxShadow" Value="{StaticResource GlassShadow}" />
+  </Style>
+
+  <!-- Shadows reach past the control's bounds, so neither layer may clip them. -->
+  <Style Selector="Button.glass, ToggleButton.glass, Button.playButton">
+    <Setter Property="ClipToBounds" Value="False" />
+  </Style>
+  <Style Selector="Button.glass, ToggleButton.glass">
+    <Setter Property="Background" Value="{StaticResource GlassBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+  </Style>
+  <Style Selector="Button.glass /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.glass /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="BoxShadow" Value="{StaticResource GlassShadow}" />
+    <Setter Property="ClipToBounds" Value="False" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.15" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.glass:pointerover /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.glass:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource GlassHoverBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="Button.glass:pressed /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.glass:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource GlassPressedBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+  </Style>
+  <!-- Disabled (also everything under an open sheet): the same glass with a muted label,
+       not the theme's light grey block. -->
+  <Style Selector="Button.glass:disabled /template/ ContentPresenter#PART_ContentPresenter,
+                   ToggleButton.glass:disabled /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource GlassBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+  </Style>
+  <Style Selector="TextBox.glass:disabled /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="{StaticResource GlassBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+  </Style>
+  <!-- Inside a glass group the button is only a hit target; the group is the glass. -->
+  <Style Selector="Border.glass Button.iconGhost">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+
+  <Style Selector="TextBox.glass /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="{StaticResource GlassBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BoxShadow" Value="{StaticResource GlassShadow}" />
+  </Style>
+  <Style Selector="TextBox.glass:pointerover /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="{StaticResource GlassHoverBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+  </Style>
+  <Style Selector="TextBox.glass:focus /template/ Border#PART_BorderElement">
+    <Setter Property="Background" Value="{StaticResource GlassHoverBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+  </Style>
+
+  <!-- Library toolbar: search with its icon and clear button, and the view pill
+       (two view segments, plus the tile-size slider in the grid). -->
+  <!-- Search rests as a round icon and opens out while it is in use or holds text. -->
+  <Style Selector="TextBox.librarySearch">
+    <Setter Property="Width" Value="44" />
+    <Setter Property="MinWidth" Value="44" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Cursor" Value="Hand" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <DoubleTransition Property="Width" Duration="0:0:0.24" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="TextBox.librarySearch.expanded">
+    <Setter Property="Width" Value="300" />
+    <Setter Property="Padding" Value="10,0,4,0" />
+    <Setter Property="Cursor" Value="IBeam" />
+  </Style>
+  <Style Selector="TextBlock.searchGlyph">
+    <Setter Property="Margin" Value="12,0,0,0" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+  </Style>
+  <Style Selector="Button.searchClear">
+    <Setter Property="Width" Value="32" />
+    <Setter Property="Height" Value="32" />
+    <Setter Property="Margin" Value="0,0,6,0" />
+    <Setter Property="CornerRadius" Value="16" />
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="Border.toolbarPill">
+    <Setter Property="Height" Value="44" />
+    <Setter Property="CornerRadius" Value="22" />
+    <Setter Property="Padding" Value="3" />
+  </Style>
+  <Style Selector="Button.viewSegment">
+    <Setter Property="Width" Value="36" />
+    <Setter Property="Height" Value="36" />
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="CornerRadius" Value="18" />
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="BorderThickness" Value="0" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Button.viewSegment /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.15" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+  <Style Selector="Button.viewSegment:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource TileHoverBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="Button.viewSegment.active /template/ ContentPresenter#PART_ContentPresenter,
+                   Button.viewSegment:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{StaticResource AccentTintBrush}" />
+    <Setter Property="Foreground" Value="{StaticResource TextBrush}" />
+  </Style>
+  <Style Selector="TextBlock.tileSizeGlyph">
+    <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+
+  <!-- The accent pill keeps its flat fill and gets the same lit top edge. -->
+  <Style Selector="Button.playButton /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="BoxShadow" Value="{StaticResource AccentEdgeShadow}" />
+    <Setter Property="ClipToBounds" Value="False" />
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.15" Easing="CubicEaseOut" />
+      </Transitions>
+    </Setter>
+  </Style>
+</Styles>

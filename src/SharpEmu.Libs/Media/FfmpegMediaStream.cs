@@ -26,6 +26,7 @@ internal sealed unsafe class FfmpegMediaStream : Stream
     private int _streamIndex;
 
     private byte[] _pending = [];
+    private byte[] _videoConversionBuffer = [];
     private int _pendingOffset;
     private bool _draining;
     private bool _finished;
@@ -62,12 +63,130 @@ internal sealed unsafe class FfmpegMediaStream : Stream
     internal static bool TryOpenAudio(string path, out FfmpegMediaStream? stream) =>
         TryOpen(path, AVMediaType.AVMEDIA_TYPE_AUDIO, 0, 0, out stream);
 
+    internal static bool TryOpenAudio(string path, int streamIndex, out FfmpegMediaStream? stream) =>
+        TryOpen(path, AVMediaType.AVMEDIA_TYPE_AUDIO, 0, 0, out stream, streamIndex);
+
+    internal enum MediaStreamKind : uint
+    {
+        Video,
+        Audio,
+        TimedText,
+    }
+
+    internal readonly record struct MediaStreamEntry(int Index, MediaStreamKind Kind, string Language);
+
+    internal static bool TryListStreams(string path, out MediaStreamEntry[] streams)
+    {
+        streams = [];
+        FfmpegRuntime.EnsureInitialized();
+
+        AVFormatContext* formatContext = null;
+        try
+        {
+            if (ffmpeg.avformat_open_input(&formatContext, path, null, null) < 0 ||
+                ffmpeg.avformat_find_stream_info(formatContext, null) < 0)
+            {
+                return false;
+            }
+
+            var entries = new System.Collections.Generic.List<MediaStreamEntry>();
+            for (var index = 0; index < formatContext->nb_streams; index++)
+            {
+                var stream = formatContext->streams[index];
+                MediaStreamKind? kind = stream->codecpar->codec_type switch
+                {
+                    AVMediaType.AVMEDIA_TYPE_VIDEO => MediaStreamKind.Video,
+                    AVMediaType.AVMEDIA_TYPE_AUDIO => MediaStreamKind.Audio,
+                    AVMediaType.AVMEDIA_TYPE_SUBTITLE => MediaStreamKind.TimedText,
+                    _ => null,
+                };
+                if (kind is null)
+                {
+                    continue;
+                }
+
+                var language = ffmpeg.av_dict_get(stream->metadata, "language", null, 0);
+                entries.Add(new MediaStreamEntry(
+                    index,
+                    kind.Value,
+                    language is null
+                        ? string.Empty
+                        : System.Runtime.InteropServices.Marshal.PtrToStringUTF8((IntPtr)language->value) ?? string.Empty));
+            }
+
+            streams = entries.ToArray();
+            return true;
+        }
+        finally
+        {
+            if (formatContext is not null)
+            {
+                ffmpeg.avformat_close_input(&formatContext);
+            }
+        }
+    }
+
+    internal bool TrySeekMilliseconds(ulong milliseconds)
+    {
+        lock (_decodeGate)
+        {
+            if (Volatile.Read(ref _disposed) != 0 ||
+                _formatContext is null ||
+                _codecContext is null ||
+                _streamIndex < 0)
+            {
+                return false;
+            }
+
+            var stream = _formatContext->streams[_streamIndex];
+            if (stream is null || stream->time_base.num <= 0 || stream->time_base.den <= 0)
+            {
+                return false;
+            }
+
+            var targetMilliseconds = checked((long)Math.Min(milliseconds, (ulong)long.MaxValue));
+            var targetTimestamp = ffmpeg.av_rescale_q(
+                targetMilliseconds,
+                new AVRational { num = 1, den = 1000 },
+                stream->time_base);
+            if (ffmpeg.av_seek_frame(
+                    _formatContext,
+                    _streamIndex,
+                    targetTimestamp,
+                    ffmpeg.AVSEEK_FLAG_BACKWARD) < 0)
+            {
+                return false;
+            }
+
+            ffmpeg.avcodec_flush_buffers(_codecContext);
+            if (_packet is not null)
+            {
+                ffmpeg.av_packet_unref(_packet);
+            }
+            if (_frame is not null)
+            {
+                ffmpeg.av_frame_unref(_frame);
+            }
+            if (_swrContext is not null)
+            {
+                ffmpeg.swr_close(_swrContext);
+            }
+
+            _pending = [];
+            _pendingOffset = 0;
+            _draining = false;
+            _finished = false;
+            return true;
+        }
+    }
+
     private static bool TryOpen(
         string path,
         AVMediaType mediaType,
         int width,
         int height,
-        out FfmpegMediaStream? stream)
+        out FfmpegMediaStream? stream,
+        int preferredStream = -1)
     {
         stream = null;
         FfmpegRuntime.EnsureInitialized();
@@ -88,7 +207,17 @@ internal sealed unsafe class FfmpegMediaStream : Stream
             }
 
             AVCodec* decoder = null;
-            var streamIndex = ffmpeg.av_find_best_stream(formatContext, mediaType, -1, -1, &decoder, 0);
+            int streamIndex;
+            if (preferredStream >= 0 && preferredStream < formatContext->nb_streams &&
+                formatContext->streams[preferredStream]->codecpar->codec_type == mediaType)
+            {
+                streamIndex = preferredStream;
+                decoder = ffmpeg.avcodec_find_decoder(formatContext->streams[streamIndex]->codecpar->codec_id);
+            }
+            else
+            {
+                streamIndex = ffmpeg.av_find_best_stream(formatContext, mediaType, -1, -1, &decoder, 0);
+            }
             if (streamIndex < 0 || decoder is null)
             {
                 ffmpeg.avformat_close_input(&formatContext);
@@ -99,14 +228,25 @@ internal sealed unsafe class FfmpegMediaStream : Stream
             if (codecContext is null ||
                 ffmpeg.avcodec_parameters_to_context(
                     codecContext,
-                    formatContext->streams[streamIndex]->codecpar) < 0 ||
-                ffmpeg.avcodec_open2(codecContext, decoder, null) < 0)
+                    formatContext->streams[streamIndex]->codecpar) < 0)
             {
                 if (codecContext is not null)
                 {
                     ffmpeg.avcodec_free_context(&codecContext);
                 }
 
+                ffmpeg.avformat_close_input(&formatContext);
+                return false;
+            }
+
+            if (mediaType == AVMediaType.AVMEDIA_TYPE_VIDEO)
+            {
+                codecContext->thread_count = 0;
+                codecContext->thread_type = ffmpeg.FF_THREAD_FRAME | ffmpeg.FF_THREAD_SLICE;
+            }
+            if (ffmpeg.avcodec_open2(codecContext, decoder, null) < 0)
+            {
+                ffmpeg.avcodec_free_context(&codecContext);
                 ffmpeg.avformat_close_input(&formatContext);
                 return false;
             }
@@ -144,12 +284,20 @@ internal sealed unsafe class FfmpegMediaStream : Stream
         out int width,
         out int height,
         out double frameRate,
-        out double durationSeconds)
+        out double durationSeconds,
+        out float aspectRatio,
+        out bool videoFullRange,
+        out uint colorPrimaries,
+        out uint transferCharacteristics)
     {
         width = 0;
         height = 0;
         frameRate = 0;
         durationSeconds = 0;
+        aspectRatio = 0;
+        videoFullRange = false;
+        colorPrimaries = 0;
+        transferCharacteristics = 0;
         FfmpegRuntime.EnsureInitialized();
 
         AVFormatContext* formatContext = null;
@@ -175,8 +323,26 @@ internal sealed unsafe class FfmpegMediaStream : Stream
             var stream = formatContext->streams[streamIndex];
             width = stream->codecpar->width;
             height = stream->codecpar->height;
+            if (height > 0)
+            {
+                var ratio = (double)width / height;
+                if (stream->sample_aspect_ratio.num > 0 &&
+                    stream->sample_aspect_ratio.den > 0)
+                {
+                    ratio *= (double)stream->sample_aspect_ratio.num /
+                        stream->sample_aspect_ratio.den;
+                }
+                aspectRatio = checked((float)ratio);
+            }
+            videoFullRange = stream->codecpar->color_range == AVColorRange.AVCOL_RANGE_JPEG;
+            colorPrimaries = unchecked((uint)stream->codecpar->color_primaries);
+            transferCharacteristics = unchecked((uint)stream->codecpar->color_trc);
 
             var rate = stream->avg_frame_rate;
+            if (rate.den <= 0 || rate.num <= 0)
+            {
+                rate = stream->r_frame_rate;
+            }
             if (rate.den > 0 && rate.num > 0)
             {
                 frameRate = (double)rate.num / rate.den;
@@ -291,7 +457,13 @@ internal sealed unsafe class FfmpegMediaStream : Stream
             return null;
         }
         var lumaBytes = width * height;
-        var output = new byte[lumaBytes + lumaBytes / 2];
+        var outputByteCount = checked(lumaBytes + lumaBytes / 2);
+        if (_videoConversionBuffer.Length != outputByteCount)
+        {
+            _videoConversionBuffer = new byte[outputByteCount];
+        }
+        // Read consumes the previous output before conversion can reuse its storage.
+        var output = _videoConversionBuffer;
         fixed (byte* outputPointer = output)
         {
             var planes = new byte*[4] { outputPointer, outputPointer + lumaBytes, null, null };
@@ -442,6 +614,8 @@ internal sealed unsafe class FfmpegMediaStream : Stream
 
         lock (_decodeGate)
         {
+            _pending = [];
+            _videoConversionBuffer = [];
             if (_swsContext is not null)
             {
                 ffmpeg.sws_freeContext(_swsContext);

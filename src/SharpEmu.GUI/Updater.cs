@@ -16,7 +16,7 @@ namespace SharpEmu.GUI;
 /// <summary>Self-contained Windows updater; the emulator layers do not depend on it.</summary>
 public static class Updater
 {
-    private const string ApplyArgument = "--sharpemu-apply-update";
+    public const string ApplyArgument = "--sharpemu-apply-update";
     private const string LatestReleaseUrl = "https://api.github.com/repos/sharpemu/sharpemu/releases/latest";
     private static readonly TimeSpan CheckTimeout = TimeSpan.FromSeconds(10);
     private static readonly HttpClient Http = CreateHttpClient();
@@ -404,7 +404,6 @@ public static class Updater
 
         if (OperatingSystem.IsWindows()) return new("win-x64", ".zip", "SharpEmu.exe");
         if (OperatingSystem.IsLinux()) return new("linux-x64", ".tar.gz", "SharpEmu");
-        if (OperatingSystem.IsMacOS()) return new("osx-x64", ".tar.gz", "SharpEmu");
         throw new PlatformNotSupportedException();
     }
 

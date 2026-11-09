@@ -9,6 +9,20 @@ namespace SharpEmu.Libs.Tests.Media;
 
 public sealed class HostMovieBridgeTests : IDisposable
 {
+    [Theory]
+    [InlineData(null, "GUEST")]
+    [InlineData("", "GUEST")]
+    [InlineData("unknown", "GUEST")]
+    [InlineData("guest", "GUEST")]
+    [InlineData("native", "HOST")]
+    [InlineData("FFMPEG", "HOST")]
+    [InlineData("skip", "SKIP")]
+    [InlineData("dummy", "DUMMY")]
+    public void PlaybackModeNameUsesTheEffectiveSelection(string? configured, string expected)
+    {
+        Assert.Equal(expected, HostMovieBridge.GetPlaybackModeName(configured));
+    }
+
     private readonly string _tempDirectory = Path.Combine(
         Path.GetTempPath(),
         $"sharpemu-bink-{Guid.NewGuid():N}");
@@ -44,6 +58,19 @@ public sealed class HostMovieBridgeTests : IDisposable
             1);
 
         Assert.True(HostMovieBridge.TryReadBinkInfo(path, out _));
+    }
+
+    [Theory]
+    // Demon's Souls history_of_the_world.bk2 (171 s) and credits (756 s).
+    [InlineData(5_125u, 30_000u, 1_001u, 231)]
+    [InlineData(22_685u, 30u, 1u, 816)]
+    [InlineData(255u, 30u, 1u, 90)]
+    public void PlaybackWatchdogOutlastsTheWholeMovie(uint frames, uint numerator, uint denominator, int expectedSeconds)
+    {
+        var timeout = HostMovieBridge.GetPlaybackWatchdogTimeout(
+            new HostMovieBridge.Bink2MovieInfo(1920, 1080, frames, numerator, denominator));
+
+        Assert.Equal(expectedSeconds, (int)timeout.TotalSeconds);
     }
 
     [Fact]

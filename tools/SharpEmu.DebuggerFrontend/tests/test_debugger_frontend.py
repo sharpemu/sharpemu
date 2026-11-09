@@ -257,8 +257,9 @@ class FrontendHttpTests(unittest.TestCase):
     ) -> dict[str, object]:
         with self.assertRaises(HTTPError) as caught:
             self.post(path, payload, **kwargs)
-        self.assertEqual(status, caught.exception.code)
-        return json.load(caught.exception)
+        with caught.exception as response:
+            self.assertEqual(status, response.code)
+            return json.load(response)
 
     def test_api_connect_and_command_round_trip(self) -> None:
         connected = self.post("/api/connect", {"host": "127.0.0.1", "port": self.debugger.port})
@@ -352,6 +353,31 @@ class FrontendHttpTests(unittest.TestCase):
         )
         self.assertIn("CSRF", str(result["error"]))
 
+    def test_api_rejects_non_ascii_tokens_without_changing_connection(self) -> None:
+        self.post("/api/connect", {"host": "127.0.0.1", "port": self.debugger.port})
+        for method, path in (("GET", "/api/snapshot"), ("POST", "/api/disconnect")):
+            for supplied_token in ("\u00e9", self.csrf_token + "\u00e9"):
+                with self.subTest(method=method, token=supplied_token):
+                    request = Request(
+                        f"http://127.0.0.1:{self.http_port}{path}",
+                        data=b"{}" if method == "POST" else None,
+                        headers={
+                            "Content-Type": "application/json",
+                            "Origin": f"http://127.0.0.1:{self.http_port}",
+                            CSRF_HEADER: supplied_token,
+                        },
+                        method=method,
+                    )
+                    with self.assertRaises(HTTPError) as caught:
+                        urlopen(request, timeout=2)
+                    with caught.exception as response:
+                        self.assertEqual(403, response.code)
+                        self.assertIn("token", str(json.load(response)["error"]).lower())
+                    self.assertTrue(self.bridge.snapshot()["connected"])
+
+        disconnected = self.post("/api/disconnect", {})
+        self.assertFalse(disconnected["connected"])
+
     def test_reported_text_plain_no_cors_launch_is_rejected(self) -> None:
         result = self.assert_post_rejected(
             "/api/launch",
@@ -439,7 +465,8 @@ class FrontendHttpTests(unittest.TestCase):
     def test_api_get_requires_token(self) -> None:
         with self.assertRaises(HTTPError) as caught:
             urlopen(f"http://127.0.0.1:{self.http_port}/api/snapshot", timeout=2)
-        self.assertEqual(403, caught.exception.code)
+        with caught.exception as response:
+            self.assertEqual(403, response.code)
 
     def test_frontend_cannot_bind_beyond_loopback(self) -> None:
         with self.assertRaisesRegex(SystemExit, "only listen on localhost"):

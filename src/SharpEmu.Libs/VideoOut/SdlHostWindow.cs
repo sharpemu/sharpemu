@@ -11,12 +11,6 @@ using static SDL.SDL3;
 
 namespace SharpEmu.Libs.VideoOut;
 
-internal enum SdlGraphicsApi
-{
-    Vulkan,
-    Metal,
-}
-
 internal readonly record struct SdlHdrState(
     bool Enabled,
     float SdrWhiteLevel,
@@ -26,15 +20,15 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 {
     private const SDL_InitFlags InitFlags = SDL_InitFlags.SDL_INIT_VIDEO | SDL_InitFlags.SDL_INIT_GAMEPAD;
     private static readonly long CursorHideDelayTicks = 2 * Stopwatch.Frequency;
+    private static readonly long InputPollTicks = Stopwatch.Frequency / 250;
     private const uint OutputDurationMs = 5_000;
 
     private readonly HostVideoOptions _options;
-    private readonly SdlGraphicsApi _graphicsApi;
     private readonly Action? _toggleBackendHud;
     private readonly object _gamepadGate = new();
     private SDL_Window* _window;
-    private nint _metalView;
     private SDL_Gamepad* _gamepad;
+    private readonly Pad.TouchContactIds _touchIds = new();
     private HostGamepadType _gamepadType;
     private byte _leftTriggerRumble;
     private byte _rightTriggerRumble;
@@ -47,15 +41,15 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
     private bool _surfaceRestorePending;
     private bool _hdrStateChangePending;
     private bool _disposed;
+    private string _baseTitle = string.Empty;
+    private string _titleSummary = string.Empty;
 
     public SdlHostWindow(
         string title,
         HostVideoOptions options,
-        SdlGraphicsApi graphicsApi,
         Action? toggleBackendHud = null)
     {
         _options = options.Normalize();
-        _graphicsApi = graphicsApi;
         _toggleBackendHud = toggleBackendHud;
         SdlGamepadStateReader.EnableSonyHidApi();
         if (!SDL_InitSubSystem(InitFlags))
@@ -63,20 +57,20 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             throw new InvalidOperationException($"SDL video initialization failed: {GetError()}");
         }
 
-        var graphicsFlag = graphicsApi == SdlGraphicsApi.Vulkan
-            ? SDL_WindowFlags.SDL_WINDOW_VULKAN
-            : SDL_WindowFlags.SDL_WINDOW_METAL;
-        var flags = graphicsFlag |
+        var flags = SDL_WindowFlags.SDL_WINDOW_VULKAN |
                     SDL_WindowFlags.SDL_WINDOW_RESIZABLE |
                     SDL_WindowFlags.SDL_WINDOW_HIGH_PIXEL_DENSITY |
                     SDL_WindowFlags.SDL_WINDOW_HIDDEN;
-        _window = CreateWindow(title, _options.Width, _options.Height, flags);
+        _window = CreateWindow(
+            FormatWindowTitle(title, RenderDocCapture.IsAvailable), _options.Width, _options.Height, flags);
         if (_window is null)
         {
             SDL_QuitSubSystem(InitFlags);
             throw new InvalidOperationException($"SDL window creation failed: {GetError()}");
         }
 
+        _baseTitle = title;
+        PerfOverlay.Configure(_options);
         MoveToConfiguredDisplay();
         ApplyConfiguredMode(_options.WindowMode);
         SetIcon();
@@ -158,7 +152,6 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 
     public byte** GetRequiredVulkanInstanceExtensions(out uint count)
     {
-        EnsureGraphicsApi(SdlGraphicsApi.Vulkan);
         uint extensionCount = 0;
         var extensions = SDL_Vulkan_GetInstanceExtensions(&extensionCount);
         count = extensionCount;
@@ -172,7 +165,6 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 
     public SurfaceKHR CreateVulkanSurface(Instance instance)
     {
-        EnsureGraphicsApi(SdlGraphicsApi.Vulkan);
         VkSurfaceKHR_T* surface = null;
         if (!SDL_Vulkan_CreateSurface(
                 _window,
@@ -186,35 +178,30 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         return new SurfaceKHR(unchecked((ulong)surface));
     }
 
-    public nint CreateMetalLayer()
+    public void SetTitle(string title)
     {
-        EnsureGraphicsApi(SdlGraphicsApi.Metal);
-        if (_metalView == 0)
-        {
-            _metalView = SDL_Metal_CreateView(_window);
-            if (_metalView == 0)
-            {
-                throw new InvalidOperationException($"SDL Metal view creation failed: {GetError()}");
-            }
-        }
-
-        var layer = SDL_Metal_GetLayer(_metalView);
-        if (layer == 0)
-        {
-            throw new InvalidOperationException($"SDL Metal layer lookup failed: {GetError()}");
-        }
-
-        return layer;
+        _baseTitle = title;
+        ApplyWindowTitle();
     }
 
-    public void SetTitle(string title)
+    private void RefreshOverlayTitle()
+    {
+        var summary = PerfOverlay.GetTitleBarSummary();
+        if (_titleSummary != summary)
+        {
+            _titleSummary = summary;
+            ApplyWindowTitle();
+        }
+    }
+
+    private void ApplyWindowTitle()
     {
         if (_window is null)
         {
             return;
         }
 
-        var utf8 = Marshal.StringToCoTaskMemUTF8(title);
+        var utf8 = Marshal.StringToCoTaskMemUTF8(FormatWindowTitle(_baseTitle, RenderDocCapture.IsAvailable, _titleSummary));
         try
         {
             SDL_SetWindowTitle(_window, (byte*)utf8);
@@ -343,23 +330,47 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         initialize();
         var timer = Stopwatch.StartNew();
         var last = timer.Elapsed.TotalSeconds;
+        var polledAt = Stopwatch.GetTimestamp() - InputPollTicks;
         try
         {
             while (Volatile.Read(ref _closeRequested) == 0)
             {
-                PumpEvents();
-                if (Volatile.Read(ref _closeRequested) != 0)
+                using var windowScope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.WindowLoop);
+                var pollTimestamp = Stopwatch.GetTimestamp();
+                if (pollTimestamp - polledAt >= InputPollTicks)
                 {
-                    break;
+                    polledAt = pollTimestamp;
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowEvents))
+                    {
+                        PumpEvents();
+                        RefreshOverlayTitle();
+                    }
+                    if (Volatile.Read(ref _closeRequested) != 0)
+                    {
+                        break;
+                    }
+
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CursorUpdate))
+                    {
+                        UpdateCursorAutoHide();
+                    }
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GamepadPoll))
+                    {
+                        SampleGamepad(updateDevices: false);
+                    }
                 }
 
-                UpdateCursorAutoHide();
-                SampleGamepad();
                 var now = timer.Elapsed.TotalSeconds;
                 render(now - last);
                 last = now;
-                if (IsMinimized)
+                bool minimized;
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowState))
                 {
+                    minimized = IsMinimized;
+                }
+                if (minimized)
+                {
+                    using var delayScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowDelay);
                     SDL_Delay(10);
                 }
                 else
@@ -382,15 +393,10 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         }
 
         _disposed = true;
+        PerfOverlay.Shutdown();
         SDL_ShowCursor();
         HostWindowInput.Disconnect();
         CloseGamepad();
-        if (_metalView != 0)
-        {
-            SDL_Metal_DestroyView(_metalView);
-            _metalView = 0;
-        }
-
         if (_window is not null)
         {
             SDL_DestroyWindow(_window);
@@ -400,11 +406,25 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         SDL_QuitSubSystem(InitFlags);
     }
 
+    private long _lastEventPumpTimestamp;
+
     private void PumpEvents()
     {
-        SDL_Event windowEvent;
-        while (SDL_PollEvent(&windowEvent))
+        if (RenderPhaseProfile.Enabled)
         {
+            var timestamp = Stopwatch.GetTimestamp();
+            if (_lastEventPumpTimestamp != 0)
+            {
+                var gap = Stopwatch.GetElapsedTime(_lastEventPumpTimestamp, timestamp).TotalMilliseconds;
+                if (gap >= 1000)
+                    Console.Error.WriteLine($"[PERF][WINDOW_EVENT_GAP] gap_ms={gap:F3}");
+            }
+            _lastEventPumpTimestamp = timestamp;
+        }
+        SDL_Event windowEvent;
+        while (PollWindowEvent(&windowEvent))
+        {
+            using var eventProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowEventHandling);
             switch (windowEvent.Type)
             {
                 case SDL_EventType.SDL_EVENT_QUIT:
@@ -472,6 +492,17 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         }
     }
 
+    private static bool PollWindowEvent(SDL_Event* windowEvent)
+    {
+        using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.WindowEventPolling);
+        if (!WindowPollProfile.Enabled) return SDL_PollEvent(windowEvent);
+        var startedAt = Stopwatch.GetTimestamp();
+        var returnedEvent = SDL_PollEvent(windowEvent);
+        var finishedAt = Stopwatch.GetTimestamp();
+        WindowPollProfile.Record(startedAt, finishedAt, returnedEvent, returnedEvent ? (uint)windowEvent->type : 0);
+        return returnedEvent;
+    }
+
     private void HandleKey(SDL_KeyboardEvent keyEvent)
     {
         var down = keyEvent.type == SDL_EventType.SDL_EVENT_KEY_DOWN;
@@ -487,7 +518,11 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             {
                 PerfOverlay.Toggle();
             }
-            else if (keyEvent.key == SDL_Keycode.SDLK_F10)
+            else if (keyEvent.key == SDL_Keycode.SDLK_F2)
+            {
+                PerfOverlay.CycleCorner();
+            }
+            else if (IsCaptureKey(keyEvent.key))
             {
                 RenderDocCapture.RequestCapture();
             }
@@ -501,6 +536,14 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         {
             HostWindowInput.SetKey(virtualKey, down);
         }
+    }
+
+    internal static bool IsCaptureKey(SDL_Keycode key) => key == SDL_Keycode.SDLK_F12;
+
+    internal static string FormatWindowTitle(string title, bool captureAvailable, string summary = "")
+    {
+        var result = string.IsNullOrEmpty(summary) ? title : $"{title} · {summary}";
+        return captureAvailable ? $"{result} · Press F12 for capture" : result;
     }
 
     private void ToggleFullscreen()
@@ -673,7 +716,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         HostWindowInput.ClearGamepad();
     }
 
-    private void SampleGamepad()
+    private void SampleGamepad(bool updateDevices = true)
     {
         lock (_gamepadGate)
         {
@@ -683,7 +726,8 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                 return;
             }
 
-            SDL_UpdateGamepads();
+            if (updateDevices)
+                SDL_UpdateGamepads();
             var state = SdlGamepadStateReader.Read(_gamepad) with
             {
                 Motion = ReadMotion(),
@@ -743,6 +787,12 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
     }
 
     private HostTouchPoint ReadTouchPoint(int finger)
+    {
+        var point = ReadRawTouchPoint(finger);
+        return point with { Id = _touchIds.Track(finger, point.Active) };
+    }
+
+    private HostTouchPoint ReadRawTouchPoint(int finger)
     {
         if (SDL_GetNumGamepadTouchpadFingers(_gamepad, 0) <= finger)
         {
@@ -824,13 +874,4 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 
     private static string GetError() =>
         Marshal.PtrToStringUTF8((nint)Unsafe_SDL_GetError()) ?? "unknown SDL error";
-
-    private void EnsureGraphicsApi(SdlGraphicsApi expected)
-    {
-        if (_graphicsApi != expected)
-        {
-            throw new InvalidOperationException(
-                $"SDL host window uses {_graphicsApi}, not {expected}.");
-        }
-    }
 }

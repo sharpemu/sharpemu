@@ -9,8 +9,65 @@ namespace SharpEmu.ShaderCompiler;
 /// </summary>
 public static class Gen5InlineConstants
 {
+    public const uint SharedBase = 235;
+    public const uint SharedLimit = 236;
+    public const uint PrivateBase = 237;
+    public const uint PrivateLimit = 238;
+
+    // Generated addresses use virtual segments outside global memory.
+    public const ulong SharedApertureBase = 1ul << 48;
+    public const ulong PrivateApertureBase = 2ul << 48;
+
+    // Guest literal tags are distinct from the generated segments.
+    public const uint SharedApertureHigh = 0x8000_0000;
+    public const uint PrivateApertureHigh = 0x7000_0000;
+    public const ulong SharedFlatApertureBase = (ulong)SharedApertureHigh << 32;
+    public const ulong PrivateFlatApertureBase = (ulong)PrivateApertureHigh << 32;
+    public const int ApertureShift = 28;
+
+    public static bool IsSharedApertureHigh(uint high) =>
+        high >> ApertureShift == SharedApertureHigh >> ApertureShift;
+
+    public static bool IsPrivateApertureHigh(uint high) =>
+        high >> ApertureShift == PrivateApertureHigh >> ApertureShift;
+
+    public static bool IsAperture(uint encoded) => encoded is >= SharedBase and <= PrivateLimit;
+
+    public static bool IsSharedAperture(uint encoded) => encoded is SharedBase or SharedLimit;
+
+    public static bool TryDecodeAperture(uint encoded, out ulong value)
+    {
+        value = encoded switch
+        {
+            SharedBase => SharedApertureBase,
+            SharedLimit => SharedApertureBase | uint.MaxValue,
+            PrivateBase => PrivateApertureBase,
+            PrivateLimit => PrivateApertureBase | uint.MaxValue,
+            _ => 0,
+        };
+        return IsAperture(encoded);
+    }
+
+    public static ulong DecodeAperture64(uint encoded) =>
+        TryDecodeAperture(encoded, out var value)
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(encoded));
+
     public static bool TryDecode(uint encoded, out uint value)
     {
+        if (IsAperture(encoded))
+        {
+            value = (uint)(DecodeAperture64(encoded) >> 32);
+            return true;
+        }
+
+        // POPS_EXITING_WAVE_ID: no primitive-ordered pixel shading is modeled.
+        if (encoded == 239)
+        {
+            value = 0;
+            return true;
+        }
+
         if (encoded == 125)
         {
             value = 0;

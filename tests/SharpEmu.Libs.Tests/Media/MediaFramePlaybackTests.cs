@@ -57,6 +57,45 @@ public sealed class MediaFramePlaybackTests
         Assert.Equal(2, WaitForAdvancedFrame(playback)[0]);
     }
 
+    [Fact]
+    public void PauseHoldsTheCurrentFrameWithoutClockCatchUp()
+    {
+        using var playback = new MediaFramePlayback(new SequenceDecoder(1, 2));
+
+        Assert.Equal(1, WaitForAdvancedFrame(playback)[0]);
+        playback.Pause();
+        Thread.Sleep(700);
+
+        Assert.False(playback.TryGetFrame(true, out _, out _));
+
+        playback.Resume();
+        Assert.True(playback.TryGetFrame(true, out var held, out var advanced));
+        Assert.False(advanced);
+        Assert.Equal(1, held[0]);
+        Assert.Equal(2, WaitForAdvancedFrame(playback)[0]);
+    }
+
+    [Fact]
+    public void GuestFrameIndexLimitsClientControlledPresentation()
+    {
+        using var playback = new MediaFramePlayback(new SequenceDecoder(1, 2, 3));
+
+        Assert.Equal(1, WaitForGuestFrame(playback, 0)[0]);
+        Thread.Sleep(700);
+
+        Assert.True(playback.TryGetFrameAtOrBeforeIndex(
+            0,
+            out var held,
+            out var heldIndex,
+            out var advanced));
+        Assert.False(advanced);
+        Assert.Equal(0, heldIndex);
+        Assert.Equal(1, held[0]);
+
+        Assert.Equal(2, WaitForGuestFrame(playback, 1)[0]);
+        Assert.Equal(3, WaitForGuestFrame(playback, 2)[0]);
+    }
+
     private static byte[] WaitForFrame(
         MediaFramePlayback playback,
         bool advanceClock)
@@ -73,6 +112,29 @@ public sealed class MediaFramePlaybackTests
         }
 
         throw new TimeoutException("The decoder did not produce a frame.");
+    }
+
+    private static byte[] WaitForGuestFrame(
+        MediaFramePlayback playback,
+        long targetFrameIndex)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (playback.TryGetFrameAtOrBeforeIndex(
+                    targetFrameIndex,
+                    out var frame,
+                    out var frameIndex,
+                    out _) &&
+                frameIndex == targetFrameIndex)
+            {
+                return frame;
+            }
+
+            Thread.Sleep(1);
+        }
+
+        throw new TimeoutException("The decoder did not produce the requested guest frame.");
     }
 
     private sealed class SequenceDecoder(params byte[] values) : IMediaFrameDecoder

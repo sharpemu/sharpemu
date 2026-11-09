@@ -6,11 +6,11 @@ using System.Collections.Concurrent;
 namespace SharpEmu.HLE;
 
 /// <summary>
-/// Runs work on the real process main thread. macOS requires its windowing
-/// event loop on that thread, so the CLI moves emulation onto
-/// a worker thread, parks the main thread in <see cref="Pump"/>, and the
-/// video presenter posts its window loop here. On other platforms
-/// <see cref="IsAvailable"/> stays false and nothing changes.
+/// Runs work on the real process main thread. On Linux the CLI keeps the
+/// windowing event loop on that thread for consistent X11/Wayland event
+/// ownership: it moves emulation onto a worker thread, parks the main thread
+/// in <see cref="Pump"/>, and the video presenter posts its window loop here.
+/// On other platforms <see cref="IsAvailable"/> stays false and nothing changes.
 /// </summary>
 public static class HostMainThread
 {

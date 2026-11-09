@@ -1,0 +1,398 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using System.Buffers.Binary;
+using SharpEmu.Libs.Gpu.GpuCommands.Registers;
+using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.Libs.VideoOut;
+
+namespace SharpEmu.Libs.Gpu.GpuCommands;
+
+public sealed partial class GpuCommandInterpreter
+{
+    private const uint RegisterTableSentinel = 0xFFFF_FFFFu;
+
+    private static int _contextTableSkipWarnings;
+    private static readonly bool TraceRegisterTables =
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC") == "1";
+
+    private enum RegisterBank
+    {
+        Context,
+        Shader,
+        UserConfig,
+    }
+
+    private void ClearCompositeDepthExtent(uint offset)
+    {
+        if (offset is RegisterBankLayout.DepthZInfo or RegisterBankLayout.DepthSizeXy)
+        {
+            // A direct attachment or extent write supersedes a composite binding's extent.
+            TypedRegisters.CompositeDepthSizeXy = null;
+        }
+    }
+
+    private void WriteUserConfigRegister(uint offset, uint value)
+    {
+        if (offset == RegisterBankLayout.IndexTypeRegister)
+        {
+            SetIndexType(value);
+        }
+    }
+
+    internal uint SetContextRegisterPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
+    {
+        var offset = RegisterBankLayout.Normalize(payload[0]);
+        if (offset == RegisterBankLayout.ContextNop)
+        {
+            return 2;
+        }
+
+        if (offset >= RegisterBankLayout.ContextRegisterCount)
+        {
+            throw _host.Fatal($"The context register is outside the bank: offset=0x{offset:X8} value=0x{payload[1]:X8} header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16}.");
+        }
+
+        var count = packet.Length - 2;
+        for (var index = 0u; index < count; index++)
+        {
+            if (offset + index >= RegisterBankLayout.ContextRegisterCount)
+            {
+                throw _host.Fatal($"The context register range leaves the bank: offset=0x{offset:X8} count={count} address=0x{packet.PacketAddress:X16}.");
+            }
+
+            ClearCompositeDepthExtent(offset + index);
+        }
+
+        var consumed = RegisterWriteTable.WriteContextPacket(TypedRegisters, in packet, offset, payload.Slice(1, (int)count));
+        if (ScissorTrace.Instance is { Active: true } trace)
+        {
+            for (var index = 0u; index < consumed && index < count; index++)
+                trace.RegisterWrite(TypedRegisters, SubmitId, QueueId, in packet,
+                    offset + index, payload[1 + (int)index], entry: index, count: count);
+        }
+        if (offset == ContextRegisterOffset.PaScAaSampleLocations0 && count == SampleLocationRegisters.LocationCount)
+        {
+            RequireCentroidPriorityPacket(in packet);
+        }
+
+        if (offset == RegisterBankLayout.DepthZInfo && packet.Length == CompositeDepthBindingLeadLength)
+        {
+            DetectCompositeDepthExtent(packet);
+        }
+
+        return consumed + 1;
+    }
+
+    // The sixteen-location sample packet is valid only with the centroid priority packet behind it.
+    private void RequireCentroidPriorityPacket(in PacketContext packet)
+    {
+        const uint centroidPacketDwords = 4;
+        var next = packet.PacketAddress + (ulong)packet.Length * sizeof(uint);
+        var expectedHeader = PacketHeader.Make(centroidPacketDwords, PacketOpcode.SetContextRegister);
+        if (packet.Remaining < packet.Length + centroidPacketDwords ||
+            ReadDword(next, RenderPhaseProfile.CommandReadKind.Payload) != expectedHeader ||
+            RegisterBankLayout.Normalize(ReadDword(next + sizeof(uint), RenderPhaseProfile.CommandReadKind.Payload)) != ContextRegisterOffset.PaScCentroidPriority0)
+        {
+            throw _host.Fatal($"The sample location packet is not followed by the centroid priority packet: header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16} next=0x{next:X16}.");
+        }
+    }
+
+    private const uint CompositeDepthBindingLeadLength = 10;
+    private const uint CompositeDepthBindingDwords = 24;
+
+    // A composite depth binding ends in a NOP that carries the x/y maxima, not padding.
+    private void DetectCompositeDepthExtent(in PacketContext packet)
+    {
+        if (packet.Remaining < CompositeDepthBindingDwords)
+        {
+            return;
+        }
+
+        var address = packet.PacketAddress;
+        var registerHeader = PacketHeader.Make(3, PacketOpcode.SetContextRegister);
+        if (ReadDword(address + 40, RenderPhaseProfile.CommandReadKind.Payload) != registerHeader || ReadDword(address + 44, RenderPhaseProfile.CommandReadKind.Payload) != RegisterBankLayout.DepthInfo ||
+            ReadDword(address + 52, RenderPhaseProfile.CommandReadKind.Payload) != registerHeader || ReadDword(address + 56, RenderPhaseProfile.CommandReadKind.Payload) != RegisterBankLayout.DepthView ||
+            ReadDword(address + 64, RenderPhaseProfile.CommandReadKind.Payload) != registerHeader || ReadDword(address + 68, RenderPhaseProfile.CommandReadKind.Payload) != RegisterBankLayout.HtileDataBase ||
+            ReadDword(address + 76, RenderPhaseProfile.CommandReadKind.Payload) != registerHeader || ReadDword(address + 80, RenderPhaseProfile.CommandReadKind.Payload) != RegisterBankLayout.HtileSurface ||
+            ReadDword(address + 88, RenderPhaseProfile.CommandReadKind.Payload) != PacketHeader.Make(2, PacketOpcode.Nop))
+        {
+            return;
+        }
+
+        var sizeXy = ReadDword(address + 92, RenderPhaseProfile.CommandReadKind.Payload);
+        if (sizeXy != 0)
+        {
+            TypedRegisters.CompositeDepthSizeXy = sizeXy;
+        }
+    }
+
+    internal uint SetShaderRegisterPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
+    {
+        var offset = payload[0];
+        if (offset == RegisterBankLayout.ShaderRegisterNop)
+        {
+            return 2;
+        }
+
+        if (offset >= RegisterBankLayout.ShaderRegisterCount)
+        {
+            throw _host.Fatal($"The shader register is outside the bank: offset=0x{offset:X8} header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16}.");
+        }
+
+        var count = packet.Length - 2;
+        if (count > RegisterBankLayout.ShaderRegisterCount - offset)
+        {
+            throw _host.Fatal($"The shader register range leaves the bank: offset=0x{offset:X8} count={count} address=0x{packet.PacketAddress:X16}.");
+        }
+
+        var values = payload.Slice(1, (int)count);
+        Registers.Shader.SetRange(offset, values);
+        return RegisterWriteTable.WriteShaderPacket(TypedRegisters, in packet, offset, values) + 1;
+    }
+
+    internal uint SetUserConfigRegisterPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
+    {
+        if (InternalDataPacket.Matches(packet.Header, payload))
+        {
+            return packet.Length - 1;
+        }
+
+        var rawOffset = payload[0];
+        var offset = packet.Opcode == PacketOpcode.SetUserConfigRegisterIndex
+            ? rawOffset & 0x0FFF_FFFFu
+            : RegisterBankLayout.Normalize(rawOffset);
+        if (offset == RegisterBankLayout.UserConfigNop)
+        {
+            return packet.Length - 1;
+        }
+
+        if (offset >= RegisterBankLayout.UserConfigRegisterCount)
+        {
+            throw _host.Fatal($"The user-config register is outside the bank: offset=0x{offset:X8} raw=0x{rawOffset:X8} header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16}.");
+        }
+
+        var count = packet.Length - 2;
+        for (var index = 0u; index < count; index++)
+        {
+            if (offset + index >= RegisterBankLayout.UserConfigRegisterCount)
+            {
+                throw _host.Fatal($"The user-config register range leaves the bank: offset=0x{offset:X8} count={count} address=0x{packet.PacketAddress:X16}.");
+            }
+
+            WriteUserConfigRegister(offset + index, payload[1 + (int)index]);
+        }
+
+        return RegisterWriteTable.WriteUserConfigPacket(TypedRegisters, in packet, offset, payload.Slice(1, (int)count)) + 1;
+    }
+
+    // Native table form: 64-bit table address, then a count of (offset, value) pairs.
+    internal uint SetContextRegisterTablePacket(in PacketContext packet, ReadOnlySpan<uint> payload) =>
+        RegisterTablePacket(packet, payload, RegisterBank.Context);
+
+    internal uint SetShaderRegisterTablePacket(in PacketContext packet, ReadOnlySpan<uint> payload) =>
+        RegisterTablePacket(packet, payload, RegisterBank.Shader);
+
+    internal uint SetUserConfigRegisterTablePacket(in PacketContext packet, ReadOnlySpan<uint> payload) =>
+        RegisterTablePacket(packet, payload, RegisterBank.UserConfig);
+
+    private uint RegisterTablePacket(in PacketContext packet, ReadOnlySpan<uint> payload, RegisterBank bank)
+    {
+        if (packet.Length != 5)
+        {
+            throw _host.Fatal($"The register table header is not supported: header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16}.");
+        }
+
+        var tableAddress = (payload[0] & 0xFFFF_FFFCu) | ((ulong)payload[1] << 32);
+        var count = payload[3] & 0x3FFFu;
+        ApplyRegisterTable(bank, tableAddress, count, packet, payload);
+        return 4;
+    }
+
+    // Read bounded blocks when the packet executes. Apply entries in table order.
+    private void ApplyRegisterTable(RegisterBank bank, ulong tableAddress, uint count, in PacketContext packet,
+        ReadOnlySpan<uint> payload)
+    {
+        if (count == 0)
+        {
+            return;
+        }
+
+        if (tableAddress == 0)
+        {
+            throw _host.Fatal($"The register table address is zero: bank={bank} count={count} address=0x{packet.PacketAddress:X16}.");
+        }
+
+        const int entriesPerBlock = 128;
+        const int entryBytes = 2 * sizeof(uint);
+        if (tableAddress > ulong.MaxValue - (ulong)count * entryBytes)
+        {
+            throw _host.Fatal($"The register table range exceeds the address space: address=0x{tableAddress:X16} count={count}.");
+        }
+
+        if (bank == RegisterBank.Context && ScissorTrace.Instance is { Active: true } scissorTrace)
+            scissorTrace.RegisterTable(TypedRegisters, SubmitId, QueueId, in packet, tableAddress, count);
+
+        Span<byte> tableBlock = stackalloc byte[entriesPerBlock * entryBytes];
+        Span<byte> beforeSynchronization = stackalloc byte[entriesPerBlock * entryBytes];
+        var gpuWritten = !_submittedCommands.IsEmpty && _host.HasGpuWrittenCommandData(tableAddress, (ulong)count * entryBytes);
+        byte[]? retained = null;
+        if (_submittedRegisterTables is { } tables && tables.TryGetValue(packet.PacketAddress, out var submitted) &&
+            (ulong)submitted.Length == (ulong)count * entryBytes && !gpuWritten)
+            retained = submitted;
+        for (var index = 0u; index < count; index++)
+        {
+            var blockEntry = (int)(index % entriesPerBlock);
+            if (blockEntry == 0)
+            {
+                var blockBytes = (int)Math.Min(count - index, entriesPerBlock) * entryBytes;
+                var blockAddress = tableAddress + (ulong)index * entryBytes;
+                RenderPhaseProfile.RecordCommandRead(RenderPhaseProfile.CommandReadKind.RegisterTable, blockBytes);
+                var capturedBeforeSynchronization = TraceRegisterTables &&
+                    _host.Memory.TryRead(blockAddress, beforeSynchronization[..blockBytes]);
+                if (retained is not null)
+                {
+                    retained.AsSpan((int)index * entryBytes, blockBytes).CopyTo(tableBlock);
+                }
+                else if (!(gpuWritten
+                    ? _host.TryReadGuest(blockAddress, tableBlock[..blockBytes])
+                    : TryReadCommand(blockAddress, tableBlock[..blockBytes])))
+                {
+                    throw _host.Fatal($"The register table cannot be read: address=0x{blockAddress:X16} size={blockBytes}.");
+                }
+                if (TraceRegisterTables)
+                {
+                    TraceRegisterTableRead(bank, packet, tableAddress, count, index,
+                        capturedBeforeSynchronization ? beforeSynchronization[..blockBytes] : default,
+                        tableBlock[..blockBytes]);
+                }
+            }
+
+            var entryOffset = blockEntry * entryBytes;
+            var rawOffset = BinaryPrimitives.ReadUInt32LittleEndian(tableBlock[entryOffset..]);
+            var value = BinaryPrimitives.ReadUInt32LittleEndian(tableBlock[(entryOffset + sizeof(uint))..]);
+            var offset = RegisterBankLayout.Normalize(rawOffset);
+            if (bank == RegisterBank.Context && offset == 0 && (value & 0xCu) != 0)
+            {
+                var blockStart = index - (uint)blockEntry;
+                var capturedBytes = (int)Math.Min(count - blockStart, 16u) * entryBytes;
+                Console.Error.WriteLine($"[GPU][ERROR] Register table before unsupported depth copy: " +
+                    $"header=0x{packet.Header:X8} packet=0x{packet.PacketAddress:X16} table=0x{tableAddress:X16} " +
+                    $"entry={index} count={count} raw=0x{rawOffset:X8} value=0x{value:X8} " +
+                    $"payload={string.Join(',', payload.ToArray().Select(word => word.ToString("X8")))} " +
+                    $"block_start={blockStart} bytes={Convert.ToHexString(tableBlock[..capturedBytes])}");
+            }
+            switch (bank)
+            {
+                case RegisterBank.Context:
+                    if (offset == RegisterBankLayout.ContextNop || rawOffset == RegisterTableSentinel)
+                    {
+                        continue;
+                    }
+
+                    if (offset >= RegisterBankLayout.ContextRegisterCount)
+                    {
+                        if (Interlocked.Increment(ref _contextTableSkipWarnings) <= 16)
+                        {
+                            Console.Error.WriteLine($"[LOADER][WARN] command_stream.context_table_skip offset=0x{offset:X8} value=0x{value:X8}");
+                        }
+
+                        continue;
+                    }
+
+                    ClearCompositeDepthExtent(offset);
+                    RegisterWriteTable.WriteContextEntry(TypedRegisters, offset, value, tableAddress);
+                    if (ScissorTrace.Instance is { Active: true } trace)
+                        trace.RegisterWrite(TypedRegisters, SubmitId, QueueId, in packet, offset, value, tableAddress, index, count);
+                    break;
+                case RegisterBank.Shader:
+                    if (offset == RegisterBankLayout.ShaderRegisterNop || rawOffset == RegisterTableSentinel)
+                    {
+                        continue;
+                    }
+
+                    if (offset >= RegisterBankLayout.ShaderRegisterCount)
+                    {
+                        throw _host.Fatal($"The shader table register is outside the bank: offset=0x{offset:X8} raw=0x{rawOffset:X8} value=0x{value:X8} table=0x{tableAddress:X16}.");
+                    }
+
+                    Registers.Shader[offset] = value;
+                    RegisterWriteTable.WriteShaderEntry(TypedRegisters, offset, value, tableAddress);
+                    break;
+                case RegisterBank.UserConfig:
+                    if (offset == RegisterBankLayout.UserConfigNop)
+                    {
+                        continue;
+                    }
+
+                    if (offset >= RegisterBankLayout.UserConfigRegisterCount)
+                    {
+                        throw _host.Fatal($"The user-config table register is outside the bank: offset=0x{offset:X8} raw=0x{rawOffset:X8} value=0x{value:X8} table=0x{tableAddress:X16}.");
+                    }
+
+                    // A depth extent in a user-config table belongs to the context bank.
+                    if (offset == RegisterBankLayout.DepthSizeXy)
+                    {
+                        ClearCompositeDepthExtent(offset);
+                        RegisterWriteTable.WriteContextEntry(TypedRegisters, offset, value, tableAddress);
+                        continue;
+                    }
+
+                    WriteUserConfigRegister(offset, value);
+                    RegisterWriteTable.WriteUserConfigEntry(TypedRegisters, offset, value, tableAddress,
+                        packet, index, count, rawOffset, payload);
+                    break;
+            }
+        }
+    }
+
+    private void TraceRegisterTableRead(RegisterBank bank, in PacketContext packet, ulong tableAddress,
+        uint count, uint blockStart, ReadOnlySpan<byte> before, ReadOnlySpan<byte> after)
+    {
+        var suspicious = false;
+        for (var entry = 0; entry < after.Length; entry += 8)
+        {
+            var rawOffset = BinaryPrimitives.ReadUInt32LittleEndian(after[entry..]);
+            var offset = RegisterBankLayout.Normalize(rawOffset);
+            var value = BinaryPrimitives.ReadUInt32LittleEndian(after[(entry + 4)..]);
+            suspicious |= bank switch
+            {
+                RegisterBank.Context => rawOffset != RegisterTableSentinel &&
+                    (offset >= RegisterBankLayout.ContextRegisterCount || (offset == 0 && (value & 0xCu) != 0)),
+                RegisterBank.Shader => rawOffset != RegisterTableSentinel && offset >= RegisterBankLayout.ShaderRegisterCount,
+                _ => offset == 0 || offset >= RegisterBankLayout.UserConfigRegisterCount,
+            };
+        }
+
+        var changed = !before.IsEmpty && !before.SequenceEqual(after);
+        if (!suspicious && !changed && !before.IsEmpty)
+        {
+            return;
+        }
+
+        var blockAddress = tableAddress + blockStart * 8UL;
+        Console.Error.WriteLine($"[GPU][INFO] command_stream.register_table_read bank={bank} " +
+            $"packet=0x{packet.PacketAddress:X16} header=0x{packet.Header:X8} table=0x{tableAddress:X16} " +
+            $"count={count} block_start={blockStart} before_read={!before.IsEmpty} changed={changed} " +
+            $"before={Convert.ToHexString(before)} after={Convert.ToHexString(after)} " +
+            $"mapping={_host.Memory.DescribeReadRange(blockAddress, (ulong)after.Length)}");
+    }
+
+    // Wrapped table form: a count, then the 64-bit table address.
+    internal uint RegisterTableNopPacket(in PacketContext packet, ReadOnlySpan<uint> payload)
+    {
+        if (packet.Length < 4)
+        {
+            throw _host.Fatal($"The wrapped register table is too short: header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16}.");
+        }
+
+        var bank = packet.CustomCode switch
+        {
+            PacketCustomCode.ContextRegisterTable => RegisterBank.Context,
+            PacketCustomCode.ShaderRegisterTable => RegisterBank.Shader,
+            _ => RegisterBank.UserConfig,
+        };
+        ApplyRegisterTable(bank, Address(payload[1], payload[2]), payload[0], packet, payload);
+        return packet.Length - 1;
+    }
+}

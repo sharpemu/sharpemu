@@ -174,9 +174,14 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                     }
 
                     var bytesPerSecond = (double)_bytesPerFrame * _sampleRate;
-                    return bytesPerSecond <= 0
-                        ? -1
-                        : (int)(SDL_GetAudioStreamQueued(_stream) / bytesPerSecond * 1000.0);
+                    if (bytesPerSecond <= 0)
+                    {
+                        return -1;
+                    }
+
+                    // SDL reports a failed query as -1, which would otherwise truncate to an empty queue.
+                    var queuedBytes = SDL_GetAudioStreamQueued(_stream);
+                    return queuedBytes < 0 ? -1 : (int)(queuedBytes / bytesPerSecond * 1000.0);
                 }
             }
         }
@@ -212,7 +217,15 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                         break;
                     }
 
-                    Thread.Sleep(1);
+                    // Sleep until the device should have drained to the cap rather than polling every
+                    // millisecond: this wait paces every audio grain, and 1 ms polls cost the audio
+                    // thread several wakeups per grain.
+                    var bytesPerMillisecond = _bytesPerFrame * (double)_sampleRate / 1_000;
+                    var drainMilliseconds = bytesPerMillisecond > 0
+                        ? (queued - _maximumQueuedBytes) / bytesPerMillisecond
+                        : 1;
+                    var remainingMilliseconds = (deadline - Stopwatch.GetTimestamp()) * 1_000.0 / Stopwatch.Frequency;
+                    Thread.Sleep((int)Math.Clamp(Math.Ceiling(Math.Min(drainMilliseconds, remainingMilliseconds)), 1, MaximumWaitMilliseconds));
                 }
 
                 RecordSubmission(queued, blockStart, dropped: overrun, bytes: pcm.Length);

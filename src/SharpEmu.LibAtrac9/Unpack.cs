@@ -10,9 +10,54 @@ namespace LibAtrac9
     {
         public static void UnpackFrame(BitReader reader, Frame frame)
         {
+            if (frame.Config.IndependentBlockSuperframeBytes != 0)
+            {
+                UnpackIndependentMonoFrame(reader, frame);
+                return;
+            }
+
             foreach (Block block in frame.Blocks)
             {
                 UnpackBlock(reader, block);
+            }
+        }
+
+        // Each channel is a standalone mono superframe with a fixed byte budget,
+        // interleaved frame by frame. Blocks of the earlier frames are packed
+        // back to back; in the last frame every block gets whatever is left of
+        // its channel's budget, so those slots end in padding.
+        private static void UnpackIndependentMonoFrame(BitReader reader, Frame frame)
+        {
+            int budget = frame.Config.IndependentBlockSuperframeBytes;
+            bool lastFrame = frame.FrameIndex == frame.Config.FramesPerSuperframe - 1;
+            int slotStart = reader.Position / 8;
+
+            foreach (Block block in frame.Blocks)
+            {
+                if (frame.FrameIndex == 0)
+                {
+                    block.SuperframeBytesUsed = 0;
+                }
+
+                int usedBefore = block.SuperframeBytesUsed;
+                if (lastFrame)
+                {
+                    reader.Position = slotStart * 8;
+                }
+
+                int start = reader.Position;
+                UnpackBlock(reader, block);
+                block.SuperframeBytesUsed += (reader.Position - start) / 8;
+                if (block.SuperframeBytesUsed > budget)
+                {
+                    throw new InvalidDataException();
+                }
+
+                if (lastFrame)
+                {
+                    slotStart += budget - usedBefore;
+                    reader.Position = slotStart * 8;
+                }
             }
         }
 
