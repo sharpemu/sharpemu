@@ -211,7 +211,10 @@ public static partial class Gen5SpirvTranslator
         {
             _module = new SpirvModuleBuilder { InheritBlockState = inheritBlockState };
             _request = request;
-            _compactMemoryAccess = Gen5ShaderCallLinker.IsLinked(request.Program);
+            // The layout decides: ShaderResourcePlan binds the fallback address for a program it lowers compactly.
+            _compactMemoryAccess = Gen5ShaderCallLinker.IsLinked(request.Program) ||
+                (request.Bindings.Find(DescriptorBindingKind.DeviceAddressPageTable) is not null &&
+                 request.Bindings.Find(DescriptorBindingKind.DeviceAddressFallback) is not null);
             _sharedCalls = sharedCalls;
             _callArgumentSlots = callArguments?.Select((argument, slot) => (argument, slot)).ToDictionary(entry => entry.argument, entry => entry.slot);
             _callTargetSlots = callTargets?.Select((address, slot) => (address, slot)).ToDictionary(entry => entry.address, entry => entry.slot);
@@ -437,6 +440,9 @@ public static partial class Gen5SpirvTranslator
                     _deviceAddressFaultPage = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(uint.MaxValue));
                     _module.AddName(_deviceAddressFaultPage, "deviceAddressFaultPage");
                     _interfaces.Add(_deviceAddressFaultPage);
+                    _deviceAddressFirstFaultPage = _module.AddGlobalVariable(_privateUintPointer, SpirvStorageClass.Private, UInt(uint.MaxValue));
+                    _module.AddName(_deviceAddressFirstFaultPage, "deviceAddressFirstFaultPage");
+                    _interfaces.Add(_deviceAddressFirstFaultPage);
                 }
                 if (request.Memory.Entries.Any(static memory => memory.DeviceDescriptor))
                 {
@@ -1002,10 +1008,15 @@ public static partial class Gen5SpirvTranslator
 
             if (!_request.TraceDeviceAddressFaults)
             {
-                // The invocation keeps its last missing page and reports it when it ends (FlushDeviceAddressFault):
-                // an atomic at every load site made large shaders compile several times slower.
+                // The invocation keeps its first and last missing pages and reports them when it ends (FlushDeviceAddressFault):
+                // an atomic at every load site made large shaders compile several times slower. The null page is never
+                // recorded: a pointer read as zero from a missing page would otherwise replace the page that is missing.
+                var recorded = LogicalAnd(missing, _module.AddInstruction(SpirvOp.INotEqual, _boolType, pageIndex, UInt(0)));
+                var first = Load(_uintType, _deviceAddressFirstFaultPage);
+                Store(_deviceAddressFirstFaultPage, _module.AddInstruction(SpirvOp.Select, _uintType,
+                    LogicalAnd(recorded, _module.AddInstruction(SpirvOp.IEqual, _boolType, first, UInt(uint.MaxValue))), pageIndex, first));
                 Store(_deviceAddressFaultPage,
-                    _module.AddInstruction(SpirvOp.Select, _uintType, missing, pageIndex, Load(_uintType, _deviceAddressFaultPage)));
+                    _module.AddInstruction(SpirvOp.Select, _uintType, recorded, pageIndex, Load(_uintType, _deviceAddressFaultPage)));
                 return (IAdd64(entry, And64(masked, ULong(DeviceAddressPageSize - 1))), mapped);
             }
 
@@ -1036,6 +1047,7 @@ public static partial class Gen5SpirvTranslator
         }
 
         private uint _deviceAddressFaultPage;
+        private uint _deviceAddressFirstFaultPage;
 
         private void FlushDeviceAddressFault()
         {
@@ -1044,10 +1056,17 @@ public static partial class Gen5SpirvTranslator
                 return;
             }
 
-            var page = Load(_uintType, _deviceAddressFaultPage);
+            var first = Load(_uintType, _deviceAddressFirstFaultPage);
+            ReportDeviceAddressFault(first, _module.ConstantBool(true));
+            var last = Load(_uintType, _deviceAddressFaultPage);
+            ReportDeviceAddressFault(last, _module.AddInstruction(SpirvOp.INotEqual, _boolType, last, first));
+        }
+
+        private void ReportDeviceAddressFault(uint page, uint report)
+        {
             var word = ShiftRightLogical(page, UInt(5));
             EmitConditional(
-                LogicalAnd(_module.AddInstruction(SpirvOp.INotEqual, _boolType, page, UInt(uint.MaxValue)), IsBlockWordInRange(_faultBuffer, word)),
+                LogicalAnd(report, LogicalAnd(_module.AddInstruction(SpirvOp.INotEqual, _boolType, page, UInt(uint.MaxValue)), IsBlockWordInRange(_faultBuffer, word))),
                 () => _module.AddInstruction(SpirvOp.AtomicOr, _uintType, BlockWordPointer(_faultBuffer, word), UInt(1), UInt(0),
                     ShiftLeftLogical(UInt(1), BitwiseAnd(page, UInt(31)))));
         }

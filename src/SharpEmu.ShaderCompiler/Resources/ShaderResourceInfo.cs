@@ -194,7 +194,8 @@ public sealed class ShaderResourceInfo
     // A call that reaches a callee the program does not hold marks it (CallMarks).
     public bool UsesCallMarks { get; set; }
 
-    // The program has shader calls and reads device addresses: it binds DescriptorBindingKind.DeviceAddressFallback.
+    // The program reads device addresses through the compact lowering (it has shader calls, or CompactMemoryAccessPolicy
+    // chose it): it binds DescriptorBindingKind.DeviceAddressFallback.
     public bool UsesDeviceAddressFallback { get; set; }
 
     public ShaderResourceInfo Clone() => new()

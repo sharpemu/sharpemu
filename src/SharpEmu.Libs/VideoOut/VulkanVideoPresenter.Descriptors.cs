@@ -833,6 +833,17 @@ internal static unsafe partial class VulkanVideoPresenter
                 _presenter.PollCallMarks();
             }
 
+            // Making the fallback records its address into the render thread's command buffer, before this dispatch.
+            if (layout.Find(DescriptorBindingKind.DeviceAddressFallback) is not null && !_bufferCache.HasDeviceAddressFallback)
+            {
+                if (_worker)
+                {
+                    throw Serial("device address fallback", resumable: true);
+                }
+
+                _ = _bufferCache.DeviceAddressFallbackBuffer;
+            }
+
             using var stallProfile = DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.Prepare, program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count);
             if (snapshot.Images.Length != info.Images.Count || snapshot.Samplers.Length != info.Samplers.Count || snapshot.Buffers.Length != info.Buffers.Count)
             {
@@ -1973,7 +1984,9 @@ internal static unsafe partial class VulkanVideoPresenter
                                     break;
                                 case DescriptorBindingKind.DeviceAddressFallback:
                                 {
-                                    var fallback = _bufferCache.DeviceAddressFallbackBuffer;
+                                    var fallback = _worker && !_bufferCache.HasDeviceAddressFallback
+                                        ? throw Serial("device address fallback", resumable: true)
+                                        : _bufferCache.DeviceAddressFallbackBuffer;
                                     bufferInfos[bufferIndex++] = new DescriptorBufferInfo { Buffer = fallback.Handle, Offset = 0, Range = fallback.Size };
                                     break;
                                 }

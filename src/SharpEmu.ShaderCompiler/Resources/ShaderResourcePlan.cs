@@ -221,7 +221,10 @@ public sealed class ShaderResourcePlan
         plan.CallRecords = tracked.CallRecords;
         if (program.Instructions.Any(instruction => instruction.Control is ShaderCallFaultControl))
             plan.Info.UsesDeviceAddresses = true;
-        if (plan.Info.UsesDeviceAddresses && Gen5ShaderCallLinker.IsLinked(program))
+        // A program with shader calls, or a compute program with many device-address dwords (CompactMemoryAccessPolicy),
+        // reads device addresses without branches; an access it does not make reads the host's fallback address.
+        if (plan.Info.UsesDeviceAddresses &&
+            (Gen5ShaderCallLinker.IsLinked(program) || CompactMemoryAccessPolicy.Prefers(plan, stage)))
             plan.Info.UsesDeviceAddressFallback = true;
         if (callMarks && program.Instructions.Any(static instruction => instruction.Control is ShaderCallFaultControl { ReturnPc: not null }))
             plan.Info.UsesCallMarks = true;

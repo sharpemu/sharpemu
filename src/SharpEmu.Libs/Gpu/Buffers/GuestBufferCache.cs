@@ -150,8 +150,11 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     public GpuBuffer BdaPageTableBuffer => _bdaPageTable;
 
-    // The address of a readable buffer, for programs with shader calls: their branchless device-address loads read there for
-    // an access they do not make and drop the value (DescriptorBindingKind.DeviceAddressFallback). Made at their first use.
+    // The address of a readable buffer, for programs with compact device-address access (shader calls, compute programs that
+    // CompactMemoryAccessPolicy selects): their branchless loads read there for an access they do not make and drop the value
+    // (DescriptorBindingKind.DeviceAddressFallback). Made at their first use, on the render thread: making it records fills.
+    public bool HasDeviceAddressFallback => Volatile.Read(ref _bdaFallbackAddress) is not null;
+
     public GpuBuffer DeviceAddressFallbackBuffer
     {
         get
@@ -160,10 +163,11 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             {
                 _bdaFallback = new GpuBuffer(_device, _scheduler, GpuBufferUsage.DeviceLocal, 0,
                     GpuBuffer.AllFlags | BufferUsageFlags.ShaderDeviceAddressBit, 256);
-                _bdaFallbackAddress = new GpuBuffer(_device, _scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, 16);
+                var fallbackAddress = new GpuBuffer(_device, _scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, 16);
                 var address = _bdaFallback.DeviceAddress;
-                _bdaFallbackAddress.Fill(0, sizeof(uint), (uint)address);
-                _bdaFallbackAddress.Fill(sizeof(uint), sizeof(uint), (uint)(address >> 32));
+                fallbackAddress.Fill(0, sizeof(uint), (uint)address);
+                fallbackAddress.Fill(sizeof(uint), sizeof(uint), (uint)(address >> 32));
+                Volatile.Write(ref _bdaFallbackAddress, fallbackAddress);
             }
 
             return _bdaFallbackAddress;
