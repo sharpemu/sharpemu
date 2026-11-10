@@ -6994,6 +6994,25 @@ public static partial class Gen5SpirvTranslator
                     goto GatherComplete;
                 }
 
+                if (GatherCompareLod &&
+                    instruction.Opcode == "ImageGather4CL" &&
+                    resource.Dimension == SpirvImageDim.Dim2D)
+                {
+                    // OpImageDrefGather has no level operand either; compare the four texels at the requested level.
+                    sampled = EmitGatherAtLevel(
+                        image,
+                        resource,
+                        imageObject,
+                        coordinates,
+                        LoadImageFloatAddress(
+                            image,
+                            addressCursor + (int)coordinateComponentCount),
+                        reference,
+                        resource.EmulatedCompareFunction);
+                    writeAllComponents = true;
+                    goto GatherComplete;
+                }
+
                 var operands = new List<uint>
                 {
                     imageObject,
@@ -7220,12 +7239,21 @@ public static partial class Gen5SpirvTranslator
 
         // The four texels a gather reads, (i, j+1), (i+1, j+1), (i+1, j) and (i, j), taken from one level of
         // detail. Each is sampled at its centre, so the sampler still applies its addressing and its level clamp.
+        // image_gather4_c_l gathers at its LOD instead of the base level (SHARPEMU_GATHER_COMPARE_LOD=0 reads the base level,
+        // for bisecting). A terrain occlusion test gathers its HiZ pyramid at the patch's footprint level; at the base
+        // level it tests a 2x2-texel corner of the footprint, so patches behind a thin occluder (a character's legs) drop out of the list.
+        private static readonly bool GatherCompareLod = Environment.GetEnvironmentVariable("SHARPEMU_GATHER_COMPARE_LOD") != "0";
+
+        // reference != 0: each texel is the depth comparison against it (in the sampler, or emulated when
+        // emulatedCompare >= 0), as image_gather4_c* returns.
         private uint EmitGatherAtLevel(
             Gen5ImageControl image,
             SpirvImageResource resource,
             uint sampledImage,
             uint coordinates,
-            uint lod)
+            uint lod,
+            uint reference = 0,
+            int emulatedCompare = -1)
         {
             var imageValue = _module.AddInstruction(
                 SpirvOp.Image,
@@ -7305,6 +7333,19 @@ public static partial class Gen5SpirvTranslator
                         layer);
                 }
 
+                if (reference != 0 && emulatedCompare < 0)
+                {
+                    values[index] = _module.AddInstruction(
+                        SpirvOp.ImageSampleDrefExplicitLod,
+                        _floatType,
+                        sampledImage,
+                        centre,
+                        reference,
+                        2u,
+                        levelFloat);
+                    continue;
+                }
+
                 var texel = _module.AddInstruction(
                     SpirvOp.ImageSampleExplicitLod,
                     resource.VectorType,
@@ -7317,6 +7358,10 @@ public static partial class Gen5SpirvTranslator
                     resource.ComponentType,
                     texel,
                     component);
+                if (reference != 0)
+                {
+                    values[index] = EmulatedDepthCompare(reference, values[index], emulatedCompare);
+                }
             }
 
             return _module.AddInstruction(
