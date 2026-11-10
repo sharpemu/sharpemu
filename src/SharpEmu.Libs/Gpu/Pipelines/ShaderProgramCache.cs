@@ -1437,7 +1437,6 @@ internal sealed class ShaderProgramCache
             (_host.SharedInt64AtomicsEnabled, _host.ExecGuardElisionEnabled, _host.ShaderSignedZeroInfNanPreserveFloat32Supported,
                 _host.ComputeWave64SubgroupNative, _host.ImageInt64AtomicsEnabled);
         var subgroup32 = _host.ComputeRunsOn32LaneSubgroups(current);
-        var tableBlocks = _host.TableBlocks;
         var usesBufferLengths = source.Registered.Frontend?.RequiresExplicitBufferLengths ?? false;
         var tessellationHull = options.TessellationHull;
         var usesTessellationData = options.Tessellation is not null || tessellationHull is not null;
@@ -1445,7 +1444,7 @@ internal sealed class ShaderProgramCache
         {
             var resources = ResourceMaterializer.ApplyTo(plan, specialization);
             var layout = AllocateLayout(program, plan, resources, userDataBase, userDataCount, pushDataCursor, info.DispatchThreadDimensions,
-                usesBufferLengths: usesBufferLengths, usesTessellationData: usesTessellationData, tableBlocks: tableBlocks);
+                usesBufferLengths: usesBufferLengths, usesTessellationData: usesTessellationData);
             var request = BuildComputeRequest(plan, resources, layout, info, systemRegisters, sharedInt64Atomics, execGuardElision,
                 signedZeroInfNanPreserve, wave64Native, subgroup32, imageInt64Atomics, tessellationHull);
             var translated = compiler.TryCompileProgram(request, out var compiled, out var error);
@@ -1453,6 +1452,10 @@ internal sealed class ShaderProgramCache
         }));
         throw new ShaderProgramPendingException();
     }
+
+    // Table blocks are for graphics stages: compute programs that read their buffers through them gave wrong results
+    // or stalled, so compute programs keep descriptor buffer bindings.
+    private bool UsesTableBlocks(ShaderStage stage) => _host.TableBlocks && stage is not (ShaderStage.Compute or ShaderStage.Mesh);
 
     private ProgramPermutation CompilePermutation(
         ShaderSource source,
@@ -1481,7 +1484,7 @@ internal sealed class ShaderProgramCache
                 resources = ResourceMaterializer.ApplyTo(plan, specialization);
                 layout = AllocateLayout(program, plan, resources, source.UserDataBase, (uint)source.UserData.Length, pushDataCursor,
                     source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions,
-                    usesMeshDrawParameters: source.Stage == ShaderStage.Mesh, tableBlocks: _host.TableBlocks && source.Stage != ShaderStage.Mesh,
+                    usesMeshDrawParameters: source.Stage == ShaderStage.Mesh, tableBlocks: UsesTableBlocks(source.Stage),
                     usesBufferLengths: source.Registered.Frontend?.RequiresExplicitBufferLengths ?? false,
                     usesTessellationData: options.Tessellation is not null || options.TessellationHull is not null);
             }
