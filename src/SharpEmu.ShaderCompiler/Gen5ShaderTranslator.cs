@@ -1834,7 +1834,10 @@ public static partial class Gen5ShaderTranslator
         out string error)
     {
         var segment = (word >> 14) & 0x3;
-        var opcode = ((word >> 18) & 0x7F) | ((word & 1) << 7);
+        // GFX10 FLAT has a 7-bit opcode in bits 18..24. Bit 0 belongs to the
+        // offset; unlike MIMG it is not an opcode bit, so an odd offset must not
+        // change the opcode.
+        var opcode = (word >> 18) & 0x7F;
         sizeDwords = 2;
         error = string.Empty;
         var prefix = segment switch
@@ -2912,7 +2915,8 @@ public static partial class Gen5ShaderTranslator
                     sourceVectorRegister,
                     destinationVectorRegister,
                     usesFlatAddress ? uint.MaxValue : scalarAddress,
-                    SignExtend(word & 0x1FFF, 13),
+                    // GFX10 FLAT offsets are 12-bit signed; bit 12 is DLC.
+                    SignExtend(word & 0xFFF, 12),
                     globallyCoherent,
                     ((word >> 17) & 1) != 0,
                     usesFlatAddress);
