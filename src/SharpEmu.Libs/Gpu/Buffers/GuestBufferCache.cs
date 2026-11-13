@@ -71,10 +71,6 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             cache._gpuModifiedGate.ExitWriteLock();
         }
     }
-    private const int ObtainMemoSlots = 4096;
-    private readonly ObtainMemo[] _obtainMemos = new ObtainMemo[ObtainMemoSlots];
-
-    private readonly record struct ObtainMemo(ulong Address, ulong Size, ResourceSlotIdentifier Identifier, ulong Offset, GpuBuffer? Buffer);
     private long _gpuModifiedVersion;
     private readonly GuestPageTracker _tracker;
     private readonly GuestWriteReservations _managedWrites;
@@ -346,19 +342,14 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         // Admission precedes all tracker/image/backing locks and lasts through GPU ownership publication.
         using var managedWriteClaim = isWritten ? _managedWrites.BeginGpuClaim(guestAddress, size) : default;
 
-        var memoSlot = -1;
-        if (!isWritten)
+        var memoSet = -1;
+        (GpuBuffer? Buffer, ulong Offset) remembered = default;
+        if (!isWritten && ObtainMemoUse != ObtainMemoMode.Off)
         {
-            memoSlot = (int)(((guestAddress >> 4) ^ (guestAddress >> 17) ^ (size * 0x9E3779B1UL)) & (ObtainMemoSlots - 1));
-            ref var memo = ref _obtainMemos[memoSlot];
-            if (memo.Buffer is { } kept && memo.Address == guestAddress && memo.Size == size &&
-                ReferenceEquals(_registry.TryGetRegisteredBuffer(memo.Identifier), kept) && kept.IsInBounds(guestAddress, size) &&
-                !_tracker.MayHaveCpuDirtyPages(guestAddress, size) &&
-                (!isTexelBuffer || !RequireImageCache().MayHaveImageBytes(guestAddress, size)))
+            memoSet = ObtainMemoSet(guestAddress, size);
+            if (TryServeObtainMemo(memoSet, guestAddress, size, isTexelBuffer, out remembered))
             {
-                TouchBuffer(memo.Identifier);
-                OverlayGuestPublications?.Invoke(kept, memo.Offset, guestAddress, size);
-                return (kept, memo.Offset);
+                return (remembered.Buffer!, remembered.Offset);
             }
         }
 
@@ -444,9 +435,9 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
         else OverlayGuestPublications?.Invoke(buffer, buffer.Offset(guestAddress), guestAddress, size);
 
-        if (memoSlot >= 0)
+        if (memoSet >= 0)
         {
-            _obtainMemos[memoSlot] = new ObtainMemo(guestAddress, size, bufferIdentifier, buffer.Offset(guestAddress), buffer);
+            RememberObtain(memoSet, guestAddress, size, bufferIdentifier, buffer, remembered);
         }
 
         return (buffer, buffer.Offset(guestAddress));

@@ -165,7 +165,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     public static string TakeFastPathReport() =>
         FormattableString.Invariant($"[PERF][FAST_PATHS] zero_group_skips={Interlocked.Exchange(ref Rendering.RenderExecutor.ZeroGroupSkips, 0)} shader_hash_memo={_identityMemoHits.Take()} ") +
-        FormattableString.Invariant($"stream_cleaned={Interlocked.Exchange(ref Buffers.GuestBufferCache.StreamCleaned, 0)} stream_uses={Interlocked.Exchange(ref Buffers.GuestBufferCache.StreamUses, 0)}");
+        FormattableString.Invariant($"stream_cleaned={Interlocked.Exchange(ref Buffers.GuestBufferCache.StreamCleaned, 0)} stream_uses={Interlocked.Exchange(ref Buffers.GuestBufferCache.StreamUses, 0)} ") +
+        Buffers.GuestBufferCache.TakeObtainMemoReport();
 
     private uint[]? InputSemantics(ShaderHeaderEntry header)
     {
