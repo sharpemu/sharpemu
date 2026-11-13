@@ -44,8 +44,23 @@ public static class BoundedFillDetector
         "BufferLoadFormatX", "BufferStoreFormatX", "SEndpgm",
     ];
 
-    public static BoundedCopy? DetectCopy(Gen5ShaderProgram program)
+    private const ulong DemonsSoulsPatternCopyShader = 0xEB7456322124ECC7UL;
+    private const uint PatternCopyGroupRegister = 12;
+    private const uint PatternCopyParameters = 8;
+
+    public static BoundedCopy? DetectCopy(Gen5ShaderProgram program, ulong hash = 0)
     {
+        if (hash == DemonsSoulsPatternCopyShader)
+        {
+            static FillWord UserWord(uint register) => new(FillWordSource.UserData, register, 0, 0);
+            return new BoundedCopy(
+                PatternCopyGroupRegister,
+                new FillWord(FillWordSource.BufferResource, PatternCopyParameters, 0, 0),
+                new FillWord(FillWordSource.BufferResource, PatternCopyParameters, 0, sizeof(uint)),
+                [.. Enumerable.Range(0, 4).Select(word => UserWord((uint)word))],
+                [.. Enumerable.Range(4, 4).Select(word => UserWord((uint)word))]);
+        }
+
         var instructions = ShaderOpcodePattern.Match(program.Instructions, ModuloCopyOpcodes, ignoreMarkers: true);
         if (instructions is null)
         {
