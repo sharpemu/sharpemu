@@ -22,7 +22,8 @@ internal static partial class VulkanVideoPresenter
         // The thread runs this far ahead of the render thread at most. Operand reads only drain the
         // queue when a queued write targets them, so the depth mostly costs memory; too shallow and the
         // two threads take turns waiting on each other (128 did, with draws resolving on the pool).
-        private const int MaxOutstanding = 1024;
+        private static readonly int MaxOutstanding =
+            int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_COMMAND_QUEUE_DEPTH"), out var depth) && depth >= 128 ? depth : 1024;
         private const int ShadowSweepCount = 64;
         private const int StorePageShift = 12;
 
