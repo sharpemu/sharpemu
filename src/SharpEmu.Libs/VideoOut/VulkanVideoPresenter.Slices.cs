@@ -829,7 +829,17 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (requests.NeedsBdaSweep && requests.BdaSpans is { } spans)
                 {
-                    _bufferCache.PrepareBda(spans, requests.BdaMapping);
+                    // A worker captured these spans before this thread ran the relay's mapping changes between items.
+                    // A guest munmap among them marks the buffers it covered CPU-dirty, and sweeping the captured spans
+                    // then reads memory that is gone. Sweep the spans current at the join.
+                    var mapping = requests.BdaMapping;
+                    if (GuestGpuMemoryHook.Current is { } memory)
+                    {
+                        spans = Recording.DeviceAddressSpans(memory);
+                        mapping = Recording.DeviceAddressSpanMapping;
+                    }
+
+                    _bufferCache.PrepareBda(spans, mapping);
                 }
                 else if (requests.NeedsBdaTouch && requests.BdaSpans is { } touched)
                 {

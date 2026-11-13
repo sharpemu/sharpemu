@@ -1393,7 +1393,9 @@ internal static unsafe partial class VulkanVideoPresenter
         private long _bdaSpanVersion = -1;
         private ulong _bdaSpanMapping;
 
-        private List<GuestSpan> DeviceAddressSpans(GuestGpuMemory memory)
+        internal ulong DeviceAddressSpanMapping => _bdaSpanMapping;
+
+        internal List<GuestSpan> DeviceAddressSpans(GuestGpuMemory memory)
         {
             var version = memory.SpanVersion;
             if (_bdaSpans is { } cached && ReferenceEquals(_bdaSpanMemory, memory) && _bdaSpanVersion == version)
