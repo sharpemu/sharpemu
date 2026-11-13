@@ -367,6 +367,31 @@ public sealed class PadExportsTests
         Assert.Equal(0xA5, result[1]);
     }
 
+    [NativeX64Fact]
+    public void UnknownZBsgF0q8DIM_WritesZeroForAnOpenHandle()
+    {
+        const ulong valueAddress = Base + 0x100;
+        Assert.True(_memory.TryWrite(valueAddress, new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xA5 }));
+        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rsi] = valueAddress;
+
+        Assert.Equal(0, PadExports.PadUnknownZBsgF0q8DIM(_ctx));
+        Span<byte> value = stackalloc byte[5];
+        Assert.True(_memory.TryRead(valueAddress, value));
+        Assert.Equal(new byte[] { 0, 0, 0, 0, 0xA5 }, value.ToArray());
+    }
+
+    [NativeX64Theory]
+    [InlineData(2, Base + 0x100, InvalidHandle)]
+    [InlineData(1, 0ul, unchecked((int)0x80920001))]
+    [InlineData(1, Base + 0x1000, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT)]
+    public void UnknownZBsgF0q8DIM_RejectsUnknownHandlesAndInvalidOutput(int handle, ulong address, int expected)
+    {
+        _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
+        _ctx[CpuRegister.Rsi] = address;
+        Assert.Equal(expected, PadExports.PadUnknownZBsgF0q8DIM(_ctx));
+    }
+
     [NativeX64Theory]
     [InlineData(0ul, unchecked((int)0x80920001))]
     [InlineData(Base + 0x1000, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT)]
