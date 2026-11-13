@@ -416,6 +416,11 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             buffer.NoteGpuWrite(buffer.Offset(guestAddress), size);
             if (Diagnostics.DccWriterTrace.Enabled)
             {
+                if (traceShaderHash != 0)
+                {
+                    Diagnostics.DccWriterTrace.CurrentProgram = traceShaderHash;
+                }
+
                 Diagnostics.DccWriterTrace.Record(RequireImageCache(), guestAddress, size);
                 Diagnostics.DccWriterTrace.RecordWrite(guestAddress, size);
             }
