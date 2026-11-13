@@ -450,6 +450,29 @@ public sealed class PendingGpuWrites
         }
     }
 
+    public PendingWriteKind? KindBetween(ulong address, ulong size, long afterSequence, long beforeSequence)
+    {
+        _gate.EnterReadLock();
+        try
+        {
+            foreach (var entry in _entries.Values)
+            {
+                if (Volatile.Read(ref entry.Sequence) > afterSequence && Volatile.Read(ref entry.Oldest) < beforeSequence &&
+                    entry.Address < address + size && address < entry.Address + entry.Size &&
+                    entry.HasBetween(afterSequence, beforeSequence))
+                {
+                    return entry.Kind;
+                }
+            }
+
+            return null;
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
     public bool TryGetPending(ulong address, ulong size, out long sequence)
     {
         sequence = 0;
