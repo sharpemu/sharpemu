@@ -235,9 +235,11 @@ internal static partial class VulkanVideoPresenter
         internal const int ProducerRunWait = 4;
         private volatile int _producerState;
 
-        public void PostWrite(ulong address, ReadOnlySpan<byte> data, bool kernel = false)
+        public void PostWrite(ulong address, ReadOnlySpan<byte> data, bool kernel = false) => PostOwnedWrite(address, data.ToArray(), kernel);
+
+        public void PostOwnedWrite(ulong address, byte[] data, bool kernel)
         {
-            var item = new Item { Kind = Kind.Write, Address = address, Data = data.ToArray(), Kernel = kernel };
+            var item = new Item { Kind = Kind.Write, Address = address, Data = data, Kernel = kernel };
             lock (_writeLock)
             {
                 _pendingWrites.Enqueue(item);
