@@ -7,7 +7,7 @@ namespace SharpEmu.ShaderCompiler;
 public static class Gen5TessellationData
 {
     public const uint DwordCount = 22;
-    public const uint FirstPatch = 0, PatchCount = 1, VertexOffset = 2, InstanceId = 3;
+    public const uint FirstPatch = 0, PatchCount = 1, VertexOffset = 2;
     public const uint IndexAddress = 4, IndexSize = 6;
     public const uint FactorAddress = 7, FactorBytes = 9;
     public const uint OffchipOffset = 10, FactorOffset = 11;

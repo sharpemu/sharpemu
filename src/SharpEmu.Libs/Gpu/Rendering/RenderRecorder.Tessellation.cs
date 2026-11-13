@@ -21,7 +21,6 @@ internal sealed partial class RenderRecorder
         var draw = record.Draw;
         var count = draw.Count;
         var instances = draw.InstanceCount;
-        var firstInstance = draw.FirstInstance;
         var indexAddress = record.TessellationIndexAddress;
         var indexSize = record.TessellationIndexSize;
         var vertexOffset = record.TessellationVertexOffset;
@@ -83,7 +82,6 @@ internal sealed partial class RenderRecorder
                 data[Gen5TessellationData.FirstPatch] = firstPatch;
                 data[Gen5TessellationData.PatchCount] = batchPatches;
                 data[Gen5TessellationData.VertexOffset] = unchecked((uint)vertexOffset);
-                data[Gen5TessellationData.InstanceId] = firstInstance;
                 data[Gen5TessellationData.PatchesPerInstance] = patches;
                 data[Gen5TessellationData.IndexSize] = indexSize;
                 data[Gen5TessellationData.FactorBytes] = batchPatches * patchFactorBytes;
