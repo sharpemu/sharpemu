@@ -38,6 +38,7 @@ internal enum KernelWriteRefusal
     PendingWrite,
     Image,
     Metadata,
+    Input,
     Count,
 }
 

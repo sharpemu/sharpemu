@@ -37,6 +37,10 @@ internal sealed partial class ShaderPipelineCache
     internal static readonly ThreadCounter KernelWritesToCpu = new();
     internal static readonly ThreadCounter KernelWritesOverGpu = new();
     internal static readonly ThreadCounter KernelWriteBytesOverGpu = new();
+    private static readonly ThreadCounter _wordCopiesPosted = new();
+    private static readonly ThreadCounter _wordCopyBytesPosted = new();
+    private static readonly ThreadCounter[] _wordCopyRefusals = NewCounters((int)KernelWriteRefusal.Count);
+    private static readonly ThreadCounter[] _wordCopyInputs = NewCounters(6);
     private static readonly ThreadCounter[] _kernelMemoLookups = NewCounters(4);
     private static long _kernelMemoBytes;
     private static readonly ConditionalWeakTable<Gen5ShaderProgram, KernelDemand> _kernelDemands = new();
@@ -67,7 +71,39 @@ internal sealed partial class ShaderPipelineCache
                FormattableString.Invariant($" ineligible={_kernelsIneligible.Take()} lane_ops={_kernelLaneOperations.Take()} ") +
                FormattableString.Invariant($"probe_runs={_kernelProbeRuns.Take()} eval_ms={milliseconds:F2}") +
                FormattableString.Invariant($" demand=read:{_kernelPredictionsRead.Take()},muted:{_kernelProgramsMuted.Take()},") +
-               FormattableString.Invariant($"unmuted:{_kernelProgramsUnmuted.Take()},muted_skips:{_kernelMutedSkips.Take()},rechecks:{_kernelMutedRechecks.Take()}");
+               FormattableString.Invariant($"unmuted:{_kernelProgramsUnmuted.Take()},muted_skips:{_kernelMutedSkips.Take()},rechecks:{_kernelMutedRechecks.Take()}") +
+               FormattableString.Invariant($" word_copies=posted:{_wordCopiesPosted.Take()},bytes:{_wordCopyBytesPosted.Take()},refused:") + TakeRefusals(_wordCopyRefusals) +
+               FormattableString.Invariant($" input=publication:{_wordCopyInputs[0].Take()},unmapped:{_wordCopyInputs[1].Take()},range:{_wordCopyInputs[2].Take()},") +
+               FormattableString.Invariant($"pending:{_wordCopyInputs[3].Take()},gpu_dirty:{_wordCopyInputs[4].Take()},other:{_wordCopyInputs[5].Take()}");
+    }
+
+    internal static void NoteWordCopyInput(int reason) => _wordCopyInputs[reason].Increment();
+
+    internal static void NoteWordCopy(KernelWriteRefusal refusal, ulong bytes)
+    {
+        if (refusal != KernelWriteRefusal.None)
+        {
+            _wordCopyRefusals[(int)refusal].Increment();
+            return;
+        }
+
+        _wordCopiesPosted.Increment();
+        _wordCopyBytesPosted.Add((long)bytes);
+    }
+
+    private static string TakeRefusals(ThreadCounter[] counters)
+    {
+        var reasons = new List<string>();
+        for (var index = 1; index < counters.Length; index++)
+        {
+            var count = counters[index].Take();
+            if (count != 0)
+            {
+                reasons.Add(FormattableString.Invariant($"{(KernelWriteRefusal)index}:{count}"));
+            }
+        }
+
+        return reasons.Count == 0 ? "none" : string.Join(",", reasons);
     }
 
     private static string TakeConsumeRefusals()
