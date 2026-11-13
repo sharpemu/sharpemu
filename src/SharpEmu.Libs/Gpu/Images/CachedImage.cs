@@ -551,12 +551,23 @@ public sealed unsafe partial class CachedImage : IDisposable
 
     public ulong AccountedSize => Backing.Exists ? (Description.HeldGuestSize + 1023) & ~1023UL : 0;
 
+    // The leading bytes of Description.Data the image's levels read from guest memory. An image of a
+    // streamed texture's resident levels reads only the part that holds them; the unmapped rest of
+    // its range is not read or hashed. Set by the upload that stages that part.
+    internal ulong GuestReadSize
+    {
+        get => _guestReadSize != 0 ? Math.Min(_guestReadSize, Description.Data.Size) : Description.Data.Size;
+        set => _guestReadSize = value;
+    }
+
+    private ulong _guestReadSize;
+
     // Hashes the first and last partial tracker page of the guest data through the backing alias.
     public ulong HashGuestEdges()
     {
         const ulong pageMask = TrackerLayout.PageBytes - 1;
         var range = Description.Data;
-        var end = range.End;
+        var end = range.Address + GuestReadSize;
         var headEnd = Math.Min(end, (range.Address + pageMask) & ~pageMask);
         var tailBegin = Math.Max(range.Address, end & ~pageMask);
         var headSize = headEnd - range.Address;

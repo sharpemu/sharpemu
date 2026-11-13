@@ -50,6 +50,31 @@ public sealed unsafe partial class GuestImageCache
         return size;
     }
 
+    // The leading bytes of the image's guest range its levels read. A streamed texture's image holds
+    // only the levels from FirstLevel, and a tiled chain lays those at the start of the range with
+    // level 0 last, so the mapped prefix is all the upload needs: it neither reads nor invents the
+    // rest. Every other image reads its whole range.
+    private static ulong GuestReadSize(in ImageDescription info, ColorTransferPlan plan)
+    {
+        if (info.FirstLevel == 0 || !plan.Valid || !plan.Tiled || plan.Tiles.Count == 0)
+        {
+            return info.Data.Size;
+        }
+
+        ulong end = 0;
+        foreach (var tile in plan.Tiles)
+        {
+            end = Math.Max(end, tile.TiledOffset + tile.TiledSize);
+        }
+
+        return Math.Min(end, info.Data.Size);
+    }
+
+    private static ulong GuestReadSize(CachedImage image, in ImageRequest request) =>
+        image.Description.FirstLevel == 0 || request.Role == ImageRole.DepthTarget || image.DepthOwner.IsValid
+            ? image.Description.Data.Size
+            : GuestReadSize(image.Description, PlanColorTransfer(image, request.Role, TransferDirection.Upload));
+
     private static ColorTransferPlan PlanColorTransfer(CachedImage image, ImageRole role, TransferDirection direction)
     {
         ref readonly var info = ref image.Description;
@@ -428,10 +453,11 @@ public sealed unsafe partial class GuestImageCache
                 if (plan.Tiled) plan.Tiles.RemoveRange(0, checked((int)firstLayer));
             }
 
-            var linear = new TilerBufferSpan(source.Handle, sourceOffset, info.Data.Size);
+            var readSize = GuestReadSize(info, plan);
+            var linear = new TilerBufferSpan(source.Handle, sourceOffset, readSize);
             if (plan.Tiled)
             {
-                linear = _tiler.Detile(source.Handle, sourceOffset, info.Data.Size, plan.LinearSize, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(plan.Tiles));
+                linear = _tiler.Detile(source.Handle, sourceOffset, readSize, plan.LinearSize, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(plan.Tiles));
             }
 
             if (plan.SwapBgra16)
@@ -551,7 +577,9 @@ public sealed unsafe partial class GuestImageCache
                     : null;
                 var pieceHashes = piecePlan != null ? HashGuestPieces(image.Description.Data, piecePlan.Tiles) : null;
                 var backingBytes = SnapshotVolumeBacking(image);
-                var (source, sourceOffset) = _bufferCache.ObtainBufferForImage(image.Description.Data.Address, image.Description.Data.Size);
+                var readSize = GuestReadSize(image, request);
+                image.GuestReadSize = readSize;
+                var (source, sourceOffset) = _bufferCache.ObtainBufferForImage(image.Description.Data.Address, readSize);
                 sourceFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 UploadFromBuffer(image, request, source, sourceOffset, backingBytes, firstLayer);
                 image.SetGuestPieceHashes(pieceHashes);
