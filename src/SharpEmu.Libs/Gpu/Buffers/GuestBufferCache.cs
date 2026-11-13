@@ -2629,7 +2629,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
 
         CompleteGuestPublications?.Invoke(guestAddress, size, PublicationAccess.Write);
-        if (RequireImageCache().MayHaveImageBytes(guestAddress, size))
+        if (RequireImageCache().MayHaveImageBytes(guestAddress, size) && RequireImageCache().QueryRegion(guestAddress, size).ImageBytes)
         {
             return false;
         }
