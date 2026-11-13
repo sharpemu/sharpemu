@@ -4488,6 +4488,13 @@ public static partial class Gen5SpirvTranslator
             {
                 value = _module.AddInstruction(SpirvOp.Not, _ulongType, left);
             }
+            else if (instruction.Opcode == "SBrevB64")
+            {
+                // Vulkan limits OpBitReverse to 32-bit operands: reverse each half and swap them.
+                var low = _module.AddInstruction(SpirvOp.BitReverse, _uintType, Narrow(ShiftRightLogical64(left, ULong(32))));
+                var high = _module.AddInstruction(SpirvOp.BitReverse, _uintType, Narrow(left));
+                value = _module.AddInstruction(SpirvOp.BitwiseOr, _ulongType, Widen(low), ShiftLeftLogical64(Widen(high), ULong(32)));
+            }
             else
             {
                 if (instruction.Sources.Count < 2)

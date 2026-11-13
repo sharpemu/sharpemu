@@ -204,7 +204,7 @@ public static class Gen5WaveLaneLocalAnalysis
 
     private static readonly HashSet<string> ScalarDestination64Opcodes = new(StringComparer.Ordinal)
     {
-        "SMovB64", "SNotB64", "SWqmB64", "SQuadmaskB64", "SBitreplicateB64B32", "SGetpcB64",
+        "SMovB64", "SNotB64", "SWqmB64", "SBrevB64", "SQuadmaskB64", "SBitreplicateB64B32", "SGetpcB64",
         "SAndB64", "SAndn2B64", "SOrB64", "SOrn2B64", "SXorB64", "SNandB64", "SNorB64", "SXnorB64",
         "SLshlB64", "SLshrB64", "SAshrI64", "SBfeU64", "SBfeI64", "SBfmB64", "SCselectB64",
         "SBitset0B64", "SBitset1B64",
@@ -223,7 +223,7 @@ public static class Gen5WaveLaneLocalAnalysis
 
     private static readonly HashSet<string> SccKeepers = new(StringComparer.Ordinal)
     {
-        "SMovB32", "SMovB64", "SMovkI32", "SCselectB32", "SCselectB64", "SBrevB32", "SFF1I32B32", "SFF1I32B64",
+        "SMovB32", "SMovB64", "SMovkI32", "SCselectB32", "SCselectB64", "SBrevB32", "SBrevB64", "SFF1I32B32", "SFF1I32B64",
         "SFlbitI32B32", "SFlbitI32B64", "SBitset0B32", "SBitset1B32", "SBitset0B64", "SBitset1B64",
         "SMulI32", "SMulHiU32", "SMulHiI32", "SMulkI32", "SBfmB32", "SBfmB64",
         "SPackLlB32B16", "SPackLhB32B16", "SPackHhB32B16", "SGetpcB64",

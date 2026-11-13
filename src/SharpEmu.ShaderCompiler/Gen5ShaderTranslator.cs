@@ -731,6 +731,7 @@ public static partial class Gen5ShaderTranslator
             0x09 => "SWqmB32",
             0x0A => "SWqmB64",
             0x0B => "SBrevB32",
+            0x0C => "SBrevB64",
             0x0F => "SBcnt1I32B32",
             0x10 => "SBcnt1I32B64",
             0x13 => "SFF1I32B32",

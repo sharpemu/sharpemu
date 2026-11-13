@@ -3,6 +3,8 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Xunit;
 using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
@@ -64,6 +66,41 @@ public sealed class Gen5ScalarAddImmediateTests
         Assert.Equal(Count(moved, SpirvOp.INotEqual), Count(reversed, SpirvOp.INotEqual));
     }
 
+    // s_brev_b64 reverses all 64 bits: each half is reversed and the halves change places.
+    // Shaders build a 64-bit constant with it from a 32-bit literal.
+    [Fact]
+    public void BitReverse64SwapsTheReversedHalvesAndLeavesSccAlone()
+    {
+        const uint literal = 0x0A000000;
+        var instruction = DecodeProgram(0xBE840CFF, literal, SEndpgm).Instructions[0];
+        Assert.Equal("SBrevB64", instruction.Opcode);
+        Assert.Equal(2u, instruction.DestinationWidth);
+        Assert.Equal(4u, instruction.Destinations[0].Value);
+        var reversed = CompiledOpcodes(0xBE840CFF, literal);
+        var moved = CompiledOpcodes(0xBE8404FF, literal);
+        Assert.Equal(2, Count(reversed, SpirvOp.BitReverse));
+        Assert.Equal(Count(moved, SpirvOp.Store), Count(reversed, SpirvOp.Store));
+        Assert.Equal(Count(moved, SpirvOp.INotEqual), Count(reversed, SpirvOp.INotEqual));
+    }
+
+    [Fact]
+    public void BitReverse64OfALiteralIsAKnownAddressForTheResourcePlan()
+    {
+        // brev64(0x0000_0000_0400_0000) = 0x0000_0020_0000_0000: the table the loads go through.
+        const ulong table = 0x20_0000_0000;
+        var memory = new TestWordMemory { Base = table, Words = new uint[16] };
+        memory.At(table) = 0x6000;
+        memory.At(table + 8) = 128;
+        var program = Program(
+            Sop1(0, "SBrevB64", 10, Operand(0x04000000)),
+            ScalarLoad(8, 10, 16, 4), BufferLoad(16, 16), EndProgram(24));
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 8, 2, waveSize: 64);
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(new uint[2], memory.Read), ref snapshot, ref specialization));
+        Assert.Equal(0x6000u, snapshot.Buffers[0][0]);
+    }
+
     private static int Count(IReadOnlyList<ushort> opcodes, SpirvOp opcode)
     {
         var total = 0;
@@ -78,9 +115,9 @@ public sealed class Gen5ScalarAddImmediateTests
         return total;
     }
 
-    private static IReadOnlyList<ushort> CompiledOpcodes(uint word)
+    private static IReadOnlyList<ushort> CompiledOpcodes(params uint[] words)
     {
-        var request = Request(DecodeProgram(word, SEndpgm), userDataCount: 0);
+        var request = Request(DecodeProgram([.. words, SEndpgm]), userDataCount: 0);
         Assert.True(
             Gen5SpirvTranslator.TryCompileProgram(request, out var compiled, out var error),
             error);
