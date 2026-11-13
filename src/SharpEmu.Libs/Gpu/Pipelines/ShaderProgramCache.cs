@@ -1484,8 +1484,10 @@ internal sealed partial class ShaderProgramCache
         var program = Decode(source);
         if (options.TessellationHull is not null && source.Registered.Frontend is null)
         {
-            program = Gen5TessellationLowering.PrepareMergedHull(program,
-                checked(source.UserDataBase + (uint)source.UserData.Length - 2));
+            program = program.FusedContinuationPc is null
+                ? Gen5TessellationLowering.PrepareCombinedHull(program)
+                : Gen5TessellationLowering.PrepareMergedHull(program,
+                    checked(source.UserDataBase + (uint)source.UserData.Length - 2));
         }
 
         var dumpPlanning = CompiledShaderDump.ShouldWrite(source.Address, source.Hash);

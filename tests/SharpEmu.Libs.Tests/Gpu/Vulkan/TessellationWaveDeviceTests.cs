@@ -55,6 +55,50 @@ public sealed class TessellationWaveDeviceTests(HeadlessVulkanFixture fixture) :
         harness.AssertNoValidationMessages();
     }
 
+    // Every hull lane reads the LDS word a wave 0 local lane wrote, and every local lane
+    // keeps the v13 its local half left. With two input and four output control points on
+    // 32 patches the 64 local lanes fill wave 0, so wave 1 skips the local half and meets
+    // wave 0 at the barrier. Four of each on 63 patches is a shape real hull shaders use.
+    [Theory]
+    [InlineData(2u, 32u)]
+    [InlineData(4u, 63u)]
+    public void CombinedHull_HullHalfReadsLocalWritesAcrossWavesAndRegistersTheLocalHalfLeft(uint inputPoints, uint patches)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var entry = SharpEmu.ShaderCompiler.Tests.Gen5TessellationTests.CombinedHullEntry;
+        var program = Gen5TessellationLowering.PrepareCombinedHull(
+            SharpEmu.ShaderCompiler.Tests.DecodeHarness.Decode(SharpEmu.ShaderCompiler.Tests.Gen5TessellationTests.CombinedHullWords));
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 8, 8, waveSize: 64);
+        var resources = ResourceMaterializer.ApplyTo(plan, ResourceSpecialization.Default(plan.Info));
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(program, 8, 8),
+            false, false, false, usesTessellationData: true);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = (patches * 4 + 63) & ~63u, WaveSize = 64, CooperativeWave64Workgroup = true, LocalDataShareDwords = 256,
+            TessellationHull = new(inputPoints, 4, patches, entry + 4),
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        SharpEmu.ShaderCompiler.Tests.Gen5MipStatisticsTests.ValidateWhenAvailable(shader.Spirv);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var buffer = runner.CreateBuffer(2048);
+        var scalar = new uint[16]; scalar[10] = 2048;
+        var data = new uint[Gen5TessellationData.DwordCount];
+        data[Gen5TessellationData.PatchCount] = patches;
+        data[Gen5TessellationData.VertexOffset] = 11;
+        harness.Run(() => runner.Dispatch(scalar,
+            new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [buffer] }, 1,
+            tessellationData: data));
+        var bytes = runner.ReadBack(buffer, 0, 2048);
+        for (var lane = 0; lane < patches * 4; lane++)
+        {
+            Assert.Equal((uint)(lane & 63) + 11, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(lane * 8)));
+            if (lane < patches * inputPoints) Assert.Equal(37u, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(lane * 8 + 4)));
+        }
+        harness.AssertNoValidationMessages();
+    }
+
     [Theory]
     [InlineData(128u)]
     [InlineData(256u)]

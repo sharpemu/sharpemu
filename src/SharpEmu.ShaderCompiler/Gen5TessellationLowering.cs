@@ -59,4 +59,53 @@ public static class Gen5TessellationLowering
         }
         return new(program.Address, instructions) { FusedContinuationPc = checked(continuation + 8) };
     }
+
+    // A complete hull binary (AGC shader type HS) holds both halves in one code object,
+    // with no jump between two code objects to mark the boundary. The local half runs for
+    // the lanes below the low byte of the wave counts; the hull half then re-opens every
+    // lane and keeps those below the second byte. That re-open is the hull entry.
+    public static bool TryFindCombinedHullEntry(Gen5ShaderProgram program, out uint hullEntryPc)
+    {
+        hullEntryPc = 0;
+        if (program.TessellationRegisters.HullWaveCountScalar is not { } counts) return false;
+        var instructions = program.Instructions;
+        var gate = 0;
+        while (gate < instructions.Count && !(instructions[gate].Opcode.StartsWith("VCmpx", StringComparison.Ordinal) &&
+            instructions[gate].Control is Gen5SdwaControl { Source1Select: 1 } &&
+            instructions[gate].Sources.Contains(Gen5Operand.Scalar(counts)))) gate++;
+        if (gate == instructions.Count) return false;
+        for (var index = gate - 1; index >= 0 && !Ir.Gen5IrBranchResolver.Instance.IsBranch(instructions[index]); index--)
+        {
+            var instruction = instructions[index];
+            if (instruction.Opcode != "SMovB64" || instruction.Destinations.Count != 1 || instruction.Sources.Count != 1 ||
+                instruction.Destinations[0] != Gen5Operand.Scalar(126) || instruction.Sources[0] != Gen5Operand.Source(193)) continue;
+            hullEntryPc = instruction.Pc;
+            return true;
+        }
+        return false;
+    }
+
+    // Both halves of a complete hull binary share one set of user scalars, and the hull
+    // half may read registers the local half left. It needs only the barrier that
+    // publishes the local half's writes; the local half's skip lands on that barrier.
+    public static Gen5ShaderProgram PrepareCombinedHull(Gen5ShaderProgram program)
+    {
+        if (!TryFindCombinedHullEntry(program, out var entry))
+            throw new ArgumentException("A combined hull shader requires its local and hull wave-count gates.", nameof(program));
+        var instructions = new List<Gen5ShaderInstruction>(program.Instructions.Count + 1);
+        foreach (var instruction in program.Instructions)
+        {
+            if (Ir.Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target) &&
+                target != entry && (instruction.Pc < entry) != (target < entry))
+                throw new NotSupportedException("A branch crosses the combined hull entry.");
+            if (instruction.Pc == entry)
+                instructions.Add(new(entry, Gen5ShaderEncoding.Sopp, "SBarrier", [0u], [], [], null));
+            instructions.Add(instruction.Pc < entry ? instruction : instruction with
+            {
+                Pc = checked(instruction.Pc + 4),
+                AddressOffset = instruction.ProgramOffset,
+            });
+        }
+        return new(program.Address, instructions);
+    }
 }
