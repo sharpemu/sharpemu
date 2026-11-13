@@ -32,17 +32,19 @@ internal interface IKernelWriteStream
 // as well, so they need no download.
 internal static class KernelWritePolicy
 {
+    public static KernelWriteRefusal Check(IKernelWriteStream stream, ulong address, ulong size) =>
+        !stream.OnStreamThread ? KernelWriteRefusal.Thread
+        : stream.InCrossQueueOrderWindow ? KernelWriteRefusal.CrossQueue
+        : stream.HasPendingPublication(address, size) ? KernelWriteRefusal.Publication
+        : stream.HasPendingRange(address, size) ? KernelWriteRefusal.PendingRange
+        : stream.HasPendingGpuWrite(address, size) ? KernelWriteRefusal.PendingWrite
+        : stream.HasImageBytes(address, size) ? KernelWriteRefusal.Image
+        : stream.HasSurfaceMetadata(address, size) ? KernelWriteRefusal.Metadata
+        : KernelWriteRefusal.None;
+
     public static KernelWriteRefusal TryPost(IKernelWriteStream stream, ulong address, ReadOnlySpan<uint> words)
     {
-        var size = (ulong)words.Length * sizeof(uint);
-        var refusal = !stream.OnStreamThread ? KernelWriteRefusal.Thread
-            : stream.InCrossQueueOrderWindow ? KernelWriteRefusal.CrossQueue
-            : stream.HasPendingPublication(address, size) ? KernelWriteRefusal.Publication
-            : stream.HasPendingRange(address, size) ? KernelWriteRefusal.PendingRange
-            : stream.HasPendingGpuWrite(address, size) ? KernelWriteRefusal.PendingWrite
-            : stream.HasImageBytes(address, size) ? KernelWriteRefusal.Image
-            : stream.HasSurfaceMetadata(address, size) ? KernelWriteRefusal.Metadata
-            : KernelWriteRefusal.None;
+        var refusal = Check(stream, address, (ulong)words.Length * sizeof(uint));
         if (refusal == KernelWriteRefusal.None)
         {
             stream.PostWrite(address, MemoryMarshal.AsBytes(words));
