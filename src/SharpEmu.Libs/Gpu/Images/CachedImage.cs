@@ -141,7 +141,7 @@ public sealed unsafe partial class CachedImage : IDisposable
 
         Backing.Format = Description.PixelFormat;
         Backing.ImageType = HostImageType(Description.Type);
-        Backing.Extent = Description.Extent;
+        Backing.Extent = Description.HostExtent;
         Backing.GuestPitch = Description.Pitch;
         Backing.Layers = Description.IsVolume ? 1 : Description.Resources.Layers;
         Backing.MipLevels = Math.Min(Description.Resources.Levels, MipChainLevels(Backing.ImageType, Backing.Extent));
@@ -549,7 +549,7 @@ public sealed unsafe partial class CachedImage : IDisposable
 
     public bool IsWatched => WatchBegin != 0 && WatchEnd != 0;
 
-    public ulong AccountedSize => Backing.Exists ? (Description.Data.Size + 1023) & ~1023UL : 0;
+    public ulong AccountedSize => Backing.Exists ? (Description.HeldGuestSize + 1023) & ~1023UL : 0;
 
     // Hashes the first and last partial tracker page of the guest data through the backing alias.
     public ulong HashGuestEdges()

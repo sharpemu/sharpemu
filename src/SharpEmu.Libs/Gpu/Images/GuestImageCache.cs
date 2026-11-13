@@ -255,6 +255,11 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                     $"cpuDirty={cached.IsCpuDirty} bufferDirty={cached.IsBufferModified} gpuDirty={cached.IsGpuModified} target={cached.Uses.RenderTarget}");
             }
         }
+        if (request.Description.FirstLevel != 0 && HoldsWholeChain(request, candidates))
+        {
+            request = ImageRequestBuilders.WithWholeMipChain(request);
+        }
+
         foreach (var imageIdentifier in candidates)
         {
             if (HasSameBacking(_slots[imageIdentifier].Description, request.Description, exactFormat))
@@ -291,7 +296,10 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             {
                 result = ResourceSlotIdentifier.Invalid;
             }
-            else if (resolved.Description.Resources < request.Description.Resources)
+            else if (resolved.Description.Resources < request.Description.Resources ||
+                     resolved.Description.FirstLevel > request.Description.FirstLevel ||
+                     resolved.Description.FirstLevel + resolved.Description.Resources.Levels <
+                     request.Description.FirstLevel + request.Description.Resources.Levels)
             {
                 ReleaseImage(result);
                 result = ResourceSlotIdentifier.Invalid;
@@ -387,6 +395,12 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         {
             request.View = request.View with { BaseLevel = (uint)viewMip };
         }
+        else
+        {
+            // The image starts at an earlier guest level than the request (a texture of a streamed
+            // chain's resident levels found the whole chain): its view starts that many levels later.
+            request.View = ImageRequestBuilders.RebaseView(request.View, request.Description.FirstLevel - image.Description.FirstLevel);
+        }
 
         if (viewLayer >= 0)
         {
@@ -402,6 +416,29 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
         TraceVolumeState("lookup", image, request);
         return result;
+    }
+
+    // A texture of a chain's resident levels is the whole chain once that memory is all mapped
+    // (a fully loaded or rendered chain sampled from a lower mip), and whenever an image over its
+    // range holds GPU-written contents the guest memory does not show: the request then shares
+    // that image instead of reading guest memory into a separate one.
+    private bool HoldsWholeChain(in ImageRequest request, in ImageQueryResults candidates)
+    {
+        var range = request.Description.Data;
+        if (_backing.IsBackedRange(range.Address, range.Size))
+        {
+            return true;
+        }
+
+        foreach (var candidate in candidates)
+        {
+            if (_slots.TryGet(candidate) is { } image && (image.IsGpuModified || image.Uses.RenderTarget || image.Uses.Storage))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Uploads guest changes of an image that was found earlier.

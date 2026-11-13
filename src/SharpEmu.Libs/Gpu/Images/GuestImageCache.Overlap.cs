@@ -468,6 +468,21 @@ public sealed partial class GuestImageCache
         // in it is past the removal window in between. As in collection, an image used this frame is not stale.
         var usedThisFrame = cached.Registered && _recencyQueue.GetLastUseTick(cached.RecencyEntryIndex) >= _collectionTick;
         var safeToDelete = !usedThisFrame && currentTick - Math.Min(currentTick, cached.LastAccessTick) > TicksBeforeRemoval;
+        if (requested.FirstLevel != 0 || cachedInfo.FirstLevel != 0)
+        {
+            // An image of a streamed chain's resident levels shares only an identical chain (the
+            // same-backing match). It is a copy of guest memory that a lookup recreates cheaply, so
+            // another resource over its range replaces it; a request for resident levels over
+            // another image is a separate texture (the lookup took the whole chain when that image
+            // holds GPU contents).
+            if (cachedInfo.FirstLevel != 0 && !cached.IsGpuModified)
+            {
+                cached.Binding.NeedsRebind |= cached.Binding.IsBound || cached.Binding.IsTarget;
+                ReleaseImage(cachedImageIdentifier);
+            }
+
+            return new OverlapResolution(mergedImageIdentifier);
+        }
         var requestedBlock = requested.BytesPerBlock * requested.Samples;
         var cachedBlock = cachedInfo.BytesPerBlock * cachedInfo.Samples;
         var requestedBlockExtent = requested.BlockExtent;
