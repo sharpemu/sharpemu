@@ -1871,6 +1871,11 @@ public sealed partial class DirectExecutionBackend
 		var expectedPlayGoChunkEnumerationEnd =
 			string.Equals(nid, "uWIYLFkkwqk", StringComparison.Ordinal) &&
 			resultValue == unchecked((int)0x80B2000C);
+		// sceSaveDataConvert reports a save directory that is missing or already in the current format; titles
+		// then mount it as usual.
+		var expectedSaveDataNoConversion =
+			string.Equals(nid, "2mfSRGdshtk", StringComparison.Ordinal) &&
+			(resultValue == unchecked((int)0x809F0008) || resultValue == unchecked((int)0x809F001E));
 		if (!expectedFileProbeMiss &&
 			!expectedTimedWaitTimeout &&
 			!expectedEqueueTimeout &&
@@ -1883,7 +1888,8 @@ public sealed partial class DirectExecutionBackend
 			!expectedNetAcceptWouldBlock &&
 			!expectedUserServiceNoEvent &&
 			!expectedPrivacyInvalidParameter &&
-			!expectedPlayGoChunkEnumerationEnd)
+			!expectedPlayGoChunkEnumerationEnd &&
+			!expectedSaveDataNoConversion)
 		{
 			return ShouldSampleImportResult(nid, resultValue, out mutexOccurrence);
 		}
