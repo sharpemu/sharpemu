@@ -766,7 +766,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
     }
 
-    public const ulong MaxHostCopyWords = 64 * 1024;
+    public const ulong MaxHostCopyWords = 4 * 1024 * 1024;
 
     public bool TryCopyWordsOnHost(ulong destination, ulong source, ulong sourceWords, ulong words)
     {
