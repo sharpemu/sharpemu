@@ -40,11 +40,34 @@ internal static unsafe partial class VulkanVideoPresenter
     private static long _stageMemoAcquireReuses;
     private static long _stageMemoContentHits;
     private static long _stageMemoEvictions;
+    private static readonly ThreadCounter _nullImageHits = new();
+    private static readonly ThreadCounter _nullImageVerified = new();
+    private static readonly ThreadCounter _nullImageMismatches = new();
+    private static int _nullImageMismatchReports;
+
+    internal enum NullImageMemoMode
+    {
+        Off,
+        On,
+        Verify,
+    }
+
+    // The image binding memo keeps the binding of a descriptor that names no memory like any other.
+    // SHARPEMU_NULL_IMAGE_MEMO=0 keeps none; =verify looks the placeholder up again on every use and counts the uses where
+    // the lookup found another image.
+    internal static readonly NullImageMemoMode ConfiguredNullImageMemo =
+        Environment.GetEnvironmentVariable("SHARPEMU_NULL_IMAGE_MEMO") switch
+        {
+            "0" => NullImageMemoMode.Off,
+            "verify" => NullImageMemoMode.Verify,
+            _ => NullImageMemoMode.On,
+        };
 
     internal static string TakeStagePreparationReport() =>
         FormattableString.Invariant($"[PERF][STAGE_MEMO] hits={Interlocked.Exchange(ref _stageMemoHits, 0)} misses={Interlocked.Exchange(ref _stageMemoMisses, 0)} captures={Interlocked.Exchange(ref _stageMemoCaptures, 0)} ") +
         FormattableString.Invariant($"stale={Interlocked.Exchange(ref _stageMemoStale, 0)} invalidations={Interlocked.Exchange(ref _stageMemoInvalidations, 0)} acquire_reuses={Interlocked.Exchange(ref _stageMemoAcquireReuses, 0)} ") +
-        FormattableString.Invariant($"content_hits={Interlocked.Exchange(ref _stageMemoContentHits, 0)} evictions={Interlocked.Exchange(ref _stageMemoEvictions, 0)}");
+        FormattableString.Invariant($"content_hits={Interlocked.Exchange(ref _stageMemoContentHits, 0)} evictions={Interlocked.Exchange(ref _stageMemoEvictions, 0)} ") +
+        FormattableString.Invariant($"null_images=hits:{_nullImageHits.Take()},verified:{_nullImageVerified.Take()},mismatches:{_nullImageMismatches.Take()}");
 
     private sealed class StagePreparationSet
     {
@@ -198,6 +221,38 @@ internal static unsafe partial class VulkanVideoPresenter
             public ResourceSlotIdentifier Found;
             public uint MetadataBaseLayer;
             public bool CompletesLookup;
+            // Found is the image cache's placeholder for a descriptor that names no memory. The cache keeps each placeholder
+            // for its lifetime, so it stays the lookup's answer for these words whatever images are created or removed.
+            public bool NullImage;
+        }
+
+        // Tests choose the mode per host.
+        internal NullImageMemoMode NullImageMemo = ConfiguredNullImageMemo;
+
+        // Null bindings this host served from the memo, looked up again in verify mode, and found to differ.
+        internal long NullImageHits { get; private set; }
+
+        internal long NullImageVerifications { get; private set; }
+
+        internal long NullImageMismatches { get; private set; }
+
+        private void NoteNullImageVerification(ResourceSlotIdentifier kept, ResourceSlotIdentifier found, ShaderProgramInfo program, int index)
+        {
+            NullImageVerifications++;
+            _nullImageVerified.Increment();
+            if (kept == found)
+            {
+                return;
+            }
+
+            NullImageMismatches++;
+            _nullImageMismatches.Increment();
+            if (Interlocked.Increment(ref _nullImageMismatchReports) <= 16)
+            {
+                Console.Error.WriteLine(
+                    $"[GPU][WARN] The image binding memo's placeholder differs from the lookup: stage={program.Stage} hash=0x{program.Hash:X16} " +
+                    $"image={index} memo={kept} found={found}");
+            }
         }
 
         private readonly record struct ImageBindingKey(ulong Words01, ulong Words23, ulong Words45, ulong Words67, int Length, ShaderImageShape Shape)
@@ -564,11 +619,19 @@ internal static unsafe partial class VulkanVideoPresenter
             TextureRequestResolution resolution;
             ResourceSlotIdentifier imageIdentifier;
             if (known &&
-                (_worker
-                    ? _imageCache.TryRememberedForSlice(memo.Found, ref memo.Generation, memo.Begin, memo.End)
-                    : _imageCache.TryTouchRemembered(memo.Found, ref memo.Generation, memo.Begin, memo.End)))
+                (memo.NullImage
+                    ? NullImageMemo == NullImageMemoMode.On
+                    : _worker
+                        ? _imageCache.TryRememberedForSlice(memo.Found, ref memo.Generation, memo.Begin, memo.End)
+                        : _imageCache.TryTouchRemembered(memo.Found, ref memo.Generation, memo.Begin, memo.End)))
             {
                 GuestImageCache.CountBindingMemo(hit: true);
+                if (memo.NullImage)
+                {
+                    NullImageHits++;
+                    _nullImageHits.Increment();
+                }
+
                 resolution = memo.Resolution;
                 imageIdentifier = memo.Found;
                 if (memo.CompletesLookup)
@@ -588,20 +651,30 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             else
             {
+                // Read before the memo is replaced: the placeholder a kept null binding would have served (verify mode).
+                var keptPlaceholder = known && memo.NullImage && NullImageMemo == NullImageMemoMode.Verify
+                    ? memo.Found : ResourceSlotIdentifier.Invalid;
                 GuestImageCache.CountBindingMemo(hit: false);
                 resolution = originalResolution;
                 var request = resolution.Request;
                 var metadataBaseLayer = request.View.BaseLayer;
                 imageIdentifier = LookUpImage(ref request, resolution.ExactFormat);
                 resolution = resolution with { Request = request };
-                if (!ImageDescription.IsEmptyRange(request.Description.Data))
+                var nullImage = ImageDescription.IsEmptyRange(request.Description.Data);
+                if (keptPlaceholder.IsValid)
+                {
+                    NoteNullImageVerification(keptPlaceholder, imageIdentifier, program, index);
+                }
+
+                if (!nullImage || NullImageMemo != NullImageMemoMode.Off)
                 {
                     if (memos.Count >= ImageBindingMemoCapacity)
                     {
                         memos.Clear();
                     }
 
-                    var remembered = _imageCache.RememberedRange(imageIdentifier, request);
+                    // The lookup returns a placeholder without completing a lookup, so a kept placeholder completes none.
+                    var remembered = nullImage ? default : _imageCache.RememberedRange(imageIdentifier, request);
                     memos[key] = new ImageBindingMemo
                     {
                         Generation = _imageCache.LookupGeneration,
@@ -611,8 +684,9 @@ internal static unsafe partial class VulkanVideoPresenter
                         OriginalResolution = originalResolution,
                         Found = imageIdentifier,
                         MetadataBaseLayer = metadataBaseLayer,
-                        CompletesLookup = request.Description.Metadata.Kind == MetadataKind.Dcc ||
-                            Image(imageIdentifier).Description.DccSliceSize != 0,
+                        CompletesLookup = !nullImage && (request.Description.Metadata.Kind == MetadataKind.Dcc ||
+                            Image(imageIdentifier).Description.DccSliceSize != 0),
+                        NullImage = nullImage,
                     };
                 }
             }
