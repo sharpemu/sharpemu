@@ -3121,7 +3121,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 if (_defer)
                     _cache.DeferSweepUpload(_buffer, _guestAddress, _size, Copies, TotalSize);
                 else
-                    Source = _cache._uploader.PrepareSource(_buffer.CpuAddress, CollectionsMarshal.AsSpan(Copies), TotalSize, _guestAddress, _size);
+                    Source = _cache.StageCollectedUpload(this, _buffer, _guestAddress, _size);
             };
         }
 
@@ -3153,6 +3153,80 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     }
 
     [ThreadStatic] private static UploadCollector? _uploadCollector;
+
+    // An upload larger than the staging ring goes through the ring in pieces of half its size instead of through a new
+    // buffer of the whole size, whose first writes fault in every page. Each piece is recorded before the next one is
+    // staged, so staging a later piece may submit the earlier ones and wait for them. The last piece stays with the
+    // collector for the caller to record.
+    private GpuBuffer? StageCollectedUpload(UploadCollector collector, GpuBuffer buffer, ulong guestAddress, ulong size)
+    {
+        var copies = collector.Copies;
+        var pieceBytes = _staging.Size / 2;
+        if (collector.TotalSize <= _staging.Size || pieceBytes == 0)
+        {
+            return _uploader.PrepareSource(buffer.CpuAddress, CollectionsMarshal.AsSpan(copies), collector.TotalSize, guestAddress, size);
+        }
+
+        var pieces = SplitUploadPieces(CollectionsMarshal.AsSpan(copies), pieceBytes);
+        for (var index = 0; index < pieces.Count - 1; index++)
+        {
+            var regions = CollectionsMarshal.AsSpan(pieces[index]);
+            var bytes = UploadPieceBytes(regions);
+            if (_uploader.PrepareSource(buffer.CpuAddress, regions, bytes, guestAddress, size) is { } source)
+            {
+                RecordUpload(buffer, source, regions, guestAddress, size, bytes);
+                BufferUploadProfile.NoteUpload(regions.Length, bytes, size);
+            }
+        }
+
+        copies.Clear();
+        copies.AddRange(pieces[^1]);
+        collector.TotalSize = UploadPieceBytes(CollectionsMarshal.AsSpan(copies));
+        return _uploader.PrepareSource(buffer.CpuAddress, CollectionsMarshal.AsSpan(copies), collector.TotalSize, guestAddress, size);
+    }
+
+    // Splits staged copies into pieces of at most pieceBytes staged bytes each; a copy that crosses a piece boundary is
+    // split there. Source offsets restart at zero in every piece.
+    internal static List<List<BufferCopy>> SplitUploadPieces(ReadOnlySpan<BufferCopy> copies, ulong pieceBytes)
+    {
+        var pieces = new List<List<BufferCopy>>();
+        var piece = new List<BufferCopy>();
+        ulong staged = 0;
+        foreach (var copy in copies)
+        {
+            for (ulong done = 0; done < copy.Size;)
+            {
+                var take = Math.Min(copy.Size - done, pieceBytes - staged);
+                piece.Add(new BufferCopy(staged, copy.DstOffset + done, take));
+                staged += take;
+                done += take;
+                if (staged == pieceBytes)
+                {
+                    pieces.Add(piece);
+                    piece = new List<BufferCopy>();
+                    staged = 0;
+                }
+            }
+        }
+
+        if (piece.Count != 0)
+        {
+            pieces.Add(piece);
+        }
+
+        return pieces;
+    }
+
+    private static ulong UploadPieceBytes(ReadOnlySpan<BufferCopy> regions)
+    {
+        ulong bytes = 0;
+        foreach (var region in regions)
+        {
+            bytes += region.Size;
+        }
+
+        return bytes;
+    }
 
     private bool SynchronizeBufferCore(UploadCollector collector, GpuBuffer buffer, ulong guestAddress, ulong size, bool isWritten,
         bool isTexelBuffer, bool preserveCpuWriteHotPages, long startedAt)
