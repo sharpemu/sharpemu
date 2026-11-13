@@ -497,6 +497,7 @@ public static partial class Gen5SpirvTranslator
 
                 // After every function that may call it.
                 EmitTypedElementDecoder();
+                EmitDeviceBufferFormatLoaders();
                 EmitCallRecordSearch();
 
                 var model = _stage switch
@@ -4388,6 +4389,89 @@ public static partial class Gen5SpirvTranslator
                 return compact;
             }
 
+            // A compact program's device loads read main's fallback address (InitializeDeviceAddressFallback), so its
+            // split-format loads stay inline.
+            var values = _compactMemoryAccess
+                ? BuildDeviceBufferFormatLoadValues(baseAddress, size, byteAddress, descriptorWord3, componentCount, splitDescriptorFormat)
+                : CallDeviceBufferFormatLoader(baseAddress, size, byteAddress, descriptorWord3, componentCount, splitDescriptorFormat);
+            for (uint destination = 0; destination < componentCount; destination++)
+            {
+                store?.Invoke(destination, values[destination]);
+            }
+
+            return values;
+        }
+
+        // The run-time format conversion and checked byte loads of a formatted device-buffer load are large; every such load
+        // of one width calls one DontInline function (EmitDeviceBufferFormatLoaders). The caller keeps the register writes
+        // and EXEC handling.
+        private readonly Dictionary<(uint ComponentCount, bool SplitDescriptorFormat), uint> _deviceBufferFormatLoaders = [];
+
+        // The access site's PC while a shared loader is emitted, a parameter of it: a fault in the loader reports its caller.
+        private uint _deviceAddressFaultPcValue;
+
+        private uint[] CallDeviceBufferFormatLoader(
+            uint baseAddress,
+            uint size,
+            uint byteAddress,
+            uint descriptorWord3,
+            uint componentCount,
+            bool splitDescriptorFormat)
+        {
+            var key = (componentCount, splitDescriptorFormat);
+            if (!_deviceBufferFormatLoaders.TryGetValue(key, out var function))
+            {
+                function = _module.AllocateId();
+                _deviceBufferFormatLoaders.Add(key, function);
+            }
+
+            var loaded = _module.AddInstruction(SpirvOp.FunctionCall, _uvec4Type, function,
+                baseAddress, size, byteAddress, descriptorWord3, UInt(_deviceAddressInstructionPc));
+            var values = new uint[componentCount];
+            for (uint destination = 0; destination < componentCount; destination++)
+            {
+                values[destination] = _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, loaded, destination);
+            }
+
+            return values;
+        }
+
+        private void EmitDeviceBufferFormatLoaders()
+        {
+            const uint dontInline = 2;
+            foreach (var ((componentCount, splitDescriptorFormat), function) in _deviceBufferFormatLoaders)
+            {
+                var functionType = _module.TypeFunction(_uvec4Type, _ulongType, _ulongType, _uintType, _uintType, _uintType);
+                _module.BeginFunction(_uvec4Type, functionType, dontInline, function);
+                _module.AddName(function, $"loadDeviceBufferFormat{componentCount}{(splitDescriptorFormat ? "Split" : "")}");
+                var baseAddress = _module.AddFunctionParameter(_ulongType);
+                var size = _module.AddFunctionParameter(_ulongType);
+                var byteAddress = _module.AddFunctionParameter(_uintType);
+                var descriptorWord3 = _module.AddFunctionParameter(_uintType);
+                _deviceAddressFaultPcValue = _module.AddFunctionParameter(_uintType);
+                _module.AddLabel();
+                var values = BuildDeviceBufferFormatLoadValues(
+                    baseAddress, size, byteAddress, descriptorWord3, componentCount, splitDescriptorFormat);
+                var result = new uint[4];
+                for (var destination = 0; destination < result.Length; destination++)
+                {
+                    result[destination] = destination < values.Length ? values[destination] : UInt(0);
+                }
+
+                _module.AddStatement(SpirvOp.ReturnValue, _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec4Type, result));
+                _module.EndFunction();
+                _deviceAddressFaultPcValue = 0;
+            }
+        }
+
+        private uint[] BuildDeviceBufferFormatLoadValues(
+            uint baseAddress,
+            uint size,
+            uint byteAddress,
+            uint descriptorWord3,
+            uint componentCount,
+            bool splitDescriptorFormat)
+        {
             var unifiedFormat = BitwiseAnd(
                 ShiftRightLogical(descriptorWord3, UInt(12)),
                 UInt(0x7F));
@@ -4443,7 +4527,6 @@ public static partial class Gen5SpirvTranslator
                 value = SelectUInt(selector, 6, canonical[2], value);
                 value = SelectUInt(selector, 7, canonical[3], value);
                 values[destination] = _module.AddInstruction(SpirvOp.Select, _uintType, inBounds, value, constant);
-                store?.Invoke(destination, values[destination]);
             }
 
             return values;
