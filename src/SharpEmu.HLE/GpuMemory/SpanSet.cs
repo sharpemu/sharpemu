@@ -6,6 +6,9 @@ namespace SharpEmu.HLE.GpuMemory;
 public sealed class SpanSnapshot(ulong[] starts, ulong[] ends)
 {
     public static readonly SpanSnapshot Empty = new([], []);
+
+    internal ReadOnlySpan<ulong> Starts => starts;
+    internal ReadOnlySpan<ulong> Ends => ends;
     // Contains remembers, per thread, the span of its last complete hit in a snapshot; SHARPEMU_SPAN_CONTAINS_CACHE=0
     // searches every query.
     private static readonly bool CacheLastHit = Environment.GetEnvironmentVariable("SHARPEMU_SPAN_CONTAINS_CACHE") != "0";

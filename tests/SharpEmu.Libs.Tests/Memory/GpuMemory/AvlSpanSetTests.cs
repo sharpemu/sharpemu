@@ -8,6 +8,49 @@ namespace SharpEmu.Libs.Tests.Memory.GpuMemory;
 
 public sealed class AvlSpanSetTests
 {
+    // A snapshot built from the last one's spans outside the changed extent holds exactly the set's spans, after single and
+    // batched changes, merges, splits and clears.
+    [Theory]
+    [InlineData(7, 4096)]
+    [InlineData(19, 1 << 20)]
+    public void SnapshotsAfterBatchedChangesHoldExactlyTheSpans(int seed, int space)
+    {
+        var expected = new SpanSet();
+        var actual = new AvlSpanSet();
+        var random = new System.Random(seed);
+        for (var round = 0; round < 4000; round++)
+        {
+            if (random.Next(400) == 0)
+            {
+                expected.Clear();
+                actual.Clear();
+            }
+
+            for (var change = random.Next(1, 6); change > 0; change--)
+            {
+                var address = (ulong)random.Next(space);
+                var size = (ulong)random.Next(1, space / (random.Next(2) == 0 ? 512 : 16));
+                if (random.Next(3) != 0)
+                {
+                    expected.Add(address, size);
+                    actual.Add(address, size);
+                }
+                else
+                {
+                    expected.Remove(address, size);
+                    actual.Remove(address, size);
+                }
+            }
+
+            var want = expected.Snapshot();
+            var got = actual.Snapshot();
+            Assert.Equal(want.Starts.ToArray(), got.Starts.ToArray());
+            Assert.Equal(want.Ends.ToArray(), got.Ends.ToArray());
+        }
+
+        Assert.True(actual.SplicedSnapshots > 3000, $"spliced {actual.SplicedSnapshots} of 4000 snapshots");
+    }
+
     [Theory]
     [InlineData(101, 4096)]
     [InlineData(202, 1048576)]

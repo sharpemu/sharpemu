@@ -16,13 +16,28 @@ public sealed class AvlSpanSet
         public int Count = 1;
     }
 
+    // A new snapshot copies the last one's spans outside the extent of every span removed or inserted since, and walks the
+    // tree only inside it. SHARPEMU_SPAN_SNAPSHOT_SPLICE=0 walks the whole tree.
+    private static readonly bool SpliceSnapshots = Environment.GetEnvironmentVariable("SHARPEMU_SPAN_SNAPSHOT_SPLICE") != "0";
+
     private Node? _root;
     private SpanSnapshot? _snapshot = SpanSnapshot.Empty;
+    private SpanSnapshot _built = SpanSnapshot.Empty;
+    private ulong _changedStart = ulong.MaxValue;
+    private ulong _changedEnd;
+    internal int SplicedSnapshots { get; private set; }
     public bool IsEmpty => _root is null;
     public void Clear()
     {
         _root = null;
-        _snapshot = SpanSnapshot.Empty;
+        Built(SpanSnapshot.Empty);
+    }
+
+    private void NoteChange(ulong start, ulong end)
+    {
+        _snapshot = null;
+        _changedStart = Math.Min(_changedStart, start);
+        _changedEnd = Math.Max(_changedEnd, end);
     }
 
     public void Add(ulong address, ulong size)
@@ -37,13 +52,13 @@ public sealed class AvlSpanSet
             start = previous.Start;
             _root = Delete(_root, start);
         }
-        _snapshot = null;
         for (var next = FindAtOrAbove(start); next is not null && next.Start <= end; next = FindAtOrAbove(start))
         {
             end = Math.Max(end, next.End);
             _root = Delete(_root, next.Start);
         }
         _root = Insert(_root, start, end);
+        NoteChange(start, end);
     }
 
     public void Remove(ulong address, ulong size)
@@ -53,11 +68,11 @@ public sealed class AvlSpanSet
         var current = FindAtOrBelow(address);
         if (current is null || current.End <= address) current = FindAtOrAbove(address);
         if (current is null || current.Start >= end) return;
-        _snapshot = null;
         while (current is not null && current.Start < end)
         {
             var spanStart = current.Start;
             var spanEnd = current.End;
+            NoteChange(spanStart, spanEnd);
             _root = Delete(_root, spanStart);
             if (spanStart < address) _root = Insert(_root, spanStart, address);
             if (spanEnd > end)
@@ -93,12 +108,90 @@ public sealed class AvlSpanSet
     public SpanSnapshot Snapshot()
     {
         if (_snapshot is { } snapshot) return snapshot;
-        if (_root is null) return _snapshot = SpanSnapshot.Empty;
+        if (_root is null) return Built(SpanSnapshot.Empty);
         var starts = new ulong[_root.Count];
         var ends = new ulong[starts.Length];
-        var index = 0;
-        Collect(_root, starts, ends, ref index);
-        return _snapshot = new SpanSnapshot(starts, ends);
+        if (SpliceSnapshots && TrySplice(starts, ends))
+        {
+            SplicedSnapshots++;
+        }
+        else
+        {
+            var index = 0;
+            Collect(_root, starts, ends, ref index);
+        }
+
+        return Built(new SpanSnapshot(starts, ends));
+    }
+
+    private SpanSnapshot Built(SpanSnapshot snapshot)
+    {
+        _changedStart = ulong.MaxValue;
+        _changedEnd = 0;
+        return _snapshot = _built = snapshot;
+    }
+
+    // The spans that end before the changed extent or start after it are the last snapshot's; the tree gives the ones
+    // between. False when the counts disagree, and the caller walks the whole tree.
+    private bool TrySplice(ulong[] starts, ulong[] ends)
+    {
+        var builtStarts = _built.Starts;
+        var builtEnds = _built.Ends;
+        var before = FirstAtOrAbove(builtEnds, _changedStart);
+        var after = FirstAbove(builtStarts, _changedEnd);
+        var tail = builtStarts.Length - after;
+        var middle = starts.Length - before - tail;
+        if (middle < 0) return false;
+        builtStarts[..before].CopyTo(starts);
+        builtEnds[..before].CopyTo(ends);
+        var index = before;
+        if (!CollectWithin(_root, _changedStart, _changedEnd, starts, ends, ref index, before + middle) ||
+            index != before + middle)
+        {
+            return false;
+        }
+
+        builtStarts[after..].CopyTo(starts.AsSpan(index));
+        builtEnds[after..].CopyTo(ends.AsSpan(index));
+        return true;
+    }
+
+    private static int FirstAtOrAbove(ReadOnlySpan<ulong> values, ulong bound)
+    {
+        int low = 0, high = values.Length;
+        while (low < high)
+        {
+            var middle = (low + high) >>> 1;
+            if (values[middle] < bound) low = middle + 1;
+            else high = middle;
+        }
+        return low;
+    }
+
+    private static int FirstAbove(ReadOnlySpan<ulong> values, ulong bound)
+    {
+        int low = 0, high = values.Length;
+        while (low < high)
+        {
+            var middle = (low + high) >>> 1;
+            if (values[middle] <= bound) low = middle + 1;
+            else high = middle;
+        }
+        return low;
+    }
+
+    // In order, the spans that touch [low, high]; false when they would pass the limit.
+    private static bool CollectWithin(Node? node, ulong low, ulong high, ulong[] starts, ulong[] ends, ref int index, int limit)
+    {
+        if (node is null) return true;
+        if (node.Start >= low && !CollectWithin(node.Left, low, high, starts, ends, ref index, limit)) return false;
+        if (node.End >= low && node.Start <= high)
+        {
+            if (index == limit) return false;
+            starts[index] = node.Start;
+            ends[index++] = node.End;
+        }
+        return node.End > high || CollectWithin(node.Right, low, high, starts, ends, ref index, limit);
     }
 
     public List<GuestSpan> GetOverlappingRanges(ulong address, ulong size)
