@@ -270,5 +270,7 @@ public interface IRenderHost
 
     bool TryCopyWordsOnHost(ulong destination, ulong source, ulong sourceWords, ulong words);
 
+    bool TryPostWordCopy(ulong destination, ulong source, ulong sourceWords, ulong words) => false;
+
     Exception Fatal(string message);
 }
