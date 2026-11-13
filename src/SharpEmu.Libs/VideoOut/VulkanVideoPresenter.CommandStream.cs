@@ -334,7 +334,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (IsPendingForWorker(address, size))
             {
-                throw new SerialResolveRequiredException("pending write read");
+                throw new SerialResolveRequiredException(PendingReadReason(address, size, worker.Sequence));
             }
 
             if (!_commandThread!.ReadOverlayBefore(address, destination, worker.Sequence))
@@ -369,6 +369,24 @@ internal static unsafe partial class VulkanVideoPresenter
 
             AgcExports.NoteWorkerShadowRead((int)shadowSource);
             return true;
+        }
+
+        private static readonly string[] PendingReadReasons =
+            [.. Enum.GetNames<Gpu.Rendering.PendingWriteKind>().Select(static name => "pending write read " + name.ToLowerInvariant())];
+
+        private string PendingReadReason(ulong address, ulong size, long sequence)
+        {
+            if (!RenderPhaseProfile.Enabled)
+            {
+                return "pending write read";
+            }
+
+            if (_translation.PendingWrites is { } pending && pending.KindBetween(address, size, pending.Released, sequence) is { } kind)
+            {
+                return PendingReadReasons[(int)kind];
+            }
+
+            return "pending write read shadow";
         }
 
         private bool IsGpuOwnedForWorkerRead(ulong address, ulong size) => _bufferCache.HasGpuDirtyBytes(address, size);
