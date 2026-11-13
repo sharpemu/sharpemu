@@ -123,6 +123,17 @@ public sealed partial class RenderExecutor
             record.BoundedFill = DecodeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator);
             record.BoundedCopy = DecodeBoundedCopy(input, groupsX, groupsY, groupsZ, dispatchInitiator);
             record.ImageClear = TryDecodeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator);
+            if (record.BoundedCopy is { } wordCopy && PostedWordCopyEnabled &&
+                _host.TryPostWordCopy(wordCopy.Destination, wordCopy.Source, wordCopy.Modulus, wordCopy.Words))
+            {
+                record.MetadataClear = null;
+                record.ConstantFill = null;
+                record.BoundedFill = null;
+                record.BoundedCopy = null;
+                record.ImageClear = null;
+                Record(record);
+                return;
+            }
         }
 
         if (useThreadDimensions)
@@ -569,6 +580,8 @@ public sealed partial class RenderExecutor
     }
 
     private static readonly bool BoundedCopyEnabled = Environment.GetEnvironmentVariable("SHARPEMU_HOST_BOUNDED_COPY") != "0";
+
+    private static readonly bool PostedWordCopyEnabled = Environment.GetEnvironmentVariable("SHARPEMU_POSTED_WORD_COPY") != "0";
 
     private static bool IsPlainWordBuffer(BufferDescriptorWords descriptor) =>
         descriptor.Stride == sizeof(uint) && !descriptor.SwizzleEnabled && !descriptor.AddThreadId && descriptor.OutOfBounds == 0 &&
