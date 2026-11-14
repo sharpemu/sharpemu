@@ -180,7 +180,7 @@ internal sealed class ProgramSourceEntry
 
 // Programs keyed by identity and static state; each draw materializes its resources and reuses
 // the permutation whose specialization and push-data start match, else compiles one more.
-internal sealed class ShaderProgramCache
+internal sealed partial class ShaderProgramCache
 {
     private readonly ImageDescriptorTrace _imageDescriptorTrace = new();
     private const uint MaxInstructionScan = 16384;
@@ -553,13 +553,14 @@ internal sealed class ShaderProgramCache
         }
     }
 
-    // With runtimeFallback, the caller's dispatch runs that ready program of it (see _runtimeFallbacks).
+    // With runtimeFallback, the caller's dispatch runs that ready program of it (see _runtimeFallbacks). With preparation, it
+    // continues from the caller's own preparation (CallDispatchPreparation) instead of redoing it.
     private ShaderProgram GetOrCompileCore(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor, out ShaderStageResources stage,
-        bool deferLinking, ProgramSourceEntry? runtimeFallback = null)
+        bool deferLinking, ProgramSourceEntry? runtimeFallback = null, CallDispatchPreparation? preparation = null)
     {
-        ProgramKey? key = null;
-        ProgramSourceEntry? entry;
-        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramCacheLookup))
+        var key = preparation?.Key;
+        var entry = preparation?.Entry;
+        if (preparation is null)
         {
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramCacheLookup))
             {
@@ -599,7 +600,7 @@ internal sealed class ShaderProgramCache
             }
         }
 
-        return CompleteProgram(entry, sourceWasCached, key, source, options, ref pushDataCursor, out stage, deferLinking, runtimeFallback);
+        return CompleteProgram(entry, sourceWasCached, key, source, options, ref pushDataCursor, out stage, deferLinking, runtimeFallback, preparation);
     }
 
     // The entry of this source and static state, or null; a key whose plan was rejected throws its rejection again.
@@ -624,14 +625,16 @@ internal sealed class ShaderProgramCache
     }
 
     private ShaderProgram CompleteProgram(ProgramSourceEntry entry, bool sourceWasCached, ProgramKey? key, ShaderSource source, StageCompileOptions options,
-        ref uint pushDataCursor, out ShaderStageResources stage, bool deferLinking, ProgramSourceEntry? runtimeFallback = null)
+        ref uint pushDataCursor, out ShaderStageResources stage, bool deferLinking, ProgramSourceEntry? runtimeFallback = null,
+        CallDispatchPreparation? preparation = null)
     {
         if (runtimeFallback is null)
         {
             _lastEntry = entry;
         }
 
-        var inputs = new ResourceRuntimeInputs
+        var callPreparation = preparation;
+        var inputs = preparation?.Inputs ?? new ResourceRuntimeInputs
         {
             UserData = source.UserData,
             ShaderBase = source.Address,
@@ -654,8 +657,8 @@ internal sealed class ShaderProgramCache
                 $"The backend does not support linked shader calls: backend={_compiler.BackendName} stage={source.Label} hash=0x{source.Hash:X16}.");
 
         // Both are assigned by the materialization that follows; a failed one throws.
-        ResourceSnapshot snapshot = null!;
-        ResourceSpecialization specialization = null!;
+        ResourceSnapshot snapshot = preparation?.Snapshot!;
+        ResourceSpecialization specialization = preparation?.Specialization!;
         var captureIndirectImageFailure = _spirvDumpEnabled ? ShaderPermutationDump.CreateFailureCapture(source) : null;
         if (Diagnostics.GpuReadTrace.Enabled)
         {
@@ -663,40 +666,47 @@ internal sealed class ShaderProgramCache
             Diagnostics.GpuReadTrace.CurrentStage = source.Label;
         }
 
-        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
+        if (preparation is null)
         {
-            // Failure capture needs the full walk, so a dump run bypasses the cache.
-            ResourceMaterializationFailure materializationFailure;
-            var started = System.Diagnostics.Stopwatch.GetTimestamp();
-            bool materialized;
-            MaterializationTally.Outcome outcome;
-            if (captureIndirectImageFailure is null && ResourceMaterializer.CanMaterializeFast(entry.Plan))
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ResourceMaterialization))
             {
-                materialized = ResourceMaterializer.MaterializeFast(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure);
-                outcome = ResourceMaterializer.LastFastOutcome;
-            }
-            else if (Materializations is { } materializations && captureIndirectImageFailure is null)
-            {
-                materialized = materializations.Materialize(entry.Plan, inputs, _readResidentGuestBytes, ref snapshot, ref specialization,
-                    out materializationFailure);
-                outcome = MaterializationTally.FromCache(materializations.LastOutcome);
-            }
-            else
-            {
-                materialized = ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
-                    captureIndirectImageFailure);
-                outcome = MaterializationTally.Outcome.Full;
-            }
+                // Failure capture needs the full walk, so a dump run bypasses the cache.
+                ResourceMaterializationFailure materializationFailure;
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                bool materialized;
+                MaterializationTally.Outcome outcome;
+                if (captureIndirectImageFailure is null && ResourceMaterializer.CanMaterializeFast(entry.Plan))
+                {
+                    materialized = ResourceMaterializer.MaterializeFast(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure);
+                    outcome = ResourceMaterializer.LastFastOutcome;
+                }
+                else if (Materializations is { } materializations && captureIndirectImageFailure is null)
+                {
+                    materialized = materializations.Materialize(entry.Plan, inputs, _readResidentGuestBytes, ref snapshot, ref specialization,
+                        out materializationFailure);
+                    outcome = MaterializationTally.FromCache(materializations.LastOutcome);
+                }
+                else
+                {
+                    materialized = ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
+                        captureIndirectImageFailure);
+                    outcome = MaterializationTally.Outcome.Full;
+                }
 
-            MaterializationTally.Note(materialized ? outcome : MaterializationTally.Outcome.Failed,
-                System.Diagnostics.Stopwatch.GetTimestamp() - started, materialized ? snapshot : null);
-            if (!materialized)
-            {
-                var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
-                if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
-                    throw new ShaderProgramRejectedException(message);
-                throw SubmissionScheduler.Fatal(message);
+                MaterializationTally.Note(materialized ? outcome : MaterializationTally.Outcome.Failed,
+                    System.Diagnostics.Stopwatch.GetTimestamp() - started, materialized ? snapshot : null);
+                if (!materialized)
+                {
+                    var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
+                    if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
+                        throw new ShaderProgramRejectedException(message);
+                    throw SubmissionScheduler.Fatal(message);
+                }
             }
+        }
+        else
+        {
+            CallDispatchReuses++;
         }
 
         ulong[] callArguments = [];
@@ -715,12 +725,12 @@ internal sealed class ShaderProgramCache
                     var caller = entry.Program with { Address = source.Address };
                     // Tables and function code are read like the caller's code: a stale image over reused memory must not hide them.
                     var runtimeRecords = runtimeFallback is not null || (RuntimeCallRecords && !_perRecordCallers.Contains(source.Hash));
-                    var library = _libraryMemo is { } readMemo
+                    var library = preparation?.Library ?? (_libraryMemo is { } readMemo
                         ? readMemo.Read(caller, entry.Plan.Memory, snapshot, _readGuestWord, _functions, runtimeRecords, source.UserDataBase,
                             _readResidentGuestBytes)
                         : ShaderCallLibrary.Read(caller, entry.Plan.Memory, snapshot, _readGuestWord, _functions, runtimeRecords,
-                            source.UserDataBase, _readResidentGuestBytes);
-                    if (runtimeRecords)
+                            source.UserDataBase, _readResidentGuestBytes));
+                    if (runtimeRecords && preparation is null)
                     {
                         if (!_calleeUnions.TryGetValue(programKey, out var union))
                         {
@@ -737,6 +747,11 @@ internal sealed class ShaderProgramCache
                         library = _libraryMemo is { } uniteMemo
                             ? uniteMemo.Unite(library, caller.Address, union, MaxUnitedCallees)
                             : library.Unite(caller.Address, union, MaxUnitedCallees);
+                        if (runtimeFallback is null && ReuseCallDispatch && captureIndirectImageFailure is null && !captureLinkedImages)
+                        {
+                            callPreparation = new(programKey, entry, inputs, snapshot, specialization, library);
+                        }
+
                         if (_calleeTiers.TryGetValue(programKey, out var tiers))
                         {
                             if (runtimeFallback is null)
@@ -773,7 +788,8 @@ internal sealed class ShaderProgramCache
                             }
                             catch (ShaderProgramPendingException) when (runtimeRecords && _runtimeFallbacks.TryGetValue(programKey, out var ready))
                             {
-                                return GetOrCompileCore(source, options, ref pushDataCursor, out stage, deferLinking, ready);
+                                return GetOrCompileFallback(source, options, ref pushDataCursor, out stage, deferLinking, ready,
+                                    null, library.LayoutIdentity, "link", callPreparation);
                             }
                         }
                         else
@@ -809,7 +825,7 @@ internal sealed class ShaderProgramCache
                             PendingPassSkips++;
                             PendingPassEarlySkips++;
                             return GetOrCompileFallback(source, options, ref pushDataCursor, out stage, deferLinking, earlyServing,
-                            linked.Generation, linked.LibraryIdentity, "pipeline");
+                                linked.Generation, linked.LibraryIdentity, "pipeline", callPreparation);
                         }
                     }
 
@@ -852,7 +868,7 @@ internal sealed class ShaderProgramCache
                         {
                             PendingPassSkips++;
                             return GetOrCompileFallback(source, options, ref pushDataCursor, out stage, deferLinking, servingWhilePending,
-                                linked.Generation, linked.LibraryIdentity, "pipeline");
+                                linked.Generation, linked.LibraryIdentity, "pipeline", callPreparation);
                         }
                     }
 
@@ -892,7 +908,8 @@ internal sealed class ShaderProgramCache
                 var ready = ReadyFallback(key!, entry);
                 if (ready is null)
                     throw;
-                return GetOrCompileCore(source, options, ref pushDataCursor, out stage, deferLinking, ready);
+                return GetOrCompileFallback(source, options, ref pushDataCursor, out stage, deferLinking, ready,
+                    entry.Generation, entry.LibraryIdentity, "permutation", callPreparation);
             }
         }
         else if (RenderTrace.Enabled && RenderTrace.Pipeline())
@@ -921,7 +938,8 @@ internal sealed class ShaderProgramCache
                     if (runtimeFallback is not null)
                         throw new ShaderProgramPendingException();
                     if (ReadyFallback(key!, entry) is { } ready)
-                        return GetOrCompileCore(source, options, ref pushDataCursor, out stage, deferLinking, ready);
+                        return GetOrCompileFallback(source, options, ref pushDataCursor, out stage, deferLinking, ready,
+                            entry.Generation, entry.LibraryIdentity, "pipeline", callPreparation);
                 }
             }
         }
@@ -990,9 +1008,9 @@ internal sealed class ShaderProgramCache
     // A recursive GetOrCompileCore that serves a ready program; its stage names the fallback (CompileFallback).
     private ShaderProgram GetOrCompileFallback(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor,
         out ShaderStageResources stage, bool deferLinking, ProgramSourceEntry fallback,
-        long? requestedGeneration, string requestedLibrary, string reason)
+        long? requestedGeneration, string requestedLibrary, string reason, CallDispatchPreparation? preparation)
     {
-        var handle = GetOrCompileCore(source, options, ref pushDataCursor, out stage, deferLinking, fallback);
+        var handle = GetOrCompileCore(source, options, ref pushDataCursor, out stage, deferLinking, fallback, preparation);
         var selection = new LinkedCompileFallback(source.Hash, requestedGeneration, fallback.Generation,
             requestedLibrary, fallback.LibraryIdentity, reason);
         stage = stage with { CompileFallback = selection };

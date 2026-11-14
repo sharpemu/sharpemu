@@ -24,10 +24,73 @@ public sealed class PendingPassSkipTests : IDisposable
     private const ulong Callee = PipelineTestGuest.MemoryBase + 0x20000;
     private readonly string _directory = Path.Combine(Path.GetTempPath(), "SharpEmuTests", Guid.NewGuid().ToString("N"));
     private long _lastEarlySkips;
+    private long _lastCallDispatchReuses;
 
     private sealed record Dispatch(ulong Served, LinkedCompileFallback? Fallback);
 
     private sealed record Poll(int Dispatch, ulong Program, ShaderStageResources Stage);
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void CurrentDispatchContinuationPreservesFallbackSelectionAndPipelinePolling(bool early, bool middle)
+    {
+        var (ordinary, ordinaryPolls, _) = Run(skip: true, middle: middle, early: early);
+        Assert.Equal(0, _lastCallDispatchReuses);
+        var (continued, continuedPolls, _) = Run(skip: true, middle: middle, early: early, reuseDispatch: true);
+        Assert.True(_lastCallDispatchReuses > 0);
+        Assert.Equal(ordinary.Select(Served), continued.Select(Served));
+        Assert.Equal(ordinaryPolls.Select(poll => (poll.Dispatch, poll.Program)),
+            continuedPolls.Select(poll => (poll.Dispatch, poll.Program)));
+    }
+
+    [Fact]
+    public void CurrentDispatchContinuationReadsTheNextDispatchsChangedRecords()
+    {
+        using var fatal = new FatalScope();
+        var guest = new PipelineTestGuest(CompileSpirv);
+        guest.Host.RuntimeCallRecordsSupported = true;
+        // Two fixed-offset call sites: the first stays ready and reads the changed argument, while the second
+        // introduces new code whose pipeline stays pending. Merely growing this fixed-offset table adds no call site.
+        guest.RegisterProgram(Caller, Header,
+            [0xF4280400, 125u << 25, 0xBF8C0000, 0xBE8E0310, 0xBE8F0311, 0xBE900312, 0xBE910313, 0xBE8E210E,
+             0xF4280400, (125u << 25) | 16, 0xBF8C0000, 0xBE8E0310, 0xBE8F0311, 0xBE900312, 0xBE910313, 0xBE8E210E, 0xBF810000]);
+        guest.WriteWords(Callee, 0xBF800000, 0xBE80200E);
+        const ulong secondCallee = Callee + 0x100;
+        guest.WriteWords(secondCallee, 0xBF800001, 0xBE80200E);
+        guest.WriteWords(Table, unchecked((uint)Callee), (uint)(Callee >> 32), 0x3000, 0,
+            unchecked((uint)Callee), (uint)(Callee >> 32), 0x6000, 0);
+        UseIsolatedCallUnion(guest, false, false, [28, 60]);
+        guest.Programs.ReuseCallDispatch = true;
+        guest.Programs.SkipPendingPass = true;
+        guest.Programs.SkipPendingPassEarly = true;
+        var ready = new HashSet<ulong>();
+        guest.Programs.TryComputePipeline = (program, _, _) => ready.Contains(program.Id);
+        (ulong Handle, ShaderStageResources Stage) Resolve(uint count)
+        {
+            var cursor = 0u;
+            var program = guest.Programs.GetOrCompile(guest.Source(Caller, ShaderStage.Compute,
+                PipelineTestGuest.BufferDescriptor(Table, 16, count, 0)), PipelineTestGuest.ComputeOptions(32),
+                ref cursor, out var stage);
+            return (program.Id, stage);
+        }
+        ready.Add(Resolve(2).Handle);
+        Assert.Null(Resolve(2).Stage.CompileFallback);
+        guest.WriteWords(Table, unchecked((uint)Callee), (uint)(Callee >> 32), 0x4000, 0,
+            unchecked((uint)secondCallee), (uint)(secondCallee >> 32), 0x6000, 0);
+        var first = Resolve(2);
+        Assert.NotNull(first.Stage.CompileFallback);
+        Assert.Contains((Callee, 0x4000ul), first.Stage.CallRecords!);
+        guest.WriteWords(Table + 8, 0x5000, 0);
+        var second = Resolve(2);
+        Assert.NotNull(second.Stage.CompileFallback);
+        Assert.Contains((Callee, 0x5000ul), second.Stage.CallRecords!);
+        Assert.DoesNotContain((Callee, 0x4000ul), second.Stage.CallRecords!);
+        Assert.Contains((Callee, 0x4000ul), first.Stage.CallRecords!);
+        Assert.True(guest.Programs.CallDispatchReuses >= 2);
+    }
 
     [Fact]
     public void ThePendingNewestProgramIsPolledWhileTheSameProgramsServe()
@@ -164,7 +227,8 @@ public sealed class PendingPassSkipTests : IDisposable
 
     // Without middle: five dispatches; the second program becomes ready before the last. With middle: a third program links at
     // dispatch 3, and the second (not the newest) becomes ready before dispatch 4.
-    private (List<Dispatch> Dispatches, List<Poll> Polls, long Skips) Run(bool skip, bool middle = false, bool early = false)
+    private (List<Dispatch> Dispatches, List<Poll> Polls, long Skips) Run(bool skip, bool middle = false, bool early = false,
+        bool reuseDispatch = false)
     {
         using var fatal = new FatalScope();
         var guest = new PipelineTestGuest(CompileSpirv);
@@ -177,6 +241,7 @@ public sealed class PendingPassSkipTests : IDisposable
         UseIsolatedCallUnion(guest, skip, middle);
         guest.Programs.SkipPendingPass = skip;
         guest.Programs.SkipPendingPassEarly = early;
+        guest.Programs.ReuseCallDispatch = reuseDispatch;
 
         var dispatches = new List<Dispatch>();
         var polls = new List<Poll>();
@@ -202,6 +267,7 @@ public sealed class PendingPassSkipTests : IDisposable
         ready.Add(second);
         dispatches.Add(Next(guest));
         _lastEarlySkips = guest.Programs.PendingPassEarlySkips;
+        _lastCallDispatchReuses = guest.Programs.CallDispatchReuses;
         return (dispatches, polls, guest.Programs.PendingPassSkips);
     }
 
@@ -215,7 +281,7 @@ public sealed class PendingPassSkipTests : IDisposable
 
     // Runtime linking loads the callees kept for the caller before its first link; each run keeps them under this test's
     // directory, so no run reads or writes the user's shader cache or another run's union.
-    private void UseIsolatedCallUnion(PipelineTestGuest guest, bool skip, bool middle)
+    private void UseIsolatedCallUnion(PipelineTestGuest guest, bool skip, bool middle, uint[]? callSites = null)
     {
         var path = Path.Combine(_directory, $"callees-{skip}-{middle}.bin");
         var decoded = ShaderFunctionReader.Read(Callee, guest.Host.TryReadGuestWord);
@@ -224,6 +290,8 @@ public sealed class PendingPassSkipTests : IDisposable
         var callee = new UnitedCallee(new ShaderCallTarget(Callee, 0, decoded.Program),
             System.Security.Cryptography.SHA256.HashData(decoded.Bytes), decoded.Runs);
         // The single-site caller's s_swappc is word 7 (pc 28); the record freshness test uses two sites.
+        new ShaderCallUnionStore(path).Save(ShaderStage.Compute, source.Hash,
+            (callSites ?? [28]).ToDictionary(static pc => pc, _ => new[] { callee }));
         var field = typeof(ShaderProgramCache).GetField("_callUnionStore",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
         Assert.NotNull(field);
