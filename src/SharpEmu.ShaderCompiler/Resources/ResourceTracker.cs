@@ -1160,6 +1160,8 @@ public sealed partial class ResourceTracker
                     {
                         Provenance = BufferDescriptorProvenance.Runtime,
                     };
+                    // Each candidate is a binding, whose stride an indexed access reads from shader data.
+                    _info.UsesIndexedBuffers |= memory.IndexEnabled;
                     return;
                 }
 
@@ -1220,6 +1222,9 @@ public sealed partial class ResourceTracker
                 Provenance = BufferDescriptorProvenance.Static,
                 StaticResource = resource,
             };
+            // An indexed access through a binding reads the binding's stride from shader data. A V# read on the device
+            // (the returns above) carries its own stride.
+            _info.UsesIndexedBuffers |= memory.IndexEnabled;
             AddMemoryPatch(index, resource, 0, false, memory.Pc);
             return;
         }

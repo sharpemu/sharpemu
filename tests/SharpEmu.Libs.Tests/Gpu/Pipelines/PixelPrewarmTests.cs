@@ -93,7 +93,7 @@ public sealed class PixelPrewarmTests : IDisposable
             ],
             InputEnable = 0x22,
             InputAddress = 0x23,
-            Specialization = new ResourceSpecialization { BaseBufferCount = 1, Buffers = [new BufferSpecialization(16, 4, 0xFAC)] },
+            Specialization = new ResourceSpecialization { BaseBufferCount = 1, Buffers = [new BufferSpecialization(4, 0xFAC)] },
         };
 
         using (var list = Open())
@@ -112,7 +112,7 @@ public sealed class PixelPrewarmTests : IDisposable
         Assert.Equal(new uint[] { 0, 3 }, loaded.Outputs.Select(output => output.ExportTarget));
         Assert.Equal(Gen5PixelExportFormat.Uint16, loaded.Outputs[1].ExportFormat);
         Assert.Equal((byte)0x1B, loaded.Outputs[1].ComponentMapping.Packed);
-        Assert.Equal(new BufferSpecialization(16, 4, 0xFAC), Assert.Single(loaded.Specialization.Buffers));
+        Assert.Equal(new BufferSpecialization(4, 0xFAC), Assert.Single(loaded.Specialization.Buffers));
     }
 
     [Theory]

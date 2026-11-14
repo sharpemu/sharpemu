@@ -33,8 +33,7 @@ public readonly record struct BufferResourceInfo(
     bool Atomic,
     bool Formatted,
     bool Scalar,
-    uint MaxByteExtent,
-    uint PackedStride);
+    uint MaxByteExtent);
 
 // How a compiled program uses one image resource.
 public readonly record struct ImageResourceInfo(ImageResourceClass Class, bool Written);

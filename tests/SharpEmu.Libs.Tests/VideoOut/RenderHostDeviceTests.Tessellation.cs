@@ -236,7 +236,7 @@ public sealed unsafe partial class RenderHostDeviceTests
             {
                 Stage = ShaderStageKind.Compute, Hash = Hash, UserDataBase = 8, UserDataCount = 20,
                 Bindings = layout, Resources = resources, TessellationFactorBuffer = (int)Gen5TessellationLowering.FindFactorBuffer(plan, 0),
-                Buffers = [new(false, true, false, false, false, 24, 0)],
+                Buffers = [new(false, true, false, false, false, 24)],
             };
             var data = new uint[20];
             data[12] = BitConverter.SingleToUInt32Bits(firstOuter);

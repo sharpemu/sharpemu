@@ -981,12 +981,17 @@ internal sealed partial class ShaderPrewarmList : IDisposable
                 }
 
                 case ComputeKind:
-                    if (_computes.Add(XxHash3.HashToUInt64(payload)))
+                {
+                    // By the record's identity, not its bytes: records that differ only in a buffer's stride word load
+                    // as one.
+                    var record = DeserializeCompute(payload);
+                    if (_computes.Add(Identity(record)))
                     {
-                        _loadedComputes.Add(DeserializeCompute(payload));
+                        _loadedComputes.Add(record);
                     }
 
                     return true;
+                }
 
                 case PixelKind:
                 {
@@ -1088,14 +1093,14 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         }
     }
 
-    private static readonly uint SchemaFingerprint = ComputeSchemaFingerprint();
+    internal static readonly uint SchemaFingerprint = ComputeSchemaFingerprint();
 
     private static uint ComputeSchemaFingerprint() => SchemaFingerprintOf(
         typeof(ComputeInputInfo), typeof(Gen5ComputeSystemRegisters), typeof(ResourceSpecialization),
         typeof(BufferSpecialization), typeof(ImageSpecialization), typeof(BufferCandidateTableSpecialization),
         typeof(LinkedShaderPrewarm), typeof(LinkedPrewarmFunction), typeof(LinkedPrewarmSite), typeof(LinkedPrewarmTarget));
 
-    private static readonly uint PixelSchemaFingerprint = SchemaFingerprintOf(
+    internal static readonly uint PixelSchemaFingerprint = SchemaFingerprintOf(
         typeof(PixelPrewarmRecord), typeof(PixelInputInfo), typeof(Gen5PixelOutputBinding), typeof(Gen5ColorComponentMapping),
         typeof(ColorComponentMap), typeof(ResourceSpecialization), typeof(BufferSpecialization), typeof(ImageSpecialization),
         typeof(BufferCandidateTableSpecialization));
@@ -1113,6 +1118,14 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         var builder = new StringBuilder();
         foreach (var type in types)
         {
+            if (type == typeof(BufferSpecialization))
+            {
+                // Records keep a stride word in front of each buffer's format (written as 0, skipped on load) that the
+                // specialization has no property for, so the schema lists it with the specialization's properties.
+                builder.Append(type.FullName).Append("{System.UInt32 DescriptorFormat;System.UInt32 DescriptorSwizzle;System.UInt32 PackedStride;}");
+                continue;
+            }
+
             builder.Append(type.FullName).Append('{');
             foreach (var property in type.GetProperties().OrderBy(static property => property.Name, StringComparer.Ordinal))
             {
@@ -1342,7 +1355,8 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         writer.Write(specialization.Buffers.Count);
         foreach (var buffer in specialization.Buffers)
         {
-            writer.Write(buffer.PackedStride);
+            // The stride word, written as 0: strides are read at run time, and the word keeps the record layout.
+            writer.Write(0u);
             writer.Write(buffer.DescriptorFormat);
             writer.Write(buffer.DescriptorSwizzle);
         }
@@ -1386,7 +1400,8 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         };
         for (var count = CheckedCount(reader.ReadInt32(), limit); count > 0; count--)
         {
-            specialization.Buffers.Add(new BufferSpecialization(reader.ReadUInt32(), reader.ReadUInt32(), reader.ReadUInt32()));
+            _ = reader.ReadUInt32();
+            specialization.Buffers.Add(new BufferSpecialization(reader.ReadUInt32(), reader.ReadUInt32()));
         }
 
         for (var count = CheckedCount(reader.ReadInt32(), limit); count > 0; count--)

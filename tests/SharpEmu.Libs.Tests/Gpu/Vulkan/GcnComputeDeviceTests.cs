@@ -170,7 +170,8 @@ public sealed class GcnComputeDeviceTests(HeadlessVulkanFixture fixture) : IClas
             output.Fill(destinationWord * 4UL, 256, 0xCDCDCDCD);
             runner.Dispatch(userData, new Dictionary<DescriptorBindingKind, GpuBuffer[]>
                 { [DescriptorBindingKind.Buffers] = [command, data, output] }, 1,
-                bufferRanges: [12, 256, (destinationWord + (ulong)boundWords) * 4]);
+                bufferRanges: [12, 256, (destinationWord + (ulong)boundWords) * 4],
+                bufferStrides: [.. snapshot.Buffers.Select(static words => (words[1] >> 16) & 0x3FFF)]);
         });
         var actual = runner.ReadBack(output, destinationWord * 4UL, 256);
         for (var index = (int)boundWords; index < values.Length; index++) values[index] = 0xCDCDCDCD;

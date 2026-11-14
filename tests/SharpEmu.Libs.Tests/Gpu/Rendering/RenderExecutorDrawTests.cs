@@ -1225,7 +1225,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
     [Fact]
     public void ShaderBufferWrites_EndRenderingAndBarrierAfterTheDraw()
     {
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         var descriptor = BufferDescriptor(VertexBase, 4, 16);
         _pipelines.Graphics = Programs(
             vertexStage: Stage(Program(ShaderStageKind.Vertex, buffers: [written]), buffers: [descriptor]),
@@ -1238,7 +1238,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
     [Fact]
     public void ShaderBufferWrites_WithoutAnAddressOrFootprintNeedNoBarrier()
     {
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Graphics = Programs(vertexStage: Stage(Program(ShaderStageKind.Vertex, buffers: [written]), buffers: [BufferDescriptor(0, 4, 16)]));
         _executor.DrawIndexed(1, Banks(), Indexed(3));
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("write_barrier", StringComparison.Ordinal));

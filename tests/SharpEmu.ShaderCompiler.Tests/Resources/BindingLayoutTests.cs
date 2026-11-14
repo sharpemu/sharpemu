@@ -65,6 +65,29 @@ public sealed class BindingLayoutTests
             BindingLayoutValidator.Validate(limits, info, [0u], false, false, true, Hash, ShaderStage.Pixel));
     }
 
+    // A program with an indexed buffer access carries every buffer binding's stride, two to a dword, after the store
+    // coverage bases; a program without one carries none.
+    [Fact]
+    public void IndexedBuffersCarryTheirStridesTwoToADword()
+    {
+        var info = new ShaderResourceInfo
+        {
+            Buffers = Enumerable.Range(0, 3).Select(_ => new BufferResource { Read = true }).ToList(),
+            UsesIndexedBuffers = true,
+        };
+        var indexed = BindingLayout.Allocate(info, [0u], false, false, false);
+        Assert.Equal(3u, indexed.BufferStrideCount);
+        Assert.Equal(indexed.CallTargetsDword + indexed.CallTargetCount * 2, indexed.BufferStridesDword);
+        Assert.Equal(indexed.BufferStridesDword + 2, indexed.ShaderDataDwordCount);
+        BindingLayoutValidator.Validate(indexed, info, [0u], false, false, false, Hash, ShaderStage.Compute);
+
+        info.UsesIndexedBuffers = false;
+        var plain = BindingLayout.Allocate(info, [0u], false, false, false);
+        Assert.Equal(0u, plain.BufferStrideCount);
+        Assert.Equal(plain.BufferStridesDword, plain.ShaderDataDwordCount);
+        Assert.NotEqual(indexed, plain);
+    }
+
     [Fact]
     public void ShaderInfoAndBindingLayout()
     {

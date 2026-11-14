@@ -165,6 +165,7 @@ public static partial class Gen5SpirvTranslator
         private uint _privateVec2Pointer;
         private readonly HashSet<uint> _flagVariables = [];
         private uint _runtimeBufferBiases;
+        private uint _runtimeBufferStrides;
         // One Private variable per register the program touches, declared on first use. A whole
         // register-file array is kept only for the VGPRs of a program that indexes them at run time
         // (V_MOVREL*): MoltenVK lowers a 512-entry private array to thread memory, and every
@@ -3774,7 +3775,6 @@ public static partial class Gen5SpirvTranslator
             }
 
             var specialized = info.Buffers[bindingIndex];
-            var stride = UInt(specialized.PackedStride & 0x3FFF);
             var descriptorFormat = specialized.DescriptorFormat;
             var descriptorSwizzle = specialized.DescriptorSwizzle;
             var descriptorWord3 = UInt((specialized.DescriptorFormat << 12) | (specialized.DescriptorSwizzle & 0xFFF));
@@ -3792,9 +3792,11 @@ public static partial class Gen5SpirvTranslator
                 UInt(unchecked((uint)control.OffsetBytes)),
                 scalarOffset);
             byteAddress = IAdd(byteAddress, vectorOffset);
-            byteAddress = IAdd(
-                byteAddress,
-                _module.AddInstruction(SpirvOp.IMul, _uintType, vectorIndex, stride));
+            if (control.IndexEnabled)
+            {
+                byteAddress = IAdd(byteAddress, _module.AddInstruction(SpirvOp.IMul, _uintType, vectorIndex, RuntimeBufferStride(bindingIndex)));
+            }
+
             byteAddress = ApplyGuestBufferByteBias(bindingIndex, byteAddress);
             var dwordAddress = ShiftRightLogical(byteAddress, UInt(2));
 
@@ -9155,6 +9157,20 @@ public static partial class Gen5SpirvTranslator
                 SpirvOp.AccessChain,
                 _privateUintPointer,
                 _runtimeBufferBiases,
+                UInt(checked((uint)binding)));
+
+        // The stride an indexed access multiplies its index by, from the binding's V# at run time.
+        private uint RuntimeBufferStride(int binding) =>
+            _runtimeBufferStrides != 0 && (uint)binding < _request.Bindings.BufferStrideCount
+                ? CapturedBufferValue(_bufferStrideValues, binding) ?? Load(_uintType, RuntimeBufferStridePointer(binding))
+                : throw new ResourcePlanException(
+                    $"buffer binding {binding} is indexed, but the layout carries {_request.Bindings.BufferStrideCount} buffer strides");
+
+        private uint RuntimeBufferStridePointer(int binding) =>
+            _module.AddInstruction(
+                SpirvOp.AccessChain,
+                _privateUintPointer,
+                _runtimeBufferStrides,
                 UInt(checked((uint)binding)));
 
         private uint VectorPointer(uint register)

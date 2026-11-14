@@ -858,13 +858,22 @@ public sealed class ResourceTrackerTests
         memory.Reads = 0;
         memory.FailAfter = 0;
         var snapshot = new ResourceSnapshot { UserData = [1] };
-        var specialization = new ResourceSpecialization { Buffers = [new BufferSpecialization(7, 0, 0)] };
+        var specialization = new ResourceSpecialization { Buffers = [new BufferSpecialization(7, 0)] };
         Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
         Assert.Equal([1u], snapshot.UserData);
-        Assert.Equal(7u, specialization.Buffers[0].PackedStride);
+        Assert.Equal(7u, specialization.Buffers[0].DescriptorFormat);
 
         var layout = BindingLayout.Allocate(plan.Info, BindingLayout.CollectUserDataRegisters(program, 0, 64), false, plan.TableReads.Count != 0, false);
         Assert.NotNull(layout.Find(DescriptorBindingKind.FlattenedResourceTable));
+    }
+
+    // An indexed buffer access (idxen) makes the program read its buffers' strides at run time; offsets alone do not.
+    [Fact]
+    public void AnIndexedBufferAccessReadsTheBufferStridesAtRunTime()
+    {
+        Assert.True(Extract(Program(BufferAccess(0, "BufferLoadDword", 0, indexEnabled: true, vectorAddress: 1), EndProgram(8)))
+            .Info.UsesIndexedBuffers);
+        Assert.False(Extract(Program(BufferLoad(0, 0), EndProgram(8))).Info.UsesIndexedBuffers);
     }
 
     [Fact]

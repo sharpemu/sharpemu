@@ -1858,24 +1858,8 @@ public static partial class ResourceMaterializer
                 Array.Clear(words);
             }
 
-            var stride = (words[1] >> 16) & 0x3FFF;
-            var swizzleEnabled = (words[1] >> 31) != 0;
-            var indexStride = (words[3] >> 21) & 0x3;
-            var addThreadId = (words[3] >> 23) & 0x1;
-            var packedStride = stride | ((swizzleEnabled ? 1u : 0u) << 14) | (indexStride << 16) | (addThreadId << 20);
-            var swizzle = stride != 0 && ((packedStride >> 14) & 1) != 0;
-            if (stride == 0)
-            {
-                packedStride &= ~((1u << 14) | (3u << 16));
-            }
-            else if (!swizzle)
-            {
-                packedStride &= ~(3u << 16);
-            }
-
             var formatted = info.Buffers[index].Formatted;
             buffers.Add(new BufferSpecialization(
-                packedStride,
                 formatted ? (words[3] >> 12) & 0x7F : DescriptorConstants.InvalidFormat,
                 formatted ? words[3] & 0xFFF : DescriptorConstants.IdentityDestinationSelect));
         }
@@ -2182,22 +2166,7 @@ public static partial class ResourceMaterializer
                 }
 
                 snapshot.Buffers[bufferCursor + candidate] = words;
-                var stride = (words[1] >> 16) & 0x3FFF;
-                var swizzleEnabled = (words[1] >> 31) != 0;
-                var indexStride = (words[3] >> 21) & 0x3;
-                var addThreadId = (words[3] >> 23) & 0x1;
-                var packedStride = stride | ((swizzleEnabled ? 1u : 0u) << 14) | (indexStride << 16) | (addThreadId << 20);
-                var swizzle = stride != 0 && ((packedStride >> 14) & 1) != 0;
-                if (stride == 0)
-                {
-                    packedStride &= ~((1u << 14) | (3u << 16));
-                }
-                else if (!swizzle)
-                {
-                    packedStride &= ~(3u << 16);
-                }
-
-                buffers.Add(new BufferSpecialization(packedStride, (words[3] >> 12) & 0x7F, words[3] & 0xFFF));
+                buffers.Add(new BufferSpecialization((words[3] >> 12) & 0x7F, words[3] & 0xFFF));
             }
 
             var mappingOffset = (uint)mappingCursor;
@@ -2298,7 +2267,6 @@ public static partial class ResourceMaterializer
         var info = source.Clone();
         for (var index = 0; index < info.Buffers.Count; index++)
         {
-            info.Buffers[index].PackedStride = specialization.Buffers[index].PackedStride;
             info.Buffers[index].DescriptorFormat = specialization.Buffers[index].DescriptorFormat;
             info.Buffers[index].DescriptorSwizzle = specialization.Buffers[index].DescriptorSwizzle;
         }
@@ -2311,7 +2279,6 @@ public static partial class ResourceMaterializer
             {
                 Source = DescriptorConstants.NoIndex,
                 Read = true,
-                PackedStride = specialized.PackedStride,
                 DescriptorFormat = specialized.DescriptorFormat,
                 DescriptorSwizzle = specialized.DescriptorSwizzle,
             });

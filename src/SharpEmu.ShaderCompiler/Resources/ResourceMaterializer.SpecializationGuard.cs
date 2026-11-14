@@ -9,15 +9,17 @@ public static partial class ResourceMaterializer
     internal sealed class SpecializationGuard
     {
         internal bool StableImageBindings;
-        internal uint[][] Buffers = [];
+        internal uint[] Buffers = [];
         internal uint[][] Images = [];
         internal uint[][] Samplers = [];
         internal int[] SamplerSources = [];
         internal ResourceSpecialization Specialization = new();
     }
 
+    // The V# bits a buffer's specialization depends on: its type and, when formatted, its format and destination selects.
+    // The stride is read at run time; the other addressing fields do not shape the module.
     private static uint BufferGuardFlags(ShaderResourcePlan plan, int index) =>
-        0xC0E00000u | (plan.Info.Buffers[index].Formatted ? 0x7FFFFu : 0u);
+        0xC0000000u | (plan.Info.Buffers[index].Formatted ? 0x7FFFFu : 0u);
 
     private static SpecializationGuard? CaptureGuard(ShaderResourcePlan plan, MaterializedSnapshot snapshot)
     {
@@ -31,7 +33,7 @@ public static partial class ResourceMaterializer
         return new SpecializationGuard
         {
             StableImageBindings = plan.StableImageBindings,
-            Buffers = snapshot.Buffers.Select((words, index) => new[] { words[1] & 0xBFFF0000u, words[3] & BufferGuardFlags(plan, index) }).ToArray(),
+            Buffers = snapshot.Buffers.Select((words, index) => words[3] & BufferGuardFlags(plan, index)).ToArray(),
             Images = snapshot.Images.Select(words => words.ToArray()).ToArray(),
             Samplers = snapshot.Samplers.Select(words => words.ToArray()).ToArray(),
         };
@@ -46,8 +48,7 @@ public static partial class ResourceMaterializer
         for (var index = 0; index < guard.Buffers.Length; index++)
         {
             var words = snapshot.Buffers[index];
-            if (words.Length != 4 || (words[1] & 0xBFFF0000u) != guard.Buffers[index][0] ||
-                (words[3] & BufferGuardFlags(plan, index)) != guard.Buffers[index][1]) return false;
+            if (words.Length != 4 || (words[3] & BufferGuardFlags(plan, index)) != guard.Buffers[index]) return false;
         }
         for (var index = 0; index < guard.Images.Length; index++)
             if (!snapshot.Images[index].AsSpan().SequenceEqual(guard.Images[index])) return false;

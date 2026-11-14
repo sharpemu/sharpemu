@@ -280,7 +280,7 @@ public sealed class RenderExecutorAdaptationTests : IDisposable
     public void TargetlessDrawWithImagesAndBufferWrites_IsNeverRetained(bool vertexWrites, bool atomic)
     {
         _host.RetainTargetlessDraws = true;
-        var written = new BufferResourceInfo(false, true, atomic, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, atomic, false, false, 4);
         var vertex = Stage(Program(ShaderStageKind.Vertex,
             buffers: vertexWrites ? [written] : []),
             buffers: vertexWrites ? [BufferDescriptor(VertexBase, 4, 16)] : []);

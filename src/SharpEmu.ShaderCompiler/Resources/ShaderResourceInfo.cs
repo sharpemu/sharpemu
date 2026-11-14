@@ -47,7 +47,6 @@ public sealed class BufferResource
     public uint Source { get; set; }
     public uint FirstUsePc { get; set; }
     public uint MaxByteExtent { get; set; }
-    public uint PackedStride { get; set; }
     public uint DescriptorFormat { get; set; } = DescriptorConstants.InvalidFormat;
     public uint DescriptorSwizzle { get; set; } = DescriptorConstants.IdentityDestinationSelect;
     public uint ImageAlias { get; set; } = DescriptorConstants.NoIndex;
@@ -198,6 +197,10 @@ public sealed class ShaderResourceInfo
     // chose it): it binds DescriptorBindingKind.DeviceAddressFallback.
     public bool UsesDeviceAddressFallback { get; set; }
 
+    // Some access indexes a buffer binding (idxen): the layout carries every buffer binding's V# stride as shader data
+    // (BindingLayout.BufferStridesDword), which the access multiplies the index by.
+    public bool UsesIndexedBuffers { get; set; }
+
     public ShaderResourceInfo Clone() => new()
     {
         Buffers = Buffers.Select(buffer => buffer.Clone()).ToList(),
@@ -218,6 +221,7 @@ public sealed class ShaderResourceInfo
         UsesCallRecords = UsesCallRecords,
         UsesCallMarks = UsesCallMarks,
         UsesDeviceAddressFallback = UsesDeviceAddressFallback,
+        UsesIndexedBuffers = UsesIndexedBuffers,
     };
 }
 

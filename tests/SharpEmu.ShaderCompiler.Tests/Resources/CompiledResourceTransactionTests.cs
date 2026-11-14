@@ -194,10 +194,12 @@ public sealed class CompiledResourceTransactionTests
         Assert.Equal(expected, specialization);
         Assert.Equal(memory.DescriptorAddress, snapshot.Buffers[0][0]);
         Assert.NotEqual(previous.Buffers[0][0], snapshot.Buffers[0][0]);
+        // A stride is a payload too (an indexed access reads it at run time): the guard and the specialization stay.
         memory.DescriptorStride = 16u << 16;
         Assert.True(ResourceMaterializer.Materialize(plan, memory.Inputs(false), ref snapshot, ref specialization));
-        Assert.NotSame(guard, plan.SpecializationGuard);
-        Assert.NotEqual(expected, specialization);
+        Assert.Same(guard, plan.SpecializationGuard);
+        Assert.Equal(expected, specialization);
+        Assert.Equal(16u << 16, snapshot.Buffers[0][1]);
         var saved = snapshot;
         var savedSpecialization = specialization;
         var savedGuard = plan.SpecializationGuard;

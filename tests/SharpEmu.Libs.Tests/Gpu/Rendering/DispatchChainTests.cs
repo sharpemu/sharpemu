@@ -23,9 +23,9 @@ public sealed class DispatchChainTests : IDisposable
 
     public void Dispose() => _fatal.Dispose();
 
-    private static BufferResourceInfo Written => new(false, true, false, false, false, 4, 0);
+    private static BufferResourceInfo Written => new(false, true, false, false, false, 4);
 
-    private static BufferResourceInfo Read => new(true, false, false, false, false, 4, 0);
+    private static BufferResourceInfo Read => new(true, false, false, false, false, 4);
 
     private void Dispatch(ulong submitId, BufferResourceInfo[] buffers, uint[][] descriptors)
     {

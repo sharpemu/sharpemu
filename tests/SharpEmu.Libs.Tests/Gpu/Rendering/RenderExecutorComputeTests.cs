@@ -251,8 +251,8 @@ public sealed class RenderExecutorComputeTests : IDisposable
         Assert.Equal(new[] { (program.Hash, false) }, _pipelines.RecordedLinkedCompiles);
     }
 
-    private static BufferResourceInfo ClearResource(bool read = false, bool formatted = true, bool written = true, uint maxByteExtent = 16, uint packedStride = 16) =>
-        new(read, written, false, formatted, false, maxByteExtent, packedStride);
+    private static BufferResourceInfo ClearResource(bool read = false, bool formatted = true, bool written = true, uint maxByteExtent = 16) =>
+        new(read, written, false, formatted, false, maxByteExtent);
 
     private static uint[] ClearUserData(uint[] descriptor, uint value, uint last = ClearValue) => [descriptor[0], descriptor[1], descriptor[2], descriptor[3], value, value, value, last];
 
@@ -371,7 +371,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
     [Fact]
     public void StorageWrites_InsertTheHazardBarrierBeforeThePipelineBind()
     {
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [written]), buffers: [BufferDescriptor(VertexBase, 4, 16)]));
         _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
         Assert.True(_host.Calls.IndexOf("write_hazard_barrier") < _host.Calls.IndexOf("bind_pipeline Compute C1"));
@@ -464,8 +464,8 @@ public sealed class RenderExecutorComputeTests : IDisposable
         var source = BufferDescriptor(valueAddress, 0, 1);
         var program = Program(ShaderStageKind.Compute, buffers:
         [
-            new BufferResourceInfo(Read: true, Written: false, Atomic: false, Formatted: false, Scalar: true, MaxByteExtent: 4, PackedStride: 0),
-            ClearResource(maxByteExtent: 4, packedStride: 4),
+            new BufferResourceInfo(Read: true, Written: false, Atomic: false, Formatted: false, Scalar: true, MaxByteExtent: 4),
+            ClearResource(maxByteExtent: 4),
         ]);
         _pipelines.Compute = ComputeProgram(Stage(program, buffers: [source, target], userData: [.. target, .. source]));
     }
@@ -513,10 +513,10 @@ public sealed class RenderExecutorComputeTests : IDisposable
         { "read-modify-write", ClearResource(read: true), BufferDescriptor(MetadataAddress, 16, 256) },
         { "unformatted", ClearResource(formatted: false), BufferDescriptor(MetadataAddress, 16, 256) },
         { "narrow extent", ClearResource(maxByteExtent: 4), BufferDescriptor(MetadataAddress, 16, 256) },
-        { "stride mismatch", ClearResource(packedStride: 8), BufferDescriptor(MetadataAddress, 8, 256) },
+        { "stride mismatch", ClearResource(), BufferDescriptor(MetadataAddress, 8, 256) },
         { "other format", ClearResource(), BufferDescriptor(MetadataAddress, 16, 256, format: 10) },
-        { "swizzled", ClearResource(packedStride: 16 | (1u << 14)), BufferDescriptor(MetadataAddress, 16, 256, swizzle: true) },
-        { "thread id added", ClearResource(packedStride: 16 | (1u << 20)), BufferDescriptor(MetadataAddress, 16, 256, addThreadId: true) },
+        { "swizzled", ClearResource(), BufferDescriptor(MetadataAddress, 16, 256, swizzle: true) },
+        { "thread id added", ClearResource(), BufferDescriptor(MetadataAddress, 16, 256, addThreadId: true) },
     };
 
     [Theory]
@@ -576,7 +576,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
     {
         _host.MetadataAddresses.Add(MetadataAddress);
         _host.ClearableMetadata.Add(MetadataAddress);
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [written]), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
         _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
 
@@ -590,7 +590,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
     {
         _host.MetadataAddresses.Add(MetadataAddress);
         _host.ClearableMetadata.Add(MetadataAddress);
-        var readWrite = new BufferResourceInfo(true, true, false, false, false, 4, 0);
+        var readWrite = new BufferResourceInfo(true, true, false, false, false, 4);
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [readWrite]), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
         _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
 
@@ -602,7 +602,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
     public void MetadataClear_RefusesAProgramWithBitwiseExclusiveOr()
     {
         _host.ClearableMetadata.Add(MetadataAddress);
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [written], exclusiveOr: true), buffers: [BufferDescriptor(MetadataAddress, 4, 16)]));
         _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
 
@@ -613,7 +613,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
     [Fact]
     public void MetadataClear_WithAMismatchedBufferCountIsFatal()
     {
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [written])));
         var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41));
         Assert.Contains("descriptors=0 program=1", fatal.Message);
@@ -622,7 +622,7 @@ public sealed class RenderExecutorComputeTests : IDisposable
     [Fact]
     public void ShortBufferDescriptor_IsFatal()
     {
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [written]), buffers: [[1, 2]]));
         var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41));
         Assert.Contains("index=0 words=2", fatal.Message);

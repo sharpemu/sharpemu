@@ -6,7 +6,8 @@ using System.Linq;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
-public readonly record struct BufferSpecialization(uint PackedStride, uint DescriptorFormat, uint DescriptorSwizzle);
+// A buffer's stride is not part of its specialization; an indexed access reads it from the binding's V# at run time.
+public readonly record struct BufferSpecialization(uint DescriptorFormat, uint DescriptorSwizzle);
 
 // The module-affecting layout of one bounded runtime V# table. Candidate descriptors
 // themselves are appended to Buffers; this names their contiguous run and the flattened
@@ -92,7 +93,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     public static ResourceSpecialization Default(ShaderResourceInfo info) => new()
     {
         BaseBufferCount = info.Buffers.Count,
-        Buffers = info.Buffers.Select(_ => new BufferSpecialization(0, DescriptorConstants.InvalidFormat, DescriptorConstants.IdentityDestinationSelect)).ToList(),
+        Buffers = info.Buffers.Select(_ => new BufferSpecialization(DescriptorConstants.InvalidFormat, DescriptorConstants.IdentityDestinationSelect)).ToList(),
         Images = info.Images.Select(image => new ImageSpecialization(
             image.NumericClass == ImageNumericClass.Unsupported
                 ? (image.Atomic64 ? ImageNumericClass.Uint64 : image.Atomic ? ImageNumericClass.Uint : ImageNumericClass.Float)

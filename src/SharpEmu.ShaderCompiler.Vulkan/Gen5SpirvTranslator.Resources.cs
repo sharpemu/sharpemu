@@ -395,6 +395,15 @@ public static partial class Gen5SpirvTranslator
                 _interfaces.Add(_runtimeBufferBiases);
             }
 
+            if (layout.BufferStrideCount != 0)
+            {
+                var strideArrayType = _module.TypeArray(_uintType, layout.BufferStrideCount);
+                _runtimeBufferStrides = _module.AddGlobalVariable(_module.TypePointer(SpirvStorageClass.Private, strideArrayType),
+                    SpirvStorageClass.Private, _module.ConstantNull(strideArrayType));
+                _module.AddName(_runtimeBufferStrides, "guestBufferStride");
+                _interfaces.Add(_runtimeBufferStrides);
+            }
+
             if (info.UsesDeviceAddresses || _stage == Gen5SpirvStage.Mesh || layout.UsesTessellationData || layout.UsesTableBlock)
             {
                 _module.AddCapability(SpirvCapability.PhysicalStorageBufferAddresses);
@@ -695,8 +704,8 @@ public static partial class Gen5SpirvTranslator
 
         // ---- initial state ----
 
-        // User data comes from push data or the shader-data buffer, and the packed memory
-        // offset bytes become the per-buffer byte biases.
+        // User data comes from push data or the shader-data buffer, the packed memory offset bytes become the per-buffer
+        // byte biases, and the packed strides the per-buffer strides.
         private void EmitLayoutInitialState()
         {
             var layout = _request.Bindings;
@@ -710,6 +719,13 @@ public static partial class Gen5SpirvTranslator
                 var packed = LoadShaderDataDword(UInt(layout.MemoryOffsetDword + (buffer / 4)));
                 var bias = BitwiseAnd(ShiftRightLogical(packed, UInt((buffer % 4) * 8)), UInt(0xFF));
                 Store(RuntimeBufferBiasPointer((int)buffer), bias);
+            }
+
+            for (uint buffer = 0; buffer < layout.BufferStrideCount; buffer++)
+            {
+                var packed = LoadShaderDataDword(UInt(layout.BufferStridesDword + (buffer / 2)));
+                var stride = BitwiseAnd(ShiftRightLogical(packed, UInt((buffer % 2) * 16)), UInt(0x3FFF));
+                Store(RuntimeBufferStridePointer((int)buffer), stride);
             }
 
             if (layout.UsesTableBlock)
@@ -757,13 +773,17 @@ public static partial class Gen5SpirvTranslator
         private readonly Dictionary<int, uint> _bufferBaseValues = [];
         private readonly Dictionary<int, uint> _bufferLengthValues = [];
         private readonly Dictionary<int, uint> _bufferBiasValues = [];
+        private readonly Dictionary<int, uint> _bufferStrideValues = [];
         private uint _bufferValuesFunction;
 
+        // The per-buffer byte biases, strides and table-block bases and lengths, read once per function after they are stored
+        // (main) or on entry (outlined bodies); later uses in the same function take these values instead of loading again.
         private void CaptureBufferTableValues()
         {
             _bufferBaseValues.Clear();
             _bufferLengthValues.Clear();
             _bufferBiasValues.Clear();
+            _bufferStrideValues.Clear();
             _bufferValuesFunction = _module.CurrentFunction;
             var count = _request.Resources.Info.Buffers.Count;
             for (var buffer = 0; buffer < count; buffer++)
@@ -778,6 +798,11 @@ public static partial class Gen5SpirvTranslator
                     _bufferBaseValues[buffer] = Load(_ulongType, TableBufferBasePointer(buffer));
                     _bufferLengthValues[buffer] = Load(_uintType, TableBufferLengthPointer(buffer));
                 }
+            }
+
+            for (var buffer = 0; buffer < _request.Bindings.BufferStrideCount; buffer++)
+            {
+                _bufferStrideValues[buffer] = Load(_uintType, RuntimeBufferStridePointer(buffer));
             }
         }
 

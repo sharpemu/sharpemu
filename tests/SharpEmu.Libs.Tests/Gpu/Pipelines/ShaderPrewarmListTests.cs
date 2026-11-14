@@ -238,6 +238,57 @@ public sealed class ShaderPrewarmListTests : IDisposable
         Assert.Equal([BufferDescriptorWords.Format32x4UInt, BufferDescriptorWords.Format32UInt], Formats(reloaded));
     }
 
+    // A schema fingerprint that changes discards every recorded main list and graphics list and every pixel and vertex
+    // record, so it may only change with a deliberate format change. These are the values the recorded lists carry.
+    [Fact]
+    public void TheSchemaFingerprintsKeepTheValuesOfTheRecordedLists()
+    {
+        Assert.Equal(0xBE236E8Du, ShaderPrewarmList.SchemaFingerprint);
+        Assert.Equal(0x4049A4C8u, ShaderPrewarmList.PixelSchemaFingerprint);
+    }
+
+    [Fact]
+    public void RecordsThatDifferOnlyInAnOldBufferStrideLoadAsOne()
+    {
+        using (var list = Open())
+        {
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+        }
+
+        var path = Path.Combine(_directory, ShaderPrewarmList.FileName);
+        var compute = MainListBodies(File.ReadAllBytes(path)).Single(static body => body[0] == 2);
+        // The buffer's stride field (written as 0), then its descriptor format.
+        byte[] field = [0, 0, 0, 0, .. BitConverter.GetBytes(BufferDescriptorWords.Format32UInt)];
+        var at = compute.AsSpan().IndexOf(field);
+        Assert.True(at > 0);
+        Assert.Equal(-1, compute.AsSpan(at + 1).IndexOf(field));
+        using (var file = File.Open(path, FileMode.Append))
+        {
+            foreach (var stride in new uint[] { 16, 32 })
+            {
+                var old = (byte[])compute.Clone();
+                BitConverter.TryWriteBytes(old.AsSpan(at), stride);
+                file.Write(BitConverter.GetBytes((uint)old.Length));
+                file.Write(BitConverter.GetBytes(System.IO.Hashing.XxHash3.HashToUInt64(old)));
+                file.Write(old);
+            }
+        }
+
+        using var reloaded = Open();
+        Assert.Single(reloaded.LoadedComputes());
+    }
+
+    // Each record of a main list: its kind, then its payload.
+    private static IEnumerable<byte[]> MainListBodies(byte[] data)
+    {
+        for (var offset = 12; data.Length - offset >= 13;)
+        {
+            var length = BitConverter.ToInt32(data, offset);
+            yield return data.AsSpan(offset + 12, length).ToArray();
+            offset += 12 + length;
+        }
+    }
+
     private static uint[] Formats(ShaderPrewarmList list) =>
         [.. list.LoadedComputes().Select(item => item.Record.Specialization.Buffers[0].DescriptorFormat)];
 

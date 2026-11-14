@@ -65,7 +65,7 @@ public sealed unsafe partial class RenderHostDeviceTests
             Resources = resources, Bindings = layout,
             Buffers = resources.Info.Buffers.Select(buffer => new BufferResourceInfo(
                 buffer.Read, buffer.Written, buffer.Atomic, buffer.Formatted, buffer.Scalar,
-                buffer.MaxByteExtent, buffer.PackedStride)).ToArray(),
+                buffer.MaxByteExtent)).ToArray(),
         };
         GpuBuffer? original = null;
         var retained = false;

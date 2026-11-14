@@ -371,6 +371,10 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     // The addresses of the module's callees (Gen5ShaderCallLinker.CallTargets), two dwords each.
     public uint CallTargetCount { get; init; }
+
+    // The V# stride of every buffer binding, two to a dword (16 bits each), when some access indexes its buffer
+    // (ShaderResourceInfo.UsesIndexedBuffers); otherwise none.
+    public uint BufferStrideCount { get; init; }
     // The program reads bindless heap records through descriptor set 1 (see BindlessHeap).
     public bool UsesBindlessHeap { get; init; }
     public IReadOnlyList<uint> UserDataRegisters { get; init; } = [];
@@ -399,7 +403,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public uint CallTargetsDword => CallArgumentsDword + CallArgumentCount * 2;
 
-    public uint ShaderDataDwordCount => CallTargetsDword + CallTargetCount * 2;
+    public uint BufferStridesDword => CallTargetsDword + CallTargetCount * 2;
+
+    public uint ShaderDataDwordCount => BufferStridesDword + (BufferStrideCount + 1) / 2;
 
     public bool UsesPushData => PushDataStartDword != PushData.NoStart;
 
@@ -657,6 +663,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         var memoryOffsetCount = usesTableBlock ? 0u : (uint)info.Buffers.Count;
         var mipStatisticsCount = info.Images.Any(static image => image.MipStatistics) ? (uint)info.Images.Count : 0u;
         usesBufferLengths &= memoryOffsetCount != 0 && !usesTableBlock;
+        var bufferStrideCount = info.UsesIndexedBuffers ? (uint)info.Buffers.Count : 0u;
         var shaderDataDwords = memoryOffsetDword + (usesTableBlock ? 2u : (memoryOffsetCount + 3) / 4) + (usesBufferLengths ? memoryOffsetCount : 0) +
             (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesMeshDrawParameters ? 6u : 0u) +
             (usesTessellationData ? Gen5TessellationData.DwordCount : 0u) + callArgumentCount * 2 + callTargetCount * 2;
@@ -767,6 +774,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             UsesMeshDrawParameters = usesMeshDrawParameters,
             CallArgumentCount = callArgumentCount,
             CallTargetCount = callTargetCount,
+            BufferStrideCount = bufferStrideCount,
             UsesBindlessHeap = info.UsesBindlessHeap,
             UserDataRegisters = userDataRegisters,
             Descriptors = descriptors,
@@ -790,6 +798,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         UsesMeshDrawParameters == other.UsesMeshDrawParameters &&
         CallArgumentCount == other.CallArgumentCount &&
         CallTargetCount == other.CallTargetCount &&
+        BufferStrideCount == other.BufferStrideCount &&
         UsesBindlessHeap == other.UsesBindlessHeap &&
         UserDataRegisters.SequenceEqual(other.UserDataRegisters) &&
         Descriptors.Count == other.Descriptors.Count &&

@@ -94,7 +94,7 @@ internal sealed partial class ShaderPrewarmList
         ? (payload, 0f)
         : (payload[..^FirstUseBytes], BitConverter.ToSingle(payload, payload.Length - FirstUseBytes));
 
-    private static readonly uint VertexSchemaFingerprint = SchemaFingerprintOf(
+    internal static readonly uint VertexSchemaFingerprint = SchemaFingerprintOf(
         typeof(VertexPrewarmRecord), typeof(VertexInputInfo), typeof(VertexAttributeResource), typeof(BufferDescriptorWords),
         typeof(ClipSpaceTransform), typeof(MeshDrawConfiguration), typeof(GuestGeometryConfiguration), typeof(MeshExecutionLimits),
         typeof(ResourceSpecialization), typeof(BufferSpecialization), typeof(ImageSpecialization),

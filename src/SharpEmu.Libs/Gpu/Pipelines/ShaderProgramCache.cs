@@ -2445,7 +2445,7 @@ internal sealed partial class ShaderProgramCache
         for (var index = 0; index < buffers.Length; index++)
         {
             var buffer = info.Buffers[index];
-            buffers[index] = new BufferResourceInfo(buffer.Read, buffer.Written, buffer.Atomic, buffer.Formatted, buffer.Scalar, buffer.MaxByteExtent, buffer.PackedStride);
+            buffers[index] = new BufferResourceInfo(buffer.Read, buffer.Written, buffer.Atomic, buffer.Formatted, buffer.Scalar, buffer.MaxByteExtent);
         }
 
         var images = new ImageResourceInfo[info.Images.Count];

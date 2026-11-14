@@ -102,7 +102,7 @@ public sealed class VertexPrewarmTests : IDisposable
         },
         RequiredVertexOutputCount = 4,
         MeshOutputLocationMask = 0x13,
-        Specialization = new ResourceSpecialization { BaseBufferCount = 1, Buffers = [new BufferSpecialization(16, 4, 0xFAC)] },
+        Specialization = new ResourceSpecialization { BaseBufferCount = 1, Buffers = [new BufferSpecialization(4, 0xFAC)] },
         DeviceRecordCounts = true,
     };
 
@@ -243,7 +243,7 @@ public sealed class VertexPrewarmTests : IDisposable
                 Assert.Equal(mesh.MeshOutputLocationMask, part.Program.MeshOutputLocationMask);
                 Assert.Equal(0x40ul, part.Program.ContinuationAddressOffset);
                 Assert.True(part.Program.DeviceRecordCounts);
-                Assert.Equal(new BufferSpecialization(16, 4, 0xFAC), Assert.Single(part.Program.Specialization.Buffers));
+                Assert.Equal(new BufferSpecialization(4, 0xFAC), Assert.Single(part.Program.Specialization.Buffers));
                 Assert.Equal(ShaderPrewarmList.Identity(mesh), ShaderPrewarmList.Identity(part.Program));
             });
     }

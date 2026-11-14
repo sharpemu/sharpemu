@@ -1562,6 +1562,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 BindBufferViews(prepared, shaderData);
             }
 
+            WriteBufferStrides(prepared, shaderData);
             if (layout.MipStatisticsCount != 0)
             {
                 if (_worker && _presenter._lodStatistics is null)
@@ -1586,6 +1587,22 @@ internal static unsafe partial class VulkanVideoPresenter
             if (layout.Find(DescriptorBindingKind.CallRecords) is not null)
             {
                 prepared.Descriptors.CallRecords = UploadDwords(prepared.CallRecordWords, "call records", program, byIdentity: false);
+            }
+        }
+
+        // The stride indexed accesses of each binding multiply their index by, two to a dword.
+        private static void WriteBufferStrides(PreparedStageBindings prepared, uint[] shaderData)
+        {
+            var layout = prepared.Layout;
+            if (layout.BufferStrideCount == 0)
+            {
+                return;
+            }
+
+            Array.Clear(shaderData, (int)layout.BufferStridesDword, (int)((layout.BufferStrideCount + 1) / 2));
+            for (var index = 0; index < layout.BufferStrideCount; index++)
+            {
+                shaderData[layout.BufferStridesDword + (uint)index / 2] |= prepared.BufferSources[index].Descriptor.Stride << (index % 2 * 16);
             }
         }
 

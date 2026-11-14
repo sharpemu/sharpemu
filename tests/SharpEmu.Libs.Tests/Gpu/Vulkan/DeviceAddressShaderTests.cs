@@ -549,6 +549,8 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
             Branch(76, "SCbranchScc1", -8),
             EndProgram(80));
         var run = new Run(vulkan, program, threadCount: 8);
+        // The indexed store's V# is built on the device and carries its own stride; the layout carries none.
+        Assert.Equal(0u, run.Request.Bindings.BufferStrideCount);
         var data = new byte[64];
         WriteWord(data, 0, recordCount);
         run.MapPage(GuestBase, data);

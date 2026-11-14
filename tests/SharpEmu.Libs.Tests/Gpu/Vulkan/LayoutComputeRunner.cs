@@ -219,6 +219,7 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         uint[]? memoryOffsets = null,
         ulong[]? callArguments = null,
         ulong[]? callTargets = null,
+        uint[]? bufferStrides = null,
         uint[]? tessellationData = null)
     {
         var vk = _harness.Vk;
@@ -254,6 +255,14 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         {
             for (var index = 0; index < memoryOffsets.Length; index++)
                 shaderData[layout.MemoryOffsetDword + (uint)index / 4] |= (memoryOffsets[index] & 0xFF) << (index % 4 * 8);
+        }
+
+        // The V# stride of each buffer binding, as BindBuffers writes it, for indexed buffer accesses.
+        if (layout.BufferStrideCount != 0)
+        {
+            if (bufferStrides?.Length != layout.BufferStrideCount) throw new InvalidOperationException("The dispatch requires its buffer strides.");
+            for (var index = 0; index < bufferStrides.Length; index++)
+                shaderData[layout.BufferStridesDword + (uint)index / 2] |= (bufferStrides[index] & 0x3FFF) << (index % 2 * 16);
         }
 
         if (layout.UsesDispatchThreadLimits)
