@@ -77,6 +77,9 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             _relay.BindCurrentThread();
             WaitForRenderDocAttachIfRequested();
+            DriverShaderCacheFolder.Apply(VulkanPipelineCacheStorage.ResolvePath(
+                VideoOutExports.GetApplicationTitleId(),
+                Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_PATH")));
             _vk = Vk.GetApi();
             uint loaderVersion = Vk.Version10;
             Check(_vk.EnumerateInstanceVersion(ref loaderVersion), "vkEnumerateInstanceVersion");
