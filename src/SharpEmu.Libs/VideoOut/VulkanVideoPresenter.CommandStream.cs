@@ -590,6 +590,11 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             RenderPhaseProfile.RecordCleanRead(hit: false);
+            if (!_guestMemory.CanRead(address, size))
+            {
+                return false;
+            }
+
             var thread = _commandThread!;
             if (thread.TryReadShadow(address, destination, out var shadowSequence, out var shadowSource) &&
                 !NewerPendingWrite(address, size, shadowSequence) && !thread.HasPendingRangeAfter(address, size, shadowSequence))
