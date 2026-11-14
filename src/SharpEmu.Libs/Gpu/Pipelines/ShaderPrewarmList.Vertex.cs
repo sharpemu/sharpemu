@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Diagnostics;
 using System.IO.Hashing;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.ShaderCompiler.Resources;
@@ -65,8 +66,32 @@ internal sealed partial class ShaderPrewarmList
     private readonly Dictionary<ulong, VertexPrewarmRecord> _loadedVertices = new();
     private readonly HashSet<ulong> _preRasterizations = [];
     private readonly List<(ulong Program, PreRasterizationState State, ulong Identity)> _loadedPreRasterizations = [];
-    // The loaded pixel and pre-rasterization records in load order (record kind, index in its list): the prewarm's order.
-    private readonly List<(byte Kind, int Index)> _graphicsOrder = [];
+    // The loaded pixel and pre-rasterization records in load order: record kind, index in its list, and the seconds into its
+    // session at which that session first met it.
+    private readonly List<(byte Kind, int Index, float FirstUse)> _graphicsOrder = [];
+
+    // A pixel or pre-rasterization record ends with the seconds into its session at which the session first met it (a
+    // float after the record's own bytes, which alone give its identity). The graphics prewarm runs items in that order
+    // across sessions, so the records a later session adds go where that session needed them instead of after every
+    // record of the earlier sessions.
+    private const int FirstUseBytes = sizeof(float);
+    private readonly long _opened = Stopwatch.GetTimestamp();
+
+    // The session's clock, seconds since the list opened (tests replace it).
+    internal Func<float>? SessionClock { get; set; }
+
+    private byte[] WithFirstUse(byte[] record)
+    {
+        var payload = new byte[record.Length + FirstUseBytes];
+        record.CopyTo(payload, 0);
+        BitConverter.TryWriteBytes(payload.AsSpan(record.Length),
+            SessionClock?.Invoke() ?? (float)Stopwatch.GetElapsedTime(_opened).TotalSeconds);
+        return payload;
+    }
+
+    private static (byte[] Record, float FirstUse) SplitFirstUse(byte[] payload) => payload.Length < FirstUseBytes
+        ? (payload, 0f)
+        : (payload[..^FirstUseBytes], BitConverter.ToSingle(payload, payload.Length - FirstUseBytes));
 
     private static readonly uint VertexSchemaFingerprint = SchemaFingerprintOf(
         typeof(VertexPrewarmRecord), typeof(VertexInputInfo), typeof(VertexAttributeResource), typeof(BufferDescriptorWords),
@@ -79,12 +104,12 @@ internal sealed partial class ShaderPrewarmList
     // Without the code address, as a pixel record's.
     public static ulong Identity(VertexPrewarmRecord record) => XxHash3.HashToUInt64(SerializeVertex(record, address: 0));
 
-    // The recorded pixel programs and pre-rasterization states, in the order sessions first met them. A state whose program
-    // or code is missing is left out.
+    // The recorded pixel programs and pre-rasterization states by the time into their sessions at which they were first
+    // met, records of equal times in load order. A state whose program or code is missing is left out.
     public IReadOnlyList<GraphicsPrewarmItem> LoadedGraphicsPrewarm()
     {
         var items = new List<GraphicsPrewarmItem>(_graphicsOrder.Count);
-        foreach (var (kind, index) in _graphicsOrder)
+        foreach (var (kind, index, _) in _graphicsOrder.OrderBy(static item => item.FirstUse))
         {
             if (kind == PixelKind)
             {
@@ -139,7 +164,7 @@ internal sealed partial class ShaderPrewarmList
                 return;
             }
 
-            Append(_extension, PreRasterizationKind, payload);
+            Append(_extension, PreRasterizationKind, WithFirstUse(payload));
         }
     }
 
@@ -157,14 +182,17 @@ internal sealed partial class ShaderPrewarmList
                 return true;
 
             case PreRasterizationKind:
-                if (payload.Length == PreRasterizationPayloadBytes && _preRasterizations.Add(XxHash3.HashToUInt64(payload)))
             {
-                    _loadedPreRasterizations.Add((BitConverter.ToUInt64(payload, 0), DeserializePreRasterization(payload),
-                        XxHash3.HashToUInt64(payload)));
-                    _graphicsOrder.Add((PreRasterizationKind, _loadedPreRasterizations.Count - 1));
+                var (state, firstUse) = SplitFirstUse(payload);
+                if (state.Length == PreRasterizationPayloadBytes && _preRasterizations.Add(XxHash3.HashToUInt64(state)))
+                {
+                    _loadedPreRasterizations.Add((BitConverter.ToUInt64(state, 0), DeserializePreRasterization(state),
+                        XxHash3.HashToUInt64(state)));
+                    _graphicsOrder.Add((PreRasterizationKind, _loadedPreRasterizations.Count - 1, firstUse));
                 }
 
                 return true;
+            }
 
             default:
                 return false;

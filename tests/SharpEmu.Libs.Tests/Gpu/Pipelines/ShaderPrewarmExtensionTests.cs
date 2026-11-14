@@ -91,6 +91,8 @@ public sealed class ShaderPrewarmExtensionTests : IDisposable
         Assert.Equal(code.Ranges[0].Bytes, Assert.Single(loadedCode.Ranges).Bytes);
     }
 
+    // A side file of another version is not loaded: version 2 changed the image binding policy graphics records
+    // translate under, and version 3 ends pixel and pre-rasterization records with their first use.
     [Fact]
     public void ASideFileOfAnotherVersionStartsEmpty()
     {
@@ -111,7 +113,7 @@ public sealed class ShaderPrewarmExtensionTests : IDisposable
         }
 
         Assert.Equal(ExtensionHeaderBytes, new FileInfo(ExtensionPath).Length);
-        Assert.Equal(2u, BitConverter.ToUInt32(File.ReadAllBytes(ExtensionPath), sizeof(uint)));
+        Assert.Equal(3u, BitConverter.ToUInt32(File.ReadAllBytes(ExtensionPath), sizeof(uint)));
     }
 
     [Fact]
@@ -231,16 +233,41 @@ public sealed class ShaderPrewarmExtensionTests : IDisposable
             list.RecordPixel(code, record);
         }
 
-        // Move the side file's records to the end of the main list, where a list written without a side file keeps them.
+        // Move the side file's records to the end of the main list, where a list written without a side file keeps
+        // them, and cut the first use from each pixel record.
         var extension = File.ReadAllBytes(ExtensionPath);
         using (var main = new FileStream(MainPath, FileMode.Append, FileAccess.Write))
         {
-            main.Write(extension.AsSpan(ExtensionHeaderBytes));
+            main.Write(WithoutFirstUse(extension.AsSpan(ExtensionHeaderBytes)));
         }
 
         File.Delete(ExtensionPath);
         using var reloaded = Open();
         var (loaded, _, _) = Assert.IsType<PixelPrewarmItem>(Assert.Single(reloaded.LoadedGraphicsPrewarm()));
         Assert.Equal(ShaderPrewarmList.Identity(record), ShaderPrewarmList.Identity(loaded));
+    }
+
+    // Records (length, checksum, kind and payload each) with the first use cut from every pixel record's payload.
+    private static byte[] WithoutFirstUse(ReadOnlySpan<byte> records)
+    {
+        const byte pixelKind = 3;
+        const int headerBytes = sizeof(uint) + sizeof(ulong);
+        using var output = new MemoryStream();
+        while (records.Length >= headerBytes)
+        {
+            var length = (int)BitConverter.ToUInt32(records);
+            var body = records.Slice(headerBytes, length).ToArray();
+            if (body[0] == pixelKind)
+            {
+                body = body[..^sizeof(float)];
+            }
+
+            output.Write(BitConverter.GetBytes((uint)body.Length));
+            output.Write(BitConverter.GetBytes(XxHash3.HashToUInt64(body)));
+            output.Write(body);
+            records = records[(headerBytes + length)..];
+        }
+
+        return output.ToArray();
     }
 }

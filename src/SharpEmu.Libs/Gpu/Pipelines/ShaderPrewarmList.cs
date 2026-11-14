@@ -347,9 +347,10 @@ internal sealed partial class ShaderPrewarmList : IDisposable
     // Kinds 5 and 6 (vertex prewarm records): ShaderPrewarmList.Vertex.cs.
     private const int LinkedCompilePayloadBytes = sizeof(ulong) + 1 + sizeof(long);
     private const uint ExtensionMagic = 0x58504553;
-    // 2: graphics programs bind their images one per slot when the layout fits, so the graphics records of version 1
-    // would not translate as sessions now do; a side file of another version starts empty.
-    private const uint ExtensionFormatVersion = 2;
+    // 2: graphics programs bind their images one per slot when the layout fits, so graphics records of version 1 would
+    // translate differently. 3: pixel and pre-rasterization records end with the seconds into their session at which it
+    // first met them. A side file of another version starts empty.
+    private const uint ExtensionFormatVersion = 3;
     private const int ExtensionHeaderBytes = 2 * sizeof(uint);
     private const int RecordHeaderBytes = sizeof(uint) + sizeof(ulong);
     // The pipeline file's kinds besides CodeKind, a numbering of its own. 2: stage records hold their resource
@@ -668,7 +669,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
                 Append(_extension, CodeKind, SerializeCode(code));
             }
 
-            Append(_extension, PixelKind, payload);
+            Append(_extension, PixelKind, WithFirstUse(payload));
         }
     }
 
@@ -912,14 +913,18 @@ internal sealed partial class ShaderPrewarmList : IDisposable
                     return true;
 
                 case PixelKind:
-                    // A pixel record of another schema is skipped, not refused, so the records after it still load.
-                    if (TryDeserializePixel(payload) is { } pixel && _pixels.Add(Identity(pixel)))
+                {
+                    // A pixel record of another schema is skipped, not refused, so the records after it still load. The
+                    // pixel records of a main list written before the side file existed have no first use.
+                    var (bytes, firstUse) = extension ? SplitFirstUse(payload) : (payload, 0f);
+                    if (TryDeserializePixel(bytes) is { } pixel && _pixels.Add(Identity(pixel)))
                     {
                         _loadedPixels.Add(pixel);
-                        _graphicsOrder.Add((PixelKind, _loadedPixels.Count - 1));
+                        _graphicsOrder.Add((PixelKind, _loadedPixels.Count - 1, firstUse));
                     }
 
                     return true;
+                }
 
                 case LinkedCompileKind:
                     if (payload.Length != LinkedCompilePayloadBytes)

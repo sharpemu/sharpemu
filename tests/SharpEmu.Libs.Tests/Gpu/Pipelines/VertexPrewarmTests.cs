@@ -163,6 +163,36 @@ public sealed class VertexPrewarmTests : IDisposable
         Assert.Equal(CodeAddress, Assert.IsType<PreRasterizationPrewarmItem>(items[1]).Program.Address);
     }
 
+    // Items run by the time into their sessions at which they were first met, so a state a later session adds runs
+    // before the earlier session's later records instead of after all of them.
+    [Fact]
+    public void ALaterSessionsRecordsRunWhereThatSessionFirstMetThem()
+    {
+        var pixelCode = Code(0x1111);
+        var vertexCode = Code(0x2222);
+        var vertex = VertexRecord(vertexCode, EmbeddedFetchInfo(DataBase, 16, 4));
+        var state = new PreRasterizationState(0, 2, 1, false, false, true, false);
+        using (var list = Open())
+        {
+            list.SessionClock = () => 10;
+            list.RecordPixel(pixelCode, PixelRecord(pixelCode, 1));
+            list.SessionClock = () => 100;
+            list.RecordPixel(pixelCode, PixelRecord(pixelCode, 2));
+        }
+
+        using (var list = Open())
+        {
+            list.SessionClock = () => 50;
+            list.RecordPreRasterization(list.RecordVertex(vertexCode, vertex), state);
+        }
+
+        using var reloaded = Open();
+        Assert.Collection(reloaded.LoadedGraphicsPrewarm(),
+            item => Assert.Equal(1u, Assert.IsType<PixelPrewarmItem>(item).Record.UserDataBase),
+            item => Assert.Equal(state, Assert.IsType<PreRasterizationPrewarmItem>(item).State),
+            item => Assert.Equal(2u, Assert.IsType<PixelPrewarmItem>(item).Record.UserDataBase));
+    }
+
     [Fact]
     public void PixelProgramsAndPreRasterizationStatesLoadInTheOrderTheyWereRecorded()
     {
