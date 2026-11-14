@@ -2437,7 +2437,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         {
             _bufferPages.Set(buffer.CpuAddress, buffer.Size, covered: false);
             _registry.BeginRetirement(bufferIdentifier);
-            _registrationGeneration++;
+            _unregistrations++;
             _bdaPageTable.Fill(first * sizeof(ulong), sizePages * sizeof(ulong), 0);
         }
     }
@@ -2465,12 +2465,45 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         CompleteRetirementAfterSubmittedWork(bufferIdentifier);
     }
 
+    private long _unregistrations;
+    private int _preparationsOpen;
+    private readonly List<ResourceSlotIdentifier> _retireAfterPreparation = [];
+
+    // Changes whenever an owner is unregistered. A binding made before a change may name a retired owner.
+    internal long OwnerGeneration => _unregistrations;
+
+    // A draw or dispatch being prepared can still name an owner unregistered during its own preparation, and a wait
+    // inside the preparation can complete the tick a retirement was queued on. Such retirements are queued when the
+    // preparation closes, behind everything it recorded.
+    internal void BeginPreparation() => _preparationsOpen++;
+
+    internal void EndPreparation()
+    {
+        if (--_preparationsOpen != 0 || _retireAfterPreparation.Count == 0)
+        {
+            return;
+        }
+
+        var retired = _retireAfterPreparation.ToArray();
+        _retireAfterPreparation.Clear();
+        foreach (var bufferIdentifier in retired)
+        {
+            CompleteRetirementAfterSubmittedWork(bufferIdentifier);
+        }
+    }
+
     // Unregistering clears the buffer's page-table entries only for work recorded from now
     // on. Work already recorded or in flight can still reach it through its device address
     // (an async readback waits only for its last recorded writer), so it is destroyed once
     // that work completes.
     private void CompleteRetirementAfterSubmittedWork(ResourceSlotIdentifier bufferIdentifier)
     {
+        if (_preparationsOpen != 0)
+        {
+            _retireAfterPreparation.Add(bufferIdentifier);
+            return;
+        }
+
         if (_scheduler.Active)
         {
             _scheduler.QueueCompletionAction(() => _registry.CompleteRetirement(bufferIdentifier));

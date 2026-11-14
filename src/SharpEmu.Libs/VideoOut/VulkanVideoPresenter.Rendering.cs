@@ -145,6 +145,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 owner._preparation = null;
+                if (!owner._worker)
+                {
+                    owner._bufferCache.EndPreparation();
+                }
+
                 owner._preparedTextures.Clear();
                 try
                 {
@@ -607,6 +612,8 @@ internal static unsafe partial class VulkanVideoPresenter
             EnsureGuestSubmissionCapacity();
             EnsureBatchedGuestCommands();
             _preparation = (_sparePreparation ??= new RenderPreparation(this)).Open(_bufferCache.GetUtilityBuffer(GpuBufferUsage.Stream).RetainUpcomingAllocations());
+            // An owner merged while the scope is open retires only after it closes: the scope's bindings may still name it.
+            _bufferCache.BeginPreparation();
             return _preparation;
         }
 

@@ -1279,6 +1279,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var stage = (PreparedStageBindings)prepared;
             var info = stage.Resources.Info;
             using var stallProfile = DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.Bind, stage.Program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count);
+            var owners = _worker ? 0 : _bufferCache.OwnerGeneration;
             if (!_worker)
             {
                 _bufferCache.BeginUploadBatch();
@@ -1310,7 +1311,44 @@ internal static unsafe partial class VulkanVideoPresenter
                     BindImages(stage);
             }
 
+            // Binding an image can merge an owner bound above (an image source that grows it); bind the buffers again until no
+            // owner changes, so the stage never keeps a retired owner's handle. Render workers merge no owners.
+            for (var attempt = 0; !_worker && _bufferCache.OwnerGeneration != owners; attempt++)
+            {
+                if (attempt == 8)
+                {
+                    throw SubmissionScheduler.Fatal($"Buffer owners kept changing while a stage was bound: hash=0x{stage.Program.Hash:X16}.");
+                }
+
+                owners = _bufferCache.OwnerGeneration;
+                RebindBuffers(stage);
+            }
+
             _preparedTextures.Add(stage.Textures);
+        }
+
+        long IRenderHost.BufferOwnerGeneration => _worker ? 0 : _bufferCache.OwnerGeneration;
+
+        public void RebindBuffers(IPreparedBindings prepared)
+        {
+            var stage = (PreparedStageBindings)prepared;
+            if (!_worker)
+            {
+                _bufferCache.BeginUploadBatch();
+            }
+
+            try
+            {
+                BindBuffers(stage);
+                ObtainDeviceAddressRanges(stage);
+            }
+            finally
+            {
+                if (!_worker)
+                {
+                    _bufferCache.EndUploadBatch();
+                }
+            }
         }
 
         // Textures bound for the draw being prepared; cleared when its preparation closes.

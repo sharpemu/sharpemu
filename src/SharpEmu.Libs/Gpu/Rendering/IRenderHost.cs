@@ -173,6 +173,13 @@ public interface IRenderHost
     // Opens the preparation scope; a ring wrap inside it is refused, and disposal releases it on every path.
     IResourcePreparation BeginPreparation();
 
+    // Changes whenever a buffer owner is unregistered; buffers bound before a change are bound again (RebindBuffers).
+    long BufferOwnerGeneration => 0;
+
+    void RebindBuffers(IPreparedBindings prepared)
+    {
+    }
+
     IPreparedBindings PrepareBindings(ShaderStageResources stage);
 
     void UpdateTessellationData(IPreparedBindings prepared, uint[] data) =>

@@ -488,6 +488,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             _host.PrepareDeviceAddresses();
         }
 
+        var owners = _host.BufferOwnerGeneration;
         _host.BindResources(vertexBindings);
         if (pixelBindings is not null)
         {
@@ -514,6 +515,35 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
             state.Rendering = AcquireAttachments(ref state);
         }
+
+        // An owner bound above can be merged by a later stage or acquisition; bind and acquire the buffers again
+        // until none changes, so the draw records no retired owner.
+        for (var attempt = 0; _host.BufferOwnerGeneration != owners; attempt++)
+        {
+            if (attempt == 8)
+            {
+                throw _host.Fatal("Buffer owners kept changing while a draw was prepared.");
+            }
+
+            owners = _host.BufferOwnerGeneration;
+            _host.RebindBuffers(vertexBindings);
+            if (pixelBindings is not null)
+            {
+                _host.RebindBuffers(pixelBindings);
+            }
+
+            if (meshInput is null)
+            {
+                vertexBuffers = AcquireVertexBuffers(vertexInput);
+                indexBuffer = AcquireIndexBuffer(in indexSource);
+                if (emission.IndirectArgumentsAddress != 0)
+                {
+                    indirectArguments = _host.ObtainBuffer(emission.IndirectArgumentsAddress,
+                        emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false);
+                }
+            }
+        }
+
         var pipeline = ResolvePipeline(record, ref state, vertexInput, state.PixelActive ? pixelInput : null);
         if (record.SetBindDebug)
         {
