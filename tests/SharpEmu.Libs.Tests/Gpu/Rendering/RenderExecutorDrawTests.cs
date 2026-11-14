@@ -301,9 +301,8 @@ public sealed class RenderExecutorDrawTests : IDisposable
 
         if (totalLimit < (triangleStrip ? 8u : 4u))
         {
-            var error = Assert.Throws<RenderExecutorFatalException>(() =>
-                _executor.DrawAuto(1, banks, Auto(30, instances: 2, firstVertex: 5)));
-            Assert.Contains("total=8/7", error.Message);
+            // A draw over the device group limits is left out, as the GPU preparation leaves out an indirect one.
+            _executor.DrawAuto(1, banks, Auto(30, instances: 2, firstVertex: 5));
             Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw_mesh", StringComparison.Ordinal));
             return;
         }

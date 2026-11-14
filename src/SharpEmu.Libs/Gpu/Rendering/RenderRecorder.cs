@@ -28,6 +28,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
     private readonly KeptPipeline _pipeline = new();
     private readonly InPlaceDraw _inPlace = new();
     private long _sequence;
+    private static int _meshDrawsOverLimits;
     private static readonly ThreadCounter _inPlaceDraws = new();
     private static readonly ThreadCounter _inPlaceRefused = new();
 
@@ -630,9 +631,17 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         if (groupCount > mesh.Execution.MaxGroupCountX || draw.InstanceCount > mesh.Execution.MaxGroupCountY ||
             totalGroupCount > mesh.Execution.MaxGroupTotalCount)
         {
-            throw _host.Fatal($"The mesh draw exceeds device group limits: groups={groupCount}/{mesh.Execution.MaxGroupCountX} " +
-                $"instances={draw.InstanceCount}/{mesh.Execution.MaxGroupCountY} " +
-                $"total={totalGroupCount}/{mesh.Execution.MaxGroupTotalCount}.");
+            // Left out, as the GPU preparation leaves out an indirect draw over the limits.
+            var left = Interlocked.Increment(ref _meshDrawsOverLimits);
+            if ((left & (left - 1)) == 0)
+            {
+                Console.Error.WriteLine($"[GPU][WARN] A mesh draw over the device group limits was left out ({left} so far): " +
+                    $"groups={groupCount}/{mesh.Execution.MaxGroupCountX} instances={draw.InstanceCount}/{mesh.Execution.MaxGroupCountY} " +
+                    $"total={totalGroupCount}/{mesh.Execution.MaxGroupTotalCount} vertices={draw.Count} " +
+                    $"hash=0x{(record.State.Programs.VertexInput.Stage.Program?.Hash ?? 0ul):X16}.");
+            }
+
+            return;
         }
 
         if (RenderTrace.Enabled)

@@ -37,7 +37,7 @@ public sealed unsafe partial class RenderHostDeviceTests
             (IntPtr)(void*)_vulkan.Vk.GetDeviceProcAddr(_vulkan.Device, "vkCmdDrawMeshTasksIndirectEXT"));
         var harness = presenter.Harness;
         var memory = harness.MapBacked(0x10000, ImageCacheTestSupport.ReadWrite);
-        // An instance count over the group limit is fatal, as on the CPU path.
+        // An instance count over the group limit launches nothing (status 2) and is left out, as on the CPU path.
         harness.Write(memory, [3, 0, 0, 0, invalid ? (byte)255 : (byte)1, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0]);
         var request = new IndirectMeshDrawRequest(memory, memory + 64, 8, 2, false, 1,
@@ -50,14 +50,8 @@ public sealed unsafe partial class RenderHostDeviceTests
                 using var draw = presenter.RenderHost.PrepareIndirectMeshDraw(request);
                 if (record) draw.Prepare();
             }
-            if (invalid)
-            {
-                Assert.Throws<SchedulerFatalException>(() => harness.Scheduler.Finish());
-                // All completion callbacks must release their resources even when one reports an error.
-                for (var index = 0; index < 2; index++)
-                    Assert.Throws<SchedulerFatalException>(() => harness.Scheduler.RunCompletedOperations());
-            }
-            else harness.Scheduler.Finish();
+            harness.Scheduler.Finish();
+            Assert.Empty(fatal.Messages);
         });
         harness.Shutdown();
     }

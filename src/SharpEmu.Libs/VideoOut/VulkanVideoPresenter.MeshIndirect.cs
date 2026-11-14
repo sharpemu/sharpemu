@@ -20,6 +20,7 @@ internal static unsafe partial class VulkanVideoPresenter
     private sealed partial class RecordingHost
     {
         private static int _clampWarned;
+        private static int _overLimitDraws;
 
         public bool SupportsIndirectMeshDraw => _presenter._supportsMeshShader && _presenter._cmdDrawMeshTasksIndirect is not null;
 
@@ -109,9 +110,15 @@ internal static unsafe partial class VulkanVideoPresenter
                     uint status;
                     try { status = resources.ReadStatus(); }
                     finally { ReleaseResources(); }
-                    // The CPU path also rejects draws over the device group limits.
+                    // The preparation launched no groups for a draw over the device group limits; the CPU path leaves such
+                    // a draw out too.
                     if (status == 2)
-                        throw SubmissionScheduler.Fatal("The indirect mesh draw exceeds device group limits.");
+                    {
+                        var left = Interlocked.Increment(ref _overLimitDraws);
+                        if ((left & (left - 1)) == 0)
+                            Console.Error.WriteLine($"[GPU][WARN] An indirect mesh draw over the device group limits was left out ({left} so far): " +
+                                $"arguments=0x{argumentsAddress:X16} capacity={capacity}.");
+                    }
                     if (status == 1 && Interlocked.Exchange(ref _clampWarned, 1) == 0)
                         Console.Error.WriteLine($"[GPU][WARN] An indirect mesh draw read past its index range; the extra indices were dropped: " +
                             $"arguments=0x{argumentsAddress:X16} capacity={capacity}.");
