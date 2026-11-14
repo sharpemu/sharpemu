@@ -2710,6 +2710,13 @@ public static partial class Gen5SpirvTranslator
             return _module.AddInstruction(SpirvOp.Select, _uintType, found, element, UInt(BindlessHeap.CallRecordNullIndex));
         }
 
+        // The records marked since the last branch, by slot, index and EXEC value (0: EXEC known full), and the block the
+        // last of those marks ended in.
+        private readonly HashSet<(int Slot, uint Index, uint Exec)> _markedHeapRecords = [];
+        private uint _markedHeapRecordsBlock;
+
+        // Sets the record's bit in its array's feedback words; a plain read first keeps marked records from repeating the atomic.
+        // A record marked again under the same EXEC value with no branch since finds its bit set, so that mark is left out.
         private void MarkHeapRecord(int slot, uint index)
         {
             if (_heapFeedback == 0)
@@ -2725,16 +2732,29 @@ public static partial class Gen5SpirvTranslator
                 _interfaces.Add(_heapFeedback);
             }
 
+            if (_module.CurrentBlock != _markedHeapRecordsBlock)
+            {
+                _markedHeapRecords.Clear();
+            }
+
+            // Only a lane the guest runs marks its record: the idle lanes of a waterfall hold keys nothing samples.
+            var exec = _execKnownFull ? 0 : Load(_boolType, _exec);
+            if (!_markedHeapRecords.Add((slot, index, exec)))
+            {
+                return;
+            }
+
             var word = IAdd(UInt((uint)slot * BindlessHeap.FeedbackWordsPerArray), ShiftRightLogical(index, UInt(5)));
             var bit = ShiftLeftLogical(UInt(1), BitwiseAnd(index, UInt(31)));
             var pointer = BlockWordPointer(_heapFeedback, word);
             var unmarked = _module.AddInstruction(SpirvOp.IEqual, _boolType, BitwiseAnd(Load(_uintType, pointer), bit), UInt(0));
-            if (!_execKnownFull)
+            if (exec != 0)
             {
-                unmarked = LogicalAnd(unmarked, Load(_boolType, _exec));
+                unmarked = LogicalAnd(unmarked, exec);
             }
 
             EmitConditional(unmarked, () => _module.AddInstruction(SpirvOp.AtomicOr, _uintType, pointer, UInt(1), UInt(0), bit));
+            _markedHeapRecordsBlock = _module.CurrentBlock;
         }
 
         private const uint MipStatisticsEntries = 257;

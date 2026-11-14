@@ -926,6 +926,9 @@ public sealed partial class SpirvModuleBuilder
     public uint AddFunctionParameter(uint type) =>
         EmitResult(_functions, SpirvOp.FunctionParameter, type);
 
+    // The label of the block being emitted.
+    public uint CurrentBlock => _currentBlock;
+
     public uint AddLabel(uint? id = null)
     {
         var result = id ?? AllocateId();
