@@ -147,12 +147,14 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
 
     private sealed class Run : IDisposable
     {
-        public Run(HeadlessVulkan vulkan, Gen5ShaderProgram program, uint[] registers, uint threadCount, bool imageInt64Atomics = false)
+        public Run(HeadlessVulkan vulkan, Gen5ShaderProgram program, uint[] registers, uint threadCount, bool imageInt64Atomics = false,
+            Func<ResourceSpecialization, ResourceSpecialization>? specialize = null)
         {
             Plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, 0x5348_4152_5045_4D55, 0, 64);
             var snapshot = new ResourceSnapshot();
             var specialization = new ResourceSpecialization();
             Assert.True(ResourceMaterializer.Materialize(Plan, Inputs(registers), ref snapshot, ref specialization));
+            specialization = specialize?.Invoke(specialization) ?? specialization;
             Snapshot = snapshot;
             Resources = ResourceMaterializer.ApplyTo(Plan, specialization);
             var layout = BindingLayout.Allocate(
@@ -431,6 +433,53 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         run.Harness.AssertNoValidationMessages();
         output.WriteLine($"Verified descriptor aliases on {vulkan.DeviceName}; validation={vulkan.ValidationEnabled}.");
     }
+
+    // The program above with one image and one sampler descriptor repeated, bound once (the draw's groups) or to each of its
+    // resources (a specialization without groups): both sample the same texel, and the shared sampler as well.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RepeatedDescriptorsSampleTheSameBoundOnceOrToEachResource(bool bindingEach)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan)) return;
+        var program = Program(
+            MoveVector(0, 0, 0x3F00_0000), MoveVector(4, 1, 0x3F00_0000),
+            Image(8, "ImageSampleLz", 16, 32, dmask: 1),
+            BufferAccess(16, "BufferStoreDword", ResultRegister, 0, vectorData: 4),
+            Image(24, "ImageSampleLz", 24, 36, dmask: 1),
+            BufferAccess(32, "BufferStoreDword", ResultRegister, 4, vectorData: 4), EndProgram(40));
+        var registers = UserData();
+        uint[] descriptor = [(uint)FirstImageAddress, Format32Float << 20, 0, 0xFAC | (ImageType2D << 28), 0, 0, 0, 0];
+        descriptor.CopyTo(registers, 16);
+        descriptor.CopyTo(registers, 24);
+        using var run = new Run(vulkan, program, registers, 1, specialize: bindingEach ? WithoutGroups : null);
+        var imageClass = ImageDescriptorBinding.ForImage(run.Resources.Info.Images[0])!.Value;
+        Assert.Equal(bindingEach ? 2 : 1, run.Request.Bindings.Find(imageClass)!.Resources.Count);
+        Assert.Equal(bindingEach ? 2 : 1, run.Request.Bindings.Find(DescriptorBindingKind.Samplers)!.Resources.Count);
+        var image = run.Harness.CreateImage(Describe(0, Format.R32Sfloat, GuestPixelFormat.Bits32Float, 2, 1, 1));
+        run.Harness.UploadImage(image, MemoryMarshal.AsBytes<float>([0.25f, 0.75f]), ImageTestHarness.WholeImageCopies(image.Description, 0));
+        var sampler = run.Runner.CreateSampler(Filter.Linear);
+        var views = new Dictionary<int, DescriptorImageInfo[]> { [0] = [SampledView(image)], [1] = [SampledView(image)] };
+        run.Dispatch(run.BindImages(views, [sampler, sampler]), command =>
+            image.Transition(AccessFlags.ShaderReadBit, null, command));
+
+        // Both resources sample the centre of the same two-texel image through the same linear sampler: the texels' mean.
+        Assert.Equal(BitConverter.SingleToUInt32Bits(0.5f), run.ResultWord(0));
+        Assert.Equal(BitConverter.SingleToUInt32Bits(0.5f), run.ResultWord(1));
+        run.Harness.AssertNoValidationMessages();
+        output.WriteLine($"Verified repeated descriptors bound {(bindingEach ? "to each resource" : "once")} on {vulkan.DeviceName}.");
+    }
+
+    // The specialization with no descriptor groups: every image and sampler resource its own binding.
+    private static ResourceSpecialization WithoutGroups(ResourceSpecialization specialization) => new()
+    {
+        BaseBufferCount = specialization.BaseBufferCount,
+        StableImageBindings = specialization.StableImageBindings,
+        Buffers = [.. specialization.Buffers],
+        Images = [.. specialization.Images],
+        BufferCandidateTables = [.. specialization.BufferCandidateTables],
+    };
 
     // Image 0 is plain, image 1 the indirect root, image 2 its candidate for key 1; a mip load
     // reads texel (0, 0) of mip 1 of two-level images.
