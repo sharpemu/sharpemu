@@ -3822,6 +3822,25 @@ public static partial class Gen5SpirvTranslator
                         }
 
                         // An 8-byte aligned pair is one 64-bit word; any other address names none, so it stays two dword atomics.
+                        if (_request.Bindings.UsesTableBlock)
+                        {
+                            // A table-block buffer is addressed through its device address, so the pair is aligned when that is.
+                            var address = TableBufferByteAddress(bindingIndex, dwordAddress);
+                            EmitConditional(
+                                LogicalAnd(
+                                    _module.AddInstruction(SpirvOp.IEqual, _boolType, BitwiseAnd(byteAddress, UInt(3)), UInt(0)),
+                                    _module.AddInstruction(SpirvOp.IEqual, _boolType, And64(address, ULong(7)), ULong(0))),
+                                () => EmitQwordAtomic(
+                                    atomicOp,
+                                    _module.AddInstruction(
+                                        SpirvOp.ConvertUToPtr,
+                                        _module.TypePointer(SpirvStorageClass.PhysicalStorageBuffer, _ulongType),
+                                        address),
+                                    control),
+                                EmitDwordAtomics);
+                            return;
+                        }
+
                         EmitConditional(
                             _module.AddInstruction(SpirvOp.IEqual, _boolType, BitwiseAnd(byteAddress, UInt(7)), UInt(0)),
                             () => EmitQwordAtomic(
