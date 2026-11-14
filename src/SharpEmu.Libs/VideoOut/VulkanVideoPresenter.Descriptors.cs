@@ -820,7 +820,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     throw Serial("bindless heap", resumable: true);
                 }
 
-                _presenter.PrepareBindlessHeap(preparation);
+
+                _presenter.PrepareBindlessHeap(preparation, snapshot.Heaps);
             }
 
             if (layout.Find(DescriptorBindingKind.CallMarks) is not null)
@@ -944,6 +945,19 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             return prepared;
+        }
+
+        private static bool ReadsBindlessHeap(List<PreparedStageBindings> stages)
+        {
+            foreach (var stage in stages)
+            {
+                if (stage.Layout.UsesBindlessHeap)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         // Reject incompatible draw views before buffer writes or image transitions are recorded.

@@ -6011,6 +6011,11 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
+                if (IsHeapVolumeRead(instruction, out var heapVolume, out var volumeType))
+                {
+                    return TryEmitHeapVolumeRead(instruction, image, heapVolume, volumeType, out error);
+                }
+
                 if (!TryResolveLayoutImage(instruction, image, out resource, out imageObject, out dstSelect, out error))
                 {
                     return false;
@@ -6024,6 +6029,73 @@ public static partial class Gen5SpirvTranslator
 
             return EmitImageOperation(instruction, image, resource, imageObject, dstSelect, mipLevel, out error);
         }
+
+        // A heap record a 3D read picks can hold a 2D texture, whose 3D element stays null; the hardware then takes the
+        // third coordinate as the array layer. Reads that place their operands alike in both shapes (no gradients) try
+        // the 3D element and, when it is null, the record's 2D-array element.
+        private bool IsHeapVolumeRead(Gen5ShaderInstruction instruction, out HeapRecordUse heapImage, out uint volumeType)
+        {
+            heapImage = default;
+            volumeType = 0;
+            var opcode = instruction.Opcode;
+            var sameOperands = opcode is "ImageLoad" or "ImageLoadMip" || opcode.StartsWith("ImageGather4", StringComparison.Ordinal) ||
+                (opcode.StartsWith("ImageSample", StringComparison.Ordinal) && !opcode.Contains("SampleD", StringComparison.Ordinal) &&
+                 !opcode.Contains("SampleCD", StringComparison.Ordinal) && !opcode.Contains("SampleCd", StringComparison.Ordinal) &&
+                 !opcode.Contains("SampleCCd", StringComparison.Ordinal));
+            if (!sameOperands || !_request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex) ||
+                !_request.HeapImageByMemoryIndex.TryGetValue(memoryIndex, out heapImage))
+            {
+                return false;
+            }
+
+            var entry = _request.Memory[memoryIndex];
+            var info = _request.Resources.Info;
+            if (entry.Resource >= (uint)info.Images.Count ||
+                ImageDescriptorBinding.ForImage(info.Images[(int)entry.Resource]) is not { } kind ||
+                BindlessHeap.ImageSlot(kind) != BindlessHeap.VolumeSlot || !_imageClasses.TryGetValue(kind, out var volumeClass))
+            {
+                return false;
+            }
+
+            volumeType = volumeClass.ImageType;
+            return true;
+        }
+
+        private bool TryEmitHeapVolumeRead(Gen5ShaderInstruction instruction, Gen5ImageControl image, HeapRecordUse heapImage,
+            uint volumeType, out string error)
+        {
+            // A null descriptor reports no levels. Each branch builds its sampled image in the block that samples it, so the
+            // query loads the 3D element on its own.
+            _module.AddCapability(SpirvCapability.ImageQuery);
+            var (_, volumeImage) = LoadHeapElement(BindlessHeap.VolumeSlot, volumeType, HeapRecordIndex(heapImage));
+            var levels = _module.AddInstruction(SpirvOp.ImageQueryLevels, _uintType, volumeImage);
+            _module.AddDecoration(levels, SpirvDecoration.NonUniform);
+            var isVolume = _module.AddInstruction(SpirvOp.INotEqual, _boolType, levels, UInt(0));
+            var emitted = true;
+            var branchError = string.Empty;
+            EmitConditional(isVolume, () =>
+                emitted = TryResolveLayoutImage(instruction, image, out var volume, out var volumeObject, out var volumeSelect, out branchError) &&
+                    EmitImageOperation(instruction, image, volume, volumeObject, volumeSelect,
+                        HeapReadMipLevel(instruction, image, volume), out branchError));
+            if (!emitted)
+            {
+                error = branchError;
+                return false;
+            }
+
+            EmitConditional(_module.AddInstruction(SpirvOp.LogicalNot, _boolType, isVolume), () =>
+                emitted = TryResolveLayoutImage(instruction, image, out var layers, out var layersObject, out var layersSelect, out branchError,
+                    heapVolumeLayers: true) &&
+                    EmitImageOperation(instruction, image, layers, layersObject, layersSelect,
+                        HeapReadMipLevel(instruction, image, layers), out branchError));
+            error = branchError;
+            return emitted;
+        }
+
+        private uint HeapReadMipLevel(Gen5ShaderInstruction instruction, Gen5ImageControl image, SpirvImageResource resource) =>
+            instruction.Opcode == "ImageLoadMip"
+                ? LoadImageIntegerAddress(image, (int)ImageCoordinateComponentCount(resource))
+                : UInt(0);
 
         // One image operation over a resolved image object; its results are register writes.
         private bool EmitImageOperation(

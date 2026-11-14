@@ -123,10 +123,22 @@ public sealed class ShaderCompileRequest
 
         FlattenedSlotByMemoryIndex = new Dictionary<int, uint>(plan.FlattenedSlotByMemoryIndex);
         FlattenedTableReservedWords = (uint)plan.FlattenedTableReservedCount;
+        var heapImages = new Dictionary<int, HeapRecordUse>();
+        var heapSamplers = new Dictionary<int, HeapRecordUse>();
+        foreach (var record in plan.HeapRecords)
+        {
+            var heap = plan.DescriptorSources[(int)record.Source].Heap!;
+            (record.Sampler ? heapSamplers : heapImages)[record.MemoryIndex] =
+                new HeapRecordUse(heap.KeyMemoryIndex, heap.Immediate, heap.RecordBytes);
+        }
+
+        HeapImageByMemoryIndex = heapImages;
+        HeapSamplerByMemoryIndex = heapSamplers;
         (CallRecordImageByMemoryIndex, CallRecordSamplerByMemoryIndex, CallRecordCallees) = PlanCallRecordFields(plan, resources);
-        IndirectKeyMemoryIndices = plan.IndirectImages.Select(access => access.Key.MemoryIndex).ToHashSet();
+        var heapKeys = heapImages.Values.Concat(heapSamplers.Values).Select(use => use.KeyMemoryIndex).ToList();
+        IndirectKeyMemoryIndices = plan.IndirectImages.Select(access => access.Key.MemoryIndex).Concat(heapKeys).ToHashSet();
         IndirectOffsetKeyMemoryIndices = plan.IndirectImages.Where(access => access.KeyIsAddressOffset)
-            .Select(access => access.Key.MemoryIndex).ToHashSet();
+            .Select(access => access.Key.MemoryIndex).Concat(heapKeys).ToHashSet();
         IndirectRootByMemoryIndex = plan.IndirectImages.ToDictionary(access => access.MemoryIndex, access => access.Key.MemoryIndex);
 
         var writtenSlots = new Dictionary<int, uint>();
@@ -205,8 +217,13 @@ public sealed class ShaderCompileRequest
 
     public IReadOnlySet<int> IndirectOffsetKeyMemoryIndices { get; }
 
-    // The program reads call records through descriptor set 1 (BindlessHeap).
-    public bool UsesBindlessHeap => CallRecordImageByMemoryIndex.Count != 0 || CallRecordSamplerByMemoryIndex.Count != 0;
+    // Image accesses whose image or sampler is a bindless heap record: memory index → how the record is read.
+    public IReadOnlyDictionary<int, HeapRecordUse> HeapImageByMemoryIndex { get; }
+
+    public IReadOnlyDictionary<int, HeapRecordUse> HeapSamplerByMemoryIndex { get; }
+
+    public bool UsesBindlessHeap => HeapImageByMemoryIndex.Count != 0 || HeapSamplerByMemoryIndex.Count != 0 ||
+        CallRecordImageByMemoryIndex.Count != 0 || CallRecordSamplerByMemoryIndex.Count != 0;
 
     // Image accesses whose image or sampler a call record holds: memory index → its field and set-1 array.
     public IReadOnlyDictionary<int, CallRecordFieldUse> CallRecordImageByMemoryIndex { get; }

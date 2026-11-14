@@ -371,7 +371,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     // The addresses of the module's callees (Gen5ShaderCallLinker.CallTargets), two dwords each.
     public uint CallTargetCount { get; init; }
-    // The program reads call records through descriptor set 1 (see BindlessHeap).
+    // The program reads bindless heap records through descriptor set 1 (see BindlessHeap).
     public bool UsesBindlessHeap { get; init; }
     public IReadOnlyList<uint> UserDataRegisters { get; init; } = [];
     public IReadOnlyList<DescriptorBinding> Descriptors { get; init; } = [];

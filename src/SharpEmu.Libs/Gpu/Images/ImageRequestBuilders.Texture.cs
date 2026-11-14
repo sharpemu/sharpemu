@@ -20,7 +20,7 @@ public static partial class ImageRequestBuilders
     [ThreadStatic] private static int _rejectInvalidDescriptors;
 
     // Inside this scope a descriptor the builder cannot turn into a texture request throws TextureDescriptorRejectedException
-    // instead of stopping the GPU: a call record holds whatever the game last wrote there.
+    // instead of stopping the GPU: a bindless heap record holds whatever the game last wrote there.
     public static RejectionScope RejectInvalidDescriptors()
     {
         _rejectInvalidDescriptors++;

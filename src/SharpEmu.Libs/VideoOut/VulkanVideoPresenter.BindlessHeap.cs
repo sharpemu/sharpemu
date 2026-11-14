@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Numerics;
+using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -9,9 +11,11 @@ using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.VideoOut;
 
-// Descriptor set 1: the images and samplers of call records (see BindlessHeap and VulkanVideoPresenter.CallRecords). Every
-// element starts as a null descriptor; the host writes a descriptor's view or sampler when a dispatch's records first name
-// it, and a record image's contents and layout are made current before each command that reads set 1.
+// Descriptor set 1: the bindless heaps a program reads at a record only its shader knows (see BindlessHeap). Every
+// element starts as a null descriptor. The shader marks each record it reads in a feedback bitset; once the marking
+// work completes, the host reads the record's T# or S# from the guest heap and writes its view or sampler. Records are
+// read again periodically, and a heap image's contents and layout are made current before each command that reads
+// set 1.
 internal static unsafe partial class VulkanVideoPresenter
 {
     private sealed partial class Presenter
@@ -20,13 +24,16 @@ internal static unsafe partial class VulkanVideoPresenter
             DescriptorBindingFlags.UpdateAfterBindBit | DescriptorBindingFlags.PartiallyBoundBit |
             DescriptorBindingFlags.UpdateUnusedWhilePendingBit;
 
-        // The images set 1 holds are marked in use again after this many submission ticks, so the image cache keeps them.
+        // Records are read again after this many submission ticks, so a rewritten record gets its new view.
         private const ulong HeapRevalidationTicks = 16;
 
-        // Programs linked with run-time call records read their records through set 1, on every device that supports it.
+        // Set 1 exists on every device that supports it: programs linked with run-time call records read their records
+        // through it, and other programs read guest heap records through it.
         bool Gpu.Pipelines.IShaderPipelineHost.RuntimeCallRecordsSupported => _bindlessHeapSupported;
 
-        // One element of set 1: the descriptor words it was resolved from and what it holds.
+        private static ulong FeedbackBytes => (ulong)BindlessHeap.FeedbackWords * sizeof(uint);
+
+        // One record the shaders marked: the words it was resolved from and what set 1 holds for it.
         private sealed class HeapEntry
         {
             public int Slot;
@@ -42,12 +49,21 @@ internal static unsafe partial class VulkanVideoPresenter
         private DescriptorSetLayout _heapSetLayout;
         private DescriptorPool _heapPool;
         private DescriptorSet _heapSet;
+        private GpuBuffer? _heapFeedback;
+        private GpuBuffer? _heapFeedbackReadback;
+        private uint[]? _heapFeedbackSnapshot;
+        private int _heapFeedbackCopyPending;
+        private uint[] _heapMarked = [];
+        private readonly Dictionary<(int Slot, uint Index), HeapEntry> _heapEntries = new();
         private readonly Dictionary<CachedImage, List<HeapEntry>> _heapEntriesByImage = new(ReferenceEqualityComparer.Instance);
         private readonly HashSet<CachedImage> _heapChangedImages = new(ReferenceEqualityComparer.Instance);
+        private BindlessHeapDescriptor _textureHeap;
+        private BindlessHeapDescriptor _samplerHeap;
         private ulong _heapRevalidatedTick;
         private object? _heapPreparedFor;
         private Sampler _heapNullSampler;
         private Action<CachedImage>? _heapImageChanged;
+        private int _heapReports;
 
         // Called during device setup with the queried features; the layout is made when the device supports the heap.
         private static bool BindlessHeapSupported(in PhysicalDeviceVulkan12Features features, bool nullDescriptor) =>
@@ -71,16 +87,19 @@ internal static unsafe partial class VulkanVideoPresenter
                 indexing.MaxPerStageDescriptorUpdateAfterBindSampledImages < images ||
                 indexing.MaxDescriptorSetUpdateAfterBindSamplers < samplers ||
                 indexing.MaxPerStageDescriptorUpdateAfterBindSamplers < samplers ||
-                indexing.MaxPerStageUpdateAfterBindResources < images + samplers)
+                indexing.MaxPerStageUpdateAfterBindResources < images + samplers + 1)
             {
-                // Linked programs then link a copy of each callee per record.
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] The device cannot hold the bindless heap arrays: images={images} " +
+                    $"max_images={indexing.MaxDescriptorSetUpdateAfterBindSampledImages} samplers={samplers} " +
+                    $"max_samplers={indexing.MaxDescriptorSetUpdateAfterBindSamplers}; programs that read bindless heap records will fail.");
                 _bindlessHeapSupported = false;
                 return;
             }
 
             var stages = ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit | ShaderStageFlags.ComputeBit |
                 (_supportsMeshShader ? ShaderStageFlags.MeshBitExt : 0);
-            var count = BindlessHeap.ArrayCount;
+            var count = BindlessHeap.ArrayCount + 1;
             var bindings = stackalloc DescriptorSetLayoutBinding[count];
             var flags = stackalloc DescriptorBindingFlags[count];
             for (var slot = 0; slot < BindlessHeap.ArrayCount; slot++)
@@ -95,6 +114,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 flags[slot] = HeapElementFlags;
             }
 
+            bindings[count - 1] = new DescriptorSetLayoutBinding
+            {
+                Binding = BindlessHeap.FeedbackBinding,
+                DescriptorType = DescriptorType.StorageBuffer,
+                DescriptorCount = 1,
+                StageFlags = stages,
+            };
+            flags[count - 1] = 0;
             var bindingFlags = new DescriptorSetLayoutBindingFlagsCreateInfo
             {
                 SType = StructureType.DescriptorSetLayoutBindingFlagsCreateInfo,
@@ -116,9 +143,9 @@ internal static unsafe partial class VulkanVideoPresenter
             _heapSetLayout.Handle != 0
                 ? _heapSetLayout
                 : throw SubmissionScheduler.Fatal(
-                    "A program reads call records, but the device has no descriptor set 1 for them (it needs descriptor indexing).");
+                    "A program reads bindless heap records, but the device has no bindless heap set.");
 
-        // The set and its null elements, made at the first command that reads set 1.
+        // The set, its null elements and the feedback bitsets, made at the first command that reads the heap.
         private void EnsureBindlessHeap()
         {
             if (_heapSet.Handle != 0)
@@ -127,15 +154,16 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var layout = RequireHeapSetLayout();
-            var sizes = stackalloc DescriptorPoolSize[2];
+            var sizes = stackalloc DescriptorPoolSize[3];
             sizes[0] = new DescriptorPoolSize { Type = DescriptorType.SampledImage, DescriptorCount = (uint)BindlessHeap.ImageKinds.Length * BindlessHeap.Capacity };
             sizes[1] = new DescriptorPoolSize { Type = DescriptorType.Sampler, DescriptorCount = 2 * BindlessHeap.Capacity };
+            sizes[2] = new DescriptorPoolSize { Type = DescriptorType.StorageBuffer, DescriptorCount = 1 };
             var poolInfo = new DescriptorPoolCreateInfo
             {
                 SType = StructureType.DescriptorPoolCreateInfo,
                 Flags = DescriptorPoolCreateFlags.UpdateAfterBindBit,
                 MaxSets = 1,
-                PoolSizeCount = 2,
+                PoolSizeCount = 3,
                 PPoolSizes = sizes,
             };
             Check(_vk.CreateDescriptorPool(_device, &poolInfo, null, out _heapPool), "vkCreateDescriptorPool(bindless heap)");
@@ -154,6 +182,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 $"sampler_arrays=2 capacity={BindlessHeap.Capacity}");
             SetDebugName(ObjectType.DescriptorSet, set.Handle, "SharpEmu bindless heap");
 
+            _heapFeedback = new GpuBuffer(_deviceInfo, _scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, FeedbackBytes);
+            _heapFeedbackReadback = new GpuBuffer(_deviceInfo, _scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, FeedbackBytes);
+            _ = BeginBatchedGuestCommands();
+            _heapFeedback.Fill(0, FeedbackBytes, 0);
+            _heapMarked = new uint[BindlessHeap.FeedbackWords];
             Span<uint> nullSampler = stackalloc uint[4];
             _heapNullSampler = _samplerStore.GetSampler(new SamplerDescriptorWords(nullSampler), integerView: false);
             _heapImageChanged = image =>
@@ -169,7 +202,8 @@ internal static unsafe partial class VulkanVideoPresenter
             Array.Fill(nullImages, new DescriptorImageInfo { ImageLayout = ImageLayout.General });
             var nullSamplers = new DescriptorImageInfo[BindlessHeap.Capacity];
             Array.Fill(nullSamplers, new DescriptorImageInfo { Sampler = _heapNullSampler });
-            var writes = new WriteDescriptorSet[BindlessHeap.ArrayCount];
+            var feedback = new DescriptorBufferInfo { Buffer = _heapFeedback.Handle, Offset = 0, Range = FeedbackBytes };
+            var writes = new WriteDescriptorSet[BindlessHeap.ArrayCount + 1];
             fixed (DescriptorImageInfo* images = nullImages)
             fixed (DescriptorImageInfo* samplers = nullSamplers)
             fixed (WriteDescriptorSet* writePointer = writes)
@@ -188,6 +222,15 @@ internal static unsafe partial class VulkanVideoPresenter
                     };
                 }
 
+                writes[BindlessHeap.ArrayCount] = new WriteDescriptorSet
+                {
+                    SType = StructureType.WriteDescriptorSet,
+                    DstSet = set,
+                    DstBinding = BindlessHeap.FeedbackBinding,
+                    DescriptorCount = 1,
+                    DescriptorType = DescriptorType.StorageBuffer,
+                    PBufferInfo = &feedback,
+                };
                 _vk.UpdateDescriptorSets(_device, (uint)writes.Length, writePointer, 0, null);
             }
         }
@@ -200,8 +243,13 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _heapEntriesByImage.Clear();
+            _heapEntries.Clear();
             _callRecordEntries.Clear();
             Array.Clear(_callRecordNext);
+            _heapFeedback?.Dispose();
+            _heapFeedbackReadback?.Dispose();
+            _heapFeedback = null;
+            _heapFeedbackReadback = null;
             if (_heapPool.Handle != 0)
             {
                 _vk.DestroyDescriptorPool(_device, _heapPool, null);
@@ -216,9 +264,9 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        // Before the images of a draw or dispatch that reads set 1 are found: set 1 exists, its images stay in use, and those
-        // whose contents or layout changed are made current.
-        internal void PrepareBindlessHeap(object preparation)
+        // Before the images of a draw or dispatch that reads set 1 are found: the heap V#s, the records marked since the
+        // last look, records rewritten since they were read, and heap images whose contents or layout changed.
+        internal void PrepareBindlessHeap(object preparation, BindlessHeapDescriptor[] heaps)
         {
             if (ReferenceEquals(_heapPreparedFor, preparation))
             {
@@ -227,9 +275,29 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _heapPreparedFor = preparation;
             EnsureBindlessHeap();
-            if (_scheduler.CurrentTick - _heapRevalidatedTick >= HeapRevalidationTicks)
+            var revalidate = _scheduler.CurrentTick - _heapRevalidatedTick >= HeapRevalidationTicks;
+            foreach (var heap in heaps)
             {
-                KeepHeapImagesInUse();
+                ref var current = ref heap.Sampler ? ref _samplerHeap : ref _textureHeap;
+                if (current == heap)
+                {
+                    continue;
+                }
+
+                if (current.Base != 0 && current.Base != heap.Base && _heapReports++ < 16)
+                {
+                    Console.Error.WriteLine(
+                        $"[GPU][WARN] Bindless {(heap.Sampler ? "sampler" : "texture")} heap moved: from=0x{current.Base:X16} to=0x{heap.Base:X16} records={heap.Records}");
+                }
+
+                current = heap;
+                revalidate = true;
+            }
+
+            PollHeapFeedback();
+            if (revalidate)
+            {
+                RevalidateHeapEntries();
             }
 
             RefreshChangedHeapImages();
@@ -240,16 +308,99 @@ internal static unsafe partial class VulkanVideoPresenter
             var set = _heapSet;
             if (set.Handle == 0)
             {
-                throw SubmissionScheduler.Fatal("A program reads call records before descriptor set 1 exists.");
+                throw SubmissionScheduler.Fatal("A program reads bindless heap records before the heap set exists.");
             }
 
             _vk.CmdBindDescriptorSets(command, bindPoint, layout, BindlessHeap.DescriptorSet, 1, &set, 0, null);
         }
 
-        // A call record entry is named by its words, which never change; its image stays in use.
-        private void KeepHeapImagesInUse()
+        // Takes the marks of the last completed copy and starts the next copy; one copy is in flight at a time.
+        private void PollHeapFeedback()
+        {
+            if (Interlocked.Exchange(ref _heapFeedbackSnapshot, null) is { } marked)
+            {
+                ResolveMarkedRecords(marked);
+            }
+
+            if (Volatile.Read(ref _heapFeedbackCopyPending) != 0)
+            {
+                return;
+            }
+
+            var feedback = _heapFeedback!;
+            var readback = _heapFeedbackReadback!;
+            Volatile.Write(ref _heapFeedbackCopyPending, 1);
+            _ = BeginBatchedGuestCommands();
+            readback.CopyFrom(
+                _scheduler.Current, feedback, 0, 0, FeedbackBytes,
+                AccessFlags.ShaderWriteBit | AccessFlags.MemoryWriteBit, AccessFlags.None,
+                AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit | AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
+                AccessFlags.HostReadBit);
+            _scheduler.QueueCompletionAction(() =>
+            {
+                if (_heapFeedbackReadback is null)
+                {
+                    return;
+                }
+
+                readback.Invalidate(0, FeedbackBytes);
+                var words = MemoryMarshal.Cast<byte, uint>(readback.Mapped[..(int)FeedbackBytes]).ToArray();
+                Volatile.Write(ref _heapFeedbackSnapshot, words);
+                Volatile.Write(ref _heapFeedbackCopyPending, 0);
+            });
+        }
+
+        private void ResolveMarkedRecords(uint[] marked)
+        {
+            for (var word = 0; word < marked.Length && word < _heapMarked.Length; word++)
+            {
+                var fresh = marked[word] & ~_heapMarked[word];
+                if (fresh == 0)
+                {
+                    continue;
+                }
+
+                _heapMarked[word] |= fresh;
+                var slot = word / (int)BindlessHeap.FeedbackWordsPerArray;
+                var first = (uint)(word % (int)BindlessHeap.FeedbackWordsPerArray) * 32;
+                while (fresh != 0)
+                {
+                    var index = first + (uint)BitOperations.TrailingZeroCount(fresh);
+                    fresh &= fresh - 1;
+                    if (index >= BindlessHeap.CallRecordFirstIndex)
+                    {
+                        // Call records own these elements; the shader reads a heap record past the heap's range as null.
+                        continue;
+                    }
+
+                    var entry = new HeapEntry { Slot = slot, Index = index };
+                    _heapEntries[(slot, index)] = entry;
+                    entry.Words = ReadHeapRecord(slot, index);
+                    ResolveHeapEntry(entry);
+                }
+            }
+        }
+
+        private void RevalidateHeapEntries()
         {
             _heapRevalidatedTick = _scheduler.CurrentTick;
+            foreach (var entry in _heapEntries.Values)
+            {
+                var words = ReadHeapRecord(entry.Slot, entry.Index);
+                if (entry.Image is { } image && _imageCache.TryGetImage(entry.ImageIdentifier, out var found) && ReferenceEquals(found, image))
+                {
+                    // Keeps the image the heap reads from the cache's collection of unused images.
+                    _ = _imageCache.GetImage(entry.ImageIdentifier);
+                }
+
+                if (!words.AsSpan().SequenceEqual(entry.Words))
+                {
+                    entry.Words = words;
+                    ResolveHeapEntry(entry);
+                }
+            }
+
+            // A call record entry is named by its words, which never change; its image stays in use.
             foreach (var entry in _callRecordEntries.Values)
             {
                 if (entry.Image is { } image && _imageCache.TryGetImage(entry.ImageIdentifier, out var found) && ReferenceEquals(found, image))
@@ -257,6 +408,21 @@ internal static unsafe partial class VulkanVideoPresenter
                     _ = _imageCache.GetImage(entry.ImageIdentifier);
                 }
             }
+        }
+
+        // The record's words, or none when the heap has no such record or it cannot be read.
+        private uint[] ReadHeapRecord(int slot, uint index)
+        {
+            var sampler = slot >= BindlessHeap.ImageKinds.Length;
+            var heap = sampler ? _samplerHeap : _textureHeap;
+            var bytes = sampler ? BindlessHeap.SamplerRecordBytes : BindlessHeap.ImageRecordBytes;
+            if (heap.Base == 0 || index >= heap.Records)
+            {
+                return [];
+            }
+
+            var words = new uint[bytes / sizeof(uint)];
+            return _guestMemory.TryRead(heap.Base + (ulong)index * bytes, MemoryMarshal.AsBytes(words.AsSpan())) ? words : [];
         }
 
         private void ResolveHeapEntry(HeapEntry entry)

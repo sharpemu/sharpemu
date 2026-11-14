@@ -118,6 +118,11 @@ internal interface IShaderPipelineHost
     // The device can blend with a second fragment output (dualSrcBlend).
     bool SupportsDualSourceBlend => false;
 
+    // The device has the bindless heap set (descriptor indexing with update-after-bind and partially bound arrays, and
+    // null descriptors): an image or sampler read from one heap V# at an index the host cannot evaluate becomes a heap
+    // record instead of rejecting the program.
+    bool SupportsBindlessHeap => false;
+
     // The sample counts a pipeline without attachments can rasterize at.
     SampleCountFlags NoAttachmentSampleCounts { get; }
 

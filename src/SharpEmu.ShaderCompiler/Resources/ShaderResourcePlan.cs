@@ -152,6 +152,10 @@ public sealed class ShaderResourcePlan
     // The handles each memory access reads, after flattened reads were replaced.
     public MemoryAccessBinding?[] Accesses { get; private set; } = [];
 
+    // The image accesses whose image or sampler is a bindless heap record, and the heap V#s they read.
+    public IReadOnlyList<HeapRecordAccess> HeapRecords { get; private set; } = [];
+    public IReadOnlyList<HeapRecordSource> HeapRecordSources { get; private set; } = [];
+
     // The image accesses whose image or sampler a linked callee's call record holds, and what each callee reads through its
     // records' arguments besides them (by its slot among the program's call targets; empty unless linked with run-time
     // arguments).
@@ -163,9 +167,12 @@ public sealed class ShaderResourcePlan
     public IReadOnlyDictionary<uint, (ScalarValue Low, ScalarValue High)> CallRecordArguments { get; private set; } =
         new Dictionary<uint, (ScalarValue Low, ScalarValue High)>();
 
+    // The accesses whose bindless image or sampler descriptor reads as null.
+    public IReadOnlyList<uint> NullBindlessDescriptorPcs { get; private set; } = [];
+
     public static ShaderResourcePlan Extract(Gen5ShaderProgram program, ShaderStage stage, ulong hash, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64,
-        bool callRecords = false, bool callMarks = false, int dynamicUserData = -1,
+        bool bindlessNullDescriptors = false, bool bindlessHeap = false, bool callRecords = false, bool callMarks = false, int dynamicUserData = -1,
         BufferDescriptorNormalizer? normalizeBufferDescriptor = null,
         ImageDescriptorNormalizer? normalizeImageDescriptor = null, Func<long>? imageNormalizationVersion = null)
     {
@@ -215,10 +222,16 @@ public sealed class ShaderResourcePlan
 
         // Diagnostics observe rewritten values before descriptor validation.
         beforeResourceTracking?.Invoke(plan);
-        var tracked = ResourceTracker.Track(plan, callRecords);
+        var tracked = ResourceTracker.Track(plan, bindlessNullDescriptors, bindlessHeap, callRecords);
         plan.DescriptorSources = tracked.Sources;
         plan.Info = tracked.Info;
+        plan.NullBindlessDescriptorPcs = tracked.NullBindlessDescriptorPcs;
+        plan.HeapRecords = tracked.HeapRecords;
         plan.CallRecords = tracked.CallRecords;
+        plan.HeapRecordSources = tracked.HeapRecords
+            .Select(record => new HeapRecordSource(plan.DescriptorSources[(int)record.Source].Heap!.HeapSource, record.Sampler))
+            .Distinct()
+            .ToList();
         if (program.Instructions.Any(instruction => instruction.Control is ShaderCallFaultControl))
             plan.Info.UsesDeviceAddresses = true;
         // A program with shader calls, or a compute program with many device-address dwords (CompactMemoryAccessPolicy),

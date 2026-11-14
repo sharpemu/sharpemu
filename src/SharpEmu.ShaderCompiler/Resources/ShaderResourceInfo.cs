@@ -259,6 +259,7 @@ public sealed class DescriptorSource
     public ScalarValue[] Dwords { get; init; } = [];
     public uint DwordCount => (uint)Dwords.Length;
     public IndirectImageSelector? IndirectImage { get; init; }
+    public HeapRecordSelector? Heap { get; init; }
     public CallRecordSelector? CallRecord { get; init; }
 }
 

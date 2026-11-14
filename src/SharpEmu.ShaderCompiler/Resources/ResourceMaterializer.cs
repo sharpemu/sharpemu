@@ -49,6 +49,7 @@ public static partial class ResourceMaterializer
         public uint[] UserData = [];
         public List<IndirectImageTable> IndirectImages = [];
         public List<BufferCandidateTable> BufferCandidateTables = [];
+        public BindlessHeapDescriptor[] Heaps = [];
     }
 
     // One bounded runtime V# table resolved for this draw: the distinct candidate descriptors
@@ -145,6 +146,7 @@ public static partial class ResourceMaterializer
             FlattenedResourceTable = nextSnapshot.FlattenedTable,
             UserData = nextSnapshot.UserData,
             DeviceAddressRanges = ranges,
+            Heaps = nextSnapshot.Heaps,
         };
         specialization = nextSpecialization;
         failure = ResourceMaterializationFailure.None;
@@ -952,6 +954,30 @@ public static partial class ResourceMaterializer
             snapshot.BufferCandidateTables.Add(candidateTable);
         }
 
+        // The heap V#s the bindless heap records are read from, for the host's descriptor set 1.
+        if (plan.HeapRecordSources.Count != 0)
+        {
+            var heapSources = new uint[plan.HeapRecordSources.Count];
+            for (var index = 0; index < heapSources.Length; index++)
+                heapSources[index] = plan.HeapRecordSources[index].Source;
+            if (!RuntimeValueEvaluator.EvaluateSources(plan, heapSources, inputs, [], evaluateTable: false, out var heaps, out _) ||
+                heaps.Count != heapSources.Length)
+            {
+                return false;
+            }
+
+            snapshot.Heaps = new BindlessHeapDescriptor[heaps.Count];
+            for (var index = 0; index < heaps.Count; index++)
+            {
+                if (heaps[index].DwordCount != 4)
+                {
+                    return false;
+                }
+
+                snapshot.Heaps[index] = BindlessHeapDescriptor.FromWords(plan.HeapRecordSources[index].Sampler, heaps[index].Dwords);
+            }
+        }
+
         snapshot.UserData = inputs.UserData.ToArray();
         return true;
     }
@@ -1261,8 +1287,8 @@ public static partial class ResourceMaterializer
         !NullImageDescriptor(candidate) && ValidImageDescriptor(candidate, r128) && ReservedImageBitsClear(candidate) &&
         GuestImageFormat.SampledNumericClass(GuestImageFormat.FormatOf(candidate)) != ImageNumericClass.Unsupported;
 
-    // A call record's image the host can give a float view without a conversion in the shader: a valid sampled T# of a
-    // float format. A freed T# (0xFEFEFEFE words) fails the reserved-bit check.
+    // A bindless heap record the host can give a float view without a conversion in the shader: a valid sampled T# of a
+    // float format. A freed record (0xFEFEFEFE words) fails the reserved-bit check.
     public static bool IsFloatHeapImage(ReadOnlySpan<uint> words)
     {
         if (words.Length < 8 || !UsableImageCandidate(words, r128: false))
@@ -1868,6 +1894,18 @@ public static partial class ResourceMaterializer
                     NumericClass = ImageNumericClass.Float,
                     Dimension = baseImage.Dimension,
                     Cube = callRecord.Cube,
+                };
+                continue;
+            }
+
+            if (index < info.Images.Count && plan.DescriptorSources[(int)baseImage.Source].Heap is { } heap)
+            {
+                // A heap image has no descriptor before the shader picks its record: the instruction names its class.
+                images[index] = image with
+                {
+                    NumericClass = ImageNumericClass.Float,
+                    Dimension = baseImage.Dimension,
+                    Cube = heap.Cube,
                 };
                 continue;
             }

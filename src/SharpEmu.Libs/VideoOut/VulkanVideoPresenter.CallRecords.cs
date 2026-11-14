@@ -9,7 +9,7 @@ namespace SharpEmu.Libs.VideoOut;
 
 // The call records of a program linked with run-time record arguments (CallRecordSelector). For every record of a dispatch's
 // tables, the host reads each image and sampler its callee reads through the record's argument, gives each distinct
-// descriptor an element of set 1, and writes the table the shader's call entries
+// descriptor an element of set 1 from BindlessHeap.CallRecordFirstIndex on, and writes the table the shader's call entries
 // search (BindlessHeap.CallRecordKeyWords). The memory a callee reads through its record, its own reads and its buffers, is
 // made resident through the device-address table as a planned range would be.
 internal static unsafe partial class VulkanVideoPresenter
@@ -129,7 +129,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var next = _callRecordNext[field.Slot];
-            if (next >= BindlessHeap.CallRecordNullIndex)
+            if (BindlessHeap.CallRecordFirstIndex + next >= BindlessHeap.CallRecordNullIndex)
             {
                 if (_callRecordReports++ < 8)
                 {
@@ -140,7 +140,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _callRecordNext[field.Slot] = next + 1;
-            entry = new HeapEntry { Slot = field.Slot, Index = next, Words = words[..count].ToArray() };
+            entry = new HeapEntry { Slot = field.Slot, Index = BindlessHeap.CallRecordFirstIndex + next, Words = words[..count].ToArray() };
             _callRecordEntries.Add(key, entry);
             ResolveHeapEntry(entry);
             return entry.Index;

@@ -292,6 +292,11 @@ internal sealed class ShaderProgramCache
 
     private static readonly bool PrefetchEnabled = Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_PREFETCH") != "0";
 
+    // An image or sampler descriptor loaded at an index the host cannot evaluate (a bindless heap entry) reads as a null
+    // descriptor, so the draw or dispatch that uses it still runs. SHARPEMU_BINDLESS_NULL=0 skips that work instead; it is
+    // read whenever a program is planned.
+    private static bool BindlessNullDescriptors => Environment.GetEnvironmentVariable("SHARPEMU_BINDLESS_NULL") != "0";
+
     // On a host that reads call records at run time (descriptor set 1), a linked program keeps one copy of each callee per
     // call site and reads its records' images and samplers at run time, so tables that gain or lose records, or move their
     // arguments, link to the same program; only a new callee links a new one. SHARPEMU_RUNTIME_CALL_RECORDS=0 links a copy
@@ -714,7 +719,7 @@ internal sealed class ShaderProgramCache
                         {
                             linked = LinkProgram(caller, library, source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length,
                                 waveSize, captureLinkedImages ? plan => failedLinkedPlan = plan : null, runtimeRecords, runtimeRecords && CalleeTiering,
-                                source.Registered.Frontend) ??
+                                _host.SupportsBindlessHeap, source.Registered.Frontend) ??
                                 RefuseRuntimeCallRecords(source.Hash);
                             failedLinkedPlan = null;
                         }
@@ -888,7 +893,7 @@ internal sealed class ShaderProgramCache
     // links a copy per record from then on (RefuseRuntimeCallRecords).
     private ProgramSourceEntry? LinkProgram(Gen5ShaderProgram caller, ShaderCallLibrary library, ShaderStage stage, ulong hash,
         uint userDataBase, uint userDataCount, uint waveSize, Action<ShaderResourcePlan>? beforeResourceTracking, bool runtimeRecords = false,
-        bool callMarks = false, IShaderFrontend? frontend = null)
+        bool callMarks = false, bool bindlessHeap = false, IShaderFrontend? frontend = null)
     {
         Gen5ShaderProgram program;
         ShaderResourcePlan plan;
@@ -896,7 +901,8 @@ internal sealed class ShaderProgramCache
         {
             program = Gen5ShaderCallLinker.Link(caller, library.Calls, runtimeRecords);
             plan = ShaderResourcePlan.Extract(program, stage, hash, userDataBase, userDataCount,
-                beforeResourceTracking: beforeResourceTracking, waveSize: waveSize, callRecords: runtimeRecords, callMarks: callMarks,
+                beforeResourceTracking: beforeResourceTracking, waveSize: waveSize, bindlessNullDescriptors: BindlessNullDescriptors,
+                bindlessHeap: bindlessHeap, callRecords: runtimeRecords, callMarks: callMarks,
                 normalizeBufferDescriptor: frontend?.NormalizeBufferDescriptor,
                 normalizeImageDescriptor: ImageNormalizer(frontend),
                 imageNormalizationVersion: frontend?.ImageNormalizationVersion);
@@ -1161,9 +1167,10 @@ internal sealed class ShaderProgramCache
 
         var (stage, hash, userDataBase, userDataCount) = (source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length);
         var callMarks = runtimeRecords && CalleeTiering;
+        var bindlessHeap = _host.SupportsBindlessHeap;
         var frontend = source.Registered.Frontend;
         _pendingLinks.Add(source.Hash, (linkedKey, Task.Run(() =>
-            LinkProgram(caller, library, stage, hash, userDataBase, userDataCount, waveSize, null, runtimeRecords, callMarks, frontend))));
+            LinkProgram(caller, library, stage, hash, userDataBase, userDataCount, waveSize, null, runtimeRecords, callMarks, bindlessHeap, frontend))));
         throw new ShaderProgramPendingException();
     }
 
@@ -1270,6 +1277,7 @@ internal sealed class ShaderProgramCache
                     ShaderStage.Compute => options.ComputeInfo?.WaveSize ?? 64u,
                     _ => 32u,
                 }, dynamicUserData: options.VertexInfo?.StartInstanceUserData ?? -1,
+                bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: _host.SupportsBindlessHeap,
                 normalizeBufferDescriptor: source.Registered.Frontend?.NormalizeBufferDescriptor,
                 normalizeImageDescriptor: ImageNormalizer(source.Registered.Frontend),
                 imageNormalizationVersion: source.Registered.Frontend?.ImageNormalizationVersion);
@@ -1278,6 +1286,13 @@ internal sealed class ShaderProgramCache
         {
             if (dumpPlanning) ShaderPlanningDump.WriteFailure(source, exception.Message);
             throw new ShaderProgramRejectedException($"The shader resource plan is invalid: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} error={exception.Message}.");
+        }
+
+        if (plan.NullBindlessDescriptorPcs.Count != 0)
+        {
+            Console.Error.WriteLine(
+                $"[GPU][WARN] Bindless descriptors read as null: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} " +
+                $"pcs={string.Join(',', plan.NullBindlessDescriptorPcs.Select(pc => $"0x{pc:X}"))}");
         }
 
         var exclusiveOr = false;
@@ -1838,7 +1853,7 @@ internal sealed class ShaderProgramCache
     internal static bool TryCompilePrewarm(ComputePrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
         bool sharedInt64Atomics, bool execGuardElision, bool signedZeroInfNanPreserve, out IGuestCompiledShader? compiled,
         out BindingLayout? layout, out string error, bool hostWave64Supported = false, bool hostComputeSubgroup32 = false,
-        bool imageInt64Atomics = false, bool shaderDeviceClock = false,
+        bool imageInt64Atomics = false, bool shaderDeviceClock = false, bool bindlessHeap = false,
         bool tableBlocks = false, Func<ulong, IShaderFrontend?>? frontendOf = null)
     {
         compiled = null;
@@ -1872,7 +1887,7 @@ internal sealed class ShaderProgramCache
             }
 
             var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, record.Hash, record.UserDataBase, record.UserDataCount,
-                waveSize: record.Info.WaveSize,
+                waveSize: record.Info.WaveSize, bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: bindlessHeap,
                 normalizeBufferDescriptor: frontend?.NormalizeBufferDescriptor,
                 normalizeImageDescriptor: frontend?.NormalizeImageDescriptor,
                 imageNormalizationVersion: frontend?.ImageNormalizationVersion);

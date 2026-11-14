@@ -165,6 +165,7 @@ public static partial class Gen5SpirvTranslator
         private readonly Dictionary<DescriptorBindingKind, LayoutImageClass> _imageClasses = [];
         private readonly Dictionary<int, uint> _indirectKeyScratch = [];
         private readonly Dictionary<int, uint> _heapArrays = [];
+        private uint _heapFeedback;
         private uint _pushData;
         private uint _shaderData;
         private uint _mipStatistics;
@@ -2286,7 +2287,8 @@ public static partial class Gen5SpirvTranslator
             out uint imageObject,
             out uint dstSelect,
             out string error,
-            (uint Resource, uint Element)? fixedElement = null)
+            (uint Resource, uint Element)? fixedElement = null,
+            bool heapVolumeLayers = false)
         {
             error = string.Empty;
             resource = default;
@@ -2338,16 +2340,33 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            // A call record's image is the element of set 1 the host resolved for the record its callee's entry found, not its
-            // null element in set 0.
+            // A bindless heap image reads the record its key picks from set 1, not its null element in set 0.
             var heapImageSlot = BindlessHeap.ImageSlot(kind.Value);
-            var fromHeap = false;
+            HeapRecordUse heapImage = default;
+            var fromHeap = fixedElement is null && heapImageSlot >= 0 &&
+                request.HeapImageByMemoryIndex.TryGetValue(memoryIndex, out heapImage);
+            if (heapVolumeLayers)
+            {
+                if (!fromHeap || heapImageSlot != BindlessHeap.VolumeSlot)
+                {
+                    error = "only a 3D heap image read has a layered alternative";
+                    return false;
+                }
+
+                heapImageSlot = BindlessHeap.VolumeLayerSlot;
+                imageClass = VolumeLayerClass();
+            }
             uint elementPointer;
             uint imageValue;
-            if (fixedElement is null && heapImageSlot >= 0 &&
+            if (fromHeap)
+            {
+                (elementPointer, imageValue) = LoadHeapElement(heapImageSlot, imageClass.ImageType, HeapRecordIndex(heapImage));
+            }
+            else if (fixedElement is null && heapImageSlot >= 0 &&
                 request.CallRecordImageByMemoryIndex.TryGetValue(memoryIndex, out var recordImage))
             {
-                (elementPointer, imageValue) = LoadHeapElement(heapImageSlot, imageClass.ImageType, CallRecordElement(recordImage.Field));
+                // A call record's image is the element the host resolved for the record its callee's entry found.
+                (elementPointer, imageValue) = LoadHeapElement(heapImageSlot, imageClass.ImageType, CallRecordElement(recordImage.Field), mark: false);
                 fromHeap = true;
             }
             else
@@ -2361,9 +2380,15 @@ public static partial class Gen5SpirvTranslator
             if (UsesSampler(instruction.Opcode))
             {
                 uint sampler;
-                if (fixedElement is null && request.CallRecordSamplerByMemoryIndex.TryGetValue(memoryIndex, out var recordSampler))
+                if (fixedElement is null && request.HeapSamplerByMemoryIndex.TryGetValue(memoryIndex, out var heapSampler))
                 {
-                    (_, sampler) = LoadHeapElement(recordSampler.Slot, _module.TypeSampler(), CallRecordElement(recordSampler.Field));
+                    var samplerSlot = imageInfo.DepthCompare ? BindlessHeap.CompareSamplerSlot : BindlessHeap.SamplerSlot;
+                    (_, sampler) = LoadHeapElement(samplerSlot, _module.TypeSampler(), HeapRecordIndex(heapSampler));
+                    fromHeap = true;
+                }
+                else if (fixedElement is null && request.CallRecordSamplerByMemoryIndex.TryGetValue(memoryIndex, out var recordSampler))
+                {
+                    (_, sampler) = LoadHeapElement(recordSampler.Slot, _module.TypeSampler(), CallRecordElement(recordSampler.Field), mark: false);
                     fromHeap = true;
                 }
                 else
@@ -2426,6 +2451,25 @@ public static partial class Gen5SpirvTranslator
 
         // ---- bindless heap ----
 
+        // The float 2D-array class of set 1, which a 3D heap read takes for a record that holds a 2D texture.
+        private LayoutImageClass VolumeLayerClass()
+        {
+            var imageType = _module.TypeImage(_floatType, SpirvImageDim.Dim2D, depth: false, arrayed: true, multisampled: false,
+                sampled: 1u, SpirvImageFormat.Unknown);
+            return new LayoutImageClass(0, imageType, _module.TypePointer(SpirvStorageClass.UniformConstant, imageType), _floatType,
+                ImageComponentKind.Float, IsStorage: false, Arrayed: true, Cube: false, Multisampled: false, SpirvImageDim.Dim2D, []);
+        }
+
+        // The record a heap read picks: the dynamic offset its key read kept plus the read's immediate, in records.
+        private uint HeapRecordIndex(HeapRecordUse use)
+        {
+            var key = _indirectKeyScratch.TryGetValue(use.KeyMemoryIndex, out var scratch) ? Load(_uintType, scratch) : UInt(0);
+            var shift = use.RecordBytes == BindlessHeap.SamplerRecordBytes ? 4u : 5u;
+            var index = BitwiseAnd(ShiftRightLogical(IAdd(key, UInt(use.Immediate)), UInt(shift)), UInt(BindlessHeap.Capacity - 1));
+            var inHeap = _module.AddInstruction(SpirvOp.ULessThan, _boolType, index, UInt(BindlessHeap.CallRecordFirstIndex));
+            return _module.AddInstruction(SpirvOp.Select, _uintType, inHeap, index, UInt(BindlessHeap.CallRecordNullIndex));
+        }
+
         // One runtime array of set 1, declared at its first use.
         private uint HeapArray(int slot, uint elementType)
         {
@@ -2452,8 +2496,8 @@ public static partial class Gen5SpirvTranslator
             return variable;
         }
 
-        // Loads one element of a set-1 array.
-        private (uint Pointer, uint Value) LoadHeapElement(int slot, uint elementType, uint index)
+        // Loads one element of a set-1 array; a heap record is marked in the feedback bitset, so the host gives it a view.
+        private (uint Pointer, uint Value) LoadHeapElement(int slot, uint elementType, uint index, bool mark = true)
         {
             var array = HeapArray(slot, elementType);
             var pointer = _module.AddInstruction(
@@ -2461,6 +2505,11 @@ public static partial class Gen5SpirvTranslator
             _module.AddDecoration(pointer, SpirvDecoration.NonUniform);
             var value = Load(elementType, pointer);
             _module.AddDecoration(value, SpirvDecoration.NonUniform);
+            if (mark)
+            {
+                MarkHeapRecord(slot, index);
+            }
+
             return (pointer, value);
         }
 
@@ -2592,6 +2641,33 @@ public static partial class Gen5SpirvTranslator
             var first = CallRecordWord(Clamped(IAdd(rowsEnd, safe)));
             var element = CallRecordWord(Clamped(IAdd(first, UInt((uint)field))));
             return _module.AddInstruction(SpirvOp.Select, _uintType, found, element, UInt(BindlessHeap.CallRecordNullIndex));
+        }
+
+        private void MarkHeapRecord(int slot, uint index)
+        {
+            if (_heapFeedback == 0)
+            {
+                var block = _module.TypeStruct(WordRuntimeArray());
+                _module.AddDecoration(block, SpirvDecoration.Block);
+                _module.AddMemberDecoration(block, 0, SpirvDecoration.Offset, 0);
+                _heapFeedback = _module.AddGlobalVariable(
+                    _module.TypePointer(SpirvStorageClass.StorageBuffer, block), SpirvStorageClass.StorageBuffer);
+                _module.AddName(_heapFeedback, "heapFeedback");
+                _module.AddDecoration(_heapFeedback, SpirvDecoration.DescriptorSet, BindlessHeap.DescriptorSet);
+                _module.AddDecoration(_heapFeedback, SpirvDecoration.Binding, BindlessHeap.FeedbackBinding);
+                _interfaces.Add(_heapFeedback);
+            }
+
+            var word = IAdd(UInt((uint)slot * BindlessHeap.FeedbackWordsPerArray), ShiftRightLogical(index, UInt(5)));
+            var bit = ShiftLeftLogical(UInt(1), BitwiseAnd(index, UInt(31)));
+            var pointer = BlockWordPointer(_heapFeedback, word);
+            var unmarked = _module.AddInstruction(SpirvOp.IEqual, _boolType, BitwiseAnd(Load(_uintType, pointer), bit), UInt(0));
+            if (!_execKnownFull)
+            {
+                unmarked = LogicalAnd(unmarked, Load(_boolType, _exec));
+            }
+
+            EmitConditional(unmarked, () => _module.AddInstruction(SpirvOp.AtomicOr, _uintType, pointer, UInt(1), UInt(0), bit));
         }
 
         private const uint MipStatisticsEntries = 257;

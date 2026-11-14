@@ -164,6 +164,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         bool IShaderPipelineHost.MeshShadersSupported => _supportsMeshShader;
 
+        bool IShaderPipelineHost.SupportsBindlessHeap => _bindlessHeapSupported;
+
         MeshShaderLimits IShaderPipelineHost.MeshLimits => _meshShaderLimits;
         uint IShaderPipelineHost.MeshSubgroupSize => checked((uint)Volatile.Read(ref _nativeSubgroupSize));
         bool IShaderPipelineHost.ShaderDrawParametersSupported => _supportsShaderDrawParameters;
@@ -931,7 +933,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        // A program that reads call records also binds descriptor set 1 (BindlessHeap).
+        // A program that reads bindless heap records also binds the heap as set 1.
         private PipelineLayout CreatePipelineLayout(DescriptorSetLayout setLayout, ShaderStageFlags pushStages, bool bindlessHeap = false)
         {
             var pushConstants = new PushConstantRange { StageFlags = pushStages, Offset = 0, Size = PushConstantBytes };

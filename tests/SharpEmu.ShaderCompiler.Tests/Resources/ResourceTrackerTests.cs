@@ -315,22 +315,64 @@ public sealed class ResourceTrackerTests
     [Fact]
     public void SamplerLoadedAtALaneChosenIndex_IsStillRejected()
     {
-        var program = Program(
-            MoveScalarRegister(0, 16, 0),
-            MoveScalarRegister(4, 17, 1),
-            MoveScalarRegister(8, 18, 2),
-            MoveScalarRegister(12, 19, 3),
-            Vop2(16, "VLshlrevB32", 1, Operand(12), Gen5Operand.Vector(0)),
-            ReadFirstLane(20, 106, 1),
-            ScalarBufferLoad(24, 16, destination: 24, count: 4, dynamicOffsetRegister: 106),
-            Image(32, "ImageSample", 8, 24),
-            EndProgram(40));
+        var program = LaneIndexedSamplerProgram();
 
         var error = Assert.Throws<ResourcePlanException>(() => Extract(program, stage: ShaderStage.Pixel));
         Assert.Contains("not a valid runtime value", error.Message);
     }
 
-    private static Gen5ShaderProgram LaneIndexedImageProgram() => Program(
+    // Opted in to the bindless fallback, the same heap entry reads as a null image in compute too, and the plan names
+    // the access.
+    [Fact]
+    public void ImageDescriptorLoadedAtALaneChosenIndexInCompute_ReadsAsNullWhenOptedIn()
+    {
+        var program = LaneIndexedImageProgram();
+
+        var plan = Extract(program, stage: ShaderStage.Compute, bindlessNullDescriptors: true);
+
+        var image = Assert.Single(plan.DescriptorSources, source => source.DwordCount == 8);
+        Assert.All(image.Dwords, dword => Assert.True(dword.IsConstant && dword.ConstantU32 == 0));
+        Assert.Equal([48u], plan.NullBindlessDescriptorPcs);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program, bindlessNullDescriptors: true), out var shader, out var error), error);
+        Assert.NotEmpty(shader.Spirv);
+    }
+
+    // A sampler read from a heap at a lane-chosen index reads as a null sampler when opted in.
+    [Fact]
+    public void SamplerLoadedAtALaneChosenIndex_ReadsAsNullWhenOptedIn()
+    {
+        var program = LaneIndexedSamplerProgram();
+
+        var plan = Extract(program, stage: ShaderStage.Pixel, bindlessNullDescriptors: true);
+
+        Assert.Single(plan.DescriptorSources, source =>
+            source.DwordCount == 4 && source.Dwords.All(dword => dword.IsConstant && dword.ConstantU32 == 0));
+        Assert.Equal([32u], plan.NullBindlessDescriptorPcs);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program, ShaderStage.Pixel, bindlessNullDescriptors: true), out var shader, out var error), error);
+        Assert.NotEmpty(shader.Spirv);
+    }
+
+    // The plan lists only what the opt-in added: a pixel shader's lane-chosen image reads as null without it.
+    [Fact]
+    public void ThePlanListsOnlyTheOptedInFallbacks()
+    {
+        var plan = Extract(LaneIndexedImageProgram(), stage: ShaderStage.Pixel, bindlessNullDescriptors: true);
+
+        Assert.Empty(plan.NullBindlessDescriptorPcs);
+    }
+
+    internal static Gen5ShaderProgram LaneIndexedSamplerProgram() => Program(
+        MoveScalarRegister(0, 16, 0),
+        MoveScalarRegister(4, 17, 1),
+        MoveScalarRegister(8, 18, 2),
+        MoveScalarRegister(12, 19, 3),
+        Vop2(16, "VLshlrevB32", 1, Operand(12), Gen5Operand.Vector(0)),
+        ReadFirstLane(20, 106, 1),
+        ScalarBufferLoad(24, 16, destination: 24, count: 4, dynamicOffsetRegister: 106),
+        Image(32, "ImageSample", 8, 24),
+        EndProgram(40));
+
+    internal static Gen5ShaderProgram LaneIndexedImageProgram(uint dimension = 1) => Program(
         // The table V# in s16..s19 and the sampler in s24..s27 come from user data.
         MoveScalarRegister(0, 16, 0),
         MoveScalarRegister(4, 17, 1),
@@ -344,7 +386,7 @@ public sealed class ResourceTrackerTests
         ReadFirstLane(32, 106, 7),
         Sop2(36, "SLshlB32", 106, Gen5Operand.Scalar(106), Operand(5)),
         ScalarBufferLoad(40, 16, destination: 0, count: 8, dynamicOffsetRegister: 106),
-        Image(48, "ImageSample", 0, 24),
+        Image(48, "ImageSample", 0, 24, dimension: dimension),
         EndProgram(56));
     // A shader that selects among states with v_cmpx and s_cbranch_execz sets a constant sampler up in the first state's block and samples
     // with it in a later state's block. The skip edge of the first branch reaches the join with the sampler registers unwritten, so the host

@@ -292,6 +292,7 @@ public sealed partial class ResourceMaterializationCache
                 FlattenedResourceTable = table ?? snapshot.FlattenedResourceTable,
                 UserData = snapshot.UserData,
                 DeviceAddressRanges = snapshot.DeviceAddressRanges,
+                Heaps = snapshot.Heaps,
             };
         }
 
@@ -508,6 +509,7 @@ public sealed partial class ResourceMaterializationCache
                     FlattenedResourceTable = snapshot.FlattenedResourceTable,
                     UserData = snapshot.UserData,
                     DeviceAddressRanges = snapshot.DeviceAddressRanges,
+                    Heaps = snapshot.Heaps,
                     Origin = snapshot.Origin,
                 };
         }
@@ -1555,6 +1557,7 @@ public sealed partial class ResourceMaterializationCache
                     FlattenedResourceTable = table,
                     UserData = previous.UserData,
                     DeviceAddressRanges = previous.DeviceAddressRanges,
+                    Heaps = previous.Heaps,
                 },
                 Specialization = cached.Specialization,
                 Next = cached.Next,
@@ -1729,6 +1732,7 @@ public sealed partial class ResourceMaterializationCache
             FlattenedResourceTable = cached.FlattenedResourceTable,
             UserData = current,
             DeviceAddressRanges = cached.DeviceAddressRanges,
+            Heaps = cached.Heaps,
             Origin = cached.Origin,
         };
     }
@@ -2050,6 +2054,7 @@ public sealed partial class ResourceMaterializationCache
                     FlattenedResourceTable = table,
                     UserData = patched.UserData,
                     DeviceAddressRanges = patched.DeviceAddressRanges,
+                    Heaps = patched.Heaps,
                 };
                 patches = found;
                 return true;
@@ -2117,6 +2122,7 @@ public sealed partial class ResourceMaterializationCache
                     FlattenedResourceTable = table,
                     UserData = patched.UserData,
                     DeviceAddressRanges = patched.DeviceAddressRanges,
+                    Heaps = patched.Heaps,
                 };
             }
             finally
