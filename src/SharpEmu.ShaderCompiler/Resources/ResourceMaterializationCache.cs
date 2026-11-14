@@ -1312,6 +1312,8 @@ public sealed partial class ResourceMaterializationCache
                         refreshed.Next = cached;
                         CountDiagnostic(Diagnostic.RefreshOlderVariant);
                     }
+                    // Learning history may still own this replaced entry, but not its variant chain.
+                    variant.Next = null;
                     Store(key, refreshed);
                     _outcome = MaterializeOutcome.TableRefresh;
                     TableRefreshes++;
