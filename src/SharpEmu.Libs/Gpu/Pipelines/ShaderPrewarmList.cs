@@ -344,6 +344,21 @@ internal sealed partial class ShaderPrewarmList : IDisposable
     private const byte PixelKind = 3;
     // What a session learned about a linked program's module compile (side file).
     private const byte LinkedCompileKind = 4;
+    // When a session first used a compute record (its identity, then the seconds into the session), in the side file,
+    // since the main list's records carry no time. A session writes one for each record it uses unless a session used
+    // that record sooner, and the prewarm runs records by their earliest use, so a record goes where a session needed
+    // it rather than where the session that recorded it first met it. Records no session timed, and linked records,
+    // whose permutations the prewarm takes newest first in list order (ShaderPrewarmQueue), keep list order after the
+    // timed ones.
+    private const byte ComputeFirstUseKind = 7;
+    // How long a prewarm compile of a compute record took (its identity, then the seconds), in the side file, kept when
+    // it took a second or more and longer than any compile recorded before. The prewarm runs each record by the time it
+    // must start to be ready at its earliest use, first use minus compile time, so a long compile starts that much
+    // sooner.
+    private const byte ComputeCostKind = 8;
+    private const float MinimumComputeCostSeconds = 1;
+    // Kinds 7 and 8: a record identity, then seconds.
+    private const int ComputeSecondsPayloadBytes = sizeof(ulong) + sizeof(float);
     // Kinds 5 and 6 (vertex prewarm records): ShaderPrewarmList.Vertex.cs.
     private const int LinkedCompilePayloadBytes = sizeof(ulong) + 1 + sizeof(long);
     private const uint ExtensionMagic = 0x58504553;
@@ -373,6 +388,8 @@ internal sealed partial class ShaderPrewarmList : IDisposable
     // The last recorded outcome of each linked program's module compile (true: it compiled for minutes).
     private readonly ConcurrentDictionary<ulong, bool> _linkedCompiles = new();
     private readonly HashSet<ulong> _computes = [];
+    private readonly Dictionary<ulong, float> _computeFirstUses = new();
+    private readonly Dictionary<ulong, float> _computeCosts = new();
     private readonly Dictionary<(ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset), ShaderCodeCapture> _loadedCodes = new();
     private readonly List<ComputePrewarmRecord> _loadedComputes = [];
     private readonly HashSet<ulong> _pixels = [];
@@ -461,11 +478,26 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         }
     }
 
+    // The recorded compute programs by the time each must start to be ready at its earliest use (the recorded first use
+    // minus the recorded compile time; infinite for an untimed record), then the untimed ones, each group in list
+    // order. Sessions record first uses and the prewarm its compile times while the list is open, so the times are read
+    // under the gate; the loaded records and codes are written only while the file loads.
     public IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code)> LoadedComputes()
     {
-        var result = new List<(ComputePrewarmRecord, ShaderCodeCapture)>(_loadedComputes.Count);
-        foreach (var record in _loadedComputes)
+        var identities = _loadedComputes.Select(static record => Identity(record)).ToArray();
+        var startBy = new float[identities.Length];
+        lock (_gate)
         {
+            for (var index = 0; index < identities.Length; index++)
+            {
+                startBy[index] = StartBy(identities[index]);
+            }
+        }
+
+        var result = new List<(ComputePrewarmRecord, ShaderCodeCapture)>(identities.Length);
+        foreach (var index in Enumerable.Range(0, identities.Length).OrderBy(index => startBy[index]))
+        {
+            var record = _loadedComputes[index];
             if (_loadedCodes.TryGetValue(record.CodeKey, out var code))
             {
                 result.Add((record, code));
@@ -474,6 +506,11 @@ internal sealed partial class ShaderPrewarmList : IDisposable
 
         return result;
     }
+
+    private float StartBy(ulong identity) =>
+        _computeFirstUses.TryGetValue(identity, out var firstUse)
+            ? firstUse - (_computeCosts.TryGetValue(identity, out var cost) ? cost : 0)
+            : float.PositiveInfinity;
 
     // The recorded whole pipelines whose stage programs and code loaded, in the order sessions created them.
     public IReadOnlyList<PipelinePrewarmItem> LoadedPipelines()
@@ -637,20 +674,59 @@ internal sealed partial class ShaderPrewarmList : IDisposable
     {
         var payload = SerializeCompute(record);
         var identity = XxHash3.HashToUInt64(payload);
+        var seconds = SessionSeconds();
         lock (_gate)
         {
-            if (_failed || !_computes.Add(identity))
+            if (_failed)
             {
                 return;
             }
 
-            if (_codes.Add(code.Key))
+            if (_computes.Add(identity))
             {
-                Append(CodeKind, SerializeCode(code));
+                if (_codes.Add(code.Key))
+                {
+                    Append(CodeKind, SerializeCode(code));
+                }
+
+                Append(ComputeKind, payload);
             }
 
-            Append(ComputeKind, payload);
+            if (record.Linked is null && (!_computeFirstUses.TryGetValue(identity, out var known) || seconds < known))
+            {
+                _computeFirstUses[identity] = seconds;
+                Append(_extension, ComputeFirstUseKind, IdentitySeconds(identity, seconds));
+            }
         }
+    }
+
+    // A prewarm compile of the record took this long.
+    public void RecordComputeCost(ComputePrewarmRecord record, float seconds)
+    {
+        if (seconds < MinimumComputeCostSeconds)
+        {
+            return;
+        }
+
+        var identity = Identity(record);
+        lock (_gate)
+        {
+            if (_failed || (_computeCosts.TryGetValue(identity, out var known) && known >= seconds))
+            {
+                return;
+            }
+
+            _computeCosts[identity] = seconds;
+            Append(_extension, ComputeCostKind, IdentitySeconds(identity, seconds));
+        }
+    }
+
+    private static byte[] IdentitySeconds(ulong identity, float seconds)
+    {
+        var payload = new byte[ComputeSecondsPayloadBytes];
+        BitConverter.TryWriteBytes(payload, identity);
+        BitConverter.TryWriteBytes(payload.AsSpan(sizeof(ulong)), seconds);
+        return payload;
     }
 
     public void RecordPixel(ShaderCodeCapture code, PixelPrewarmRecord record)
@@ -934,6 +1010,26 @@ internal sealed partial class ShaderPrewarmList : IDisposable
 
                     _linkedCompiles[BitConverter.ToUInt64(payload, 0)] = payload[sizeof(ulong)] != 0;
                     return true;
+
+                case ComputeFirstUseKind:
+                case ComputeCostKind:
+                {
+                    if (payload.Length != ComputeSecondsPayloadBytes)
+                    {
+                        return false;
+                    }
+
+                    var identity = BitConverter.ToUInt64(payload, 0);
+                    var seconds = BitConverter.ToSingle(payload, sizeof(ulong));
+                    // The earliest first use, the longest compile.
+                    var times = kind == ComputeFirstUseKind ? _computeFirstUses : _computeCosts;
+                    if (!times.TryGetValue(identity, out var known) || (kind == ComputeFirstUseKind ? seconds < known : seconds > known))
+                    {
+                        times[identity] = seconds;
+                    }
+
+                    return true;
+                }
 
                 default:
                     return TryLoadGraphicsRecord(kind, payload);

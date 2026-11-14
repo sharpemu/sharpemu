@@ -80,12 +80,13 @@ internal sealed partial class ShaderPrewarmList
     // The session's clock, seconds since the list opened (tests replace it).
     internal Func<float>? SessionClock { get; set; }
 
+    private float SessionSeconds() => SessionClock?.Invoke() ?? (float)Stopwatch.GetElapsedTime(_opened).TotalSeconds;
+
     private byte[] WithFirstUse(byte[] record)
     {
         var payload = new byte[record.Length + FirstUseBytes];
         record.CopyTo(payload, 0);
-        BitConverter.TryWriteBytes(payload.AsSpan(record.Length),
-            SessionClock?.Invoke() ?? (float)Stopwatch.GetElapsedTime(_opened).TotalSeconds);
+        BitConverter.TryWriteBytes(payload.AsSpan(record.Length), SessionSeconds());
         return payload;
     }
 

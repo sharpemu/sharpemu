@@ -164,6 +164,83 @@ public sealed class ShaderPrewarmListTests : IDisposable
         Assert.Same(loaded[0].Code.Ranges, loaded[1].Code.Ranges);
     }
 
+    // Compute records run by the earliest time into a session at which one used them, and a later session that uses a
+    // record sooner moves it up.
+    [Fact]
+    public void ComputeRecordsRunByTheirEarliestUse()
+    {
+        using (var list = Open())
+        {
+            list.SessionClock = () => 10;
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+            list.SessionClock = () => 50;
+            CompileAtRuntime(list, BufferDescriptorWords.Format32x4UInt);
+        }
+
+        using (var list = Open())
+        {
+            Assert.Equal([BufferDescriptorWords.Format32UInt, BufferDescriptorWords.Format32x4UInt], Formats(list));
+            list.SessionClock = () => 5;
+            CompileAtRuntime(list, BufferDescriptorWords.Format32x4UInt);
+            list.SessionClock = () => 30;
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+        }
+
+        using var reloaded = Open();
+        Assert.Equal([BufferDescriptorWords.Format32x4UInt, BufferDescriptorWords.Format32UInt], Formats(reloaded));
+    }
+
+    // A main list without first uses keeps list order.
+    [Fact]
+    public void ComputeRecordsWithoutFirstUsesKeepListOrder()
+    {
+        using (var list = Open())
+        {
+            list.SessionClock = () => 50;
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+            list.SessionClock = () => 10;
+            CompileAtRuntime(list, BufferDescriptorWords.Format32x4UInt);
+        }
+
+        File.Delete(Path.Combine(_directory, ShaderPrewarmList.ExtensionFileName));
+        using var reloaded = Open();
+        Assert.Equal([BufferDescriptorWords.Format32UInt, BufferDescriptorWords.Format32x4UInt], Formats(reloaded));
+    }
+
+    // A record whose compile takes long runs by the time it must start, its first use minus its longest recorded
+    // compile; a compile of under a second is not recorded, and a shorter one leaves the longer.
+    [Fact]
+    public void ALongCompileRunsByTheTimeItMustStart()
+    {
+        using (var list = Open())
+        {
+            list.SessionClock = () => 10;
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+            list.SessionClock = () => 50;
+            CompileAtRuntime(list, BufferDescriptorWords.Format32x4UInt);
+        }
+
+        using (var list = Open())
+        {
+            var (first, second) = (list.LoadedComputes()[0].Record, list.LoadedComputes()[1].Record);
+            list.RecordComputeCost(second, 30);
+            Assert.Equal([BufferDescriptorWords.Format32UInt, BufferDescriptorWords.Format32x4UInt], Formats(list));
+            // The second must start by 9.8 s, before the first's 10 s; a recorded half second would move the first to 9.5 s.
+            list.RecordComputeCost(first, 0.5f);
+            list.RecordComputeCost(second, 40.2f);
+            Assert.Equal([BufferDescriptorWords.Format32x4UInt, BufferDescriptorWords.Format32UInt], Formats(list));
+            // A shorter compile leaves the longer: 50 - 20 = 30 s would put the second after the first again.
+            list.RecordComputeCost(second, 20);
+            Assert.Equal([BufferDescriptorWords.Format32x4UInt, BufferDescriptorWords.Format32UInt], Formats(list));
+        }
+
+        using var reloaded = Open();
+        Assert.Equal([BufferDescriptorWords.Format32x4UInt, BufferDescriptorWords.Format32UInt], Formats(reloaded));
+    }
+
+    private static uint[] Formats(ShaderPrewarmList list) =>
+        [.. list.LoadedComputes().Select(item => item.Record.Specialization.Buffers[0].DescriptorFormat)];
+
     [Fact]
     public void ATruncatedLastRecordIsDroppedAndTheListKeepsAppending()
     {
@@ -219,8 +296,9 @@ public sealed class ShaderPrewarmListTests : IDisposable
         using var reloaded = Open();
         var records = reloaded.LoadedComputes();
         Assert.Equal(3, records.Count);
+        // The order follows each record's first use; the continuations are what this checks.
         Assert.Equal(new ulong[] { 0, 0x100, 0x1_0000_0000 },
-            records.Select(entry => entry.Record.ContinuationAddressOffset));
+            records.Select(entry => entry.Record.ContinuationAddressOffset).Order());
         foreach (var (record, code) in records)
             Assert.Equal(record.ContinuationAddressOffset,
                 code.Fused is { } fused ? unchecked(fused.ContinuationAddress - code.Address) : 0);
@@ -253,7 +331,8 @@ public sealed class ShaderPrewarmListTests : IDisposable
             });
         }
         using var reloaded = Open();
-        Assert.Equal(new[] { false, true }, reloaded.LoadedComputes().Select(entry => entry.Record.DeviceRecordCounts));
+        // The second session's record runs first by its earlier use; the two records are what this checks.
+        Assert.Equal(new[] { false, true }, reloaded.LoadedComputes().Select(entry => entry.Record.DeviceRecordCounts).Order());
     }
 
     [Fact]
