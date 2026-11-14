@@ -22,8 +22,11 @@ public sealed class AgcDrawIndex2Tests
     [Theory]
     [InlineData(0u, 0u, 0UL, 0x280u, 0x280u, 2u, 3)]
     [InlineData(1u, 0u, 0UL, 0x280u, 0x280u, 2u, 0)]
-    [InlineData(1u, 1u, 0x60180707UL, 0x010C010Fu, 0x0800010Fu, 0x22u, 1)]
-    [InlineData(1u, 5u, 0x160180707UL, 0x010C010Fu, 0x0800010Fu, 2u, 3)]
+    [InlineData(1u, 1u, 0x60180707UL, 0x0000010Fu, 0x0000010Fu, 0x22u, 1)]
+    [InlineData(1u, 5u, 0x160180707UL, 0x0000010Fu, 0x0000010Fu, 2u, 3)]
+    [InlineData(0u, 0u, 0x5C000008UL, 0x00A80280u, 0x08000280u, 2u, 3)]
+    [InlineData(0u, 0u, 0x5C000018UL, 0x00000280u, 0x00000280u, 2u, 3)]
+    [InlineData(0u, 0u, 0x60180705UL | 0x0F000008UL, 0x011B010Fu, 0x0800010Fu, 0x22u, 3)]
     public void IndexedMultiDrawPreservesCountAddressStrideAndModifier(
         uint countFromMemory, uint memoryCount, ulong modifier, uint vertexLocations,
         uint instanceLocation, uint initiator, int expectedDraws)
@@ -70,6 +73,12 @@ public sealed class AgcDrawIndex2Tests
         {
             Assert.Equal((uint)(7 + draw), runner.Host.IndexedDraws[draw].IndexCount);
             Assert.Equal(2u, runner.Host.IndexedDraws[draw].InstanceCount);
+        }
+
+        // The CP writes each draw's ordinal to the draw index register.
+        if ((instanceLocation & (1u << 27)) != 0)
+        {
+            Assert.Equal((uint)expectedDraws - 1, runner.Interpreter.Registers.Shader[vertexLocations >> 16]);
         }
     }
 
@@ -124,6 +133,7 @@ public sealed class AgcDrawIndex2Tests
     [InlineData(0x60180705UL, 0x10Fu, 0x10Fu, 0x22u)]
     [InlineData(0xA0180605UL, 0x10Fu, 0x10Fu, 2u)]
     [InlineData(0x40180605UL, 0x8Fu, 0x8Fu, 2u)]
+    [InlineData(0x40180615UL, 0x280u, 0x280u, 2u)]
     public void DrawIndirectEncodesTheModifierBeforeInterpretation(
         ulong drawModifier, uint firstVertexRegister, uint firstInstanceRegister, uint drawInitiator)
     {
@@ -169,7 +179,10 @@ public sealed class AgcDrawIndex2Tests
     [InlineData(0x40000000UL, 0x280u, 0x280u, 2u)]
     [InlineData(0x40000100UL, 0x280u, 0x280u, 0x22u)]
     [InlineData(0x140000100UL, 0x280u, 0x280u, 2u)]
-    [InlineData(0x60180707UL, 0x010C010Fu, 0x0800010Fu, 0x22u)]
+    [InlineData(0x60180707UL, 0x0000010Fu, 0x0000010Fu, 0x22u)]
+    [InlineData(0x5C000008UL, 0x00000280u, 0x00000280u, 2u)]
+    [InlineData(0x60180715UL, 0x00000280u, 0x00000280u, 0x22u)]
+    [InlineData(0x40180605UL | 0x0F000008UL, 0x0000008Fu, 0x0000008Fu, 2u)]
     public void IndexedIndirectDrawEncodesTheModifierBeforeInterpretation(
         ulong modifier, uint vertexLocations, uint instanceLocation, uint initiator)
     {
@@ -209,7 +222,8 @@ public sealed class AgcDrawIndex2Tests
         {
             Assert.Equal(5u, runner.Interpreter.Registers.Shader[instanceLocation & 0xFFFFu]);
         }
-            Assert.Equal(0u, runner.Interpreter.Registers.Shader[vertexLocations >> 16]);
+
+        Assert.Equal(0u, vertexLocations >> 16);
     }
 
     [Theory]

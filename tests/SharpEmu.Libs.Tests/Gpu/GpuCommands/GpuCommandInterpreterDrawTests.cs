@@ -175,6 +175,27 @@ public sealed class GpuCommandInterpreterDrawTests
         Assert.All(runner.Host.AutoDraws, draw => Assert.Equal(0u, draw.FirstInstance));
     }
 
+    // The draw index is the draw's ordinal, so a packet that names only it leaves the arguments on the GPU.
+    [Fact]
+    public void IndexedIndirectMulti_KeepsArgumentsOnTheGpuWhenOnlyTheDrawIndexIsNamed()
+    {
+        var runner = new StreamRunner();
+        runner.Host.ResolvesIndirectDrawOnGpu = true;
+        var seen = new List<uint>();
+        runner.Host.OnDraw = () => seen.Add(runner.Interpreter.Registers.Shader[0xA8]);
+
+        runner.Run(
+            SetBase(Arguments, dispatch: false),
+            StreamRunner.Packet(PacketOpcode.IndexBase, StreamRunner.Low(Indices), StreamRunner.High(Indices)),
+            StreamRunner.Packet(PacketOpcode.IndexType, 0),
+            StreamRunner.Packet(PacketOpcode.IndexBufferSize, 40),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirectMulti, 16, 0xA8u << 16 | 0x280, 0x280u | 1u << 27, 0, 2, 0, 0, 32, 2));
+
+        Assert.Equal(new uint[] { 0, 1 }, seen);
+        Assert.Equal(new[] { Arguments + 16, Arguments + 48 }, runner.Host.IndexedDraws.Select(draw => draw.IndirectArgumentsAddress));
+        Assert.DoesNotContain(runner.Host.GuestReads, address => address >= Arguments && address < Arguments + 80);
+    }
+
     [Fact]
     public void IndexedIndirectDraws_LeaveArgumentsOnTheGpuWhenTheHostCan()
     {

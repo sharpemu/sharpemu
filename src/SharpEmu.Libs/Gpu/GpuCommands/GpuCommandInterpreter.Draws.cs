@@ -13,7 +13,8 @@ internal readonly record struct DrawRegisterLocations(uint BaseVertex, uint Star
     public static DrawRegisterLocations FromPacket(uint vertexWord, uint instanceWord) =>
         new(vertexWord & 0xFFFFu, instanceWord & 0xFFFFu, (instanceWord & (1u << 27)) != 0 ? vertexWord >> 16 : 0);
 
-    public bool Any => Names(BaseVertex) || Names(StartInstance) || Names(DrawIndex);
+    // The base vertex and start instance come from the arguments; the draw index is the draw's ordinal.
+    public bool NeedArguments => Names(BaseVertex) || Names(StartInstance);
 
     public static bool Names(uint location) => location != 0 && location != RegisterBankLayout.ShaderRegisterNop;
 }
@@ -133,8 +134,9 @@ public sealed partial class GpuCommandInterpreter
     {
         if (!indexed)
         {
-            if (!locations.Any && _host.ResolvesIndirectDrawOnGpu)
+            if (!locations.NeedArguments && _host.ResolvesIndirectDrawOnGpu)
             {
+                WriteDrawRegister(locations.DrawIndex, drawIndex);
                 // The host reads the four arguments on the GPU, or itself when the draw needs the counts.
                 _deferredInstanceCountAddress = argumentsAddress + 4;
                 if (Rendering.ScissorTrace.Instance is { Active: true } gpuTrace)
@@ -156,9 +158,10 @@ public sealed partial class GpuCommandInterpreter
             return;
         }
 
-        // The registers take their values now, so a draw that names any reads its arguments here.
-        if (!locations.Any && _host.ResolvesIndirectDrawOnGpu && IndexTypeAndSize is 0 or 1 && TryGetGpuIndexRange(out var gpuIndexCount))
+        // The registers take their values now, so a draw that names a base or start register reads its arguments here.
+        if (!locations.NeedArguments && _host.ResolvesIndirectDrawOnGpu && IndexTypeAndSize is 0 or 1 && TryGetGpuIndexRange(out var gpuIndexCount))
         {
+            WriteDrawRegister(locations.DrawIndex, drawIndex);
             // The host reads the five arguments on the GPU. It draws from the whole index
             // range; the arguments pick the indices. The host falls back to reading them
             // itself when the draw needs the counts.
