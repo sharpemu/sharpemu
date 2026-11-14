@@ -237,6 +237,11 @@ public sealed partial class SpirvModuleBuilder
         var result = EmitResult(_functions, SpirvOp.Load, resultType, operands);
         _inheritedPointers.Remove(pointer);
         _pendingStores.Remove(pointer);
+        if (_elementBases.TryGetValue(pointer, out var elementBase))
+        {
+            _pendingStores.Remove(elementBase);
+        }
+
         if (_localVariables.Contains(pointer))
         {
             ForgetElements(pointer, keepValues: true);

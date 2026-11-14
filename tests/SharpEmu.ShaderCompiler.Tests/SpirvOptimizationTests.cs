@@ -226,6 +226,43 @@ public sealed class SpirvOptimizationTests
         Assert.False(module.InheritedBlocksHeld);
     }
 
+    [Fact]
+    public void ElementLoadKeepsTheWholePrivateStoreItReadsBeforeALaterWholeStore()
+    {
+        var module = new SpirvModuleBuilder();
+        module.AddCapability(SpirvCapability.Shader);
+        var integer = module.TypeInt(32, false);
+        var array = module.TypeArray(integer, 2);
+        var register = module.AddGlobalVariable(module.TypePointer(SpirvStorageClass.Private, array), SpirvStorageClass.Private);
+        var output = module.AddGlobalVariable(module.TypePointer(SpirvStorageClass.Output, integer), SpirvStorageClass.Output);
+        module.AddDecoration(output, SpirvDecoration.Location, 0);
+        var first = module.ConstantComposite(array, module.Constant(integer, 41), module.Constant(integer, 42));
+        var second = module.ConstantComposite(array, module.Constant(integer, 73), module.Constant(integer, 74));
+        var function = module.BeginFunction(module.TypeVoid(), module.TypeFunction(module.TypeVoid()));
+        module.AddEntryPoint(SpirvExecutionModel.Vertex, function, "main", [register, output]);
+        module.AddLabel();
+        var pointer = module.AddInstruction(SpirvOp.AccessChain,
+            module.TypePointer(SpirvStorageClass.Private, integer), register, module.Constant(integer, 1));
+        module.AddStatement(SpirvOp.Store, register, first);
+        var loaded = module.AddInstruction(SpirvOp.Load, integer, pointer);
+        module.AddStatement(SpirvOp.Store, register, second);
+        module.AddStatement(SpirvOp.Store, output, loaded);
+        module.AddStatement(SpirvOp.Return);
+        module.EndFunction();
+
+        var instructions = Instructions(module.Build());
+        var stores = instructions.Where(words => (SpirvOp)(words[0] & 0xffff) == SpirvOp.Store && words[1] == register).ToArray();
+        Assert.Collection(stores,
+            words => Assert.Equal(new uint[] { ((uint)SpirvOp.Store) | (3u << 16), register, first }, words),
+            words => Assert.Equal(new uint[] { ((uint)SpirvOp.Store) | (3u << 16), register, second }, words));
+        var load = Assert.Single(instructions.Where(words =>
+            (SpirvOp)(words[0] & 0xffff) == SpirvOp.Load && words[2] == loaded));
+        Assert.Equal(new uint[] { ((uint)SpirvOp.Load) | (4u << 16), integer, loaded, pointer }, load);
+        Assert.True(Array.IndexOf(instructions, stores[0]) < Array.IndexOf(instructions, load));
+        Assert.True(Array.IndexOf(instructions, load) < Array.IndexOf(instructions, stores[1]));
+        Assert.Contains(instructions, words => (SpirvOp)(words[0] & 0xffff) == SpirvOp.Store && words[1] == output && words[2] == loaded);
+    }
+
     private static uint[][] Instructions(byte[] code)
     {
         var words = new uint[code.Length / sizeof(uint)];
