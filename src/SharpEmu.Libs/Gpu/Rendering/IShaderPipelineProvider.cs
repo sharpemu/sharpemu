@@ -207,6 +207,14 @@ public interface IShaderPipelineProvider
 
     Task? GetComputePipelineCompletion(ShaderProgram program) => null;
 
+    // Whether a session saw this linked program's module compile for minutes (ShaderPrewarmList.IsSlowLinkedCompile).
+    bool IsSlowLinkedCompile(ulong hash) => false;
+
+    // Records what this session learned about a linked program's module compile.
+    void RecordLinkedCompile(ulong hash, bool slow, long milliseconds)
+    {
+    }
+
     // False means the host is still compiling this pipeline; asking again returns it once
     // the compile finishes, without starting a second one.
     bool TryCreateComputePipeline(ComputeInputInfo input, ShaderProgram program, out PipelineHandle handle)

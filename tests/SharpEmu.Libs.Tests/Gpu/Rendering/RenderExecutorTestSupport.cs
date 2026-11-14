@@ -593,6 +593,13 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         return PendingComputeCompletion;
     }
 
+    public HashSet<ulong> SlowLinkedPrograms { get; } = [];
+    public List<(ulong Hash, bool Slow)> RecordedLinkedCompiles { get; } = [];
+
+    public bool IsSlowLinkedCompile(ulong hash) => SlowLinkedPrograms.Contains(hash);
+
+    public void RecordLinkedCompile(ulong hash, bool slow, long milliseconds) => RecordedLinkedCompiles.Add((hash, slow));
+
     public bool TryCreateComputePipeline(ComputeInputInfo input, ShaderProgram program, out PipelineHandle handle)
     {
         ComputePipelineAttempts++;

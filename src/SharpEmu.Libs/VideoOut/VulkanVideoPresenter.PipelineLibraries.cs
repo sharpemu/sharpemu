@@ -316,8 +316,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 };
                 // Every depth and stencil state is dynamic.
                 var depthStencil = new PipelineDepthStencilStateCreateInfo { SType = StructureType.PipelineDepthStencilStateCreateInfo };
-                // The pre-rasterization part takes stage 0 and, for a task-launched mesh program, the task stage.
-                var preStages = stackalloc PipelineShaderStageCreateInfo[2];
                 PipelineLayout layout = default;
                 switch (part)
                 {
@@ -326,19 +324,9 @@ internal static unsafe partial class VulkanVideoPresenter
                         create.PInputAssemblyState = info->PInputAssemblyState;
                         break;
                     case GraphicsPipelineLibraryFlagsEXT.PreRasterizationShadersBitExt:
-                        var taskIndex = StageIndex(info, ShaderStageFlags.TaskBitExt);
-                        preStages[0] = info->PStages[0];
-                        if (taskIndex >= 0)
-                        {
-                            preStages[1] = info->PStages[taskIndex];
-                        }
-
-                        create.StageCount = taskIndex >= 0 ? 2u : 1u;
-                        create.PStages = preStages;
-                        create.PViewportState = info->PViewportState;
-                        create.PRasterizationState = info->PRasterizationState;
-                        create.Layout = layout = CreateLibraryPipelineLayout(entry.SetLayout, entry.VertexUsesBindlessHeap, default);
-                        break;
+                        // Built as the prewarm builds it (CreatePreRasterizationLibrary).
+                        created = CompilePreRasterizationPart(info, entry, label);
+                        return created;
                     case GraphicsPipelineLibraryFlagsEXT.FragmentShaderBitExt:
                         var fragmentIndex = StageIndex(info, ShaderStageFlags.FragmentBit);
                         create.StageCount = fragmentIndex >= 0 ? 1u : 0u;
@@ -373,6 +361,128 @@ internal static unsafe partial class VulkanVideoPresenter
 
             return created;
         }
+
+        // The pre-rasterization part of a linked pipeline, from the draw's stage and rasterization state, as the
+        // graphics prewarm builds it from a recorded state: both compile one create info and share stored binaries.
+        private Pipeline CompilePreRasterizationPart(GraphicsPipelineCreateInfo* info, RenderPipelineEntry entry, string label)
+        {
+            var state = PreRasterizationStateOf(info);
+            var taskIndex = StageIndex(info, ShaderStageFlags.TaskBitExt);
+            var layout = CreateLibraryPipelineLayout(entry.SetLayout, entry.VertexUsesBindlessHeap, default);
+            try
+            {
+                var created = CreatePreRasterizationLibrary(info->PStages[0], taskIndex >= 0 ? info->PStages + taskIndex : null,
+                    state, layout, label);
+                // A task-launched program's part also takes the task stage, which the prewarm does not record.
+                if (created.Handle != 0 && taskIndex < 0)
+                {
+                    RecordPreRasterization(info->PStages[0].Module.Handle, state);
+                }
+
+                return created;
+            }
+            finally
+            {
+                _vk.DestroyPipelineLayout(_device, layout, null);
+            }
+        }
+
+        private static PreRasterizationState PreRasterizationStateOf(GraphicsPipelineCreateInfo* info)
+        {
+            var raster = info->PRasterizationState;
+            var viewport = info->PViewportState;
+            return new PreRasterizationState(
+                (int)raster->PolygonMode,
+                (int)raster->CullMode,
+                (int)raster->FrontFace,
+                raster->DepthClampEnable,
+                raster->RasterizerDiscardEnable,
+                raster->PNext is not null && ((PipelineRasterizationDepthClipStateCreateInfoEXT*)raster->PNext)->DepthClipEnable,
+                viewport->PNext is not null && ((PipelineViewportDepthClipControlCreateInfoEXT*)viewport->PNext)->NegativeOneToOne);
+        }
+
+        // A pre-rasterization part from its stage (and a task stage), a rasterization state and its layout. It takes no
+        // attachment formats, which belong to the color outputs part, so the graphics prewarm builds the same create
+        // info from a recorded state and one part serves pipelines of any attachments.
+        private Pipeline CreatePreRasterizationLibrary(PipelineShaderStageCreateInfo stage, PipelineShaderStageCreateInfo* task,
+            PreRasterizationState state, PipelineLayout layout, string label)
+        {
+            var stages = stackalloc PipelineShaderStageCreateInfo[2];
+            stages[0] = stage;
+            if (task is not null)
+            {
+                stages[1] = *task;
+            }
+
+            var clipControl = new PipelineViewportDepthClipControlCreateInfoEXT
+            {
+                SType = StructureType.PipelineViewportDepthClipControlCreateInfoExt,
+                NegativeOneToOne = state.NegativeOneToOne,
+            };
+            var viewport = new PipelineViewportStateCreateInfo
+            {
+                SType = StructureType.PipelineViewportStateCreateInfo,
+                PNext = _supportsDepthClipControl ? &clipControl : null,
+                ViewportCount = 1,
+                ScissorCount = 1,
+            };
+            var depthClip = new PipelineRasterizationDepthClipStateCreateInfoEXT
+            {
+                SType = StructureType.PipelineRasterizationDepthClipStateCreateInfoExt,
+                DepthClipEnable = state.DepthClipEnable,
+            };
+            var rasterization = new PipelineRasterizationStateCreateInfo
+            {
+                SType = StructureType.PipelineRasterizationStateCreateInfo,
+                PNext = _supportsDepthClipEnable ? &depthClip : null,
+                DepthClampEnable = state.DepthClampEnable,
+                RasterizerDiscardEnable = state.RasterizerDiscardEnable,
+                PolygonMode = (PolygonMode)state.PolygonMode,
+                CullMode = (CullModeFlags)state.CullMode,
+                FrontFace = (FrontFace)state.FrontFace,
+                LineWidth = 1,
+            };
+            var rendering = new PipelineRenderingCreateInfo { SType = StructureType.PipelineRenderingCreateInfo };
+            var states = BaseDynamicStates;
+            fixed (DynamicState* statePointer = states)
+            {
+                var dynamicState = new PipelineDynamicStateCreateInfo
+                {
+                    SType = StructureType.PipelineDynamicStateCreateInfo,
+                    DynamicStateCount = (uint)states.Length,
+                    PDynamicStates = statePointer,
+                };
+                var partInfo = new GraphicsPipelineLibraryCreateInfoEXT
+                {
+                    SType = StructureType.GraphicsPipelineLibraryCreateInfoExt,
+                    PNext = &rendering,
+                    Flags = GraphicsPipelineLibraryFlagsEXT.PreRasterizationShadersBitExt,
+                };
+                var create = new GraphicsPipelineCreateInfo
+                {
+                    SType = StructureType.GraphicsPipelineCreateInfo,
+                    PNext = &partInfo,
+                    Flags = PipelineCreateFlags.CreateLibraryBitKhr,
+                    StageCount = task is null ? 1u : 2u,
+                    PStages = stages,
+                    PViewportState = &viewport,
+                    PRasterizationState = &rasterization,
+                    PDynamicState = &dynamicState,
+                    Layout = layout,
+                };
+                return CompileGraphicsLibrary(&create, GraphicsPipelineLibraryFlagsEXT.PreRasterizationShadersBitExt, label);
+            }
+        }
+
+        // The vertex or mesh stage of a pipeline or pre-rasterization part; the graphics prewarm builds the same one.
+        private static PipelineShaderStageCreateInfo VertexStageInfo(bool mesh, ShaderModule module, byte* entryPoint) => new()
+        {
+            SType = StructureType.PipelineShaderStageCreateInfo,
+            Stage = mesh ? ShaderStageFlags.MeshBitExt : ShaderStageFlags.VertexBit,
+            Flags = mesh ? PipelineShaderStageCreateFlags.RequireFullSubgroupsBit : 0,
+            Module = module,
+            PName = entryPoint,
+        };
 
         // True with a compiled part, after waiting while another thread compiles it; false with the completion this
         // thread finishes (FinishGraphicsLibrary) once it has compiled the part itself.
@@ -527,6 +637,20 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var created = default(Pipeline);
+            try
+            {
+                created = CreateEarlyPixelLibrary(module, bindings, heap, label);
+            }
+            finally
+            {
+                FinishGraphicsLibrary(key, compile!, created);
+            }
+        }
+
+        // The part itself; the pixel prewarm builds it the same way for the pipeline binary store.
+        private Pipeline CreateEarlyPixelLibrary(ulong module, List<DescriptorSetLayoutBinding> bindings, bool heap, string label)
+        {
+            var created = default(Pipeline);
             DescriptorSetLayout pixelSet = default;
             PipelineLayout layout = default;
             var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
@@ -591,8 +715,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 SilkMarshal.Free((nint)entryPoint);
-                FinishGraphicsLibrary(key, compile!, created);
             }
+
+            return created;
         }
 
         private static string PartName(GraphicsPipelineLibraryFlagsEXT part) => part switch

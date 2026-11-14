@@ -1770,6 +1770,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return _host.GetComputePipelineCompletion(program);
         }
     }
+
+    public bool IsSlowLinkedCompile(ulong hash) => _host.ShaderPrewarm?.IsSlowLinkedCompile(hash) ?? false;
+
+    public void RecordLinkedCompile(ulong hash, bool slow, long milliseconds) =>
+        _host.ShaderPrewarm?.RecordLinkedCompile(hash, slow, milliseconds);
 }
 
 internal sealed class KeptGraphicsPrograms

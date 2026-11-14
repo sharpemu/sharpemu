@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO.Hashing;
 using System.Security.Cryptography;
@@ -148,6 +149,29 @@ internal sealed class ComputePrewarmRecord
         (Hash, CodeSize, Address, ContinuationAddressOffset);
 }
 
+// A pixel program a session translated, with what its translation read besides the code. A later build's prewarm
+// translates it again and compiles its pixel library, so the program's first draw links a stored library instead of
+// compiling one while the command stream waits.
+internal sealed class PixelPrewarmRecord
+{
+    public ulong ContinuationAddressOffset { get; init; }
+    public required ulong Hash { get; init; }
+    public required uint CodeSize { get; init; }
+    public required ulong Address { get; init; }
+    public required uint UserDataBase { get; init; }
+    public required uint UserDataCount { get; init; }
+    public required uint PushDataCursor { get; init; }
+    public required PixelInputInfo Info { get; init; }
+    public required Gen5PixelOutputBinding[] Outputs { get; init; }
+    public required uint InputEnable { get; init; }
+    public required uint InputAddress { get; init; }
+    public required ResourceSpecialization Specialization { get; init; }
+    public bool DeviceRecordCounts { get; init; }
+
+    public (ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset) CodeKey =>
+        (Hash, CodeSize, Address, ContinuationAddressOffset);
+}
+
 internal sealed class StagePrewarmRecord
 {
     public required ShaderStage Stage { get; init; }
@@ -173,7 +197,10 @@ internal sealed class GraphicsPrewarmRecord
 
 internal sealed record PrewarmStage(ulong Identity, StagePrewarmRecord Record, ShaderCodeCapture Code);
 
-internal sealed record GraphicsPrewarmItem(ulong Identity, GraphicsPrewarmRecord Record, PrewarmStage Vertex, PrewarmStage? Pixel);
+// A whole graphics pipeline a session created, with the stage programs it links; the prewarm builds it again on a
+// device that creates whole pipelines (the graphics prewarm otherwise builds pipeline library parts).
+internal sealed record PipelinePrewarmItem(GraphicsPrewarmRecord Record, PrewarmStage Vertex, PrewarmStage? Pixel, ulong Identity)
+    : GraphicsPrewarmItem(Identity);
 
 internal sealed class PrewarmRecordFile : IDisposable
 {
@@ -295,53 +322,87 @@ internal sealed class PrewarmRecordFile : IDisposable
     }
 }
 
-internal sealed class ShaderPrewarmList : IDisposable
+internal sealed partial class ShaderPrewarmList : IDisposable
 {
     public const string FileName = "shader-prewarm.bin";
-    public const string GraphicsFileName = "shader-prewarm-graphics.bin";
     public const string StampFileName = "shader-prewarm.stamp";
     public const string ProgressFileName = "shader-prewarm.progress";
+    // Records a build before them cannot read go to a side file such a build never opens: a build stops reading the main
+    // list at the first record kind it does not know and cuts the file there, losing every record written after it.
+    public const string ExtensionFileName = "shader-prewarm-ext.bin";
+    // The side file's prewarms keep their own progress: the compute prewarm clears its progress when it cannot trust it.
+    public const string ExtensionProgressFileName = "shader-prewarm-ext.progress";
+    // Whole graphics pipelines (RecordGraphics) and the stage programs they link (RecordStage), in a file of their own.
+    public const string GraphicsFileName = "shader-prewarm-graphics.bin";
 
     private const uint Magic = 0x57504553;
-    private const uint GraphicsMagic = 0x47504553;
     private const uint FormatVersion = 6;
-    private const uint GraphicsFormatVersion = 1;
     private const byte CodeKind = 1;
     private const byte ComputeKind = 2;
+    // Pixel prewarm records, in the side file (a main list written before the side file existed can hold some; they
+    // still load).
+    private const byte PixelKind = 3;
+    // What a session learned about a linked program's module compile (side file).
+    private const byte LinkedCompileKind = 4;
+    // Kinds 5 and 6 (vertex prewarm records): ShaderPrewarmList.Vertex.cs.
+    private const int LinkedCompilePayloadBytes = sizeof(ulong) + 1 + sizeof(long);
+    private const uint ExtensionMagic = 0x58504553;
+    private const uint ExtensionFormatVersion = 1;
+    private const int ExtensionHeaderBytes = 2 * sizeof(uint);
+    private const int RecordHeaderBytes = sizeof(uint) + sizeof(ulong);
+    // The pipeline file's kinds besides CodeKind, a numbering of its own. 2: stage records hold their resource
+    // specialization in the layout of the compute records (WriteSpecialization) and whether they read device record counts.
+    private const uint GraphicsMagic = 0x47504553;
+    private const uint GraphicsFormatVersion = 2;
     private const byte StageKind = 3;
     private const byte GraphicsKind = 4;
 
     private readonly object _gate = new();
-    private PrewarmRecordFile? _computeFile;
+    private readonly FileStream _file;
+    private readonly FileStream _extension;
     private PrewarmRecordFile? _graphicsFile;
     private readonly string _stampPath;
     private readonly string _progressPath;
+    private readonly string _extensionProgressPath;
     private readonly object _progressGate = new();
     private readonly HashSet<(ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset)> _codes = [];
+    private readonly HashSet<(ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset)> _extensionCodes = [];
+    // The last recorded outcome of each linked program's module compile (true: it compiled for minutes).
+    private readonly ConcurrentDictionary<ulong, bool> _linkedCompiles = new();
     private readonly HashSet<ulong> _computes = [];
     private readonly Dictionary<(ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset), ShaderCodeCapture> _loadedCodes = new();
     private readonly List<ComputePrewarmRecord> _loadedComputes = [];
+    private readonly HashSet<ulong> _pixels = [];
+    private readonly List<PixelPrewarmRecord> _loadedPixels = [];
     private readonly HashSet<(ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset)> _graphicsCodes = [];
     private readonly HashSet<ulong> _stages = [];
     private readonly HashSet<ulong> _graphics = [];
     private readonly Dictionary<(ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset), ShaderCodeCapture> _loadedGraphicsCodes = new();
     private readonly Dictionary<ulong, StagePrewarmRecord> _loadedStages = new();
     private readonly List<(ulong Identity, GraphicsPrewarmRecord Record)> _loadedGraphics = [];
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, ulong> _stageByModule = new();
+    private readonly ConcurrentDictionary<ulong, ulong> _stageByModule = new();
     private bool _failed;
 
-    private ShaderPrewarmList(string stampPath, string progressPath)
+    private ShaderPrewarmList(FileStream file, FileStream extension, string stampPath, string progressPath, string extensionProgressPath)
     {
+        _file = file;
+        _extension = extension;
+        _extensionProgressPath = extensionProgressPath;
         _stampPath = stampPath;
         _progressPath = progressPath;
     }
 
+    private string _loadedCoverage = string.Empty;
+
     public int LoadedComputeCount => _loadedComputes.Count;
-    public int LoadedGraphicsCount => _loadedGraphics.Count;
+    public int LoadedPixelCount => _loadedPixels.Count;
+    public int LoadedPipelineCount => _loadedGraphics.Count;
     public string StampPath => _stampPath;
 
-    public string CoverageStamp(string stamp) =>
-        $"{stamp}|coverage-v1|{_computeFile?.Coverage}|graphics-v1|{_graphicsFile?.Coverage}";
+    // The main list's coverage; with pipelines also the pipeline file's, for a prewarm that builds whole pipelines.
+    public string CoverageStamp(string stamp, bool pipelines = false) => pipelines
+        ? $"{stamp}|coverage-v1|{_loadedCoverage}|graphics-v1|{_graphicsFile?.Coverage}"
+        : $"{stamp}|coverage-v1|{_loadedCoverage}";
 
     public static string CacheStamp(string coverageStamp, ReadOnlySpan<byte> cache) =>
         $"{coverageStamp}|cache-v1|{Convert.ToHexString(SHA256.HashData(cache))}";
@@ -351,14 +412,37 @@ internal sealed class ShaderPrewarmList : IDisposable
         try
         {
             Directory.CreateDirectory(directory);
-            var list = new ShaderPrewarmList(Path.Combine(directory, StampFileName), Path.Combine(directory, ProgressFileName));
-            list._computeFile = PrewarmRecordFile.Open(
-                Path.Combine(directory, FileName), Magic, FormatVersion, SchemaFingerprint, list.TryLoadRecord);
+            var path = Path.Combine(directory, FileName);
+            var file = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+            FileStream extension;
+            try
+            {
+                extension = new FileStream(Path.Combine(directory, ExtensionFileName), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+            }
+            catch
+            {
+                file.Dispose();
+                throw;
+            }
+
+            var list = new ShaderPrewarmList(file, extension, Path.Combine(directory, StampFileName), Path.Combine(directory, ProgressFileName),
+                Path.Combine(directory, ExtensionProgressFileName));
+            try
+            {
+                list.Load();
+            }
+            catch
+            {
+                file.Dispose();
+                extension.Dispose();
+                throw;
+            }
+
             try
             {
                 list._graphicsFile = PrewarmRecordFile.Open(
                     Path.Combine(directory, GraphicsFileName), GraphicsMagic, GraphicsFormatVersion, GraphicsSchemaFingerprint,
-                    list.TryLoadGraphicsRecord);
+                    list.TryLoadPipelineRecord);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
@@ -388,7 +472,8 @@ internal sealed class ShaderPrewarmList : IDisposable
         return result;
     }
 
-    public IReadOnlyList<GraphicsPrewarmItem> LoadedGraphics()
+    // The recorded whole pipelines whose stage programs and code loaded, in the order sessions created them.
+    public IReadOnlyList<PipelinePrewarmItem> LoadedPipelines()
     {
         var stages = new Dictionary<ulong, PrewarmStage?>();
         PrewarmStage? Stage(ulong identity)
@@ -405,13 +490,13 @@ internal sealed class ShaderPrewarmList : IDisposable
             return stage;
         }
 
-        var result = new List<GraphicsPrewarmItem>(_loadedGraphics.Count);
+        var result = new List<PipelinePrewarmItem>(_loadedGraphics.Count);
         foreach (var (identity, record) in _loadedGraphics)
         {
             var pixel = record.PixelStage == 0 ? null : Stage(record.PixelStage);
             if (Stage(record.VertexStage) is { } vertex && (record.PixelStage == 0 || pixel is not null))
             {
-                result.Add(new GraphicsPrewarmItem(identity, record, vertex, pixel));
+                result.Add(new PipelinePrewarmItem(record, vertex, pixel, identity));
             }
         }
 
@@ -452,22 +537,27 @@ internal sealed class ShaderPrewarmList : IDisposable
 
     public static ulong Identity(ComputePrewarmRecord record) => XxHash3.HashToUInt64(SerializeCompute(record));
 
-    public HashSet<ulong> ReadProgress(string stamp)
+    public static ulong Identity(PixelPrewarmRecord record) => XxHash3.HashToUInt64(SerializePixel(record));
+
+    private string ProgressPath(bool extension) => extension ? _extensionProgressPath : _progressPath;
+
+    public HashSet<ulong> ReadProgress(string stamp, bool extension = false)
     {
         var completed = new HashSet<ulong>();
+        var path = ProgressPath(extension);
         lock (_progressGate)
         {
             try
             {
-                if (!File.Exists(_progressPath))
+                if (!File.Exists(path))
                 {
                     return completed;
                 }
 
-                var lines = File.ReadAllLines(_progressPath);
+                var lines = File.ReadAllLines(path);
                 if (lines.Length == 0 || lines[0] != ProgressKey(stamp))
                 {
-                    File.Delete(_progressPath);
+                    File.Delete(path);
                     return completed;
                 }
 
@@ -488,19 +578,20 @@ internal sealed class ShaderPrewarmList : IDisposable
         return completed;
     }
 
-    public void AppendProgress(string stamp, IReadOnlyCollection<ulong> identities)
+    public void AppendProgress(string stamp, IReadOnlyCollection<ulong> identities, bool extension = false)
     {
         if (identities.Count == 0)
         {
             return;
         }
 
+        var path = ProgressPath(extension);
         lock (_progressGate)
         {
             try
             {
                 var lines = new List<string>(identities.Count + 1);
-                if (!File.Exists(_progressPath))
+                if (!File.Exists(path))
                 {
                     lines.Add(ProgressKey(stamp));
                 }
@@ -510,7 +601,7 @@ internal sealed class ShaderPrewarmList : IDisposable
                     lines.Add(identity.ToString("X16", CultureInfo.InvariantCulture));
                 }
 
-                File.AppendAllLines(_progressPath, lines);
+                File.AppendAllLines(path, lines);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
@@ -543,17 +634,62 @@ internal sealed class ShaderPrewarmList : IDisposable
         var identity = XxHash3.HashToUInt64(payload);
         lock (_gate)
         {
-            if (_failed || _computeFile is not { } file || !_computes.Add(identity))
+            if (_failed || !_computes.Add(identity))
             {
                 return;
             }
 
             if (_codes.Add(code.Key))
             {
-                file.Append(CodeKind, SerializeCode(code));
+                Append(CodeKind, SerializeCode(code));
             }
 
-            file.Append(ComputeKind, payload);
+            Append(ComputeKind, payload);
+        }
+    }
+
+    public void RecordPixel(ShaderCodeCapture code, PixelPrewarmRecord record)
+    {
+        var payload = SerializePixel(record);
+        var identity = XxHash3.HashToUInt64(payload);
+        lock (_gate)
+        {
+            if (_failed || !_pixels.Add(identity))
+            {
+                return;
+            }
+
+            if (_extensionCodes.Add(code.Key))
+            {
+                Append(_extension, CodeKind, SerializeCode(code));
+            }
+
+            Append(_extension, PixelKind, payload);
+        }
+    }
+
+    // Linked programs whose module a session saw compile for minutes; their dispatches wait only briefly for it.
+    public bool IsSlowLinkedCompile(ulong hash) => _linkedCompiles.TryGetValue(hash, out var slow) && slow;
+
+    // Records a linked program's compile outcome when it changes what later sessions know: slow when its module was
+    // still compiling a minute after its first dispatch waited, fast again when a compile of a slow one ended within the
+    // normal wait.
+    public void RecordLinkedCompile(ulong hash, bool slow, long milliseconds)
+    {
+        lock (_gate)
+        {
+            var known = _linkedCompiles.TryGetValue(hash, out var current);
+            if (_failed || (known ? current == slow : !slow))
+            {
+                return;
+            }
+
+            _linkedCompiles[hash] = slow;
+            var payload = new byte[LinkedCompilePayloadBytes];
+            BitConverter.TryWriteBytes(payload, hash);
+            payload[sizeof(ulong)] = slow ? (byte)1 : (byte)0;
+            BitConverter.TryWriteBytes(payload.AsSpan(sizeof(ulong) + 1), milliseconds);
+            Append(_extension, LinkedCompileKind, payload);
         }
     }
 
@@ -613,12 +749,195 @@ internal sealed class ShaderPrewarmList : IDisposable
         lock (_gate)
         {
             _failed = true;
-            _computeFile?.Dispose();
+            _file.Dispose();
+            _extension.Dispose();
             _graphicsFile?.Dispose();
         }
     }
 
-    private bool TryLoadGraphicsRecord(byte kind, byte[] payload)
+    private void Append(byte kind, byte[] payload) => Append(_file, kind, payload);
+
+    private void Append(FileStream file, byte kind, byte[] payload)
+    {
+        try
+        {
+            var record = new byte[RecordHeaderBytes + 1 + payload.Length];
+            record[RecordHeaderBytes] = kind;
+            payload.CopyTo(record, RecordHeaderBytes + 1);
+            var body = record.AsSpan(RecordHeaderBytes);
+            BitConverter.TryWriteBytes(record.AsSpan(0, sizeof(uint)), (uint)body.Length);
+            BitConverter.TryWriteBytes(record.AsSpan(sizeof(uint), sizeof(ulong)), XxHash3.HashToUInt64(body));
+            file.Write(record);
+            file.Flush();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ObjectDisposedException)
+        {
+            _failed = true;
+            Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm list write failed: {exception.Message}");
+        }
+    }
+
+    private void Load()
+    {
+        LoadMain();
+        LoadExtension();
+    }
+
+    private void LoadMain()
+    {
+        var content = new byte[_file.Length];
+        _file.Position = 0;
+        _file.ReadExactly(content);
+        var validEnd = 0L;
+        if (content.Length >= 3 * sizeof(uint) &&
+            BitConverter.ToUInt32(content, 0) == Magic &&
+            BitConverter.ToUInt32(content, sizeof(uint)) == FormatVersion &&
+            BitConverter.ToUInt32(content, 2 * sizeof(uint)) == SchemaFingerprint)
+        {
+            validEnd = 3 * sizeof(uint);
+            var offset = (int)validEnd;
+            while (content.Length - offset >= RecordHeaderBytes + 1)
+            {
+                var length = BitConverter.ToUInt32(content, offset);
+                var checksum = BitConverter.ToUInt64(content, offset + sizeof(uint));
+                if (length == 0 || length > content.Length - offset - RecordHeaderBytes)
+                {
+                    break;
+                }
+
+                var body = content.AsSpan(offset + RecordHeaderBytes, (int)length);
+                if (XxHash3.HashToUInt64(body) != checksum || !TryLoadRecord(body[0], body[1..].ToArray(), extension: false))
+                {
+                    break;
+                }
+
+                offset += RecordHeaderBytes + (int)length;
+                validEnd = offset;
+            }
+        }
+
+        _loadedCoverage = Convert.ToHexString(SHA256.HashData(content.AsSpan(0, checked((int)validEnd))));
+        if (validEnd == 0)
+        {
+            _file.SetLength(0);
+            _file.Position = 0;
+            Span<byte> header = stackalloc byte[3 * sizeof(uint)];
+            BitConverter.TryWriteBytes(header, Magic);
+            BitConverter.TryWriteBytes(header[sizeof(uint)..], FormatVersion);
+            BitConverter.TryWriteBytes(header[(2 * sizeof(uint))..], SchemaFingerprint);
+            _file.Write(header);
+            _file.Flush();
+            return;
+        }
+
+        _file.SetLength(validEnd);
+        _file.Position = validEnd;
+    }
+
+    // The side file: a record this build does not know or cannot read is skipped instead of ending the load, so the records
+    // after it still load and stay in the file. A torn write still ends the load, and the file is cut there.
+    private void LoadExtension()
+    {
+        var content = new byte[_extension.Length];
+        _extension.Position = 0;
+        _extension.ReadExactly(content);
+        var validEnd = 0L;
+        if (content.Length >= ExtensionHeaderBytes &&
+            BitConverter.ToUInt32(content, 0) == ExtensionMagic &&
+            BitConverter.ToUInt32(content, sizeof(uint)) == ExtensionFormatVersion)
+        {
+            validEnd = ExtensionHeaderBytes;
+            var offset = (int)validEnd;
+            while (content.Length - offset >= RecordHeaderBytes + 1)
+            {
+                var length = BitConverter.ToUInt32(content, offset);
+                var checksum = BitConverter.ToUInt64(content, offset + sizeof(uint));
+                if (length == 0 || length > content.Length - offset - RecordHeaderBytes)
+                {
+                    break;
+                }
+
+                var body = content.AsSpan(offset + RecordHeaderBytes, (int)length);
+                if (XxHash3.HashToUInt64(body) != checksum)
+                {
+                    break;
+                }
+
+                _ = TryLoadRecord(body[0], body[1..].ToArray(), extension: true);
+                offset += RecordHeaderBytes + (int)length;
+                validEnd = offset;
+            }
+        }
+
+        if (validEnd == 0)
+        {
+            _extension.SetLength(0);
+            _extension.Position = 0;
+            Span<byte> header = stackalloc byte[ExtensionHeaderBytes];
+            BitConverter.TryWriteBytes(header, ExtensionMagic);
+            BitConverter.TryWriteBytes(header[sizeof(uint)..], ExtensionFormatVersion);
+            _extension.Write(header);
+            _extension.Flush();
+            return;
+        }
+
+        _extension.SetLength(validEnd);
+        _extension.Position = validEnd;
+    }
+
+    private bool TryLoadRecord(byte kind, byte[] payload, bool extension)
+    {
+        try
+        {
+            switch (kind)
+            {
+                case CodeKind:
+                {
+                    var code = DeserializeCode(payload);
+                    (extension ? _extensionCodes : _codes).Add(code.Key);
+                    _loadedCodes[code.Key] = code;
+                    return true;
+                }
+
+                case ComputeKind:
+                    if (_computes.Add(XxHash3.HashToUInt64(payload)))
+                    {
+                        _loadedComputes.Add(DeserializeCompute(payload));
+                    }
+
+                    return true;
+
+                case PixelKind:
+                    // A pixel record of another schema is skipped, not refused, so the records after it still load.
+                    if (TryDeserializePixel(payload) is { } pixel && _pixels.Add(XxHash3.HashToUInt64(payload)))
+                    {
+                        _loadedPixels.Add(pixel);
+                        _graphicsOrder.Add((PixelKind, _loadedPixels.Count - 1));
+                    }
+
+                    return true;
+
+                case LinkedCompileKind:
+                    if (payload.Length != LinkedCompilePayloadBytes)
+                    {
+                        return false;
+                    }
+
+                    _linkedCompiles[BitConverter.ToUInt64(payload, 0)] = payload[sizeof(ulong)] != 0;
+                    return true;
+
+                default:
+                    return TryLoadGraphicsRecord(kind, payload);
+            }
+        }
+        catch (Exception exception) when (exception is EndOfStreamException or ArgumentException or IOException)
+        {
+            return false;
+        }
+    }
+
+    // The pipeline file's records; a record of an unknown kind ends the load there.
+    private bool TryLoadPipelineRecord(byte kind, byte[] payload)
     {
         try
         {
@@ -664,58 +983,42 @@ internal sealed class ShaderPrewarmList : IDisposable
         }
     }
 
-    private bool TryLoadRecord(byte kind, byte[] payload)
-    {
-        try
-        {
-            switch (kind)
-            {
-                case CodeKind:
-                {
-                    var code = DeserializeCode(payload);
-                    _codes.Add(code.Key);
-                    _loadedCodes[code.Key] = code;
-                    return true;
-                }
+    private static readonly uint SchemaFingerprint = ComputeSchemaFingerprint();
 
-                case ComputeKind:
-                    if (_computes.Add(XxHash3.HashToUInt64(payload)))
-                    {
-                        _loadedComputes.Add(DeserializeCompute(payload));
-                    }
-
-                    return true;
-
-                default:
-                    return false;
-            }
-        }
-        catch (Exception exception) when (exception is EndOfStreamException or ArgumentException or IOException)
-        {
-            return false;
-        }
-    }
-
-    private static readonly uint SchemaFingerprint = ComputeSchemaFingerprint(
+    private static uint ComputeSchemaFingerprint() => SchemaFingerprintOf(
         typeof(ComputeInputInfo), typeof(Gen5ComputeSystemRegisters), typeof(ResourceSpecialization),
         typeof(BufferSpecialization), typeof(ImageSpecialization), typeof(BufferCandidateTableSpecialization),
         typeof(LinkedShaderPrewarm), typeof(LinkedPrewarmFunction), typeof(LinkedPrewarmSite), typeof(LinkedPrewarmTarget));
 
-    private static readonly uint GraphicsSchemaFingerprint = ComputeSchemaFingerprint(
+    private static readonly uint PixelSchemaFingerprint = SchemaFingerprintOf(
+        typeof(PixelPrewarmRecord), typeof(PixelInputInfo), typeof(Gen5PixelOutputBinding), typeof(Gen5ColorComponentMapping),
+        typeof(ColorComponentMap), typeof(ResourceSpecialization), typeof(BufferSpecialization), typeof(ImageSpecialization),
+        typeof(BufferCandidateTableSpecialization));
+
+    private static readonly uint GraphicsSchemaFingerprint = SchemaFingerprintOf(
         typeof(StageCompileOptions), typeof(VertexInputInfo), typeof(VertexInputBuffer), typeof(VertexAttributeResource),
         typeof(ClipSpaceTransform), typeof(PixelInputInfo), typeof(Gen5PixelOutputBinding), typeof(RegisteredShader),
         typeof(PipelineRenderingState), typeof(PipelineVertexInputState), typeof(PipelineStaticParameters),
         typeof(ResourceSpecialization), typeof(BufferSpecialization), typeof(ImageSpecialization),
         typeof(BufferCandidateTableSpecialization));
 
-    private static uint ComputeSchemaFingerprint(params Type[] types)
+    private static uint SchemaFingerprintOf(params Type[] types)
     {
+        var vertexRecord = types.Contains(typeof(VertexPrewarmRecord));
         var builder = new StringBuilder();
         foreach (var type in types)
         {
             builder.Append(type.FullName).Append('{');
             foreach (var property in type.GetProperties().OrderBy(static property => property.Name, StringComparer.Ordinal))
             {
+                // A vertex record holds neither: tessellated programs are not recorded, and the start instance register
+                // follows the record as an optional field (SerializeVertex), so the lists recorded before them still load.
+                if (vertexRecord && type == typeof(VertexInputInfo) &&
+                    property.Name is nameof(VertexInputInfo.Tessellation) or nameof(VertexInputInfo.StartInstanceUserData))
+                {
+                    continue;
+                }
+
                 builder.Append(property.PropertyType.FullName).Append(' ').Append(property.Name).Append(';');
             }
 
@@ -861,6 +1164,72 @@ internal sealed class ShaderPrewarmList : IDisposable
         return stream.ToArray();
     }
 
+    private static ComputePrewarmRecord DeserializeCompute(byte[] payload)
+    {
+        using var reader = new BinaryReader(new MemoryStream(payload));
+        var hash = reader.ReadUInt64();
+        var codeSize = reader.ReadUInt32();
+        var address = reader.ReadUInt64();
+        var continuationAddressOffset = reader.ReadUInt64();
+        var userDataBase = reader.ReadUInt32();
+        var userDataCount = reader.ReadUInt32();
+        var pushDataCursor = reader.ReadUInt32();
+        var threadsX = reader.ReadUInt32();
+        var threadsY = reader.ReadUInt32();
+        var threadsZ = reader.ReadUInt32();
+        var threadDimensions = reader.ReadByte();
+        var info = new ComputeInputInfo
+        {
+            ThreadsX = threadsX,
+            ThreadsY = threadsY,
+            ThreadsZ = threadsZ,
+            DispatchThreadDimensions = threadDimensions != 0,
+            IndirectThreadCounts = threadDimensions == 2,
+            GroupIdX = reader.ReadBoolean(),
+            GroupIdY = reader.ReadBoolean(),
+            GroupIdZ = reader.ReadBoolean(),
+            ThreadIdCount = reader.ReadInt32(),
+            ThreadGroupSizeEnabled = reader.ReadBoolean(),
+            WaveSize = reader.ReadUInt32(),
+            LocalDataShareDwords = reader.ReadUInt32(),
+            ScratchDwords = reader.ReadUInt32(),
+            IeeeMode = reader.ReadBoolean(),
+            NeedsLocalDataShareBarriers = reader.ReadBoolean(),
+            WorkgroupRegister = reader.ReadInt32(),
+        };
+
+        Gen5ComputeSystemRegisters? registers = reader.ReadBoolean()
+            ? new Gen5ComputeSystemRegisters(ReadOptional(reader), ReadOptional(reader), ReadOptional(reader), ReadOptional(reader))
+            : null;
+
+        var specialization = ReadSpecialization(reader, payload.Length);
+        var linked = reader.ReadBoolean() ? LinkedShaderPrewarm.Read(reader) : null;
+        var deviceRecordCounts = false;
+        if (reader.BaseStream.Position + 1 == reader.BaseStream.Length)
+        {
+            if (reader.ReadByte() != 1) throw new ArgumentException("Unknown prewarm compute extension.");
+            deviceRecordCounts = true;
+        }
+        if (reader.BaseStream.Position != reader.BaseStream.Length)
+            throw new ArgumentException("Trailing prewarm compute data.");
+
+        return new ComputePrewarmRecord
+        {
+            Hash = hash,
+            CodeSize = codeSize,
+            Address = address,
+            UserDataBase = userDataBase,
+            ContinuationAddressOffset = continuationAddressOffset,
+            UserDataCount = userDataCount,
+            PushDataCursor = pushDataCursor,
+            Info = info,
+            SystemRegisters = registers,
+            Specialization = specialization,
+            Linked = linked,
+            DeviceRecordCounts = deviceRecordCounts,
+        };
+    }
+
     private static void WriteSpecialization(BinaryWriter writer, ResourceSpecialization specialization)
     {
         writer.Write(specialization.BaseBufferCount);
@@ -898,8 +1267,10 @@ internal sealed class ShaderPrewarmList : IDisposable
             writer.Write(table.SearchIterations);
         }
 
-        WriteWords(writer, specialization.ImageDescriptorGroups);
-        WriteWords(writer, specialization.SamplerDescriptorGroups);
+        writer.Write(specialization.ImageDescriptorGroups.Count);
+        foreach (var group in specialization.ImageDescriptorGroups) writer.Write(group);
+        writer.Write(specialization.SamplerDescriptorGroups.Count);
+        foreach (var group in specialization.SamplerDescriptorGroups) writer.Write(group);
     }
 
     private static ResourceSpecialization ReadSpecialization(BinaryReader reader, int limit)
@@ -935,8 +1306,10 @@ internal sealed class ShaderPrewarmList : IDisposable
                 reader.ReadUInt32(), reader.ReadUInt32(), reader.ReadUInt32(), reader.ReadUInt32()));
         }
 
-        specialization.ImageDescriptorGroups.AddRange(ReadWords(reader, limit));
-        specialization.SamplerDescriptorGroups.AddRange(ReadWords(reader, limit));
+        for (var count = CheckedCount(reader.ReadInt32(), limit); count > 0; count--)
+            specialization.ImageDescriptorGroups.Add(reader.ReadUInt32());
+        for (var count = CheckedCount(reader.ReadInt32(), limit); count > 0; count--)
+            specialization.SamplerDescriptorGroups.Add(reader.ReadUInt32());
         return specialization;
     }
 
@@ -967,6 +1340,172 @@ internal sealed class ShaderPrewarmList : IDisposable
     }
 
     private static byte[] ReadBytes(BinaryReader reader, int limit) => reader.ReadBytes(CheckedCount(reader.ReadInt32(), limit));
+
+    private static byte[] SerializePixel(PixelPrewarmRecord record)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new BinaryWriter(stream);
+        writer.Write(PixelSchemaFingerprint);
+        writer.Write(record.Hash);
+        writer.Write(record.CodeSize);
+        writer.Write(record.Address);
+        writer.Write(record.ContinuationAddressOffset);
+        writer.Write(record.UserDataBase);
+        writer.Write(record.UserDataCount);
+        writer.Write(record.PushDataCursor);
+        var info = record.Info;
+        writer.Write(info.InputCount);
+        writer.Write(info.SystemInputBase);
+        writer.Write(info.CustomInterpolationMask);
+        writer.Write(info.PerspectiveCenterRegister);
+        writer.Write(info.InterpolatorSettings.Length);
+        foreach (var setting in info.InterpolatorSettings) writer.Write(setting);
+        writer.Write(info.TargetOutputModes.Length);
+        writer.Write(info.TargetOutputModes);
+        writer.Write(info.TargetExportFormats.Length);
+        writer.Write(info.TargetExportFormats);
+        writer.Write(info.TargetExportMappings.Length);
+        foreach (var mapping in info.TargetExportMappings) writer.Write(mapping.Packed);
+        writer.Write(info.IeeeMode);
+        writer.Write(info.ScratchDwords);
+        writer.Write(info.PositionX);
+        writer.Write(info.PositionY);
+        writer.Write(info.PositionZ);
+        writer.Write(info.PositionW);
+        writer.Write(info.FrontFace);
+        writer.Write(info.NoPerspective);
+        writer.Write(info.KillEnable);
+        writer.Write(info.DepthExportEnable);
+        writer.Write(info.SampleMaskExportEnable);
+        writer.Write(info.SampleShading);
+        writer.Write(info.EarlyDepth);
+        writer.Write(info.ExecuteOnNoop);
+        writer.Write(record.Outputs.Length);
+        foreach (var output in record.Outputs)
+        {
+            writer.Write(output.GuestSlot);
+            writer.Write(output.HostLocation);
+            writer.Write((int)output.Kind);
+            writer.Write(output.ComponentMapping.Packed);
+            writer.Write(output.DualSourceAlpha);
+            writer.Write(output.ExportTarget);
+            writer.Write(output.Index);
+            writer.Write((int)output.ExportFormat);
+        }
+
+        writer.Write(record.InputEnable);
+        writer.Write(record.InputAddress);
+        WriteSpecialization(writer, record.Specialization);
+        writer.Write(record.DeviceRecordCounts);
+        writer.Flush();
+        return stream.ToArray();
+    }
+
+    // Null for a record of another pixel schema or a damaged one.
+    private static PixelPrewarmRecord? TryDeserializePixel(byte[] payload)
+    {
+        try
+        {
+            using var reader = new BinaryReader(new MemoryStream(payload));
+            if (reader.ReadUInt32() != PixelSchemaFingerprint)
+            {
+                return null;
+            }
+
+            var hash = reader.ReadUInt64();
+            var codeSize = reader.ReadUInt32();
+            var address = reader.ReadUInt64();
+            var continuationAddressOffset = reader.ReadUInt64();
+            var userDataBase = reader.ReadUInt32();
+            var userDataCount = reader.ReadUInt32();
+            var pushDataCursor = reader.ReadUInt32();
+            var inputCount = reader.ReadUInt32();
+            var systemInputBase = reader.ReadUInt32();
+            var customInterpolationMask = reader.ReadUInt32();
+            var perspectiveCenterRegister = reader.ReadUInt32();
+            var interpolators = new uint[CheckedCount(reader.ReadInt32(), payload.Length)];
+            for (var index = 0; index < interpolators.Length; index++) interpolators[index] = reader.ReadUInt32();
+            var outputModes = reader.ReadBytes(CheckedCount(reader.ReadInt32(), payload.Length));
+            var exportFormats = reader.ReadBytes(CheckedCount(reader.ReadInt32(), payload.Length));
+            var mappings = new ColorComponentMap[CheckedCount(reader.ReadInt32(), payload.Length)];
+            for (var index = 0; index < mappings.Length; index++) mappings[index] = new ColorComponentMap(reader.ReadByte());
+            // Member initializers run in order, so the reads below follow the written layout.
+            var info = new PixelInputInfo
+            {
+                InputCount = inputCount,
+                SystemInputBase = systemInputBase,
+                CustomInterpolationMask = customInterpolationMask,
+                PerspectiveCenterRegister = perspectiveCenterRegister,
+                InterpolatorSettings = interpolators,
+                TargetOutputModes = outputModes,
+                TargetExportFormats = exportFormats,
+                TargetExportMappings = mappings,
+                IeeeMode = reader.ReadBoolean(),
+                ScratchDwords = reader.ReadUInt32(),
+                PositionX = reader.ReadBoolean(),
+                PositionY = reader.ReadBoolean(),
+                PositionZ = reader.ReadBoolean(),
+                PositionW = reader.ReadBoolean(),
+                FrontFace = reader.ReadBoolean(),
+                NoPerspective = reader.ReadBoolean(),
+                KillEnable = reader.ReadBoolean(),
+                DepthExportEnable = reader.ReadBoolean(),
+                SampleMaskExportEnable = reader.ReadBoolean(),
+                SampleShading = reader.ReadBoolean(),
+                EarlyDepth = reader.ReadBoolean(),
+                ExecuteOnNoop = reader.ReadBoolean(),
+            };
+            var outputs = new Gen5PixelOutputBinding[CheckedCount(reader.ReadInt32(), payload.Length)];
+            for (var index = 0; index < outputs.Length; index++)
+            {
+                var guestSlot = reader.ReadUInt32();
+                var hostLocation = reader.ReadUInt32();
+                var kind = (Gen5PixelOutputKind)reader.ReadInt32();
+                var mapping = new Gen5ColorComponentMapping(reader.ReadByte());
+                var dualSourceAlpha = reader.ReadBoolean();
+                var exportTarget = reader.ReadUInt32();
+                var outputIndex = reader.ReadUInt32();
+                var exportFormat = (Gen5PixelExportFormat)reader.ReadInt32();
+                outputs[index] = new Gen5PixelOutputBinding(guestSlot, hostLocation, kind, mapping)
+                {
+                    DualSourceAlpha = dualSourceAlpha,
+                    ExportTarget = exportTarget,
+                    Index = outputIndex,
+                    ExportFormat = exportFormat,
+                };
+            }
+
+            var inputEnable = reader.ReadUInt32();
+            var inputAddress = reader.ReadUInt32();
+            var specialization = ReadSpecialization(reader, payload.Length);
+            var deviceRecordCounts = reader.ReadBoolean();
+            if (reader.BaseStream.Position != reader.BaseStream.Length)
+            {
+                return null;
+            }
+
+            return new PixelPrewarmRecord
+            {
+                Hash = hash,
+                CodeSize = codeSize,
+                Address = address,
+                ContinuationAddressOffset = continuationAddressOffset,
+                UserDataBase = userDataBase,
+                UserDataCount = userDataCount,
+                PushDataCursor = pushDataCursor,
+                Info = info,
+                Outputs = outputs,
+                InputEnable = inputEnable,
+                InputAddress = inputAddress,
+                Specialization = specialization,
+                DeviceRecordCounts = deviceRecordCounts,
+            };
+        }
+        catch (Exception exception) when (exception is EndOfStreamException or ArgumentException or IOException)
+        {
+            return null;
+        }
+    }
 
     private static byte[] SerializeStage(StagePrewarmRecord record)
     {
@@ -1026,6 +1565,7 @@ internal sealed class ShaderPrewarmList : IDisposable
 
         writer.Write(options.PixelInputEnable);
         writer.Write(options.PixelInputAddress);
+        writer.Write(options.DeviceRecordCounts);
         WriteSpecialization(writer, record.Specialization);
         writer.Flush();
         return stream.ToArray();
@@ -1088,6 +1628,11 @@ internal sealed class ShaderPrewarmList : IDisposable
             PixelInputEnable = reader.ReadUInt32(),
             PixelInputAddress = reader.ReadUInt32(),
         };
+        if (!reader.ReadBoolean())
+        {
+            options = options.WithoutDeviceRecordCounts();
+        }
+
         if ((stage == ShaderStage.Vertex && vertexInfo is null) || (stage == ShaderStage.Pixel && pixelInfo is null))
         {
             throw new ArgumentException("The prewarm stage has no input info.");
@@ -1319,71 +1864,6 @@ internal sealed class ShaderPrewarmList : IDisposable
             VertexInput = input,
             VertexInfo = vertexInfo,
             StaticParameters = PipelineStaticParameters.FromBytes(parameters),
-        };
-    }
-
-    private static ComputePrewarmRecord DeserializeCompute(byte[] payload)
-    {
-        using var reader = new BinaryReader(new MemoryStream(payload));
-        var hash = reader.ReadUInt64();
-        var codeSize = reader.ReadUInt32();
-        var address = reader.ReadUInt64();
-        var continuationAddressOffset = reader.ReadUInt64();
-        var userDataBase = reader.ReadUInt32();
-        var userDataCount = reader.ReadUInt32();
-        var pushDataCursor = reader.ReadUInt32();
-        var threadsX = reader.ReadUInt32();
-        var threadsY = reader.ReadUInt32();
-        var threadsZ = reader.ReadUInt32();
-        var threadDimensions = reader.ReadByte();
-        var info = new ComputeInputInfo
-        {
-            ThreadsX = threadsX,
-            ThreadsY = threadsY,
-            ThreadsZ = threadsZ,
-            DispatchThreadDimensions = threadDimensions != 0,
-            IndirectThreadCounts = threadDimensions == 2,
-            GroupIdX = reader.ReadBoolean(),
-            GroupIdY = reader.ReadBoolean(),
-            GroupIdZ = reader.ReadBoolean(),
-            ThreadIdCount = reader.ReadInt32(),
-            ThreadGroupSizeEnabled = reader.ReadBoolean(),
-            WaveSize = reader.ReadUInt32(),
-            LocalDataShareDwords = reader.ReadUInt32(),
-            ScratchDwords = reader.ReadUInt32(),
-            IeeeMode = reader.ReadBoolean(),
-            NeedsLocalDataShareBarriers = reader.ReadBoolean(),
-            WorkgroupRegister = reader.ReadInt32(),
-        };
-
-        Gen5ComputeSystemRegisters? registers = reader.ReadBoolean()
-            ? new Gen5ComputeSystemRegisters(ReadOptional(reader), ReadOptional(reader), ReadOptional(reader), ReadOptional(reader))
-            : null;
-
-        var specialization = ReadSpecialization(reader, payload.Length);
-        var linked = reader.ReadBoolean() ? LinkedShaderPrewarm.Read(reader) : null;
-        var deviceRecordCounts = false;
-        if (reader.BaseStream.Position + 1 == reader.BaseStream.Length)
-        {
-            if (reader.ReadByte() != 1) throw new ArgumentException("Unknown prewarm compute extension.");
-            deviceRecordCounts = true;
-        }
-        if (reader.BaseStream.Position != reader.BaseStream.Length)
-            throw new ArgumentException("Trailing prewarm compute data.");
-        return new ComputePrewarmRecord
-        {
-            Hash = hash,
-            CodeSize = codeSize,
-            Address = address,
-            UserDataBase = userDataBase,
-            ContinuationAddressOffset = continuationAddressOffset,
-            UserDataCount = userDataCount,
-            PushDataCursor = pushDataCursor,
-            Info = info,
-            SystemRegisters = registers,
-            Specialization = specialization,
-            Linked = linked,
-            DeviceRecordCounts = deviceRecordCounts,
         };
     }
 

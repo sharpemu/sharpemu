@@ -83,6 +83,10 @@ internal class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public ShaderPrewarmList? ShaderPrewarm { get; set; }
 
+    public List<(ulong Module, ulong Identity)> RecordedVertexPrograms { get; } = new();
+
+    public void VertexProgramRecorded(ulong module, ulong prewarmIdentity) => RecordedVertexPrograms.Add((module, prewarmIdentity));
+
     public RenderHostLimits Limits => new(16384, 16384, 16384, 16384);
 
     public bool TryResolveColorOutput(uint dataFormat, uint numberType, uint componentSwap, out Gen5PixelOutputKind outputKind, out Gen5ColorComponentMapping componentMapping)

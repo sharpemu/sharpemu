@@ -1,0 +1,223 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.Pipelines;
+using SharpEmu.Libs.Gpu.Rendering;
+using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
+using SharpEmu.ShaderCompiler.Vulkan;
+using Xunit;
+
+namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
+
+// Vertex and mesh programs recorded in the prewarm side file with the pre-rasterization states their libraries were
+// compiled with, and translated again from the record.
+public sealed class VertexPrewarmTests : IDisposable
+{
+    private const ulong CodeAddress = PipelineTestGuest.MemoryBase + 0x1_0000;
+    private const ulong HeaderAddress = PipelineTestGuest.MemoryBase + 0x8000;
+    private const ulong DataBase = PipelineTestGuest.MemoryBase + 0x4_0000;
+    private const uint Format32x4Float = 77;
+
+    // The attribute table load and the formatted fetch of attribute 0 that the embedded fetch replaces, then s_endpgm.
+    private static readonly uint[] EmbeddedFetchProgram = [0xF4080303, 0xFA000000, 0x02020B08, 0xE00C2000, 0x80030401, 0xBF810000];
+
+    private readonly string _directory = Path.Combine(Path.GetTempPath(), "SharpEmuTests", Guid.NewGuid().ToString("N"));
+
+    public void Dispose()
+    {
+        if (Directory.Exists(_directory))
+        {
+            Directory.Delete(_directory, recursive: true);
+        }
+    }
+
+    private ShaderPrewarmList Open() => ShaderPrewarmList.Open(_directory) ?? throw new InvalidOperationException("The list did not open.");
+
+    internal static byte[] Compile(ShaderCompileRequest request)
+    {
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        return shader.Spirv;
+    }
+
+    private static ShaderCodeCapture Code(ulong hash, ulong continuationOffset = 0) => new()
+    {
+        Hash = hash, CodeSize = 12, Address = CodeAddress, Generation = Generation.Gen5,
+        Fused = continuationOffset == 0
+            ? null
+            : new FusedCodeParts(HeaderAddress, CodeAddress + continuationOffset, HeaderAddress + 0x100),
+        Ranges = [new CodeRange(CodeAddress, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])],
+    };
+
+    private static VertexInputInfo EmbeddedFetchInfo(ulong buffer, uint stride, uint records)
+    {
+        var descriptor = PipelineTestGuest.BufferDescriptor(buffer, stride, records, Format32x4Float);
+        return new VertexInputInfo
+        {
+            FetchEmbedded = true,
+            FetchAttributeRegister = 4,
+            FetchBufferRegister = 6,
+            Attributes = [new VertexAttributeResource(new(descriptor[0], descriptor[1], descriptor[2], descriptor[3]), 4, 4, 0, 0, 0, 0)],
+            Buffers = [new VertexInputBuffer(buffer, stride, records)],
+        };
+    }
+
+    private static VertexPrewarmRecord VertexRecord(ShaderCodeCapture code, VertexInputInfo info) => new()
+    {
+        Hash = code.Hash,
+        CodeSize = code.CodeSize,
+        Address = code.Address,
+        UserDataBase = 0,
+        UserDataCount = 8,
+        PushDataCursor = 0,
+        VertexInfo = info,
+        RequiredVertexOutputCount = 2,
+        Specialization = new ResourceSpecialization(),
+    };
+
+    private static VertexPrewarmRecord MeshRecord(ShaderCodeCapture code) => new()
+    {
+        Mesh = true,
+        Hash = code.Hash,
+        CodeSize = code.CodeSize,
+        Address = code.Address,
+        ContinuationAddressOffset = 0x40,
+        UserDataBase = 2,
+        UserDataCount = 12,
+        PushDataCursor = 5,
+        MeshInfo = new MeshDrawConfiguration
+        {
+            Geometry = new GuestGeometryConfiguration
+            {
+                ThreadsPerGroup = 128, InputTriangleStrip = true, InputPrimitiveCountPerWorkgroup = 64,
+                InputVertexCountPerWorkgroup = 192, OutputVertexCapacity = 256, OutputPrimitiveCapacity = 128, ProvokingVertex = 2,
+                WaveSize = 32, IeeeMode = true, ScratchDwords = 7, LocalDataShareDwords = 1024, PositionExportControl = 3,
+                ClipSpace = new ClipSpaceTransform(true, 0.5f, -0.5f, 0.25f, 0.75f, 960, 540),
+            },
+            Execution = new MeshExecutionLimits
+            {
+                DeviceSubgroupLaneCount = 32, MaxGroupCountX = 65535, MaxGroupCountY = 65535, MaxGroupTotalCount = 4194304,
+            },
+        },
+        RequiredVertexOutputCount = 4,
+        MeshOutputLocationMask = 0x13,
+        Specialization = new ResourceSpecialization { BaseBufferCount = 1, Buffers = [new BufferSpecialization(16, 4, 0xFAC)] },
+        DeviceRecordCounts = true,
+    };
+
+    private static PixelPrewarmRecord PixelRecord(ShaderCodeCapture code, uint userDataBase) => new()
+    {
+        Hash = code.Hash,
+        CodeSize = code.CodeSize,
+        Address = code.Address,
+        UserDataBase = userDataBase,
+        UserDataCount = 4,
+        PushDataCursor = 0,
+        Info = new PixelInputInfo { InputCount = 1 },
+        Outputs = [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)],
+        InputEnable = 0x2,
+        InputAddress = 0x2,
+        Specialization = new ResourceSpecialization(),
+    };
+
+    [Fact]
+    public void AVertexRecordLeavesOutBufferAddressesAndRecordCounts()
+    {
+        var code = Code(0x1111);
+        var identity = ShaderPrewarmList.Identity(VertexRecord(code, EmbeddedFetchInfo(DataBase, 16, 4)));
+        Assert.Equal(identity, ShaderPrewarmList.Identity(VertexRecord(code, EmbeddedFetchInfo(DataBase + 0x1_0001_2340, 16, 900))));
+        Assert.NotEqual(identity, ShaderPrewarmList.Identity(VertexRecord(code, EmbeddedFetchInfo(DataBase, 32, 4))));
+    }
+
+    [Fact]
+    public void PixelProgramsAndPreRasterizationStatesLoadInTheOrderTheyWereRecorded()
+    {
+        var pixelCode = Code(0x1111);
+        var vertexCode = Code(0x2222);
+        var meshCode = Code(0x3333, continuationOffset: 0x40);
+        var vertex = VertexRecord(vertexCode, EmbeddedFetchInfo(DataBase, 16, 4));
+        var mesh = MeshRecord(meshCode);
+        var first = new PreRasterizationState(0, 2, 1, true, false, true, false);
+        var second = new PreRasterizationState(2, 0, 0, false, true, false, true);
+        using (var list = Open())
+        {
+            list.RecordPixel(pixelCode, PixelRecord(pixelCode, 1));
+            var vertexIdentity = list.RecordVertex(vertexCode, vertex);
+            list.RecordPreRasterization(vertexIdentity, first);
+            list.RecordPixel(pixelCode, PixelRecord(pixelCode, 2));
+            var meshIdentity = list.RecordVertex(meshCode, mesh);
+            list.RecordPreRasterization(meshIdentity, second);
+            list.RecordPreRasterization(vertexIdentity, first);
+            // A state of a program the file does not hold is kept but left out of the prewarm.
+            list.RecordPreRasterization(0xDEAD, first);
+            Assert.Equal(vertexIdentity, list.RecordVertex(vertexCode, vertex));
+            Assert.Equal(ShaderPrewarmList.Identity(mesh), meshIdentity);
+        }
+
+        using var reloaded = Open();
+        Assert.Equal(3, reloaded.LoadedPreRasterizationCount);
+        Assert.Collection(reloaded.LoadedGraphicsPrewarm(),
+            item => Assert.Equal(1u, Assert.IsType<PixelPrewarmItem>(item).Record.UserDataBase),
+            item =>
+            {
+                var part = Assert.IsType<PreRasterizationPrewarmItem>(item);
+                Assert.Equal(first, part.State);
+                Assert.Equal(ShaderPrewarmList.Identity(vertex), ShaderPrewarmList.Identity(part.Program));
+                var attribute = Assert.Single(part.Program.VertexInfo!.Attributes);
+                Assert.Equal(0u, attribute.Descriptor.Word0);
+                Assert.Equal(16u, attribute.Descriptor.Stride);
+                Assert.Equal(Format32x4Float, attribute.Descriptor.Format);
+                Assert.Equal(vertexCode.Ranges[0].Bytes, Assert.Single(part.Code.Ranges).Bytes);
+            },
+            item => Assert.Equal(2u, Assert.IsType<PixelPrewarmItem>(item).Record.UserDataBase),
+            item =>
+            {
+                var part = Assert.IsType<PreRasterizationPrewarmItem>(item);
+                Assert.Equal(second, part.State);
+                Assert.True(part.Program.Mesh);
+                Assert.Equal(mesh.MeshInfo, part.Program.MeshInfo);
+                Assert.Equal(mesh.MeshOutputLocationMask, part.Program.MeshOutputLocationMask);
+                Assert.Equal(0x40ul, part.Program.ContinuationAddressOffset);
+                Assert.True(part.Program.DeviceRecordCounts);
+                Assert.Equal(new BufferSpecialization(16, 4, 0xFAC), Assert.Single(part.Program.Specialization.Buffers));
+                Assert.Equal(ShaderPrewarmList.Identity(mesh), ShaderPrewarmList.Identity(part.Program));
+            });
+    }
+
+    // The embedded fetch vertex program compiled by a program cache that records into the list, as a session's does: its
+    // prewarm identity, the session's SPIR-V and the host it compiled for.
+    internal static (ulong Identity, byte[] Spirv, IShaderPipelineHost Host) RecordEmbeddedFetchProgram(ShaderPrewarmList list)
+    {
+        var guest = new PipelineTestGuest(Compile);
+        guest.Host.ShaderPrewarm = list;
+        guest.RegisterProgram(CodeAddress, HeaderAddress, EmbeddedFetchProgram);
+        var cursor = 0u;
+        guest.Programs.GetOrCompile(guest.Source(CodeAddress, ShaderStage.Vertex, new uint[8]),
+            new StageCompileOptions { VertexInfo = EmbeddedFetchInfo(DataBase, 16, 4) }, ref cursor, out _);
+        var (_, identity) = Assert.Single(guest.Host.RecordedVertexPrograms);
+        return (identity, Assert.Single(guest.Compiler.Shaders).Spirv, guest.Host);
+    }
+
+    [Fact]
+    public void ARecordedVertexProgramTranslatesToTheSameSpirvAfterReload()
+    {
+        byte[] runtime;
+        IShaderPipelineHost host;
+        var state = new PreRasterizationState(0, 0, 0, false, false, true, false);
+        using (var list = Open())
+        {
+            (var identity, runtime, host) = RecordEmbeddedFetchProgram(list);
+            list.RecordPreRasterization(identity, state);
+        }
+
+        using var reloaded = Open();
+        var part = Assert.IsType<PreRasterizationPrewarmItem>(Assert.Single(reloaded.LoadedGraphicsPrewarm()));
+        Assert.Equal(state, part.State);
+        var compiler = new FakeShaderCompiler(Compile);
+        Assert.True(ShaderProgramCache.TryCompileVertexPrewarm(part.Program, part.Code, compiler, host, out var compiled, out var layout, out var error), error);
+        Assert.NotNull(layout);
+        Assert.Single(Assert.IsType<FakeCompiledShader>(compiled).Request.VertexInputs);
+        Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
+    }
+}

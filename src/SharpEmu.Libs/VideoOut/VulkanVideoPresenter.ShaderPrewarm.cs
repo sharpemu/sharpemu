@@ -48,7 +48,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private sealed record PrewarmedStage(ShaderProgram Handle, ShaderProgramInfo Program);
 
-        private readonly record struct PrewarmWork(ComputePrewarmRecord? Compute, ShaderCodeCapture? Code, GraphicsPrewarmItem? Graphics);
+        private readonly record struct PrewarmWork(ComputePrewarmRecord? Compute, ShaderCodeCapture? Code, PipelinePrewarmItem? Graphics);
+        private static readonly bool PrewarmBinarySkip = Environment.GetEnvironmentVariable("SHARPEMU_PREWARM_BINARY_SKIP") != "0";
 
         ShaderPrewarmList? IShaderPipelineHost.ShaderPrewarm => Volatile.Read(ref _shaderPrewarmList);
 
@@ -84,8 +85,10 @@ internal static unsafe partial class VulkanVideoPresenter
 
             Volatile.Write(ref _shaderPrewarmList, list);
             var compiler = GuestGpu.Current;
-            var stamp = list.CoverageStamp(ShaderPrewarmStamp(compiler));
-            if (list.LoadedComputeCount == 0 && list.LoadedGraphicsCount == 0)
+            var buildStamp = ShaderPrewarmStamp(compiler);
+            var stamp = list.CoverageStamp(buildStamp);
+            StartGraphicsPrewarm(list, buildStamp, compiler);
+            if (list.LoadedComputeCount == 0 && list.LoadedPipelineCount == 0)
             {
                 _loadedPrewarmCache = [];
                 _shaderPrewarmFinished = true;
@@ -98,7 +101,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _loadedPrewarmCache = [];
                 _shaderPrewarmFinished = true;
                 Console.Error.WriteLine(
-                    $"[LOADER][INFO] Shader prewarm skipped: compute={list.LoadedComputeCount} graphics={list.LoadedGraphicsCount} " +
+                    $"[LOADER][INFO] Shader prewarm skipped: compute={list.LoadedComputeCount} graphics={list.LoadedPipelineCount} " +
                     "reason=cache-and-recording-match");
                 return false;
             }
@@ -107,9 +110,9 @@ internal static unsafe partial class VulkanVideoPresenter
             // Progress alone does not prove that the saved cache contains those pipelines.
             list.ClearProgress();
             var computes = list.LoadedComputes();
-            var graphics = list.LoadedGraphics();
+            var graphics = list.LoadedPipelines();
             Interlocked.Add(ref _shaderPrewarmFailed,
-                list.LoadedComputeCount - computes.Count + list.LoadedGraphicsCount - graphics.Count);
+                list.LoadedComputeCount - computes.Count + list.LoadedPipelineCount - graphics.Count);
             var started = Stopwatch.GetTimestamp();
             var pendingCount = computes.Count + graphics.Count;
             if (pendingCount == 0)
@@ -338,7 +341,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private bool PrewarmGraphicsPipeline(GraphicsPrewarmItem item, IGuestGpuBackend compiler)
+        private bool PrewarmGraphicsPipeline(PipelinePrewarmItem item, IGuestGpuBackend compiler)
         {
             var vertex = PrewarmStageProgram(item.Vertex, compiler);
             var pixel = item.Pixel is { } pixelSource ? PrewarmStageProgram(pixelSource, compiler) : null;

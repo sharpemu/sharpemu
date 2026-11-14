@@ -693,6 +693,10 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 NoteRuntimeComputeModule(identity);
             }
+            else if (stage is ShaderStage.Pixel or ShaderStage.Vertex or ShaderStage.Mesh)
+            {
+                NoteRuntimeGraphicsModule(identity, stage);
+            }
 
             // Publish the handle only after all metadata is installed. The owning resolver exposes its program next.
             if (!_shaderModules.TryAdd(programId, module))

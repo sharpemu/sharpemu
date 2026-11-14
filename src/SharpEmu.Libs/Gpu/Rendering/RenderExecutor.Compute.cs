@@ -212,6 +212,21 @@ public sealed partial class RenderExecutor
     internal long LinkedCompileWait = LinkedCompileWaitTicks;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte> _linkedCompileSlow = new();
 
+    // A program whose module a session saw compile for minutes waits at most this long for it (default 250 ms,
+    // SHARPEMU_LINKED_KNOWN_SLOW_WAIT_MS, never longer than LinkedCompileWait). That is time enough for a module
+    // created from stored data, while a fresh compile would outlast LinkedCompileWait anyway and hold the stream for
+    // nothing.
+    internal static readonly long KnownSlowLinkedCompileWaitTicks =
+        (long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_LINKED_KNOWN_SLOW_WAIT_MS"), out var knownSlowMs) ? Math.Clamp(knownSlowMs, 0, 600_000) : 250) *
+        System.Diagnostics.Stopwatch.Frequency / 1000;
+    internal long KnownSlowLinkedCompileWait = KnownSlowLinkedCompileWaitTicks;
+    // A module still compiling this long after its program's first dispatch waited is recorded as slow.
+    internal long SlowLinkedCompileRecordTicks = 60 * System.Diagnostics.Stopwatch.Frequency;
+    // When this session's first dispatch of each linked program began waiting for its module, and whether the program
+    // was known slow then; removed once the module is ready.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, (long Started, bool KnownSlow)> _linkedCompileWaits = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte> _linkedCompileRecorded = new();
+
     // Polls until ready() holds, sleeping on the compile's completion when there is one, for at most boundTicks.
     internal static bool WaitForLinkedModule(Func<bool> ready, Func<Task?> completion, long boundTicks)
     {
@@ -248,17 +263,27 @@ public sealed partial class RenderExecutor
         if (!ready && LinkedCompileWait > 0 && !_linkedCompileSlow.ContainsKey(program.Hash))
         {
             var waiting = System.Diagnostics.Stopwatch.GetTimestamp();
+            var knownSlow = _pipelines.IsSlowLinkedCompile(program.Hash);
+            _linkedCompileWaits.TryAdd(program.Hash, (waiting, knownSlow));
+            var bound = knownSlow ? Math.Min(LinkedCompileWait, KnownSlowLinkedCompileWait) : LinkedCompileWait;
             using (VideoOut.RenderPhaseProfile.MeasureDetail(VideoOut.RenderPhaseProfile.Phase.ComputePipelineWait))
             {
                 ready = WaitForLinkedModule(() => _pipelines.TryCreateComputePipeline(input, handle, out _),
-                    () => _pipelines.GetComputePipelineCompletion(handle), LinkedCompileWait);
+                    () => _pipelines.GetComputePipelineCompletion(handle), bound);
             }
 
             var waitedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - waiting) * 1000 / System.Diagnostics.Stopwatch.Frequency;
             if (!ready) _linkedCompileSlow.TryAdd(program.Hash, 0);
             Console.Error.WriteLine(ready
                 ? $"[GPU][INFO][LINKED_COMPILE] A dispatch waited {waitedMs} ms for its linked module: hash=0x{program.Hash:X16}."
-                : $"[GPU][WARN][LINKED_COMPILE] A linked module still compiles after {waitedMs} ms; its dispatches are skipped until it is ready: hash=0x{program.Hash:X16}.");
+                : knownSlow
+                    ? $"[GPU][INFO][LINKED_COMPILE] A linked module a session saw compile for minutes still compiles after {waitedMs} ms; its dispatches are skipped until it is ready: hash=0x{program.Hash:X16}."
+                    : $"[GPU][WARN][LINKED_COMPILE] A linked module still compiles after {waitedMs} ms; its dispatches are skipped until it is ready: hash=0x{program.Hash:X16}.");
+        }
+
+        if (_linkedCompileWaits.TryGetValue(program.Hash, out var wait))
+        {
+            NoteLinkedCompileWait(program.Hash, wait, ready);
         }
 
         if (ready) return false;
@@ -266,6 +291,33 @@ public sealed partial class RenderExecutor
         if ((skipped & (skipped - 1)) == 0)
             Console.Error.WriteLine($"[GPU][WARN][LINKED_COMPILE] Dispatches of a linked program are skipped while its module compiles: hash=0x{program.Hash:X16} skipped={skipped}.");
         return true;
+    }
+
+    // What later sessions learn from a module this session waited for. Still compiling SlowLinkedCompileRecordTicks
+    // after the first wait: slow (unless already known). Ready within LinkedCompileWait once the short bound of a known
+    // slow program had run out: not slow. A module ready within the short bound was created from stored data and says
+    // nothing about a fresh compile.
+    private void NoteLinkedCompileWait(ulong hash, (long Started, bool KnownSlow) wait, bool ready)
+    {
+        var elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - wait.Started;
+        var milliseconds = elapsed * 1000 / System.Diagnostics.Stopwatch.Frequency;
+        if (!ready)
+        {
+            if (!wait.KnownSlow && elapsed >= SlowLinkedCompileRecordTicks && _linkedCompileRecorded.TryAdd(hash, 0))
+            {
+                _pipelines.RecordLinkedCompile(hash, slow: true, milliseconds);
+                Console.Error.WriteLine($"[GPU][INFO][LINKED_COMPILE] Recorded a linked module that compiles for minutes: hash=0x{hash:X16} compiling_ms={milliseconds}.");
+            }
+
+            return;
+        }
+
+        _linkedCompileWaits.TryRemove(hash, out _);
+        if (wait.KnownSlow && _linkedCompileSlow.ContainsKey(hash) && elapsed < LinkedCompileWait)
+        {
+            _pipelines.RecordLinkedCompile(hash, slow: false, milliseconds);
+            Console.Error.WriteLine($"[GPU][INFO][LINKED_COMPILE] Recorded a linked module that no longer compiles for minutes: hash=0x{hash:X16} ready_ms={milliseconds}.");
+        }
     }
 
     // The dispatch counts threads; the host counts groups of the shader's thread size.

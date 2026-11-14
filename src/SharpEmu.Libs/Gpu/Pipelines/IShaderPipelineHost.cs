@@ -188,6 +188,12 @@ internal interface IShaderPipelineHost
     {
     }
 
+    // A vertex or mesh program was recorded for the prewarm under prewarmIdentity (ShaderPrewarmList.Identity); the host
+    // records the states it compiles the program's pre-rasterization libraries with.
+    void VertexProgramRecorded(ulong module, ulong prewarmIdentity)
+    {
+    }
+
     PipelineHandle CreateComputePipeline(ComputePipelineDescription description);
 
     Task? GetComputePipelineCompletion(ShaderProgram program) => null;

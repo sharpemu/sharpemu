@@ -1473,15 +1473,8 @@ internal sealed partial class ShaderProgramCache
         ShaderVertexInput[] vertexInputs = [];
         if (source.Stage == ShaderStage.Vertex && options.VertexInfo is { FetchEmbedded: true } vertexInfo)
         {
-            fetch = EmbeddedVertexFetchDetector.Detect(
-                program,
-                (int)source.UserDataBase + vertexInfo.FetchAttributeRegister,
-                (int)source.UserDataBase + vertexInfo.FetchBufferRegister,
-                source.UserDataBase,
-                (uint)source.UserData.Length,
-                waveSize: 32);
-            vertexInputs = BuildVertexInputs(fetch, vertexInfo, source);
-            program = fetch.RemoveReplacedTableLoads(program);
+            (fetch, vertexInputs, program) = PrepareEmbeddedFetch(program, vertexInfo, source.UserDataBase,
+                (uint)source.UserData.Length, source.Hash, source.Address);
         }
 
         ShaderResourcePlan plan;
@@ -1537,8 +1530,18 @@ internal sealed partial class ShaderProgramCache
         };
     }
 
+    // The embedded vertex fetch of a vertex program: its plan, the fixed-function inputs it becomes, and the program
+    // without the table loads they replace. The graphics prewarm prepares a recorded program the same way.
+    private static (EmbeddedVertexFetchPlan Fetch, ShaderVertexInput[] Inputs, Gen5ShaderProgram Program) PrepareEmbeddedFetch(
+        Gen5ShaderProgram program, VertexInputInfo info, uint userDataBase, uint userDataCount, ulong hash, ulong address)
+    {
+        var fetch = EmbeddedVertexFetchDetector.Detect(program, (int)userDataBase + info.FetchAttributeRegister,
+            (int)userDataBase + info.FetchBufferRegister, userDataBase, userDataCount, waveSize: 32);
+        return (fetch, BuildVertexInputs(fetch, info, hash, address), fetch.RemoveReplacedTableLoads(program));
+    }
+
     // One fixed-function input per fetched attribute; later loads of the same attribute alias the first.
-    private static ShaderVertexInput[] BuildVertexInputs(EmbeddedVertexFetchPlan fetch, VertexInputInfo info, ShaderSource source)
+    private static ShaderVertexInput[] BuildVertexInputs(EmbeddedVertexFetchPlan fetch, VertexInputInfo info, ulong hash, ulong address)
     {
         var inputs = new List<ShaderVertexInput>();
         var inputByLocation = new Dictionary<int, int>();
@@ -1579,7 +1582,7 @@ internal sealed partial class ShaderProgramCache
             if (location < 0)
             {
                 throw SubmissionScheduler.Fatal(
-                    $"The vertex program fetches an attribute the tables do not declare: hash=0x{source.Hash:X16} shader=0x{source.Address:X16} attribute={load.AttributeId} pc=0x{load.Pc:X}.");
+                    $"The vertex program fetches an attribute the tables do not declare: hash=0x{hash:X16} shader=0x{address:X16} attribute={load.AttributeId} pc=0x{load.Pc:X}.");
             }
 
             var attribute = info.Attributes[location];
@@ -1606,13 +1609,13 @@ internal sealed partial class ShaderProgramCache
                 }
 
                 throw SubmissionScheduler.Fatal(
-                    $"The vertex program uses an unsupported attribute destination selector: hash=0x{source.Hash:X16} shader=0x{source.Address:X16} attribute={load.AttributeId} pc=0x{load.Pc:X} component={component} selector={selector}.");
+                    $"The vertex program uses an unsupported attribute destination selector: hash=0x{hash:X16} shader=0x{address:X16} attribute={load.AttributeId} pc=0x{load.Pc:X} component={component} selector={selector}.");
             }
 
             if (requiredComponents == 0)
             {
                 throw SubmissionScheduler.Fatal(
-                    $"The vertex program fetches an attribute without a memory component: hash=0x{source.Hash:X16} shader=0x{source.Address:X16} attribute={load.AttributeId} pc=0x{load.Pc:X}.");
+                    $"The vertex program fetches an attribute without a memory component: hash=0x{hash:X16} shader=0x{address:X16} attribute={load.AttributeId} pc=0x{load.Pc:X}.");
             }
 
             if (inputByLocation.TryGetValue(location, out var existingIndex))
@@ -1713,7 +1716,10 @@ internal sealed partial class ShaderProgramCache
 
     // Table blocks are for graphics stages: compute programs that read their buffers through them gave wrong results
     // or stalled, so compute programs keep descriptor buffer bindings.
-    private bool UsesTableBlocks(ShaderStage stage) => _host.TableBlocks && stage is not (ShaderStage.Compute or ShaderStage.Mesh);
+    private bool UsesTableBlocks(ShaderStage stage) => UsesTableBlocks(_host, stage);
+
+    private static bool UsesTableBlocks(IShaderPipelineHost host, ShaderStage stage) =>
+        host.TableBlocks && stage is not (ShaderStage.Compute or ShaderStage.Mesh);
 
     private ProgramPermutation CompilePermutation(
         ShaderSource source,
@@ -1872,7 +1878,55 @@ internal sealed partial class ShaderProgramCache
         if (source.Stage == ShaderStage.Pixel)
         {
             _host.PixelProgramCreated(info, module);
+            if (_host.ShaderPrewarm is { } pixelPrewarm && options.PixelInfo is { } pixelInfo && !entry.HasShaderCalls &&
+                _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var pixelCapture))
+            {
+                var pixelRecord = new PixelPrewarmRecord
+                {
+                    Hash = source.Hash,
+                    CodeSize = source.CodeSize,
+                    Address = pixelCapture.Address,
+                    ContinuationAddressOffset = source.ContinuationAddressOffset,
+                    UserDataBase = source.UserDataBase,
+                    UserDataCount = (uint)source.UserData.Length,
+                    PushDataCursor = pushDataCursor,
+                    Info = pixelInfo,
+                    Outputs = [.. options.PixelOutputs],
+                    InputEnable = options.PixelInputEnable,
+                    InputAddress = options.PixelInputAddress,
+                    Specialization = specialization.Clone(),
+                    DeviceRecordCounts = plan.DeviceRecordCounts is not null,
+                };
+                pixelPrewarm.RecordPixel(pixelCapture, pixelRecord);
+            }
         }
+
+        // Vertex and mesh programs, for the graphics prewarm; the host records their parts' states under the identity. The
+        // part of a task-launched mesh program also takes the generic task stage, which its record determines (TaskLaunch).
+        if (source.Stage is ShaderStage.Vertex or ShaderStage.Mesh && _host.ShaderPrewarm is { } vertexPrewarm &&
+            !entry.HasShaderCalls && options.MeshInfo is not { Geometry.TaskLaunched: true } &&
+            _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var vertexCapture))
+        {
+            var identity = vertexPrewarm.RecordVertex(vertexCapture, new VertexPrewarmRecord
+            {
+                Mesh = source.Stage == ShaderStage.Mesh,
+                Hash = source.Hash,
+                CodeSize = source.CodeSize,
+                Address = vertexCapture.Address,
+                ContinuationAddressOffset = source.ContinuationAddressOffset,
+                UserDataBase = source.UserDataBase,
+                UserDataCount = (uint)source.UserData.Length,
+                PushDataCursor = pushDataCursor,
+                VertexInfo = options.VertexInfo,
+                MeshInfo = options.MeshInfo,
+                RequiredVertexOutputCount = options.RequiredVertexOutputCount,
+                MeshOutputLocationMask = options.MeshOutputLocationMask,
+                Specialization = specialization.Clone(),
+                DeviceRecordCounts = plan.DeviceRecordCounts is not null,
+            });
+            _host.VertexProgramRecorded(module, identity);
+        }
+
         if (source.Stage == ShaderStage.Compute && options.TessellationHull is null &&
             _host.ShaderPrewarm is { } prewarm &&
             (!Gen5ShaderCallLinker.IsLinked(program) || entry.LinkedPrewarm is not null) &&
@@ -1926,6 +1980,107 @@ internal sealed partial class ShaderProgramCache
         };
     }
 
+    // The vertex or domain request of a program; the prewarm (TryCompileVertexPrewarm) builds the same one.
+    private static ShaderCompileRequest BuildVertexRequest(IShaderPipelineHost host, ShaderResourcePlan plan,
+        SpecializedResourceInfo resources, BindingLayout layout, StageCompileOptions options, ShaderVertexInput[] vertexInputs,
+        bool tessellationEvaluation = false)
+    {
+        var info = options.VertexInfo!;
+        return new ShaderCompileRequest(plan, resources, layout)
+        {
+            WaveSize = 32,
+            TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
+            IeeeMode = info.IeeeMode,
+            ScratchDwords = info.ScratchDwords,
+            EnableGraphicsSubgroupOperations = !tessellationEvaluation && host.GraphicsSubgroupOperationsEnabled,
+            SupportsSharedInt64Atomics = host.SharedInt64AtomicsEnabled,
+            SupportsImageInt64Atomics = host.ImageInt64AtomicsEnabled,
+            SupportsBufferInt64Atomics = host.BufferInt64AtomicsEnabled,
+            SupportsShaderDeviceClock = host.ShaderDeviceClockEnabled,
+            ShaderSignedZeroInfNanPreserveFloat32Supported = host.ShaderSignedZeroInfNanPreserveFloat32Supported,
+            RequiredVertexOutputCount = options.RequiredVertexOutputCount,
+            Tessellation = options.Tessellation,
+            VertexInputs = vertexInputs,
+            PositionExportControl = info.PositionExportControl,
+            SupportsClipDistance = host.ClipDistanceEnabled,
+            SupportsDrawParameters = host.ShaderDrawParametersSupported,
+            StartInstanceUserData = info.StartInstanceUserData,
+            ClipSpace = new ShaderClipSpaceTransform(
+                info.ClipSpace.Enabled,
+                info.ClipSpace.ScaleX,
+                info.ClipSpace.ScaleY,
+                info.ClipSpace.OffsetX,
+                info.ClipSpace.OffsetY,
+                info.ClipSpace.HalfExtentX,
+                info.ClipSpace.HalfExtentY),
+        };
+    }
+
+    // The mesh request of a program; the prewarm (TryCompileVertexPrewarm) builds the same one.
+    private static ShaderCompileRequest BuildMeshRequest(IShaderPipelineHost host, ShaderResourcePlan plan,
+        SpecializedResourceInfo resources, BindingLayout layout, StageCompileOptions options)
+    {
+        var info = options.MeshInfo!;
+        return new ShaderCompileRequest(plan, resources, layout)
+        {
+            WaveSize = info.Geometry.WaveSize,
+            TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
+            IeeeMode = info.Geometry.IeeeMode,
+            ScratchDwords = info.Geometry.ScratchDwords,
+            EnableGraphicsSubgroupOperations = host.GraphicsSubgroupOperationsEnabled,
+            SupportsImageInt64Atomics = host.ImageInt64AtomicsEnabled,
+            SupportsBufferInt64Atomics = host.BufferInt64AtomicsEnabled,
+            SupportsShaderDeviceClock = host.ShaderDeviceClockEnabled,
+            RequiredVertexOutputCount = options.RequiredVertexOutputCount,
+            PositionExportControl = info.Geometry.PositionExportControl,
+            MeshOutputLocationMask = options.MeshOutputLocationMask,
+            ClipSpace = new ShaderClipSpaceTransform(
+                info.Geometry.ClipSpace.Enabled,
+                info.Geometry.ClipSpace.ScaleX,
+                info.Geometry.ClipSpace.ScaleY,
+                info.Geometry.ClipSpace.OffsetX,
+                info.Geometry.ClipSpace.OffsetY,
+                info.Geometry.ClipSpace.HalfExtentX,
+                info.Geometry.ClipSpace.HalfExtentY),
+            LocalSizeX = info.Geometry.ThreadsPerGroup,
+            Mesh = new MeshShaderConfiguration(info.Geometry.OutputVertexCapacity, info.Geometry.OutputPrimitiveCapacity,
+                info.Geometry.ProvokingVertex, info.Geometry.InputPrimitiveCountPerWorkgroup, info.Geometry.InputVertexCountPerWorkgroup,
+                info.Geometry.LocalDataShareDwords, info.Geometry.InputTriangleStrip, info.Execution.DeviceSubgroupLaneCount,
+                info.Geometry.InputPointList, info.Geometry.InputLineList, TaskLaunched: info.Geometry.TaskLaunched),
+        };
+    }
+
+    // The pixel request of a program; the prewarm (TryCompilePixelPrewarm) builds the same one.
+    private static ShaderCompileRequest BuildPixelRequest(IShaderPipelineHost host, ShaderResourcePlan plan,
+        SpecializedResourceInfo resources, BindingLayout layout, StageCompileOptions options)
+    {
+        var info = options.PixelInfo!;
+        var interpolators = new uint[info.InputCount];
+        Array.Copy(info.InterpolatorSettings, interpolators, interpolators.Length);
+        return new ShaderCompileRequest(plan, resources, layout)
+        {
+            WaveSize = 32,
+            TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
+            IeeeMode = info.IeeeMode,
+            ScratchDwords = info.ScratchDwords,
+            EnableGraphicsSubgroupOperations = host.GraphicsSubgroupOperationsEnabled,
+            SupportsSharedInt64Atomics = host.SharedInt64AtomicsEnabled,
+            SupportsImageInt64Atomics = host.ImageInt64AtomicsEnabled,
+            SupportsBufferInt64Atomics = host.BufferInt64AtomicsEnabled,
+            SupportsShaderDeviceClock = host.ShaderDeviceClockEnabled,
+            ShaderSignedZeroInfNanPreserveFloat32Supported = host.ShaderSignedZeroInfNanPreserveFloat32Supported,
+            PixelOutputs = options.PixelOutputs,
+            PixelDepthExportEnable = info.DepthExportEnable,
+            PixelInputEnable = options.PixelInputEnable,
+            PixelCustomInterpolationMask = info.CustomInterpolationMask,
+            SupportsPerVertexPixelInputs = host.PerVertexPixelInputsSupported,
+            PixelInputAddress = options.PixelInputAddress,
+            PixelInputCntl = interpolators,
+            MipStatisticsSubgroupReduction = host.MipStatisticsSubgroupReduction,
+            SubgroupArithmetic = host.PixelSubgroupArithmetic,
+        };
+    }
+
     private ShaderCompileRequest BuildRequest(
         ShaderSource source,
         StageCompileOptions options,
@@ -1933,7 +2088,6 @@ internal sealed partial class ShaderProgramCache
         SpecializedResourceInfo resources,
         BindingLayout layout)
     {
-        var enableGraphicsSubgroups = _host.GraphicsSubgroupOperationsEnabled;
         var sharedInt64Atomics = _host.SharedInt64AtomicsEnabled;
         var imageInt64Atomics = _host.ImageInt64AtomicsEnabled;
         var bufferInt64Atomics = _host.BufferInt64AtomicsEnabled;
@@ -1943,97 +2097,14 @@ internal sealed partial class ShaderProgramCache
         {
             case ShaderStage.Vertex:
             case ShaderStage.TessellationEvaluation:
-            {
-                var info = options.VertexInfo!;
-                return new ShaderCompileRequest(entry.Plan, resources, layout)
-                {
-                    WaveSize = 32,
-                    TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
-                    IeeeMode = info.IeeeMode,
-                    ScratchDwords = info.ScratchDwords,
-                    EnableGraphicsSubgroupOperations = source.Stage != ShaderStage.TessellationEvaluation && enableGraphicsSubgroups,
-                    SupportsSharedInt64Atomics = sharedInt64Atomics,
-                    SupportsImageInt64Atomics = imageInt64Atomics,
-                    SupportsBufferInt64Atomics = bufferInt64Atomics,
-                    SupportsShaderDeviceClock = shaderDeviceClock,
-                    ShaderSignedZeroInfNanPreserveFloat32Supported = signedZeroInfNanPreserve,
-                    RequiredVertexOutputCount = options.RequiredVertexOutputCount,
-                    Tessellation = options.Tessellation,
-                    VertexInputs = entry.VertexInputs,
-                    PositionExportControl = info.PositionExportControl,
-                    SupportsClipDistance = _host.ClipDistanceEnabled,
-                    SupportsDrawParameters = _host.ShaderDrawParametersSupported,
-                    StartInstanceUserData = info.StartInstanceUserData,
-                    ClipSpace = new ShaderClipSpaceTransform(
-                        info.ClipSpace.Enabled,
-                        info.ClipSpace.ScaleX,
-                        info.ClipSpace.ScaleY,
-                        info.ClipSpace.OffsetX,
-                        info.ClipSpace.OffsetY,
-                        info.ClipSpace.HalfExtentX,
-                        info.ClipSpace.HalfExtentY),
-                };
-            }
+                return BuildVertexRequest(_host, entry.Plan, resources, layout, options, entry.VertexInputs,
+                    tessellationEvaluation: source.Stage == ShaderStage.TessellationEvaluation);
 
             case ShaderStage.Pixel:
-            {
-                var info = options.PixelInfo!;
-                var interpolators = new uint[info.InputCount];
-                Array.Copy(info.InterpolatorSettings, interpolators, interpolators.Length);
-                return new ShaderCompileRequest(entry.Plan, resources, layout)
-                {
-                    WaveSize = 32,
-                    TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
-                    IeeeMode = info.IeeeMode,
-                    ScratchDwords = info.ScratchDwords,
-                    EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
-                    SupportsSharedInt64Atomics = sharedInt64Atomics,
-                    SupportsImageInt64Atomics = imageInt64Atomics,
-                    SupportsBufferInt64Atomics = bufferInt64Atomics,
-                    SupportsShaderDeviceClock = shaderDeviceClock,
-                    ShaderSignedZeroInfNanPreserveFloat32Supported = signedZeroInfNanPreserve,
-                    PixelOutputs = options.PixelOutputs,
-                    PixelDepthExportEnable = info.DepthExportEnable,
-                    PixelInputEnable = options.PixelInputEnable,
-                    PixelCustomInterpolationMask = info.CustomInterpolationMask,
-                    SupportsPerVertexPixelInputs = _host.PerVertexPixelInputsSupported,
-                    PixelInputAddress = options.PixelInputAddress,
-                    PixelInputCntl = interpolators,
-                    MipStatisticsSubgroupReduction = _host.MipStatisticsSubgroupReduction,
-                };
-            }
+                return BuildPixelRequest(_host, entry.Plan, resources, layout, options);
 
             case ShaderStage.Mesh:
-            {
-                var info = options.MeshInfo!;
-                return new ShaderCompileRequest(entry.Plan, resources, layout)
-                {
-                    WaveSize = info.Geometry.WaveSize,
-                    TraceDeviceAddressFaults = SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
-                    IeeeMode = info.Geometry.IeeeMode,
-                    ScratchDwords = info.Geometry.ScratchDwords,
-                    EnableGraphicsSubgroupOperations = enableGraphicsSubgroups,
-                    SupportsImageInt64Atomics = imageInt64Atomics,
-                    SupportsBufferInt64Atomics = bufferInt64Atomics,
-                    SupportsShaderDeviceClock = shaderDeviceClock,
-                    RequiredVertexOutputCount = options.RequiredVertexOutputCount,
-                    PositionExportControl = info.Geometry.PositionExportControl,
-                    MeshOutputLocationMask = options.MeshOutputLocationMask,
-                    ClipSpace = new ShaderClipSpaceTransform(
-                        info.Geometry.ClipSpace.Enabled,
-                        info.Geometry.ClipSpace.ScaleX,
-                        info.Geometry.ClipSpace.ScaleY,
-                        info.Geometry.ClipSpace.OffsetX,
-                        info.Geometry.ClipSpace.OffsetY,
-                        info.Geometry.ClipSpace.HalfExtentX,
-                        info.Geometry.ClipSpace.HalfExtentY),
-                    LocalSizeX = info.Geometry.ThreadsPerGroup,
-                    Mesh = new MeshShaderConfiguration(info.Geometry.OutputVertexCapacity, info.Geometry.OutputPrimitiveCapacity,
-                        info.Geometry.ProvokingVertex, info.Geometry.InputPrimitiveCountPerWorkgroup, info.Geometry.InputVertexCountPerWorkgroup,
-                        info.Geometry.LocalDataShareDwords, info.Geometry.InputTriangleStrip, info.Execution.DeviceSubgroupLaneCount,
-                        info.Geometry.InputPointList, info.Geometry.InputLineList, TaskLaunched: info.Geometry.TaskLaunched),
-                };
-            }
+                return BuildMeshRequest(_host, entry.Plan, resources, layout, options);
 
             default:
                 return BuildComputeRequest(entry.Plan, resources, layout, options.ComputeInfo!, options.ComputeSystemRegisters,
@@ -2151,6 +2222,119 @@ internal sealed partial class ShaderProgramCache
                 sharedInt64Atomics, execGuardElision, signedZeroInfNanPreserve, hostWave64Supported, hostComputeSubgroup32,
                 imageInt64Atomics, shaderDeviceClock, bufferInt64Atomics);
             return compiler.TryCompileProgram(request, out compiled, out error) && compiled is not null;
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+    }
+
+    // A recorded pixel program translated again as its session translated it (CreateEntry, then the specialized
+    // translation through the translation cache); the caller compiles its pixel library.
+    internal static bool TryCompilePixelPrewarm(PixelPrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
+        IShaderPipelineHost host, out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error)
+    {
+        compiled = null;
+        layout = null;
+        try
+        {
+            if (!Gen5ShaderTranslator.TryDecodeProgram(code.CreateContext(), code.Address, out var program, out error))
+            {
+                return false;
+            }
+
+            if (program.Instructions.Any(static instruction => instruction.Opcode == "SSwappcB64"))
+            {
+                error = "the recorded pixel program has shader calls";
+                return false;
+            }
+
+            var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, record.Hash, record.UserDataBase, record.UserDataCount,
+                waveSize: 32, bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: host.SupportsBindlessHeap,
+                stableImageLimits: host.ComputeImageDescriptorLimits,
+                deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts);
+            var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
+            layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor, false,
+                tableBlocks: UsesTableBlocks(host, ShaderStage.Pixel));
+            var options = new StageCompileOptions
+            {
+                PixelInfo = record.Info,
+                PixelOutputs = record.Outputs,
+                PixelInputEnable = record.InputEnable,
+                PixelInputAddress = record.InputAddress,
+            };
+            var request = BuildPixelRequest(host, plan, resources, layout, options);
+            var state = new List<uint>();
+            BuildStaticState(ShaderStage.Pixel, options, state);
+            var key = new ProgramKey(ShaderStage.Pixel, record.Hash, record.UserDataCount, record.CodeSize,
+                record.ContinuationAddressOffset, [.. state]);
+            return TranslationDiskCache.TryTranslate(compiler, request,
+                    TranslationDiskCache.Key(key, record.UserDataBase, record.Specialization, record.PushDataCursor, request),
+                    out compiled, out error) && compiled is not null;
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+    }
+
+    // A recorded vertex or mesh program translated again as its session translated it (CreateEntry, then the specialized
+    // translation through the translation cache); the caller compiles its pre-rasterization libraries.
+    internal static bool TryCompileVertexPrewarm(VertexPrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
+        IShaderPipelineHost host, out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error)
+    {
+        compiled = null;
+        layout = null;
+        try
+        {
+            if (!Gen5ShaderTranslator.TryDecodeProgram(code.CreateContext(), code.Address, out var program, out error))
+            {
+                return false;
+            }
+
+            if (program.Instructions.Any(static instruction => instruction.Opcode == "SSwappcB64"))
+            {
+                error = "the recorded vertex program has shader calls";
+                return false;
+            }
+
+            var stage = record.Mesh ? ShaderStage.Mesh : ShaderStage.Vertex;
+            var options = new StageCompileOptions
+            {
+                VertexInfo = record.VertexInfo,
+                MeshInfo = record.MeshInfo,
+                RequiredVertexOutputCount = record.RequiredVertexOutputCount,
+                MeshOutputLocationMask = record.MeshOutputLocationMask,
+            };
+            EmbeddedVertexFetchPlan? fetch = null;
+            ShaderVertexInput[] vertexInputs = [];
+            if (!record.Mesh && record.VertexInfo is { FetchEmbedded: true } vertexInfo)
+            {
+                (fetch, vertexInputs, program) = PrepareEmbeddedFetch(program, vertexInfo, record.UserDataBase, record.UserDataCount,
+                    record.Hash, record.Address);
+            }
+
+            var plan = ShaderResourcePlan.Extract(program, stage, record.Hash, record.UserDataBase, record.UserDataCount,
+                fetch?.Loads.Select(load => load.Pc).ToHashSet(), waveSize: record.Mesh ? record.MeshInfo!.Geometry.WaveSize : 32u,
+                dynamicUserData: record.VertexInfo?.StartInstanceUserData ?? -1,
+                bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: host.SupportsBindlessHeap,
+                stableImageLimits: host.ComputeImageDescriptorLimits,
+                deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts);
+            var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
+            layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor, false,
+                usesMeshDrawParameters: record.Mesh, tableBlocks: UsesTableBlocks(host, stage));
+            var request = record.Mesh
+                ? BuildMeshRequest(host, plan, resources, layout, options)
+                : BuildVertexRequest(host, plan, resources, layout, options, vertexInputs);
+            var state = new List<uint>();
+            BuildStaticState(stage, options, state);
+            var key = new ProgramKey(stage, record.Hash, record.UserDataCount, record.CodeSize, record.ContinuationAddressOffset,
+                [.. state]);
+            return TranslationDiskCache.TryTranslate(compiler, request,
+                    TranslationDiskCache.Key(key, record.UserDataBase, record.Specialization, record.PushDataCursor, request),
+                    out compiled, out error) && compiled is not null;
         }
         catch (Exception exception)
         {
