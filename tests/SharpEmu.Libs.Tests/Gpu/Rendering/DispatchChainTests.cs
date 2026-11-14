@@ -35,6 +35,57 @@ public sealed class DispatchChainTests : IDisposable
 
     private int HazardBarriers => _host.Calls.Count(call => call == "write_hazard_barrier");
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RuntimeCalleeAccessesKeepTheBarrierOnEitherSideOfTheChain(bool calleeFirst)
+    {
+        var caller = new ShaderProgramInfo
+        {
+            Stage = ShaderStageKind.Compute,
+            Buffers = [Written],
+            UsesDeviceAddresses = true,
+            CallRecordCallees = [new CallRecordCallee([], [], 16)],
+        };
+        var hidden = new ShaderStageResources(caller, new ResourceSnapshot
+        {
+            Buffers = [BufferDescriptor(BufferB, 4, 16)],
+            // A nonempty ordinary range list must not hide the missing callee accesses.
+            DeviceAddressRanges = [new(1, BufferB, 64, true, true)],
+        })
+        {
+            CallRecords = [(0x1000, BufferA)],
+        };
+        DispatchWithHiddenAccesses(hidden, calleeFirst);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BindlessImageAccessesKeepTheBarrierOnEitherSideOfTheChain(bool heapFirst)
+    {
+        // The heap may read an image written by a previous dispatch, or write an image
+        // the next dispatch reads. Neither image is in the caller's explicit image list.
+        var caller = new ShaderProgramInfo
+        {
+            Stage = ShaderStageKind.Compute,
+            Buffers = [Written],
+            Bindings = new BindingLayout { UsesBindlessHeap = true },
+        };
+        DispatchWithHiddenAccesses(Stage(caller, [BufferDescriptor(BufferB, 4, 16)]), heapFirst);
+    }
+
+    private void DispatchWithHiddenAccesses(ShaderStageResources hidden, bool hiddenFirst)
+    {
+        var ordinary = Stage(Program(ShaderStageKind.Compute, buffers: [Written]), [BufferDescriptor(BufferA, 4, 16)]);
+        _pipelines.Compute = ComputeProgram(hiddenFirst ? hidden : ordinary);
+        _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
+        _pipelines.Compute = ComputeProgram(hiddenFirst ? ordinary : hidden);
+        _executor.Dispatch(2, Banks(), 1, 1, 1, 0x41);
+
+        Assert.Equal(2, HazardBarriers);
+    }
+
     [Fact]
     public void DisjointDispatchesShareOneHazardBarrierAndDeferTheirAccessBarriers()
     {

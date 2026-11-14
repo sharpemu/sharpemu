@@ -100,6 +100,15 @@ internal sealed class DispatchChain
         }
 
         var resources = stage.Resources;
+        // Runtime callees and heap accesses can touch resources outside the snapshot below.
+        // Keep their barriers until the chain can account for that complete access set.
+        if (program.CallRecordCallees.Count != 0 || program.Bindings is { UsesBindlessHeap: true } ||
+            stage.CallRecordRanges is { Length: > 0 })
+        {
+            _recordConservative = true;
+            return;
+        }
+
         if (program.Bindings?.Find(DescriptorBindingKind.GlobalDataShare) is not null)
         {
             _recordConservative = true;
