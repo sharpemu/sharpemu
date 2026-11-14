@@ -384,8 +384,15 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
                     indexSource.Address, draw.Count, indexSource.Type == IndexType.Uint16 ? 2u : 4u,
                     topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution)
                 : IndirectMeshDrawRequest.ForAutomaticDraw(emission.IndirectArgumentsAddress,
-                    topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution))
+                    topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution)
+                    with { TaskLaunched = meshInput.Geometry.TaskLaunched })
             : null;
+        // Only an automatic indirect draw resolves a task-launched program; anything else is a broken join.
+        if (meshInput is { Geometry.TaskLaunched: true } && (emission.IndirectArgumentsAddress == 0 || emission.Indexed))
+        {
+            throw _host.Fatal("A task-launched mesh program reached a draw that is not automatic and indirect.");
+        }
+
         var meshVertexCount = draw.Count;
         if (MeshDrawTrace.Active)
             MeshDrawTrace.Write("programs", $"mesh={meshInput is not null} vertexHash=0x{vertexInput.Stage.Program?.Hash:X16} pixelHash=0x{pixelInput.Stage.Program?.Hash:X16} pixelActive={state.PixelActive}");

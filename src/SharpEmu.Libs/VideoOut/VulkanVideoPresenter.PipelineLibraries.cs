@@ -185,12 +185,19 @@ internal static unsafe partial class VulkanVideoPresenter
         // null where the pipeline or part has none, and one push constant range for every stage.
         private PipelineLayout CreateLibraryPipelineLayout(DescriptorSetLayout vertexSet, bool heap, DescriptorSetLayout pixelSet)
         {
-            var pushConstants = new PushConstantRange
+            // Linked parts need equal ranges: with task launches on, every part carries the task range too.
+            var pushRanges = stackalloc PushConstantRange[2];
+            pushRanges[0] = new PushConstantRange
             {
                 StageFlags = LibraryPushStages,
                 Offset = 0,
                 Size = PushConstantBytes,
             };
+            var pushRangeCount = 1u;
+            if (_supportsTaskShader)
+            {
+                pushRanges[pushRangeCount++] = TaskPushRange;
+            }
             var setLayouts = stackalloc DescriptorSetLayout[3];
             setLayouts[0] = vertexSet;
             setLayouts[1] = heap ? RequireHeapSetLayout() : default;
@@ -201,8 +208,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 Flags = PipelineLayoutCreateFlags.IndependentSetsBitExt,
                 SetLayoutCount = 3,
                 PSetLayouts = setLayouts,
-                PushConstantRangeCount = 1,
-                PPushConstantRanges = &pushConstants,
+                PushConstantRangeCount = pushRangeCount,
+                PPushConstantRanges = pushRanges,
             };
             Check(_vk.CreatePipelineLayout(_device, &create, null, out var layout), "vkCreatePipelineLayout(independent sets)");
             return layout;
@@ -233,20 +240,24 @@ internal static unsafe partial class VulkanVideoPresenter
             var started = Stopwatch.GetTimestamp();
             var mesh = description.VertexStage.Stage == ShaderStageKind.Mesh;
             var label = $"vs=0x{description.VertexStage.Hash:X16} ps=0x{description.PixelStage?.Hash ?? 0:X16}";
+            var vertexInputKey = mesh ? null : VertexInputKey(info, baseDynamicState);
+            var preRasterizationKey = PreRasterizationKey(entry, info, baseDynamicState);
+            var pixelIndex = StageIndex(info, ShaderStageFlags.FragmentBit);
+            var pixelModule = pixelIndex >= 0 ? info->PStages[pixelIndex].Module.Handle : 0;
+            var fragmentKey = FragmentKey(pixelModule, entry.PixelSetSignature, entry.PixelUsesBindlessHeap, info->PMultisampleState, baseDynamicState);
+            var outputKey = OutputKey(info);
             var parts = stackalloc Pipeline[4];
             var count = 0u;
-            if (!mesh)
+            if (vertexInputKey is not null)
             {
-                parts[count++] = GraphicsLibrary(VertexInputKey(info, baseDynamicState), GraphicsPipelineLibraryFlagsEXT.VertexInputInterfaceBitExt,
+                parts[count++] = GraphicsLibrary(vertexInputKey, GraphicsPipelineLibraryFlagsEXT.VertexInputInterfaceBitExt,
                     info, baseDynamicState, entry, label);
             }
 
-            parts[count++] = GraphicsLibrary(PreRasterizationKey(entry, info, baseDynamicState), GraphicsPipelineLibraryFlagsEXT.PreRasterizationShadersBitExt,
+            parts[count++] = GraphicsLibrary(preRasterizationKey, GraphicsPipelineLibraryFlagsEXT.PreRasterizationShadersBitExt,
                 info, baseDynamicState, entry, label);
-            var pixelModule = info->StageCount > 1 ? info->PStages[1].Module.Handle : 0;
-            parts[count++] = GraphicsLibrary(FragmentKey(pixelModule, entry.PixelSetSignature, entry.PixelUsesBindlessHeap, info->PMultisampleState, baseDynamicState),
-                GraphicsPipelineLibraryFlagsEXT.FragmentShaderBitExt, info, baseDynamicState, entry, label);
-            parts[count++] = GraphicsLibrary(OutputKey(info), GraphicsPipelineLibraryFlagsEXT.FragmentOutputInterfaceBitExt,
+            parts[count++] = GraphicsLibrary(fragmentKey, GraphicsPipelineLibraryFlagsEXT.FragmentShaderBitExt, info, baseDynamicState, entry, label);
+            parts[count++] = GraphicsLibrary(outputKey, GraphicsPipelineLibraryFlagsEXT.FragmentOutputInterfaceBitExt,
                 info, baseDynamicState, entry, label);
             for (var index = 0; index < count; index++)
             {
@@ -305,6 +316,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 };
                 // Every depth and stencil state is dynamic.
                 var depthStencil = new PipelineDepthStencilStateCreateInfo { SType = StructureType.PipelineDepthStencilStateCreateInfo };
+                // The pre-rasterization part takes stage 0 and, for a task-launched mesh program, the task stage.
+                var preStages = stackalloc PipelineShaderStageCreateInfo[2];
                 PipelineLayout layout = default;
                 switch (part)
                 {
@@ -313,15 +326,23 @@ internal static unsafe partial class VulkanVideoPresenter
                         create.PInputAssemblyState = info->PInputAssemblyState;
                         break;
                     case GraphicsPipelineLibraryFlagsEXT.PreRasterizationShadersBitExt:
-                        create.StageCount = 1;
-                        create.PStages = info->PStages;
+                        var taskIndex = StageIndex(info, ShaderStageFlags.TaskBitExt);
+                        preStages[0] = info->PStages[0];
+                        if (taskIndex >= 0)
+                        {
+                            preStages[1] = info->PStages[taskIndex];
+                        }
+
+                        create.StageCount = taskIndex >= 0 ? 2u : 1u;
+                        create.PStages = preStages;
                         create.PViewportState = info->PViewportState;
                         create.PRasterizationState = info->PRasterizationState;
                         create.Layout = layout = CreateLibraryPipelineLayout(entry.SetLayout, entry.VertexUsesBindlessHeap, default);
                         break;
                     case GraphicsPipelineLibraryFlagsEXT.FragmentShaderBitExt:
-                        create.StageCount = info->StageCount > 1 ? 1u : 0u;
-                        create.PStages = info->StageCount > 1 ? info->PStages + 1 : null;
+                        var fragmentIndex = StageIndex(info, ShaderStageFlags.FragmentBit);
+                        create.StageCount = fragmentIndex >= 0 ? 1u : 0u;
+                        create.PStages = fragmentIndex >= 0 ? info->PStages + fragmentIndex : null;
                         create.PMultisampleState = info->PMultisampleState;
                         create.PDepthStencilState = &depthStencil;
                         create.Layout = layout = CreateLibraryPipelineLayout(default, entry.PixelUsesBindlessHeap, entry.PixelSetLayout);
@@ -619,16 +640,48 @@ internal static unsafe partial class VulkanVideoPresenter
             return builder.ToString();
         }
 
+        // A task stage and its specialization values, or nothing.
+        private static string TaskKey(GraphicsPipelineCreateInfo* info)
+        {
+            var index = StageIndex(info, ShaderStageFlags.TaskBitExt);
+            if (index < 0) return "";
+            var builder = new System.Text.StringBuilder(";task");
+            var specialization = info->PStages[index].PSpecializationInfo;
+            if (specialization is not null)
+            {
+                var values = (uint*)specialization->PData;
+                for (var word = 0; word < (int)(specialization->DataSize / sizeof(uint)); word++)
+                    builder.Append(':').Append(values[word]);
+            }
+
+            return builder.ToString();
+        }
+
+        // The index of the stage of this kind in info, or -1.
+        private static int StageIndex(GraphicsPipelineCreateInfo* info, ShaderStageFlags stage)
+        {
+            for (var index = 0; index < (int)info->StageCount; index++)
+            {
+                if (info->PStages[index].Stage == stage)
+                {
+                    return index;
+                }
+            }
+
+            return -1;
+        }
+
         // Depth bias enable and line width are dynamic.
         private static string PreRasterizationKey(RenderPipelineEntry entry, GraphicsPipelineCreateInfo* info,
             PipelineDynamicStateCreateInfo* dynamicState)
         {
             var stage = info->PStages[0];
+            var task = TaskKey(info);
             var viewport = info->PViewportState;
             var clipControl = viewport->PNext is null ? "-" : ((bool)((PipelineViewportDepthClipControlCreateInfoEXT*)viewport->PNext)->NegativeOneToOne).ToString();
             var raster = info->PRasterizationState;
             var depthClip = raster->PNext is null ? "-" : ((bool)((PipelineRasterizationDepthClipStateCreateInfoEXT*)raster->PNext)->DepthClipEnable).ToString();
-            return $"pr;{stage.Module.Handle:X};{(int)stage.Stage};{(int)stage.Flags};{entry.VertexSetSignature};{entry.VertexUsesBindlessHeap};" +
+            return $"pr;{stage.Module.Handle:X};{(int)stage.Stage};{(int)stage.Flags}{task};{entry.VertexSetSignature};{entry.VertexUsesBindlessHeap};" +
                 $"{clipControl};{(int)raster->PolygonMode};{(int)raster->CullMode};{(int)raster->FrontFace};{depthClip};" +
                 $"{(bool)raster->DepthClampEnable};{(bool)raster->RasterizerDiscardEnable};" +
                 DynamicKey(dynamicState);

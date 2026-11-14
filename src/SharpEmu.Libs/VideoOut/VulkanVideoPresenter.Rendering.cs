@@ -1686,6 +1686,7 @@ internal static unsafe partial class VulkanVideoPresenter
             VulkanSynchronization.PipelineBarrier(_vk,command, sourceStages, destinationStages, 0, 1, &barrier, 0, null, 0, null, BarrierSource.Requested);
         }
 
+        // A task stage reads the automatic indirect arguments of task-launched mesh draws (MeshTaskLaunch).
         public void ShaderWriteBarrier(PipelineStageFlags sourceStages)
         {
             NoteShaderMayWriteMappedMemory();
@@ -1693,7 +1694,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 sourceStages,
                 PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.VertexInputBit | PipelineStageFlags.VertexShaderBit |
                 PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit | PipelineStageFlags.ColorAttachmentOutputBit |
-                (_presenter._supportsMeshShader ? PipelineStageFlags.MeshShaderBitExt : PipelineStageFlags.None),
+                (_presenter._supportsMeshShader ? PipelineStageFlags.MeshShaderBitExt : PipelineStageFlags.None) |
+                (_presenter._supportsTaskShader ? PipelineStageFlags.TaskShaderBitExt : PipelineStageFlags.None),
                 AccessFlags.ShaderWriteBit,
                 AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit | AccessFlags.VertexAttributeReadBit | AccessFlags.IndexReadBit |
                 AccessFlags.UniformReadBit | AccessFlags.TransferReadBit | AccessFlags.TransferWriteBit |

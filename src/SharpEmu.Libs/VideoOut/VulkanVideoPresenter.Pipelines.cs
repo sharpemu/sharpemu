@@ -826,6 +826,57 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        private ShaderModule _meshTaskModule;
+        private static readonly object MeshTaskModuleGate = new();
+
+        // The generic task stage of task-launched mesh pipelines; pipelines compile on worker threads.
+        private ShaderModule RequireMeshTaskModule()
+        {
+            lock (MeshTaskModuleGate)
+            {
+                if (_meshTaskModule.Handle == 0)
+                {
+                    _meshTaskModule = CreateShaderModule(SharpEmu.ShaderCompiler.Vulkan.SpirvMeshTask.Create());
+                }
+
+                return _meshTaskModule;
+            }
+        }
+
+        // The task stage's specialization: the program's primitives per group and point list, the device's group limits.
+        private void FillTaskSpecialization(MeshTaskLaunchInfo task, SpecializationMapEntry* entries, uint* values,
+            ref SpecializationInfo specialization)
+        {
+            // The task stage divides by it, as the conversion did by its push word.
+            if (task.PrimitivesPerGroup == 0)
+                throw SubmissionScheduler.Fatal("A task-launched mesh program has no primitives per group.");
+            values[0] = task.PrimitivesPerGroup;
+            values[1] = task.PointList ? 1u : 0u;
+            values[2] = _meshShaderLimits.MaxGroupCountX;
+            values[3] = _meshShaderLimits.MaxGroupCountY;
+            values[4] = _meshShaderLimits.MaxGroupTotalCount;
+            uint[] ids =
+            [
+                SharpEmu.ShaderCompiler.Vulkan.SpirvMeshTask.SpecPrimitivesPerGroup,
+                SharpEmu.ShaderCompiler.Vulkan.SpirvMeshTask.SpecPointList,
+                SharpEmu.ShaderCompiler.Vulkan.SpirvMeshTask.SpecMaxGroupCountX,
+                SharpEmu.ShaderCompiler.Vulkan.SpirvMeshTask.SpecMaxGroupCountY,
+                SharpEmu.ShaderCompiler.Vulkan.SpirvMeshTask.SpecMaxGroupTotalCount,
+            ];
+            for (var index = 0; index < ids.Length; index++)
+            {
+                entries[index] = new SpecializationMapEntry(ids[index], (uint)(index * sizeof(uint)), sizeof(uint));
+            }
+
+            specialization = new SpecializationInfo
+            {
+                MapEntryCount = (uint)ids.Length,
+                PMapEntries = entries,
+                DataSize = (nuint)(ids.Length * sizeof(uint)),
+                PData = values,
+            };
+        }
+
         private ShaderModule CreateShaderModule(byte[] code)
         {
             if (!_supportsShaderClipDistance && RequiresCapability(code, SpirvCapability.ClipDistance))
@@ -956,10 +1007,25 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        // The task stage's own push words (SpirvMeshTask), after the shared push data: in every layout a task-launched mesh
+        // pipeline can use when task launches are on.
+        private static readonly PushConstantRange TaskPushRange = new()
+        {
+            StageFlags = ShaderStageFlags.TaskBitExt,
+            Offset = SharpEmu.ShaderCompiler.Vulkan.SpirvMeshTask.PushOffsetBytes,
+            Size = SharpEmu.ShaderCompiler.Vulkan.SpirvMeshTask.PushWordCount * 4u,
+        };
+
         // A program that reads bindless heap records also binds the heap as set 1.
         private PipelineLayout CreatePipelineLayout(DescriptorSetLayout setLayout, ShaderStageFlags pushStages, bool bindlessHeap = false)
         {
-            var pushConstants = new PushConstantRange { StageFlags = pushStages, Offset = 0, Size = PushConstantBytes };
+            var pushRanges = stackalloc PushConstantRange[2];
+            pushRanges[0] = new PushConstantRange { StageFlags = pushStages, Offset = 0, Size = PushConstantBytes };
+            var pushRangeCount = 1u;
+            if (_supportsTaskShader && (pushStages & ShaderStageFlags.MeshBitExt) != 0)
+            {
+                pushRanges[pushRangeCount++] = TaskPushRange;
+            }
             var setLayouts = stackalloc DescriptorSetLayout[2];
             setLayouts[0] = setLayout;
             setLayouts[1] = bindlessHeap ? RequireHeapSetLayout() : default;
@@ -968,8 +1034,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 SType = StructureType.PipelineLayoutCreateInfo,
                 SetLayoutCount = bindlessHeap ? 2u : 1u,
                 PSetLayouts = setLayouts,
-                PushConstantRangeCount = 1,
-                PPushConstantRanges = &pushConstants,
+                PushConstantRangeCount = pushRangeCount,
+                PPushConstantRanges = pushRanges,
             };
             Check(_vk.CreatePipelineLayout(_device, &create, null, out var layout), "vkCreatePipelineLayout");
             return layout;
@@ -1357,6 +1423,9 @@ internal static unsafe partial class VulkanVideoPresenter
                     if (pixelCode is not null) rectanglePixelModule = CreateShaderModule(pixelCode);
                 }
                 var shaderStages = stackalloc PipelineShaderStageCreateInfo[5];
+                var taskEntries = stackalloc SpecializationMapEntry[5];
+                var taskValues = stackalloc uint[5];
+                var taskSpecialization = new SpecializationInfo();
                 var stageCount = 1u;
                 shaderStages[0] = new PipelineShaderStageCreateInfo
                 {
@@ -1415,6 +1484,25 @@ internal static unsafe partial class VulkanVideoPresenter
                         Stage = ShaderStageFlags.FragmentBit,
                         Module = expandRectangles ? rectanglePixelModule : pixelModule,
                         PName = entryPoint,
+                    };
+                }
+
+                // A task-launched mesh program takes the generic task stage, last, specialized for this program.
+                if (description.VertexStage.MeshTask is { } task)
+                {
+                    if (!_supportsTaskShader || expandRectangles || description.VertexStage.Stage != ShaderStageKind.Mesh)
+                    {
+                        throw SubmissionScheduler.Fatal("A task-launched mesh program needs task shaders and a mesh pipeline.");
+                    }
+
+                    FillTaskSpecialization(task, taskEntries, taskValues, ref taskSpecialization);
+                    shaderStages[stageCount++] = new PipelineShaderStageCreateInfo
+                    {
+                        SType = StructureType.PipelineShaderStageCreateInfo,
+                        Stage = ShaderStageFlags.TaskBitExt,
+                        Module = RequireMeshTaskModule(),
+                        PName = entryPoint,
+                        PSpecializationInfo = &taskSpecialization,
                     };
                 }
 
@@ -2016,6 +2104,12 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _shaderModules.Clear();
+            lock (MeshTaskModuleGate)
+            {
+                if (_meshTaskModule.Handle != 0) _vk.DestroyShaderModule(_device, _meshTaskModule, null);
+                _meshTaskModule = default;
+            }
+
             _rectangleStageCode.Clear();
             _shaderModuleCacheIdentities.Clear();
         }

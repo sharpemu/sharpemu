@@ -202,6 +202,9 @@ public unsafe class GpuBuffer : IDisposable
 
     public ulong DeviceAddress => _deviceAddress != 0 ? _deviceAddress : throw SubmissionScheduler.Fatal("The buffer has no device address.");
 
+    // Created with ShaderDeviceAddressBit (rings are not).
+    public bool HasDeviceAddress => _deviceAddress != 0;
+
     public int StreamScore { get; private set; }
 
     protected GpuDeviceInfo Device => _device;

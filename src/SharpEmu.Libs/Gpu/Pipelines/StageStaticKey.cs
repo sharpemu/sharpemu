@@ -127,7 +127,15 @@ public static class StageStaticKey
             key.Add(Bits(info.Geometry.ClipSpace.HalfExtentX));
             key.Add(Bits(info.Geometry.ClipSpace.HalfExtentY));
         }
+
+        // A task-launched program is another translation; the keys of the others are unchanged.
+        if (info.Geometry.TaskLaunched)
+        {
+            key.Add(TaskLaunchedMark);
+        }
     }
+
+    private const uint TaskLaunchedMark = 0x7A5C1A0Du;
 
     // The dispatch mode is static; exact thread limits arrive with each dispatch.
     public static void Build(ComputeInputInfo info, List<uint> key)

@@ -204,12 +204,22 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         UserConfigRegisters userConfig,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
-        bool depthBound)
+        bool depthBound) =>
+        GetMeshGraphicsPrograms(banks, userConfig, targetExportMapping, pixelActive, depthBound, taskLaunch: false);
+
+    // taskLaunch: an automatic indirect draw launched by the task stage (MeshTaskLaunch).
+    public GraphicsPrograms GetMeshGraphicsPrograms(
+        RegisterBanks banks,
+        UserConfigRegisters userConfig,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool taskLaunch)
     {
         var vertex = banks.Shader.Vertex;
         var context = banks.Context;
         var shaderInterface = context.ShaderInterface;
-        var mesh = PrepareMeshInput(vertex, shaderInterface, context, userConfig);
+        var mesh = PrepareMeshInput(vertex, shaderInterface, context, userConfig, taskLaunch);
         if (MeshDrawTrace.Active)
         {
             var group = userConfig.GeometryEngineControl;
@@ -524,7 +534,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             DropUnwrittenColorTargets = dropUnwritten,
             PositionStream = mesh is null ? FindPositionStream(vertexInfo) : null,
         };
-        if (keptGraphics is not null)
+        // A program with shader calls reads its call tables at every draw: its call records, targets and ready fallback can
+        // change while its registers and resources stay the same.
+        if (keptGraphics is not null && pair.Vertex.Entry is not { HasShaderCalls: true } &&
+            (pixelSource is null || pair.Pixel.Entry is not { HasShaderCalls: true }))
         {
             KeepGraphicsPrograms(keptGraphics, programs, programsStamp, vertexUserDataStamp, pixelUserDataStamp, interfaceStamp,
                 blendDependent ? banks.Stamp(RegisterStamp.PipelineState) : 0, pixelActive ? PixelOutputBlend(context) : 0, targetExportMapping, pixelActive,
@@ -534,9 +547,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return programs;
     }
 
+    // The task stage's payload (SpirvMeshTask): three words, rounded up.
+    private const uint MeshTaskPayloadBytes = 16;
+
     private MeshDrawConfiguration? PrepareMeshInput(VertexStageRegisters vertex,
         ShaderInterfaceRegisters shaderInterface, ContextRegisters context,
-        UserConfigRegisters userConfig)
+        UserConfigRegisters userConfig, bool taskLaunch = false)
     {
         var planned = MeshDrawPlanner.Create(vertex, shaderInterface, context, userConfig,
             _host.MeshLimits, _host.MeshSubgroupSize);
@@ -550,6 +566,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 IeeeMode = vertex.GeometryResource1.IeeeMode,
                 ScratchDwords = Math.Max(registered.ScratchDwords, registered.ContinuationScratchDwords),
                 ClipSpace = ResolveClipSpace(context),
+                // The task payload shares the mesh workgroup's payload-and-shared memory with the planned shared memory.
+                TaskLaunched = taskLaunch &&
+                    (configuration.Geometry.LocalDataShareDwords + configuration.Geometry.OutputVertexCapacity + 5) * 4 + MeshTaskPayloadBytes <=
+                    _host.MeshLimits.MaxSharedMemoryBytes,
             },
         };
     }

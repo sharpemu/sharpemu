@@ -1717,8 +1717,10 @@ internal sealed class ShaderProgramCache
                     $"components={outputLocations * 4} limit={limits.MaxOutputComponents}.");
             var outputBytes = mesh.OutputMemoryBytes(parameterCount,
                 limits.OutputPerVertexGranularity, limits.OutputPerPrimitiveGranularity);
-            if (outputBytes > limits.MaxOutputMemoryBytes || outputBytes > limits.MaxPayloadAndOutputMemoryBytes)
-                throw new ShaderProgramRejectedException($"The mesh output exceeds device memory limits: bytes={outputBytes} " +
+            // A task-launched program's payload counts in the payload-and-output limit.
+            var payloadBytes = mesh.TaskLaunched ? SharpEmu.ShaderCompiler.Vulkan.SpirvMeshTask.PayloadWordCount * 4 : 0u;
+            if (outputBytes > limits.MaxOutputMemoryBytes || outputBytes + payloadBytes > limits.MaxPayloadAndOutputMemoryBytes)
+                throw new ShaderProgramRejectedException($"The mesh output exceeds device memory limits: bytes={outputBytes} payload={payloadBytes} " +
                     $"output_limit={limits.MaxOutputMemoryBytes} payload_output_limit={limits.MaxPayloadAndOutputMemoryBytes}.");
         }
         var permutationDump = ShaderPermutationDump.WriteInputs(
@@ -1976,7 +1978,7 @@ internal sealed class ShaderProgramCache
                     Mesh = new MeshShaderConfiguration(info.Geometry.OutputVertexCapacity, info.Geometry.OutputPrimitiveCapacity,
                         info.Geometry.ProvokingVertex, info.Geometry.InputPrimitiveCountPerWorkgroup, info.Geometry.InputVertexCountPerWorkgroup,
                         info.Geometry.LocalDataShareDwords, info.Geometry.InputTriangleStrip, info.Execution.DeviceSubgroupLaneCount,
-                        info.Geometry.InputPointList, info.Geometry.InputLineList),
+                        info.Geometry.InputPointList, info.Geometry.InputLineList, TaskLaunched: info.Geometry.TaskLaunched),
                 };
             }
 

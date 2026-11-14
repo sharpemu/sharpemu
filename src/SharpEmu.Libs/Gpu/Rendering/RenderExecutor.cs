@@ -544,7 +544,7 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        ResolveShaderPrograms(banks, ref state);
+        ResolveShaderPrograms(banks, ref state, indirect: arguments.IndirectArgumentsAddress != 0);
         if (arguments.IndirectArgumentsAddress != 0 &&
             (state.Programs.SolidClear is not null || (state.Programs.Available && MayBeMetadataClearQuad(banks, ref state))))
         {
@@ -984,7 +984,7 @@ public sealed partial class RenderExecutor
         resolution.ValidatedUserConfigStamp = userConfigStamp;
     }
 
-    private void ResolveShaderPrograms(RegisterBanks banks, ref DrawState state, bool indexed = false)
+    private void ResolveShaderPrograms(RegisterBanks banks, ref DrawState state, bool indexed = false, bool indirect = false)
     {
         if (state.Programs is not null)
         {
@@ -1010,7 +1010,9 @@ public sealed partial class RenderExecutor
                 userConfig.PrimitiveType = (uint)GuestPrimitiveType.TriangleList;
             }
 
-            state.Programs = _pipelines.GetMeshGraphicsPrograms(banks, userConfig, targetExportMapping, state.PixelActive, state.Depth.HasTarget);
+            var taskLaunch = indirect && !indexed && MeshTaskLaunch.Active;
+            state.Programs = _pipelines.GetMeshGraphicsPrograms(banks, userConfig, targetExportMapping, state.PixelActive, state.Depth.HasTarget,
+                taskLaunch);
             return;
         }
 

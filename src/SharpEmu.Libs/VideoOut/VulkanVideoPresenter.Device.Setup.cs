@@ -781,6 +781,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _supportsShaderLayer;
         internal bool _supportsShaderClipDistance;
         internal bool _supportsMeshShader;
+        // Task shaders for task-launched mesh draws (MeshTaskLaunch), off with SHARPEMU_MESH_TASK_LAUNCH=0.
+        internal bool _supportsTaskShader;
         internal MeshShaderLimits _meshShaderLimits;
         internal delegate* unmanaged<CommandBuffer, uint, uint, uint, void> _cmdDrawMeshTasks;
         private const string FragmentShaderBarycentricExtensionName = "VK_KHR_fragment_shader_barycentric";
@@ -1127,6 +1129,16 @@ internal static unsafe partial class VulkanVideoPresenter
             _supportsMeshShader = meshExtensionAvailable && meshFeatures.MeshShader &&
                 vulkan13Features.ComputeFullSubgroups &&
                 ((ShaderStageFlags)Volatile.Read(ref _nativeSubgroupShaderStages) & ShaderStageFlags.MeshBitExt) != 0;
+            _vk.GetPhysicalDeviceProperties(_physicalDevice, out var taskLimitProperties);
+            _supportsTaskShader = MeshTaskLaunch.Configured && _supportsMeshShader && meshFeatures.TaskShader &&
+                taskLimitProperties.Limits.MaxPushConstantsSize >=
+                    SharpEmu.ShaderCompiler.Vulkan.SpirvMeshTask.PushOffsetBytes + SharpEmu.ShaderCompiler.Vulkan.SpirvMeshTask.PushWordCount * 4u;
+            MeshTaskLaunch.DeviceSupported = _supportsTaskShader;
+            if (MeshTaskLaunch.Configured)
+            {
+                Console.Error.WriteLine($"[GPU][INFO] Task-launched mesh draws: {(_supportsTaskShader ? "on" : "off")} " +
+                    $"(task_shader={(bool)meshFeatures.TaskShader} max_push={taskLimitProperties.Limits.MaxPushConstantsSize}).");
+            }
             var supportsTimelineSemaphore = vulkan12Features.TimelineSemaphore;
             var supportsBufferDeviceAddress = vulkan12Features.BufferDeviceAddress;
             var supportsSharedInt64Atomics = vulkan12Features.ShaderSharedInt64Atomics;
@@ -1334,6 +1346,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     {
                         SType = StructureType.PhysicalDeviceMeshShaderFeaturesExt,
                         MeshShader = true,
+                        TaskShader = _supportsTaskShader,
                         PNext = renderingChain,
                     };
                     renderingChain = &meshFeatures;

@@ -83,6 +83,9 @@ public class ShaderProgramInfo
     // What the host resolves for each record of each callee, by callee slot, when the program reads its records'
     // descriptors at run time (ShaderCompileRequest.CallRecordCallees).
     public IReadOnlyList<CallRecordCallee> CallRecordCallees { get; init; } = [];
+
+    // A task-launched mesh program: its pipelines take the task stage, specialized with these values.
+    public MeshTaskLaunchInfo? MeshTask { get; init; }
 }
 
 // Null RequestedGeneration means the requested link is still pending: its exact layout identity is known, but no
@@ -275,7 +278,12 @@ public readonly record struct GuestGeometryConfiguration
     public uint LocalDataShareDwords { get; init; }
     public uint PositionExportControl { get; init; }
     public ClipSpaceTransform ClipSpace { get; init; }
+    // The program is launched by the task stage (MeshTaskLaunch): it reads its draw parameters from the task payload.
+    public bool TaskLaunched { get; init; }
 }
+
+// What the task stage of a task-launched mesh program is specialized with.
+public readonly record struct MeshTaskLaunchInfo(uint PrimitivesPerGroup, bool PointList);
 
 public sealed class PixelInputInfo
 {

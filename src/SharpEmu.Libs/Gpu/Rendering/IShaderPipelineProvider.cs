@@ -157,6 +157,17 @@ public interface IShaderPipelineProvider
         int startInstanceUserData) =>
         GetGraphicsPrograms(banks, targetExportMapping, pixelActive, depthBound);
 
+    // taskLaunch: an automatic indirect draw launched by the task stage (MeshTaskLaunch). Providers without task launches
+    // never see it: the decision is made only while MeshTaskLaunch is active.
+    GraphicsPrograms GetMeshGraphicsPrograms(
+        RegisterBanks banks,
+        UserConfigRegisters userConfig,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool taskLaunch) =>
+        GetMeshGraphicsPrograms(banks, userConfig, targetExportMapping, pixelActive, depthBound);
+
     PipelineHandle CreateGraphicsPipeline(
         ReadOnlySpan<ColorTargetState> colors,
         in DepthAttachmentState depth,

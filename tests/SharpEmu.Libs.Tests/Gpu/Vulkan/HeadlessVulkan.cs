@@ -49,6 +49,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     public bool SupportsFragmentShaderBarycentric { get; private init; }
     public bool SupportsFillRectangle { get; private init; }
     public bool SupportsMeshShaders { get; private init; }
+    public bool SupportsTaskShaders { get; private init; }
     public bool CanRequireComputeSubgroup32 { get; private init; }
     public uint SubgroupSize
     {
@@ -394,6 +395,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
 
         vk.GetPhysicalDeviceFeatures(physical, out var baseFeatures);
         var meshShaders = meshFeatures.MeshShader && vulkan13Features.ComputeFullSubgroups && dynamicRendering;
+        var taskShaders = meshShaders && meshFeatures.TaskShader;
         var sizeControlProperties = new PhysicalDeviceSubgroupSizeControlProperties
         {
             SType = StructureType.PhysicalDeviceSubgroupSizeControlProperties,
@@ -471,6 +473,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             {
                 SType = StructureType.PhysicalDeviceMeshShaderFeaturesExt,
                 MeshShader = true,
+                TaskShader = taskShaders,
                 PNext = vulkan13Features.PNext,
             };
             vulkan13Features.PNext = &meshFeatures;
@@ -523,6 +526,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             SupportsFragmentShaderBarycentric = barycentric,
             SupportsFillRectangle = fillRectangle,
             SupportsMeshShaders = meshShaders,
+            SupportsTaskShaders = taskShaders,
             CanRequireComputeSubgroup32 = computeSubgroup32,
             SupportsImageInt64Atomics = imageAtomicInt64,
             SupportsBufferInt64Atomics = bufferInt64Atomics,
