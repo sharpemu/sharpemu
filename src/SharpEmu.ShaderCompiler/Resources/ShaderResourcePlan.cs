@@ -204,7 +204,7 @@ public sealed partial class ShaderResourcePlan
         int dynamicUserData = -1, BufferDescriptorNormalizer? normalizeBufferDescriptor = null,
         ImageDescriptorNormalizer? normalizeImageDescriptor = null, Func<long>? imageNormalizationVersion = null,
         StableImageDescriptorLimits stableImageLimits = default, bool? scalarDataOnDevice = null,
-        bool? deviceRecordCounts = null)
+        bool? deviceRecordCounts = null, bool? runtimeImageSwizzles = null)
     {
         // Mesh system inputs are not uniform user data, even when a GS pointer occupies s0:s1.
         var graph = ScalarGraphDiskCache.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize,
@@ -272,6 +272,8 @@ public sealed partial class ShaderResourcePlan
             plan.Info.UsesDeviceAddressFallback = true;
         if (callMarks && program.Instructions.Any(static instruction => instruction.Control is ShaderCallFaultControl { ReturnPc: not null }))
             plan.Info.UsesCallMarks = true;
+        // Storage image selects as shader data (RuntimeImageSwizzle, SHARPEMU_RUNTIME_IMAGE_SWIZZLE unless the caller says).
+        plan.Info.UsesRuntimeImageSwizzles = runtimeImageSwizzles ?? RuntimeImageSwizzle.Enabled;
         plan.IndirectImages = tracked.IndirectImages;
         plan.BufferCandidateTables = tracked.BufferCandidateTables;
         plan.DynamicReads = plan.DynamicReads.Where(read => !tracked.IndirectReads.Contains(read)).ToList();

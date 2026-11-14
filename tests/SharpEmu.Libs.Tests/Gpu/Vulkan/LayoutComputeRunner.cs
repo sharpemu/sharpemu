@@ -220,6 +220,7 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         ulong[]? callArguments = null,
         ulong[]? callTargets = null,
         uint[]? bufferStrides = null,
+        IReadOnlyList<uint[]>? imageDescriptors = null,
         uint[]? tessellationData = null)
     {
         var vk = _harness.Vk;
@@ -263,6 +264,12 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
             if (bufferStrides?.Length != layout.BufferStrideCount) throw new InvalidOperationException("The dispatch requires its buffer strides.");
             for (var index = 0; index < bufferStrides.Length; index++)
                 shaderData[layout.BufferStridesDword + (uint)index / 2] |= (bufferStrides[index] & 0x3FFF) << (index % 2 * 16);
+        }
+
+        // Each written image's store channel map, as BindBuffers writes it from the bound T#s.
+        if (imageDescriptors is not null)
+        {
+            RuntimeImageSwizzle.WriteStoreMaps(shaderData, layout, _request.Resources.Info.Images, imageDescriptors);
         }
 
         if (layout.UsesDispatchThreadLimits)

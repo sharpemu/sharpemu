@@ -417,6 +417,28 @@ public sealed partial class SpirvModuleBuilder
         return result;
     }
 
+    // A load, in the current function's entry block, of a word the invocation never writes (the host's shader data), through
+    // constant indices: operations of it and of constants then join the entry too (CanHoistToEntry), once per function.
+    // Zero when the entry block is not open or an index is not a constant.
+    public uint EntryWordLoad(uint resultType, uint pointerType, uint variable, params uint[] constantIndices)
+    {
+        if (!IsEntryAvailable() || constantIndices.Any(index => !_scalarConstantValues.ContainsKey(index)))
+        {
+            return 0;
+        }
+
+        uint[] chain = [variable, .. constantIndices];
+        var key = new InstructionKey(SpirvOp.AccessChain, pointerType, chain);
+        if (!_entryOperations.TryGetValue(key, out var pointer))
+        {
+            pointer = AppendToEntry(SpirvOp.AccessChain, pointerType, chain);
+            _entryOperations[key] = pointer;
+            _definitions[pointer] = new Definition(SpirvOp.AccessChain, pointerType, chain);
+        }
+
+        return EntryLoad(resultType, pointer);
+    }
+
     private bool IsEntryAvailable() => CurrentFunction != 0 && !_entryLabelPending && _entryLabelOffset >= 0;
 
     private bool IsImmutablePointer(uint pointer) =>

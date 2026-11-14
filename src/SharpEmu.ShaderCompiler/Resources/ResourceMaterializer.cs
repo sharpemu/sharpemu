@@ -1957,7 +1957,12 @@ public static partial class ResourceMaterializer
                 MipStatistics = RecordMipStatistics && plan.Stage == ShaderStage.Pixel && !storage && ((descriptor[5] >> 25) & 1) != 0,
             };
             var conversionFormat = ImageConversionFormat(format);
-            var shaderSwizzle = storage || conversionFormat != GuestImageFormat.Invalid ? descriptor[3] & 0xFFF : image.ShaderSwizzle;
+            // A storage image with no conversion format takes its select from shader data (RuntimeImageSwizzle), so the
+            // module keeps the identity select for every select bound.
+            var runtimeSwizzle = storage && conversionFormat == GuestImageFormat.Invalid && info.UsesRuntimeImageSwizzles &&
+                image.IndirectRoot == DescriptorConstants.NoIndex;
+            var shaderSwizzle = runtimeSwizzle ? DescriptorConstants.IdentityImageSwizzle
+                : storage || conversionFormat != GuestImageFormat.Invalid ? descriptor[3] & 0xFFF : image.ShaderSwizzle;
             var rawSintStorage = storage && format == GuestImageFormat.Format32Sint && baseImage.Written && !baseImage.Read && !baseImage.Atomic;
             var numericClass = GuestImageFormat.SampledNumericClass(format);
             if (storage)

@@ -375,6 +375,10 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     // The V# stride of every buffer binding, two to a dword (16 bits each), when some access indexes its buffer
     // (ShaderResourceInfo.UsesIndexedBuffers); otherwise none.
     public uint BufferStrideCount { get; init; }
+
+    // The store channel map (RuntimeImageSwizzle.StoreChannelMap) of every written image that takes its destination select
+    // from shader data (ShaderResourceInfo.UsesRuntimeImageSwizzles), in image order, two to a dword (16 bits each).
+    public uint StorageImageSwizzleCount { get; init; }
     // The program reads bindless heap records through descriptor set 1 (see BindlessHeap).
     public bool UsesBindlessHeap { get; init; }
     public IReadOnlyList<uint> UserDataRegisters { get; init; } = [];
@@ -405,7 +409,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public uint BufferStridesDword => CallTargetsDword + CallTargetCount * 2;
 
-    public uint ShaderDataDwordCount => BufferStridesDword + (BufferStrideCount + 1) / 2;
+    public uint StorageImageSwizzlesDword => BufferStridesDword + (BufferStrideCount + 1) / 2;
+
+    public uint ShaderDataDwordCount => StorageImageSwizzlesDword + (StorageImageSwizzleCount + 1) / 2;
 
     public bool UsesPushData => PushDataStartDword != PushData.NoStart;
 
@@ -664,9 +670,11 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         var mipStatisticsCount = info.Images.Any(static image => image.MipStatistics) ? (uint)info.Images.Count : 0u;
         usesBufferLengths &= memoryOffsetCount != 0 && !usesTableBlock;
         var bufferStrideCount = info.UsesIndexedBuffers ? (uint)info.Buffers.Count : 0u;
+        var storageImageSwizzleCount = info.UsesRuntimeImageSwizzles ? RuntimeImageSwizzle.SlotCount(info.Images) : 0u;
         var shaderDataDwords = memoryOffsetDword + (usesTableBlock ? 2u : (memoryOffsetCount + 3) / 4) + (usesBufferLengths ? memoryOffsetCount : 0) +
             (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesMeshDrawParameters ? 6u : 0u) +
-            (usesTessellationData ? Gen5TessellationData.DwordCount : 0u) + callArgumentCount * 2 + callTargetCount * 2;
+            (usesTessellationData ? Gen5TessellationData.DwordCount : 0u) + callArgumentCount * 2 + callTargetCount * 2 +
+            (bufferStrideCount + 1) / 2 + (storageImageSwizzleCount + 1) / 2;
         var pushStart = usesTessellationData ? PushData.NoStart : PushData.StartFor(pushDataStartDword, shaderDataDwords);
         var descriptors = new List<DescriptorBinding>();
         if (info.Buffers.Count != 0 && !usesTableBlock)
@@ -775,6 +783,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             CallArgumentCount = callArgumentCount,
             CallTargetCount = callTargetCount,
             BufferStrideCount = bufferStrideCount,
+            StorageImageSwizzleCount = storageImageSwizzleCount,
             UsesBindlessHeap = info.UsesBindlessHeap,
             UserDataRegisters = userDataRegisters,
             Descriptors = descriptors,
@@ -799,6 +808,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         CallArgumentCount == other.CallArgumentCount &&
         CallTargetCount == other.CallTargetCount &&
         BufferStrideCount == other.BufferStrideCount &&
+        StorageImageSwizzleCount == other.StorageImageSwizzleCount &&
         UsesBindlessHeap == other.UsesBindlessHeap &&
         UserDataRegisters.SequenceEqual(other.UserDataRegisters) &&
         Descriptors.Count == other.Descriptors.Count &&

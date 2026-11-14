@@ -1565,6 +1565,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             WriteBufferStrides(prepared, shaderData);
+            // Each written image's store channel map, from its bound T# (RuntimeImageSwizzle).
+            RuntimeImageSwizzle.WriteStoreMaps(shaderData, layout, info.Images, snapshot.Images);
             if (layout.MipStatisticsCount != 0)
             {
                 if (_worker && _presenter._lodStatistics is null)

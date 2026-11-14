@@ -201,6 +201,10 @@ public sealed class ShaderResourceInfo
     // (BindingLayout.BufferStridesDword), which the access multiplies the index by.
     public bool UsesIndexedBuffers { get; set; }
 
+    // Storage images take their destination select from shader data (RuntimeImageSwizzle); the layout carries the store
+    // channel map of each written one (BindingLayout.StorageImageSwizzlesDword).
+    public bool UsesRuntimeImageSwizzles { get; set; }
+
     public ShaderResourceInfo Clone() => new()
     {
         Buffers = Buffers.Select(buffer => buffer.Clone()).ToList(),
@@ -222,6 +226,7 @@ public sealed class ShaderResourceInfo
         UsesCallMarks = UsesCallMarks,
         UsesDeviceAddressFallback = UsesDeviceAddressFallback,
         UsesIndexedBuffers = UsesIndexedBuffers,
+        UsesRuntimeImageSwizzles = UsesRuntimeImageSwizzles,
     };
 }
 

@@ -259,7 +259,10 @@ public static partial class Gen5SpirvTranslator
             uint ConversionFormat = 0,
             uint ShaderSwizzle = 0,
             int EmulatedCompareFunction = -1,
-            int ResourceIndex = -1);
+            int ResourceIndex = -1,
+            // The slot of the image's store channel map in shader data (RuntimeImageSwizzle.Slot), or -1 when its stores
+            // keep the select of the module.
+            int SwizzleSlot = -1);
 
         private readonly record struct SpirvVertexInput(
             uint Variable,
@@ -6412,6 +6415,13 @@ public static partial class Gen5SpirvTranslator
                     image,
                     0,
                     coordinateComponentCount);
+                if (resource.SwizzleSlot >= 0)
+                {
+                    var mapped = PackImageTexel(resource, RuntimeSwizzleStoreTexel(image, resource));
+                    EmitExecConditional(() => _module.AddStatement(SpirvOp.ImageWrite, imageObject, coordinates, mapped));
+                    return true;
+                }
+
                 var components = new uint[4];
                 for (var component = 0; component < components.Length; component++)
                 {
@@ -7560,6 +7570,42 @@ public static partial class Gen5SpirvTranslator
             return BitwiseAnd(
                 ShiftRightLogical(raw, UInt((uint)((component & 1) * 16))),
                 UInt(0xFFFF));
+        }
+
+        // A store's texel when the image's select is shader data (RuntimeImageSwizzle): the words of the components the
+        // dmask enables, in data-register order (zero for the others), each moved to the physical channel its slot's map names
+        // (a code xor its channel; 4 stores zero), as GetImageStoreSourceIndex places them for a select baked into the module.
+        // The map's decode is of an entry load and constants, so it runs once per function; a store adds a pick and a select
+        // per channel. The words are the bits the baked store writes, cast once.
+        private uint RuntimeSwizzleStoreTexel(Gen5ImageControl image, SpirvImageResource resource)
+        {
+            var dmask = (image.Dmask & 0xFu) == 0 ? 1u : image.Dmask & 0xFu;
+            var logical = new uint[4];
+            var source = 0u;
+            for (var component = 0; component < logical.Length; component++)
+            {
+                logical[component] = (dmask & (1u << component)) != 0 ? LoadImageStoreComponent(image, resource, source++) : UInt(0);
+            }
+
+            var words = _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec4Type, logical);
+            var slot = (uint)resource.SwizzleSlot;
+            var map = LoadShaderDataDwordAtEntry(_request.Bindings.StorageImageSwizzlesDword + slot / 2);
+            var physical = new uint[4];
+            for (var channel = 0u; channel < 4; channel++)
+            {
+                var code = _module.AddInstruction(SpirvOp.BitFieldUExtract, _uintType, map, UInt(slot % 2 * 16 + channel * 3), UInt(3));
+                if (channel != 0)
+                {
+                    code = _module.AddInstruction(SpirvOp.BitwiseXor, _uintType, code, UInt(channel));
+                }
+
+                var stored = _module.AddInstruction(SpirvOp.ULessThan, _boolType, code, UInt(4));
+                var picked = _module.AddInstruction(SpirvOp.VectorExtractDynamic, _uintType, words, BitwiseAnd(code, UInt(3)));
+                physical[channel] = _module.AddInstruction(SpirvOp.Select, _uintType, stored, picked, UInt(0));
+            }
+
+            var texel = _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec4Type, physical);
+            return resource.ComponentKind == ImageComponentKind.Uint ? texel : Bitcast(resource.VectorType, texel);
         }
 
         private uint LoadImageStoreComponent(

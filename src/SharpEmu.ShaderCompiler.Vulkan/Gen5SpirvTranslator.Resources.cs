@@ -827,6 +827,19 @@ public static partial class Gen5SpirvTranslator
             return LoadBlockWord(_shaderData, dwordIndex);
         }
 
+        // A shader-data dword the layout places (inside the push data or the block the host binds whole), loaded in the current
+        // function's entry block: the host writes shader data before the dispatch and the invocation never writes it, so the
+        // operations of it and of constants run once per function (SpirvModuleBuilder.EntryWordLoad). In place when the entry
+        // is not open.
+        private uint LoadShaderDataDwordAtEntry(uint dwordIndex)
+        {
+            var layout = _request.Bindings;
+            var value = layout.UsesPushData
+                ? _module.EntryWordLoad(_uintType, _pushConstantUintPointer, _pushData, UInt(0), UInt(layout.PushDataStartDword + dwordIndex))
+                : _module.EntryWordLoad(_uintType, _storageUintPointer, _shaderData, UInt(0), UInt(dwordIndex));
+            return value != 0 ? value : LoadShaderDataDword(UInt(dwordIndex));
+        }
+
         // A bounds-checked dword of a storage block; outside the block reads zero. The host binds these blocks as whole
         // dwords (UploadDwords, the 64 KiB GDS), so robustBufferAccess2 bounds them where the length does.
         private uint LoadBlockWord(uint block, uint dwordIndex)
@@ -2516,7 +2529,9 @@ public static partial class Gen5SpirvTranslator
                 imageInfo.ConversionFormat,
                 imageInfo.ShaderSwizzle,
                 imageInfo.EmulatedCompareFunction,
-                resourceIndex);
+                resourceIndex,
+                SwizzleSlot: fromHeap || request.Bindings.StorageImageSwizzleCount == 0 ? -1
+                    : RuntimeImageSwizzle.Slot(info.Images, resourceIndex));
             dstSelect = imageInfo.ShaderSwizzle;
             return true;
         }

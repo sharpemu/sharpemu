@@ -2224,7 +2224,9 @@ internal sealed partial class ShaderProgramCache
                 normalizeBufferDescriptor: frontend?.NormalizeBufferDescriptor,
                 normalizeImageDescriptor: frontend?.NormalizeImageDescriptor,
                 imageNormalizationVersion: frontend?.ImageNormalizationVersion);
-            var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
+            // A record's storage image selects as the session keeps them (RuntimeImageSwizzle.Canonical).
+            var specialization = RuntimeImageSwizzle.Canonical(plan, record.Specialization);
+            var resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor,
                 record.Info.DispatchThreadDimensions, usesBufferLengths: frontend?.RequiresExplicitBufferLengths ?? false,
                 tableBlocks: tableBlocks);
@@ -2264,7 +2266,9 @@ internal sealed partial class ShaderProgramCache
                 waveSize: 32, bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: host.SupportsBindlessHeap,
                 stableImageLimits: host.GraphicsImageDescriptorLimits,
                 deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts);
-            var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
+            // A record's storage image selects as the session keeps them (RuntimeImageSwizzle.Canonical).
+            var specialization = RuntimeImageSwizzle.Canonical(plan, record.Specialization);
+            var resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor, false,
                 tableBlocks: UsesTableBlocks(host, ShaderStage.Pixel));
             var options = new StageCompileOptions
@@ -2280,7 +2284,7 @@ internal sealed partial class ShaderProgramCache
             var key = new ProgramKey(ShaderStage.Pixel, record.Hash, record.UserDataCount, record.CodeSize,
                 record.ContinuationAddressOffset, [.. state]);
             return TranslationDiskCache.TryTranslate(compiler, request,
-                    TranslationDiskCache.Key(key, record.UserDataBase, record.Specialization, record.PushDataCursor, request),
+                    TranslationDiskCache.Key(key, record.UserDataBase, specialization, record.PushDataCursor, request),
                     out compiled, out error) && compiled is not null;
         }
         catch (Exception exception)
@@ -2335,7 +2339,9 @@ internal sealed partial class ShaderProgramCache
                 bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: host.SupportsBindlessHeap,
                 stableImageLimits: host.GraphicsImageDescriptorLimits,
                 deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts);
-            var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
+            // A record's storage image selects as the session keeps them (RuntimeImageSwizzle.Canonical).
+            var specialization = RuntimeImageSwizzle.Canonical(plan, record.Specialization);
+            var resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor, false,
                 usesMeshDrawParameters: record.Mesh, tableBlocks: UsesTableBlocks(host, stage));
             var request = record.Mesh
@@ -2347,7 +2353,7 @@ internal sealed partial class ShaderProgramCache
             var key = new ProgramKey(stage, record.Hash, record.UserDataCount, record.CodeSize, record.ContinuationAddressOffset,
                 [.. state]);
             return TranslationDiskCache.TryTranslate(compiler, request,
-                    TranslationDiskCache.Key(key, record.UserDataBase, record.Specialization, record.PushDataCursor, request),
+                    TranslationDiskCache.Key(key, record.UserDataBase, specialization, record.PushDataCursor, request),
                     out compiled, out error) && compiled is not null;
         }
         catch (Exception exception)
