@@ -8,6 +8,7 @@ using SharpEmu.Core.Cpu.Native;
 using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Core.Cpu;
 
@@ -489,6 +490,7 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
             return false;
         }
 
+        KernelExports.ConfigureProcessArguments(arguments.Count, entryParamsAddress + 0x08);
         if (processArguments is not null)
         {
             for (var index = 0; index <= argumentAddresses.Length; index++)
