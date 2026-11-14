@@ -48,6 +48,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool _supportsDualSourceBlend;
         internal bool _supportsDepthBiasClamp;
         private bool _supportsShaderSignedZeroInfNanPreserveFloat32;
+        private bool _supportsPipelineBinaries;
         private uint _maxColorAttachments;
         internal Device _device;
         private PipelineCache _pipelineCache;
@@ -88,6 +89,13 @@ internal static unsafe partial class VulkanVideoPresenter
             SelectPhysicalDevice();
             CreateDevice();
             CreatePipelineCache();
+            if (_supportsPipelineBinaries)
+            {
+                InitializePipelineBinaries(VulkanPipelineCacheStorage.ResolvePath(
+                    VideoOutExports.GetApplicationTitleId(),
+                    Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_PATH")) + ".binaries");
+            }
+
             CreateSwapchain();
             CreateCommandResources();
             CreateGuestDrawResources();
@@ -949,6 +957,21 @@ internal static unsafe partial class VulkanVideoPresenter
                 supportsMaintenance5 = maintenance5Features.Maintenance5;
             }
 
+            var pipelineBinaryFeatures = new PhysicalDevicePipelineBinaryFeaturesKHR
+            {
+                SType = StructureType.PhysicalDevicePipelineBinaryFeaturesKhr,
+            };
+            if (supportsMaintenance5 && PipelineBinariesRequested() && IsDeviceExtensionAvailable(PipelineBinaryExtensionName))
+            {
+                var pipelineBinaryQuery = new PhysicalDeviceFeatures2
+                {
+                    SType = StructureType.PhysicalDeviceFeatures2,
+                    PNext = &pipelineBinaryFeatures,
+                };
+                _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &pipelineBinaryQuery);
+                _supportsPipelineBinaries = pipelineBinaryFeatures.PipelineBinaries;
+            }
+
             var imageViewMinLodFeatures = new PhysicalDeviceImageViewMinLodFeaturesEXT
             {
                 SType = StructureType.PhysicalDeviceImageViewMinLodFeaturesExt,
@@ -1143,6 +1166,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var imageAtomicInt64Extension = (byte*)SilkMarshal.StringToPtr(ShaderImageAtomicInt64ExtensionName);
             var unifiedImageLayoutsExtension = (byte*)SilkMarshal.StringToPtr(UnifiedImageLayoutsExtensionName);
             var shaderClockExtension = (byte*)SilkMarshal.StringToPtr(ShaderClockExtensionName);
+            var pipelineBinaryExtension = (byte*)SilkMarshal.StringToPtr(PipelineBinaryExtensionName);
             try
             {
                 var extensions = stackalloc byte*[24];
@@ -1184,6 +1208,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (supportsMaintenance5)
                 {
                     extensions[extensionCount++] = maintenance5Extension;
+                }
+
+                if (_supportsPipelineBinaries)
+                {
+                    extensions[extensionCount++] = pipelineBinaryExtension;
                 }
 
                 if (_supportsImageViewMinLod)
@@ -1296,6 +1325,16 @@ internal static unsafe partial class VulkanVideoPresenter
                         PNext = renderingChain,
                     };
                     renderingChain = &maintenance5Features;
+                }
+                if (_supportsPipelineBinaries)
+                {
+                    pipelineBinaryFeatures = new PhysicalDevicePipelineBinaryFeaturesKHR
+                    {
+                        SType = StructureType.PhysicalDevicePipelineBinaryFeaturesKhr,
+                        PipelineBinaries = true,
+                        PNext = renderingChain,
+                    };
+                    renderingChain = &pipelineBinaryFeatures;
                 }
                 if (_supportsImageViewMinLod)
                 {
@@ -1420,6 +1459,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)fillRectangleExtension);
                 SilkMarshal.Free((nint)imageAtomicInt64Extension);
                 SilkMarshal.Free((nint)shaderClockExtension);
+                SilkMarshal.Free((nint)pipelineBinaryExtension);
                 SilkMarshal.Free((nint)robustness2Extension);
                 SilkMarshal.Free((nint)portabilitySubsetExtension);
                 SilkMarshal.Free((nint)colorWriteEnableExtension);

@@ -1423,16 +1423,16 @@ internal static unsafe partial class VulkanVideoPresenter
                     var reportStart = Stopwatch.GetTimestamp();
                     var cache = prewarm ? _pipelineCache : GetGuestPipelineCache(GraphicsCacheKey(description.VertexStage.Hash,
                         description.PixelStage?.Hash ?? 0, vertexModule.Handle, pixelModule.Handle));
-                    var creationStart = RenderPhaseProfile.Enabled ? Stopwatch.GetTimestamp() : 0;
                     Result creationResult;
                     Pipeline pipeline;
+                    double creationMilliseconds;
                     using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsPipelineDriver))
                     {
-                        creationResult = _vk.CreateGraphicsPipelines(_device, cache, 1, &pipelineInfo, null, out pipeline);
+                        creationResult = CreatePipelineWithBinaries(&pipelineInfo, &pipelineInfo.PNext, cache,
+                            &CreateGraphicsPipelineCall, out pipeline, out creationMilliseconds);
                     }
                     if (RenderPhaseProfile.Enabled && !prewarm)
                     {
-                        var creationMilliseconds = Stopwatch.GetElapsedTime(creationStart).TotalMilliseconds;
                         Console.Error.WriteLine($"[PERF][PIPELINE_DRIVER] kind=graphics stage={description.VertexStage.Stage} vertex=0x{description.VertexStage.Hash:X16} pixel=0x{description.PixelStage?.Hash ?? 0:X16} topology={topology} driver_ms={creationMilliseconds:F3} result={creationResult}");
                     }
                     Check(creationResult,
@@ -1509,15 +1509,15 @@ internal static unsafe partial class VulkanVideoPresenter
                 };
                 var reportStart = Stopwatch.GetTimestamp();
                 var cache = GetGuestPipelineCache(ComputeCacheKey(description.Stage.Hash, computeModule.Handle));
-                var creationStart = RenderPhaseProfile.Enabled ? Stopwatch.GetTimestamp() : 0;
                 Result creationResult;
+                double creationMilliseconds;
                 using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ComputePipelineDriver))
                 {
-                    creationResult = _vk.CreateComputePipelines(_device, cache, 1, &pipelineInfo, null, out pipeline);
+                    creationResult = CreatePipelineWithBinaries(&pipelineInfo, &pipelineInfo.PNext, cache,
+                        &CreateComputePipelineCall, out pipeline, out creationMilliseconds);
                 }
                 if (RenderPhaseProfile.Enabled)
                 {
-                    var creationMilliseconds = Stopwatch.GetElapsedTime(creationStart).TotalMilliseconds;
                     Console.Error.WriteLine($"[PERF][PIPELINE_DRIVER] kind=compute compute=0x{description.Stage.Hash:X16} driver_ms={creationMilliseconds:F3} result={creationResult}");
                 }
                 Check(creationResult, $"vkCreateComputePipelines(rendering) hash=0x{description.Stage.Hash:X16}");
@@ -1725,7 +1725,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // vkCreateComputePipelines is the only call here; Vulkan synchronises host
         // access to the pipeline cache internally, so several may run at once.
-        private static Pipeline CompileComputePipeline(
+        private Pipeline CompileComputePipeline(
             Vk vk,
             Device device,
             PipelineCache cache,
@@ -1755,7 +1755,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     Stage = stageInfo,
                     Layout = layout,
                 };
-                var result = vk.CreateComputePipelines(device, cache, 1, &pipelineInfo, null, out var pipeline);
+                var result = CreatePipelineWithBinaries(&pipelineInfo, &pipelineInfo.PNext, cache,
+                    &CreateComputePipelineCall, out var pipeline, out _);
                 if (result != Result.Success)
                 {
                     throw SubmissionScheduler.Fatal($"vkCreateComputePipelines(async) failed: {result}.");
