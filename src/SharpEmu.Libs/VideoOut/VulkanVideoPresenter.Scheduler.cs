@@ -114,11 +114,14 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        // The image store follows the buffer store; readback of linear images stays off.
+        // The image store follows the buffer store. A guest can read a linear image the GPU wrote on the CPU, such as
+        // an occlusion buffer a compute shader fills, so linear images the GPU writes are read back to guest memory;
+        // SHARPEMU_READBACK_LINEAR_IMAGES=0 turns that readback off.
         private void CreateImageCache()
         {
             var (memory, _, backing) = RequireGuestMemory("image store");
-            _imageCache = new GuestImageCache(_deviceInfo, _scheduler, memory.Pages, _bufferCache, backing, readbackLinearImages: false);
+            _imageCache = new GuestImageCache(_deviceInfo, _scheduler, memory.Pages, _bufferCache, backing,
+                readbackLinearImages: Environment.GetEnvironmentVariable("SHARPEMU_READBACK_LINEAR_IMAGES") != "0");
             _bufferCache.ImageCache = _imageCache;
             _samplerStore = new SamplerStore(_deviceInfo);
         }
