@@ -784,6 +784,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (MeshDrawTrace.Active) MeshDrawTrace.Write("stage-binding", $"stage={stage.Program?.Stage} hash=0x{stage.Program?.Hash:X16} shaderBase=0x{stage.ShaderBase:X16} userData={string.Join(",", stage.Resources.UserData.Select(value => value.ToString("X8")))}");
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DescriptorPreparation);
+            using var costScope = DescriptorCostProfile.Measure(DescriptorCostProfile.Op.Prepare);
             var program = RequireProgram(stage);
             if (_worker && program.Frontend is { RequiresOrderedImagePreparation: true } orderedFrontend)
             {
@@ -1262,6 +1263,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public void BindResources(IPreparedBindings prepared)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DescriptorPreparation);
+            using var costScope = DescriptorCostProfile.Measure(DescriptorCostProfile.Op.BindResources);
             var stage = (PreparedStageBindings)prepared;
             var info = stage.Resources.Info;
             using var stallProfile = DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.Bind, stage.Program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count);
@@ -1273,9 +1275,15 @@ internal static unsafe partial class VulkanVideoPresenter
             try
             {
                 using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.BindBuffers, stage.Program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
+                {
+                    using var bufferCost = DescriptorCostProfile.Measure(DescriptorCostProfile.Op.BindBuffers);
                     BindBuffers(stage);
+                }
                 using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.ObtainAddressRanges, stage.Program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
+                {
+                    using var rangeCost = DescriptorCostProfile.Measure(DescriptorCostProfile.Op.ObtainAddressRanges);
                     ObtainDeviceAddressRanges(stage);
+                }
             }
             finally
             {
@@ -1293,7 +1301,10 @@ internal static unsafe partial class VulkanVideoPresenter
             else
             {
                 using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.BindImages, stage.Program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
+                {
+                    using var imageCost = DescriptorCostProfile.Measure(DescriptorCostProfile.Op.BindImages);
                     BindImages(stage);
+                }
             }
 
             _preparedTextures.Add(stage.Textures);
@@ -1807,6 +1818,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public void CommitBindings(PipelineBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DescriptorCommit);
+            using var costScope = DescriptorCostProfile.Measure(DescriptorCostProfile.Op.Commit);
             var preparation = RequirePreparation();
             var entry = RequirePipelineEntry(in pipeline);
             var command = BeginBatchedGuestStateCommands();
@@ -2097,12 +2109,15 @@ internal static unsafe partial class VulkanVideoPresenter
                     PushConstantsShadowed(command, entry.Layout, pushStages, pushData);
                 }
 
+                var driverCost = DescriptorCostProfile.Measure(DescriptorCostProfile.Op.CommitDriver);
                 if (writeIndex != 0 && DescriptorsAlreadyBound(command, bindPoint, entry.Layout, writes[..writeIndex]))
                 {
                     Interlocked.Increment(ref _descriptorsShadowed);
+                    DescriptorCostProfile.NoteCommit(writeIndex, bufferIndex, imageIndex, entry.UsesPushDescriptors, shadowed: true);
                 }
                 else if (writeIndex != 0)
                 {
+                    DescriptorCostProfile.NoteCommit(writeIndex, bufferIndex, imageIndex, entry.UsesPushDescriptors, shadowed: false);
                     fixed (WriteDescriptorSet* writePointer = writes)
                     {
                         if (entry.UsesPushDescriptors)
@@ -2136,6 +2151,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
                 }
 
+                driverCost.Dispose();
                 if (entry.UsesBindlessHeap)
                 {
                     if (_worker)

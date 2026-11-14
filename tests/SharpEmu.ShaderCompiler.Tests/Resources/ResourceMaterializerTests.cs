@@ -89,7 +89,7 @@ public sealed class ResourceMaterializerTests
 
         Assert.Equal(supported, success);
         Assert.Equal(
-            supported ? ResourceMaterializationFailure.None : ResourceMaterializationFailure.Other,
+            supported ? ResourceMaterializationFailure.None : ResourceMaterializationFailure.UnsupportedAtomicImageFormat,
             failure);
         if (supported)
         {

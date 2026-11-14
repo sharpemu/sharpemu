@@ -13,6 +13,9 @@ namespace SharpEmu.Core.Cpu;
 
 public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
 {
+    // Set after a module initializer frame returns so the next frame keeps the threads it started.
+    private bool _keepThreadsForNextFrame;
+
     private enum EntryFrameKind
     {
         ProcessEntry,
@@ -304,6 +307,9 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
         _nativeCpuBackend ??= new DirectExecutionBackend(_moduleManager);
         // Let backend stall reports reference the same frame as entry.
         (_nativeCpuBackend as DirectExecutionBackend)?.SetActiveDebugFrame(debugFrame);
+        (_nativeCpuBackend as DirectExecutionBackend)?.SetEntryReturnWaitsForBlockedThreads(frameKind == EntryFrameKind.ProcessEntry);
+        (_nativeCpuBackend as DirectExecutionBackend)?.SetPreserveGuestThreadsOnNextExecute(_keepThreadsForNextFrame);
+        _keepThreadsForNextFrame = false;
         if (_nativeCpuBackend.TryExecute(
                 context,
                 entryPoint,
@@ -325,6 +331,9 @@ public sealed class CpuDispatcher : ICpuDispatcher, IDisposable
                 totalInstructions: 0,
                 importsHit: 0,
                 uniqueNidsHit: 0);
+            _keepThreadsForNextFrame =
+                frameKind == EntryFrameKind.ModuleInitializer &&
+                nativeResult == OrbisGen2Result.ORBIS_GEN2_OK;
             return nativeResult;
         }
 

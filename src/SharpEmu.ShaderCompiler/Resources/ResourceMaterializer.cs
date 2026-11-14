@@ -1909,6 +1909,9 @@ public static partial class ResourceMaterializer
                 : baseImage.Atomic && format != GuestImageFormat.Format32Uint &&
                     GuestImageFormat.SampledNumericClass(format) != ImageNumericClass.Float)
             {
+                // The descriptor words are read when the draw is translated; a table the guest is still rewriting
+                // can hold a format no atomic accepts. The caller skips this draw instead of ending the process.
+                failure = ResourceMaterializationFailure.UnsupportedAtomicImageFormat;
                 return Fail($"atomic image descriptor {index} uses unsupported format {format}");
             }
 

@@ -449,6 +449,19 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void RunDeferredWork(AgcExports.DeferredWork work)
         {
+            var timelineStart = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
+            try
+            {
+                RunDeferredWorkBody(work);
+            }
+            finally
+            {
+                SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineStart, "render:translate+record deferred draw/dispatch", 30);
+            }
+        }
+
+        private void RunDeferredWorkBody(AgcExports.DeferredWork work)
+        {
             if (work is AgcExports.GlobalBarrierWork)
             {
                 EmitGlobalBarrier();

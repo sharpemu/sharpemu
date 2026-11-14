@@ -445,7 +445,7 @@ internal sealed class ShaderProgramCache
         }
         catch (ShaderProgramRejectedException exception)
         {
-            if (strictShaders)
+            if (strictShaders && !exception.Transient)
             {
                 throw SubmissionScheduler.Fatal(exception.Message);
             }
@@ -457,7 +457,11 @@ internal sealed class ShaderProgramCache
         }
     }
 
-    private sealed class ShaderProgramRejectedException(string message) : Exception(message);
+    // Transient: the failure came from guest memory read mid-update, so strict mode still skips the draw.
+    private sealed class ShaderProgramRejectedException(string message, bool transient = false) : Exception(message)
+    {
+        public bool Transient { get; } = transient;
+    }
 
     private sealed class ShaderProgramPendingException() : Exception("The linked program is still being prepared.");
 
@@ -483,7 +487,7 @@ internal sealed class ShaderProgramCache
         }
         catch (ShaderProgramRejectedException exception)
         {
-            if (strictShaders)
+            if (strictShaders && !exception.Transient)
             {
                 throw SubmissionScheduler.Fatal(exception.Message);
             }
@@ -507,6 +511,7 @@ internal sealed class ShaderProgramCache
         }
 
         var sourceWasCached = entry is not null;
+        PipelineCacheStats.Lookup(PipelineCacheStats.Kind.ProgramEntry, sourceWasCached);
         if (RenderTrace.Enabled && RenderTrace.Pipeline())
         {
             RenderTrace.Write($"ProgramCache lookup stage={source.Label} hash=0x{source.Hash:X16} cached={entry is not null} permutations={entry?.Permutations.Count ?? 0}");
@@ -514,6 +519,7 @@ internal sealed class ShaderProgramCache
 
         if (entry is null)
         {
+            var entryMissStarted = PipelineCacheStats.MissBegin();
             lock (_gate)
             {
                 entry = FindEntry(source, options, out key);
@@ -527,6 +533,8 @@ internal sealed class ShaderProgramCache
                     ShaderCacheCounters.CountProgram();
                 }
             }
+
+            PipelineCacheStats.MissEnd(PipelineCacheStats.Kind.ProgramEntry, entryMissStarted, $"stage={source.Label} hash=0x{source.Hash:X16}");
         }
 
         return CompleteProgram(entry, sourceWasCached, key, source, options, ref pushDataCursor, out stage, deferLinking, runtimeFallback);
@@ -619,6 +627,8 @@ internal sealed class ShaderProgramCache
                 var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
                 if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
                     throw new ShaderProgramRejectedException(message);
+                if (materializationFailure is ResourceMaterializationFailure.UnsupportedAtomicImageFormat)
+                    throw new ShaderProgramRejectedException(message, transient: true);
                 throw SubmissionScheduler.Fatal(message);
             }
         }
@@ -754,15 +764,18 @@ internal sealed class ShaderProgramCache
             last.Bindings.PushDataStartDword == PushData.StartFor(pushDataCursor, last.Bindings.ShaderDataDwordCount)
             ? last
             : FindPermutation(entry, specialization, pushDataCursor);
+        PipelineCacheStats.Lookup(PipelineCacheStats.Kind.Permutation, permutation is not null);
         if (permutation is null)
         {
             // A ready program serves while this one is prepared; it is never translated again for another specialization.
             if (runtimeFallback is not null)
                 throw new ShaderProgramPendingException();
+            var permutationMissStarted = PipelineCacheStats.MissBegin();
             try
             {
                 permutation = MakePermutation(source, options, entry, specialization, pushDataCursor, key, sourceWasCached, snapshot,
                     deferTranslation: hasShaderCalls && deferLinking);
+                PipelineCacheStats.MissEnd(PipelineCacheStats.Kind.Permutation, permutationMissStarted, $"stage={source.Label} hash=0x{source.Hash:X16}");
             }
             catch (ShaderProgramPendingException) when (entry.RuntimeCallRecords)
             {
@@ -1526,10 +1539,14 @@ internal sealed class ShaderProgramCache
         }
         else
         {
+            var translateStarted = PipelineCacheStats.MissBegin();
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramTranslation))
             {
                 translated = _compiler.TryCompileProgram(request, out compiled, out error);
             }
+
+            PipelineCacheStats.Lookup(PipelineCacheStats.Kind.Translate, hit: false);
+            PipelineCacheStats.MissEnd(PipelineCacheStats.Kind.Translate, translateStarted, $"stage={source.Label} hash=0x{source.Hash:X16}");
         }
 
         if (!translated || compiled is null)

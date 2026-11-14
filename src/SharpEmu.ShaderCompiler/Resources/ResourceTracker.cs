@@ -863,7 +863,7 @@ public sealed partial class ResourceTracker
         return end > uint.MaxValue ? uint.MaxValue : (uint)end;
     }
 
-    private uint AddBuffer(uint source, MemoryAccessInfo memory, uint pc)
+    private uint AddBuffer(uint source, MemoryAccessInfo memory, uint pc, bool beyondBudget = false)
     {
         for (var index = 0; index < _info.Buffers.Count; index++)
         {
@@ -874,7 +874,8 @@ public sealed partial class ResourceTracker
             }
         }
 
-        if (_info.Buffers.Count >= ShaderResourceInfo.MaxBuffers)
+        var limit = beyondBudget ? ShaderResourceInfo.MaxBuffersForUnloweredAccess : ShaderResourceInfo.MaxBuffers;
+        if (_info.Buffers.Count >= limit)
         {
             return DescriptorConstants.NoIndex;
         }
@@ -1146,13 +1147,20 @@ public sealed partial class ResourceTracker
                 memoryOpcode: memory.Opcode,
                 memoryAccess: memory.Access);
             var resource = AddBuffer(source, memory, memory.Pc);
+            var needsBinding = memory.Opcode.StartsWith("TBuffer", StringComparison.Ordinal) ||
+                (memory.Formatted && memory.Access != MemoryAccess.Read);
+            if (resource == DescriptorConstants.NoIndex && needsBinding)
+            {
+                // The device-address path has no typed (tbuffer) or formatted store lowering, so
+                // this access keeps a real binding beyond the normal budget (MK11 compute shaders).
+                resource = AddBuffer(source, memory, memory.Pc, beyondBudget: true);
+            }
+
             if (resource == DescriptorConstants.NoIndex)
             {
                 // Past the binding budget the access reads its V# from its SGPRs when it
                 // runs, as the hardware does, and goes through the device-address table.
-                // That path has no typed (tbuffer) or formatted store lowering.
-                if (memory.Opcode.StartsWith("TBuffer", StringComparison.Ordinal) ||
-                    (memory.Formatted && memory.Access != MemoryAccess.Read))
+                if (needsBinding)
                 {
                     throw Failure(memory.Pc, "buffer resource limit exceeded");
                 }

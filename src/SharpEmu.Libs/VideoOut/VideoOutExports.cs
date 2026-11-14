@@ -441,6 +441,18 @@ public static partial class VideoOutExports
         {
             port.FlipRate = rate;
         }
+        if (_logFrameRate)
+        {
+            _ = ctx.TryReadUInt64(ctx[CpuRegister.Rsp], out var returnRip);
+            var chain = new System.Text.StringBuilder();
+            var frame = ctx[CpuRegister.Rbp];
+            for (var depth = 0; depth < 6 && frame != 0; depth++)
+            {
+                if (!ctx.TryReadUInt64(frame + 8, out var callerRip) || !ctx.TryReadUInt64(frame, out frame)) break;
+                chain.Append(" 0x").Append(callerRip.ToString("X"));
+            }
+            Console.Error.WriteLine($"[LOADER][PERF] videoout SetFlipRate handle={handle} rate={rate} return=0x{returnRip:X} callers={chain}");
+        }
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 

@@ -594,8 +594,6 @@ public sealed class RenderExecutorStateTests : IDisposable
         { "clip planes", banks => banks.Context.Clip = new ClipControlRegisters { UserClipPlanes = 3 }, "planes=3" },
         { "copy centroid", banks => banks.Context.DepthTarget = banks.Context.DepthTarget with { RenderControl = 1u << 7 }, "renderControl=0x00000080" },
         { "copy sample", banks => banks.Context.DepthTarget = banks.Context.DepthTarget with { RenderControl = 2u << 8 }, "copySample=2" },
-        { "front polygon type", banks => banks.Context.RasterMode = new RasterModeRegisters { FrontPolygonType = 1 }, "type=1" },
-        { "back polygon type", banks => banks.Context.RasterMode = new RasterModeRegisters { BackPolygonType = 3 }, "type=3" },
         { "provoking vertex", banks => banks.Context.RasterMode = new RasterModeRegisters { ProvokingVertexLast = true }, "provoking vertex" },
         { "perspective correction", banks => banks.Context.RasterMode = new RasterModeRegisters { PerspectiveCorrectionDisable = true }, "perspective correction" },
         { "inverted slices", banks => banks.Context.ColorTargets[0] = banks.Context.ColorTargets[0] with { View = 2 }, "start=2 last=0" },
@@ -615,6 +613,19 @@ public sealed class RenderExecutorStateTests : IDisposable
         var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, banks, Indexed(3)));
         Assert.True(fatal.Message.Contains(expected, StringComparison.Ordinal), $"{state}: {fatal.Message}");
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("find_image", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PolygonTypes_AreDrawnFilledWhateverTheirValue()
+    {
+        var banks = Banks();
+        foreach (var mode in new byte[] { 0, 1 })
+        {
+            banks.Context.RasterMode = new RasterModeRegisters { PolygonMode = mode, FrontPolygonType = 1, BackPolygonType = 3 };
+            _executor.DrawIndexed(1, banks, Indexed(3));
+        }
+
+        Assert.Equal(2, _host.Calls.Count(c => c.StartsWith("draw", StringComparison.Ordinal)));
     }
 
     [Fact]

@@ -78,6 +78,7 @@ public static partial class VideoOutExports
     internal static ICommandStreamFlipTarget HeadlessFlipTarget { get; } = new CommandStreamFlipTarget();
 
     // Validates the flip and takes its counters; returns a video-out error or zero.
+    private static int _lastLoggedFlipMode = int.MinValue;
     internal static int TryReserveFlipRequest(
         int handle,
         int bufferIndex,
@@ -113,6 +114,11 @@ public static partial class VideoOutExports
                     Math.Floor((submittedAt - startedAt) * 1_000_000d / Stopwatch.Frequency));
             }
 
+            if (_logFrameRate && flipMode != _lastLoggedFlipMode)
+            {
+                _lastLoggedFlipMode = flipMode;
+                Console.Error.WriteLine($"[LOADER][PERF] videoout flip mode={flipMode} flipRate={port.FlipRate} refresh={port.RefreshRate} gpuQueued={gpuQueued}");
+            }
             port.FlipPendingCount++;
             if (gpuQueued)
             {

@@ -267,46 +267,17 @@ public static partial class AgcExports
                     TryReadPacketUInt32(ctx, packetAddress + 16, out var indexCount))
                 {
                     var indexAddress = indexBaseLo | ((ulong)indexBaseHi << 32);
-                    var indexStride = AgcIndexHelpers.GetGuestStrideBytes(
-                        AgcIndexHelpers.Decode(captureState.IndexSize));
-                    var byteCount64 = (ulong)indexCount * (uint)indexStride;
                     captureState.DrawIndexOffset = 0;
-                    var capture = CreateCaptureFingerprint(captureState, indexAddress, indexCount);
-                    SubmittedIndexSnapshot? indexSnapshot = null;
-                    if (indexSnapshots is not null &&
-                        byteCount64 != 0 &&
-                        byteCount64 <= int.MaxValue &&
-                        retainedIndexBytes + (long)byteCount64 <=
-                            MaximumRetainedIndexBytesPerSubmission)
-                    {
-                        using var captureProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.IndexCapture);
-                        var data = new byte[(int)byteCount64];
-                        if (ctx.Memory.TryRead(indexAddress, data) ||
-                            KernelMemoryCompatExports.TryReadTrackedLibcHeap(indexAddress, data))
-                        {
-                            indexSnapshot = new SubmittedIndexSnapshot(
-                                indexAddress,
-                                indexCount,
-                                indexStride,
-                                data,
-                                capture);
-                            indexSnapshots[packetAddress] = indexSnapshot;
-                            retainedIndexBytes += data.Length;
-                        }
-                    }
-
                     captureState.IndexBufferAddress = indexAddress;
                     captureState.IndexBufferCount = maximumIndexCount;
-                    captureState.CurrentIndexSnapshot = indexSnapshot;
                     TryCaptureSubmittedVertexSnapshot(
                         ctx,
                         captureState,
                         packetAddress,
                         indexCount,
-                        capture,
+                        indexAddress,
                         vertexSnapshots,
                         ref retainedVertexBytes);
-                    captureState.CurrentIndexSnapshot = null;
                 }
                 else if (opcode == ItDrawIndexAuto && length >= 3 &&
                          TryReadPacketUInt32(ctx, packetAddress + 4, out var vertexCount))
@@ -316,7 +287,7 @@ public static partial class AgcExports
                         captureState,
                         packetAddress,
                         vertexCount,
-                        CreateCaptureFingerprint(captureState, 0, vertexCount),
+                        0,
                         vertexSnapshots,
                         ref retainedVertexBytes);
                 }
@@ -416,7 +387,7 @@ public static partial class AgcExports
         SubmittedDcbState state,
         ulong packetAddress,
         uint drawCount,
-        GeometryCaptureFingerprint capture,
+        ulong indexAddress,
         Dictionary<ulong, SubmittedVertexSnapshot>? snapshots,
         ref long retainedBytes)
     {
@@ -461,7 +432,8 @@ public static partial class AgcExports
             return;
         }
 
-        snapshots[packetAddress] = new SubmittedVertexSnapshot(exportShaderAddress, data, capture);
+        snapshots[packetAddress] = new SubmittedVertexSnapshot(
+            exportShaderAddress, data, CreateCaptureFingerprint(state, indexAddress, drawCount));
         retainedBytes += data!.ByteCount;
         DcbSubmissionProfile.RecordRetainedVertexBytes(data.ByteCount);
     }

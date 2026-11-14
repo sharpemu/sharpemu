@@ -165,6 +165,11 @@ public sealed class BufferCandidateTableInfo
 public sealed class ShaderResourceInfo
 {
     public const int MaxBuffers = 32;
+
+    // An access with no device-address lowering (typed tbuffer accesses and formatted stores) cannot
+    // spill past MaxBuffers, so it may take a binding up to this larger cap instead of failing the
+    // shader. The device's descriptor limits are still checked when the pipeline layout is built.
+    public const int MaxBuffersForUnloweredAccess = 128;
     public const int MaxIndirectImageCandidates = 64;
     public const int NoScalarRegister = -1;
 

@@ -646,6 +646,10 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
     }
 
+    // SHARPEMU_LEGACY_VERTEX_SCRATCH=1 restores the fixed-size scratch for a comparison run.
+    private static readonly bool SizeVertexScratchToDraw =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LEGACY_VERTEX_SCRATCH"), "1", StringComparison.Ordinal);
+
     private ReadOnlySpan<BufferBinding> AcquireVertexBuffers(VertexInputInfo vertexInput)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawVertexBufferAcquisition);
@@ -655,7 +659,8 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             throw _host.Fatal($"The vertex input has too many buffers: count={buffers.Length} max={VertexInputInfo.MaxBuffers}.");
         }
 
-        Span<VertexBufferRange> ranges = stackalloc VertexBufferRange[VertexInputInfo.MaxBuffers];
+        // A draw has two to four vertex buffers; zeroing room for the maximum on every draw cost more than the work.
+        Span<VertexBufferRange> ranges = stackalloc VertexBufferRange[SizeVertexScratchToDraw ? buffers.Length : VertexInputInfo.MaxBuffers];
         Span<ulong> sizes = stackalloc ulong[buffers.Length];
         for (var slot = 0; slot < buffers.Length; slot++)
         {

@@ -25,12 +25,36 @@ public static partial class AgcExports
         Target = Generation.Gen5, LibraryName = "libSceAgc")]
     public static int Unknown7Wa3ae(CpuContext ctx) => PatchIndirectBufferTarget(ctx);
 
-    private static int PatchIndirectBufferTarget(CpuContext ctx)
+    // Observed ABI: packet (the INDIRECT_BUFFER sceAgcDcbJump wrote), target
+    // address, target length in dwords, cache policy. Titles that build their
+    // frame from several command buffers emit the jump first and bind its target
+    // once the continuation has been written; left unpatched the packet keeps a
+    // null target and everything recorded after it never executes.
+    [SysAbiExport(Nid = "2BS4EtAaF28", ExportName = "sceAgcJumpPatchSetTarget",
+        Target = Generation.Gen5, LibraryName = "libSceAgc")]
+    public static int JumpPatchSetTarget(CpuContext ctx) =>
+        PatchIndirectBufferTarget(
+            ctx,
+            ctx[CpuRegister.Rdi],
+            (uint)ctx[CpuRegister.Rcx],
+            ctx[CpuRegister.Rsi],
+            (uint)ctx[CpuRegister.Rdx]);
+
+    private static int PatchIndirectBufferTarget(CpuContext ctx) =>
+        PatchIndirectBufferTarget(
+            ctx,
+            ctx[CpuRegister.Rdi],
+            (uint)ctx[CpuRegister.Rsi],
+            ctx[CpuRegister.Rdx],
+            (uint)ctx[CpuRegister.Rcx]);
+
+    private static int PatchIndirectBufferTarget(
+        CpuContext ctx,
+        ulong packet,
+        uint cachePolicy,
+        ulong target,
+        uint dwords)
     {
-        var packet = ctx[CpuRegister.Rdi];
-        var cachePolicy = (uint)ctx[CpuRegister.Rsi];
-        var target = ctx[CpuRegister.Rdx];
-        var dwords = (uint)ctx[CpuRegister.Rcx];
         if (cachePolicy > 3 || dwords > 0xFFFFFu ||
             !TryGetPacketIdentity(ctx, packet, out var opcode, out _) ||
             opcode != ItIndirectBuffer ||

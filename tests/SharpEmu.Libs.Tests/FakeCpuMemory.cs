@@ -78,6 +78,40 @@ internal sealed class FakeCpuMemory : ICpuMemory, IGuestMemoryAllocator
 
     public bool TryFreeGuestMemory(ulong address) => false;
 
+    // Off by default, like a memory that cannot scan in place; tests turn it on to cover the in-place path.
+    public bool SupportsCStringScan { get; set; }
+
+    public bool TryScanCString(ulong address, byte needle, bool findLast, ulong maxLength, out ulong match)
+    {
+        match = 0;
+        if (!SupportsCStringScan)
+        {
+            return false;
+        }
+
+        for (ulong index = 0; index < maxLength; index++)
+        {
+            if (!TryResolve(address + index, 1, out var offset))
+            {
+                return false;
+            }
+
+            var value = _storage[offset];
+            if (value == needle)
+            {
+                match = address + index;
+                return true;
+            }
+
+            if (value == 0)
+            {
+                return true;
+            }
+        }
+
+        return true;
+    }
+
     public ulong WriteCString(ulong virtualAddress, string text)
     {
         var bytes = System.Text.Encoding.UTF8.GetBytes(text);

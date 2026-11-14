@@ -592,6 +592,19 @@ internal static partial class VulkanVideoPresenter
 
         private void WaitForSpaceTimed()
         {
+            var timelineStart = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
+            try
+            {
+                WaitForSpaceTimedCore();
+            }
+            finally
+            {
+                SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineStart, "cmd:wait for ring space (render thread behind)", 10);
+            }
+        }
+
+        private void WaitForSpaceTimedCore()
+        {
             var started = Diagnostics.CommandThreadTally.Enabled ? Stopwatch.GetTimestamp() : 0;
             try
             {
@@ -675,6 +688,19 @@ internal static partial class VulkanVideoPresenter
         }
 
         private void WaitFor(Item item)
+        {
+            var timelineStart = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
+            try
+            {
+                WaitForCore(item);
+            }
+            finally
+            {
+                SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineStart, "cmd:wait for render thread item", 10);
+            }
+        }
+
+        private void WaitForCore(Item item)
         {
             var spinner = new SpinWait();
             for (var spin = 0; spin < 100 && !item.Done; spin++)

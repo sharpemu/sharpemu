@@ -1360,6 +1360,43 @@ public static class AudioOut2Exports
         return context.ClockQueuedGrains();
     }
 
+    // SHARPEMU_LOG_AUDIO_CLIPPING=1: every five seconds, how many mixed samples left the [-1, 1] range and were
+    // hard-clipped, and the loudest sample of the window before clipping.
+    private static readonly bool LogClipping =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_AUDIO_CLIPPING"), "1", StringComparison.Ordinal);
+
+    private static long _clippingWindowStart = Stopwatch.GetTimestamp();
+    private static long _clippedSamples;
+    private static long _mixedSamples;
+    private static float _clippingPeak;
+
+    private static void NoteClipping(float left, float right)
+    {
+        // Called with HostSubmitGate held, so the counters need no further locking.
+        _mixedSamples += 2;
+        var loudest = Math.Max(Math.Abs(left), Math.Abs(right));
+        _clippingPeak = Math.Max(_clippingPeak, loudest);
+        if (loudest > 1f)
+        {
+            _clippedSamples += (Math.Abs(left) > 1f ? 1 : 0) + (Math.Abs(right) > 1f ? 1 : 0);
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        if (now - _clippingWindowStart < Stopwatch.Frequency * 5)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[PERF][AUDIO_CLIPPING] window={(now - _clippingWindowStart) / (double)Stopwatch.Frequency:F1}s " +
+            $"samples={_mixedSamples} clipped={_clippedSamples} " +
+            $"({(_mixedSamples == 0 ? 0 : _clippedSamples * 100.0 / _mixedSamples):F2}%) peak={_clippingPeak:F2}");
+        _clippingWindowStart = now;
+        _mixedSamples = 0;
+        _clippedSamples = 0;
+        _clippingPeak = 0f;
+    }
+
     private static bool TrySubmitContextAudio(CpuContext ctx, ContextState context)
     {
         var frames = checked((int)context.GrainSamples);
@@ -1435,6 +1472,11 @@ public static class AudioOut2Exports
                 var peak = 0f;
                 for (var frame = 0; frame < frames; frame++)
                 {
+                    if (LogClipping)
+                    {
+                        NoteClipping(mix[frame * 2], mix[(frame * 2) + 1]);
+                    }
+
                     var left = Math.Clamp(mix[frame * 2], -1f, 1f);
                     var right = Math.Clamp(mix[(frame * 2) + 1], -1f, 1f);
                     peak = Math.Max(peak, Math.Max(Math.Abs(left), Math.Abs(right)));

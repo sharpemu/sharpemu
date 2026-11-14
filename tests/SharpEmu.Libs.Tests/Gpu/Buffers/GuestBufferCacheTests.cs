@@ -879,6 +879,77 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void OverwritingWrite_OverTheWholeGpuWrittenRange_DropsTheGpuDataWithoutDownloadingIt()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address + 0x100, 0x40, isWritten: true);
+            buffer.Fill(offset, 0x40, 0xCAFEF00D);
+        });
+        Assert.True(harness.Cache.HasGpuDirtyBytes(address + 0x100, 0x40));
+
+        Assert.True(harness.Store.MarkCpuWriteOverwriting(address + 0x80, 0x100));
+
+        Assert.False(harness.Cache.HasGpuDirtyPages(address, Page));
+        Assert.False(harness.Cache.HasGpuDirtyBytes(address, 0x2000));
+        Assert.True(harness.Cache.HasCpuDirtyPages(address, Page));
+        // The GPU bytes were never downloaded into guest memory.
+        Assert.Equal(0u, BitConverter.ToUInt32(harness.Read(address + 0x100, 4)));
+
+        // The bytes the write leaves are what the GPU sees next.
+        var written = Pattern(0x100, 5);
+        harness.Write(address + 0x80, written);
+        var (buffer, offset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address + 0x80, 0x100, isWritten: false));
+        Assert.Equal(written, harness.ReadBack(buffer, offset, 0x100));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void OverwritingWrite_ThatLeavesPartOfTheGpuDataOutside_StillDownloadsIt()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address + 0x100, 0x40, isWritten: true);
+            buffer.Fill(offset, 0x40, 0xCAFEF00D);
+        });
+
+        // The write covers only the second half of the range the GPU wrote.
+        Assert.True(harness.Store.MarkCpuWriteOverwriting(address + 0x120, 0x20));
+
+        Assert.False(harness.Cache.HasGpuDirtyBytes(address, 0x2000));
+        Assert.Equal(0xCAFEF00Du, BitConverter.ToUInt32(harness.Read(address + 0x100, 4)));
+        Assert.Equal(0xCAFEF00Du, BitConverter.ToUInt32(harness.Read(address + 0x13C, 4)));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void OverwritingWrite_NextToGpuDataOnTheSamePage_DownloadsThatData()
+    {
+        if (_vulkan is null) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            var (buffer, offset) = harness.Cache.ObtainBuffer(address + 0x800, 0x40, isWritten: true);
+            buffer.Fill(offset, 0x40, 0xCAFEF00D);
+        });
+
+        // The CPU replaces bytes elsewhere in the page; the GPU range must survive it.
+        Assert.True(harness.Store.MarkCpuWriteOverwriting(address + 0x100, 0x100));
+
+        Assert.False(harness.Cache.HasGpuDirtyBytes(address, 0x2000));
+        Assert.Equal(0xCAFEF00Du, BitConverter.ToUInt32(harness.Read(address + 0x800, 4)));
+        Assert.Equal(0xCAFEF00Du, BitConverter.ToUInt32(harness.Read(address + 0x83C, 4)));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void LandedCpuWrite_MarksAnUploadedPageAgainAndNeverDownloads()
     {
         if (_vulkan is null) return;

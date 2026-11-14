@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.GpuCommands.Packets;
 
 namespace SharpEmu.Libs.Agc;
@@ -808,38 +809,87 @@ public static partial class AgcExports
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var markerAddress = ctx[CpuRegister.Rsi];
         if (commandBufferAddress == 0 ||
-            !TryReadGuestCString(ctx, markerAddress, 4095, out var marker))
+            !TryMeasureMarkerString(ctx, markerAddress, out var markerLength, out var markerBytes))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        var payloadDwords = Math.Max(((uint)marker.Length + 4) / 4, 1);
+        var payloadDwords = Math.Max(((uint)markerLength + 4) / 4, 1);
         var packetDwords = payloadDwords + 1;
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItNop, RPushMarker)))
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress))
         {
             return ReturnPointer(ctx, 0);
         }
 
-        for (uint index = 0; index < payloadDwords; index++)
+        // Games emit thousands of markers a frame: the string is read once, straight into the packet, and the
+        // packet leaves in one write. The marker is padded with zeros up to a whole number of dwords.
+        var packetBytes = (int)(packetDwords * sizeof(uint));
+        var rented = packetBytes > MarkerPacketStackBytes ? System.Buffers.ArrayPool<byte>.Shared.Rent(packetBytes) : null;
+        Span<byte> packet = rented is null ? stackalloc byte[MarkerPacketStackBytes] : rented;
+        packet = packet[..packetBytes];
+        try
         {
-            uint value = 0;
-            for (uint byteIndex = 0; byteIndex < sizeof(uint); byteIndex++)
+            packet.Clear();
+            BinaryPrimitives.WriteUInt32LittleEndian(packet, Pm4(packetDwords, ItNop, RPushMarker));
+            var markerDestination = packet.Slice(sizeof(uint), markerLength);
+            if (markerBytes is not null)
             {
-                var markerIndex = (index * sizeof(uint)) + byteIndex;
-                if (markerIndex < (uint)marker.Length)
-                {
-                    value |= (uint)marker[(int)markerIndex] << ((int)byteIndex * 8);
-                }
+                markerBytes.CopyTo(markerDestination);
             }
-
-            if (!TryWriteUInt32(ctx, commandAddress + 4 + ((ulong)index * sizeof(uint)), value))
+            else if (markerLength != 0 && !ctx.Memory.TryRead(markerAddress, markerDestination))
             {
                 return ReturnPointer(ctx, 0);
             }
+
+            return ctx.Memory.TryWrite(commandAddress, packet)
+                ? ReturnPointer(ctx, commandAddress)
+                : ReturnPointer(ctx, 0);
+        }
+        finally
+        {
+            if (rented is not null)
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            }
+        }
+    }
+
+    private const int MaximumMarkerLength = 4094;
+    private const int MarkerPacketStackBytes = 256;
+
+    // Measures the NUL-terminated marker at address. False when it is unreadable or longer than
+    // MaximumMarkerLength. markerBytes stays null when the length came from an in-place scan, and holds the
+    // bytes when this memory cannot scan and the string had to be read one byte at a time.
+    private static bool TryMeasureMarkerString(CpuContext ctx, ulong address, out int length, out byte[]? markerBytes)
+    {
+        length = 0;
+        markerBytes = null;
+        if (address == 0)
+        {
+            return true;
         }
 
-        return ReturnPointer(ctx, commandAddress);
+        if (ctx.Memory.TryScanCString(address, 0, false, MaximumMarkerLength + 1, out var terminator))
+        {
+            // No terminator inside the limit leaves the match at zero.
+            if (terminator < address || terminator - address > MaximumMarkerLength)
+            {
+                return false;
+            }
+
+            length = (int)(terminator - address);
+            return true;
+        }
+
+        if (!TryReadGuestCString(ctx, address, MaximumMarkerLength + 1, out var bytes) ||
+            bytes.Length > MaximumMarkerLength)
+        {
+            return false;
+        }
+
+        markerBytes = bytes;
+        length = bytes.Length;
+        return true;
     }
 
     [SysAbiExport(

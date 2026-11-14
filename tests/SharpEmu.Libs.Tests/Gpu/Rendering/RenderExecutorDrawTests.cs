@@ -891,6 +891,31 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
+    public void VertexRanges_MergeOverlappingBuffersIntoOneAcquisitionForAnyBufferCount()
+    {
+        // Five buffers, the middle three overlapping: sorted, merged and sized to the draw's own buffer count.
+        _pipelines.Graphics = Programs(vertexBuffers:
+        [
+            new VertexInputBuffer(VertexBase + 0x400, 16, 4),
+            new VertexInputBuffer(VertexBase, 16, 4),
+            new VertexInputBuffer(VertexBase + 0x20, 16, 4),
+            new VertexInputBuffer(VertexBase + 0x50, 16, 4),
+            new VertexInputBuffer(VertexBase + 0x800, 16, 1),
+        ]);
+
+        _executor.DrawAuto(1, Banks(), Auto(3));
+
+        var obtains = _host.Calls.Where(call => call.StartsWith("obtain", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(
+            [
+                $"obtain {VertexBase:X} 90 written=False -> 100:0",
+                $"obtain {VertexBase + 0x400:X} 40 written=False -> 101:0",
+                $"obtain {VertexBase + 0x800:X} 10 written=False -> 102:0",
+            ],
+            obtains);
+    }
+
+    [Fact]
     public void VertexRange_WithoutAnAddressIsFatal()
     {
         _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(0, 16, 4)]);

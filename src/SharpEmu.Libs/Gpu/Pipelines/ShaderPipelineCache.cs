@@ -1318,9 +1318,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lookup.Tessellation = vertexInput.Tessellation;
         if (_graphicsPipelines.TryGetValue(lookup, out var known))
         {
+            PipelineCacheStats.Lookup(PipelineCacheStats.Kind.GraphicsPipeline, hit: true);
             return known;
         }
 
+        PipelineCacheStats.Lookup(PipelineCacheStats.Kind.GraphicsPipeline, hit: false);
+        var missStarted = PipelineCacheStats.MissBegin();
         var description = BuildGraphicsDescription(
             colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
             vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts);
@@ -1347,6 +1350,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             {
                 _graphicsPipelines.TryAdd(key, created);
             }
+
+            PipelineCacheStats.MissEnd(PipelineCacheStats.Kind.GraphicsPipeline, missStarted,
+                $"vertex=0x{vertexProgram.Id:X16} pixel=0x{key.PixelProgramId:X16}");
 
             if (_host.ShaderPrewarm is { } prewarm && description.Tessellation is null &&
                 description.VertexStage.Stage == ShaderStageKind.Vertex)
@@ -1579,9 +1585,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var key = new ComputePipelineKey(program.Id);
         if (_computePipelines.TryGetValue(key, out var known))
         {
+            PipelineCacheStats.Lookup(PipelineCacheStats.Kind.ComputePipeline, hit: true);
             return known;
         }
 
+        PipelineCacheStats.Lookup(PipelineCacheStats.Kind.ComputePipeline, hit: false);
+        var missStarted = PipelineCacheStats.MissBegin();
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
         lock (_pipelineGate)
         {
@@ -1602,6 +1611,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 _computePipelines.TryAdd(key, created);
             }
 
+            PipelineCacheStats.MissEnd(PipelineCacheStats.Kind.ComputePipeline, missStarted, $"program=0x{program.Id:X16} hash=0x{stage.Hash:X16}");
+
             ShaderCacheCounters.CountComputePipeline();
             return created;
         }
@@ -1620,10 +1631,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var key = new ComputePipelineKey(program.Id);
         if (_computePipelines.TryGetValue(key, out var known))
         {
+            PipelineCacheStats.Lookup(PipelineCacheStats.Kind.ComputePipeline, hit: true);
             handle = known;
             return true;
         }
 
+        PipelineCacheStats.Lookup(PipelineCacheStats.Kind.ComputePipeline, hit: false);
+        var missStarted = PipelineCacheStats.MissBegin();
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
         lock (_pipelineGate)
         {
@@ -1646,6 +1660,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 _computePipelines.TryAdd(key, created);
             }
 
+            PipelineCacheStats.MissEnd(PipelineCacheStats.Kind.ComputePipeline, missStarted, $"program=0x{program.Id:X16} hash=0x{stage.Hash:X16}");
             ShaderCacheCounters.CountComputePipeline();
             handle = created;
             return true;

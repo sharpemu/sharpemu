@@ -904,6 +904,53 @@ public sealed class ResourceTrackerTests
     }
 
     [Fact]
+    public void FormattedStoresPastTheBindingBudget_KeepABindingInsteadOfFailing()
+    {
+        // A formatted store has no device-address lowering, so it takes a binding beyond MaxBuffers.
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        const uint count = ShaderResourceInfo.MaxBuffers + 4;
+        for (uint index = 0; index < count; index++)
+        {
+            for (uint dword = 0; dword < 4; dword++)
+            {
+                instructions.Add(MoveScalar(pc, 8 + dword, index + dword + 0x100));
+                pc += 8;
+            }
+
+            instructions.Add(BufferStore(pc, 8, formatted: true));
+            pc += 8;
+        }
+
+        instructions.Add(EndProgram(pc));
+        var plan = Extract(Program([.. instructions]));
+
+        Assert.Equal((int)count, plan.Info.Buffers.Count);
+        Assert.DoesNotContain(plan.Memory.Entries, memory => memory.DeviceDescriptor);
+    }
+
+    [Fact]
+    public void FormattedStoresPastTheLargerCap_StillFail()
+    {
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        for (uint index = 0; index <= ShaderResourceInfo.MaxBuffersForUnloweredAccess; index++)
+        {
+            for (uint dword = 0; dword < 4; dword++)
+            {
+                instructions.Add(MoveScalar(pc, 8 + dword, index + dword + 0x100));
+                pc += 8;
+            }
+
+            instructions.Add(BufferStore(pc, 8, formatted: true));
+            pc += 8;
+        }
+
+        instructions.Add(EndProgram(pc));
+        Assert.ThrowsAny<Exception>(() => Extract(Program([.. instructions])));
+    }
+
+    [Fact]
     public void GlobalDataShareAccess_AllocatesTheBinding()
     {
         var program = Program(DataShareWrite(0, gds: true), EndProgram(8));

@@ -215,6 +215,25 @@ public static class GameServiceStubs
         Target = Generation.Gen5, LibraryName = "libSceVoice")]
     public static int VoiceEnd(CpuContext ctx) => Ok(ctx);
 
+    // No voice chat device is modelled; starting a port is accepted like the other sceVoice calls.
+    [SysAbiExport(Nid = "54phPH2LZls", ExportName = "sceVoiceStart",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceStart(CpuContext ctx) => Ok(ctx);
+
+    // A network diagnostic that prints the interface configuration; nothing to report.
+    [SysAbiExport(Nid = "k1V1djYpk7k", ExportName = "sceNetShowIfconfig",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceNet")]
+    public static int NetShowIfconfig(CpuContext ctx) => Ok(ctx);
+
+    // Colour space conversion is not modelled (the output is SDR), so the settings are accepted as given.
+    [SysAbiExport(Nid = "Yn8KT+VTZaE", ExportName = "sceVideoOutColorSpaceConversionSettingsSetSdrToHdrConversion_",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceVideoOut")]
+    public static int VideoOutColorSpaceConversionSetSdrToHdr(CpuContext ctx) => Ok(ctx);
+
+    [SysAbiExport(Nid = "dYDAfB+cJEU", ExportName = "sceVideoOutAdjustColorSpaceConversion_",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceVideoOut")]
+    public static int VideoOutAdjustColorSpaceConversion(CpuContext ctx) => Ok(ctx);
+
 
     [SysAbiExport(Nid = "amuBfI-AQc4", ExportName = "sceRudpInit",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceRudp")]

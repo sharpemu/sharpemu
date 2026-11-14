@@ -148,7 +148,9 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
                 _pending.Lower();
             }
 
+            var timelineStart = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
             command();
+            SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineStart, "gpu:relay command run", 10);
         }
     }
 
@@ -183,7 +185,9 @@ public sealed class GpuWorkerRelay : IGpuQueueRelay
             return false;
         }
 
+        var timelineWait = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
         WaitForRelayedWork(done);
+        SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineWait, "wait:relay hop to GPU thread", 10);
         if (timing is not null)
         {
             var callerResumed = GuestMemoryProfile.GetTimestamp();

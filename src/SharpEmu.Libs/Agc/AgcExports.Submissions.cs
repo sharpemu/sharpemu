@@ -192,7 +192,9 @@ public static partial class AgcExports
         var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
         lock (gpuState.CommandSubmissionGate)
         {
+            var timelineStart = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
             var outcome = GuestGpu.Current.SubmitDone(ctx.Memory);
+            SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineStart, "wait:SubmitDone (all accepted DCBs done)", 10);
             if (outcome != IdleOutcome.Completed)
             {
                 TraceAgc($"agc.suspend_point_incomplete outcome={outcome}");

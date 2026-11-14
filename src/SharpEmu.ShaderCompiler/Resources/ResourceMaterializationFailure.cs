@@ -9,4 +9,5 @@ public enum ResourceMaterializationFailure
     Other,
     IncompatibleImageCandidates,
     ImageCapacityExceeded,
+    UnsupportedAtomicImageFormat,
 }

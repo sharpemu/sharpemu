@@ -927,8 +927,9 @@ public static class AmprExports
         }
         commands.Sort(static (left, right) => left.Offset.CompareTo(right.Offset));
 
-        foreach (var commandEntry in commands)
+        for (var commandIndex = 0; commandIndex < commands.Count; commandIndex++)
         {
+            var commandEntry = commands[commandIndex];
             switch (commandEntry.Kind)
             {
                 case 0:
@@ -969,6 +970,21 @@ public static class AmprExports
 
                 case 3:
                     var waitCommand = waitAddressCommands[commandEntry.Index];
+                    if (!IsWaitAddressSatisfied(ctx, waitCommand))
+                    {
+                        // The APR engine runs a submitted buffer asynchronously. A wait that is not
+                        // satisfied yet is released by the submitting CPU after submit returns
+                        // (It Takes Two / Mortal Kombat 11 post 0xCAFE to a word the buffer waits
+                        // on). Executing it inline would block this guest thread, and the cooperative
+                        // scheduler never runs the thread that would release the wait. Run the rest
+                        // of the buffer on a host thread and let submit return.
+                        DeferRemainingCommands(
+                            ctx, commandBuffer, commands, commandIndex,
+                            readCommands, kernelEventCommands, writeAddressCommands, waitAddressCommands);
+                        TraceAmpr(ctx, "deferred", commandBuffer, waitCommand.Address, waitCommand.Reference);
+                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                    }
+
                     var waitResult = WaitForAddress(ctx, waitCommand);
                     if (waitResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
                     {
@@ -982,6 +998,82 @@ public static class AmprExports
 
         TraceAmpr(ctx, "complete", commandBuffer, buffer, writeOffset);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    private static bool IsWaitAddressSatisfied(CpuContext ctx, WaitAddressCommand command)
+    {
+        if (command.Flush != 0)
+        {
+            Thread.MemoryBarrier();
+        }
+
+        // An unreadable address is reported by the inline path, so treat it as ready here.
+        return !ctx.TryReadUInt64(command.Address, out var value) ||
+               IsWaitConditionSatisfied(value, command.Reference, command.Compare);
+    }
+
+    private static void DeferRemainingCommands(
+        CpuContext ctx,
+        ulong commandBuffer,
+        List<(ulong Offset, int Kind, int Index)> commands,
+        int startIndex,
+        ReadFileCommand[] readCommands,
+        KernelEventCommand[] kernelEventCommands,
+        WriteAddressCommand[] writeAddressCommands,
+        WaitAddressCommand[] waitAddressCommands)
+    {
+        var remaining = commands.GetRange(startIndex, commands.Count - startIndex);
+        var worker = new Thread(() =>
+        {
+            foreach (var commandEntry in remaining)
+            {
+                TraceAmpr(ctx, "deferred_cmd", commandBuffer, (ulong)commandEntry.Kind, (ulong)commandEntry.Index);
+                switch (commandEntry.Kind)
+                {
+                    case 0:
+                        if (CompleteReadFileRecord(ctx, commandBuffer, readCommands[commandEntry.Index]) != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+                        {
+                            return;
+                        }
+                        break;
+                    case 1:
+                        var eventCommand = kernelEventCommands[commandEntry.Index];
+                        if (!KernelEventQueueCompatExports.TriggerAmprEvent(eventCommand.Equeue, unchecked((uint)eventCommand.Id), eventCommand.Data))
+                        {
+                            return;
+                        }
+                        break;
+                    case 2:
+                        var writeCommand = writeAddressCommands[commandEntry.Index];
+                        if (!ctx.TryWriteUInt64(writeCommand.Address, writeCommand.Value))
+                        {
+                            return;
+                        }
+                        break;
+                    case 3:
+                        {
+                            var deferredWait = waitAddressCommands[commandEntry.Index];
+                            _ = ctx.TryReadUInt64(deferredWait.Address, out var before);
+                            TraceAmpr(ctx, "deferred_wait_begin", commandBuffer, deferredWait.Address, before);
+                            if (WaitForAddress(ctx, deferredWait) != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+                            {
+                                return;
+                            }
+
+                            _ = ctx.TryReadUInt64(deferredWait.Address, out var after);
+                            TraceAmpr(ctx, "deferred_wait_released", commandBuffer, deferredWait.Address, after);
+                        }
+                        break;
+                }
+            }
+
+            TraceAmpr(ctx, "complete_deferred", commandBuffer, 0, 0);
+        })
+        {
+            IsBackground = true,
+            Name = "AMPR deferred command buffer",
+        };
+        worker.Start();
     }
 
     private static int _unknownReadFileIdWarnings;
@@ -1921,5 +2013,10 @@ public static class AmprExports
         _ = ctx.TryReadUInt64(ctx[CpuRegister.Rsp], out returnRip);
         Console.Error.WriteLine(
             $"[LOADER][TRACE] ampr.read_file: cmd=0x{commandBuffer:X16} id=0x{fileId:X8} dst=0x{destination:X16} size=0x{size:X16} offset=0x{fileOffset:X16} read=0x{bytesRead:X16} result=0x{result:X8} path='{hostPath ?? string.Empty}' ret=0x{returnRip:X16}");
+        var head = new byte[32];
+        if (bytesRead != 0 && ctx.Memory.TryRead(destination, head))
+        {
+            Console.Error.WriteLine($"[LOADER][TRACE] ampr.read_head: {Convert.ToHexString(head)}");
+        }
     }
 }

@@ -2306,10 +2306,18 @@ public static class KernelPthreadCompatExports
         }
     }
 
+    private static readonly bool _tracePthreadWake =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PTHREADS"), "1", StringComparison.Ordinal);
+
     private static void WakeProfiledMutexWaiter(PthreadMutexState state, PthreadMutexWaiter waiter)
     {
         ProfileMutexHandoff(state, "WakeStarted", waiter: waiter);
         var wakeCount = GuestThreadExecution.Scheduler?.WakeBlockedThreads(waiter.WakeKey, 1) ?? 0;
+        if (_tracePthreadWake)
+        {
+            Console.Error.WriteLine($"[LOADER][TRACE] pthread_mutex_handoff_wake key={waiter.WakeKey} thread=0x{waiter.ThreadId:X16} owner=0x{state.OwnerThreadId:X16} woke={wakeCount}");
+        }
+
         ProfileMutexHandoff(state, "WakeFinished", waiter: waiter, result: wakeCount);
     }
 

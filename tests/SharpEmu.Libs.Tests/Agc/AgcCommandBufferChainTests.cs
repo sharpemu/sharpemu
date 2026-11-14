@@ -127,6 +127,45 @@ public sealed class AgcCommandBufferChainTests
     }
 
     [Fact]
+    public void JumpPatchSetTarget_BindsTheTargetOfAJumpWrittenWithANullTarget()
+    {
+        // Titles emit the jump first and bind the continuation once it has been written.
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        PointCommandBufferAt(memory, FirstLinkAddress);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = 0; // call
+        ctx[CpuRegister.Rdx] = 2; // bypass
+        ctx[CpuRegister.Rcx] = 0;
+        ctx[CpuRegister.R8] = 0;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.DcbJump(ctx));
+        Assert.Equal(0u, ReadUInt32(memory, FirstLinkAddress + 4));
+
+        ctx[CpuRegister.Rdi] = FirstLinkAddress; // the packet DcbJump returned
+        ctx[CpuRegister.Rsi] = SecondLinkAddress;
+        ctx[CpuRegister.Rdx] = 0x123;            // target length in dwords
+        ctx[CpuRegister.Rcx] = 2;                // cache policy
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.JumpPatchSetTarget(ctx));
+
+        Assert.Equal(unchecked((uint)SecondLinkAddress), ReadUInt32(memory, FirstLinkAddress + 4));
+        Assert.Equal(0x2F20_0123u, ReadUInt32(memory, FirstLinkAddress + 12));
+    }
+
+    [Fact]
+    public void JumpPatchSetTarget_RejectsAnAddressThatIsNotAJumpPacket()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        ctx[CpuRegister.Rdi] = FirstLinkAddress; // zeroed memory, no packet
+        ctx[CpuRegister.Rsi] = SecondLinkAddress;
+        ctx[CpuRegister.Rdx] = 0x10;
+        ctx[CpuRegister.Rcx] = 2;
+        Assert.NotEqual((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.JumpPatchSetTarget(ctx));
+    }
+
+    [Fact]
     public void AcbJump_AlwaysEncodesChainMode()
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);

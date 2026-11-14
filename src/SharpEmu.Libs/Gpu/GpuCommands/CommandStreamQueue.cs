@@ -33,7 +33,9 @@ public sealed class CommandStreamQueue
     public const int AllBlockedRetryMilliseconds = 100;
     // One boundary may run ahead; explicit zero keeps the synchronous diagnostic mode.
     public static readonly int DefaultBoundariesInFlight =
-        Environment.GetEnvironmentVariable("SHARPEMU_SUSPEND_POINTS_IN_FLIGHT") == "0" ? 0 : 1;
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_SUSPEND_POINTS_IN_FLIGHT"), out var inFlight)
+            ? Math.Clamp(inFlight, 0, 8)
+            : 1;
 
     private readonly ICommandStreamHost _host;
     private readonly object _gate = new();
@@ -300,6 +302,19 @@ public sealed class CommandStreamQueue
     // Waits until a submission can run or the timeout passes; returns whether one can run.
     public bool WaitForWork(int timeoutMilliseconds)
     {
+        var timelineStart = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
+        try
+        {
+            return WaitForWorkCore(timeoutMilliseconds);
+        }
+        finally
+        {
+            SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineStart, "cmd:idle (no work)", 50);
+        }
+    }
+
+    private bool WaitForWorkCore(int timeoutMilliseconds)
+    {
         lock (_gate)
         {
             if (HasRunnableWorkLocked() || _stopping)
@@ -410,6 +425,19 @@ public sealed class CommandStreamQueue
 
     // Runs one slice of the next unblocked submission on the calling thread.
     public SliceResult ProcessOne()
+    {
+        var timelineStart = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
+        try
+        {
+            return ProcessOneCore();
+        }
+        finally
+        {
+            SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineStart, "cmd:interpret DCB slice", 20);
+        }
+    }
+
+    private SliceResult ProcessOneCore()
     {
         CommandSubmission? submission = null;
         ControlBarrier? control = null;

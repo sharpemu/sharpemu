@@ -206,11 +206,100 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     bool IGuestBufferStore.MarkCpuWrite(ulong address, ulong size)
     {
         var tracked = _tracker.InvalidateRegion(address, size, out var needsGpuFlush);
+        if (needsGpuFlush)
+        {
+            CpuWriteReadbackReport.Record(address, size);
+        }
+
         var completed = !needsGpuFlush || ReadMemoryOrAwaitShutdown(address, size, isWrite: true,
             GuestMemoryProfile.ReadbackSource.CpuWriteInvalidation);
         if (GuestGpuMemoryHook.Traces(address, size))
             GuestGpuMemoryHook.Trace(address, size, $"buffer-write tracked={tracked} completed={completed}");
         return tracked && completed;
+    }
+
+    // SHARPEMU_DISABLE_OVERWRITE_DISCARD=1 restores the readback for every CPU write over GPU data.
+    private static readonly bool DiscardOverwrittenGpuData =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_OVERWRITE_DISCARD"), "1", StringComparison.Ordinal);
+
+    public static long OverwriteDiscards;
+
+    bool IGuestBufferStore.MarkCpuWriteOverwriting(ulong address, ulong size)
+    {
+        var tracked = _tracker.InvalidateRegion(address, size, out var needsGpuFlush);
+        if (needsGpuFlush && DiscardOverwrittenGpuData && TryDiscardOverwrittenGpuData(address, size))
+        {
+            if (GuestGpuMemoryHook.Traces(address, size))
+                GuestGpuMemoryHook.Trace(address, size, "buffer-write-overwrite discarded");
+            CpuWriteReadbackReport.RecordDiscard();
+            return tracked;
+        }
+
+        if (needsGpuFlush)
+        {
+            CpuWriteReadbackReport.Record(address, size);
+        }
+
+        var completed = !needsGpuFlush || ReadMemoryOrAwaitShutdown(address, size, isWrite: true,
+            GuestMemoryProfile.ReadbackSource.CpuWriteInvalidation);
+        if (GuestGpuMemoryHook.Traces(address, size))
+            GuestGpuMemoryHook.Trace(address, size, $"buffer-write tracked={tracked} completed={completed}");
+        return tracked && completed;
+    }
+
+    // One hop to the GPU queue thread, which owns the GPU-modified ranges, instead of a download: the
+    // write replaces every GPU-modified byte of the pages it touches, so nothing there is worth keeping.
+    private bool TryDiscardOverwrittenGpuData(ulong address, ulong size)
+    {
+        if (!_relay.IsGpuQueueThread && SubmissionScheduler.InDeferredOperation)
+        {
+            return false;
+        }
+
+        var discarded = false;
+        if (_relay.IsGpuQueueThread)
+        {
+            return DiscardOverwrittenGpuDataOnGpu(address, size);
+        }
+
+        return _relay.TryRunOnGpuQueue(() => discarded = DiscardOverwrittenGpuDataOnGpu(address, size)) && discarded;
+    }
+
+    private bool DiscardOverwrittenGpuDataOnGpu(ulong address, ulong size)
+    {
+        const ulong pageBytes = TrackerLayout.PageBytes;
+        var end = address + size;
+        var pageStart = address & ~(pageBytes - 1);
+        var pageEnd = (end + pageBytes - 1) & ~(pageBytes - 1);
+        if (size == 0 || end < address || OverlapsEagerReadback(pageStart, pageEnd - pageStart))
+        {
+            return false;
+        }
+
+        var spans = _gpuModifiedRanges.GetOverlappingRanges(pageStart, pageEnd - pageStart);
+        if (spans.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var span in spans)
+        {
+            if (span.Address < address || span.Address + span.Size > end)
+            {
+                return false;
+            }
+        }
+
+        using (WriteGpuModified())
+        {
+            _gpuModifiedRanges.Remove(address, size);
+        }
+
+        BumpGpuModifiedVersion();
+        ClearGpuDirtyPagesOfRemovedRange(address, size);
+        _tracker.MarkCpuDirtyPages(address, size);
+        Interlocked.Increment(ref OverwriteDiscards);
+        return true;
     }
 
     // A managed write has landed: pages an upload cleaned between MarkCpuWrite and the write turn
@@ -2061,6 +2150,20 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         if (isWrite && !IsRegionRegistered(guestAddress, size))
         {
             return null;
+        }
+
+        if (isWrite && CpuWriteReadbackReport.Active)
+        {
+            var pageStart = guestAddress & ~(TrackerLayout.PageBytes - 1);
+            var pageEnd = (guestAddress + size + TrackerLayout.PageBytes - 1) & ~(TrackerLayout.PageBytes - 1);
+            long inside = 0, outside = 0;
+            foreach (var span in _gpuModifiedRanges.GetOverlappingRanges(pageStart, pageEnd - pageStart))
+            {
+                if (span.Address >= guestAddress && span.Address + span.Size <= guestAddress + size) inside += (long)span.Size;
+                else outside += (long)span.Size;
+            }
+
+            CpuWriteReadbackReport.RecordShape((inside != 0 ? 1 : 0) | (outside != 0 ? 2 : 0), inside + outside);
         }
 
         var buffer = _registry.GetBuffer(FindBuffer(guestAddress, size));

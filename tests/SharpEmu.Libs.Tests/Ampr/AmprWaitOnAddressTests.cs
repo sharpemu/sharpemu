@@ -93,6 +93,64 @@ public sealed class AmprWaitOnAddressTests
             AmprExports.CompleteCommandBuffer(context, commandBufferAddress));
     }
 
+    // The APR engine runs a submitted buffer asynchronously. A wait that the submitting CPU releases
+    // after submit returns must not block the submit call, and the commands behind it still run.
+    [Fact]
+    public void CompleteCommandBuffer_WithAnUnsatisfiedWait_ReturnsAtOnceAndFinishesOnceTheWaitIsReleased()
+    {
+        const ulong memoryBase = 0x2_0000_0000;
+        const ulong commandBufferAddress = memoryBase + 0x100;
+        const ulong recordBufferAddress = memoryBase + 0x200;
+        const ulong waitAddress = memoryBase + 0x800;
+        const ulong watcherAddress = memoryBase + 0x808;
+        const ulong reference = 0xCAFE;
+        var memory = new FakeCpuMemory(memoryBase, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var wait = CreateManagerWithExport("V7GQTEeUfhw", "sceAmprCommandBufferWaitOnAddress");
+        var write = CreateManagerWithExport("j0+3uJMxYJY", "sceAmprCommandBufferWriteAddress_04_00");
+
+        context[CpuRegister.Rdi] = commandBufferAddress;
+        context[CpuRegister.Rsi] = recordBufferAddress;
+        context[CpuRegister.Rdx] = 0x100;
+        Assert.Equal(0, AmprExports.CommandBufferConstructor(context));
+        Assert.Equal(0, AmprExports.CommandBufferSetBuffer(context));
+
+        Assert.True(context.TryWriteUInt64(waitAddress, 0));
+        context[CpuRegister.Rdi] = commandBufferAddress;
+        context[CpuRegister.Rsi] = waitAddress;
+        context[CpuRegister.Rdx] = reference;
+        context[CpuRegister.Rcx] = 0;
+        context[CpuRegister.R8] = 0;
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, wait.Dispatch("V7GQTEeUfhw", context));
+
+        context[CpuRegister.Rdi] = commandBufferAddress;
+        context[CpuRegister.Rsi] = watcherAddress;
+        context[CpuRegister.Rdx] = 1;
+        Assert.Equal(OrbisGen2Result.ORBIS_GEN2_OK, write.Dispatch("j0+3uJMxYJY", context));
+
+        var submit = Task.Run(() => AmprExports.CompleteCommandBuffer(context, commandBufferAddress));
+        Assert.True(submit.Wait(TimeSpan.FromSeconds(5)), "submit blocked on the unsatisfied wait");
+        Assert.Equal(0, submit.Result);
+        Assert.True(context.TryReadUInt64(watcherAddress, out var early));
+        Assert.Equal(0UL, early);
+
+        Assert.True(context.TryWriteUInt64(waitAddress, reference));
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        ulong watcher = 0;
+        while (DateTime.UtcNow < deadline)
+        {
+            Assert.True(context.TryReadUInt64(watcherAddress, out watcher));
+            if (watcher == 1)
+            {
+                break;
+            }
+
+            Thread.Sleep(10);
+        }
+
+        Assert.Equal(1UL, watcher);
+    }
+
     [Fact]
     public void CommandBufferWaitOnAddress_SupportsAllModernAndLegacyComparisons()
     {

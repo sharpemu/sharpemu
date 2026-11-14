@@ -286,6 +286,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private ICpuDebugHook? _debugHook;
 
 	private ICpuDebugFrame? _activeDebugFrame;
+	private bool _entryReturnWaitsForBlockedThreads = true;
+	private bool _preserveGuestThreadsOnNextExecute;
 
 	[ThreadStatic]
 	private static DirectExecutionBackend? _activeExecutionBackend;
@@ -995,6 +997,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	/// </summary>
 	internal void SetActiveDebugFrame(ICpuDebugFrame? frame) => _activeDebugFrame = frame;
 
+	// A module initializer (DT_INIT) returns before the process entry has run, so threads it
+	// spawned can legitimately stay blocked until that entry signals them. Only a process
+	// entry may wait for blocked threads to finish.
+	internal void SetEntryReturnWaitsForBlockedThreads(bool waits) => _entryReturnWaitsForBlockedThreads = waits;
+
+	// The threads a module initializer left blocked (for example a worker pool waiting for its first
+	// job) belong to the same session as the process entry that follows; the next frame must not
+	// tear them down.
+	internal void SetPreserveGuestThreadsOnNextExecute(bool preserve) => _preserveGuestThreadsOnNextExecute = preserve;
+
 	/// <summary>
 	/// Notifies an attached debugger of a detected execution stall. No-op when no
 	/// debugger is attached or no frame is bound. The debugger may block here to
@@ -1266,7 +1278,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		{
 			_prtLazyCommitRanges.Clear();
 		}
-		ClearGuestThreads();
+		if (_preserveGuestThreadsOnNextExecute)
+		{
+			_preserveGuestThreadsOnNextExecute = false;
+		}
+		else
+		{
+			ClearGuestThreads();
+		}
+
 		_contextualUnresolvedReturnSites.Clear();
 		_stallWatchdogTriggered = 0;
 		_stallWatchdogStop = false;
@@ -4284,11 +4304,21 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					!thread.HasBlockedContinuation ||
 					!string.Equals(wakeKey, thread.BlockWakeKey, StringComparison.Ordinal))
 				{
+					if (_logGuestThreads && string.Equals(wakeKey, thread.BlockWakeKey, StringComparison.Ordinal))
+					{
+						Console.Error.WriteLine($"[LOADER][INFO] guest_threads.wake_skipped key={wakeKey} thread='{thread.Name}' handle=0x{thread.ThreadHandle:X16} state={thread.State} continuation={thread.HasBlockedContinuation}");
+					}
+
 					continue;
 				}
 
 				if (thread.BlockWaiter is not null && !thread.BlockWaiter.TryWake())
 				{
+					if (_logGuestThreads)
+					{
+						Console.Error.WriteLine($"[LOADER][INFO] guest_threads.wake_refused key={wakeKey} thread='{thread.Name}' handle=0x{thread.ThreadHandle:X16}");
+					}
+
 					continue;
 				}
 
@@ -4426,7 +4456,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return wakeCount;
 	}
 
-	private void PumpUntilGuestThreadsIdle(CpuContext callerContext, string reason)
+	private void PumpUntilGuestThreadsIdle(CpuContext callerContext, string reason, bool waitForBlockedThreads = true)
 	{
 		var nextSnapshotTimestamp = Stopwatch.GetTimestamp() + Stopwatch.Frequency;
 		while (!ActiveForcedGuestExit)
@@ -4449,6 +4479,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 			if (!hasRunningThread && !hasBlockedThread)
 			{
+				return;
+			}
+
+			if (!waitForBlockedThreads && !hasRunningThread)
+			{
+				// Everything left is blocked and only guest code that has not started yet can wake it.
 				return;
 			}
 
@@ -6984,7 +7020,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				// callback.
 				if (!ActiveForcedGuestExit)
 				{
-					PumpUntilGuestThreadsIdle(context, "entry_return");
+					PumpUntilGuestThreadsIdle(context, "entry_return", _entryReturnWaitsForBlockedThreads);
 				}
 			}
 			catch (AccessViolationException ex)
@@ -7068,6 +7104,50 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private void StartStallWatchdog()
 	{
+		// Diagnostic: SHARPEMU_DUMP_THREADS_SECONDS=N prints the stall snapshot (all guest threads) once after N seconds.
+		if (int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_DUMP_THREADS_SECONDS"), out var dumpThreadsSeconds) && dumpThreadsSeconds > 0)
+		{
+			new Thread(() =>
+			{
+				Thread.Sleep(dumpThreadsSeconds * 1000);
+				LogStallWatchdogSnapshot();
+			})
+			{ IsBackground = true, Name = "ThreadDump" }.Start();
+		}
+
+		// Diagnostic: SHARPEMU_PEEK_GUEST_U32=0xADDR[,0xADDR...] logs a guest dword whenever its value changes.
+		if (Environment.GetEnvironmentVariable("SHARPEMU_PEEK_GUEST_U32") is { Length: > 0 } peekList)
+		{
+			var peekAddresses = peekList
+				.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+				.Select(text => ulong.TryParse(text.StartsWith("0x", StringComparison.OrdinalIgnoreCase) ? text[2..] : text,
+					System.Globalization.NumberStyles.HexNumber, null, out var address) ? address : 0UL)
+				.Where(address => address != 0)
+				.ToArray();
+			new Thread(() =>
+			{
+				var last = new uint?[peekAddresses.Length];
+				while (!_stallWatchdogStop)
+				{
+					Thread.Sleep(20);
+					if (_cpuContext is not { } peekContext)
+					{
+						continue;
+					}
+
+					for (var index = 0; index < peekAddresses.Length; index++)
+					{
+						if (peekContext.TryReadUInt32(peekAddresses[index], out var value) && last[index] != value)
+						{
+							Console.Error.WriteLine($"[PEEK] 0x{peekAddresses[index]:X} = 0x{value:X8}");
+							last[index] = value;
+						}
+					}
+				}
+			})
+			{ IsBackground = true, Name = "GuestPeek" }.Start();
+		}
+
 		int stallWatchdogSeconds = GetStallWatchdogSeconds();
 		if (stallWatchdogSeconds <= 0 || _stallWatchdogThread != null)
 		{

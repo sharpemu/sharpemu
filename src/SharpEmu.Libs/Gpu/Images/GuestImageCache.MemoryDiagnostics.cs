@@ -45,6 +45,34 @@ public sealed partial class GuestImageCache
             Console.Error.WriteLine("[GPU][INFO] ImageLifetime report limit reached.");
     }
 
+    private static readonly bool LogImageExtents =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_IMAGE_EXTENTS"), "1", StringComparison.Ordinal);
+    private Dictionary<ulong, (uint Width, uint Height)>? _lastTargetExtents;
+
+    // SHARPEMU_LOG_IMAGE_EXTENTS=1: one line per image of 1 MiB or more that gets created, and one line each
+    // time a render or depth target at an address is acquired with a different size than the last time.
+    private void LogImageCreated(CachedImage image, string path)
+    {
+        if (!LogImageExtents || image.Backing.AllocationSize < 1UL << 20) return;
+        var d = image.Description;
+        Console.Error.WriteLine($"[IMGEXT] t={Environment.TickCount64} create path={path} address=0x{d.Data.Address:X} " +
+            $"extent={d.Extent.Width}x{d.Extent.Height}x{d.Extent.Depth} layers={d.Resources.Layers} levels={d.Resources.Levels} " +
+            $"format={d.PixelFormat} tile={d.TileMode} alloc_mb={image.Backing.AllocationSize >> 20}");
+    }
+
+    private void LogTargetExtent(CachedImage image, string kind)
+    {
+        if (!LogImageExtents) return;
+        var d = image.Description;
+        _lastTargetExtents ??= new Dictionary<ulong, (uint, uint)>();
+        var now = (d.Extent.Width, d.Extent.Height);
+        if (_lastTargetExtents.TryGetValue(d.Data.Address, out var last) && last == now) return;
+        _lastTargetExtents[d.Data.Address] = now;
+        Console.Error.WriteLine($"[IMGEXT] t={Environment.TickCount64} {kind} address=0x{d.Data.Address:X} " +
+            $"extent={now.Width}x{now.Height} previous={(last == default ? "none" : $"{last.Width}x{last.Height}")} " +
+            $"format={d.PixelFormat} samples={d.Samples}");
+    }
+
     private void ReportLargeImageCreation(CachedImage image, string path)
     {
         if (!SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled || image.Backing.AllocationSize < 64UL * 1024 * 1024 || _largeImageReports >= 64)

@@ -197,7 +197,7 @@ public sealed class GuestGpuMemory : IDisposable
 
         if (Buffers is { } buffers && buffers.MayHoldGpuData(address, size))
         {
-            _ = buffers.MarkCpuWrite(address, size);
+            _ = buffers.MarkCpuWriteOverwriting(address, size);
         }
 
         _ = Images?.MarkCpuWrite(address, size);
@@ -444,8 +444,10 @@ public sealed class GuestGpuMemory : IDisposable
 
             if (attachment?.Gpu is { } gpu && !gpu.IsGpuQueueThread)
             {
+                var timelineWait = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
                 if (gpu.TryRunAfterPendingWork(() => Unmap(attachment.Scheduler)))
                 {
+                    SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineWait, "wait:unmap queued behind GPU work", 10);
                     return;
                 }
 
@@ -509,12 +511,16 @@ public sealed class GuestGpuMemory : IDisposable
                 var dispatchStarted = GuestMemoryProfile.GetTimestamp();
                 long callbackStarted = 0;
                 long callbackFinished = 0;
+                var timelineWait = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
                 var accepted = gpu.TryRunAfterPendingWork(() =>
                 {
                     callbackStarted = GuestMemoryProfile.GetTimestamp();
+                    var timelineApply = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
                     ApplyChange(attachment.Scheduler);
+                    SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineApply, "gpu:apply mapping change (drain + change)", 10);
                     callbackFinished = GuestMemoryProfile.GetTimestamp();
                 });
+                SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineWait, "wait:mapping change queued behind GPU work", 10);
                 var callerResumed = GuestMemoryProfile.GetTimestamp();
                 if (accepted)
                 {
@@ -543,10 +549,14 @@ public sealed class GuestGpuMemory : IDisposable
             if (scheduler is { Active: true })
             {
                 using var drainScope = GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingDrain);
+                var timelineDrain = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
                 scheduler.FinishMemoryAccess();
+                SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineDrain, "gpu:mapping drain FinishMemoryAccess", 5);
             }
+            var timelineBody = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
             using (GuestMemoryProfile.Measure(GuestMemoryProfile.Operation.MappingApply))
                 change();
+            SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineBody, "gpu:mapping change body", 5);
         }
     }
 
