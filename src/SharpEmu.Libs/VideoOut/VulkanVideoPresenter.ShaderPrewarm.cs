@@ -8,7 +8,6 @@ using System.Diagnostics;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
-using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
@@ -28,9 +27,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private ShaderPrewarmList? _shaderPrewarmList;
         private ConcurrentDictionary<string, byte>? _prewarmedShaderIdentities;
         private ConcurrentDictionary<string, byte>? _runtimeComputeIdentities;
-        private Thread[] _shaderPrewarmThreads = [];
         private PrewarmPool? _prewarmPool;
-        private PrewarmPool PrewarmWorkers => _prewarmPool ??= new PrewarmPool(() => _shaderPrewarmStopping);
         private volatile bool _shaderPrewarmStopping;
         private volatile bool _shaderPrewarmFinished;
         private int _shaderPrewarmCompiled;
@@ -47,14 +44,12 @@ internal static unsafe partial class VulkanVideoPresenter
         private int _shaderPrewarmWorkers;
         private long _shaderPrewarmStarted;
         private Func<ShaderCacheProgressView>? _shaderPrewarmProgressView;
-        private readonly ConcurrentQueue<ulong> _shaderPrewarmCompleted = new();
         // The stage programs of the whole pipelines the prewarm builds (StartPipelinePrewarm), each compiled once.
         private readonly ConcurrentDictionary<ulong, Lazy<PrewarmedStage?>> _prewarmStages = new();
         private readonly ConcurrentBag<ShaderModule> _prewarmStageModules = [];
 
         private sealed record PrewarmedStage(ShaderProgram Handle, ShaderProgramInfo Program);
 
-        private readonly record struct PrewarmWork(ComputePrewarmRecord? Compute, ShaderCodeCapture? Code, PipelinePrewarmItem? Graphics);
         // SHARPEMU_PREWARM_BINARY_SKIP (on by default; =0 turns it off): with pipeline binaries on, the graphics prewarm builds
         // only the items that no prewarm under the current build stamp completed yet (ShaderPrewarmList progress), and none when
         // every item is listed. Each listed item was built through CreatePipelineWithBinaries, which stored its binaries when the
@@ -115,9 +110,13 @@ internal static unsafe partial class VulkanVideoPresenter
             Volatile.Write(ref _shaderPrewarmList, list);
             var compiler = GuestGpu.Current;
             var buildStamp = ShaderPrewarmStamp(compiler);
-            var stamp = list.CoverageStamp(buildStamp);
+            // Whole pipelines serve a device that creates whole pipelines. With pipeline libraries the session links the parts
+            // the graphics prewarm stores (StartGraphicsPrewarm) and would never take a whole pipeline built here.
+            var pipelines = !_graphicsPipelineLibraries;
+            var stamp = list.CoverageStamp(buildStamp, pipelines);
             StartGraphicsPrewarm(list, buildStamp, compiler);
-            if (list.LoadedComputeCount == 0 && list.LoadedPipelineCount == 0)
+            var pipelineCount = pipelines ? list.LoadedPipelineCount : 0;
+            if (list.LoadedComputeCount == 0 && pipelineCount == 0)
             {
                 _loadedPrewarmCache = [];
                 _shaderPrewarmFinished = true;
@@ -130,96 +129,254 @@ internal static unsafe partial class VulkanVideoPresenter
                 _loadedPrewarmCache = [];
                 _shaderPrewarmFinished = true;
                 Console.Error.WriteLine(
-                    $"[LOADER][INFO] Shader prewarm skipped: compute={list.LoadedComputeCount} graphics={list.LoadedPipelineCount} " +
+                    $"[LOADER][INFO] Shader prewarm skipped: compute={list.LoadedComputeCount} graphics={pipelineCount} " +
                     "reason=cache-and-recording-match");
                 return false;
             }
 
             _loadedPrewarmCache = [];
-            // Progress alone does not prove that the saved cache contains those pipelines.
-            list.ClearProgress();
-            var computes = list.LoadedComputes();
-            var graphics = list.LoadedPipelines();
-            Interlocked.Add(ref _shaderPrewarmFailed,
-                list.LoadedComputeCount - computes.Count + list.LoadedPipelineCount - graphics.Count);
+            IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code, float StartBy)> pending = list.LoadedComputeStarts();
+            var missingCode = list.LoadedComputeCount - pending.Count;
+            if (PrewarmLinked != "all")
+            {
+                var plain = pending.Where(static item => item.Record.Linked is null).ToList();
+                if (PrewarmLinked == "background")
+                {
+                    StartLinkedPrewarm(list, [.. pending.Where(static item => item.Record.Linked is not null)
+                        .Select(static item => (item.Record, item.Code))], compiler);
+                }
+                else
+                {
+                    Volatile.Write(ref _shaderPrewarmDroppedLinked, pending.Count - plain.Count);
+                }
+
+                pending = plain;
+            }
+
+            IReadOnlyList<PipelinePrewarmItem> graphics = pipelines ? list.LoadedPipelines() : [];
+            Interlocked.Add(ref _shaderPrewarmFailed, missingCode + pipelineCount - graphics.Count);
             var started = Stopwatch.GetTimestamp();
-            var pendingCount = computes.Count + graphics.Count;
-            if (pendingCount == 0)
+            if (pending.Count == 0 && graphics.Count == 0)
             {
                 FinishShaderPrewarm(list, stamp, started);
                 return false;
             }
 
-            var work = new ConcurrentQueue<PrewarmWork>(
-                graphics.Select(static item => new PrewarmWork(null, null, item))
-                    .Concat(computes.Select(static item => new PrewarmWork(item.Record, item.Code, null))));
-            var workerCount = Math.Clamp(Environment.ProcessorCount / 2, 1, 8);
-            var remaining = workerCount;
+            var work = new ShaderPrewarmQueue<(ComputePrewarmRecord Record, ShaderCodeCapture Code, float StartBy)>(pending,
+                static item => item.Record.Linked is null ? null : item.Record.Hash);
+            var workerCount = Math.Clamp(Environment.ProcessorCount / 4, 1, 4);
             var host = (IShaderPipelineHost)this;
             var sharedInt64Atomics = host.SharedInt64AtomicsEnabled;
             var execGuardElision = host.ExecGuardElisionEnabled;
-            Volatile.Write(ref _shaderPrewarmTotal, pendingCount);
+            // The game waits until the compute records and the whole pipelines are done: the last lane to end finishes.
+            var lanes = (pending.Count != 0 ? 1 : 0) + (graphics.Count != 0 ? 1 : 0);
+            void FinishLane()
+            {
+                if (Interlocked.Decrement(ref lanes) == 0)
+                {
+                    FinishShaderPrewarm(list, stamp, started);
+                }
+            }
+
+            Volatile.Write(ref _shaderPrewarmTotal, pending.Count + graphics.Count);
             Volatile.Write(ref _shaderPrewarmProgress, 0);
-            Volatile.Write(ref _shaderPrewarmComputeTotal, computes.Count);
-            Volatile.Write(ref _shaderPrewarmGraphicsTotal, graphics.Count);
-            Volatile.Write(ref _shaderPrewarmWorkers, workerCount);
+            Volatile.Write(ref _shaderPrewarmComputeTotal, pending.Count);
+            Interlocked.Add(ref _shaderPrewarmGraphicsTotal, graphics.Count);
+            Interlocked.Add(ref _shaderPrewarmWorkers, pending.Count != 0 ? workerCount : 0);
             _shaderPrewarmStarted = started;
             _shaderPrewarmProgressView = ShaderPrewarmProgressView;
             ShowShaderCacheProgress(_shaderPrewarmProgressView);
             Console.Error.WriteLine(
-                $"[LOADER][INFO] Shader prewarm started: compute={computes.Count} graphics={graphics.Count} resumed=0 workers={workerCount}");
+                $"[LOADER][INFO] Shader prewarm started: compute={pending.Count} graphics={graphics.Count} workers={workerCount} " +
+                $"dropped_linked={Volatile.Read(ref _shaderPrewarmDroppedLinked)}");
             SetShaderPrewarmState(true);
-            _shaderPrewarmThreads = new Thread[workerCount];
-            for (var index = 0; index < workerCount; index++)
+            if (pending.Count != 0)
             {
-                _shaderPrewarmThreads[index] = new Thread(() =>
-                {
-                    SubmissionScheduler.ThrowOnFatal = true;
-                    while (!_shaderPrewarmStopping && work.TryDequeue(out var item))
+                PrewarmWorkers.Add(new PrewarmPool.Lane(pending.Count,
+                    (out float start) =>
                     {
-                        if (item.Graphics is { } pipeline)
-                        {
-                            if (PrewarmGraphicsPipeline(pipeline, compiler))
-                            {
-                                _shaderPrewarmCompleted.Enqueue(pipeline.Identity);
-                            }
-
-                            Interlocked.Increment(ref _shaderPrewarmGraphicsDone);
-                        }
-                        else
-                        {
-                            if (PrewarmComputePipeline(item.Compute!, item.Code!, compiler, sharedInt64Atomics, execGuardElision))
-                            {
-                                _shaderPrewarmCompleted.Enqueue(ShaderPrewarmList.Identity(item.Compute!));
-                            }
-
-                            Interlocked.Increment(ref _shaderPrewarmComputeDone);
-                        }
-
-                        if (Interlocked.Increment(ref _shaderPrewarmProgress) % PrewarmProgressBatch == 0)
-                        {
-                            FlushShaderPrewarmProgress(list, stamp);
-                        }
-                    }
-
-                    FlushShaderPrewarmProgress(list, stamp);
-                    if (Interlocked.Decrement(ref remaining) == 0)
+                        var any = work.TryPeek(out var next);
+                        start = any ? next.StartBy : 0;
+                        return any;
+                    },
+                    mayWait =>
                     {
-                        ReleasePrewarmStages();
-                        FinishShaderPrewarm(list, stamp, started);
-                    }
-                })
-                {
-                    IsBackground = true,
-                    Priority = ThreadPriority.BelowNormal,
-                    Name = $"SharpEmu shader prewarm {index}",
-                };
-                _shaderPrewarmThreads[index].Start();
+                        if (!work.TryTake(() => _shaderPrewarmStopping, out var item, out var gate, mayWait))
+                        {
+                            return false;
+                        }
+
+                        bool compiled;
+                        var began = Stopwatch.GetTimestamp();
+                        try
+                        {
+                            compiled = PrewarmComputePipeline(item.Record, item.Code, compiler, sharedInt64Atomics, execGuardElision);
+                        }
+                        finally
+                        {
+                            work.Release(gate);
+                        }
+
+                        if (compiled)
+                        {
+                            list.RecordComputeCost(item.Record, (float)Stopwatch.GetElapsedTime(began).TotalSeconds);
+                        }
+
+                        Interlocked.Increment(ref _shaderPrewarmComputeDone);
+                        Interlocked.Increment(ref _shaderPrewarmProgress);
+                        return true;
+                    },
+                    FinishLane),
+                    workerCount, "SharpEmu shader prewarm");
+            }
+
+            if (graphics.Count != 0)
+            {
+                StartPipelinePrewarm(graphics, compiler, FinishLane);
             }
 
             return true;
         }
 
+        // The compute and graphics prewarms share one pool of below-normal threads.
+        private PrewarmPool PrewarmWorkers => _prewarmPool ??= new PrewarmPool(() => _shaderPrewarmStopping);
+
+        // The whole pipelines sessions created (RecordGraphics), built again with their stage programs. Each one goes to the
+        // device pipeline cache, where the session's creation of the same pipeline finds the driver's compile; the stage
+        // programs and their modules go when the lane ends.
+        private void StartPipelinePrewarm(IReadOnlyList<PipelinePrewarmItem> items, IGuestGpuBackend compiler, Action finished)
+        {
+            var work = new ConcurrentQueue<PipelinePrewarmItem>(items);
+            var workerCount = Math.Clamp(Environment.ProcessorCount / 4, 1, 4);
+            Interlocked.Add(ref _shaderPrewarmWorkers, workerCount);
+            PrewarmWorkers.Add(new PrewarmPool.Lane(items.Count,
+                (out float start) =>
+                {
+                    // Sessions do not time a whole pipeline's first use: it is due as an untimed compute record is (StartBy).
+                    start = float.PositiveInfinity;
+                    return !work.IsEmpty;
+                },
+                _ =>
+                {
+                    if (!work.TryDequeue(out var item))
+                    {
+                        return false;
+                    }
+
+                    PrewarmGraphicsPipeline(item, compiler);
+                    Interlocked.Increment(ref _shaderPrewarmGraphicsDone);
+                    Interlocked.Increment(ref _shaderPrewarmProgress);
+                    return true;
+                },
+                () =>
+                {
+                    ReleasePrewarmStages();
+                    finished();
+                }),
+                workerCount, "SharpEmu pipeline prewarm");
+        }
+
+        // The linked permutations earlier sessions recorded, compiled on below-normal threads the game does not wait for. The
+        // driver can spend minutes on one, and a compile the session starts at the caller's first dispatch can still be
+        // running when the session ends: then nothing is stored, and every session skips the caller's dispatches as long.
+        // Started at boot, a permutation is stored when it finishes (its pipeline binaries, or the caller's linked cache), and
+        // the session's request for the same module waits for that compile and loads its result instead of compiling it
+        // beside it (the pipeline build gate and LinkedCompileAdmission). Each compile waits for its admission like the
+        // session's own. The order is ShaderPrewarmQueue.LinkedLaneOrder: each caller's first record is the one its session
+        // asks for first, since a session that asks for another large module waits for the lane's compile and then compiles
+        // its own. With cores to spare a second worker takes the next record whose caller the first is not compiling (the
+        // permutations of one caller share its linked cache file), so callers that compile in a minute or two are ready
+        // before the session reaches them instead of waiting behind a caller that compiles for several minutes; while they
+        // wait, the session skips their dispatches and draws without their results.
+        private void StartLinkedPrewarm(ShaderPrewarmList list,
+            IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code)> records, IGuestGpuBackend compiler)
+        {
+            if (records.Count == 0)
+            {
+                return;
+            }
+
+            var host = (IShaderPipelineHost)this;
+            var sharedInt64Atomics = host.SharedInt64AtomicsEnabled;
+            var execGuardElision = host.ExecGuardElisionEnabled;
+            var workers = ShaderPrewarmQueue<(ComputePrewarmRecord Record, ShaderCodeCapture Code)>.LinkedLaneWorkers(
+                Environment.ProcessorCount);
+            var thread = new Thread(() =>
+            {
+                var started = Stopwatch.GetTimestamp();
+                // Read here, off the boot path: the store decodes every kept callee.
+                var keptCallees = ShaderCallUnionStore.Open();
+                var firstAsked = records.Where(item => item.Record.Linked is { } linked &&
+                        keptCallees.KeepsCalleesOf(ShaderStage.Compute, item.Record.Hash, linked))
+                    .Select(static item => item.Record).ToHashSet<ComputePrewarmRecord>(ReferenceEqualityComparer.Instance);
+                var ordered = ShaderPrewarmQueue<(ComputePrewarmRecord Record, ShaderCodeCapture Code)>.LinkedLaneOrder(
+                    records, static item => item.Record.Hash, list.IsSlowLinkedCompile, item => firstAsked.Contains(item.Record));
+                Console.Error.WriteLine(
+                    $"[LOADER][INFO] Linked prewarm started: permutations={ordered.Length} workers={workers} callers=" +
+                    string.Join(',', ordered.GroupBy(static item => item.Record.Hash).Select(group =>
+                        $"0x{group.Key:X16}x{group.Count()}{(list.IsSlowLinkedCompile(group.Key) ? "(slow)" : "")}" +
+                        $"{(group.Any(item => firstAsked.Contains(item.Record)) ? "(kept)" : "")}")));
+                var queue = new ShaderPrewarmQueue<(ComputePrewarmRecord Record, ShaderCodeCapture Code)>(
+                    ordered, static item => item.Record.Hash, keepOrder: true);
+                var compiled = 0;
+                void Work()
+                {
+                    while (queue.TryTake(() => _shaderPrewarmStopping, out var item, out var gate))
+                    {
+                        try
+                        {
+                            var (record, code) = item;
+                            var began = Stopwatch.GetTimestamp();
+                            if (!PrewarmComputePipelineCore(record, code, compiler, sharedInt64Atomics, execGuardElision,
+                                    waitForAdmission: true))
+                            {
+                                continue;
+                            }
+
+                            Interlocked.Increment(ref compiled);
+                            var seconds = Stopwatch.GetElapsedTime(began).TotalSeconds;
+                            list.RecordComputeCost(record, (float)seconds);
+                            Console.Error.WriteLine(
+                                $"[LOADER][INFO] Linked prewarm compiled: hash=0x{record.Hash:X16} " +
+                                $"callees={record.Linked?.Functions.Length ?? 0} seconds={seconds:F1}");
+                        }
+                        finally
+                        {
+                            queue.Release(gate);
+                        }
+                    }
+                }
+
+                var helpers = new Thread[workers - 1];
+                for (var index = 0; index < helpers.Length; index++)
+                {
+                    helpers[index] = new Thread(Work)
+                    {
+                        IsBackground = true,
+                        Priority = ThreadPriority.BelowNormal,
+                        Name = $"SharpEmu linked prewarm {index + 2}",
+                    };
+                    helpers[index].Start();
+                }
+
+                Work();
+                foreach (var helper in helpers)
+                {
+                    helper.Join();
+                }
+
+                Console.Error.WriteLine(
+                    $"[LOADER][INFO] Linked prewarm {(_shaderPrewarmStopping ? "stopped" : "done")}: compiled={Volatile.Read(ref compiled)} " +
+                    $"of {ordered.Length} seconds={Stopwatch.GetElapsedTime(started).TotalSeconds:F0}");
+            })
+            {
+                IsBackground = true,
+                Priority = ThreadPriority.BelowNormal,
+                Name = "SharpEmu linked prewarm",
+            };
+            _linkedPrewarmThread = thread;
+            thread.Start();
+        }
 
         private ShaderCacheProgressView ShaderPrewarmProgressView() => new(
             "Warming up shaders",
@@ -244,17 +401,6 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 HideShaderCacheProgress(view);
             }
-        }
-
-        private void FlushShaderPrewarmProgress(ShaderPrewarmList list, string stamp)
-        {
-            var batch = new List<ulong>();
-            while (_shaderPrewarmCompleted.TryDequeue(out var identity))
-            {
-                batch.Add(identity);
-            }
-
-            list.AppendProgress(stamp, batch);
         }
 
         private static bool CanSkipShaderPrewarm(ShaderPrewarmList list, string stamp, byte[] cache) =>
@@ -719,12 +865,6 @@ internal static unsafe partial class VulkanVideoPresenter
             _shaderPrewarmStopping = true;
             EndShaderPrewarmProgress();
             SetShaderPrewarmState(false);
-            foreach (var thread in _shaderPrewarmThreads)
-            {
-                thread.Join(TimeSpan.FromSeconds(10));
-            }
-
-            _shaderPrewarmThreads = [];
             // A worker stops after its current item. Its pipeline create cannot be cancelled and teardown destroys the
             // device next, so each one is joined without a bound, as DrainPendingComputePipelines waits for the session's
             // own compiles.

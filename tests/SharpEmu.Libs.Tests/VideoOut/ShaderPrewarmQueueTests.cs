@@ -54,6 +54,39 @@ public sealed class ShaderPrewarmQueueTests
             ordered.Select(static item => item.Name));
     }
 
+    // The lane's queue keeps the lane order. While one worker compiles a caller that takes minutes, a second worker takes the
+    // next caller's record, not the busy caller's second permutation, which waits until the first is released.
+    [Fact]
+    public void ALaneQueueKeepsTheLaneOrderAndASecondWorkerTakesTheNextCaller()
+    {
+        Item[] lane = [new("slow-first", 0xA), new("quick", 0xB), new("slow-second", 0xA), new("plain", null)];
+        var queue = new ShaderPrewarmQueue<Item>(lane, static item => item.Caller, keepOrder: true);
+
+        Assert.True(queue.TryTake(Never, out var first, out var firstGate));
+        Assert.Equal("slow-first", first.Name);
+        Assert.True(queue.TryTake(Never, out var second, out var secondGate, mayWait: false));
+        Assert.Equal("quick", second.Name);
+        queue.Release(secondGate);
+        Assert.True(queue.TryTake(Never, out var third, out var thirdGate, mayWait: false));
+        Assert.Equal("plain", third.Name);
+        queue.Release(thirdGate);
+        Assert.False(queue.TryTake(Never, out _, out _, mayWait: false));
+        queue.Release(firstGate);
+        Assert.True(queue.TryTake(Never, out var last, out var lastGate, mayWait: false));
+        Assert.Equal("slow-second", last.Name);
+        queue.Release(lastGate);
+        Assert.Equal(0, queue.Count);
+    }
+
+    [Theory]
+    [InlineData(32, 2)]
+    [InlineData(16, 2)]
+    [InlineData(12, 1)]
+    [InlineData(8, 1)]
+    [InlineData(1, 1)]
+    public void TheLinkedLaneRunsASecondWorkerOnlyWithSixteenHardwareThreads(int processorCount, int workers) =>
+        Assert.Equal(workers, ShaderPrewarmQueue<Item>.LinkedLaneWorkers(processorCount));
+
     // A peek leaves the record in place, and a take without waiting returns at once when every record left waits on a
     // busy caller.
     [Fact]

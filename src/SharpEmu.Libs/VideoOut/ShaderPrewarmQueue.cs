@@ -19,11 +19,12 @@ internal sealed class ShaderPrewarmQueue<T>
     private long _releases;
     private long _deferrals;
 
-    // caller: the linked caller's hash of a record, or null for a record without linked callees.
-    public ShaderPrewarmQueue(IReadOnlyList<T> records, Func<T, ulong?> caller)
+    // caller: the linked caller's hash of a record, or null for a record without linked callees. keepOrder takes the
+    // records in the order given (the background lane's LinkedLaneOrder) instead of each caller's newest first.
+    public ShaderPrewarmQueue(IReadOnlyList<T> records, Func<T, ulong?> caller, bool keepOrder = false)
     {
         _caller = caller;
-        _work = new ConcurrentQueue<T>(NewestLinkedFirst(records, caller));
+        _work = new ConcurrentQueue<T>(keepOrder ? records : NewestLinkedFirst(records, caller));
     }
 
     public int Count => _work.Count;
@@ -126,6 +127,11 @@ internal sealed class ShaderPrewarmQueue<T>
 
         return ordered;
     }
+
+    // The workers of the background lane of linked records (VulkanVideoPresenter.StartLinkedPrewarm), each keeping one driver
+    // compile running: two on a machine with sixteen or more hardware threads, else one, beside the session and the other
+    // prewarm lanes.
+    internal static int LinkedLaneWorkers(int processorCount) => processorCount >= 16 ? 2 : 1;
 
     // The order of the background lane of linked records (VulkanVideoPresenter.StartLinkedPrewarm), which compiles one at a
     // time. Every caller's first record goes before any caller's second, since one ready permutation already runs the
