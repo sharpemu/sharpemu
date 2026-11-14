@@ -42,6 +42,12 @@ internal static unsafe partial class VulkanVideoPresenter
         public ulong ProfilePixelHash;
         public ulong ProfileComputeHash;
 
+        public bool LinkedFromLibraries;
+        public DescriptorSetLayout PixelSetLayout;
+        public DescriptorSetDemand PixelDemand;
+        public string VertexSetSignature = "";
+        public string PixelSetSignature = "";
+
         public bool RectangleList => Description is { Tessellation: null, StaticParameters.Topology: PrimitiveTopology.PatchList };
     }
 
@@ -670,12 +676,15 @@ internal static unsafe partial class VulkanVideoPresenter
         public ulong CreateShaderModule(IGuestCompiledShader shader, ShaderStage stage, ulong hash, ulong programId)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramCompile);
-            var module = CreateShaderModule(shader.Payload);
+            var payload = stage == ShaderStage.Pixel && _graphicsPipelineLibraries
+                ? WithDescriptorSet(shader.Payload, 0, PixelDescriptorSet)
+                : shader.Payload;
+            var module = CreateShaderModule(payload);
             SetDebugName(ObjectType.ShaderModule, module.Handle, $"SharpEmu {stage} 0x{hash:X16}");
-            _shaderModuleSpirvBytes[module.Handle] = shader.Payload.Length;
+            _shaderModuleSpirvBytes[module.Handle] = payload.Length;
             if (stage is ShaderStage.Vertex or ShaderStage.Pixel)
-                _rectangleStageCode[module.Handle] = shader.Payload;
-            var identity = VulkanPipelineCacheStorage.CompiledShaderIdentity(shader.Payload);
+                _rectangleStageCode[module.Handle] = payload;
+            var identity = VulkanPipelineCacheStorage.CompiledShaderIdentity(payload);
             _shaderModuleCacheIdentities[module.Handle] = identity;
             if (stage == ShaderStage.Compute)
             {
@@ -913,7 +922,11 @@ internal static unsafe partial class VulkanVideoPresenter
         // The set is pushed when its descriptors fit the device limit, else it comes from the heap.
         private PhysicalDeviceLimits _shaderDescriptorLimits;
 
-        private DescriptorSetLayout CreateDescriptorSetLayout(List<DescriptorSetLayoutBinding> bindings, out bool usesPushDescriptors, out DescriptorSetDemand demand)
+        private DescriptorSetLayout CreateDescriptorSetLayout(List<DescriptorSetLayoutBinding> bindings, out bool usesPushDescriptors, out DescriptorSetDemand demand) =>
+            CreateDescriptorSetLayout(bindings, allowPush: true, out usesPushDescriptors, out demand);
+
+        private DescriptorSetLayout CreateDescriptorSetLayout(List<DescriptorSetLayoutBinding> bindings, bool allowPush, out bool usesPushDescriptors,
+            out DescriptorSetDemand demand)
         {
             ShaderDescriptorLimits.Validate(bindings, _shaderDescriptorLimits);
             var descriptorCount = 0u;
@@ -924,7 +937,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 demand = demand.Add(DescriptorSetDemand.Of(binding.DescriptorType, binding.DescriptorCount));
             }
 
-            usesPushDescriptors = descriptorCount <= _maxPushDescriptors;
+            usesPushDescriptors = allowPush && descriptorCount <= _maxPushDescriptors;
             var bindingArray = bindings.ToArray();
             fixed (DescriptorSetLayoutBinding* bindingPointer = bindingArray)
             {
@@ -987,7 +1000,7 @@ internal static unsafe partial class VulkanVideoPresenter
             // Rectangle draws bind a native fill or compatibility variant at draw time.
             if (!entry.RectangleList)
             {
-                entry.Pipeline = CreateRenderPipeline(description, description.StaticParameters.Topology, entry.Layout);
+                entry.Pipeline = CreateRenderPipeline(description, description.StaticParameters.Topology, entry.Layout, libraries: entry);
             }
 
             return RegisterPipeline(entry);
@@ -999,6 +1012,11 @@ internal static unsafe partial class VulkanVideoPresenter
             if (description.Rendering.ColorCount > _maxColorAttachments)
             {
                 throw SubmissionScheduler.Fatal($"The draw binds more color attachments than the device supports: count={description.Rendering.ColorCount} max={_maxColorAttachments}.");
+            }
+
+            if (_graphicsPipelineLibraries)
+            {
+                return CreateLibraryPipelineEntry(description);
             }
 
             var bindings = new List<DescriptorSetLayoutBinding>();
@@ -1282,7 +1300,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // A prewarm pipeline is built in the device pipeline cache and returned unreported.
         internal Pipeline CreateRenderPipeline(GraphicsPipelineDescription description, PrimitiveTopology topology, PipelineLayout layout,
             PolygonMode polygonMode = PolygonMode.Fill, bool expandRectangles = false, PendingGraphicsPipeline? worker = null,
-            bool prewarm = false)
+            RenderPipelineEntry? libraries = null, bool prewarm = false)
         {
             var parameters = description.StaticParameters;
             var rendering = description.Rendering;
@@ -1507,6 +1525,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         dynamicStates[dynamicStateCount++] = DynamicState.DepthBounds;
                     }
 
+                    var baseDynamicStateCount = dynamicStateCount;
                     // Last so a pipeline without color attachments can leave it out.
                     if (_colorWriteEnableApi is not null && colorCount != 0)
                     {
@@ -1519,6 +1538,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         DynamicStateCount = dynamicStateCount,
                         PDynamicStates = dynamicStates,
                     };
+                    var baseDynamicState = dynamicState with { DynamicStateCount = baseDynamicStateCount };
                     var renderingInfo = new PipelineRenderingCreateInfo
                     {
                         SType = StructureType.PipelineRenderingCreateInfo,
@@ -1561,8 +1581,20 @@ internal static unsafe partial class VulkanVideoPresenter
                     {
                         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsPipelineDriver))
                         {
-                            creationResult = CreatePipelineWithBinaries(&pipelineInfo, &pipelineInfo.PNext, cache,
-                                &CreateGraphicsPipelineCall, out pipeline, out creationMilliseconds);
+                            creationResult = Result.ErrorUnknown;
+                            pipeline = default;
+                            creationMilliseconds = 0;
+                            if (libraries is { LinkedFromLibraries: true } && !expandRectangles)
+                            {
+                                creationResult = CreateLinkedGraphicsPipeline(libraries, description, &pipelineInfo, &depthStencil,
+                                    &baseDynamicState, out pipeline, out creationMilliseconds);
+                            }
+
+                            if (creationResult != Result.Success)
+                            {
+                                creationResult = CreatePipelineWithBinaries(&pipelineInfo, &pipelineInfo.PNext, cache,
+                                    &CreateGraphicsPipelineCall, out pipeline, out creationMilliseconds);
+                            }
                         }
                     }
                     if (RenderPhaseProfile.Enabled && !prewarm)
@@ -1940,6 +1972,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
                 _vk.DestroyPipelineLayout(_device, pending.Entry.Layout, null);
                 _vk.DestroyDescriptorSetLayout(_device, pending.Entry.SetLayout, null);
+                _vk.DestroyDescriptorSetLayout(_device, pending.Entry.PixelSetLayout, null);
             }
             _pendingGraphicsPipelines.Clear();
         }
@@ -1960,9 +1993,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 _vk.DestroyPipelineLayout(_device, entry.Layout, null);
                 _vk.DestroyDescriptorSetLayout(_device, entry.SetLayout, null);
+                _vk.DestroyDescriptorSetLayout(_device, entry.PixelSetLayout, null);
             }
 
             _pipelineEntries.Clear();
+            DestroyGraphicsLibraries();
             foreach (var module in _shaderModules.Values)
             {
                 _vk.DestroyShaderModule(_device, module, null);

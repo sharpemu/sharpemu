@@ -27,6 +27,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private ShaderStageFlags _shadowPushStages;
         private uint[]? _shadowPushData;
         private DescriptorShadow? _graphicsDescriptorShadow;
+        private DescriptorShadow? _graphicsPixelDescriptorShadow;
         private DescriptorShadow? _computeDescriptorShadow;
         private ulong[]? _shadowVertexBindings;
         private int _shadowVertexCount = -1;
@@ -67,6 +68,11 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_graphicsDescriptorShadow is not null)
             {
                 _graphicsDescriptorShadow.Valid = false;
+            }
+
+            if (_graphicsPixelDescriptorShadow is not null)
+            {
+                _graphicsPixelDescriptorShadow.Valid = false;
             }
 
             if (_computeDescriptorShadow is not null)
@@ -124,7 +130,10 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private bool DescriptorsAlreadyBound(CommandBuffer command, PipelineBindPoint bindPoint, PipelineLayout layout, ReadOnlySpan<WriteDescriptorSet> writes)
+        // setIndex: the set the writes go to; a pipeline linked from libraries binds its pixel stage's descriptors in a set of
+        // their own (PixelDescriptorSet).
+        private bool DescriptorsAlreadyBound(CommandBuffer command, PipelineBindPoint bindPoint, PipelineLayout layout, ReadOnlySpan<WriteDescriptorSet> writes,
+            uint setIndex = 0)
         {
             if (!SyncNativeShadow(command))
             {
@@ -134,7 +143,9 @@ internal static unsafe partial class VulkanVideoPresenter
             var length = DescriptorKey(writes);
             var shadow = bindPoint == PipelineBindPoint.Compute
                 ? _computeDescriptorShadow ??= new DescriptorShadow()
-                : _graphicsDescriptorShadow ??= new DescriptorShadow();
+                : setIndex == 0
+                    ? _graphicsDescriptorShadow ??= new DescriptorShadow()
+                    : _graphicsPixelDescriptorShadow ??= new DescriptorShadow();
             var key = _descriptorKeyScratch.AsSpan(0, length);
             var reused = shadow.Valid && shadow.Layout.Handle == layout.Handle && key.SequenceEqual(shadow.Key.AsSpan(0, shadow.Length));
             CountNativeState(NativeStateKind.Descriptors, reused);

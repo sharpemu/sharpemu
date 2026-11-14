@@ -1804,6 +1804,56 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        // Pushes one set's descriptors, or writes them to a set from the heap and binds it; nothing when the same layout and
+        // descriptors are already bound there.
+        private void CommitDescriptorSet(CommandBuffer command, PipelineBindPoint bindPoint, PipelineLayout layout, uint setIndex,
+            DescriptorSetLayout setLayout, in DescriptorSetDemand demand, bool push, Span<WriteDescriptorSet> writes)
+        {
+            if (writes.Length == 0)
+            {
+                return;
+            }
+
+            if (DescriptorsAlreadyBound(command, bindPoint, layout, writes, setIndex))
+            {
+                Interlocked.Increment(ref _descriptorsShadowed);
+                return;
+            }
+
+            fixed (WriteDescriptorSet* writePointer = writes)
+            {
+                if (push)
+                {
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                    {
+                        _presenter._pushDescriptorApi.CmdPushDescriptorSet(command, bindPoint, layout, setIndex, (uint)writes.Length, writePointer);
+                    }
+
+                    ShaderCacheCounters.CountPushSet();
+                    return;
+                }
+
+                if (_worker)
+                {
+                    throw Serial("descriptor heap", resumable: true);
+                }
+
+                var set = _descriptorHeap.Commit(setLayout, in demand);
+                for (var index = 0; index < writes.Length; index++)
+                {
+                    writes[index].DstSet = set;
+                }
+
+                _vk.UpdateDescriptorSets(_device, (uint)writes.Length, writePointer, 0, null);
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdBindDescriptorSets(command, bindPoint, layout, setIndex, 1, &set, 0, null);
+                }
+
+                ShaderCacheCounters.CountHeapSet();
+            }
+        }
+
         private static DescriptorImageInfo ImageInfo(TextureResource texture, uint element, ShaderProgramInfo program, int index)
         {
             var view = texture.MipViews.Length == 0
@@ -1898,6 +1948,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var bufferIndex = 0;
             var imageIndex = 0;
             var writeIndex = 0;
+            var pixelWriteStart = -1;
             var uploadStage = bindPoint == PipelineBindPoint.Compute ? PipelineStageFlags.ComputeShaderBit : PipelineStageFlags.FragmentShaderBit;
             var textures = textureCount == 0 ? [] : System.Buffers.ArrayPool<TextureResource>.Shared.Rent(textureCount);
             var textureIndex = 0;
@@ -1946,6 +1997,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     foreach (var texture in stage.Textures)
                     {
                         textures[textureIndex++] = texture;
+                    }
+
+                    if (shaderStage == ShaderStage.Pixel)
+                    {
+                        pixelWriteStart = writeIndex;
                     }
 
                     var occurrences = occurrenceScratch[..descriptors.Images.Length];
@@ -2111,45 +2167,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     PushConstantsShadowed(command, entry.Layout, pushStages, pushData);
                 }
 
-                if (writeIndex != 0 && DescriptorsAlreadyBound(command, bindPoint, entry.Layout, writes[..writeIndex]))
-                {
-                    Interlocked.Increment(ref _descriptorsShadowed);
-                }
-                else if (writeIndex != 0)
-                {
-                    fixed (WriteDescriptorSet* writePointer = writes)
-                    {
-                        if (entry.UsesPushDescriptors)
-                        {
-                            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
-                            {
-                                _presenter._pushDescriptorApi.CmdPushDescriptorSet(command, bindPoint, entry.Layout, 0, (uint)writeIndex, writePointer);
-                            }
-                            ShaderCacheCounters.CountPushSet();
-                        }
-                        else
-                        {
-                            if (_worker)
-                            {
-                                throw Serial("descriptor heap", resumable: true);
-                            }
-
-                            var set = _descriptorHeap.Commit(entry.SetLayout, in entry.Demand);
-                            for (var index = 0; index < writeIndex; index++)
-                            {
-                                writes[index].DstSet = set;
-                            }
-
-                            _vk.UpdateDescriptorSets(_device, (uint)writeIndex, writePointer, 0, null);
-                            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
-                            {
-                                _vk.CmdBindDescriptorSets(command, bindPoint, entry.Layout, 0, 1, &set, 0, null);
-                            }
-                            ShaderCacheCounters.CountHeapSet();
-                        }
-                    }
-                }
-
+                // A pipeline linked from libraries binds set 0 (vertex), the heap (set 1), then set 2 (pixel): binding a set
+                // with another layout disturbs the sets above it.
+                var vertexWrites = entry.LinkedFromLibraries && pixelWriteStart >= 0 ? pixelWriteStart : writeIndex;
+                CommitDescriptorSet(command, bindPoint, entry.Layout, 0, entry.SetLayout, in entry.Demand, entry.UsesPushDescriptors,
+                    writes[..vertexWrites]);
                 if (entry.UsesBindlessHeap)
                 {
                     if (_worker)
@@ -2158,6 +2180,12 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
 
                     _presenter.BindBindlessHeap(command, bindPoint, entry.Layout);
+                }
+
+                if (vertexWrites != writeIndex)
+                {
+                    CommitDescriptorSet(command, bindPoint, entry.Layout, Presenter.PixelDescriptorSet, entry.PixelSetLayout, in entry.PixelDemand,
+                        push: false, writes[vertexWrites..writeIndex]);
                 }
             }
 

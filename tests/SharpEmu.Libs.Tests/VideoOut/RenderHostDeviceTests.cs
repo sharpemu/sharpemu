@@ -694,15 +694,18 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         Assert.Equal(HostPageProtection.ReadWriteExecute, harness.Protection(address));
     }
 
-    [Fact]
-    public void TwoDraws_RenderTheVertexVersionEachWasRecordedWith()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TwoDraws_RenderTheVertexVersionEachWasRecordedWith(bool libraries)
     {
-        if (!Ready())
+        if (!Ready() || (libraries && !_vulkan.SupportsGraphicsPipelineLibrary))
         {
             return;
         }
 
         using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.SetField("_graphicsPipelineLibraries", libraries);
         presenter.LoadRenderingCommands();
         var harness = presenter.Harness;
         var firstTarget = harness.MapBacked(0x10000, ReadWrite);
@@ -729,6 +732,9 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
             Assert.Equal(Red, Pixel(second, 1, 1));
             Assert.Equal(0u, Pixel(second, Size / 2, Size / 2));
             Assert.Equal(0u, Pixel(second, Size - 2, Size - 2));
+            // Both draws share one pipeline: its vertex input, vertex, pixel and output parts.
+            var parts = presenter.GetField<Dictionary<string, Pipeline>>("_graphicsLibraries");
+            Assert.Equal(libraries ? 4 : 0, parts.Count);
         }
         finally
         {

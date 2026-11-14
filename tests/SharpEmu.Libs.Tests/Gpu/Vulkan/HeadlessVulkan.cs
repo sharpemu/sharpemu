@@ -62,6 +62,8 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     }
     public bool SupportsImageInt64Atomics { get; private init; }
 
+    public bool SupportsGraphicsPipelineLibrary { get; private init; }
+
     private static readonly string[] RenderingExtensionNames =
     [
         "VK_KHR_push_descriptor",
@@ -344,6 +346,19 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             vk.GetPhysicalDeviceFeatures2(physical, &query);
         }
         var imageAtomicInt64 = (bool)imageAtomicInt64Features.ShaderImageInt64Atomics;
+        const string pipelineLibraryExtension = "VK_KHR_pipeline_library";
+        const string graphicsPipelineLibraryExtension = "VK_EXT_graphics_pipeline_library";
+        var graphicsPipelineLibraryFeatures = new PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT
+        {
+            SType = StructureType.PhysicalDeviceGraphicsPipelineLibraryFeaturesExt,
+        };
+        if (HasDeviceExtensions(vk, physical, [pipelineLibraryExtension, graphicsPipelineLibraryExtension]))
+        {
+            var query = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &graphicsPipelineLibraryFeatures };
+            vk.GetPhysicalDeviceFeatures2(physical, &query);
+        }
+
+        var graphicsPipelineLibrary = (bool)graphicsPipelineLibraryFeatures.GraphicsPipelineLibrary;
 
         var vulkan13Features = new PhysicalDeviceVulkan13Features
         {
@@ -444,6 +459,18 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             extensionNames.Add(meshExtension);
         }
         if (imageAtomicInt64) extensionNames.Add(imageAtomicInt64Extension);
+        if (graphicsPipelineLibrary)
+        {
+            graphicsPipelineLibraryFeatures = new PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceGraphicsPipelineLibraryFeaturesExt,
+                GraphicsPipelineLibrary = true,
+                PNext = vulkan13Features.PNext,
+            };
+            vulkan13Features.PNext = &graphicsPipelineLibraryFeatures;
+            extensionNames.Add(pipelineLibraryExtension);
+            extensionNames.Add(graphicsPipelineLibraryExtension);
+        }
         if (dynamicRendering) extensionNames.AddRange(RenderingExtensionNames);
         if (barycentric) extensionNames.Add(barycentricExtension);
         const string fillRectangleExtension = "VK_NV_fill_rectangle";
@@ -480,6 +507,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             SupportsMeshShaders = meshShaders,
             CanRequireComputeSubgroup32 = computeSubgroup32,
             SupportsImageInt64Atomics = imageAtomicInt64,
+            SupportsGraphicsPipelineLibrary = graphicsPipelineLibrary,
         };
         if (validation)
         {

@@ -972,6 +972,33 @@ internal static unsafe partial class VulkanVideoPresenter
                 _supportsPipelineBinaries = pipelineBinaryFeatures.PipelineBinaries;
             }
 
+            var graphicsPipelineLibraryFeatures = new PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceGraphicsPipelineLibraryFeaturesExt,
+            };
+            if (GraphicsPipelineLibrariesRequested() && IsDeviceExtensionAvailable(PipelineLibraryExtensionName) &&
+                IsDeviceExtensionAvailable(GraphicsPipelineLibraryExtensionName))
+            {
+                var libraryProperties = new PhysicalDeviceGraphicsPipelineLibraryPropertiesEXT
+                {
+                    SType = StructureType.PhysicalDeviceGraphicsPipelineLibraryPropertiesExt,
+                };
+                var libraryPropertiesQuery = new PhysicalDeviceProperties2
+                {
+                    SType = StructureType.PhysicalDeviceProperties2,
+                    PNext = &libraryProperties,
+                };
+                _vk.GetPhysicalDeviceProperties2(_physicalDevice, &libraryPropertiesQuery);
+                var libraryQuery = new PhysicalDeviceFeatures2
+                {
+                    SType = StructureType.PhysicalDeviceFeatures2,
+                    PNext = &graphicsPipelineLibraryFeatures,
+                };
+                _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &libraryQuery);
+                _graphicsPipelineLibraries = (bool)graphicsPipelineLibraryFeatures.GraphicsPipelineLibrary &&
+                    (bool)libraryProperties.GraphicsPipelineLibraryFastLinking;
+            }
+
             var imageViewMinLodFeatures = new PhysicalDeviceImageViewMinLodFeaturesEXT
             {
                 SType = StructureType.PhysicalDeviceImageViewMinLodFeaturesExt,
@@ -1167,6 +1194,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var unifiedImageLayoutsExtension = (byte*)SilkMarshal.StringToPtr(UnifiedImageLayoutsExtensionName);
             var shaderClockExtension = (byte*)SilkMarshal.StringToPtr(ShaderClockExtensionName);
             var pipelineBinaryExtension = (byte*)SilkMarshal.StringToPtr(PipelineBinaryExtensionName);
+            var pipelineLibraryExtension = (byte*)SilkMarshal.StringToPtr(PipelineLibraryExtensionName);
+            var graphicsPipelineLibraryExtension = (byte*)SilkMarshal.StringToPtr(GraphicsPipelineLibraryExtensionName);
             try
             {
                 var extensions = stackalloc byte*[24];
@@ -1411,6 +1440,18 @@ internal static unsafe partial class VulkanVideoPresenter
                     renderingChain = &colorWriteEnableFeatures;
                 }
 
+                if (_graphicsPipelineLibraries)
+                {
+                    extensions[extensionCount++] = pipelineLibraryExtension;
+                    extensions[extensionCount++] = graphicsPipelineLibraryExtension;
+                    graphicsPipelineLibraryFeatures = new PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT
+                    {
+                        SType = StructureType.PhysicalDeviceGraphicsPipelineLibraryFeaturesExt,
+                        GraphicsPipelineLibrary = true,
+                        PNext = renderingChain,
+                    };
+                    renderingChain = &graphicsPipelineLibraryFeatures;
+                }
                 vulkan13Features = new PhysicalDeviceVulkan13Features
                 {
                     SType = StructureType.PhysicalDeviceVulkan13Features,
@@ -1437,6 +1478,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 };
 
                 Check(_vk.CreateDevice(_physicalDevice, &createInfo, null, out _device), "vkCreateDevice");
+                Console.Error.WriteLine(_graphicsPipelineLibraries
+                    ? "[LOADER][INFO] Vulkan graphics pipeline libraries: on (SHARPEMU_GRAPHICS_PIPELINE_LIBRARY=0 builds whole pipelines)"
+                    : "[LOADER][INFO] Vulkan graphics pipeline libraries: off");
                 if (_supportsMeshShader)
                 {
                     _cmdDrawMeshTasks = (delegate* unmanaged<CommandBuffer, uint, uint, uint, void>)
@@ -1460,6 +1504,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)imageAtomicInt64Extension);
                 SilkMarshal.Free((nint)shaderClockExtension);
                 SilkMarshal.Free((nint)pipelineBinaryExtension);
+                SilkMarshal.Free((nint)pipelineLibraryExtension);
+                SilkMarshal.Free((nint)graphicsPipelineLibraryExtension);
                 SilkMarshal.Free((nint)robustness2Extension);
                 SilkMarshal.Free((nint)portabilitySubsetExtension);
                 SilkMarshal.Free((nint)colorWriteEnableExtension);
