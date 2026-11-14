@@ -932,6 +932,96 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
         run.Finish(output, nameof(RayIntersect_ABvhBasedAtZero_ReadsTheNodeItsPointerAddresses));
     }
 
+    // A float32 box node takes two 64-byte units. In the last unit of a page its second unit, with the bounds of
+    // children 2 and 3, is on the next page, which can be another buffer; each unit is resolved on its own. With
+    // either page missing the node is not tested: every result dword is invalid.
+    [Theory]
+    [InlineData(true, true)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void RayIntersect_AFloat32BoxAcrossTwoPages_ReadsEachUnitFromItsPage(bool firstPageMapped, bool secondPageMapped)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true))
+        {
+            return;
+        }
+
+        const ulong NodeAddress = GuestBase + PageSize - 64;
+        uint[] children = [0x1000, 0x2000, 0x3000, 0x4000];
+        // Child bounds as min xyz, max xyz. Children 0 and 2 contain the ray, 2 nearer; 1 and 3 lie beside it.
+        float[][] bounds =
+        [
+            [0, 0, 5, 2, 2, 6],
+            [5, 5, 5, 6, 6, 6],
+            [0, 0, 2, 2, 2, 3],
+            [5, 5, 2, 6, 6, 3],
+        ];
+        var first = new byte[(int)PageSize];
+        var second = new byte[(int)PageSize];
+        void WriteNodeWord(uint dword, uint value)
+        {
+            var offset = (int)(PageSize - 64) + (int)dword * 4;
+            if (offset < (int)PageSize)
+                WriteWord(first, offset, value);
+            else
+                WriteWord(second, offset - (int)PageSize, value);
+        }
+
+        for (var child = 0u; child < 4; child++)
+        {
+            WriteNodeWord(child, children[child]);
+            for (var bound = 0u; bound < 6; bound++)
+                WriteNodeWord(4 + child * 6 + bound, BitConverter.SingleToUInt32Bits(bounds[child][bound]));
+        }
+
+        // The ray starts at (1, 1, -10) and runs along +z: extent, origin, direction, inverse direction. The inverse
+        // direction's 1e30 stands in for an axis-parallel ray's infinity: this harness compiles without the
+        // SignedZeroInfNanPreserve mode the game enables, so the driver need not keep an infinity.
+        float[] ray = [1000f, 1f, 1f, -10f, 0f, 0f, 1f, 1e30f, 1e30f, 1f];
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            MoveVector(0, OffsetRegister, 0),
+            GlobalMemory(8, "GlobalLoadDword", AddressLow, OffsetRegister, 20, 20),
+            MoveVector(16, 0, (uint)(NodeAddress >> 3) | 5),
+        };
+        for (var index = 0; index < ray.Length; index++)
+        {
+            instructions.Add(MoveVector((uint)(24 + index * 8), (uint)(1 + index), BitConverter.SingleToUInt32Bits(ray[index])));
+        }
+
+        // A base of zero with box sorting, every node index valid and the BVH type in bits [127:124].
+        instructions.Add(MoveScalar(104, 8, 0));
+        instructions.Add(MoveScalar(112, 9, 0x8000_0000));
+        instructions.Add(MoveScalar(120, 10, uint.MaxValue));
+        instructions.Add(MoveScalar(128, 11, 0x8000_03FFu));
+        instructions.Add(RayIntersect(136));
+        instructions.Add(MoveVector(144, 11, 0));
+        instructions.Add(BufferAccess(152, "BufferStoreDwordx4", ResultRegister, 0, 4, vectorData: 12, offsetEnabled: true, vectorAddress: 11));
+        instructions.Add(EndProgram(160));
+        var run = new Run(vulkan, Program([.. instructions]));
+        if (firstPageMapped)
+        {
+            run.MapPage(GuestBase, first);
+        }
+
+        if (secondPageMapped)
+        {
+            run.MapPage(GuestBase + PageSize, second);
+        }
+
+        run.Dispatch(GuestBase);
+        uint[] expected = firstPageMapped && secondPageMapped
+            ? [children[2], children[0], uint.MaxValue, uint.MaxValue]
+            : [uint.MaxValue, uint.MaxValue, uint.MaxValue, uint.MaxValue];
+        for (var index = 0u; index < 4; index++)
+        {
+            Assert.Equal(expected[index], run.ResultWord(index * 4));
+        }
+
+        run.Finish(output, nameof(RayIntersect_AFloat32BoxAcrossTwoPages_ReadsEachUnitFromItsPage));
+    }
+
     // IMAGE_BVH_INTERSECT_RAY v[12:15], v[0:10], s[8:11].
     private static Gen5ShaderInstruction RayIntersect(uint pc)
     {

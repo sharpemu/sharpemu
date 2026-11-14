@@ -105,10 +105,10 @@ public static partial class Gen5SpirvTranslator
                 Store(result[0], UInt(0x7F80_0000));
                 Store(result[1], UInt(0x3F80_0000));
                 Store(result[3], UInt(0));
-                var (_, mapped) = ResolveDeviceAddress(nodeAddress);
+                var (pointer, mapped) = ResolveDeviceAddress(nodeAddress);
                 EmitConditional(mapped, () =>
                 {
-                    var values = EmitRayTriangle(nodeAddress, nodeType, barycentrics, origin, direction);
+                    var values = EmitRayTriangle(new RayNode(pointer, pointer), nodeType, barycentrics, origin, direction);
                     for (var component = 0; component < values.Length; component++)
                         Store(result[component], values[component]);
                 });
@@ -116,15 +116,16 @@ public static partial class Gen5SpirvTranslator
             // Each box format reads only its own node bytes.
             void EmitBoxes(bool fp16)
             {
-                var (_, mapped) = ResolveDeviceAddress(nodeAddress);
+                var (first, mapped) = ResolveDeviceAddress(nodeAddress);
+                var second = first;
                 if (!fp16)
                 {
-                    var (_, secondMapped) = ResolveDeviceAddress(IAdd64(nodeAddress, ULong(64)));
+                    (second, var secondMapped) = ResolveDeviceAddress(IAdd64(nodeAddress, ULong(64)));
                     mapped = LogicalAnd(mapped, secondMapped);
                 }
                 EmitConditional(mapped, () =>
                 {
-                    var children = EmitRayBoxes(nodeAddress, fp16, boxGrow, boxSort, extent, origin, inverseDirection);
+                    var children = EmitRayBoxes(new RayNode(first, second), fp16, boxGrow, boxSort, extent, origin, inverseDirection);
                     for (var component = 0; component < children.Length; component++)
                         Store(result[component], children[component]);
                 });
@@ -161,14 +162,20 @@ public static partial class Gen5SpirvTranslator
             return values;
         }
 
-        private uint LoadNodeDword(uint nodeAddress, uint dword) =>
-            LoadDeviceDword(IAdd64(nodeAddress, ULong(dword * 4ul)));
+        // A node's 64-byte units, each resolved once through the page table. A unit is 64-byte aligned and a page is
+        // larger, so one resolution covers every dword of the unit; a float32 box node has a second unit, which can be
+        // on the next page. The caller loads only when both are mapped.
+        private readonly record struct RayNode(uint First, uint Second);
 
-        private uint LoadNodeFloat(uint nodeAddress, uint dword) =>
-            Bitcast(_floatType, LoadNodeDword(nodeAddress, dword));
+        private uint LoadNodeDword(RayNode node, uint dword) =>
+            _module.AddInstruction(SpirvOp.Load, _uintType,
+                DeviceWordPointer(IAdd64(dword < 16 ? node.First : node.Second, ULong(dword % 16 * 4ul))), 2u, 4u);
+
+        private uint LoadNodeFloat(RayNode node, uint dword) =>
+            Bitcast(_floatType, LoadNodeDword(node, dword));
 
         // Project onto the dominant ray axis. Shared edges use a top-left rule.
-        private uint[] EmitRayTriangle(uint nodeAddress, uint nodeType, uint barycentrics,
+        private uint[] EmitRayTriangle(RayNode nodeAddress, uint nodeType, uint barycentrics,
             IReadOnlyList<uint> origin, IReadOnlyList<uint> direction)
         {
             _module.AddName(nodeType, "rayTriangleType");
@@ -292,7 +299,7 @@ public static partial class Gen5SpirvTranslator
         }
 
         // Grow only the exit distance. The ray extent remains an exclusive limit.
-        private uint[] EmitRayBoxes(uint nodeAddress, bool fp16, uint boxGrow, uint boxSort, uint extent,
+        private uint[] EmitRayBoxes(RayNode nodeAddress, bool fp16, uint boxGrow, uint boxSort, uint extent,
             IReadOnlyList<uint> origin, IReadOnlyList<uint> inverseDirection)
         {
             var label = fp16 ? "rayBox16" : "rayBox32";
@@ -359,7 +366,7 @@ public static partial class Gen5SpirvTranslator
         }
 
         // Bound 0-2 is the minimum, 3-5 the maximum of one child box.
-        private uint BoxBound(uint nodeAddress, bool fp16, uint child, uint bound)
+        private uint BoxBound(RayNode nodeAddress, bool fp16, uint child, uint bound)
         {
             var index = child * 6 + bound;
             if (!fp16)
