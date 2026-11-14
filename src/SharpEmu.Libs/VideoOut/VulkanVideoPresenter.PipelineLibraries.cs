@@ -367,7 +367,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // The pre-rasterization part of a linked pipeline, from the draw's stage and rasterization state, as the
-        // graphics prewarm builds it from a recorded state: both compile one create info and share stored binaries.
+        // graphics prewarm builds it from a recorded state: both compile one create info through the pipeline cache.
         private Pipeline CompilePreRasterizationPart(GraphicsPipelineCreateInfo* info, RenderPipelineEntry entry, string label)
         {
             var state = PreRasterizationStateOf(info);
@@ -555,10 +555,21 @@ internal static unsafe partial class VulkanVideoPresenter
             compile.SetResult(created);
         }
 
+        // A part is compiled through the pipeline cache, not from and into pipeline binaries. The vertex input and color
+        // output parts hold no code: the driver gives them an all-zero pipeline key and no binaries, so on the binary path
+        // every one of them waited on the same build gate and looked for a binary that is never stored. The parts with code
+        // reach later pipelines through the cache, which the graphics prewarm fills before the session's draws ask for them.
         private Pipeline CompileGraphicsLibrary(GraphicsPipelineCreateInfo* create, GraphicsPipelineLibraryFlagsEXT part, string label)
         {
-            var result = CreatePipelineWithBinaries(create, &create->PNext, default, &CreateGraphicsPipelineCall,
-                out var created, out var milliseconds, PipelineCreateFlags2.Vk2LibraryBitKhr);
+            var started = Stopwatch.GetTimestamp();
+            var created = default(Pipeline);
+            var result = _vk.CreateGraphicsPipelines(_device, _pipelineCache, 1, create, null, &created);
+            var milliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            if (result == Result.Success)
+            {
+                MarkPipelineCacheDirty();
+            }
+
             if (result != Result.Success)
             {
                 Console.Error.WriteLine($"[GPU][WARN] Graphics pipeline library failed: part={PartName(part)} {label} result={result}; the pipeline is built whole.");
@@ -669,7 +680,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        // The part itself; the pixel prewarm builds it the same way for the pipeline binary store.
+        // The part itself; the pixel prewarm builds it the same way into the pipeline cache.
         private Pipeline CreateEarlyPixelLibrary(ulong module, List<DescriptorSetLayoutBinding> bindings, string label)
         {
             var created = default(Pipeline);

@@ -18,18 +18,18 @@ internal static unsafe partial class VulkanVideoPresenter
     {
         // The graphics prewarm (SHARPEMU_GRAPHICS_PREWARM=0 off). The pixel programs and the vertex and mesh programs
         // with their pre-rasterization states that earlier sessions recorded are translated again at boot (through the
-        // translation cache), and their libraries are compiled the way the session builds them, which stores their
-        // binaries. After a new build or translator change, a program's first draw then links stored libraries instead
-        // of compiling them while the command stream waits, which can take seconds per library. Items go in the order
-        // sessions first met them, on the prewarm pool's below-normal threads beside the compute records, the more
-        // urgent first (PrewarmPool); the side file's progress skips the items this build already prewarmed.
+        // translation cache), and their libraries are compiled the way the session builds them, into the pipeline cache.
+        // After a new build or translator change, a program's first draw then links cached libraries instead of compiling
+        // them while the command stream waits, which can take seconds per library. Items go in the order sessions first
+        // met them, on the prewarm pool's below-normal threads beside the compute records, the more urgent first
+        // (PrewarmPool); the side file's progress skips the items this build already prewarmed.
         private static readonly bool GraphicsPrewarmEnabled = Environment.GetEnvironmentVariable("SHARPEMU_GRAPHICS_PREWARM") != "0";
 
         private readonly ConcurrentQueue<ulong> _graphicsPrewarmCompleted = new();
         // The payloads the prewarm compiled, and the pixel modules the session created while it runs: the prewarm leaves a
-        // pixel item of a session module to the session's early pixel library, which stores the same binaries. A
+        // pixel item of a session module to the session's early pixel library, which compiles the same part. A
         // pre-rasterization item always compiles: a program can take several states, and a part the session compiled already
-        // loads its stored binaries.
+        // is found in the pipeline cache.
         private ConcurrentDictionary<string, byte>? _prewarmedGraphicsModules;
         private readonly ConcurrentDictionary<string, byte> _sessionPixelModules = new(StringComparer.Ordinal);
         // The prewarm identity of each vertex or mesh module the session recorded (VertexProgramRecorded).
@@ -45,8 +45,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void StartGraphicsPrewarm(ShaderPrewarmList list, string buildStamp, IGuestGpuBackend compiler)
         {
-            // Without pipeline binaries a prewarm stores nothing a later creation could load, so it would compile every item
-            // again at each boot.
+            // Only where the device has pipeline binaries, like the compute prewarm; a capture layer that hides the extension
+            // runs without a prewarm.
             if (!GraphicsPrewarmEnabled || !_graphicsPipelineLibraries || _pipelineBinaries is null || _pipelineBinaryDirectory is null)
             {
                 return;
@@ -142,7 +142,7 @@ internal static unsafe partial class VulkanVideoPresenter
         };
 
         // The translation and the pixel library of one record. The module (the same payload CreateShaderModule gives the
-        // session) and the library go once the compile has stored its binaries.
+        // session) and the library go once the compile has put the part in the pipeline cache.
         private bool PrewarmPixelLibrary(PixelPrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler)
         {
             var name = $"ps=0x{record.Hash:X16} shader=0x{record.Address:X16}";
@@ -264,7 +264,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        // True when the session already created this pixel module: its early pixel library stores the same binaries.
+        // True when the session already created this pixel module: its early pixel library compiles the same part.
         private bool LeftToSession(string identity)
         {
             if (!_sessionPixelModules.ContainsKey(identity))
