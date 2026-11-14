@@ -1696,7 +1696,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.VertexInputBit | PipelineStageFlags.VertexShaderBit |
                 PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit | PipelineStageFlags.ColorAttachmentOutputBit |
                 (_presenter._supportsMeshShader ? PipelineStageFlags.MeshShaderBitExt : PipelineStageFlags.None) |
-                (_presenter._supportsTaskShader ? PipelineStageFlags.TaskShaderBitExt : PipelineStageFlags.None),
+                (_presenter._supportsTaskShader ? PipelineStageFlags.TaskShaderBitExt : PipelineStageFlags.None) |
+                (_presenter._supportsTessellation
+                    ? PipelineStageFlags.TessellationControlShaderBit | PipelineStageFlags.TessellationEvaluationShaderBit
+                    : PipelineStageFlags.None),
                 AccessFlags.ShaderWriteBit,
                 AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit | AccessFlags.VertexAttributeReadBit | AccessFlags.IndexReadBit |
                 AccessFlags.UniformReadBit | AccessFlags.TransferReadBit | AccessFlags.TransferWriteBit |
