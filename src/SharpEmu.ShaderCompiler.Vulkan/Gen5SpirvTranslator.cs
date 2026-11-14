@@ -4928,6 +4928,7 @@ public static partial class Gen5SpirvTranslator
 
             var canonical = new uint[4];
             var componentBounds = new uint[4];
+            var elementWords = new Dictionary<uint, uint>();
             for (var component = 0; component < canonical.Length; component++)
             {
                 canonical[component] = LoadGfx10BufferFormatComponent(
@@ -4936,7 +4937,8 @@ public static partial class Gen5SpirvTranslator
                     dataFormat,
                     numberFormat,
                     component,
-                    out componentBounds[component]);
+                    out componentBounds[component],
+                    elementWords);
             }
 
             // Only selected memory components contribute to the shared bounds check.
@@ -5062,6 +5064,7 @@ public static partial class Gen5SpirvTranslator
                     UInt(Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, control.DwordCount) - 1)));
             var dataFormatId = UInt(dataFormat);
             var numberFormatId = UInt(numberFormat);
+            var elementWords = new Dictionary<uint, uint>();
             for (uint destination = 0; destination < control.DwordCount; destination++)
             {
                 var value = destination < componentCount
@@ -5071,7 +5074,8 @@ public static partial class Gen5SpirvTranslator
                         dataFormatId,
                         numberFormatId,
                         (int)destination,
-                        out _)
+                        out _,
+                        elementWords)
                     : UInt(0);
                 StoreV(
                     control.VectorData + destination,
@@ -5482,13 +5486,17 @@ public static partial class Gen5SpirvTranslator
                     UInt(0xFF)));
         }
 
+        // elementWords, when given, holds the dwords of this element already read, by their index from the element's first
+        // dword. A known component at a dword offset takes its two dwords from there, so neighbouring components share
+        // their reads: a 32_32_32_32 element reads 5 dwords instead of 8.
         private uint LoadGfx10BufferFormatComponent(
             int bindingIndex,
             uint elementAddress,
             uint dataFormat,
             uint numberFormat,
             int component,
-            out uint componentInBounds)
+            out uint componentInBounds,
+            Dictionary<uint, uint>? elementWords = null)
         {
             var byteOffset = UInt(0);
             var bitOffset = UInt(0);
@@ -5530,15 +5538,66 @@ public static partial class Gen5SpirvTranslator
                 }
             }
 
-            var packed = LoadUnalignedBufferWord(
-                bindingIndex,
-                IAdd(elementAddress, byteOffset));
-            var componentBytes = ShiftRightLogical(IAdd(IAdd(bitOffset, bitCount), UInt(7)), UInt(3));
-            componentInBounds = _module.AddInstruction(
-                SpirvOp.LogicalOr, _boolType,
-                _module.AddInstruction(SpirvOp.IEqual, _boolType, bitCount, UInt(0)),
-                IsBufferElementInRange(bindingIndex, IAdd(elementAddress, byteOffset),
-                    _module.AddInstruction(SpirvOp.ISub, _uintType, componentBytes, UInt(1))));
+            var knownLayout = _module.TryGetConstantValue(byteOffset, out var knownByteOffset) &
+                _module.TryGetConstantValue(bitOffset, out var knownBitOffset) &
+                _module.TryGetConstantValue(bitCount, out var knownBitCount);
+            if (knownLayout && knownBitCount == 0)
+            {
+                // The format has no such component: it reads as zero (one for W), and nothing is loaded.
+                componentInBounds = _module.ConstantBool(true);
+                return component == 3 ? Gfx10FormatOne(numberFormat) : UInt(0);
+            }
+
+            uint packed;
+            if (elementWords is not null && knownLayout && (knownByteOffset & 3) == 0)
+            {
+                // The component's bytes start in the element's dword knownByteOffset / 4 and end in that dword or the
+                // next, as the element's own byte offset carries; those are the dwords whose bounds it needs. A field in
+                // one byte never reaches the next dword. Dword i is the one (elementAddress + 4 * i) >> 2 names in 32 bits,
+                // so the index wraps at 2^30.
+                var elementDword = ShiftRightLogical(elementAddress, UInt(2));
+                uint ElementDword(uint index) => index == 0 ? elementDword : BitwiseAnd(IAdd(elementDword, UInt(index)), UInt(0x3FFF_FFFF));
+                uint ElementWord(uint index)
+                {
+                    if (!elementWords.TryGetValue(index, out var word))
+                    {
+                        word = LoadBufferWord(bindingIndex, ElementDword(index));
+                        elementWords[index] = word;
+                    }
+
+                    return word;
+                }
+
+                var first = knownByteOffset / 4;
+                var lastByte = (knownBitOffset + knownBitCount + 7) / 8 - 1;
+                var firstInRange = IsBufferWordInRange(bindingIndex, ElementDword(first));
+                if (lastByte == 0)
+                {
+                    packed = ShiftRightLogical(ElementWord(first), ShiftLeftLogical(BitwiseAnd(elementAddress, UInt(3)), UInt(3)));
+                    componentInBounds = firstInRange;
+                }
+                else
+                {
+                    packed = SpliceUnalignedWord(elementAddress, ElementWord(first), ElementWord(first + 1));
+                    var endsInNext = _module.AddInstruction(SpirvOp.UGreaterThan, _boolType,
+                        IAdd(BitwiseAnd(elementAddress, UInt(3)), UInt(lastByte)), UInt(3));
+                    componentInBounds = LogicalAnd(firstInRange, _module.AddInstruction(SpirvOp.Select, _boolType, endsInNext,
+                        IsBufferWordInRange(bindingIndex, ElementDword(first + 1)), firstInRange));
+                }
+            }
+            else
+            {
+                packed = LoadUnalignedBufferWord(
+                    bindingIndex,
+                    IAdd(elementAddress, byteOffset));
+                var componentBytes = ShiftRightLogical(IAdd(IAdd(bitOffset, bitCount), UInt(7)), UInt(3));
+                componentInBounds = _module.AddInstruction(
+                    SpirvOp.LogicalOr, _boolType,
+                    _module.AddInstruction(SpirvOp.IEqual, _boolType, bitCount, UInt(0)),
+                    IsBufferElementInRange(bindingIndex, IAdd(elementAddress, byteOffset),
+                        _module.AddInstruction(SpirvOp.ISub, _uintType, componentBytes, UInt(1))));
+            }
+
             var raw = _module.AddInstruction(
                 SpirvOp.BitFieldUExtract,
                 _uintType,
