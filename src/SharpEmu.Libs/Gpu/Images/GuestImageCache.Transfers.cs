@@ -707,8 +707,9 @@ public sealed unsafe partial class GuestImageCache
 
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageDownload);
         using var held = _lock.Hold();
+        // Only an image that starts at the address qualifies, and it owns the address's page: the query reads that page.
         var matches = new List<ResourceSlotIdentifier>();
-        foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: false))
+        foreach (var imageIdentifier in FindImagesInRange(address, 1, pageOverlap: false))
         {
             var owner = _slots.TryGet(imageIdentifier);
             if (owner == null || owner.Description.Data.Address != address)
