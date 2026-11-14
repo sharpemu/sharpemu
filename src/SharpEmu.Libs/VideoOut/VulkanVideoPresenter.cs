@@ -469,6 +469,22 @@ internal static unsafe partial class VulkanVideoPresenter
             DestroyGuestImage(presentedGuestImage);
         }
 
+        // No swapchain image within the acquire timeout: the taken frame is dropped as after ErrorOutOfDateKhr.
+        // Discarding its flip ends the request's wait for the presenter, so a guest queue waiting on that display
+        // buffer (WaitForFlip) runs again instead of staying suspended.
+        private void DropPresentationAfterAcquireTimeout(
+            in Presentation presentation,
+            int frameSlot,
+            bool ownsPresentedGuestImageVersion,
+            GuestImageResource? presentedGuestImage)
+        {
+            ReleaseUnsubmittedPresentationResources(
+                frameSlot,
+                ownsPresentedGuestImageVersion,
+                presentedGuestImage);
+            CompletePresentation(in presentation, presented: false);
+        }
+
         // Metal cannot blend into integer render targets or 32-bit-per-channel
         // float targets (unsupported on Apple-family GPUs). Enabling blend on
         // one makes vkCreateGraphicsPipelines fail with ErrorInitializationFailed
