@@ -43,6 +43,14 @@ internal sealed class DeferredSignalHarness : IDisposable, IEndOfPipeSink, IFlip
     internal void Set(string name, object value) => PresenterUnderTest.PresenterType
         .GetField(name, PresenterUnderTest.InstanceMembers)!.SetValue(Presenter, value);
 
+    internal object? Get(string name) => PresenterUnderTest.PresenterType
+        .GetField(name, PresenterUnderTest.InstanceMembers)!.GetValue(Presenter);
+
+    // The presenter's label publication path, as a GPU completion runs it.
+    internal void PublishDeferredSignal(PendingGuestPublications.Entry entry) => PresenterUnderTest.PresenterType
+        .GetMethod("PublishDeferredSignal", PresenterUnderTest.InstanceMembers)!
+        .Invoke(Presenter, [entry, false, (Action)(static () => { })]);
+
     internal PendingGuestPublications.Entry AddDump(ulong count = 37)
     {
         var entry = Pending.Add(0, StreamRunner.DataAddress, 8);

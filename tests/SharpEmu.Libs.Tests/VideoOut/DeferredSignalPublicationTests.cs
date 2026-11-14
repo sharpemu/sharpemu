@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Tests.Gpu.GpuCommands;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
 using Xunit;
@@ -397,5 +398,68 @@ public sealed class DeferredSignalPublicationTests
         runner.Host.PendingMemoryPublication = (_, _) => false;
         runner.Host.WriteDword(StreamRunner.LabelAddress, 7);
         Assert.Equal(SliceResult.Completed, harness.Queue.ProcessOne());
+    }
+
+    // A deferred label of queue 1 with nothing else pending in that queue.
+    private static PendingGuestPublications.Entry ForeignLabel(DeferredSignalHarness harness)
+    {
+        var ordering = harness.Pending.AddOrdering(1);
+        var label = harness.Pending.AddAfterPending(1, 0x6000, 8, 9)!;
+        harness.Pending.Publish(ordering, static () => { });
+        return label;
+    }
+
+    // A cross-queue window whose foreign label publishes between MustHoldForCrossQueueOrder's window check and its wake
+    // arm. A later entry keeps the foreign queue pending, so the publication saw no armed wake and woke nobody; the method
+    // must not report a hold that nothing will wake.
+    [Fact]
+    public void ACrossQueueWindowCompletedBeforeTheArmIsNotHeld()
+    {
+        using var harness = new DeferredSignalHarness();
+        var foreign = ForeignLabel(harness);
+        _ = harness.Pending.AddAfterPending(1, 0x6008, 4, 1);
+        harness.Set("_crossQueueWindows", new Dictionary<int, PendingGuestPublications.Entry> { [0] = foreign });
+        harness.Set("CrossQueueHoldCheckedForTest", (Action)(() => harness.PublishDeferredSignal(foreign)));
+        var held = ((ICommandStreamHost)harness.Presenter).MustHoldForCrossQueueOrder(0);
+        Assert.True(foreign.Completed);
+        Assert.True(harness.Pending.HasQueue(1));
+        Assert.False(held);
+    }
+
+    // A window whose foreign label is still pending holds the queue and arms the wake its publication will take.
+    [Fact]
+    public void APendingCrossQueueWindowHoldsAndArmsItsWake()
+    {
+        using var harness = new DeferredSignalHarness();
+        var foreign = ForeignLabel(harness);
+        harness.Set("_crossQueueWindows", new Dictionary<int, PendingGuestPublications.Entry> { [0] = foreign });
+        Assert.True(((ICommandStreamHost)harness.Presenter).MustHoldForCrossQueueOrder(0));
+        Assert.Equal(1, (int)harness.Get("_partialLabelReadBlocked")!);
+    }
+
+    // A window whose foreign label already published holds nothing and arms nothing.
+    [Fact]
+    public void ACompletedCrossQueueWindowIsNotHeld()
+    {
+        using var harness = new DeferredSignalHarness();
+        var foreign = ForeignLabel(harness);
+        harness.Set("_crossQueueWindows", new Dictionary<int, PendingGuestPublications.Entry> { [0] = foreign });
+        harness.PublishDeferredSignal(foreign);
+        Assert.False(((ICommandStreamHost)harness.Presenter).MustHoldForCrossQueueOrder(0));
+        Assert.Equal(0, (int)harness.Get("_partialLabelReadBlocked")!);
+    }
+
+    // A publication after the arm takes the armed wake, even while a later entry keeps its queue pending.
+    [Fact]
+    public void APublicationAfterTheArmTakesTheWake()
+    {
+        using var harness = new DeferredSignalHarness();
+        var foreign = ForeignLabel(harness);
+        _ = harness.Pending.AddAfterPending(1, 0x6008, 4, 1);
+        harness.Set("_crossQueueWindows", new Dictionary<int, PendingGuestPublications.Entry> { [0] = foreign });
+        Assert.True(((ICommandStreamHost)harness.Presenter).MustHoldForCrossQueueOrder(0));
+        harness.PublishDeferredSignal(foreign);
+        Assert.True(foreign.Completed);
+        Assert.Equal(0, (int)harness.Get("_partialLabelReadBlocked")!);
     }
 }
