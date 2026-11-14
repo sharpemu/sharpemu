@@ -5149,7 +5149,7 @@ public static partial class Gen5SpirvTranslator
                         componentValue(component),
                         bitCount,
                         numberFormat,
-                        dataFormat);
+                        IsUnsignedMiniFloat(numberFormat, dataFormat));
                     var dword = (int)(byteOffset / 4);
                     var bit = ((byteOffset & 3) * 8) + bitOffset;
                     var (value, mask) = element[dword];
@@ -5164,7 +5164,8 @@ public static partial class Gen5SpirvTranslator
         }
 
         // A runtime V# names its format only when the shader runs, so each buffer format stores through its own
-        // branch, converting the registers as a formatted store through a bound buffer does.
+        // branch, converting the registers as a formatted store through a bound buffer does. A branch depends only on
+        // its format's store shape (DeviceFormatStoreShape), so the formats of one shape share one branch.
         private void EmitDeviceBufferFormatStore(
             uint baseAddress,
             uint size,
@@ -5173,35 +5174,47 @@ public static partial class Gen5SpirvTranslator
             Gen5BufferMemoryControl control)
         {
             var unifiedFormat = BitwiseAnd(ShiftRightLogical(descriptorWord3, UInt(12)), UInt(0x7F));
+            var shapes = new List<(DeviceFormatStoreShape Shape, List<uint> Formats)>();
             for (uint format = 1; format <= 0x7F; format++)
             {
-                if (!Gfx10UnifiedFormat.TryDecode(format, out var dataFormat, out var numberFormat))
+                if (!TryGetDeviceFormatStoreShape(format, control.DwordCount, out var shape))
                 {
                     continue;
                 }
 
-                var componentCount = Math.Min(control.DwordCount, Gfx10UnifiedFormat.ComponentCount(dataFormat));
-                if (componentCount == 0)
+                var known = shapes.FindIndex(entry => entry.Shape.Equals(shape));
+                if (known < 0)
                 {
-                    continue;
+                    shapes.Add((shape, [format]));
+                }
+                else
+                {
+                    shapes[known].Formats.Add(format);
+                }
+            }
+
+            foreach (var (shape, formats) in shapes)
+            {
+                uint matches = 0;
+                foreach (var format in formats)
+                {
+                    var match = _module.AddInstruction(SpirvOp.IEqual, _boolType, unifiedFormat, UInt(format));
+                    matches = matches == 0 ? match : _module.AddInstruction(SpirvOp.LogicalOr, _boolType, matches, match);
                 }
 
-                var elementBytes = Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, componentCount);
-                var selected = LogicalAnd(
-                    _module.AddInstruction(SpirvOp.IEqual, _boolType, unifiedFormat, UInt(format)),
-                    IsDeviceBufferByteRangeInRange(size, byteAddress, elementBytes));
+                var selected = LogicalAnd(matches, IsDeviceBufferByteRangeInRange(size, byteAddress, shape.ElementBytes));
                 EmitConditional(selected, () =>
                 {
-                    var element = new (uint Value, uint Mask)[(elementBytes + 3) / 4];
+                    var element = new (uint Value, uint Mask)[(shape.ElementBytes + 3) / 4];
                     for (var index = 0; index < element.Length; index++)
                     {
                         element[index] = (UInt(0), 0);
                     }
 
-                    for (uint component = 0; component < componentCount; component++)
+                    for (var component = 0; component < shape.Components.Length; component++)
                     {
-                        Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out var byteOffset, out var bitOffset, out var bitCount);
-                        var register = LoadV(control.VectorData + component);
+                        var (byteOffset, bitOffset, bitCount, numberFormat, miniFloat) = shape.Components[component];
+                        var register = LoadV(control.VectorData + (uint)component);
                         var dword = (int)(byteOffset / 4);
                         if (bitCount == 32)
                         {
@@ -5210,7 +5223,7 @@ public static partial class Gen5SpirvTranslator
                             continue;
                         }
 
-                        var encoded = EncodeGfx10BufferComponent(register, bitCount, numberFormat, dataFormat);
+                        var encoded = EncodeGfx10BufferComponent(register, bitCount, numberFormat, miniFloat);
                         var bit = ((byteOffset & 3) * 8) + bitOffset;
                         var (value, mask) = element[dword];
                         element[dword] = (
@@ -5221,6 +5234,46 @@ public static partial class Gen5SpirvTranslator
                     StoreDeviceElementBits(baseAddress, byteAddress, element);
                 });
             }
+        }
+
+        // What a device store's branch for one format depends on: the bytes its element spans, and for each stored component
+        // its layout and encoding (EncodeGfx10BufferComponent's inputs; a 32-bit component keeps its register bits, so it has
+        // no encoding).
+        private readonly record struct DeviceFormatStoreComponent(uint ByteOffset, uint BitOffset, uint BitCount, uint NumberFormat, bool MiniFloat);
+
+        private sealed record DeviceFormatStoreShape(uint ElementBytes, DeviceFormatStoreComponent[] Components)
+        {
+            public bool Equals(DeviceFormatStoreShape? other) =>
+                other is not null && ElementBytes == other.ElementBytes && Components.AsSpan().SequenceEqual(other.Components);
+
+            public override int GetHashCode() => HashCode.Combine(ElementBytes, Components.Length);
+        }
+
+        private static bool TryGetDeviceFormatStoreShape(uint format, uint dwordCount, out DeviceFormatStoreShape shape)
+        {
+            shape = null!;
+            if (!Gfx10UnifiedFormat.TryDecode(format, out var dataFormat, out var numberFormat))
+            {
+                return false;
+            }
+
+            var componentCount = Math.Min(dwordCount, Gfx10UnifiedFormat.ComponentCount(dataFormat));
+            if (componentCount == 0)
+            {
+                return false;
+            }
+
+            var components = new DeviceFormatStoreComponent[componentCount];
+            for (uint component = 0; component < componentCount; component++)
+            {
+                Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out var byteOffset, out var bitOffset, out var bitCount);
+                components[component] = bitCount == 32
+                    ? new(byteOffset, bitOffset, bitCount, 0, false)
+                    : new(byteOffset, bitOffset, bitCount, numberFormat, IsUnsignedMiniFloat(numberFormat, dataFormat));
+            }
+
+            shape = new(Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, componentCount), components);
+            return true;
         }
 
         // The device form of StoreBufferElementBits: each dword the element touches takes its masked bits.
@@ -5274,8 +5327,11 @@ public static partial class Gen5SpirvTranslator
             }
         }
 
+        // The 10_11_11 and 11_11_10 float formats store unsigned mini-floats.
+        private static bool IsUnsignedMiniFloat(uint numberFormat, uint dataFormat) => numberFormat == 7 && dataFormat is 6 or 7;
+
         // Converts one register to the bits its component stores, per the number format.
-        private uint EncodeGfx10BufferComponent(uint value, uint bitCount, uint numberFormat, uint dataFormat)
+        private uint EncodeGfx10BufferComponent(uint value, uint bitCount, uint numberFormat, bool miniFloat)
         {
             if (bitCount == 32)
             {
@@ -5309,7 +5365,7 @@ public static partial class Gen5SpirvTranslator
                                 _module.Constant(_intType, signedMaximum))),
                         UInt(mask));
                 case 7:
-                    if (dataFormat is 6 or 7)
+                    if (miniFloat)
                     {
                         return EncodeUnsignedMiniFloat(value, bitCount);
                     }
