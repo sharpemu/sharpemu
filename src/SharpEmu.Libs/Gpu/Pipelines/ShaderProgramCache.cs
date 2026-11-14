@@ -1374,20 +1374,21 @@ internal sealed class ShaderProgramCache
                 StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), state);
                 foreach (var output in options.PixelOutputs)
                 {
-                    StaticState.Add(output.GuestSlot);
-                    StaticState.Add(output.HostLocation);
-                    StaticState.Add(output.ExportTarget);
-                    StaticState.Add(output.Index);
-                    StaticState.Add(output.DualSourceAlpha ? 1u : 0u);
+                    state.Add(output.GuestSlot);
+                    state.Add(output.HostLocation);
+                    state.Add(output.ExportTarget);
+                    state.Add(output.Index);
+                    state.Add(output.DualSourceAlpha ? 1u : 0u);
                 }
                 break;
             case ShaderStage.Mesh:
-                StageStaticKey.Build(options.MeshInfo ?? throw new ArgumentException("The mesh lookup has no mesh input info."), options.RequiredVertexOutputCount, StaticState);
-                StaticState.Add(options.MeshOutputLocationMask.HasValue ? 1u : 0u);
-                StaticState.Add(options.MeshOutputLocationMask.GetValueOrDefault());
+                StageStaticKey.Build(options.MeshInfo ?? throw new ArgumentException("The mesh lookup has no mesh input info."), options.RequiredVertexOutputCount, state);
+                state.Add(options.MeshOutputLocationMask.HasValue ? 1u : 0u);
+                state.Add(options.MeshOutputLocationMask.GetValueOrDefault());
                 break;
             default:
-                StageStaticKey.Build(options.ComputeInfo ?? throw new ArgumentException("The compute lookup has no compute input info."), StaticState);
+                StageStaticKey.Build(options.ComputeInfo ?? throw new ArgumentException("The compute lookup has no compute input info."), state);
+                if (ScalarDataReadPolicy.Enabled) state.Add(ScalarDataReadPolicy.CacheIdentity);
                 break;
         }
 

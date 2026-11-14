@@ -62,7 +62,7 @@ public sealed class StableImageBindingTests
     {
         var program = ImageProgram(2, "ImageStore");
         ShaderResourcePlan ExtractWith(uint storage) => ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2,
-            stableImageLimits: new(0, storage, 0, 3, 5));
+            stableImageLimits: new(0, storage, 0, 3, 5), scalarDataOnDevice: false);
         Assert.True(ExtractWith(2).StableImageBindings);
         Assert.False(ExtractWith(1).StableImageBindings);
     }

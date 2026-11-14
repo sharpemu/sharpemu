@@ -547,11 +547,8 @@ internal sealed class MaterializationProgram
         var low = _rangeLow[index];
         var high = _rangeHigh[index];
         var plannedRange = low >= 0 && valid[low] && valid[high];
-        var handleBase = plannedRange ? ((uint)values[low] | ((ulong)(uint)values[high] << 32)) & AddressMask : 0;
-        var firstByte = range.Bounded ? range.FirstByte : Math.Min(range.FirstByte, 0);
-        var baseAddress = plannedRange ? unchecked(handleBase + (ulong)firstByte) & AddressMask : 0;
-        var size = range.Bounded ? range.Extent : DeviceAddressRangePlanner.MaxRangeBytes;
-        return new DeviceAddressRange(range.Handle, baseAddress, plannedRange ? size : 0, plannedRange, range.Written);
+        return DeviceAddressRangePlanner.EvaluateRange(range, plannedRange,
+            plannedRange ? (uint)values[low] : 0, plannedRange ? (uint)values[high] : 0);
     }
 
     private bool Run(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Scratch scratch, bool[] activeSources,

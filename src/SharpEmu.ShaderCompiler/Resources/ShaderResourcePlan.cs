@@ -199,7 +199,7 @@ public sealed partial class ShaderResourcePlan
         bool bindlessNullDescriptors = false, bool bindlessHeap = false, bool callRecords = false, bool callMarks = false, int dynamicUserData = -1,
         BufferDescriptorNormalizer? normalizeBufferDescriptor = null,
         ImageDescriptorNormalizer? normalizeImageDescriptor = null, Func<long>? imageNormalizationVersion = null,
-        StableImageDescriptorLimits stableImageLimits = default)
+        StableImageDescriptorLimits stableImageLimits = default, bool? scalarDataOnDevice = null)
     {
         // Mesh system inputs are not uniform user data, even when a GS pointer occupies s0:s1.
         var graph = ScalarGraphDiskCache.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize,
@@ -210,7 +210,7 @@ public sealed partial class ShaderResourcePlan
             NormalizeImageDescriptor = normalizeImageDescriptor,
             ImageNormalizationVersion = imageNormalizationVersion,
         };
-        var reads = ResourceTableReadPlanner.Plan(graph, stage, hash);
+        var reads = ResourceTableReadPlanner.Plan(graph, stage, hash, scalarDataOnDevice ?? ScalarDataReadPolicy.Enabled);
         var memo = new Dictionary<ScalarValue, ScalarValue>();
         ScalarValue Rewrite(ScalarValue value) => graph.Substitute(value, reads.Replacements, memo);
         ScalarValue RewriteRead(ScalarValue read)

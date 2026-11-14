@@ -22,6 +22,8 @@ public sealed record DeviceAddressRangePlan(
     DeviceAddressUnboundedReason UnboundedReason = DeviceAddressUnboundedReason.None)
 {
     public ulong Extent => Bounded && EndByte > FirstByte ? (ulong)(EndByte - FirstByte) : 0;
+    // Scalar dword loads mask the effective address down to a dword in the emitter.
+    public bool AlignScalarReads { get; init; }
 }
 
 public enum DeviceAddressUnboundedReason
@@ -111,7 +113,8 @@ public static class DeviceAddressRangePlanner
                 slot = handles.Count;
                 hashSlots.Add(slot);
                 handles.Add(handle);
-                ranges.Add(new DeviceAddressRangePlan((uint)slot, handle.Operands[0], handle.Operands[1], [], false, true, long.MaxValue, long.MinValue, false));
+                ranges.Add(new DeviceAddressRangePlan((uint)slot, handle.Operands[0], handle.Operands[1], [], false, true, long.MaxValue, long.MinValue, false)
+                    { AlignScalarReads = true });
             }
 
             // The immediate offset is signed; the span keeps the lowest and highest byte.
@@ -123,6 +126,7 @@ public static class DeviceAddressRangePlanner
             {
                 MemoryIndices = [.. ranges[slot].MemoryIndices, index],
                 Written = ranges[slot].Written || written,
+                AlignScalarReads = ranges[slot].AlignScalarReads && memory.Kind == MemoryResourceKind.ScalarAddress && !written,
                 Bounded = ranges[slot].Bounded && reason == DeviceAddressUnboundedReason.None,
                 UnboundedReason = ranges[slot].UnboundedReason != DeviceAddressUnboundedReason.None ? ranges[slot].UnboundedReason : reason,
                 FirstByte = Math.Min(ranges[slot].FirstByte, firstByte),
@@ -392,20 +396,7 @@ public static class DeviceAddressRangePlanner
             uint low = 0;
             uint high = 0;
             var planned = range.Plannable && evaluator.Evaluate(range.BaseLow, out low) && evaluator.Evaluate(range.BaseHigh, out high);
-            var handleBase = (low | ((ulong)high << 32)) & AddressMask;
-            var firstByte = range.Bounded ? range.FirstByte : Math.Min(range.FirstByte, 0);
-            var baseAddress = planned ? unchecked(handleBase + (ulong)firstByte) & AddressMask : 0;
-            var size = range.Bounded ? range.Extent : MaxRangeBytes;
-            if (range.Bounded)
-            {
-                BoundedEvaluations.Increment();
-            }
-            else
-            {
-                UnboundedEvaluations[(int)range.UnboundedReason].Increment();
-            }
-
-            result[index] = new DeviceAddressRange(range.Handle, baseAddress, planned ? size : 0, planned, range.Written);
+            result[index] = EvaluateRange(range, planned, low, high);
         }
 
         if (plan.Graph.Program.FunctionBufferAccesses.Count == 0) return result;
@@ -440,5 +431,30 @@ public static class DeviceAddressRangePlanner
                 functionRanges.Add(new((uint)functionRanges.Count, address, size, true, written));
         }
         return functionRanges.ToArray();
+    }
+
+    // Shared by interpreted and compiled evaluators. Widen a scalar read's residency range down to the exact
+    // first dword the GPU can touch; aligned reads retain their original extent (e.g. six bounds words = 24 bytes).
+    internal static DeviceAddressRange EvaluateRange(DeviceAddressRangePlan range, bool planned, uint low, uint high)
+    {
+        var handleBase = (low | ((ulong)high << 32)) & AddressMask;
+        var firstByte = range.Bounded ? range.FirstByte : Math.Min(range.FirstByte, 0);
+        var baseAddress = planned ? unchecked(handleBase + (ulong)firstByte) & AddressMask : 0;
+        var size = range.Bounded ? range.Extent : MaxRangeBytes;
+        if (range.Bounded)
+        {
+            BoundedEvaluations.Increment();
+        }
+        else
+        {
+            UnboundedEvaluations[(int)range.UnboundedReason].Increment();
+        }
+
+        if (planned && range.AlignScalarReads)
+        {
+            size += baseAddress & 3;
+            baseAddress &= ~3ul;
+        }
+        return new DeviceAddressRange(range.Handle, baseAddress, planned ? size : 0, planned, range.Written);
     }
 }

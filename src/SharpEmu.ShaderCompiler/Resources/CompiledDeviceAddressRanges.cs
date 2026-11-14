@@ -244,11 +244,7 @@ internal sealed class CompiledDeviceAddressRanges
         uint low = 0;
         uint high = 0;
         var planned = range.Plannable && Root(state, 2 * index, out low) && Root(state, 2 * index + 1, out high);
-        var handleBase = (low | ((ulong)high << 32)) & AddressMask;
-        var firstByte = range.Bounded ? range.FirstByte : Math.Min(range.FirstByte, 0);
-        var baseAddress = planned ? unchecked(handleBase + (ulong)firstByte) & AddressMask : 0;
-        var size = range.Bounded ? range.Extent : DeviceAddressRangePlanner.MaxRangeBytes;
-        return new DeviceAddressRange(range.Handle, baseAddress, planned ? size : 0, planned, range.Written);
+        return DeviceAddressRangePlanner.EvaluateRange(range, planned, low, high);
     }
 
     private bool Root(State state, int root, out uint value) => Root(_evaluate!, state, root, out value);
