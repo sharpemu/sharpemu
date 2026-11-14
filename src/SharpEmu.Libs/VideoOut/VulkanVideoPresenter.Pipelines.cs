@@ -1994,7 +1994,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var device = _device;
             var linkedCache = linked ? CreateLinkedPipelineCache(description.Stage.Hash) : null;
-            var cacheSource = linkedCache?.Cache ?? GetGuestPipelineCacheSource(ComputeCacheKey(description.Stage.Hash, computeModule.Handle));
             var vk = _vk;
             var requiredSubgroupSize = ComputeRequiredSubgroupSize(description.Input);
             var started = new PendingComputePipeline
@@ -2010,6 +2009,32 @@ internal static unsafe partial class VulkanVideoPresenter
                 LinkedCache = linkedCache,
                 Linked = linked,
             };
+            // The prewarm's pipeline for this module and layout is taken instead of compiled again. It keeps the layouts
+            // it was compiled with, so once its pending entry is published this request's own, defined the same, go; the
+            // completed-compile branch above registers it. A publication that throws destroys what was taken.
+            if (!linked && TakePrewarmedComputePipeline(computeModule.Handle, bindings, usesPushDescriptors, bindlessHeap,
+                    requiredSubgroupSize, out var prewarmed))
+            {
+                try
+                {
+                    started.SetLayout = prewarmed.SetLayout;
+                    started.Layout = prewarmed.Layout;
+                    started.Compile = Task.FromResult(prewarmed.Pipeline);
+                    started.CompletedTimestamp = ComputeCompileProfile.Start();
+                    _pendingComputePipelines.Add(key, started);
+                }
+                catch
+                {
+                    DestroyPrewarmedComputePipeline(prewarmed);
+                    throw;
+                }
+
+                _vk.DestroyPipelineLayout(_device, layout, null);
+                _vk.DestroyDescriptorSetLayout(_device, setLayout, null);
+                return TryCreateComputePipeline(description, out handle);
+            }
+
+            var cacheSource = linkedCache?.Cache ?? GetGuestPipelineCacheSource(ComputeCacheKey(description.Stage.Hash, computeModule.Handle));
             started.Compile = Task.Factory.StartNew(
                 () =>
                 {

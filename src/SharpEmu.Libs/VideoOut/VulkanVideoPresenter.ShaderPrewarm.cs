@@ -37,6 +37,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private int _shaderPrewarmFailed;
         private int _shaderPrewarmRuntimeHits;
         private int _shaderPrewarmDroppedLinked;
+        // The splash's warm-up view: the items each kind has done and holds, every lane's threads, and the start.
         private int _shaderPrewarmComputeDone;
         private int _shaderPrewarmComputeTotal;
         private int _shaderPrewarmGraphicsDone;
@@ -45,12 +46,23 @@ internal static unsafe partial class VulkanVideoPresenter
         private long _shaderPrewarmStarted;
         private Func<ShaderCacheProgressView>? _shaderPrewarmProgressView;
         private readonly ConcurrentQueue<ulong> _shaderPrewarmCompleted = new();
+        // The stage programs of the whole pipelines the prewarm builds (StartPipelinePrewarm), each compiled once.
         private readonly ConcurrentDictionary<ulong, Lazy<PrewarmedStage?>> _prewarmStages = new();
         private readonly ConcurrentBag<ShaderModule> _prewarmStageModules = [];
 
         private sealed record PrewarmedStage(ShaderProgram Handle, ShaderProgramInfo Program);
 
         private readonly record struct PrewarmWork(ComputePrewarmRecord? Compute, ShaderCodeCapture? Code, PipelinePrewarmItem? Graphics);
+        // SHARPEMU_PREWARM_BINARY_SKIP (on by default; =0 turns it off): with pipeline binaries on, the graphics prewarm builds
+        // only the items that no prewarm under the current build stamp completed yet (ShaderPrewarmList progress), and none when
+        // every item is listed. Each listed item was built through CreatePipelineWithBinaries, which stored its binaries when the
+        // build took the store threshold (PipelineBinaryStorePolicy) or longer, and the session's own creation loads them. A
+        // session records a few new items each time, so the next prewarm builds those alone. The progress is keyed by the build
+        // stamp alone (the translator and compiler assemblies, the device and the translation switches), not by the coverage
+        // stamp, which also hashes the recorded list and so changes with every session. A new build prewarms every item once.
+        // The compute prewarm does not skip this way: the translation cache serves its translations and the session takes the
+        // pipelines it builds, so it runs every session unless CanSkipShaderPrewarm certifies the whole cache (a list without
+        // linked records whose cache and recording stamps match); skipping it otherwise moves its pipelines to first use.
         private static readonly bool PrewarmBinarySkip = Environment.GetEnvironmentVariable("SHARPEMU_PREWARM_BINARY_SKIP") != "0";
 
         ShaderPrewarmList? IShaderPipelineHost.ShaderPrewarm => Volatile.Read(ref _shaderPrewarmList);
@@ -304,20 +316,46 @@ internal static unsafe partial class VulkanVideoPresenter
             DescriptorSetLayout setLayout = default;
             PipelineLayout pipelineLayout = default;
             ShaderModule module = default;
+            Pipeline pipeline = default;
             DriverCacheShard? linkedCache = null;
             var created = false;
+            // A linked record compiles only when the admission of the session's linked compiles (LinkedCompileAdmission)
+            // admits it at once, so the prewarm's linked compiles keep to the same commit budget and no prewarm thread waits
+            // behind the session's; a record that is not admitted is dropped, as the older ones are (SHARPEMU_PREWARM_LINKED).
+            // The try that releases the admission follows at once.
+            var linked = layout!.CallTargetCount != 0;
+            if (linked && !WaitForLinkedAdmission(record.Hash, payload.Length, mayWait: false))
+            {
+                Interlocked.Increment(ref _shaderPrewarmDroppedLinked);
+                return false;
+            }
+
             try
             {
-                CollectLayoutBindings(bindings, layout!, ShaderStage.Compute);
-                setLayout = CreateDescriptorSetLayout(bindings, out _, out _);
-                pipelineLayout = CreatePipelineLayout(setLayout, ShaderStageFlags.ComputeBit, layout!.UsesBindlessHeap);
+                CollectLayoutBindings(bindings, layout, ShaderStage.Compute);
+                setLayout = CreateDescriptorSetLayout(bindings, out var usesPushDescriptors, out _);
+                pipelineLayout = CreatePipelineLayout(setLayout, ShaderStageFlags.ComputeBit, layout.UsesBindlessHeap);
                 module = CreateShaderModule(payload);
-                linkedCache = layout.CallTargetCount != 0 ? CreateLinkedPipelineCache(record.Hash) : null;
+                linkedCache = linked ? CreateLinkedPipelineCache(record.Hash) : null;
                 var cache = ResolveGuestPipelineCache(linkedCache?.Cache);
-                var pipeline = CompileComputePipeline(_vk, _device, cache, module, pipelineLayout, ComputeRequiredSubgroupSize(record.Info));
-                _vk.DestroyPipeline(_device, pipeline, null);
+                var identity = VulkanPipelineCacheStorage.CompiledShaderIdentity(payload);
+                var requiredSubgroupSize = ComputeRequiredSubgroupSize(record.Info);
+                pipeline = CompileComputePipeline(_vk, _device, cache, module, pipelineLayout, requiredSubgroupSize);
                 created = true;
-                _prewarmedShaderIdentities![VulkanPipelineCacheStorage.CompiledShaderIdentity(payload)] = 0;
+                // A plain record's pipeline waits, with the layouts it was compiled with, for the session's request (a
+                // linked one goes: the session links the callees its own program kept). The handover owns what it took;
+                // finally destroys the rest.
+                if (!linked && _prewarmedComputePipelines.TryAdd(
+                        ComputeHandoverKey(identity, SetSignature(bindings, usesPushDescriptors), layout.UsesBindlessHeap,
+                            requiredSubgroupSize),
+                        new PrewarmedComputePipeline(pipeline, setLayout, pipelineLayout)))
+                {
+                    pipeline = default;
+                    setLayout = default;
+                    pipelineLayout = default;
+                }
+
+                _prewarmedShaderIdentities![identity] = 0;
                 Interlocked.Increment(ref _shaderPrewarmCompiled);
                 return true;
             }
@@ -328,6 +366,16 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             finally
             {
+                if (linked)
+                {
+                    ReleaseLinkedAdmission(payload.Length);
+                }
+
+                if (pipeline.Handle != 0)
+                {
+                    _vk.DestroyPipeline(_device, pipeline, null);
+                }
+
                 ReleaseLinkedPipelineCache(linkedCache, record.Hash, save: created);
                 if (module.Handle != 0)
                 {
@@ -343,6 +391,61 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     _vk.DestroyDescriptorSetLayout(_device, setLayout, null);
                 }
+            }
+        }
+
+        // The compute prewarm's pipelines, each with the layouts it was compiled with, until the session asks for one
+        // (TakePrewarmedComputePipeline). The key holds the SHA-256 of the module's SPIR-V, the set layout, whether the layout
+        // binds the bindless heap and the required subgroup size: everything the pipeline was created from. Teardown destroys
+        // the ones never asked for (DestroyPrewarmedComputePipelines).
+        private readonly record struct PrewarmedComputePipeline(Pipeline Pipeline, DescriptorSetLayout SetLayout, PipelineLayout Layout);
+
+        private readonly ConcurrentDictionary<string, PrewarmedComputePipeline> _prewarmedComputePipelines =
+            new(StringComparer.Ordinal);
+        private int _prewarmedComputeTaken;
+
+        private static string ComputeHandoverKey(string identity, string setSignature, bool bindlessHeap, uint requiredSubgroupSize) =>
+            $"{identity}|{setSignature}|{bindlessHeap}|{requiredSubgroupSize}";
+
+        // The prewarm's pipeline for this module, set layout, heap and subgroup size, if it built one.
+        private bool TakePrewarmedComputePipeline(ulong module, List<DescriptorSetLayoutBinding> bindings, bool usesPushDescriptors,
+            bool bindlessHeap, uint requiredSubgroupSize, out PrewarmedComputePipeline prewarmed)
+        {
+            prewarmed = default;
+            if (!_shaderModuleCacheIdentities.TryGetValue(module, out var identity) || !_prewarmedComputePipelines.TryRemove(
+                    ComputeHandoverKey(identity, SetSignature(bindings, usesPushDescriptors), bindlessHeap, requiredSubgroupSize),
+                    out prewarmed))
+            {
+                return false;
+            }
+
+            Interlocked.Increment(ref _prewarmedComputeTaken);
+            return true;
+        }
+
+        private void DestroyPrewarmedComputePipeline(PrewarmedComputePipeline prewarmed)
+        {
+            _vk.DestroyPipeline(_device, prewarmed.Pipeline, null);
+            _vk.DestroyPipelineLayout(_device, prewarmed.Layout, null);
+            _vk.DestroyDescriptorSetLayout(_device, prewarmed.SetLayout, null);
+        }
+
+        private void DestroyPrewarmedComputePipelines()
+        {
+            var unclaimed = 0;
+            foreach (var key in _prewarmedComputePipelines.Keys)
+            {
+                if (_prewarmedComputePipelines.TryRemove(key, out var prewarmed))
+                {
+                    DestroyPrewarmedComputePipeline(prewarmed);
+                    unclaimed++;
+                }
+            }
+
+            var taken = Volatile.Read(ref _prewarmedComputeTaken);
+            if (taken + unclaimed != 0)
+            {
+                Console.Error.WriteLine($"[LOADER][INFO] Prewarmed compute pipelines: taken={taken} unclaimed={unclaimed}");
             }
         }
 
@@ -465,21 +568,27 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        // The stage programs of a whole pipeline compile as a session compiles them, with the device's capabilities.
         private sealed class PrewarmShaderHost(Presenter presenter) : IShaderPipelineHost
         {
             private readonly IShaderPipelineHost _inner = presenter;
 
             public uint MaxPushDescriptors => _inner.MaxPushDescriptors;
+            public StableImageDescriptorLimits ComputeImageDescriptorLimits => _inner.ComputeImageDescriptorLimits;
+            public StableImageDescriptorLimits GraphicsImageDescriptorLimits => _inner.GraphicsImageDescriptorLimits;
             public bool ComputeWave64Supported => _inner.ComputeWave64Supported;
             public bool ComputeWave64SubgroupNative => _inner.ComputeWave64SubgroupNative;
             public bool ComputeRunsOn32LaneSubgroups(ComputeInputInfo input) => _inner.ComputeRunsOn32LaneSubgroups(input);
             public bool MipStatisticsSubgroupReduction => _inner.MipStatisticsSubgroupReduction;
+            public bool PixelSubgroupArithmetic => _inner.PixelSubgroupArithmetic;
             public bool RuntimeCallRecordsSupported => _inner.RuntimeCallRecordsSupported;
             public bool CallMarksSupported => _inner.CallMarksSupported;
             public bool TableBlocks => _inner.TableBlocks;
             public bool GraphicsSubgroupOperationsEnabled => _inner.GraphicsSubgroupOperationsEnabled;
             public bool SharedInt64AtomicsEnabled => _inner.SharedInt64AtomicsEnabled;
+            public bool BufferInt64AtomicsEnabled => _inner.BufferInt64AtomicsEnabled;
             public bool ImageInt64AtomicsEnabled => _inner.ImageInt64AtomicsEnabled;
+            public bool ShaderDeviceClockEnabled => _inner.ShaderDeviceClockEnabled;
             public bool ShaderSignedZeroInfNanPreserveFloat32Supported => _inner.ShaderSignedZeroInfNanPreserveFloat32Supported;
             public bool ExecGuardElisionEnabled => _inner.ExecGuardElisionEnabled;
             public bool PerVertexPixelInputsSupported => _inner.PerVertexPixelInputsSupported;
@@ -490,6 +599,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public uint MeshSubgroupSize => _inner.MeshSubgroupSize;
             public RenderHostLimits Limits => _inner.Limits;
             public bool SupportsDualSourceBlend => _inner.SupportsDualSourceBlend;
+            public bool SupportsBindlessHeap => _inner.SupportsBindlessHeap;
             public SampleCountFlags NoAttachmentSampleCounts => _inner.NoAttachmentSampleCounts;
 
             public bool TryResolveColorOutput(uint dataFormat, uint numberType, uint componentSwap, out Gen5PixelOutputKind outputKind,
@@ -585,6 +695,7 @@ internal static unsafe partial class VulkanVideoPresenter
             // own compiles.
             _prewarmPool?.Stop();
             _prewarmPool = null;
+            DestroyPrewarmedComputePipelines();
             if (Interlocked.Exchange(ref _shaderPrewarmList, null) is { } list)
             {
                 list.Dispose();
