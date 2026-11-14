@@ -40,6 +40,11 @@ public static class PushData
     public static bool CanFit(uint start, uint size) => size != 0 && start <= DwordCount && size <= DwordCount - start;
 
     public static uint StartFor(uint cursor, uint size) => CanFit(cursor, size) ? cursor : NoStart;
+
+    // The start of data placed at the top of the range, when it fits above cursor: it depends on the data's size alone, so
+    // the stage that takes it (a graphics pipeline's vertex or mesh stage, after its pixel stage) has one place whichever
+    // stage comes before it. NoStart when it does not fit, exactly where StartFor finds no room.
+    public static uint TopFor(uint cursor, uint size) => CanFit(cursor, size) ? DwordCount - size : NoStart;
 }
 
 public sealed record DescriptorBinding(DescriptorBindingKind Kind, IReadOnlyList<uint> Resources);
@@ -355,6 +360,10 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public uint PushDataStartDword { get; init; } = PushData.NoStart;
     public uint AllocationCursor { get; init; }
+
+    // The shader data takes the top of the push range when it fits above the cursor (PushData.TopFor), not the cursor's
+    // place; the allocation cursor is then the start it took, or the end of the range when it did not fit.
+    public bool PushDataAtTop { get; init; }
     public uint ShaderBaseDword { get; init; } = NoShaderBase;
     public uint MemoryOffsetDword { get; init; }
     public uint MemoryOffsetCount { get; init; }
@@ -416,6 +425,13 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public bool UsesPushData => PushDataStartDword != PushData.NoStart;
 
     public bool UsesShaderBase => ShaderBaseDword != NoShaderBase;
+
+    // The push data start this layout takes after cursor: a permutation serves a stage whose cursor gives its own start.
+    // Tessellation runtime data never takes push data.
+    public uint PushStartFor(uint cursor) =>
+        UsesTessellationData ? PushData.NoStart
+        : PushDataAtTop ? PushData.TopFor(cursor, ShaderDataDwordCount)
+        : PushData.StartFor(cursor, ShaderDataDwordCount);
 
     public void AdvancePushData(ref uint cursor)
     {
@@ -658,6 +674,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         bool usesMeshDrawParameters = false,
         uint callArgumentCount = 0,
         uint callTargetCount = 0,
+        bool pushDataAtTop = false,
         bool tableBlock = false,
         bool usesBufferLengths = false,
         bool usesTessellationData = false)
@@ -675,7 +692,9 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesMeshDrawParameters ? 6u : 0u) +
             (usesTessellationData ? Gen5TessellationData.DwordCount : 0u) + callArgumentCount * 2 + callTargetCount * 2 +
             (bufferStrideCount + 1) / 2 + (storageImageSwizzleCount + 1) / 2;
-        var pushStart = usesTessellationData ? PushData.NoStart : PushData.StartFor(pushDataStartDword, shaderDataDwords);
+        var pushStart = usesTessellationData ? PushData.NoStart
+            : pushDataAtTop ? PushData.TopFor(pushDataStartDword, shaderDataDwords)
+            : PushData.StartFor(pushDataStartDword, shaderDataDwords);
         var descriptors = new List<DescriptorBinding>();
         if (info.Buffers.Count != 0 && !usesTableBlock)
         {
@@ -768,7 +787,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         return new BindingLayout
         {
             PushDataStartDword = pushStart,
-            AllocationCursor = pushDataStartDword,
+            AllocationCursor = !pushDataAtTop ? pushDataStartDword : pushStart != PushData.NoStart ? pushStart : PushData.DwordCount,
+            PushDataAtTop = pushDataAtTop,
             ShaderBaseDword = shaderBaseDword,
             MemoryOffsetDword = memoryOffsetDword,
             MemoryOffsetCount = memoryOffsetCount,
@@ -794,6 +814,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public bool Equals(BindingLayout? other) =>
         other is not null &&
         PushDataStartDword == other.PushDataStartDword &&
+        PushDataAtTop == other.PushDataAtTop &&
         ShaderBaseDword == other.ShaderBaseDword &&
         MemoryOffsetDword == other.MemoryOffsetDword &&
         MemoryOffsetCount == other.MemoryOffsetCount &&
@@ -847,7 +868,8 @@ public static class BindingLayoutValidator
         var expected = BindingLayout.Allocate(info, userDataRegisters, usesGlobalDataShare,
             usesFlattenedTable, usesShaderBase, layout.AllocationCursor,
             layout.UsesDispatchThreadLimits, layout.UsesMeshDrawParameters, layout.CallArgumentCount, layout.CallTargetCount,
-            tableBlock: layout.UsesTableBlock, usesBufferLengths: layout.UsesBufferLengths, usesTessellationData: layout.UsesTessellationData);
+            layout.PushDataAtTop, tableBlock: layout.UsesTableBlock, usesBufferLengths: layout.UsesBufferLengths,
+            usesTessellationData: layout.UsesTessellationData);
         if (!expected.Equals(layout))
         {
             throw new ResourcePlanException(
@@ -857,7 +879,7 @@ public static class BindingLayoutValidator
     }
 
     private static string Describe(BindingLayout layout) =>
-        $"push={layout.PushDataStartDword} base={layout.ShaderBaseDword} offsets={layout.MemoryOffsetDword}+{layout.MemoryOffsetCount} table={layout.UsesTableBlock} " +
+        $"push={layout.PushDataStartDword}{(layout.PushDataAtTop ? "(top)" : "")} base={layout.ShaderBaseDword} offsets={layout.MemoryOffsetDword}+{layout.MemoryOffsetCount} table={layout.UsesTableBlock} " +
         $"user=[{string.Join(",", layout.UserDataRegisters)}] " +
         string.Join(" ", layout.Descriptors.Select(binding => $"{binding.Kind}:{string.Join(",", binding.Resources)}"));
 }

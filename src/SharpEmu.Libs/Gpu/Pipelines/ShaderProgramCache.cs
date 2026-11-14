@@ -241,11 +241,20 @@ internal sealed partial class ShaderProgramCache
     internal long PendingPassEarlySkips { get; private set; }
 
     // Whether a layout starts its push data where BindingLayout.Allocate would start it at this cursor.
-    private static bool StartsAt(BindingLayout layout, uint pushDataCursor) => layout.PushDataStartDword == PushData.StartFor(pushDataCursor, layout.ShaderDataDwordCount);
+    private static bool StartsAt(BindingLayout layout, uint pushDataCursor) => layout.PushDataStartDword == layout.PushStartFor(pushDataCursor);
 
     // Whether the stage step serves this permutation for the push-data cursor and specialization (it takes the first that does).
     internal static bool Selects(ProgramPermutation candidate, uint pushDataCursor, ResourceSpecialization specialization) =>
         StartsAt(candidate.Bindings, pushDataCursor) && candidate.Specialization.Equals(specialization);
+
+    // SHARPEMU_VERTEX_PUSH_AT_TOP (on by default; =0 turns it off): a graphics pipeline's pixel stage takes the push
+    // range first, and its vertex or mesh stage takes the top of the rest (PushData.TopFor), not the place after the
+    // pixel stage's data. The vertex module then reads its push data at one place for every pixel stage it is paired
+    // with, so one translation and one pre-rasterization part serve every pairing; a stage whose data does not fit
+    // beside the pixel stage's uses the shader data block.
+    internal static readonly bool VertexPushAtTop = Environment.GetEnvironmentVariable("SHARPEMU_VERTEX_PUSH_AT_TOP") != "0";
+
+    private static bool PushDataAtTop(ShaderStage stage) => VertexPushAtTop && stage is ShaderStage.Vertex or ShaderStage.Mesh;
 
     // Whether the stage step would select the pending permutation: then it would poll that compile and, while it compiles,
     // serve the caller's fallback. Any other selection, or none, is left to the stage step.
@@ -1752,7 +1761,8 @@ internal sealed partial class ShaderProgramCache
                 resources = ResourceMaterializer.ApplyTo(plan, specialization);
                 layout = AllocateLayout(program, plan, resources, source.UserDataBase, (uint)source.UserData.Length, pushDataCursor,
                     source.Stage == ShaderStage.Compute && options.ComputeInfo!.DispatchThreadDimensions,
-                    usesMeshDrawParameters: source.Stage == ShaderStage.Mesh, tableBlocks: UsesTableBlocks(source.Stage),
+                    usesMeshDrawParameters: source.Stage == ShaderStage.Mesh, pushDataAtTop: PushDataAtTop(source.Stage),
+                    tableBlocks: UsesTableBlocks(source.Stage),
                     usesBufferLengths: source.Registered.Frontend?.RequiresExplicitBufferLengths ?? false,
                     usesTessellationData: options.Tessellation is not null || options.TessellationHull is not null);
             }
@@ -1799,7 +1809,7 @@ internal sealed partial class ShaderProgramCache
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramTranslation))
             {
                 translated = TranslationDiskCache.TryTranslate(_compiler, request,
-                    TranslationDiskCache.Key(key, source.UserDataBase, specialization, pushDataCursor, request), out compiled, out error);
+                    TranslationDiskCache.Key(key, source.UserDataBase, specialization, layout.AllocationCursor, request), out compiled, out error);
             }
         }
 
@@ -1920,7 +1930,7 @@ internal sealed partial class ShaderProgramCache
                 ContinuationAddressOffset = source.ContinuationAddressOffset,
                 UserDataBase = source.UserDataBase,
                 UserDataCount = (uint)source.UserData.Length,
-                PushDataCursor = pushDataCursor,
+                PushDataCursor = layout.AllocationCursor,
                 VertexInfo = options.VertexInfo,
                 MeshInfo = options.MeshInfo,
                 RequiredVertexOutputCount = options.RequiredVertexOutputCount,
@@ -2130,7 +2140,7 @@ internal sealed partial class ShaderProgramCache
 
     private static BindingLayout AllocateLayout(Gen5ShaderProgram program, ShaderResourcePlan plan, SpecializedResourceInfo resources,
         uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits, bool usesMeshDrawParameters = false,
-        bool usesBufferLengths = false, bool usesTessellationData = false, bool tableBlocks = false) =>
+        bool pushDataAtTop = false, bool usesBufferLengths = false, bool usesTessellationData = false, bool tableBlocks = false) =>
         BindingLayout.Allocate(
             resources.Info,
             BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount, plan.Graph.ExcludedUserDataRegisters),
@@ -2142,6 +2152,7 @@ internal sealed partial class ShaderProgramCache
             usesMeshDrawParameters: usesMeshDrawParameters,
             callArgumentCount: BindingLayout.CountCallArguments(program),
             callTargetCount: BindingLayout.CountCallTargets(program),
+            pushDataAtTop: pushDataAtTop,
             usesBufferLengths: usesBufferLengths,
             usesTessellationData: usesTessellationData, tableBlock: tableBlocks);
 
@@ -2349,7 +2360,7 @@ internal sealed partial class ShaderProgramCache
             var specialization = RuntimeImageSwizzle.Canonical(plan, record.Specialization);
             var resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor, false,
-                usesMeshDrawParameters: record.Mesh, tableBlocks: UsesTableBlocks(host, stage));
+                usesMeshDrawParameters: record.Mesh, pushDataAtTop: PushDataAtTop(stage), tableBlocks: UsesTableBlocks(host, stage));
             var request = record.Mesh
                 ? BuildMeshRequest(host, plan, resources, layout, options)
                 : BuildVertexRequest(host, plan, resources, layout, options, vertexInputs);
@@ -2359,7 +2370,7 @@ internal sealed partial class ShaderProgramCache
             var key = new ProgramKey(stage, record.Hash, record.UserDataCount, record.CodeSize, record.ContinuationAddressOffset,
                 [.. state]);
             return TranslationDiskCache.TryTranslate(compiler, request,
-                    TranslationDiskCache.Key(key, record.UserDataBase, specialization, record.PushDataCursor, request),
+                    TranslationDiskCache.Key(key, record.UserDataBase, specialization, layout.AllocationCursor, request),
                     out compiled, out error) && compiled is not null;
         }
         catch (Exception exception)

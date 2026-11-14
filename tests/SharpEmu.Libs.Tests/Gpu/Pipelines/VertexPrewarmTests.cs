@@ -288,6 +288,54 @@ public sealed class VertexPrewarmTests : IDisposable
         Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
     }
 
+    // A vertex program compiled after pixel stages that end at different push cursors is one translation, whose push
+    // data takes the top of the range above every one of them; after a pixel stage its data does not fit beside, it
+    // reads the shader data block. The program reads a V# from user data, so it has shader data to place.
+    [Fact]
+    public void AVertexProgramIsOneTranslationForEveryPixelStageBeforeIt()
+    {
+        var guest = new PipelineTestGuest(Compile);
+        guest.RegisterProgram(CodeAddress, HeaderAddress, PipelineTestGuest.FormatLoadProgram);
+        var userData = PipelineTestGuest.BufferDescriptor(DataBase, 16, 4, Format32x4Float);
+        var options = new StageCompileOptions { VertexInfo = new VertexInputInfo() };
+        var ids = new List<ulong>();
+        BindingLayout? first = null;
+        var pixelEnds = new List<uint> { 0 };
+        for (var index = 0; index < pixelEnds.Count; index++)
+        {
+            var pixelEnd = pixelEnds[index];
+            var cursor = pixelEnd;
+            var handle = guest.Programs.GetOrCompile(guest.Source(CodeAddress, ShaderStage.Vertex, userData), options, ref cursor,
+                out var stage);
+            ids.Add(handle.Id);
+            var layout = stage.Program!.Bindings!;
+            if (first is null)
+            {
+                // The last cursors the data fits above: the middle of the room and its end.
+                first = layout;
+                Assert.True(layout.ShaderDataDwordCount is > 0 and < PushData.DwordCount, $"data={layout.ShaderDataDwordCount}");
+                pixelEnds.Add((PushData.DwordCount - layout.ShaderDataDwordCount) / 2);
+                pixelEnds.Add(PushData.DwordCount - layout.ShaderDataDwordCount);
+            }
+
+            Assert.True(layout.UsesPushData, $"cursor={pixelEnd} data={layout.ShaderDataDwordCount} start={layout.PushDataStartDword}");
+            Assert.Equal(PushData.DwordCount - layout.ShaderDataDwordCount, layout.PushDataStartDword);
+            Assert.True(layout.PushDataStartDword >= pixelEnd);
+            Assert.Equal(PushData.DwordCount, cursor);
+        }
+
+        Assert.Equal(3, ids.Count);
+        Assert.All(ids, id => Assert.Equal(ids[0], id));
+        Assert.Single(guest.Compiler.Shaders);
+
+        var late = PushData.DwordCount - first!.ShaderDataDwordCount + 1;
+        var lateHandle = guest.Programs.GetOrCompile(guest.Source(CodeAddress, ShaderStage.Vertex, userData), options, ref late,
+            out var lateStage);
+        Assert.NotEqual(ids[0], lateHandle.Id);
+        Assert.False(lateStage.Program!.Bindings!.UsesPushData);
+        Assert.Equal(2, guest.Compiler.Shaders.Count);
+    }
+
     internal static readonly MeshShaderLimits TaskMeshLimits = new(128, 256, 256, 28672, 65535, 65535, 1u << 22, 128, 32768, 49152,
         1, 1, 128);
 
