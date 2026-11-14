@@ -867,9 +867,12 @@ public static partial class Gen5SpirvTranslator
         }
 
         // A compact program's fallback address (ResolveCompactDeviceAddress): a readable address the host binds
-        // (DescriptorBindingKind.DeviceAddressFallback), read once.
+        // (DescriptorBindingKind.DeviceAddressFallback), read once. The page table's length is read beside it, once per
+        // function (main and each outlined body); a lookup in any other function reads it itself.
         private uint _deviceAddressFallback;
         private uint _deviceFallbackPointer;
+        private uint _pageTableLength;
+        private uint _pageTableLengthFunction;
 
         private void InitializeDeviceAddressFallback()
         {
@@ -877,6 +880,8 @@ public static partial class Gen5SpirvTranslator
             {
                 _deviceFallbackPointer = Pair64(Load(_uintType, BlockWordPointer(_deviceAddressFallback, UInt(0))),
                     Load(_uintType, BlockWordPointer(_deviceAddressFallback, UInt(1))));
+                _pageTableLength = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _pageTable, 0);
+                _pageTableLengthFunction = _module.CurrentFunction;
             }
         }
 
@@ -1057,7 +1062,9 @@ public static partial class Gen5SpirvTranslator
         {
             var masked = And64(address64, ULong(DeviceAddressMask));
             var pageIndex64 = _module.AddInstruction(SpirvOp.ShiftRightLogical, _ulongType, masked, ULong(DeviceAddressPageBits));
-            var tableLength = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _pageTable, 0);
+            var tableLength = _pageTableLengthFunction != 0 && _module.CurrentFunction == _pageTableLengthFunction
+                ? _pageTableLength
+                : _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _pageTable, 0);
             var inTable = ULessThan64(pageIndex64, Widen(tableLength));
             var pageIndex = Narrow(pageIndex64);
             var entry = Load(_ulongType, _module.AddInstruction(SpirvOp.AccessChain, _storageUlongPointer, _pageTable, UInt(0),
