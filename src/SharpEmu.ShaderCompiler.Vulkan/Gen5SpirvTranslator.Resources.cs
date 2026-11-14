@@ -1399,7 +1399,8 @@ public static partial class Gen5SpirvTranslator
                 return [LoadDeviceDword(address64, allowed[0])];
             }
 
-            // The page offset of the first dword decides which dwords lie in its page.
+            // The page offset of the first dword decides which dwords lie in its page: dword i does when
+            // pageOffset + 4i < PageSize, tested as pageOffset < PageSize - 4i (both terms are below the page size).
             var pageOffset = Narrow(And64(address64, ULong(DeviceAddressPageSize - 1)));
             var firstPage = new uint[count];
             var firstAllowed = allowed[0];
@@ -1408,21 +1409,22 @@ public static partial class Gen5SpirvTranslator
             for (var index = 1; index < count; index++)
             {
                 firstPage[index] = _module.AddInstruction(SpirvOp.ULessThan, _boolType,
-                    IAdd(pageOffset, UInt((uint)index * sizeof(uint))), UInt((uint)DeviceAddressPageSize));
+                    pageOffset, UInt((uint)DeviceAddressPageSize - (uint)index * sizeof(uint)));
                 firstAllowed = _module.AddInstruction(SpirvOp.LogicalOr, _boolType, firstAllowed, LogicalAnd(allowed[index], firstPage[index]));
                 lastAllowed = _module.AddInstruction(SpirvOp.LogicalOr, _boolType, lastAllowed, LogicalAnd(allowed[index], LogicalNot(firstPage[index])));
             }
 
             var (firstPointer, firstMapped) = ResolveCompactDeviceAddress(address64, firstAllowed);
             var (lastPointer, lastMapped) = ResolveCompactDeviceAddress(IAdd64(address64, ULong((ulong)(count - 1) * sizeof(uint))), lastAllowed);
+            // Dword i is its page's base + 4i; the last page's base is its pointer moved back to dword 0.
             var values = new uint[count];
+            var lastBase = ISub64(lastPointer, ULong((ulong)(count - 1) * sizeof(uint)));
             for (var index = 0; index < count; index++)
             {
                 var pointer = index == 0
                     ? firstPointer
-                    : _module.AddInstruction(SpirvOp.Select, _ulongType, firstPage[index],
-                        IAdd64(firstPointer, ULong((ulong)index * sizeof(uint))),
-                        ISub64(lastPointer, ULong((ulong)(count - 1 - index) * sizeof(uint))));
+                    : IAdd64(_module.AddInstruction(SpirvOp.Select, _ulongType, firstPage[index], firstPointer, lastBase),
+                        ULong((ulong)index * sizeof(uint)));
                 var mapped = index == 0
                     ? firstMapped
                     : _module.AddInstruction(SpirvOp.Select, _boolType, firstPage[index], firstMapped, lastMapped);
