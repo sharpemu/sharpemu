@@ -2549,33 +2549,24 @@ public static partial class Gen5SpirvTranslator
 
         // Widens an f16 value held in the low 16 bits of `halfBits` to an f32 bit
         // pattern, exactly (subnormals normalised, Inf/NaN and signed zero preserved).
-        // Mirrors the branchless HalfToFloat reference validated against System.Half.
+        // The exponent and mantissa move into place and the exponent is re-biased;
+        // Inf/NaN take a second re-bias to the all-ones exponent. A subnormal m becomes
+        // 2^-14 * (1 + m / 1024) - 2^-14: both floats are normal and their difference
+        // m * 2^-24 is representable, so the subtraction is exact even when the driver
+        // flushes denormals.
         private uint EmitHalfToFloat(uint halfBits)
         {
-            var sign = ShiftLeftLogical(BitwiseAnd(halfBits, UInt(0x8000)), UInt(16));
-            var exponent = BitwiseAnd(ShiftRightLogical(halfBits, UInt(10)), UInt(0x1F));
-            var mantissa = BitwiseAnd(halfBits, UInt(0x3FF));
-
-            var normal = BitwiseOr(
-                ShiftLeftLogical(IAdd(exponent, UInt(112)), UInt(23)),
-                ShiftLeftLogical(mantissa, UInt(13)));
-            var infinityNan = BitwiseOr(UInt(0x7F80_0000), ShiftLeftLogical(mantissa, UInt(13)));
-
-            // Subnormal: normalise the mantissa. FindUMsb of (mantissa | 1) keeps the
-            // op defined when mantissa is 0; that lane is discarded by the select below.
-            var highBit = Ext(75, _uintType, BitwiseOr(mantissa, UInt(1)));
-            var shift = ISubU(UInt(23), highBit);
-            var subFraction = BitwiseAnd(ShiftLeftLogical(mantissa, shift), UInt(0x7F_FFFF));
-            var subnormal = SelectU(
-                IsNotZero(mantissa),
-                BitwiseOr(ShiftLeftLogical(IAdd(highBit, UInt(103)), UInt(23)), subFraction),
-                UInt(0));
-
-            var magnitude = SelectU(
+            var magnitude = ShiftLeftLogical(BitwiseAnd(halfBits, UInt(0x7FFF)), UInt(13));
+            var exponent = BitwiseAnd(magnitude, UInt(0x0F80_0000));
+            var rebiased = IAdd(magnitude, UInt(112u << 23));
+            var infinityNan = IAdd(rebiased, UInt(112u << 23));
+            var subnormal = Bitcast(_uintType, _module.AddInstruction(SpirvOp.FSub, _floatType,
+                Bitcast(_floatType, IAdd(rebiased, UInt(1u << 23))), Float(1f / 16384f)));
+            var widened = SelectU(
                 Equal(exponent, 0),
                 subnormal,
-                SelectU(Equal(exponent, 31), infinityNan, normal));
-            return BitwiseOr(sign, magnitude);
+                SelectU(Equal(exponent, 0x0F80_0000), infinityNan, rebiased));
+            return BitwiseOr(widened, ShiftLeftLogical(BitwiseAnd(halfBits, UInt(0x8000)), UInt(16)));
         }
 
         // Narrows an f32 bit pattern to an f16 value in the low 16 bits, rounding to

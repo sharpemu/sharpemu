@@ -140,7 +140,8 @@ public sealed class Gen5Float16ArithmeticTests
         Assert.Contains((ushort)SpirvOp.FAdd, opcodes);
         Assert.Contains((ushort)SpirvOp.FSub, opcodes);
         Assert.Contains((ushort)SpirvOp.FMul, opcodes);
-        Assert.True(opcodes.Count(opcode => opcode == (ushort)SpirvOp.ExtInst) >= 3);
+        // The reciprocal square root and the maximum are GLSL instructions.
+        Assert.True(opcodes.Count(opcode => opcode == (ushort)SpirvOp.ExtInst) >= 2);
         Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
     }
 
@@ -233,7 +234,10 @@ public sealed class Gen5Float16ArithmeticTests
         Assert.True(
             Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error),
             error);
-        Assert.Contains((ushort)SpirvOp.ExtInst, ReadOpcodes(shader.Spirv));
+        // The product and the sum of the round-to-odd fma.
+        var opcodes = ReadOpcodes(shader.Spirv);
+        Assert.Contains((ushort)SpirvOp.FMul, opcodes);
+        Assert.Contains((ushort)SpirvOp.FAdd, opcodes);
         Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
     }
 
