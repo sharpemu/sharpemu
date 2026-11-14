@@ -86,6 +86,8 @@ public static class HostVideoHost
 
     public static HostVideoOptions CurrentOptions => Volatile.Read(ref _currentOptions);
 
+    internal static bool IsVideoConfigured => Volatile.Read(ref _videoConfigured);
+
     public static void ConfigureSplashFont(Stream font) => ShaderCacheProgressOverlay.SetFont(font);
 
     internal static bool IsHdrOutputSupported =>

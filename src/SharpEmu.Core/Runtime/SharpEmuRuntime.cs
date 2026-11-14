@@ -200,6 +200,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         KernelMemoryCompatExports.ConfigureApplicationInfo(image.TitleId);
         SaveDataExports.ConfigureApplicationInfo(image.TitleId);
         SystemServiceExports.ConfigureApplicationInfo(image.TitleId, _systemLanguage);
+        VideoOutExports.StartPresenter();
         _ = RegisterLoadedModule(normalizedEbootPath, image, isMain: true, isSystemModule: false);
         KernelRuntimeCompatExports.ConfigureProcessProcParamAddress(image.ProcParamAddress);
         Console.Error.WriteLine($"[RUNTIME] Entry: 0x{image.EntryPoint:X16}");
