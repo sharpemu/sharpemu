@@ -272,9 +272,10 @@ internal static unsafe partial class VulkanVideoPresenter
             if (!ShaderProgramCache.TryCompilePrewarm(
                     record, code, compiler, sharedInt64Atomics, execGuardElision,
                     _supportsShaderSignedZeroInfNanPreserveFloat32, out var compiled, out var layout, out var error,
-                    ((IShaderPipelineHost)this).ComputeWave64SubgroupNative,
-                    ((IShaderPipelineHost)this).ComputeRunsOn32LaneSubgroups(record.Info),
-                    ImageInt64AtomicsEnabled,
+                    hostWave64Supported: ((IShaderPipelineHost)this).ComputeWave64SubgroupNative,
+                    hostComputeSubgroup32: ((IShaderPipelineHost)this).ComputeRunsOn32LaneSubgroups(record.Info),
+                    imageInt64Atomics: ImageInt64AtomicsEnabled,
+                    shaderDeviceClock: ShaderDeviceClockEnabled,
                     frontendOf: Agc.AgcExports.ShaderFrontendForDomain))
             {
                 NoteShaderPrewarmFailure("cs", record.Hash, record.Address, error);

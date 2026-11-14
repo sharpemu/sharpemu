@@ -184,6 +184,7 @@ public enum SpirvOp : ushort
     GroupNonUniformShuffleDown = 348,
     GroupNonUniformUMin = 354,
     SetMeshOutputsExt = 5295,
+    ReadClockKhr = 5056,
 }
 
 public enum SpirvCapability : uint
@@ -225,6 +226,7 @@ public enum SpirvCapability : uint
     PhysicalStorageBufferAddresses = 5347,
     SignedZeroInfNanPreserve = 4466,
     MeshShadingExt = 5283,
+    ShaderClockKhr = 5055,
 }
 
 public enum SpirvStorageClass : uint

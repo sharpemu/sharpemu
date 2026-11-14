@@ -152,6 +152,7 @@ public static partial class Gen5SpirvTranslator
         private uint _intType;
         private uint _longType;
         private uint _ulongType;
+        private uint _steppedClock;
         private uint _floatType;
         private uint _vec2Type;
         private uint _vec3Type;
@@ -2557,6 +2558,14 @@ public static partial class Gen5SpirvTranslator
                 Gen5ShaderEncoding.Sopk)
             {
                 return TryEmitScalarAlu(instruction, out error);
+            }
+
+            if (instruction.Opcode is "SMemtime" or "SMemrealtime")
+            {
+                var clock = ReadShaderClock();
+                StoreS(instruction.Destinations[0].Value, Narrow(clock));
+                StoreS(instruction.Destinations[1].Value, Narrow(ShiftRightLogical64(clock, ULong(32))));
+                return true;
             }
 
             if (instruction.Encoding is
@@ -8925,6 +8934,30 @@ public static partial class Gen5SpirvTranslator
                     PackedHalves = _packedHalfRegisters,
                 };
             return _packedHalfRegisters;
+        }
+
+        // Programs wait on these counters, so they must run. Without a device clock each read moves a
+        // per-invocation counter 2^32 ahead, which ends any wait for a 32-bit number of ticks.
+        private uint ReadShaderClock()
+        {
+            if (_request.SupportsShaderDeviceClock)
+            {
+                _module.AddCapability(SpirvCapability.ShaderClockKhr);
+                _module.AddExtension("SPV_KHR_shader_clock");
+                return _module.AddInstruction(SpirvOp.ReadClockKhr, _ulongType, UInt(1));
+            }
+
+            if (_steppedClock == 0)
+            {
+                _steppedClock = _module.AddGlobalVariable(
+                    _module.TypePointer(SpirvStorageClass.Private, _ulongType), SpirvStorageClass.Private, ULong(0));
+                _module.AddName(_steppedClock, "steppedClock");
+                _interfaces.Add(_steppedClock);
+            }
+
+            var value = Load(_ulongType, _steppedClock);
+            Store(_steppedClock, IAdd64(value, ULong(1UL << 32)));
+            return value;
         }
 
         private uint LoadS(uint register) =>

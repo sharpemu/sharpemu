@@ -780,6 +780,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private const string ImageViewMinLodExtensionName = "VK_EXT_image_view_min_lod";
         private const string FillRectangleExtensionName = "VK_NV_fill_rectangle";
         private const string ShaderImageAtomicInt64ExtensionName = "VK_EXT_shader_image_atomic_int64";
+        private const string ShaderClockExtensionName = "VK_KHR_shader_clock";
         private const string UnifiedImageLayoutsExtensionName = "VK_KHR_unified_image_layouts";
         private bool _supportsImageViewMinLod;
         private const string MeshShaderExtensionName = "VK_EXT_mesh_shader";
@@ -980,6 +981,24 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             SetImageInt64AtomicsCapability(supportsImageInt64Atomics);
+
+            var shaderClockFeatures = new PhysicalDeviceShaderClockFeaturesKHR
+            {
+                SType = StructureType.PhysicalDeviceShaderClockFeaturesKhr,
+            };
+            var supportsShaderDeviceClock = false;
+            if (supportedFeatures.ShaderInt64 && IsDeviceExtensionAvailable(ShaderClockExtensionName))
+            {
+                var shaderClockQuery = new PhysicalDeviceFeatures2
+                {
+                    SType = StructureType.PhysicalDeviceFeatures2,
+                    PNext = &shaderClockFeatures,
+                };
+                _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &shaderClockQuery);
+                supportsShaderDeviceClock = shaderClockFeatures.ShaderDeviceClock;
+            }
+
+            SetShaderDeviceClockCapability(supportsShaderDeviceClock);
             if (!supportsImageInt64Atomics)
             {
                 Console.Error.WriteLine(
@@ -1123,6 +1142,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var meshExtension = (byte*)SilkMarshal.StringToPtr(MeshShaderExtensionName);
             var imageAtomicInt64Extension = (byte*)SilkMarshal.StringToPtr(ShaderImageAtomicInt64ExtensionName);
             var unifiedImageLayoutsExtension = (byte*)SilkMarshal.StringToPtr(UnifiedImageLayoutsExtensionName);
+            var shaderClockExtension = (byte*)SilkMarshal.StringToPtr(ShaderClockExtensionName);
             try
             {
                 var extensions = stackalloc byte*[24];
@@ -1184,6 +1204,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (supportsImageInt64Atomics)
                 {
                     extensions[extensionCount++] = imageAtomicInt64Extension;
+                }
+
+                if (supportsShaderDeviceClock)
+                {
+                    extensions[extensionCount++] = shaderClockExtension;
                 }
 
                 if (supportsRobustness2)
@@ -1304,6 +1329,16 @@ internal static unsafe partial class VulkanVideoPresenter
                     };
                     renderingChain = &unifiedImageLayoutsFeatures;
                 }
+                if (supportsShaderDeviceClock)
+                {
+                    shaderClockFeatures = new PhysicalDeviceShaderClockFeaturesKHR
+                    {
+                        SType = StructureType.PhysicalDeviceShaderClockFeaturesKhr,
+                        ShaderDeviceClock = true,
+                        PNext = renderingChain,
+                    };
+                    renderingChain = &shaderClockFeatures;
+                }
                 if (_supportsDepthClipEnable)
                 {
                     depthClipEnableFeatures = new PhysicalDeviceDepthClipEnableFeaturesEXT
@@ -1384,6 +1419,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)unifiedImageLayoutsExtension);
                 SilkMarshal.Free((nint)fillRectangleExtension);
                 SilkMarshal.Free((nint)imageAtomicInt64Extension);
+                SilkMarshal.Free((nint)shaderClockExtension);
                 SilkMarshal.Free((nint)robustness2Extension);
                 SilkMarshal.Free((nint)portabilitySubsetExtension);
                 SilkMarshal.Free((nint)colorWriteEnableExtension);

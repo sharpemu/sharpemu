@@ -301,6 +301,10 @@ public sealed class ShaderCompileRequest
     // The device supports 64-bit integer atomics on images (shaderImageInt64Atomics). Without
     // it a program that uses an atomic on a 64-bit texel is rejected at compile time.
     public bool SupportsImageInt64Atomics { get; init; }
+
+    // The device has a shader-readable device clock (shaderDeviceClock), which S_MEMTIME and
+    // S_MEMREALTIME read.
+    public bool SupportsShaderDeviceClock { get; init; }
     public bool ShaderSignedZeroInfNanPreserveFloat32Supported { get; init; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
 

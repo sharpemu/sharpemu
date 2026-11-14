@@ -98,6 +98,9 @@ internal interface IShaderPipelineHost
     // The device supports shaderImageInt64Atomics, so an atomic on a 64-bit image texel
     // (a 32_32 UINT image) can be compiled; without it such a program is rejected.
     bool ImageInt64AtomicsEnabled => false;
+
+    // The device supports shaderDeviceClock, so a program can read a running clock.
+    bool ShaderDeviceClockEnabled => false;
     bool ShaderSignedZeroInfNanPreserveFloat32Supported => false;
     bool ExecGuardElisionEnabled => true;
     ShaderPrewarmList? ShaderPrewarm => null;

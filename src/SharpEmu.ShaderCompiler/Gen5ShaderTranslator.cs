@@ -1925,6 +1925,8 @@ public static partial class Gen5ShaderTranslator
             0x0A => "SBufferLoadDwordx4",
             0x0B => "SBufferLoadDwordx8",
             0x0C => "SBufferLoadDwordx16",
+            0x24 => "SMemtime",
+            0x25 => "SMemrealtime",
             _ => string.Empty,
         };
 
@@ -2435,6 +2437,13 @@ public static partial class Gen5ShaderTranslator
                     count,
                     immediateOffsetBytes,
                     dynamicOffsetRegister);
+                break;
+            }
+            case Gen5ShaderEncoding.Smem when opcode is "SMemtime" or "SMemrealtime":
+            {
+                // A clock read writes an SGPR pair and touches no memory.
+                var clockDestination = (word >> 6) & 0x7F;
+                destinations = [Gen5Operand.Scalar(clockDestination), Gen5Operand.Scalar(clockDestination + 1)];
                 break;
             }
             case Gen5ShaderEncoding.Smem:
