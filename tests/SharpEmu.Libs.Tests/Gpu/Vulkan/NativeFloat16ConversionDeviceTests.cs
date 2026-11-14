@@ -14,11 +14,13 @@ using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
 namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 
-// With NativeFloat16Conversions the f16 conversions are OpFConvert under the 16-bit float controls. Each kernel runs translated
-// both ways and must give the same bits: every f32 narrowed (all 2^32 patterns, as x * 1 + -0 through V_FMA_MIXLO_F16), every
-// f16 widened (all 2^16, through V_FMA_MIX_F32 from either half, V_MAX_F16 and V_PK_MAX_F16), and the f16 arithmetic over every
-// ordered triple of a value set. The narrowing and widening also match System.Half, and a NaN narrows to 0x7E00 with its sign.
-// V_CVT_F16_F32 and V_CVT_F32_F16 (GLSL packing) keep their bits in a module that declares the float controls.
+// With NativeFloat16Conversions the f16 conversions are OpFConvert under the 16-bit float controls, and the f16 add, subtract,
+// multiply, maximum and median are f16 ops. Each kernel runs translated both ways and must give the same bits: every f32
+// narrowed (all 2^32 patterns, as x * 1 + -0 through V_FMA_MIXLO_F16), every f16 widened (all 2^16, through V_FMA_MIX_F32 from
+// either half, V_MAX_F16 and V_PK_MAX_F16), the f16 arithmetic over every ordered pair of halves (all 2^32) and, with its
+// modifiers and constants, over every ordered triple of a value set. The narrowing and widening also match System.Half, and a
+// NaN narrows to 0x7E00 with its sign. V_CVT_F16_F32 and V_CVT_F32_F16 (GLSL packing) keep their bits in a module that declares
+// the float controls.
 public sealed class NativeFloat16ConversionDeviceTests(HeadlessVulkanFixture fixture, ITestOutputHelper output)
     : IClassFixture<HeadlessVulkanFixture>
 {
@@ -200,6 +202,206 @@ public sealed class NativeFloat16ConversionDeviceTests(HeadlessVulkanFixture fix
         });
     }
 
+    // Every ordered pair of halves, 2^28 per part in 64 dispatches of 4,096 groups: a in the low half of v1 and b in the high
+    // half. The words are V_ADD_F16, V_SUB_F16, V_MUL_F16 and V_MAX_F16 of (a, b) (VOP3, b through op_sel), then V_PK_ADD_F16,
+    // V_PK_MUL_F16, V_PK_MAX_F16 and V_PK_MIN_F16 of the pairs (a, b) and (b, a). The 16 parts take several minutes on a
+    // desktop GPU, so they run only with SHARPEMU_TEST_EXHAUSTIVE_F16=1; HalfArithmeticModifiersKeepTheirBits always runs.
+    [Theory]
+    [MemberData(nameof(Parts))]
+    public void EveryHalfPairComputesAsTheFloatSequence(uint part)
+    {
+        if (Environment.GetEnvironmentVariable("SHARPEMU_TEST_EXHAUSTIVE_F16") != "1" || !Ready()) return;
+        const uint groups = 4096, count = groups * Lanes, words = 8;
+        string[] names = ["V_ADD_F16", "V_SUB_F16", "V_MUL_F16", "V_MAX_F16", "V_PK_ADD_F16", "V_PK_MUL_F16", "V_PK_MAX_F16", "V_PK_MIN_F16"];
+        using var pair = new KernelPair(fixture.Vulkan!, Kernel(words,
+        [
+            Vop2(0, "VLshlrevB32", 5, Operand(16), Gen5Operand.Vector(1)),
+            Vop2(0, "VLshrrevB32", 6, Operand(16), Gen5Operand.Vector(1)),
+            Vop2(0, "VOrB32", 4, Gen5Operand.Vector(5), Gen5Operand.Vector(6)),
+            .. new[] { "VAddF16", "VSubF16", "VMulF16", "VMaxF16" }.Select((opcode, index) =>
+                Vop3With(opcode, 10 + (uint)index, Modifiers(select: 2), Gen5Operand.Vector(1), Gen5Operand.Vector(1))),
+            .. new[] { "VPkAddF16", "VPkMulF16", "VPkMaxF16", "VPkMinF16" }.Select((opcode, index) =>
+                Mix(opcode, 14 + (uint)index, [Gen5Operand.Vector(1), Gen5Operand.Vector(4)], new Gen5Vop3pControl(0, 3, 0, 0, false))),
+        ]), new byte[count * words * 4], preserveNan: true);
+        var unequal = new long[words];
+        var differences = new List<string>();
+        for (var dispatch = 0u; dispatch < 64; dispatch++)
+        {
+            var first = (part << 28) + dispatch * count;
+            pair.Dispatch(first, groups);
+            var (integer, native) = pair.Read();
+            if (integer.AsSpan().SequenceEqual(native)) continue;
+            for (var word = 0; word < integer.Length / 4; word++)
+            {
+                var expected = BinaryPrimitives.ReadUInt32LittleEndian(integer.AsSpan(word * 4));
+                var actual = BinaryPrimitives.ReadUInt32LittleEndian(native.AsSpan(word * 4));
+                if (expected == actual) continue;
+                var bits = first + (uint)(word / words);
+                if (unequal[word % words]++ == 0 || differences.Count < 12)
+                    differences.Add($"{names[word % words]} (0x{bits & 0xFFFF:X4}, 0x{bits >> 16:X4}): f32 forms 0x{expected:X8}, f16 0x{actual:X8}");
+            }
+        }
+
+        Assert.True(differences.Count == 0, $"unequal results {string.Join(", ", unequal.Select((n, i) => $"{names[i]} {n}"))}:" +
+            Environment.NewLine + string.Join(Environment.NewLine, differences));
+    }
+
+    // Every ordered triple (a, b, c) of the value set, one 256-byte row each: the inputs, then the f16 ops with abs, neg, clamp,
+    // op_sel and output modifiers and inline and literal constants, and the packed ops with op_sel, op_sel_hi, neg_lo, neg_hi,
+    // clamp and constants. Among them are the constants and modifiers that keep the f32 forms (1/(2 pi), NaN, omod). Without
+    // SignedZeroInfNanPreserve for 32 bits the f32 forms may fold x + -x, x - x, x * -0, x + 0 and an operand's negated copy
+    // (fast math), so those results depend on the code around them and are compared only with it. A maximum, minimum or
+    // median with a negated operand keeps the f32 forms, whose NaN result after a float negation has the sign the driver
+    // leaves it (Vulkan keeps no NaN bits: a driver may keep it for -b, -c and drop it for x, -x); a NaN lane of those
+    // is compared without its sign.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HalfArithmeticModifiersKeepTheirBits(bool preserveNan)
+    {
+        if (!Ready()) return;
+        var a = Gen5Operand.Vector(8);
+        var b = Gen5Operand.Vector(9);
+        var c = Gen5Operand.Vector(10);
+        var ab = Gen5Operand.Vector(30);
+        var ca = Gen5Operand.Vector(31);
+        var bc = Gen5Operand.Vector(32);
+        Gen5Operand Literal(uint value) => new(Gen5OperandKind.LiteralConstant, value);
+        Gen5Vop3pControl Packed(uint select = 0, uint selectHigh = 3, uint negateLow = 0, uint negateHigh = 0, bool clamp = false) =>
+            new(select, selectHigh, negateLow, negateHigh, clamp);
+        (string Name, Func<uint, Gen5ShaderInstruction> Emit)[] cases =
+        [
+            ("add a b", d => Vop2(0, "VAddF16", d, a, b)),
+            ("subrev a b", d => Vop2(0, "VSubrevF16", d, a, b)),
+            ("add -a |b|", d => Vop3With("VAddF16", d, Modifiers(absolute: 2, negate: 1), a, b)),
+            ("sub |a| -b clamp", d => Vop3With("VSubF16", d, Modifiers(absolute: 1, negate: 2, clamp: true), a, b)),
+            ("mul -a -b clamp", d => Vop3With("VMulF16", d, Modifiers(negate: 3, clamp: true), a, b)),
+            ("mul b a to the high half", d => Vop3With("VMulF16", d, Modifiers(select: 11), ab, ca)),
+            ("max -a |b|", d => Vop3With("VMaxF16", d, Modifiers(absolute: 2, negate: 1), a, b)),
+            ("max -a -b clamp", d => Vop3With("VMaxF16", d, Modifiers(negate: 3, clamp: true), a, b)),
+            ("max3 -a b |c|", d => Vop3With("VMax3F16", d, Modifiers(absolute: 4, negate: 1), a, b, c)),
+            ("med3 |a| -b c clamp", d => Vop3With("VMed3F16", d, Modifiers(absolute: 1, negate: 2, clamp: true), a, b, c)),
+            ("med3 b a -c", d => Vop3With("VMed3F16", d, Modifiers(negate: 4, select: 3), ab, ca, c)),
+            ("add a 1.0", d => Vop3With("VAddF16", d, Modifiers(), a, Gen5Operand.Source(242))),
+            ("mul a 1/(2 pi)", d => Vop3With("VMulF16", d, Modifiers(), a, Gen5Operand.Source(248))),
+            ("mul -a -0.5", d => Vop3With("VMulF16", d, Modifiers(negate: 1), a, Gen5Operand.Source(241))),
+            ("add 5 b", d => Vop3With("VAddF16", d, Modifiers(), Gen5Operand.Source(133), b)),
+            ("sub a 0x3555", d => Vop3With("VSubF16", d, Modifiers(), a, Literal(0x3555))),
+            ("max a NaN", d => Vop3With("VMaxF16", d, Modifiers(), a, Literal(0xFD55))),
+            ("mul a -0", d => Vop3With("VMulF16", d, Modifiers(), a, Literal(0x8000))),
+            ("add a -0", d => Vop3With("VAddF16", d, Modifiers(), a, Literal(0x8000))),
+            ("mul a 1.0", d => Vop3With("VMulF16", d, Modifiers(), a, Gen5Operand.Source(242))),
+            ("sub a b omod 2", d => Vop3With("VSubF16", d, Modifiers(outputModifier: 1), a, b)),
+            ("max a b", d => Vop2(0, "VMaxF16", d, a, b)),
+            ("mul c b", d => Vop2(0, "VMulF16", d, c, b)),
+            ("max3 a b c clamp to the high half", d => Vop3With("VMax3F16", d, Modifiers(clamp: true, select: 8), a, b, c)),
+            ("pk_add ab ca", d => Mix("VPkAddF16", d, [ab, ca], Packed())),
+            ("pk_add bb cc", d => Mix("VPkAddF16", d, [ab, ca], Packed(select: 1, selectHigh: 1))),
+            ("pk_mul -ab c-a", d => Mix("VPkMulF16", d, [ab, ca], Packed(negateLow: 1, negateHigh: 2))),
+            ("pk_mul aa bb clamp", d => Mix("VPkMulF16", d, [ab, bc], Packed(selectHigh: 0, clamp: true))),
+            ("pk_max -a-b -ca", d => Mix("VPkMaxF16", d, [ab, ca], Packed(negateLow: 3, negateHigh: 1))),
+            ("pk_min ab cb", d => Mix("VPkMinF16", d, [ab, bc], Packed(select: 2, selectHigh: 1))),
+            ("pk_max ca ab clamp", d => Mix("VPkMaxF16", d, [ca, ab], Packed(clamp: true))),
+            ("pk_add ab 1.0", d => Mix("VPkAddF16", d, [ab, Gen5Operand.Source(242)], Packed())),
+            ("pk_mul ab (0.5, -1)", d => Mix("VPkMulF16", d, [ab, Literal(0xBC00_3800)], Packed())),
+            ("pk_min ab -1 (NaN halves)", d => Mix("VPkMinF16", d, [ab, Gen5Operand.Source(193)], Packed())),
+            ("pk_add ab -ab", d => Mix("VPkAddF16", d, [ab, ab], Packed(negateLow: 2, negateHigh: 2))),
+            ("pk_mul ac cb", d => Mix("VPkMulF16", d, [ca, bc], Packed(select: 3, selectHigh: 0))),
+            ("pk_max ab -b-c", d => Mix("VPkMaxF16", d, [ab, bc], Packed(negateHigh: 3))),
+            ("pk_min -ab ca clamp", d => Mix("VPkMinF16", d, [ab, ca], Packed(negateLow: 1, clamp: true))),
+            ("add a -a", d => Vop3With("VAddF16", d, Modifiers(negate: 2), a, a)),
+            ("sub a a", d => Vop2(0, "VSubF16", d, a, a)),
+            ("subrev -a -a", d => Vop3With("VSubrevF16", d, Modifiers(negate: 3), a, a)),
+            ("max a -a", d => Vop3With("VMaxF16", d, Modifiers(negate: 2), a, a)),
+            ("pk_add -ab ab", d => Mix("VPkAddF16", d, [ab, ab], Packed(negateLow: 1, negateHigh: 1))),
+            ("pk_mul ab -ab", d => Mix("VPkMulF16", d, [ab, ab], Packed(negateLow: 2, negateHigh: 2))),
+            ("pk_add ab ab", d => Mix("VPkAddF16", d, [ab, ab], Packed())),
+            ("pk_max ab -ab", d => Mix("VPkMaxF16", d, [ab, ab], Packed(negateLow: 2, negateHigh: 2))),
+        ];
+        string[] fastMath = ["mul a -0", "add a -0", "pk_add ab 1.0", "add a -a", "sub a a", "subrev -a -a", "max a -a",
+            "pk_add -ab ab", "pk_mul ab -ab", "pk_add ab ab", "pk_add ab -ab", "pk_max ab -ab"];
+        string[] negatedSelection = ["max -a |b|", "max3 -a b |c|", "med3 b a -c", "pk_max -a-b -ca", "pk_max ab -b-c",
+            "max a -a", "pk_max ab -ab"];
+        Assert.All(fastMath.Concat(negatedSelection), name => Assert.Contains(cases, test => test.Name == name));
+        const uint first = 40;
+        var results = (uint)cases.Length;
+        var program = Program(Numbered(
+        [
+            Vop2(0, "VAddU32", 1, Gen5Operand.Scalar(8), Gen5Operand.Vector(0)),
+            Vop2(0, "VLshlrevB32", 7, Operand(8), Gen5Operand.Vector(1)),
+            BufferAccess(0, "BufferLoadDwordx3", 4, dwords: 3, vectorData: 8, offsetEnabled: true, vectorAddress: 7),
+            Vop2(0, "VLshlrevB32", 30, Operand(16), b),
+            Vop2(0, "VOrB32", 30, a, ab),
+            Vop2(0, "VLshlrevB32", 31, Operand(16), a),
+            Vop2(0, "VOrB32", 31, c, ca),
+            Vop2(0, "VLshlrevB32", 32, Operand(16), c),
+            Vop2(0, "VOrB32", 32, b, bc),
+            .. Enumerable.Range((int)first, (int)(results + 3) / 4 * 4).Select(register => MoveVector(0, (uint)register, 0)),
+            .. cases.Select((test, index) => test.Emit(first + (uint)index)),
+            .. Enumerable.Range(0, (int)(results + 3) / 4).Select(store => BufferAccess(0, "BufferStoreDwordx4", 4,
+                offset: 16 + store * 16, dwords: 4, vectorData: first + (uint)store * 4, offsetEnabled: true, vectorAddress: 7)),
+        ]));
+        const int rowBytes = 256;
+        var count = Halves.Length * Halves.Length * Halves.Length;
+        var rows = new byte[(count + (int)Lanes - 1) / (int)Lanes * (int)Lanes * rowBytes];
+        var row = 0;
+        foreach (var first16 in Halves)
+        foreach (var second in Halves)
+        foreach (var third in Halves)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(rows.AsSpan(row * rowBytes), first16);
+            BinaryPrimitives.WriteUInt32LittleEndian(rows.AsSpan(row * rowBytes + 4), second);
+            BinaryPrimitives.WriteUInt32LittleEndian(rows.AsSpan(row * rowBytes + 8), third);
+            row++;
+        }
+
+        using var pair = new KernelPair(fixture.Vulkan!, program, rows, preserveNan);
+        for (var start = 0u; start < rows.Length / rowBytes; start += Lanes)
+        {
+            pair.Dispatch(start, 1);
+        }
+
+        var (integer, native) = pair.Read();
+        var unequal = new int[cases.Length];
+        var differences = new List<string>();
+        for (var index = 0; index < count; index++)
+        {
+            for (var result = 0; result < cases.Length; result++)
+            {
+                if (!preserveNan && fastMath.Contains(cases[result].Name)) continue;
+                var offset = index * rowBytes + 16 + result * 4;
+                var expected = BinaryPrimitives.ReadUInt32LittleEndian(integer.AsSpan(offset));
+                var actual = BinaryPrimitives.ReadUInt32LittleEndian(native.AsSpan(offset));
+                if (negatedSelection.Contains(cases[result].Name) && NanSignless(expected) == NanSignless(actual)) continue;
+                if (expected == actual || unequal[result]++ >= 3) continue;
+                differences.Add($"{cases[result].Name} ({Halves[index / (Halves.Length * Halves.Length)]:X4}, " +
+                    $"{Halves[index / Halves.Length % Halves.Length]:X4}, {Halves[index % Halves.Length]:X4}): " +
+                    $"f32 forms 0x{expected:X8}, f16 0x{actual:X8}");
+            }
+        }
+
+        Assert.True(differences.Count == 0, string.Join(", ", unequal.Select((n, i) => (n, i)).Where(c => c.n > 0)
+            .Select(c => $"{cases[c.i].Name}: {c.n}")) + Environment.NewLine + string.Join(Environment.NewLine, differences));
+    }
+
+    // A word with the sign bit of each NaN half cleared.
+    private static uint NanSignless(uint word)
+    {
+        foreach (var shift in new[] { 0, 16 })
+        {
+            if (((word >> shift) & 0x7FFF) > 0x7C00) word &= ~(0x8000u << shift);
+        }
+
+        return word;
+    }
+
+    private static Gen5Vop3Control Modifiers(
+        uint absolute = 0, uint negate = 0, uint outputModifier = 0, bool clamp = false, uint select = 0) =>
+        new(absolute, negate, outputModifier, clamp, select, null);
+
+    private static Gen5ShaderInstruction Vop3With(string opcode, uint destination, Gen5Vop3Control control, params Gen5Operand[] sources) =>
+        Vop3(0, opcode, destination, sources) with { Control = control };
+
     private bool Ready()
     {
         var vulkan = fixture.Vulkan;
@@ -276,7 +478,7 @@ public sealed class NativeFloat16ConversionDeviceTests(HeadlessVulkanFixture fix
                     NativeFloat16Conversions = native,
                 };
                 Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
-                Assert.Equal(native, CountOpcode(shader.Spirv, SpirvOp.FConvert) > 0);
+                Assert.Equal(native, DeclaresFloat16(shader.Spirv));
                 var runner = new LayoutComputeRunner(_harness, request, shader.Spirv);
                 return (runner, runner.CreateBuffer(buffer));
             })];
@@ -307,16 +509,17 @@ public sealed class NativeFloat16ConversionDeviceTests(HeadlessVulkanFixture fix
             _harness.Dispose();
         }
 
-        private static int CountOpcode(byte[] spirv, SpirvOp opcode)
+        private static bool DeclaresFloat16(byte[] spirv)
         {
-            var count = 0;
             for (var offset = 20; offset < spirv.Length;)
             {
                 var header = BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset));
+                if ((header & 0xFFFF) == (uint)SpirvOp.Capability &&
+                    BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset + 4)) == (uint)SpirvCapability.Float16) return true;
                 offset += (int)(header >> 16) * 4;
             }
 
-            return count;
+            return false;
         }
     }
 }
