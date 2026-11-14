@@ -275,6 +275,17 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        // The recording host reuses one preparation object for every draw, so the first stage of each draw that reads set 1
+        // forgets the heap prepared for the previous one; otherwise the heap is prepared once and the records later draws
+        // mark never get images.
+        internal void ForgetHeapPreparation(object preparation)
+        {
+            if (ReferenceEquals(_heapPreparedFor, preparation))
+            {
+                _heapPreparedFor = null;
+            }
+        }
+
         // Before the images of a draw or dispatch that reads set 1 are found: the heap V#s, the records marked since the
         // last look, records rewritten since they were read, and heap images whose contents or layout changed.
         internal void PrepareBindlessHeap(object preparation, BindlessHeapDescriptor[] heaps)

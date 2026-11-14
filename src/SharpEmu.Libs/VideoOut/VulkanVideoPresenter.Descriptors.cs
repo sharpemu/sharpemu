@@ -820,6 +820,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     throw Serial("bindless heap", resumable: true);
                 }
 
+                // One preparation object serves every draw: the first stage of a draw that reads set 1 prepares the heap again.
+                if (!ReadsBindlessHeap(preparation.Stages))
+                {
+                    _presenter.ForgetHeapPreparation(preparation);
+                }
 
                 _presenter.PrepareBindlessHeap(preparation, snapshot.Heaps);
             }
