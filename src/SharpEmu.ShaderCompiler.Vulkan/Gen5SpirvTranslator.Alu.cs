@@ -5192,17 +5192,18 @@ public static partial class Gen5SpirvTranslator
                     GetFloatSource(instruction, 0),
                     GetFloatSource(instruction, 1)));
 
+        // v_med3_f32 with a NaN operand is v_min3_f32 (RDNA2 ISA). Without one no intermediate is NaN, so plain FMin and FMax
+        // give the median the NaN-ignoring forms would.
         private uint EmitFloatMedian(uint a, uint b, uint c)
         {
-            var low = NanIgnoringMinMax(37, a, b);
-            var high = NanIgnoringMinMax(40, a, b);
-            var median = NanIgnoringMinMax(40, low, NanIgnoringMinMax(37, high, c));
             var anyNan = _module.AddInstruction(
                 SpirvOp.LogicalOr,
                 _boolType,
                 IsNanBits(a),
                 _module.AddInstruction(SpirvOp.LogicalOr, _boolType, IsNanBits(b), IsNanBits(c)));
-            return _module.AddInstruction(SpirvOp.Select, _floatType, anyNan, NanIgnoringMinMax(37, low, c), median);
+            var median = Ext(40, _floatType, Ext(37, _floatType, a, b), Ext(37, _floatType, Ext(40, _floatType, a, b), c));
+            return _module.AddInstruction(SpirvOp.Select, _floatType, anyNan,
+                NanIgnoringMinMax(37, NanIgnoringMinMax(37, a, b), c), median);
         }
 
         private uint EmitFloatTernaryExt(
