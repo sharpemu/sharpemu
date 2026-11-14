@@ -23,7 +23,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private readonly uint[] _callRecordNext = new uint[BindlessHeap.ArrayCount];
         private int _callRecordReports;
 
-        internal (uint[] Words, DeviceAddressRange[] Ranges) PrepareCallRecords(ShaderProgramInfo program, ShaderStageResources stage)
+        // The preparation without call record spans (VulkanVideoPresenter.CallRecordSpans.cs), which is also their reference.
+        private (uint[] Words, DeviceAddressRange[] Ranges) PrepareCallRecordsOriginal(ShaderProgramInfo program, ShaderStageResources stage)
         {
             var callees = program.CallRecordCallees;
             var targets = stage.CallTargets ?? [];
@@ -150,6 +151,18 @@ internal static unsafe partial class VulkanVideoPresenter
             if (!_guestMemory.TryRead(argument + field.Immediate, MemoryMarshal.AsBytes(words[..count])))
             {
                 return BindlessHeap.CallRecordNullIndex;
+            }
+
+            return CallRecordElement(field, words);
+        }
+
+        // The element of a field whose descriptor words were read: eight words, a sampler's last four zero.
+        private uint CallRecordElement(CallRecordField field, ReadOnlySpan<uint> words)
+        {
+            var count = field.Sampler ? 4 : 8;
+            if (CallRecordElementForTests is { } element)
+            {
+                return element(field.Slot, words.ToArray());
             }
 
             static ulong Pair(uint low, uint high) => low | ((ulong)high << 32);

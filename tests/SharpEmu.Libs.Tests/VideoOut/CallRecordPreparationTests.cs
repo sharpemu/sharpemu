@@ -11,8 +11,11 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 
-public sealed class CallRecordPreparationTests
+public class CallRecordPreparationTests
 {
+    // Off: the original preparation. The derived classes run every case with call record spans and with their verify.
+    internal virtual VulkanVideoPresenter.CallRecordSpanMode Mode => VulkanVideoPresenter.CallRecordSpanMode.Off;
+
     private const BindingFlags Members = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     private static readonly Type Presenter = typeof(VulkanVideoPresenter).GetNestedType("Presenter", BindingFlags.NonPublic)!;
     private const ulong Target = 0x2000;
@@ -20,8 +23,22 @@ public sealed class CallRecordPreparationTests
 
     // Exercise the actual row construction without creating a Vulkan device. Empty image/sampler fields make this a
     // CPU-only preparation path, while the resulting words are the table the call-record shader search consumes.
-    private static (uint[] Words, DeviceAddressRange[] Ranges) Prepare(FakeCpuMemory memory, CallRecordBuffer[] buffers,
+    private (uint[] Words, DeviceAddressRange[] Ranges) Prepare(FakeCpuMemory memory, CallRecordBuffer[] buffers,
         params (ulong Target, ulong Argument)[] records)
+    {
+        VulkanVideoPresenter.CallRecordSpanOverride = Mode;
+        try
+        {
+            return PrepareIn(memory, buffers, records);
+        }
+        finally
+        {
+            VulkanVideoPresenter.CallRecordSpanOverride = null;
+        }
+    }
+
+    private static (uint[] Words, DeviceAddressRange[] Ranges) PrepareIn(FakeCpuMemory memory, CallRecordBuffer[] buffers,
+        (ulong Target, ulong Argument)[] records)
     {
         var presenter = RuntimeHelpers.GetUninitializedObject(Presenter);
         Presenter.GetField("_guestMemory", Members)!.SetValue(presenter, memory);
@@ -105,4 +122,9 @@ public sealed class CallRecordPreparationTests
         Assert.Single(result.Ranges);
         Assert.Equal(0x5000ul, result.Ranges[0].Base);
     }
+}
+
+public sealed class SpannedCallRecordPreparationTests : CallRecordPreparationTests
+{
+    internal override VulkanVideoPresenter.CallRecordSpanMode Mode => VulkanVideoPresenter.CallRecordSpanMode.On;
 }
