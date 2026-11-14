@@ -77,6 +77,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private readonly record struct ObtainMemo(ulong Address, ulong Size, ResourceSlotIdentifier Identifier, ulong Offset, GpuBuffer? Buffer);
     private long _gpuModifiedVersion;
     private readonly GuestPageTracker _tracker;
+    private readonly GuestWriteReservations _managedWrites;
     private readonly GpuRingBuffer _staging;
     private readonly ParallelGuestCopy _sweepCopy;
     private readonly GpuRingBuffer _stream;
@@ -107,6 +108,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         _gds = new GpuBuffer(device, scheduler, GpuBufferUsage.Stream, 0, GpuBuffer.AllFlags, GdsBufferSize);
         _bdaPageTable = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, BdaPageTableSize);
         _tracker = new GuestPageTracker(pages);
+        _managedWrites = pages.ManagedWrites;
         _staging = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Upload, 512 * MiB);
         _uploader = new GuestBufferUploader(device, scheduler, guest, _staging);
         // Up to three helper threads copy a large sweep's guest bytes with the render thread.
@@ -341,6 +343,9 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             throw SubmissionScheduler.Fatal("A buffer request requires a command buffer that is recording.");
         }
 
+        // Admission precedes all tracker/image/backing locks and lasts through GPU ownership publication.
+        using var managedWriteClaim = isWritten ? _managedWrites.BeginGpuClaim(guestAddress, size) : default;
+
         var memoSlot = -1;
         if (!isWritten)
         {
@@ -557,6 +562,11 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         return (owner, owner.Offset(guestAddress));
     }
 
+    // A GPU-side write into guest memory waits out overlapping reserved managed CPU writes (GuestWriteReservations); entered
+    // before the tracker, image and backing locks and held through the write's publication.
+    private GuestWriteReservations.GpuClaim ReserveGpuWrite(ulong address, ulong size) =>
+        IsValidRange(address, size) ? _managedWrites.BeginGpuClaim(address, size) : default;
+
     public void WriteHostMemory(ulong guestAddress, ReadOnlySpan<byte> data)
     {
         CompleteGuestPublications?.Invoke(guestAddress, (ulong)data.Length, PublicationAccess.Write);
@@ -565,6 +575,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             throw SubmissionScheduler.Fatal("The host DMA write range is invalid.");
         }
 
+        using var managedWriteClaim = ReserveGpuWrite(guestAddress, (ulong)data.Length);
         if (!_backing.TryWriteBacking(guestAddress, data))
         {
             throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{guestAddress:X16} size=0x{data.Length:X16}");
@@ -618,6 +629,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             throw SubmissionScheduler.Fatal("The fill memory address is invalid.");
         }
 
+        using var managedWriteClaim = ReserveGpuWrite(guestAddress, size);
         var images = RequireImageCache();
         if (ImageClearTrace.Enabled) images.TraceGuestWrite("command-fill", guestAddress, size, value);
         images.TraceMetadataFill(guestAddress, size, value);
@@ -720,6 +732,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             return;
         }
 
+        using var managedWriteClaim = ReserveGpuWrite(guestAddress, size);
         // Images over the range read it again; only GPU-owned image bytes need the general fill.
         // The buffer copy is filled on the GPU rather than uploaded from the written bytes.
         var images = RequireImageCache();
@@ -794,6 +807,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             return false;
         }
 
+        using var managedWriteClaim = ReserveGpuWrite(destination, size);
         var images = RequireImageCache();
         var sourceRegion = images.QueryRegion(source, sourceSize);
         var destinationRegion = images.QueryRegion(destination, size);
@@ -858,6 +872,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 $"The buffer copy range is invalid: src=0x{srcVaddr:X16} dst=0x{dstVaddr:X16} size=0x{size:X16} src_gds={(srcGds ? 1 : 0)} dst_gds={(dstGds ? 1 : 0)}");
         }
 
+        using var managedWriteClaim = dstMemory ? ReserveGpuWrite(dstVaddr, size) : default;
         var images = RequireImageCache();
         if (ImageClearTrace.Enabled && dstMemory) images.TraceGuestWrite("command-copy", dstVaddr, size, srcGds ? 0 : srcVaddr);
         var srcRegion = srcMemory ? images.QueryRegion(srcVaddr, size) : default;
@@ -2676,6 +2691,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
 
         CompleteGuestPublications?.Invoke(guestAddress, size, PublicationAccess.Write);
+        using var managedWriteClaim = ReserveGpuWrite(guestAddress, size);
         if (RequireImageCache().MayHaveImageBytes(guestAddress, size) && RequireImageCache().QueryRegion(guestAddress, size).ImageBytes)
         {
             return false;

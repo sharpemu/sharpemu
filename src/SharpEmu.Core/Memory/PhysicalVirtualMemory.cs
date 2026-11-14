@@ -2228,24 +2228,20 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         // there). Pre-visit the span so tracked pages are unprotected and
         // their owners dirtied before the copy; guest addresses are
         // host-identical, matching the tracker's fault addresses.
-        GuestImageWriteTracker.NotifyManagedWrite(virtualAddress, (ulong)source.Length);
         if (!source.IsEmpty && _backedSpace is { } backed && !_disposed)
         {
-            GuestGpuMemoryHook.PrepareEmulatorWrite(virtualAddress, (ulong)source.Length);
+            using var singleViewWrite = GuestGpuMemoryHook.BeginCpuWrite(virtualAddress, (ulong)source.Length, emulatorWrite: true);
             if (backed.TryWriteSingleView(virtualAddress, source))
             {
-                GuestGpuMemoryHook.NoteEmulatorWrite(virtualAddress, (ulong)source.Length);
                 NotifyGuestWriteWatch(virtualAddress, source);
                 return true;
             }
         }
 
-        GuestGpuMemoryHook.MarkCpuWrite(virtualAddress, (ulong)source.Length);
+        using var write = GuestGpuMemoryHook.BeginCpuWrite(virtualAddress, (ulong)source.Length);
         var written = TryWriteCore(virtualAddress, source);
 
-        // Backed writes go through an alias no page watch covers: an upload between the mark above
-        // and the write took the old bytes and left the pages clean, and no fault reports the new ones.
-        GuestGpuMemoryHook.MarkCpuWriteLanded(virtualAddress, (ulong)source.Length);
+        // The lease publishes landed bytes before admitting another overlapping GPU claim.
         return written;
     }
 
@@ -2344,30 +2340,30 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             return false;
         }
 
-        // Match TryWrite's managed-write notification before touching an
-        // identity-mapped guest page protected by the image tracker.
-        GuestImageWriteTracker.NotifyManagedWrite(destinationAddress, length);
         if (_backedSpace is { } backed && !_disposed)
         {
-            GuestGpuMemoryHook.PrepareEmulatorWrite(destinationAddress, length);
+            using var singleViewWrite = GuestGpuMemoryHook.BeginCpuWrite(destinationAddress, length, emulatorWrite: true);
             if (backed.TryCopySingleView(destinationAddress, sourceAddress, length))
             {
-                GuestGpuMemoryHook.NoteEmulatorWrite(destinationAddress, length);
                 NotifyBackedWriteWatch(destinationAddress, length);
                 return true;
             }
         }
 
-        GuestGpuMemoryHook.MarkCpuWrite(destinationAddress, length);
-        var copied = TryCopyCore(destinationAddress, sourceAddress, length);
+        bool copied, needsStaging;
+        using (GuestGpuMemoryHook.BeginCpuWrite(destinationAddress, length))
+        {
+            copied = TryCopyCore(destinationAddress, sourceAddress, length, out needsStaging);
+        }
 
-        // As in TryWrite: an upload after the mark may have taken the bytes from before the copy.
-        GuestGpuMemoryHook.MarkCpuWriteLanded(destinationAddress, length);
-        return copied;
+        // Staging re-enters TryWrite, whose premark may wait on the GPU. Each piece obtains
+        // its own reservation; no outer reservation may span that nested premark.
+        return needsStaging ? CopyThroughStaging(destinationAddress, sourceAddress, length) : copied;
     }
 
-    private bool TryCopyCore(ulong destinationAddress, ulong sourceAddress, ulong length)
+    private bool TryCopyCore(ulong destinationAddress, ulong sourceAddress, ulong length, out bool needsStaging)
     {
+        needsStaging = false;
         _gate.EnterReadLock();
         try
         {
@@ -2426,7 +2422,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         }
 
     staged:
-        return CopyThroughStaging(destinationAddress, sourceAddress, length);
+        needsStaging = true;
+        return false;
     }
 
     private bool TryReadExclusive(ulong virtualAddress, Span<byte> destination)

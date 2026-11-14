@@ -141,6 +141,8 @@ public sealed class PageGuard : IDisposable
 
     public CpuStackRanges Stacks { get; } = new();
 
+    internal GuestWriteReservations ManagedWrites { get; } = new();
+
     public void Dispose()
     {
         foreach (var block in _blocks)

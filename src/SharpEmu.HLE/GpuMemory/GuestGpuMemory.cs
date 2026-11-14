@@ -154,6 +154,100 @@ public sealed class GuestGpuMemory : IDisposable
 
     private const ulong GuestWriteGranule = 0x4000;
 
+    // Both hooks execute outside admission/tracker/image locks. The reserved hook is for
+    // deterministic tests only: it must never request work from the GPU queue.
+    internal Action<int>? BeforeManagedWriteReservationForTest;
+    internal Action? ManagedWriteReservedForTest;
+
+    internal readonly ref struct ManagedWriteLease(GuestGpuMemory memory, ulong address, ulong size,
+        GuestWriteReservations.CpuAttempt? attempt, bool emulatorWrite)
+    {
+        public void Dispose()
+        {
+            if (memory is null || attempt?.Released == true) return;
+            try
+            {
+                // Include partial or failed copies: any page may have received new bytes.
+                memory.MarkManagedWriteParts(address, size, landed: true, emulatorWrite);
+            }
+            finally
+            {
+                attempt?.Dispose();
+            }
+        }
+    }
+
+    // emulatorWrite: the write goes through one backing view, so the stores take PrepareEmulatorWrite before it and
+    // NoteEmulatorWrite after it; otherwise MarkCpuWrite before and MarkCpuWriteLanded after.
+    internal ManagedWriteLease BeginManagedWrite(ulong address, ulong size, bool emulatorWrite = false)
+    {
+        var valid = address != 0 && size != 0 && new GuestSpan(address, size).IsValid;
+        for (var retry = 0; ; retry++)
+        {
+            GuestWriteReservations.CpuAttempt? attempt = valid ? _pages.ManagedWrites.BeginCpuAttempt(address, size) : null;
+            try
+            {
+                // Recovery can relay to the GPU; no reservation is held yet.
+                GuestImageWriteTracker.NotifyManagedWrite(address, size);
+                MarkManagedWriteParts(address, size, landed: false, emulatorWrite);
+                BeforeManagedWriteReservationForTest?.Invoke(retry);
+                if (attempt is { } activeAttempt && !activeAttempt.TryReserve())
+                {
+                    activeAttempt.Dispose();
+                    continue;
+                }
+                if (attempt is not null) ManagedWriteReservedForTest?.Invoke();
+                return new ManagedWriteLease(this, address, size, attempt, emulatorWrite);
+            }
+            catch
+            {
+                attempt?.Dispose();
+                throw;
+            }
+        }
+    }
+
+    private void MarkManagedWriteParts(ulong address, ulong size, bool landed, bool emulatorWrite)
+    {
+        if (size == 0 || !new GuestSpan(address, size).IsValid) return;
+        var snapshot = Volatile.Read(ref _spanSnapshot) ?? throw new ObjectDisposedException(nameof(GuestGpuMemory));
+        var lazy = Volatile.Read(ref _lazySnapshot);
+        if (snapshot.Contains(address, size) || lazy.Contains(address, size))
+        {
+            MarkManagedWritePart(address, size, landed, emulatorWrite);
+            return;
+        }
+
+        MarkPartialManagedWrite(snapshot, lazy, address, size, landed, emulatorWrite);
+    }
+
+    private void MarkManagedWritePart(ulong address, ulong size, bool landed, bool emulatorWrite)
+    {
+        if (emulatorWrite)
+        {
+            if (landed) NoteEmulatorWrite(address, size);
+            else PrepareEmulatorWrite(address, size);
+        }
+        else if (landed)
+        {
+            MarkCpuWriteLanded(address, size);
+        }
+        else
+        {
+            _ = MarkCpuWrite(address, size);
+        }
+    }
+
+    // Keep the callback closure off the common full-span path. Every intersection with a registered span or a lazily backed
+    // range matters; a part both cover is marked twice, which repeats the same conservative mark.
+    private void MarkPartialManagedWrite(SpanSnapshot snapshot, SpanSnapshot lazy, ulong address, ulong size, bool landed,
+        bool emulatorWrite)
+    {
+        void Visit(ulong partAddress, ulong partSize) => MarkManagedWritePart(partAddress, partSize, landed, emulatorWrite);
+        snapshot.ForEachOverlap(address, size, Visit);
+        lazy.ForEachOverlap(address, size, Visit);
+    }
+
 
     public bool MarkCpuWrite(ulong address, ulong size)
     {
