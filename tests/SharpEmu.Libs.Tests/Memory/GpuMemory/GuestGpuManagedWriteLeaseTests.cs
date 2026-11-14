@@ -37,24 +37,58 @@ public sealed class GuestGpuManagedWriteLeaseTests
         public bool DownloadToCpu(ulong address, ulong size) => true;
     }
 
-    [Fact]
-    public void WriteAcrossUnregisteredGapNotifiesEveryMappedIntersection()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WriteAcrossUnregisteredGapNotifiesEveryMappedIntersection(bool closureFree)
     {
-        using var memory = new GuestGpuMemory(new RecordingAddressSpace());
-        var store = new Store();
-        memory.AttachStores(store, null);
-        const GuestPageProtection access = GuestPageProtection.Read | GuestPageProtection.Write;
-        memory.Register(0x10000, 0x4000, access);
-        memory.Register(0x18000, 0x4000, access);
-        // Registration reports each span to the store; only the managed write's notifications are under test.
-        store.Calls.Clear();
-        Assert.False(memory.Covers(0x12000, 0x8000));
-        using (memory.BeginManagedWrite(0x12000, 0x8000)) { }
-        Assert.Equal(new (bool, ulong, ulong)[]
+        HostCallTrims.MarkClosureFreeOverrideForTests = closureFree;
+        try
         {
-            (false, 0x12000, 0x2000), (false, 0x18000, 0x2000),
-            (true, 0x12000, 0x2000), (true, 0x18000, 0x2000)
-        }, store.Calls);
+            using var memory = new GuestGpuMemory(new RecordingAddressSpace());
+            var store = new Store();
+            memory.AttachStores(store, null);
+            const GuestPageProtection access = GuestPageProtection.Read | GuestPageProtection.Write;
+            memory.Register(0x10000, 0x4000, access);
+            memory.Register(0x18000, 0x4000, access);
+            // Registration reports each span to the store; only the managed write's notifications are under test.
+            store.Calls.Clear();
+            Assert.False(memory.Covers(0x12000, 0x8000));
+            using (memory.BeginManagedWrite(0x12000, 0x8000)) { }
+            Assert.Equal(new (bool, ulong, ulong)[]
+            {
+                (false, 0x12000, 0x2000), (false, 0x18000, 0x2000),
+                (true, 0x12000, 0x2000), (true, 0x18000, 0x2000)
+            }, store.Calls);
+        }
+        finally
+        {
+            HostCallTrims.MarkClosureFreeOverrideForTests = null;
+        }
+    }
+
+    // A write that overlaps no GPU span notifies no store, with the closure or without it.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WriteOutsideEverySpanNotifiesNothing(bool closureFree)
+    {
+        HostCallTrims.MarkClosureFreeOverrideForTests = closureFree;
+        try
+        {
+            using var memory = new GuestGpuMemory(new RecordingAddressSpace());
+            var store = new Store();
+            memory.AttachStores(store, null);
+            memory.Register(0x10000, 0x4000, GuestPageProtection.Read | GuestPageProtection.Write);
+            store.Calls.Clear();
+            using (memory.BeginManagedWrite(0x20000, 0x100)) { }
+            using (memory.BeginManagedWrite(0x0F000, 0x1000)) { }
+            Assert.Empty(store.Calls);
+        }
+        finally
+        {
+            HostCallTrims.MarkClosureFreeOverrideForTests = null;
+        }
     }
 
     // A write through one backing view: the stores take PrepareEmulatorWrite and NoteEmulatorWrite for every intersection.
@@ -111,22 +145,33 @@ public sealed class GuestGpuManagedWriteLeaseTests
 
     // A write over a registered span and a lazily backed range marks both intersections.
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void PartialWriteIncludesLazyAndRegisteredIntersections(bool emulatorWrite)
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void PartialWriteIncludesLazyAndRegisteredIntersections(bool emulatorWrite, bool closureFree)
     {
-        using var memory = new GuestGpuMemory(new RecordingAddressSpace());
-        var store = new Store();
-        memory.AttachStores(store, null);
-        memory.Register(0x10000, 0x4000, GuestPageProtection.Read | GuestPageProtection.Write);
-        memory.RegisterLazyRange(0x18000, 0x4000);
-        store.Calls.Clear();
-        using (memory.BeginManagedWrite(0x12000, 0x8000, emulatorWrite)) { }
-        Assert.Equal(new (bool, ulong, ulong)[]
+        var savedOverride = HostCallTrims.MarkClosureFreeOverrideForTests;
+        HostCallTrims.MarkClosureFreeOverrideForTests = closureFree;
+        try
         {
-            (false, 0x12000, 0x2000), (false, 0x18000, 0x2000),
-            (true, 0x12000, 0x2000), (true, 0x18000, 0x2000)
-        }, store.Calls);
+            using var memory = new GuestGpuMemory(new RecordingAddressSpace());
+            var store = new Store();
+            memory.AttachStores(store, null);
+            memory.Register(0x10000, 0x4000, GuestPageProtection.Read | GuestPageProtection.Write);
+            memory.RegisterLazyRange(0x18000, 0x4000);
+            store.Calls.Clear();
+            using (memory.BeginManagedWrite(0x12000, 0x8000, emulatorWrite)) { }
+            Assert.Equal(new (bool, ulong, ulong)[]
+            {
+                (false, 0x12000, 0x2000), (false, 0x18000, 0x2000),
+                (true, 0x12000, 0x2000), (true, 0x18000, 0x2000)
+            }, store.Calls);
+        }
+        finally
+        {
+            HostCallTrims.MarkClosureFreeOverrideForTests = savedOverride;
+        }
     }
 
     [Theory]

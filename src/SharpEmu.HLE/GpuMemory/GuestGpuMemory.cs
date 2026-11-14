@@ -243,6 +243,25 @@ public sealed class GuestGpuMemory : IDisposable
     private void MarkPartialManagedWrite(SpanSnapshot snapshot, SpanSnapshot lazy, ulong address, ulong size, bool landed,
         bool emulatorWrite)
     {
+        // HostCallTrims.MarkClosureFree: the same overlap walk, its state passed in by value instead of a closure allocated
+        // for each call.
+        if (HostCallTrims.MarkClosureFree)
+        {
+            var state = (Memory: this, Landed: landed, Emulator: emulatorWrite);
+            snapshot.ForEachOverlap(address, size, state,
+                static (part, partAddress, partSize) => part.Memory.MarkManagedWritePart(partAddress, partSize, part.Landed, part.Emulator));
+            lazy.ForEachOverlap(address, size, state,
+                static (part, partAddress, partSize) => part.Memory.MarkManagedWritePart(partAddress, partSize, part.Landed, part.Emulator));
+            return;
+        }
+
+        MarkPartialManagedWriteWithClosure(snapshot, lazy, address, size, landed, emulatorWrite);
+    }
+
+    // A separate method: a lambda capturing a parameter allocates its closure on entry to the method that holds it.
+    private void MarkPartialManagedWriteWithClosure(SpanSnapshot snapshot, SpanSnapshot lazy, ulong address, ulong size,
+        bool landed, bool emulatorWrite)
+    {
         void Visit(ulong partAddress, ulong partSize) => MarkManagedWritePart(partAddress, partSize, landed, emulatorWrite);
         snapshot.ForEachOverlap(address, size, Visit);
         lazy.ForEachOverlap(address, size, Visit);

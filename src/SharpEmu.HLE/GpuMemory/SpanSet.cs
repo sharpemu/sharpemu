@@ -61,6 +61,20 @@ public sealed class SpanSnapshot(ulong[] starts, ulong[] ends)
         }
     }
 
+    // The walk above with its state passed to a static callback; the same overlaps, in the same order.
+    internal void ForEachOverlap<TState>(ulong address, ulong size, TState state, Action<TState, ulong, ulong> visit)
+    {
+        var end = address + size;
+        var index = Array.BinarySearch(starts, address);
+        if (index < 0) index = Math.Max(0, ~index - 1);
+        for (; index < starts.Length && starts[index] < end; index++)
+        {
+            var first = Math.Max(address, starts[index]);
+            var last = Math.Min(end, ends[index]);
+            if (first < last) visit(state, first, last - first);
+        }
+    }
+
     public bool TryGetContaining(ulong address, out ulong start, out ulong end)
     {
         var index = Array.BinarySearch(starts, address);
