@@ -172,7 +172,8 @@ public sealed partial class SpirvModuleBuilder
             return element;
         }
 
-        NoteVariableUses(operands);
+        // ExtInst's operation number is a literal, even when its value equals a variable id.
+        NoteVariableUses(operands, opcode == SpirvOp.ExtInst ? 1 : -1);
         if (TryFold(opcode, resultType, operands, out var folded) ||
             TrySimplify(opcode, resultType, operands, out folded))
         {
@@ -466,10 +467,12 @@ public sealed partial class SpirvModuleBuilder
     private bool IsTrackedPointer(uint pointer) =>
         IsTrackedVariable(pointer) || (_elementBases.TryGetValue(pointer, out var variable) && IsTrackedVariable(variable));
 
-    private void NoteVariableUses(uint[] operands)
+    private void NoteVariableUses(uint[] operands, int literalIndex = -1)
     {
-        foreach (var operand in operands)
+        for (var index = 0; index < operands.Length; index++)
         {
+            if (index == literalIndex) continue;
+            var operand = operands[index];
             if (_localVariables.Contains(operand))
             {
                 EscapeVariable(operand);
@@ -1410,6 +1413,7 @@ public sealed partial class SpirvModuleBuilder
 
             for (var word = first; word < wordCount; word++)
             {
+                if (opcode == SpirvOp.ExtInst && word == 4) continue;
                 var id = words[offset + word];
                 if (id >= (uint)local.Length)
                 {
@@ -1539,6 +1543,7 @@ public sealed partial class SpirvModuleBuilder
 
             for (var word = first; word < wordCount; word++)
             {
+                if (opcode == SpirvOp.ExtInst && word == 4) continue;
                 var id = words[offset + word];
                 if (id < (uint)uses.Length)
                 {
@@ -1566,9 +1571,11 @@ public sealed partial class SpirvModuleBuilder
             removed[index] = true;
             var offset = starts[index];
             var wordCount = (int)(words[offset] >> 16);
+            var opcode = (SpirvOp)(words[offset] & 0xFFFF);
             removedIds.Add(words[offset + 2]);
             for (var word = 3; word < wordCount; word++)
             {
+                if (opcode == SpirvOp.ExtInst && word == 4) continue;
                 var id = words[offset + word];
                 if (id >= (uint)uses.Length || uses[id] == 0)
                 {
