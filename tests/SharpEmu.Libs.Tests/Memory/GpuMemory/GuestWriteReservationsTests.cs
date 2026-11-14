@@ -212,4 +212,94 @@ public sealed class GuestWriteReservationsTests
             await Task.WhenAll(workers).WaitAsync(Deadline);
         }
     }
+
+    // A write across two 2 MiB regions reserves on the locked path and still holds back an overlapping claim.
+    [Fact]
+    public async Task WriteAcrossRegionsBlocksAnOverlappingClaim()
+    {
+        var owner = new GuestWriteReservations();
+        const ulong boundary = 0x400000;
+        var blocked = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        owner.GpuClaimWaitingForTest = () => blocked.TrySetResult(true);
+        var attempt = owner.BeginCpuAttempt(boundary - 16, 32);
+        Assert.True(attempt.TryReserve());
+        var gpu = Task.Run(() =>
+        {
+            using var claim = owner.BeginGpuClaim(boundary + 64, 16);
+        });
+        await blocked.Task.WaitAsync(Deadline);
+        Assert.False(gpu.IsCompleted);
+        attempt.Dispose();
+        await gpu.WaitAsync(Deadline);
+        owner.GpuClaimWaitingForTest = null;
+    }
+
+    // More claims on other pages of the region than the claim history keeps invalidate the attempt: the history no
+    // longer shows whether one of them covered its pages.
+    [Fact]
+    public void ClaimsBeyondTheHistoryInvalidateAnAttemptConservatively()
+    {
+        var owner = new GuestWriteReservations();
+        using (var attempt = owner.BeginCpuAttempt(Address, 16))
+        {
+            for (var index = 0; index < 65; index++)
+            {
+                using (owner.BeginGpuClaim(Address + TrackerLayout.PageBytes * (ulong)(1 + index % 8), 16)) { }
+            }
+            Assert.False(attempt.TryReserve());
+        }
+        using var fresh = owner.BeginCpuAttempt(Address, 16);
+        Assert.True(fresh.TryReserve());
+    }
+
+    // Writers on several threads and a claimer on another, over a few shared pages: an admitted claim never overlaps a
+    // reserved write, and a reserved write never overlaps an admitted claim.
+    [Fact]
+    public async Task ConcurrentWritersAndClaimsNeverOverlap()
+    {
+        var owner = new GuestWriteReservations();
+        const int pages = 6;
+        var reserved = new int[pages];
+        var claimed = new int[pages];
+        var violations = 0;
+        var stop = DateTime.UtcNow + TimeSpan.FromSeconds(1.5);
+        var writers = Enumerable.Range(0, 4).Select(seed => Task.Run(() =>
+        {
+            var random = new System.Random(seed);
+            while (DateTime.UtcNow < stop)
+            {
+                var page = random.Next(pages);
+                var address = Address + (ulong)page * TrackerLayout.PageBytes;
+                while (true)
+                {
+                    using var attempt = owner.BeginCpuAttempt(address, 8);
+                    if (!attempt.TryReserve()) continue;
+                    Interlocked.Increment(ref reserved[page]);
+                    if (Volatile.Read(ref claimed[page]) != 0) Interlocked.Increment(ref violations);
+                    Thread.SpinWait(random.Next(50));
+                    Interlocked.Decrement(ref reserved[page]);
+                    break;
+                }
+            }
+        })).ToArray();
+        var claimer = Task.Run(() =>
+        {
+            var random = new System.Random(99);
+            while (DateTime.UtcNow < stop)
+            {
+                var first = random.Next(pages);
+                var count = 1 + random.Next(pages - first);
+                using var claim = owner.BeginGpuClaim(Address + (ulong)first * TrackerLayout.PageBytes, (ulong)count * TrackerLayout.PageBytes);
+                for (var page = first; page < first + count; page++)
+                {
+                    Interlocked.Increment(ref claimed[page]);
+                    if (Volatile.Read(ref reserved[page]) != 0) Interlocked.Increment(ref violations);
+                }
+                Thread.SpinWait(random.Next(50));
+                for (var page = first; page < first + count; page++) Interlocked.Decrement(ref claimed[page]);
+            }
+        });
+        await Task.WhenAll(writers.Append(claimer)).WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.Equal(0, violations);
+    }
 }
