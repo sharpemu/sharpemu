@@ -123,6 +123,16 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
         return TryReadGuest(address, destination);
     }
 
+    // Deterministically inject a completion after the predicate bytes were copied, before requeue.
+    public Action<ulong>? AfterWaitOperandRead { get; set; }
+
+    public bool TryReadGuestWaitOperand(ulong address, Span<byte> destination)
+    {
+        var read = TryReadGuestOperand(address, destination);
+        AfterWaitOperandRead?.Invoke(address);
+        return read;
+    }
+
     public bool TryReadGuest(ulong address, Span<byte> destination)
     {
         GuestReads.Add(address);

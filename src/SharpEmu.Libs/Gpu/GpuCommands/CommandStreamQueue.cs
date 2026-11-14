@@ -372,13 +372,15 @@ public sealed class CommandStreamQueue
         }
     }
 
-    private ulong _publicationGeneration;
+    // Retry notifications also cover a head temporarily removed by ProcessOne. A notification
+    // between its predicate read and requeue must leave that head eligible for another read.
+    private ulong _retryGeneration;
 
     public void NotifyPublicationCompleted()
     {
         lock (_gate)
         {
-            _publicationGeneration++;
+            _retryGeneration++;
             var retried = false;
             foreach (var queue in _queues)
                 if (queue.First is { Value.Blocked: true } head)
@@ -395,6 +397,7 @@ public sealed class CommandStreamQueue
     {
         lock (_gate)
         {
+            _retryGeneration++;
             foreach (var queue in _queues)
             {
                 if (queue.First is { } head)
@@ -413,10 +416,10 @@ public sealed class CommandStreamQueue
     {
         CommandSubmission? submission = null;
         ControlBarrier? control = null;
-        ulong publicationGeneration;
+        ulong retryGeneration;
         lock (_gate)
         {
-            publicationGeneration = _publicationGeneration;
+            retryGeneration = _retryGeneration;
             if (_processing)
             {
                 throw _host.Fatal("The command stream queue is already processing a slice.");
@@ -504,7 +507,7 @@ public sealed class CommandStreamQueue
             SliceResult result;
             if (!complete)
             {
-                submission!.Blocked = publicationGeneration == _publicationGeneration;
+                submission!.Blocked = retryGeneration == _retryGeneration;
                 submission.BlockedSinceTicks = System.Diagnostics.Stopwatch.GetTimestamp();
                 submission.BlockedPacketAddress = submission.Commands.CurrentPacketAddress;
                 _queues[submission.QueueId].AddFirst(submission);
