@@ -33,6 +33,8 @@ public sealed partial class SpirvModuleBuilder
     private readonly Dictionary<uint, uint> _elementBases = [];
     private readonly HashSet<uint> _scalarPointerTypes = [];
     private readonly HashSet<uint> _inputVariables = [];
+    // Variables nothing writes while the invocation runs: descriptors (UniformConstant) and push constants.
+    private readonly HashSet<uint> _immutableVariables = [];
     private readonly HashSet<uint> _changingInputs = [];
     private readonly Dictionary<uint, uint> _entryValues = [];
     private readonly Dictionary<InstructionKey, uint> _entryOperations = [];
@@ -300,6 +302,20 @@ public sealed partial class SpirvModuleBuilder
             return EntryLoad(resultType, pointer);
         }
 
+        // A load of memory nothing writes is a value: the block values reuse it like arithmetic.
+        if (operands.Length == 1 && IsImmutablePointer(pointer))
+        {
+            var lookup = new InstructionKey(SpirvOp.Load, resultType, operands);
+            if (_blockValues.TryGetValue(lookup, out var loaded))
+            {
+                return loaded;
+            }
+
+            var value = EmitResult(_functions, SpirvOp.Load, resultType, operands);
+            WritableBlockValues().Set(new InstructionKey(SpirvOp.Load, resultType, operands.ToArray()), value);
+            return value;
+        }
+
         if (operands.Length != 1 || !IsTrackedPointer(pointer))
         {
             if (operands.Length != 1)
@@ -402,6 +418,10 @@ public sealed partial class SpirvModuleBuilder
     }
 
     private bool IsEntryAvailable() => CurrentFunction != 0 && !_entryLabelPending && _entryLabelOffset >= 0;
+
+    private bool IsImmutablePointer(uint pointer) =>
+        _immutableVariables.Contains(pointer) ||
+        (Defines(pointer, SpirvOp.AccessChain, out var chain) && _immutableVariables.Contains(chain.Operands[0]));
 
     private bool CanHoistToEntry(SpirvOp opcode, uint[] operands)
     {

@@ -903,6 +903,10 @@ public sealed partial class SpirvModuleBuilder
         {
             _inputVariables.Add(id);
         }
+        else if (storageClass is SpirvStorageClass.UniformConstant or SpirvStorageClass.PushConstant)
+        {
+            _immutableVariables.Add(id);
+        }
 
         return id;
     }
