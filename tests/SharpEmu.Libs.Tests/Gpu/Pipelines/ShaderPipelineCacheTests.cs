@@ -584,6 +584,7 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.Equal(2, cache.GraphicsPipelineCount);
     }
 
+
     // Programs from the fixtures, pipelines from the real cache over the fake host.
     private sealed class CachingProvider(ShaderPipelineCache cache) : IShaderPipelineProvider
     {

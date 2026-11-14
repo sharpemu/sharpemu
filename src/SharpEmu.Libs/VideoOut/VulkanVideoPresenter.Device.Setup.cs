@@ -1706,10 +1706,28 @@ internal static unsafe partial class VulkanVideoPresenter
             SavePipelineCache(force: false);
         }
 
+        // Compiles start under these locks (TryCreateComputePipeline, TryCreateGraphicsPipeline), from the command stream and
+        // the resolve workers.
+        private bool AnyPipelineCompiling()
+        {
+            lock (_pendingComputePipelines)
+            {
+                if (_pendingComputePipelines.Values.Any(pending => !pending.Compile.IsCompleted))
+                {
+                    return true;
+                }
+            }
+
+            lock (_pendingGraphicsPipelines)
+            {
+                return _pendingGraphicsPipelines.Values.Any(pending => !pending.Compile.IsCompleted);
+            }
+        }
+
         private void SavePipelineCache(bool force)
         {
             // Cache export must not race asynchronous pipeline creation.
-            if (_pendingComputePipelines.Values.Any(pending => !pending.Compile.IsCompleted)) return;
+            if (AnyPipelineCompiling()) return;
             _lastPipelineCacheSaveTick = Environment.TickCount64;
             SaveGuestPipelineCaches();
             if (_pipelineCache.Handle == 0 || string.IsNullOrWhiteSpace(_pipelineCachePath))

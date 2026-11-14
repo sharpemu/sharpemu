@@ -188,6 +188,26 @@ internal class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
         handle = CreateComputePipeline(description);
         return true;
     }
+
+    // How many requests for graphics pipelines report "still compiling" before one is handed over, and the description
+    // each request named.
+    public int PendingGraphicsCompiles { get; set; }
+
+    public List<GraphicsPipelineDescription> GraphicsPipelineRequests { get; } = new();
+
+    public bool TryCreateGraphicsPipeline(GraphicsPipelineDescription description, out PipelineHandle handle)
+    {
+        GraphicsPipelineRequests.Add(description);
+        handle = default;
+        if (PendingGraphicsCompiles > 0)
+        {
+            PendingGraphicsCompiles--;
+            return false;
+        }
+
+        handle = CreateGraphicsPipeline(description);
+        return true;
+    }
 }
 
 // Remembers every request; compiles nothing unless a module factory was given.

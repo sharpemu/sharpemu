@@ -30,6 +30,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private readonly ShaderHeaderRegistry _registry;
     private readonly ShaderProgramCache _programs;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
+    // The pipelines the host is still compiling (IShaderPipelineHost.TryCreateGraphicsPipeline), each with the key and the
+    // description that started its compile; under _pipelineGate.
+    private readonly Dictionary<GraphicsPipelineKey, (GraphicsPipelineKey Key, GraphicsPipelineDescription Description)> _pendingGraphicsPipelines = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
     private readonly Dictionary<Gen5ShaderProgram, bool> _rayTracingComputePrograms = new();
     private readonly object _pipelineGate = new();
@@ -1300,6 +1303,31 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram)
     {
+        // A caller that cannot leave its draw out waits for a compile the host runs off this thread.
+        PipelineHandle handle;
+        while (!TryCreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, out handle))
+        {
+            Thread.Sleep(1);
+        }
+
+        return handle;
+    }
+
+    public bool TryCreateGraphicsPipeline(
+        ReadOnlySpan<ColorTargetState> colors,
+        in DepthAttachmentState depth,
+        VertexInputInfo vertexInput,
+        PixelInputInfo? pixelInput,
+        ContextRegisters context,
+        in RenderingState rendering,
+        PrimitiveTopology topology,
+        bool primitiveRestartEnabled,
+        bool disableBlending,
+        ShaderProgram vertexProgram,
+        ShaderProgram pixelProgram,
+        out PipelineHandle handle)
+    {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
         // The lookup fills objects this thread reuses for every draw; only a new pipeline gets its own.
         var lookup = _graphicsLookup ??= new GraphicsPipelineKey
@@ -1316,24 +1344,37 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lookup.VertexProgramId = vertexProgram.Id;
         lookup.PixelProgramId = pixelInput is not null ? pixelProgram.Id : 0;
         lookup.Tessellation = vertexInput.Tessellation;
-        if (_graphicsPipelines.TryGetValue(lookup, out var known))
+        if (_graphicsPipelines.TryGetValue(lookup, out handle))
         {
-            return known;
+            return true;
         }
 
-        var description = BuildGraphicsDescription(
-            colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts);
-        var key = KeyOf(description);
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
         lock (_pipelineGate)
         {
             profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineCreation);
-            if (_graphicsPipelines.TryGetValue(key, out var cached))
+            if (_graphicsPipelines.TryGetValue(lookup, out handle))
             {
-                return cached;
+                return true;
             }
 
+            // A pipeline the host is still compiling is asked for with the description that started its compile.
+            if (_pendingGraphicsPipelines.TryGetValue(lookup, out var pending))
+            {
+                if (!_host.TryCreateGraphicsPipeline(pending.Description, out handle))
+                {
+                    return false;
+                }
+
+                _pendingGraphicsPipelines.Remove(pending.Key);
+                AddGraphicsPipeline(pending.Key, pending.Description, handle);
+                return true;
+            }
+
+            var description = BuildGraphicsDescription(
+                colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
+                vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts);
+            var key = KeyOf(description);
             if (RenderTrace.Enabled && RenderTrace.Pipeline())
             {
                 RenderTrace.Write(
@@ -1342,21 +1383,28 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
             }
 
-            var created = _host.CreateGraphicsPipeline(description);
-            lock (_pipelineGate)
+            if (!_host.TryCreateGraphicsPipeline(description, out handle))
             {
-                _graphicsPipelines.TryAdd(key, created);
+                _pendingGraphicsPipelines.Add(key, (key, description));
+                return false;
             }
 
-            if (_host.ShaderPrewarm is { } prewarm && description.Tessellation is null &&
-                description.VertexStage.Stage == ShaderStageKind.Vertex)
-            {
-                prewarm.RecordGraphics(description);
-            }
-
-            ShaderCacheCounters.CountGraphicsPipeline();
-            return created;
+            AddGraphicsPipeline(key, description, handle);
+            return true;
         }
+    }
+
+    // Caller holds _pipelineGate.
+    private void AddGraphicsPipeline(GraphicsPipelineKey key, GraphicsPipelineDescription description, PipelineHandle handle)
+    {
+        _graphicsPipelines.TryAdd(key, handle);
+        if (_host.ShaderPrewarm is { } prewarm && description.Tessellation is null &&
+            description.VertexStage.Stage == ShaderStageKind.Vertex)
+        {
+            prewarm.RecordGraphics(description);
+        }
+
+        ShaderCacheCounters.CountGraphicsPipeline();
     }
 
     [ThreadStatic]

@@ -164,6 +164,15 @@ internal interface IShaderPipelineHost
 
     PipelineHandle CreateGraphicsPipeline(GraphicsPipelineDescription description);
 
+    // Creates the graphics pipeline without blocking the command stream on the host shader compiler: false means the
+    // compile is still running and the caller should ask again with the same description, true hands over the finished
+    // pipeline. A backend that compiles cheaply keeps the blocking behaviour.
+    bool TryCreateGraphicsPipeline(GraphicsPipelineDescription description, out PipelineHandle handle)
+    {
+        handle = CreateGraphicsPipeline(description);
+        return true;
+    }
+
     PipelineHandle CreateComputePipeline(ComputePipelineDescription description);
 
     Task? GetComputePipelineCompletion(ShaderProgram program) => null;

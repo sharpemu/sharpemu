@@ -59,7 +59,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private static int _vertexSwizzleLines;
         private static int _vertexOutOfBoundsLines;
 
-        private readonly Dictionary<ulong, ShaderModule> _shaderModules = new();
+        // Graphics and compute resolvers can publish modules concurrently; pipeline workers read their metadata too.
+        private readonly ConcurrentDictionary<ulong, ShaderModule> _shaderModules = new();
         private readonly ConcurrentDictionary<ulong, int> _shaderModuleSpirvBytes = new();
         private readonly ConcurrentDictionary<ulong, byte[]> _rectangleStageCode = new();
         private readonly ConcurrentDictionary<ulong, string> _shaderModuleCacheIdentities = new();
@@ -671,7 +672,6 @@ internal static unsafe partial class VulkanVideoPresenter
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramCompile);
             var module = CreateShaderModule(shader.Payload);
             SetDebugName(ObjectType.ShaderModule, module.Handle, $"SharpEmu {stage} 0x{hash:X16}");
-            _shaderModules.Add(programId, module);
             _shaderModuleSpirvBytes[module.Handle] = shader.Payload.Length;
             if (stage is ShaderStage.Vertex or ShaderStage.Pixel)
                 _rectangleStageCode[module.Handle] = shader.Payload;
@@ -682,6 +682,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 NoteRuntimeComputeModule(identity);
             }
 
+            // Publish the handle only after all metadata is installed. The owning resolver exposes its program next.
+            if (!_shaderModules.TryAdd(programId, module))
+                throw SubmissionScheduler.Fatal($"Duplicate shader program ID: {programId}.");
             return module.Handle;
         }
 
@@ -980,6 +983,19 @@ internal static unsafe partial class VulkanVideoPresenter
         public PipelineHandle CreateGraphicsPipeline(GraphicsPipelineDescription description)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineSetup);
+            var entry = CreateGraphicsPipelineEntry(description);
+            // Rectangle draws bind a native fill or compatibility variant at draw time.
+            if (!entry.RectangleList)
+            {
+                entry.Pipeline = CreateRenderPipeline(description, description.StaticParameters.Topology, entry.Layout);
+            }
+
+            return RegisterPipeline(entry);
+        }
+
+        // The layouts of a graphics pipeline and the entry that holds them, without its pipeline.
+        private RenderPipelineEntry CreateGraphicsPipelineEntry(GraphicsPipelineDescription description)
+        {
             if (description.Rendering.ColorCount > _maxColorAttachments)
             {
                 throw SubmissionScheduler.Fatal($"The draw binds more color attachments than the device supports: count={description.Rendering.ColorCount} max={_maxColorAttachments}.");
@@ -1008,7 +1024,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var setLayout = CreateDescriptorSetLayout(bindings, out var usesPushDescriptors, out var demand);
             var bindlessHeap = UsesBindlessHeap(description.VertexStage) ||
                 (description.PixelStage is { } heapPixelStage && UsesBindlessHeap(heapPixelStage));
-            var entry = new RenderPipelineEntry
+            return new RenderPipelineEntry
             {
                 SetLayout = setLayout,
                 Demand = demand,
@@ -1023,13 +1039,117 @@ internal static unsafe partial class VulkanVideoPresenter
                 ProfileVertexHash = description.VertexStage.Hash,
                 ProfilePixelHash = description.PixelStage?.Hash ?? 0,
             };
-            // Rectangle draws bind a native fill or compatibility variant at draw time.
-            if (!entry.RectangleList)
+        }
+
+        // One graphics pipeline whose vkCreateGraphicsPipelines call runs on a worker thread. The command stream prepares
+        // its layouts, its entry and its pipeline cache source before the compile starts, and registers the pipeline once
+        // the compile is done (TryCreateGraphicsPipeline).
+        internal sealed class PendingGraphicsPipeline
+        {
+            public required RenderPipelineEntry Entry;
+            public required Lazy<PipelineCache>? CacheSource;
+            public required string Stages;
+            public required string SpirvBytes;
+            public Task<Pipeline> Compile = Task.FromResult(default(Pipeline));
+            public long StartTimestamp;
+            public long CompileMilliseconds;
+        }
+
+        private readonly Dictionary<GraphicsPipelineDescription, PendingGraphicsPipeline> _pendingGraphicsPipelines =
+            new(ReferenceEqualityComparer.Instance);
+
+        private static readonly SemaphoreSlim _graphicsCompileSlots = new(Math.Max(2, Environment.ProcessorCount / 4));
+
+        // A host shader compiler can spend seconds on one large translated pixel shader, and a game entering a new area
+        // asks for dozens. Graphics pipelines are built on worker threads; SHARPEMU_ASYNC_GRAPHICS_PIPELINES=0 builds
+        // them on the command stream.
+        private static readonly bool _asyncGraphicsPipelines =
+            !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_ASYNC_GRAPHICS_PIPELINES"), "0", StringComparison.Ordinal);
+
+        public bool TryCreateGraphicsPipeline(GraphicsPipelineDescription description, out PipelineHandle handle)
+        {
+            lock (_pendingGraphicsPipelines)
             {
-                entry.Pipeline = CreateRenderPipeline(description, description.StaticParameters.Topology, entry.Layout);
+                return TryCreateGraphicsPipelineCore(description, out handle);
+            }
+        }
+        private bool TryCreateGraphicsPipelineCore(GraphicsPipelineDescription description, out PipelineHandle handle)
+        {
+            if (_pendingGraphicsPipelines.TryGetValue(description, out var pending))
+            {
+                return TryTakeGraphicsPipeline(description, pending, out handle);
             }
 
-            return RegisterPipeline(entry);
+            // Rectangle lists build their pipelines at draw time.
+            if (!_asyncGraphicsPipelines ||
+                (description.Tessellation is null && description.StaticParameters.Topology == PrimitiveTopology.PatchList))
+            {
+                handle = CreateGraphicsPipeline(description);
+                return true;
+            }
+
+            RenderPipelineEntry entry;
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineSetup))
+            {
+                entry = CreateGraphicsPipelineEntry(description);
+            }
+
+            var vertexModule = description.VertexProgram.Module;
+            var pixelModule = description.PixelStage is null ? 0 : description.PixelProgram.Module;
+            var started = new PendingGraphicsPipeline
+            {
+                Entry = entry,
+                CacheSource = GetGuestPipelineCacheSource(GraphicsCacheKey(description.VertexStage.Hash,
+                    description.PixelStage?.Hash ?? 0, vertexModule, pixelModule)),
+                Stages = $"vs=0x{description.VertexStage.Hash:X16} ps=0x{description.PixelStage?.Hash ?? 0:X16}",
+                SpirvBytes = pixelModule == 0 ? $"{SpirvBytesOf(vertexModule)}" : $"{SpirvBytesOf(vertexModule)}/{SpirvBytesOf(pixelModule)}",
+                StartTimestamp = Stopwatch.GetTimestamp(),
+            };
+            var topology = description.StaticParameters.Topology;
+            started.Compile = Task.Factory.StartNew(
+                () =>
+                {
+                    _graphicsCompileSlots.Wait();
+                    var compileStart = Stopwatch.GetTimestamp();
+                    try
+                    {
+                        return CreateRenderPipeline(description, topology, entry.Layout, worker: started);
+                    }
+                    finally
+                    {
+                        Interlocked.Exchange(ref started.CompileMilliseconds, (long)Stopwatch.GetElapsedTime(compileStart).TotalMilliseconds);
+                        _graphicsCompileSlots.Release();
+                    }
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            _pendingGraphicsPipelines.Add(description, started);
+            return TryTakeGraphicsPipeline(description, started, out handle);
+        }
+
+        // Takes a finished compile: reports and names the pipeline and registers its entry. False while the compile runs.
+        private bool TryTakeGraphicsPipeline(GraphicsPipelineDescription description, PendingGraphicsPipeline pending, out PipelineHandle handle)
+        {
+            if (!pending.Compile.IsCompleted)
+            {
+                handle = default;
+                return false;
+            }
+
+            var pipeline = pending.Compile.GetAwaiter().GetResult();
+            ReportPipelineCreation(
+                Interlocked.Read(ref pending.CompileMilliseconds),
+                "graphics-async",
+                $"{pending.Stages} waited_ms={(long)Stopwatch.GetElapsedTime(pending.StartTimestamp).TotalMilliseconds}",
+                pending.SpirvBytes);
+            MarkPipelineCacheDirty();
+            Interlocked.Increment(ref _perfPipelineCreations);
+            SetDebugName(ObjectType.Pipeline, pipeline.Handle,
+                $"SharpEmu graphics {pending.Stages} colors={description.StaticParameters.ColorCount}");
+            pending.Entry.Pipeline = pipeline;
+            handle = RegisterPipeline(pending.Entry, () => _pendingGraphicsPipelines.Remove(description));
+            return true;
         }
 
         private static StencilOpState ToVkStencilOpState(in StencilOperations operations) => new()
@@ -1157,8 +1277,12 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // One graphics pipeline for dynamic rendering: the attachment formats travel in the create info.
+        // With worker (a compile TryCreateGraphicsPipeline started), this runs on a compiler thread: the pipeline cache comes
+        // from the source the command stream resolved, and the command stream reports and names the pipeline when it takes it.
+        // A prewarm pipeline is built in the device pipeline cache and returned unreported.
         internal Pipeline CreateRenderPipeline(GraphicsPipelineDescription description, PrimitiveTopology topology, PipelineLayout layout,
-            PolygonMode polygonMode = PolygonMode.Fill, bool expandRectangles = false, bool prewarm = false)
+            PolygonMode polygonMode = PolygonMode.Fill, bool expandRectangles = false, PendingGraphicsPipeline? worker = null,
+            bool prewarm = false)
         {
             var parameters = description.StaticParameters;
             var rendering = description.Rendering;
@@ -1421,15 +1545,25 @@ internal static unsafe partial class VulkanVideoPresenter
                         Layout = layout,
                     };
                     var reportStart = Stopwatch.GetTimestamp();
-                    var cache = prewarm ? _pipelineCache : GetGuestPipelineCache(GraphicsCacheKey(description.VertexStage.Hash,
-                        description.PixelStage?.Hash ?? 0, vertexModule.Handle, pixelModule.Handle));
+                    var cache = prewarm ? _pipelineCache
+                        : worker is not null ? ResolveGuestPipelineCache(worker.CacheSource)
+                        : GetGuestPipelineCache(GraphicsCacheKey(description.VertexStage.Hash,
+                            description.PixelStage?.Hash ?? 0, vertexModule.Handle, pixelModule.Handle));
                     Result creationResult;
                     Pipeline pipeline;
                     double creationMilliseconds;
-                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsPipelineDriver))
+                    if (worker is not null)
                     {
                         creationResult = CreatePipelineWithBinaries(&pipelineInfo, &pipelineInfo.PNext, cache,
                             &CreateGraphicsPipelineCall, out pipeline, out creationMilliseconds);
+                    }
+                    else
+                    {
+                        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsPipelineDriver))
+                        {
+                            creationResult = CreatePipelineWithBinaries(&pipelineInfo, &pipelineInfo.PNext, cache,
+                                &CreateGraphicsPipelineCall, out pipeline, out creationMilliseconds);
+                        }
                     }
                     if (RenderPhaseProfile.Enabled && !prewarm)
                     {
@@ -1437,7 +1571,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
                     Check(creationResult,
                         $"vkCreateGraphicsPipelines(rendering vs=0x{description.VertexStage.Hash:X16} ps=0x{description.PixelStage?.Hash ?? 0:X16})");
-                    if (prewarm)
+                    if (worker is not null || prewarm)
                     {
                         return pipeline;
                     }
@@ -1610,7 +1744,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var key = description.Program.Id;
             if (_pendingComputePipelines.TryGetValue(key, out var pending))
             {
-                if (!pending.Compile.IsCompleted && description.Stage.Bindings is { CallTargetCount: not 0 })
+                if (!pending.Compile.IsCompleted)
                 {
                     return false;
                 }
@@ -1789,6 +1923,25 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             _pendingComputePipelines.Clear();
             _linkedComputeCompiles.Clear();
+        }
+
+        private void DrainPendingGraphicsPipelines()
+        {
+            foreach (var pending in _pendingGraphicsPipelines.Values)
+            {
+                try
+                {
+                    var pipeline = pending.Compile.GetAwaiter().GetResult();
+                    if (pipeline.Handle != 0) _vk.DestroyPipeline(_device, pipeline, null);
+                }
+                catch (Exception exception)
+                {
+                    Console.Error.WriteLine($"[LOADER][WARN] Pending graphics pipeline failed during shutdown: {exception.Message}");
+                }
+                _vk.DestroyPipelineLayout(_device, pending.Entry.Layout, null);
+                _vk.DestroyDescriptorSetLayout(_device, pending.Entry.SetLayout, null);
+            }
+            _pendingGraphicsPipelines.Clear();
         }
 
         private void DestroyRenderPipelines()

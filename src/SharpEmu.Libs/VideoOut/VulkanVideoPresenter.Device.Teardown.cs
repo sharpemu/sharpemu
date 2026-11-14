@@ -30,6 +30,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             StopShaderPrewarm();
             DrainPendingComputePipelines();
+            DrainPendingGraphicsPipelines();
             SavePipelineCache(force: true);
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
