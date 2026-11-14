@@ -359,14 +359,18 @@ public sealed partial class RenderExecutor
 
         TraceDrawState(submitId, banks, in draw, in state);
         var indirect = arguments.OffsetSource == DrawOffsetSource.IndirectArguments;
+        // An offset the indirect packet passes in a named register is 0 in the arguments; a fetch the host replaced adds it
+        // from that register (ResolveVertexOffset(0, ...) and ResolveInstanceOffset are 0 for a program that fetches itself).
         var vertexOffset = indirect
-            ? arguments.BaseVertex
+            ? arguments.BaseVertex + (arguments.BaseVertexInRegister ? ResolveVertexOffset(0, state.Programs.VertexInput) : 0)
             : ResolveVertexOffset(userConfig.IndexOffset, state.Programs.VertexInput) + arguments.BaseVertex;
         var emission = new DrawEmission(
             true,
             vertexOffset,
             0,
-            indirect ? arguments.FirstInstance : ResolveInstanceOffset(state.Programs.VertexInput),
+            indirect
+                ? arguments.FirstInstance + (arguments.FirstInstanceInRegister ? ResolveInstanceOffset(state.Programs.VertexInput) : 0)
+                : ResolveInstanceOffset(state.Programs.VertexInput),
             arguments.IndirectArgumentsAddress);
         record.IndexedTrace = traceSample;
         record.PacketAddress = tracePacket;
@@ -583,14 +587,17 @@ public sealed partial class RenderExecutor
 
         TraceDrawState(submitId, banks, in draw, in state);
         var indirect = arguments.OffsetSource == DrawOffsetSource.IndirectArguments;
+        // As for indexed draws: a named register's offset reaches a fetch the host replaced.
         var vertexOffset = indirect
-            ? (int)arguments.FirstVertex
+            ? (int)arguments.FirstVertex + (arguments.FirstVertexInRegister ? ResolveVertexOffset(0, vertexInput) : 0)
             : ResolveVertexOffset(userConfig.IndexOffset, vertexInput) + (int)arguments.FirstVertex;
         var emission = new DrawEmission(
             false,
             0,
             (uint)vertexOffset,
-            indirect ? arguments.FirstInstance : ResolveInstanceOffset(vertexInput),
+            indirect
+                ? arguments.FirstInstance + (arguments.FirstInstanceInRegister ? ResolveInstanceOffset(vertexInput) : 0)
+                : ResolveInstanceOffset(vertexInput),
             arguments.IndirectArgumentsAddress);
         record.PacketAddress = arguments.PacketAddress;
         FillDraw(record, banks, in draw, ref state, topology, in emission, default, primitiveRestart: false, setBindDebug: false, setAutoDebug: true);

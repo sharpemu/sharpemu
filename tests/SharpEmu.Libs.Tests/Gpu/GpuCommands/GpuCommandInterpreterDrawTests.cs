@@ -156,6 +156,10 @@ public sealed class GpuCommandInterpreterDrawTests
         Assert.Equal((Indices + 8, 0, 0u), (runner.Host.IndexedDraws[0].IndexAddress, runner.Host.IndexedDraws[0].BaseVertex, runner.Host.IndexedDraws[0].FirstInstance));
         // A base the packet names no register for still reaches the draw.
         Assert.Equal((7, 0u), (runner.Host.IndexedDraws[1].BaseVertex, runner.Host.IndexedDraws[1].FirstInstance));
+        // The draw says which values are in registers.
+        Assert.Equal((true, true), (auto.FirstVertexInRegister, auto.FirstInstanceInRegister));
+        Assert.Equal((true, true), (runner.Host.IndexedDraws[0].BaseVertexInRegister, runner.Host.IndexedDraws[0].FirstInstanceInRegister));
+        Assert.Equal((false, true), (runner.Host.IndexedDraws[1].BaseVertexInRegister, runner.Host.IndexedDraws[1].FirstInstanceInRegister));
     }
 
     [Fact]
@@ -313,10 +317,10 @@ public sealed class GpuCommandInterpreterDrawTests
             StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 16, 0x280, gs0 + 1, 0x22));
 
         var auto = Assert.Single(runner.Host.AutoDraws);
-        Assert.Equal((0u, -1), (auto.FirstInstance, auto.StartInstanceUserData));
+        Assert.Equal((0u, true, -1), (auto.FirstInstance, auto.FirstInstanceInRegister, auto.StartInstanceUserData));
         Assert.Equal(3, runner.Host.IndexedDraws.Count);
-        Assert.All(runner.Host.IndexedDraws, draw => Assert.Equal((0ul, 0u, -1),
-            (draw.IndirectArgumentsAddress, draw.FirstInstance, draw.StartInstanceUserData)));
+        Assert.All(runner.Host.IndexedDraws, draw => Assert.Equal((0ul, 0u, true, -1),
+            (draw.IndirectArgumentsAddress, draw.FirstInstance, draw.FirstInstanceInRegister, draw.StartInstanceUserData)));
         var shader = runner.Interpreter.Registers.Shader;
         Assert.Equal((2u, 1u, 1u, 1u, 1u), (shader[gs0], shader[gs0 + 1], shader[gs0 + 2], shader[gs0 + 3], shader[gs0 + 9]));
     }

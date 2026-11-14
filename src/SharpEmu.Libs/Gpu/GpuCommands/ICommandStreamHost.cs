@@ -31,7 +31,11 @@ public readonly record struct DrawIndexedArguments(
     // The guest set no index buffer size: IndexCount is only the range seen so far and
     // must not clamp the count read from the arguments.
     bool UnboundedIndexBuffer = false,
-    int StartInstanceUserData = -1);
+    int StartInstanceUserData = -1,
+    // The indirect packet named a shader register for the base vertex or the start instance: the
+    // value is in that register, and BaseVertex or FirstInstance is 0.
+    bool BaseVertexInRegister = false,
+    bool FirstInstanceInRegister = false);
 
 // Arguments of a non-indexed draw as the packet stream describes them.
 public readonly record struct DrawAutoArguments(
@@ -45,7 +49,11 @@ public readonly record struct DrawAutoArguments(
     int StartInstanceUserData = -1,
     // Nonzero when the counts are still in guest memory at this address, laid out as
     // (vertexCount, instanceCount, firstVertex, firstInstance).
-    ulong IndirectArgumentsAddress = 0);
+    ulong IndirectArgumentsAddress = 0,
+    // The indirect packet named a shader register for the start vertex or the start instance: the
+    // value is in that register, and FirstVertex or FirstInstance is 0.
+    bool FirstVertexInRegister = false,
+    bool FirstInstanceInRegister = false);
 
 public enum EndOfPipeWriteKind
 {
