@@ -61,6 +61,7 @@ public sealed class ShaderResourcePlan
     private CompiledResourceEvaluator? _compiledEvaluator;
     private CompiledResourceTransaction? _compiledTransaction;
     private CompiledResourceTransaction? _compiledTableTransaction;
+    private CompiledBranchTransaction? _compiledBranches;
     internal ResourceMaterializer.SpecializationGuard? SpecializationGuard;
     private int _compiledEvaluatorState;
 
@@ -127,6 +128,15 @@ public sealed class ShaderResourcePlan
                 _compiledTableTransaction = null;
             }
 
+            try
+            {
+                _compiledBranches = CompiledBranchTransaction.Build(this);
+            }
+            catch (Exception exception) when (exception is not OutOfMemoryException)
+            {
+                _compiledBranches = null;
+            }
+
             _compiledEvaluator = compiled;
             Volatile.Write(ref _compiledEvaluatorState, 2);
             return compiled;
@@ -148,6 +158,17 @@ public sealed class ShaderResourcePlan
         {
             _ = CompiledEvaluator;
             return Volatile.Read(ref _compiledEvaluatorState) == 2 ? _compiledTableTransaction : null;
+        }
+    }
+
+    // The compiled form of a branch plan's selected sources (CompiledBranchTransaction); null for other plans and
+    // until the SRT compiler has built it.
+    internal CompiledBranchTransaction? CompiledBranches
+    {
+        get
+        {
+            _ = CompiledEvaluator;
+            return Volatile.Read(ref _compiledEvaluatorState) == 2 ? _compiledBranches : null;
         }
     }
 

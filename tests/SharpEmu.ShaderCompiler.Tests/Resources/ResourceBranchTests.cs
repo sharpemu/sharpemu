@@ -7,8 +7,12 @@ using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
 namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
-public sealed class ResourceBranchTests
+public class ResourceBranchTests
 {
+    // Null: the configured path (the materialization program, else the fallback in tests). The derived class runs every
+    // case through the compiled branch transaction.
+    internal virtual RuntimeValueEvaluator.CompiledBranchMode? BranchMode => null;
+
     private static Gen5ShaderProgram ConditionalBuffers(string branch = "SCbranchScc1", bool shared = false) => Program(
         Sopc(0, "SCmpEqU32", Gen5Operand.Scalar(8), Operand(1)),
         Branch(4, branch, 3), BufferLoad(8, 0), Branch(16, "SBranch", 2),
@@ -36,14 +40,40 @@ public sealed class ResourceBranchTests
 
     private static bool CleanRead(ulong address, out uint word) { word = 0; return false; }
 
-    private static ResourceSnapshot Materialize(ShaderResourcePlan plan, uint[] userData, GuestWordReader? cleanReader)
+    private ResourceSnapshot Materialize(ShaderResourcePlan plan, uint[] userData, GuestWordReader? cleanReader) =>
+        Materialize(plan, Inputs(userData, readCleanMemory: cleanReader));
+
+    private ResourceSnapshot Materialize(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
     {
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
-        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, readCleanMemory: cleanReader), ref snapshot, ref specialization));
+        var mode = BranchMode;
+        if (mode is not null)
+        {
+            plan.CompileEvaluatorNow();
+            inputs = WithTablePhase(inputs);
+        }
+
+        var served = RuntimeValueEvaluator.BranchesServedOnThread;
+        RuntimeValueEvaluator.BranchModeOverride = mode;
+        try
+        {
+            Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
+        }
+        finally
+        {
+            RuntimeValueEvaluator.BranchModeOverride = null;
+        }
+
+        if (plan.ResourceBranches.Count != 0 && mode == RuntimeValueEvaluator.CompiledBranchMode.On)
+            Assert.True(RuntimeValueEvaluator.BranchesServedOnThread > served, "the compiled branch transaction did not serve");
         return snapshot;
     }
 
+    // selected sources are evaluated by the compiled branch transaction.
+    private static ResourceRuntimeInputs WithTablePhase(ResourceRuntimeInputs inputs) => new()
+    {
+    };
     [Theory]
     [InlineData("SCbranchScc1", 0u, 0)]
     [InlineData("SCbranchScc1", 1u, 1)]
@@ -120,11 +150,11 @@ public sealed class ResourceBranchTests
         uint[] userData = [.. UserData(1), 0, 0, 0, 0x3000, 0];
         var generalReads = 0;
         bool GeneralRead(ulong address, out uint word) { generalReads++; word = 1; return true; }
-        var snapshot = new ResourceSnapshot();
+        ResourceSnapshot snapshot;
         var specialization = new ResourceSpecialization();
         using (MaterializationProgramCheck.Suspend())
         {
-            Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData, GeneralRead, CleanRead), ref snapshot, ref specialization));
+            snapshot = Materialize(plan, Inputs(userData, GeneralRead, CleanRead));
         }
 
         Assert.Equal(0x1000u, snapshot.Buffers[0][0]);
@@ -195,4 +225,9 @@ public sealed class ResourceBranchTests
         Assert.Equal(0x1000u, snapshot.Buffers[0][0]);
         Assert.Equal(0x2000u, snapshot.Buffers[1][0]);
     }
+}
+
+public sealed class CompiledResourceBranchTests : ResourceBranchTests
+{
+    internal override RuntimeValueEvaluator.CompiledBranchMode? BranchMode => RuntimeValueEvaluator.CompiledBranchMode.On;
 }
