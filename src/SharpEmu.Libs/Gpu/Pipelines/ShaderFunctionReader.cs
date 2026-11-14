@@ -90,6 +90,9 @@ internal static class ShaderFunctionReader
 
 // Decoded shader functions by address. A call table names the same functions on every dispatch, so a function is decoded
 // again only when a word its decode read has changed: each lookup compares those words with the guest's current ones.
+// A decode that failed on the words it read fails again until one of them changes, so it is kept the same way (a table
+// may hold a stale record naming other data); a failed read of guest memory is not kept, as the memory may be readable
+// on the next lookup.
 internal sealed class ShaderFunctionCache(ResidentGuestBytesReader? residentReader)
 {
     private const int Capacity = 4096;
@@ -101,7 +104,7 @@ internal sealed class ShaderFunctionCache(ResidentGuestBytesReader? residentRead
         if (_functions.TryGetValue(address, out var cached) && Unchanged(cached, read))
             return cached;
         var result = ShaderFunctionReader.Read(address, read);
-        if (!result.Complete)
+        if (!result.Complete && result.Error.Contains("read-failed", StringComparison.Ordinal))
         {
             _functions.Remove(address);
             return result;
