@@ -200,10 +200,67 @@ public sealed partial class RenderExecutor
     // frames.
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, long> LinkedCompileSkips = new();
 
+    // Not every linked program is such a pass. A skipped dispatch that set up later work is lost for good (a
+    // shader-call path whose first dispatches are skipped during its compile can leave an object out for the rest of
+    // the session), so a dispatch first waits for its module, as an unlinked dispatch does, for at most
+    // SHARPEMU_LINKED_COMPILE_WAIT_MS (default 5000, 0 = skip at once, at most 600000). A program whose compile
+    // outlasts the bound is skipped while it compiles and never waited for again.
+    internal static readonly long LinkedCompileWaitTicks =
+        (long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_LINKED_COMPILE_WAIT_MS"), out var waitMs) ? Math.Clamp(waitMs, 0, 600_000) : 5000) *
+        System.Diagnostics.Stopwatch.Frequency / 1000;
+    // This executor's bound (tests change it) and the programs whose compile outlasted it.
+    internal long LinkedCompileWait = LinkedCompileWaitTicks;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte> _linkedCompileSlow = new();
+
+    // Polls until ready() holds, sleeping on the compile's completion when there is one, for at most boundTicks.
+    internal static bool WaitForLinkedModule(Func<bool> ready, Func<Task?> completion, long boundTicks)
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (true)
+        {
+            var left = boundTicks - (System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            if (left <= 0) return ready();
+            // A completed compile whose pipeline is not ready yet polls with sleeps, as no compile does: the wait never spins.
+            if (completion() is { IsCompleted: false } task)
+            {
+                try
+                {
+                    task.Wait(TimeSpan.FromSeconds((double)left / System.Diagnostics.Stopwatch.Frequency));
+                }
+                catch (AggregateException)
+                {
+                    // A failed compile surfaces where the pipeline is taken, as for an unlinked dispatch.
+                }
+            }
+            else
+            {
+                Thread.Sleep(1);
+            }
+
+            if (ready()) return true;
+        }
+    }
+
     private bool SkipWhileLinkedModuleCompiles(ComputeInputInfo input, ShaderProgram handle, ShaderProgramInfo program)
     {
         if (program.Bindings is not { CallTargetCount: not 0 }) return false;
         var ready = _pipelines.TryCreateComputePipeline(input, handle, out _);
+        if (!ready && LinkedCompileWait > 0 && !_linkedCompileSlow.ContainsKey(program.Hash))
+        {
+            var waiting = System.Diagnostics.Stopwatch.GetTimestamp();
+            using (VideoOut.RenderPhaseProfile.MeasureDetail(VideoOut.RenderPhaseProfile.Phase.ComputePipelineWait))
+            {
+                ready = WaitForLinkedModule(() => _pipelines.TryCreateComputePipeline(input, handle, out _),
+                    () => _pipelines.GetComputePipelineCompletion(handle), LinkedCompileWait);
+            }
+
+            var waitedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - waiting) * 1000 / System.Diagnostics.Stopwatch.Frequency;
+            if (!ready) _linkedCompileSlow.TryAdd(program.Hash, 0);
+            Console.Error.WriteLine(ready
+                ? $"[GPU][INFO][LINKED_COMPILE] A dispatch waited {waitedMs} ms for its linked module: hash=0x{program.Hash:X16}."
+                : $"[GPU][WARN][LINKED_COMPILE] A linked module still compiles after {waitedMs} ms; its dispatches are skipped until it is ready: hash=0x{program.Hash:X16}.");
+        }
+
         if (ready) return false;
         var skipped = LinkedCompileSkips.AddOrUpdate(program.Hash, 1, static (_, count) => count + 1);
         if ((skipped & (skipped - 1)) == 0)

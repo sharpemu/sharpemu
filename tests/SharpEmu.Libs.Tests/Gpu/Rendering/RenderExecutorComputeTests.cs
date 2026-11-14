@@ -106,6 +106,8 @@ public sealed class RenderExecutorComputeTests : IDisposable
     [Fact]
     public void LinkedProgram_SkipsItsDispatchWhileTheModuleCompiles()
     {
+        // With no linked compile wait, the dispatch is skipped at once.
+        _executor.LinkedCompileWait = 0;
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _pipelines.PendingComputeCompletion = completion.Task;
         var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x1234, Bindings = new BindingLayout { CallTargetCount = 1 } };
@@ -119,6 +121,45 @@ public sealed class RenderExecutorComputeTests : IDisposable
 
         completion.SetResult();
         _executor.Dispatch(6, Banks(), 4, 2, 1, 0x41);
+        AssertDispatched(4, 2, 1);
+    }
+
+    [Fact]
+    public void LinkedProgram_WaitsForAModuleThatCompilesWithinTheBound()
+    {
+        _executor.LinkedCompileWait = System.Diagnostics.Stopwatch.Frequency * 5;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pipelines.PendingComputeCompletion = completion.Task;
+        var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x1235, Bindings = new BindingLayout { CallTargetCount = 1 } };
+        _pipelines.Compute = ComputeProgram(Stage(program));
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(50);
+            completion.SetResult();
+        });
+        _executor.Dispatch(5, Banks(), 4, 2, 1, 0x41);
+        AssertDispatched(4, 2, 1);
+    }
+
+    [Fact]
+    public void LinkedProgram_WhoseCompileOutlastsTheBoundIsSkippedWithoutAnotherWait()
+    {
+        _executor.LinkedCompileWait = System.Diagnostics.Stopwatch.Frequency / 20;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pipelines.PendingComputeCompletion = completion.Task;
+        var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x1236, Bindings = new BindingLayout { CallTargetCount = 1 } };
+        _pipelines.Compute = ComputeProgram(Stage(program));
+        _executor.Dispatch(5, Banks(), 4, 2, 1, 0x41);
+        AssertNotDispatched();
+        var attempts = _pipelines.ComputePipelineAttempts;
+        Assert.True(attempts > 1);
+
+        _executor.Dispatch(6, Banks(), 4, 2, 1, 0x41);
+        AssertNotDispatched();
+        Assert.Equal(attempts + 1, _pipelines.ComputePipelineAttempts);
+
+        completion.SetResult();
+        _executor.Dispatch(7, Banks(), 4, 2, 1, 0x41);
         AssertDispatched(4, 2, 1);
     }
 
