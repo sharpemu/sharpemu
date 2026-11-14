@@ -77,8 +77,9 @@ public sealed unsafe partial class RenderHostDeviceTests
     public void Tessellation_VertexOffsetUsesPacketRegistersOrIndirectArguments(bool indexed) =>
         RenderTessellationPatch(0, false, true, verifyOffset: true, indexed: indexed);
 
-    // With pipeline libraries a pixel module reads its bindings from the pixel set, so a tessellated pipeline, which is
-    // built whole, binds them there too: the pixel stage here takes its color from its shader data binding.
+    // With pipeline libraries a pixel module reads its bindings from the pixel set, so a tessellated pipeline binds them
+    // there too: the pixel stage here takes its color from its shader data binding. The pipeline links its parts, the
+    // control and evaluation stages in its pre-rasterization part.
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -143,6 +144,12 @@ public sealed unsafe partial class RenderHostDeviceTests
             var image = harness.ReadImageBytes(TargetImage(presenter, words));
             Assert.Equal(visible ? Red : 0u, Pixel(image, Size / 2, Size / 2));
             Assert.Equal(visible ? Red : 0u, Pixel(image, 2, 2));
+            if (libraries)
+            {
+                var parts = presenter.GetField<Dictionary<string, Pipeline>>("_graphicsLibraries");
+                Assert.Contains(parts.Keys, key => key.StartsWith("pr;", StringComparison.Ordinal) && key.Contains(";tess:", StringComparison.Ordinal));
+            }
+
             if (ringPatches > 1)
             {
                 // Patch 0 wrote its zero factor at the start of the ring; patch 1 wrote its

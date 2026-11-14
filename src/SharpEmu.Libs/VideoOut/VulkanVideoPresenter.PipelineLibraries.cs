@@ -218,12 +218,13 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // Links the pipeline from its parts when its entry is laid out for them, else builds it whole, as when a part fails.
-        // A tessellated pipeline is built whole: a pre-rasterization part holds one vertex or mesh stage.
+        // A tessellated pipeline links too: its pre-rasterization part holds the control and evaluation stages, so its pixel
+        // part, often the largest, is the one the prewarm or an earlier pipeline compiled.
         private Result LinkOrBuildGraphicsPipeline(RenderPipelineEntry? libraries, GraphicsPipelineDescription description,
             bool expandRectangles, GraphicsPipelineCreateInfo* info, PipelineDynamicStateCreateInfo* baseDynamicState,
             PipelineCache cache, out Pipeline pipeline, out double milliseconds)
         {
-            if (libraries is { LinkedFromLibraries: true } && description.Tessellation is null && !expandRectangles &&
+            if (libraries is { LinkedFromLibraries: true } && !expandRectangles &&
                 CreateLinkedGraphicsPipeline(libraries, description, info, baseDynamicState, out pipeline, out milliseconds) == Result.Success)
             {
                 return Result.Success;
@@ -371,12 +372,23 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             var state = PreRasterizationStateOf(info);
             var taskIndex = StageIndex(info, ShaderStageFlags.TaskBitExt);
+            var controlIndex = StageIndex(info, ShaderStageFlags.TessellationControlBit);
+            var evaluationIndex = StageIndex(info, ShaderStageFlags.TessellationEvaluationBit);
+            var tessellated = controlIndex >= 0 && evaluationIndex >= 0 && info->PTessellationState is not null;
+            var tessellationStages = stackalloc PipelineShaderStageCreateInfo[2];
+            if (tessellated)
+            {
+                tessellationStages[0] = info->PStages[controlIndex];
+                tessellationStages[1] = info->PStages[evaluationIndex];
+            }
+
             var layout = CreateLibraryPipelineLayout(entry.SetLayout, default);
             try
             {
                 var created = CreatePreRasterizationLibrary(info->PStages[0], taskIndex >= 0 ? info->PStages + taskIndex : null,
-                    state, layout, label);
-                if (created.Handle != 0)
+                    state, layout, label, tessellated ? tessellationStages : null, tessellated ? info->PTessellationState : null);
+                // The prewarm records parts of one vertex or mesh stage.
+                if (created.Handle != 0 && !tessellated)
                 {
                     RecordPreRasterization(info->PStages[0].Module.Handle, state);
                 }
@@ -407,13 +419,21 @@ internal static unsafe partial class VulkanVideoPresenter
         // attachment formats, which belong to the color outputs part, so the graphics prewarm builds the same create
         // info from a recorded state and one part serves pipelines of any attachments.
         private Pipeline CreatePreRasterizationLibrary(PipelineShaderStageCreateInfo stage, PipelineShaderStageCreateInfo* task,
-            PreRasterizationState state, PipelineLayout layout, string label)
+            PreRasterizationState state, PipelineLayout layout, string label,
+            PipelineShaderStageCreateInfo* tessellationStages = null, PipelineTessellationStateCreateInfo* tessellation = null)
         {
-            var stages = stackalloc PipelineShaderStageCreateInfo[2];
-            stages[0] = stage;
+            var stages = stackalloc PipelineShaderStageCreateInfo[4];
+            var stageCount = 0u;
+            stages[stageCount++] = stage;
             if (task is not null)
             {
-                stages[1] = *task;
+                stages[stageCount++] = *task;
+            }
+
+            if (tessellationStages is not null)
+            {
+                stages[stageCount++] = tessellationStages[0];
+                stages[stageCount++] = tessellationStages[1];
             }
 
             var clipControl = new PipelineViewportDepthClipControlCreateInfoEXT
@@ -465,8 +485,9 @@ internal static unsafe partial class VulkanVideoPresenter
                     SType = StructureType.GraphicsPipelineCreateInfo,
                     PNext = &partInfo,
                     Flags = PipelineCreateFlags.CreateLibraryBitKhr,
-                    StageCount = task is null ? 1u : 2u,
+                    StageCount = stageCount,
                     PStages = stages,
+                    PTessellationState = tessellation,
                     PViewportState = &viewport,
                     PRasterizationState = &rasterization,
                     PDynamicState = &dynamicState,
@@ -784,6 +805,17 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // The index of the stage of this kind in info, or -1.
+        // The control and evaluation modules and the patch size of a tessellated part.
+        private static string TessellationKey(GraphicsPipelineCreateInfo* info)
+        {
+            var control = StageIndex(info, ShaderStageFlags.TessellationControlBit);
+            var evaluation = StageIndex(info, ShaderStageFlags.TessellationEvaluationBit);
+            return control < 0 || evaluation < 0 || info->PTessellationState is null
+                ? ""
+                : $";tess:{info->PStages[control].Module.Handle:X}:{info->PStages[evaluation].Module.Handle:X}:" +
+                    $"{info->PTessellationState->PatchControlPoints}";
+        }
+
         private static int StageIndex(GraphicsPipelineCreateInfo* info, ShaderStageFlags stage)
         {
             for (var index = 0; index < (int)info->StageCount; index++)
@@ -802,7 +834,7 @@ internal static unsafe partial class VulkanVideoPresenter
             PipelineDynamicStateCreateInfo* dynamicState)
         {
             var stage = info->PStages[0];
-            var task = TaskKey(info);
+            var task = TaskKey(info) + TessellationKey(info);
             var viewport = info->PViewportState;
             var clipControl = viewport->PNext is null ? "-" : ((bool)((PipelineViewportDepthClipControlCreateInfoEXT*)viewport->PNext)->NegativeOneToOne).ToString();
             var raster = info->PRasterizationState;
