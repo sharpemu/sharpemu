@@ -302,4 +302,89 @@ public sealed class GuestWriteReservationsTests
         await Task.WhenAll(writers.Append(claimer)).WaitAsync(TimeSpan.FromSeconds(30));
         Assert.Equal(0, violations);
     }
+
+    // Writes on chunks that no claim has covered reserve in their threads' records and do not wait for each other.
+    [Fact]
+    public async Task WritesOnUnclaimedChunksDoNotExcludeEachOther()
+    {
+        var owner = new GuestWriteReservations();
+        var reserved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        var first = Task.Run(() =>
+        {
+            using var attempt = owner.BeginCpuAttempt(Address, 16);
+            Assert.True(attempt.TryReserve());
+            reserved.TrySetResult(true);
+            if (!release.Wait(Deadline)) throw new TimeoutException("The test did not release the first write.");
+        });
+        try
+        {
+            await reserved.Task.WaitAsync(Deadline);
+            var second = await Task.Run(() =>
+            {
+                using var attempt = owner.BeginCpuAttempt(Address + 8, 16);
+                return attempt.TryReserve();
+            }).WaitAsync(Deadline);
+            Assert.True(second);
+        }
+        finally
+        {
+            release.Set();
+            await first.WaitAsync(Deadline);
+        }
+    }
+
+    // A claimer marks a fresh chunk every 20 ms while writers reserve all over the chunks, so writes keep meeting a chunk
+    // as it is marked: an admitted claim never overlaps a reserved write, and a reserved write never overlaps an admitted
+    // claim.
+    [Fact]
+    public async Task ClaimsMarkingFreshChunksNeverOverlapReservedWrites()
+    {
+        var owner = new GuestWriteReservations();
+        const int chunks = 64;
+        const ulong chunkBytes = 0x10000;
+        var reserved = new int[chunks];
+        var claimed = new int[chunks];
+        var violations = 0;
+        var stop = DateTime.UtcNow + TimeSpan.FromSeconds(1.5);
+        var writers = Enumerable.Range(0, 4).Select(seed => Task.Run(() =>
+        {
+            var random = new System.Random(seed);
+            while (DateTime.UtcNow < stop)
+            {
+                var chunk = random.Next(chunks);
+                var address = Address + (ulong)chunk * chunkBytes + (ulong)random.Next(16) * TrackerLayout.PageBytes;
+                while (true)
+                {
+                    using var attempt = owner.BeginCpuAttempt(address, 8);
+                    if (!attempt.TryReserve()) continue;
+                    Interlocked.Increment(ref reserved[chunk]);
+                    if (Volatile.Read(ref claimed[chunk]) != 0) Interlocked.Increment(ref violations);
+                    Thread.SpinWait(random.Next(50));
+                    Interlocked.Decrement(ref reserved[chunk]);
+                    break;
+                }
+            }
+        })).ToArray();
+        var claimer = Task.Run(() =>
+        {
+            var random = new System.Random(99);
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var next = 0;
+            while (DateTime.UtcNow < stop)
+            {
+                int chunk;
+                if (next < chunks && clock.ElapsedMilliseconds >= next * 20L) chunk = next++;
+                else if (next > 0) chunk = random.Next(next);
+                else continue;
+                using var claim = owner.BeginGpuClaim(Address + (ulong)chunk * chunkBytes, chunkBytes);
+                Interlocked.Increment(ref claimed[chunk]);
+                if (Volatile.Read(ref reserved[chunk]) != 0) Interlocked.Increment(ref violations);
+                Thread.SpinWait(random.Next(50));
+                Interlocked.Decrement(ref claimed[chunk]);
+            }
+        });
+        await Task.WhenAll(writers.Append(claimer)).WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.Equal(0, violations);
+    }
 }

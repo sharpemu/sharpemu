@@ -15,6 +15,14 @@ namespace SharpEmu.HLE.GpuMemory;
 // spans regions or finds its slot full takes the locked path, under the same rules. A claim that began in the region
 // while the write premarked is looked up in the history of recent claims, so only a claim over the write's own pages
 // invalidates it, as on the locked path.
+//
+// Most guest stores go to memory that no GPU claim has ever covered, such as command buffers. A claim marks the 64 KiB
+// chunks of its range for good. A write inside one region whose chunks are unmarked reserves its pages in its thread's
+// own record instead of the shared slot table and then reads the marks again; a mark that appeared while the write
+// premarked sends it on to the slot table, where the claim history decides whether it premarks again. The claim that
+// marks a chunk first makes every thread either see the mark or show its record (Interlocked.MemoryBarrierProcessWide)
+// and waits out the recorded writes over its range. Writes on unmarked chunks do not exclude each other; each landed
+// notification marks its pages again.
 internal sealed class GuestWriteReservations
 {
     private readonly object _gate = new();
@@ -36,6 +44,15 @@ internal sealed class GuestWriteReservations
     private readonly ulong[] _entryEnds = new ulong[SlotCount * Ways];
     private readonly ClaimRecord[] _history = new ClaimRecord[HistorySize];
     private long _claimSequence;
+
+    // One bit per 64 KiB chunk of the guest GPU address space that a GPU claim has covered.
+    private const int ChunkShift = 16;
+    private readonly long[] _claimedChunks = new long[(int)(TrackerLayout.SpaceBytes >> ChunkShift >> 6)];
+
+    // Each thread's reservation on unmarked chunks, shared by every owner: a thread reserves one write at a time.
+    private const int RecordCount = 1024;
+    private static readonly ThreadRecord[] s_records = new ThreadRecord[RecordCount];
+    private static int s_recordsTaken;
 
     [ThreadStatic] private static FastAttempt? t_fast;
     [ThreadStatic] private static uint t_tokens;
@@ -62,6 +79,16 @@ internal sealed class GuestWriteReservations
         [FieldOffset(8)] public long Epoch;
     }
 
+    // Padded so that two threads' records never share a cache line.
+    [StructLayout(LayoutKind.Explicit, Size = 128)]
+    private struct ThreadRecord
+    {
+        [FieldOffset(64)] public long Token;
+        [FieldOffset(72)] public ulong Start;
+        [FieldOffset(80)] public ulong End;
+        [FieldOffset(88)] public GuestWriteReservations? Owner;
+    }
+
     // The thread's lock-free attempt. A thread holds at most one; a nested attempt takes the locked path.
     private sealed class FastAttempt
     {
@@ -72,11 +99,20 @@ internal sealed class GuestWriteReservations
         public ulong End;
         public int Slot;
         public int Entry = -1;
+        // The thread's record, or -1 when every record is taken.
+        public readonly int Record = TakeRecord();
         public long Epoch;
         public long Sequence;
         public bool Active;
         public bool Reserved;
         public bool Invalidated;
+        public bool InRecord;
+    }
+
+    private static int TakeRecord()
+    {
+        var index = Interlocked.Increment(ref s_recordsTaken) - 1;
+        return index < RecordCount ? index : -1;
     }
 
     // A copied or stale token names only its original admission; a later write never reuses that id. Locked attempts
@@ -106,14 +142,17 @@ internal sealed class GuestWriteReservations
         else if (start >> RegionShift == (end - 1) >> RegionShift && fast is not { Active: true } &&
             t_lockedReserved is not { Count: > 0 })
         {
+            fast ??= t_fast = new FastAttempt();
             var slot = SlotOf(start >> RegionShift);
-            // Sequence, then epoch, then the counts: a claim counts itself into the slot before it advances the epoch
-            // and takes its sequence number.
+            // Sequence, then the marks, then epoch, then the counts: a claim marks its chunks and counts itself into the
+            // slot before it advances the epoch and takes its sequence number.
             var sequence = Volatile.Read(ref _claimSequence);
-            var epoch = Volatile.Read(ref _slots[slot].Epoch);
-            if (Volatile.Read(ref _slots[slot].Claims) == 0 && Volatile.Read(ref _slots[slot].LockedReserved) == 0)
+            var inRecord = fast.Record >= 0 && ChunksUnmarked(start, end);
+            // An epoch no slot reaches: a write that leaves its record looks up every claim since the sequence.
+            var epoch = inRecord ? -1 : Volatile.Read(ref _slots[slot].Epoch);
+            if (inRecord ||
+                (Volatile.Read(ref _slots[slot].Claims) == 0 && Volatile.Read(ref _slots[slot].LockedReserved) == 0))
             {
-                fast ??= t_fast = new FastAttempt();
                 fast.Owner = this;
                 fast.Token = ((long)Environment.CurrentManagedThreadId << 32) | ++t_tokens;
                 fast.Start = start;
@@ -125,6 +164,7 @@ internal sealed class GuestWriteReservations
                 fast.Active = true;
                 fast.Reserved = false;
                 fast.Invalidated = false;
+                fast.InRecord = inRecord;
                 return new CpuAttempt(this, -fast.Token);
             }
         }
@@ -191,6 +231,25 @@ internal sealed class GuestWriteReservations
         if (fast.Invalidated)
             return false;
 
+        if (fast.InRecord)
+        {
+            ref var record = ref s_records[fast.Record];
+            record.Owner = this;
+            record.Start = fast.Start;
+            record.End = fast.End;
+            Volatile.Write(ref record.Token, token);
+            // No fence: the claim that marks a chunk first makes this store visible before it reads the records.
+            if (ChunksUnmarked(fast.Start, fast.End))
+            {
+                fast.Reserved = true;
+                return true;
+            }
+
+            // A claim marked a chunk while the write premarked.
+            Volatile.Write(ref record.Token, 0);
+            fast.InRecord = false;
+        }
+
         var slot = fast.Slot;
         var entry = -1;
         for (var way = 0; way < Ways; way++)
@@ -243,6 +302,9 @@ internal sealed class GuestWriteReservations
         lock (_gate)
         {
             RejectReservedReentry(thread);
+            // Marked before the sequence: a write that read the sequence before this claim took its number and then found
+            // the chunks unmarked looks the claim up in the history.
+            MarkChunks(start, end);
             // Counted into the slots before the entries are read: a lock-free write that publishes later sees the count.
             var walk = new SlotWalk(start, end);
             while (walk.Next(out var slot))
@@ -363,6 +425,67 @@ internal sealed class GuestWriteReservations
         return false;
     }
 
+    // Marks the chunks of a claim's range. The claim that marks a chunk first waits until every thread either sees the
+    // mark or shows its record, and then until the recorded writes over its range have released. No write that begins
+    // afterwards reserves a marked chunk in its record, so a later claim finds none there.
+    private void MarkChunks(ulong start, ulong end)
+    {
+        var first = start >> ChunkShift;
+        var last = (end - 1) >> ChunkShift;
+        var marked = false;
+        for (var word = first >> 6; word <= last >> 6; word++)
+        {
+            var mask = ChunkMask(word, first, last);
+            if ((Volatile.Read(ref _claimedChunks[word]) & mask) == mask) continue;
+            Interlocked.Or(ref _claimedChunks[word], mask);
+            marked = true;
+        }
+
+        if (!marked) return;
+        Interlocked.MemoryBarrierProcessWide();
+        var spin = new SpinWait();
+        while (RecordOverlaps(start, end))
+        {
+            GpuClaimWaitingForTest?.Invoke();
+            spin.SpinOnce(sleep1Threshold: -1);
+        }
+    }
+
+    private bool ChunksUnmarked(ulong start, ulong end)
+    {
+        var first = start >> ChunkShift;
+        var last = (end - 1) >> ChunkShift;
+        for (var word = first >> 6; word <= last >> 6; word++)
+        {
+            if ((Volatile.Read(ref _claimedChunks[word]) & ChunkMask(word, first, last)) != 0) return false;
+        }
+        return true;
+    }
+
+    private static long ChunkMask(ulong word, ulong first, ulong last)
+    {
+        var low = word == first >> 6 ? (int)(first & 63) : 0;
+        var high = word == last >> 6 ? (int)(last & 63) : 63;
+        var bits = high - low + 1;
+        return bits == 64 ? -1L : (long)(((1UL << bits) - 1) << low);
+    }
+
+    // A recorded write of this owner over the range. A record whose token changes while it is read is skipped: the write
+    // it named has released, and a write that shows its record only now reads the marks afterwards.
+    private bool RecordOverlaps(ulong start, ulong end)
+    {
+        var count = Math.Min(Volatile.Read(ref s_recordsTaken), RecordCount);
+        for (var index = 0; index < count; index++)
+        {
+            ref var record = ref s_records[index];
+            var token = Volatile.Read(ref record.Token);
+            if (token == 0 || record.Owner != this ||
+                !Overlaps(start, end, Volatile.Read(ref record.Start), Volatile.Read(ref record.End))) continue;
+            if (Volatile.Read(ref record.Token) == token) return true;
+        }
+        return false;
+    }
+
     // Whether a claim over the range began after the attempt read the sequence. When the history does not reach back to
     // the attempt, the answer is yes.
     private bool ClaimBeganSince(long sequence, ulong start, ulong end)
@@ -418,9 +541,11 @@ internal sealed class GuestWriteReservations
             if (fast.Reserved)
             {
                 fast.Reserved = false;
-                ClearEntry(fast.Entry);
+                if (fast.InRecord) Volatile.Write(ref s_records[fast.Record].Token, 0);
+                else ClearEntry(fast.Entry);
             }
             fast.Entry = -1;
+            fast.InRecord = false;
             return;
         }
 
