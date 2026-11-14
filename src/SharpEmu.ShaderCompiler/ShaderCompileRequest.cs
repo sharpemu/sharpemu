@@ -72,7 +72,10 @@ public readonly record struct MeshShaderConfiguration(
     bool InputTriangleStrip = false,
     uint DeviceSubgroupLaneCount = 0,
     bool InputPointList = false,
-    bool InputLineList = false)
+    bool InputLineList = false,
+    // The task stage of an automatic draw launches the groups and passes the draw parameters in
+    // its payload (SpirvMeshTask), in place of the shader data.
+    bool TaskLaunched = false)
 {
     public static uint[] ParameterLocations(Gen5ShaderProgram program, int requiredOutputCount) =>
         program.Instructions.Select(instruction => instruction.Control).OfType<Gen5ExportControl>()

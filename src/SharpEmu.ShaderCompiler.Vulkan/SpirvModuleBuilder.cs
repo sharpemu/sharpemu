@@ -35,6 +35,7 @@ public enum SpirvOp : ushort
     Constant = 43,
     ConstantComposite = 44,
     ConstantNull = 46,
+    SpecConstant = 50,
     Function = 54,
     FunctionParameter = 55,
     FunctionEnd = 56,
@@ -191,6 +192,7 @@ public enum SpirvOp : ushort
     GroupNonUniformBitwiseAnd = 359,
     GroupNonUniformBitwiseOr = 360,
     GroupNonUniformBitwiseXor = 361,
+    EmitMeshTasksExt = 5294,
     SetMeshOutputsExt = 5295,
     ReadClockKhr = 5056,
 }
@@ -250,6 +252,7 @@ public enum SpirvStorageClass : uint
     Image = 11,
     StorageBuffer = 12,
     PhysicalStorageBuffer = 5349,
+    TaskPayloadWorkgroupExt = 5402,
 }
 
 public enum SpirvExecutionModel : uint
@@ -259,6 +262,7 @@ public enum SpirvExecutionModel : uint
     TessellationEvaluation = 2,
     Fragment = 4,
     GLCompute = 5,
+    TaskExt = 5364,
     MeshExt = 5365,
 }
 
@@ -284,6 +288,7 @@ public enum SpirvExecutionMode : uint
 
 public enum SpirvDecoration : uint
 {
+    SpecId = 1,
     Block = 2,
     ArrayStride = 6,
     BuiltIn = 11,
@@ -856,6 +861,16 @@ public sealed partial class SpirvModuleBuilder
         Emit(_typesConstantsGlobals, SpirvOp.ConstantNull, type, id);
         _constants.Add(key, id);
         NoteResultType(id, type);
+        return id;
+    }
+
+    // A 32-bit specialization constant. It is never folded or shared with a constant, because
+    // the pipeline sets its value.
+    public uint SpecConstant(uint type, uint specId, uint defaultValue)
+    {
+        var id = AllocateId();
+        Emit(_typesConstantsGlobals, SpirvOp.SpecConstant, type, id, defaultValue);
+        AddDecoration(id, SpirvDecoration.SpecId, specId);
         return id;
     }
 
