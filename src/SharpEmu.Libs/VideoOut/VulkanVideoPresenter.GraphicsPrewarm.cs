@@ -166,7 +166,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 module = CreateShaderModule(payload);
                 var bindings = new List<DescriptorSetLayoutBinding>();
                 CollectLayoutBindings(bindings, layout!, ShaderStage.Pixel);
-                library = CreateEarlyPixelLibrary(module.Handle, bindings, layout!.UsesBindlessHeap, $"vs=prewarm {name}");
+                library = CreateEarlyPixelLibrary(module.Handle, bindings, $"vs=prewarm {name}");
                 return NoteGraphicsPrewarmLibrary(library, identity, name);
             }
             catch (Exception exception)
@@ -227,7 +227,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     set = CreateDescriptorSetLayout(bindings, allowPush: true, out _, out _);
                 }
 
-                pipelineLayout = CreateLibraryPipelineLayout(set, layout!.UsesBindlessHeap, default);
+                pipelineLayout = CreateLibraryPipelineLayout(set, default);
                 var taskStage = task is { } launch ? TaskStageInfo(launch, taskEntries, taskValues, &taskSpecialization, entryPoint) : default;
                 library = CreatePreRasterizationLibrary(VertexStageInfo(program.Mesh, module, entryPoint), task is null ? null : &taskStage,
                     state, pipelineLayout, $"{name} prewarm");

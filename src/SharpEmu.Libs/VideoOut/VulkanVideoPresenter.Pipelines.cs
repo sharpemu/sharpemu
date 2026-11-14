@@ -49,8 +49,6 @@ internal static unsafe partial class VulkanVideoPresenter
         public DescriptorSetDemand PixelDemand;
         public string VertexSetSignature = "";
         public string PixelSetSignature = "";
-        public bool VertexUsesBindlessHeap;
-        public bool PixelUsesBindlessHeap;
 
         public bool RectangleList => Description is { Tessellation: null, StaticParameters.Topology: PrimitiveTopology.PatchList };
     }

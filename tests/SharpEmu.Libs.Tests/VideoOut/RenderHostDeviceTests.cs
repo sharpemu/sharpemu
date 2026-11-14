@@ -769,6 +769,84 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         harness.Shutdown();
     }
 
+    // The bindless heap's set is visible to every graphics stage, so parts linked with independent sets all carry it, even when
+    // only one stage reads it: here the vertex stage reads it and the pixel stage does not.
+    [Fact]
+    public void LinkedParts_AllCarryTheHeapSet_WhenOnlyTheVertexStageReadsIt()
+    {
+        if (!Ready() || !_vulkan.SupportsGraphicsPipelineLibrary)
+        {
+            return;
+        }
+
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.SetField("_graphicsPipelineLibraries", true);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var target = harness.MapBacked(0x10000, ReadWrite);
+        var vertices = harness.MapBacked(0x10000, ReadWrite);
+        var words = RegisterWords.Color(target, Size, Size);
+        harness.Write(vertices, Triangle(-1f, -1f, 3f, -1f, -1f, 3f));
+        var host = (IShaderPipelineHost)presenter.Instance;
+        var executor = new RenderExecutor(presenter.RenderHost, new FixedProgramProvider(host, vertices));
+        // A stand-in for the heap's set layout, which needs descriptor indexing the test device leaves off.
+        var binding = new DescriptorSetLayoutBinding
+        {
+            Binding = 0,
+            DescriptorType = DescriptorType.Sampler,
+            DescriptorCount = 1,
+            StageFlags = ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit,
+        };
+        var create = new DescriptorSetLayoutCreateInfo { SType = StructureType.DescriptorSetLayoutCreateInfo, BindingCount = 1, PBindings = &binding };
+        Assert.Equal(Result.Success, _vulkan.Vk.CreateDescriptorSetLayout(_vulkan.Device, &create, null, out var heap));
+        var layouts = new List<DescriptorSetLayout[]>();
+        GuestGpuMemoryHook.Attach(harness.Gpu);
+        try
+        {
+            // A draw gives the pipeline state; new modules make every part of the second pipeline compile.
+            presenter.Run(() => executor.DrawAuto(1, Banks(words), Draw()));
+            var drawn = Assert.Single(presenter.GetField<System.Collections.IDictionary>("_pipelineEntries").Values.Cast<object>()
+                .Select(entry => entry.GetType().GetField("Description")!.GetValue(entry)).OfType<GraphicsPipelineDescription>());
+            presenter.SetField("_heapSetLayout", heap);
+            presenter.SetField("LibraryLayoutCreatedForTest", (Action<DescriptorSetLayout, DescriptorSetLayout, DescriptorSetLayout>)(
+                (vertexSet, heapSet, pixelSet) => layouts.Add([vertexSet, heapSet, pixelSet])));
+            presenter.Run(() =>
+            {
+                var description = new GraphicsPipelineDescription
+                {
+                    Rendering = drawn.Rendering,
+                    VertexInput = drawn.VertexInput,
+                    VertexInfo = drawn.VertexInfo,
+                    VertexProgram = new ShaderProgram(3, host.CreateShaderModule(new VulkanCompiledGuestShader(CreatePositionVertexShader()),
+                        ShaderStage.Vertex, 3, 3)),
+                    VertexStage = FixedProgramProvider.EmptyProgram(ShaderStageKind.Vertex, 3, new ShaderResourceInfo { UsesBindlessHeap = true },
+                        fetchComponents: 2, userDataRegisters: [0, 1, 2, 3], pushDataStart: PushData.DwordCount),
+                    PixelInfo = drawn.PixelInfo,
+                    PixelProgram = new ShaderProgram(4, host.CreateShaderModule(new VulkanCompiledGuestShader(
+                        SpirvFixedShaders.CreateSolidFragment(1f, 0f, 0f, 1f)), ShaderStage.Pixel, 4, 4)),
+                    PixelStage = FixedProgramProvider.EmptyProgram(ShaderStageKind.Pixel, 4, userDataRegisters: [0, 1, 2, 3],
+                        pushDataStart: PushData.DwordCount),
+                    StaticParameters = drawn.StaticParameters,
+                };
+                host.CreateGraphicsPipeline(description);
+            });
+
+            // The pipeline's own layout, its pre-rasterization part's (no pixel set) and its pixel part's (no vertex set).
+            Assert.Contains(layouts, layout => layout[0].Handle != 0 && layout[2].Handle != 0);
+            Assert.Contains(layouts, layout => layout[0].Handle != 0 && layout[2].Handle == 0);
+            Assert.Contains(layouts, layout => layout[0].Handle == 0 && layout[2].Handle != 0);
+            Assert.All(layouts, layout => Assert.Equal(heap.Handle, layout[1].Handle));
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+            presenter.SetField("_heapSetLayout", default(DescriptorSetLayout));
+        }
+
+        harness.Shutdown();
+        _vulkan.Vk.DestroyDescriptorSetLayout(_vulkan.Device, heap, null);
+    }
+
     private delegate bool DescriptorsAlreadyBoundCall(CommandBuffer command, PipelineBindPoint bindPoint, PipelineLayout layout,
         ReadOnlySpan<WriteDescriptorSet> writes, uint setIndex);
 

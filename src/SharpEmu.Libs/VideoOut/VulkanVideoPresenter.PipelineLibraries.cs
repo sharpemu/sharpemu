@@ -20,7 +20,9 @@ namespace SharpEmu.Libs.VideoOut;
 // pipeline links its parts without optimizing across them.
 // Parts link only through layouts with independent sets: the vertex stage's bindings are set 0 and the pixel stage's set 2
 // (PixelDescriptorSet: each pixel module's set-0 variables move there), the bindless heap stays set 1. The vertex set is
-// pushed when it fits, the pixel set is allocated, so each set's layout depends on its own stage alone.
+// pushed when it fits, the pixel set is allocated, so each set's layout depends on its own stage alone. The heap set is in
+// every part's layout, read by its stage or not: its bindings are visible to every graphics stage, and parts with
+// independent sets may leave out only a set none of the other part's stages can see.
 // Every depth and stencil state is dynamic (BaseDynamicStates), so the pixel stage's part depends on the pixel program
 // alone. It starts compiling on a worker as soon as the program is translated (PixelProgramCreated), usually before the
 // draw that needs it, and the programs a scene brings at once compile side by side instead of one draw after another.
@@ -58,6 +60,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // The states every guest graphics pipeline takes from the draw (SetDynamicState), in this order.
         private DynamicState[]? _baseDynamicStates;
+
+        // Tests: told the set layouts 0, 1 and 2 of each layout CreateLibraryPipelineLayout makes.
+        internal Action<DescriptorSetLayout, DescriptorSetLayout, DescriptorSetLayout>? LibraryLayoutCreatedForTest;
 
         private DynamicState[] BaseDynamicStates => _baseDynamicStates ??= BuildBaseDynamicStates();
 
@@ -145,9 +150,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 pixelSet = CreateDescriptorSetLayout(pixelBindings, allowPush: false, out _, out pixelDemand);
             }
 
-            // Each part's layout names the heap only when its own stage reads it.
-            var vertexHeap = UsesBindlessHeap(description.VertexStage);
-            var pixelHeap = description.PixelStage is { } heapStage && UsesBindlessHeap(heapStage);
+            var heap = UsesBindlessHeap(description.VertexStage) || (description.PixelStage is { } heapStage && UsesBindlessHeap(heapStage));
             return new RenderPipelineEntry
             {
                 SetLayout = vertexSet,
@@ -158,10 +161,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 LinkedFromLibraries = true,
                 VertexSetSignature = SetSignature(vertexBindings, vertexPush),
                 PixelSetSignature = SetSignature(pixelBindings, push: false),
-                Layout = CreateLibraryPipelineLayout(vertexSet, vertexHeap || pixelHeap, pixelSet),
-                UsesBindlessHeap = vertexHeap || pixelHeap,
-                VertexUsesBindlessHeap = vertexHeap,
-                PixelUsesBindlessHeap = pixelHeap,
+                Layout = CreateLibraryPipelineLayout(vertexSet, pixelSet),
+                UsesBindlessHeap = heap,
                 Description = description,
                 ProfileVertexHash = description.VertexStage.Hash,
                 ProfilePixelHash = description.PixelStage?.Hash ?? 0,
@@ -180,9 +181,10 @@ internal static unsafe partial class VulkanVideoPresenter
             return builder.ToString();
         }
 
-        // The layout of a linked pipeline or of one part of it: sets 0 (vertex), 1 (bindless heap) and 2 (pixel), each
-        // null where the pipeline or part has none, and one push constant range for every stage.
-        private PipelineLayout CreateLibraryPipelineLayout(DescriptorSetLayout vertexSet, bool heap, DescriptorSetLayout pixelSet)
+        // The layout of a linked pipeline or of one part of it: sets 0 (vertex) and 2 (pixel), each null where the pipeline or
+        // part has none, the bindless heap's set 1 whenever the device has the heap, and one push constant range for every
+        // stage.
+        private PipelineLayout CreateLibraryPipelineLayout(DescriptorSetLayout vertexSet, DescriptorSetLayout pixelSet)
         {
             // Linked parts need equal ranges: with task launches on, every part carries the task range too.
             var pushRanges = stackalloc PushConstantRange[2];
@@ -199,7 +201,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             var setLayouts = stackalloc DescriptorSetLayout[3];
             setLayouts[0] = vertexSet;
-            setLayouts[1] = heap ? RequireHeapSetLayout() : default;
+            setLayouts[1] = _heapSetLayout;
             setLayouts[2] = pixelSet;
             var create = new PipelineLayoutCreateInfo
             {
@@ -211,6 +213,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 PPushConstantRanges = pushRanges,
             };
             Check(_vk.CreatePipelineLayout(_device, &create, null, out var layout), "vkCreatePipelineLayout(independent sets)");
+            LibraryLayoutCreatedForTest?.Invoke(setLayouts[0], setLayouts[1], setLayouts[2]);
             return layout;
         }
 
@@ -244,7 +247,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var preRasterizationKey = PreRasterizationKey(entry, info, baseDynamicState);
             var pixelIndex = StageIndex(info, ShaderStageFlags.FragmentBit);
             var pixelModule = pixelIndex >= 0 ? info->PStages[pixelIndex].Module.Handle : 0;
-            var fragmentKey = FragmentKey(pixelModule, entry.PixelSetSignature, entry.PixelUsesBindlessHeap, info->PMultisampleState, baseDynamicState);
+            var fragmentKey = FragmentKey(pixelModule, entry.PixelSetSignature, info->PMultisampleState, baseDynamicState);
             var outputKey = OutputKey(info);
             var parts = stackalloc Pipeline[4];
             var count = 0u;
@@ -333,7 +336,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         create.PStages = fragmentIndex >= 0 ? info->PStages + fragmentIndex : null;
                         create.PMultisampleState = info->PMultisampleState;
                         create.PDepthStencilState = &depthStencil;
-                        create.Layout = layout = CreateLibraryPipelineLayout(default, entry.PixelUsesBindlessHeap, entry.PixelSetLayout);
+                        create.Layout = layout = CreateLibraryPipelineLayout(default, entry.PixelSetLayout);
                         break;
                     default:
                         create.PColorBlendState = info->PColorBlendState;
@@ -368,7 +371,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             var state = PreRasterizationStateOf(info);
             var taskIndex = StageIndex(info, ShaderStageFlags.TaskBitExt);
-            var layout = CreateLibraryPipelineLayout(entry.SetLayout, entry.VertexUsesBindlessHeap, default);
+            var layout = CreateLibraryPipelineLayout(entry.SetLayout, default);
             try
             {
                 var created = CreatePreRasterizationLibrary(info->PStages[0], taskIndex >= 0 ? info->PStages + taskIndex : null,
@@ -569,7 +572,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var bindings = new List<DescriptorSetLayoutBinding>();
             CollectLayoutBindings(bindings, program, ShaderStage.Pixel);
-            var heap = UsesBindlessHeap(program);
             var multisample = SingleSampleState();
             var states = BaseDynamicStates;
             string key;
@@ -581,7 +583,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     DynamicStateCount = (uint)states.Length,
                     PDynamicStates = statePointer,
                 };
-                key = FragmentKey(module, SetSignature(bindings, push: false), heap, &multisample, &dynamicState);
+                key = FragmentKey(module, SetSignature(bindings, push: false), &multisample, &dynamicState);
             }
 
             lock (_graphicsLibraryLock)
@@ -599,7 +601,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _pixelLibrarySlots.Wait();
                     try
                     {
-                        CompileEarlyPixelLibrary(key, module, bindings, heap, label);
+                        CompileEarlyPixelLibrary(key, module, bindings, label);
                     }
                     catch (Exception exception)
                     {
@@ -628,7 +630,7 @@ internal static unsafe partial class VulkanVideoPresenter
         };
 
         // The pixel stage part GraphicsLibrary builds for a one-sample pipeline of this program.
-        private void CompileEarlyPixelLibrary(string key, ulong module, List<DescriptorSetLayoutBinding> bindings, bool heap, string label)
+        private void CompileEarlyPixelLibrary(string key, ulong module, List<DescriptorSetLayoutBinding> bindings, string label)
         {
             if (TryTakeGraphicsLibrary(key, out _, out var compile))
             {
@@ -638,7 +640,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var created = default(Pipeline);
             try
             {
-                created = CreateEarlyPixelLibrary(module, bindings, heap, label);
+                created = CreateEarlyPixelLibrary(module, bindings, label);
             }
             finally
             {
@@ -647,7 +649,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // The part itself; the pixel prewarm builds it the same way for the pipeline binary store.
-        private Pipeline CreateEarlyPixelLibrary(ulong module, List<DescriptorSetLayoutBinding> bindings, bool heap, string label)
+        private Pipeline CreateEarlyPixelLibrary(ulong module, List<DescriptorSetLayoutBinding> bindings, string label)
         {
             var created = default(Pipeline);
             DescriptorSetLayout pixelSet = default;
@@ -660,7 +662,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     pixelSet = CreateDescriptorSetLayout(bindings, allowPush: false, out _, out _);
                 }
 
-                layout = CreateLibraryPipelineLayout(default, heap, pixelSet);
+                layout = CreateLibraryPipelineLayout(default, pixelSet);
                 var stage = new PipelineShaderStageCreateInfo
                 {
                     SType = StructureType.PipelineShaderStageCreateInfo,
@@ -805,17 +807,16 @@ internal static unsafe partial class VulkanVideoPresenter
             var clipControl = viewport->PNext is null ? "-" : ((bool)((PipelineViewportDepthClipControlCreateInfoEXT*)viewport->PNext)->NegativeOneToOne).ToString();
             var raster = info->PRasterizationState;
             var depthClip = raster->PNext is null ? "-" : ((bool)((PipelineRasterizationDepthClipStateCreateInfoEXT*)raster->PNext)->DepthClipEnable).ToString();
-            return $"pr;{stage.Module.Handle:X};{(int)stage.Stage};{(int)stage.Flags}{task};{entry.VertexSetSignature};{entry.VertexUsesBindlessHeap};" +
+            return $"pr;{stage.Module.Handle:X};{(int)stage.Stage};{(int)stage.Flags}{task};{entry.VertexSetSignature};" +
                 $"{clipControl};{(int)raster->PolygonMode};{(int)raster->CullMode};{(int)raster->FrontFace};{depthClip};" +
                 $"{(bool)raster->DepthClampEnable};{(bool)raster->RasterizerDiscardEnable};" +
                 DynamicKey(dynamicState);
         }
 
-        // The pixel stage part depends on the program, its set, whether it reads the heap and the sample state: depth and
-        // stencil state are dynamic.
-        private static string FragmentKey(ulong pixelModule, string pixelSetSignature, bool pixelHeap,
+        // The pixel stage part depends on the program, its set and the sample state: depth and stencil state are dynamic.
+        private static string FragmentKey(ulong pixelModule, string pixelSetSignature,
             PipelineMultisampleStateCreateInfo* multisample, PipelineDynamicStateCreateInfo* dynamicState) =>
-            $"fs;{pixelModule:X};{pixelSetSignature};{pixelHeap};{MultisampleKey(multisample)};" + DynamicKey(dynamicState);
+            $"fs;{pixelModule:X};{pixelSetSignature};{MultisampleKey(multisample)};" + DynamicKey(dynamicState);
 
         private static string OutputKey(GraphicsPipelineCreateInfo* info)
         {
