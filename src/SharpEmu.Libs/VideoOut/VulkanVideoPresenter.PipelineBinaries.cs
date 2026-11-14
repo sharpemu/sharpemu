@@ -18,8 +18,10 @@ internal static unsafe partial class VulkanVideoPresenter
     private sealed partial class Presenter
     {
         // Pipelines that take time to build are kept as pipeline binaries (VK_KHR_pipeline_binary), one file per driver
+        // pipeline key. The driver's own shader cache does not keep them: a pipeline that captures its data is built
         // without a pipeline cache, and NVIDIA's cache has a size limit besides (1 GiB for every Vulkan and OpenGL program
         // together, storing nothing once it is full). A pipeline whose key has a file is created from its binaries without
+        // compiling. A build that takes the store threshold or longer (PipelineBinaryStorePolicy, 20 ms by default) writes
         // its file at once, since a forced close saves nothing.
         // NVIDIA compresses the binaries with the dictionary of the executable's own shader cache file and adds that 2 MiB
         // dictionary to every graphics pipeline's binaries, so large binaries are kept once, by content, in the shared
@@ -40,8 +42,9 @@ internal static unsafe partial class VulkanVideoPresenter
         private int _pipelineBinaryStores;
         private readonly ConcurrentDictionary<string, byte[]> _sharedPipelineBinaries = new();
 
+        // A build at least this long stores its binaries (PipelineBinaryStorePolicy: SHARPEMU_PIPELINE_BINARY_MS, default
         // 20 ms), and a binary at least this large is shared (tests lower both).
-        private double _pipelineBinarySlowMilliseconds = SlowPipelineCreationMilliseconds;
+        private double _pipelineBinarySlowMilliseconds = PipelineBinaryStorePolicy.Milliseconds;
         private int _sharedPipelineBinaryBytes = 1 << 20;
 
         private static bool PipelineBinariesRequested() =>
@@ -69,6 +72,8 @@ internal static unsafe partial class VulkanVideoPresenter
             _pipelineBinaries = binaries;
             _pipelineBinaryDirectory = directory;
             _pipelineBinaryGlobalKey = Convert.ToHexString(new ReadOnlySpan<byte>(globalKey.Key, (int)globalKey.KeySize));
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] Vulkan pipeline binaries ready: directory={directory} store_ms={_pipelineBinarySlowMilliseconds}");
         }
 
         // The first line of a pipeline's file: the format, the driver's global key and the pipeline key.
