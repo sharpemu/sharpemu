@@ -200,6 +200,32 @@ public sealed class GpuCommandInterpreterDrawTests
         Assert.DoesNotContain(runner.Host.GuestReads, address => address >= Arguments && address < Arguments + 80);
     }
 
+    // A start instance in the vertex program's live user data leaves the arguments on the GPU as a draw index does, so the
+    // draws never wait for the GPU work that wrote them.
+    [Fact]
+    public void IndirectMulti_KeepsArgumentsOnTheGpuWhenTheStartInstanceIsInLiveUserData()
+    {
+        var runner = new StreamRunner();
+        runner.Host.ResolvesIndirectDrawOnGpu = true;
+        const uint gs0 = ShaderRegisterOffset.SpiShaderUserDataGs0;
+
+        runner.Run(
+            StreamRunner.Packet(PacketOpcode.SetShaderRegister, ShaderRegisterOffset.SpiShaderPgmRsrc2Gs, 4u << 1),
+            SetBase(Arguments, dispatch: false),
+            StreamRunner.Packet(PacketOpcode.IndexBase, StreamRunner.Low(Indices), StreamRunner.High(Indices)),
+            StreamRunner.Packet(PacketOpcode.IndexType, 0),
+            StreamRunner.Packet(PacketOpcode.IndexBufferSize, 40),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirectMulti, 16, (gs0 + 3) << 16 | 0x280, (gs0 + 2) | 1u << 27, 0, 2, 0, 0, 32, 2),
+            StreamRunner.Packet(PacketOpcode.DrawIndirectMulti, 0, 0x280, gs0 + 1, 0, 2, 0, 0, 16, 2));
+
+        Assert.Equal(new[] { Arguments + 16, Arguments + 48 }, runner.Host.IndexedDraws.Select(draw => draw.IndirectArgumentsAddress));
+        Assert.All(runner.Host.IndexedDraws, draw => Assert.Equal((2, false), (draw.StartInstanceUserData, draw.FirstInstanceInRegister)));
+        Assert.Equal(new[] { Arguments, Arguments + 16 }, runner.Host.AutoDraws.Select(draw => draw.IndirectArgumentsAddress));
+        Assert.All(runner.Host.AutoDraws, draw => Assert.Equal((1, false), (draw.StartInstanceUserData, draw.FirstInstanceInRegister)));
+        Assert.Equal(1u, runner.Interpreter.Registers.Shader[gs0 + 3]);
+        Assert.DoesNotContain(runner.Host.GuestReads, address => address >= Arguments && address < Arguments + 80);
+    }
+
     [Fact]
     public void IndexedIndirectDraws_LeaveArgumentsOnTheGpuWhenTheHostCan()
     {
@@ -293,8 +319,10 @@ public sealed class GpuCommandInterpreterDrawTests
         Assert.Contains("stride is smaller", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.DrawIndirectMulti, 0, 0, 0, 0, 1, 0, 0, 8, 2)).Message);
     }
 
-    // A start instance the packet names reaches its user register as the base vertex does: the CP writes it, so the draw
-    // reads its arguments, counts its instances from 0 and names no start instance user data, whatever the stage reads.
+    // A start instance in one of the vertex program's live user data registers stays the draw's first instance: the draw
+    // names that user data (the program stores its base instance there), the register is not written, and the host can
+    // keep the arguments on the GPU. A named base vertex still reads the arguments here, and a start instance in a
+    // register the program does not load is written as the CP would.
     [Fact]
     public void IndirectDraws_NameTheLiveUserRegisterOfTheirStartInstance()
     {
@@ -317,12 +345,20 @@ public sealed class GpuCommandInterpreterDrawTests
             StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 16, 0x280, gs0 + 1, 0x22));
 
         var auto = Assert.Single(runner.Host.AutoDraws);
-        Assert.Equal((0u, true, -1), (auto.FirstInstance, auto.FirstInstanceInRegister, auto.StartInstanceUserData));
+        Assert.Equal((0ul, 0u, true), (auto.IndirectArgumentsAddress, auto.FirstVertex, auto.FirstVertexInRegister));
+        Assert.Equal((2u, false, 0), (auto.FirstInstance, auto.FirstInstanceInRegister, auto.StartInstanceUserData));
         Assert.Equal(3, runner.Host.IndexedDraws.Count);
-        Assert.All(runner.Host.IndexedDraws, draw => Assert.Equal((0ul, 0u, true, -1),
-            (draw.IndirectArgumentsAddress, draw.FirstInstance, draw.FirstInstanceInRegister, draw.StartInstanceUserData)));
+        var indexed = runner.Host.IndexedDraws;
+        Assert.Equal((Arguments + 16, 0u, false, 2),
+            (indexed[0].IndirectArgumentsAddress, indexed[0].FirstInstance, indexed[0].FirstInstanceInRegister, indexed[0].StartInstanceUserData));
+        Assert.Equal((0ul, 0u, true, -1),
+            (indexed[1].IndirectArgumentsAddress, indexed[1].FirstInstance, indexed[1].FirstInstanceInRegister, indexed[1].StartInstanceUserData));
+        // Byte indices have no GPU index range, so the arguments are read; the start instance still goes to the draw.
+        Assert.Equal((0ul, 1u, false, 1),
+            (indexed[2].IndirectArgumentsAddress, indexed[2].FirstInstance, indexed[2].FirstInstanceInRegister, indexed[2].StartInstanceUserData));
         var shader = runner.Interpreter.Registers.Shader;
-        Assert.Equal((2u, 1u, 1u, 1u, 1u), (shader[gs0], shader[gs0 + 1], shader[gs0 + 2], shader[gs0 + 3], shader[gs0 + 9]));
+        Assert.False(shader.ContainsKey(gs0) || shader.ContainsKey(gs0 + 1) || shader.ContainsKey(gs0 + 2));
+        Assert.Equal((1u, 1u), (shader[gs0 + 3], shader[gs0 + 9]));
     }
 
     [Fact]
