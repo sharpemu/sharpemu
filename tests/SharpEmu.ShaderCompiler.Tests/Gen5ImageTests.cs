@@ -428,10 +428,11 @@ public sealed class Gen5ImageTests
             instructions,
             item => item.Opcode == operation);
         var coordinateId = imageOperation.Operands[coordinateOperand];
+        // A fetch from an array ends its coordinates with the clamped layer.
         var coordinate = Assert.Single(
             instructions,
             item =>
-                item.Opcode == SpirvOp.CompositeConstruct &&
+                item.Opcode is SpirvOp.CompositeConstruct or SpirvOp.CompositeInsert &&
                 item.Operands.Length >= 2 &&
                 item.Operands[1] == coordinateId);
         AssertVectorTypeWidth(

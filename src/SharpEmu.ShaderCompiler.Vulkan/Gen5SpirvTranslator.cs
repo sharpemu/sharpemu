@@ -6406,6 +6406,10 @@ public static partial class Gen5SpirvTranslator
                         image,
                         0,
                         coordinateComponentCount);
+                    if (resource.Arrayed)
+                    {
+                        coordinates = ClampFetchLayer(resource, fetchedImage, coordinates, coordinateComponentCount);
+                    }
                     if (resource.Multisampled)
                     {
                         var sample = LoadImageIntegerAddress(
@@ -7451,6 +7455,23 @@ public static partial class Gen5SpirvTranslator
                 SpirvOp.CompositeConstruct,
                 ImageIntegerCoordinateType(componentCount),
                 components);
+        }
+
+        // The hardware clamps the slice of an image read to the T#'s last layer, while Vulkan fetches zero past a view's
+        // last layer. A 2D texture an array read is bound to (ResourceMaterializer.SampledArrayRead) is a one-layer view,
+        // so a fetch with a nonzero slice reads its only layer, as on the hardware.
+        private uint ClampFetchLayer(SpirvImageResource resource, uint image, uint coordinates, uint componentCount)
+        {
+            var vectorType = ImageIntegerCoordinateType(componentCount);
+            var size = resource.Multisampled
+                ? _module.AddInstruction(SpirvOp.ImageQuerySize, vectorType, image)
+                : _module.AddInstruction(SpirvOp.ImageQuerySizeLod, vectorType, image, UInt(0));
+            var layerComponent = componentCount - 1;
+            var layers = Bitcast(_uintType, _module.AddInstruction(SpirvOp.CompositeExtract, _intType, size, layerComponent));
+            var layer = Bitcast(_uintType, _module.AddInstruction(SpirvOp.CompositeExtract, _intType, coordinates, layerComponent));
+            var lastLayer = _module.AddInstruction(SpirvOp.ISub, _uintType, layers, UInt(1));
+            var clamped = Ext(38, _uintType, layer, lastLayer);
+            return _module.AddInstruction(SpirvOp.CompositeInsert, vectorType, Bitcast(_intType, clamped), coordinates, layerComponent);
         }
 
         private uint BuildImageOffset(

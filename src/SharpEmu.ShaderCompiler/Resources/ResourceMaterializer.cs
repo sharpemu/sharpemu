@@ -1265,7 +1265,7 @@ public static partial class ResourceMaterializer
     // other field of the record) is not something it can sample, so a shared selector reads it as null.
     private static bool SamplesAs(ReadOnlySpan<uint> descriptor, ImageResource image)
     {
-        var dimension = DescriptorDimension(descriptor, image.Dimension);
+        var dimension = DescriptorDimension(descriptor, image);
         return dimension == image.Dimension ||
             image.Dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray &&
             dimension is ImageDimension.Dim2D or ImageDimension.Dim2DArray;
@@ -1696,8 +1696,17 @@ public static partial class ResourceMaterializer
 
     // ---- specialization ----
 
-    private static ImageDimension DescriptorDimension(ReadOnlySpan<uint> descriptor, ImageDimension requested)
+    // A sampled image an array instruction reads (its dimension, a cube one's too, is Dim2DArray) is compiled as an array
+    // whatever its T# holds: a 2D texture or a null descriptor is bound as a one-layer array view, whose layer the
+    // sampler clamps to its only one, as the hardware clamps the slice to the T#'s layers. The address operands are
+    // those of an array read either way, so the LOD or mip after the slice is read where the instruction puts it, and a
+    // pixel shader that reads both kinds of texture through one instruction compiles once.
+    private static bool SampledArrayRead(ImageResource image) =>
+        image.ResourceClass != ImageResourceClass.Storage && image.Dimension == ImageDimension.Dim2DArray;
+
+    private static ImageDimension DescriptorDimension(ReadOnlySpan<uint> descriptor, ImageResource image)
     {
+        var requested = image.Dimension;
         var isArray = requested is ImageDimension.Dim1DArray or ImageDimension.Dim2DArray or ImageDimension.Dim2DMsaaArray;
         return GuestImageFormat.ImageTypeOf(descriptor) switch
         {
@@ -1707,7 +1716,7 @@ public static partial class ResourceMaterializer
             GuestImageFormat.ImageTypeCube => ImageDimension.Dim2DArray,
             GuestImageFormat.ImageType2DArray => isArray ? ImageDimension.Dim2DArray : ImageDimension.Dim2D,
             GuestImageFormat.ImageType2DMsaaArray => isArray ? ImageDimension.Dim2DMsaaArray : ImageDimension.Dim2DMsaa,
-            GuestImageFormat.ImageType2D => ImageDimension.Dim2D,
+            GuestImageFormat.ImageType2D => SampledArrayRead(image) ? ImageDimension.Dim2DArray : ImageDimension.Dim2D,
             GuestImageFormat.ImageType2DMsaa => ImageDimension.Dim2DMsaa,
             _ => ImageDimension.Unknown,
         };
@@ -1920,13 +1929,13 @@ public static partial class ResourceMaterializer
                     NumericClass = baseImage.Atomic64
                         ? ImageNumericClass.Uint64
                         : baseImage.Atomic ? baseImage.NumericClass : ImageNumericClass.Float,
-                    Dimension = ImageDimension.Dim2D,
+                    Dimension = SampledArrayRead(baseImage) ? ImageDimension.Dim2DArray : ImageDimension.Dim2D,
                     Cube = false,
                 };
                 continue;
             }
 
-            var dimension = DescriptorDimension(descriptor, baseImage.Dimension);
+            var dimension = DescriptorDimension(descriptor, baseImage);
             if (dimension == ImageDimension.Unknown)
             {
                 return Fail(
@@ -1984,7 +1993,7 @@ public static partial class ResourceMaterializer
                 images[index] = image with
                 {
                     NumericClass = ImageNumericClass.Float,
-                    Dimension = ImageDimension.Dim2D,
+                    Dimension = SampledArrayRead(baseImage) ? ImageDimension.Dim2DArray : ImageDimension.Dim2D,
                     Cube = false,
                 };
                 continue;

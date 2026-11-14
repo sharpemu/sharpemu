@@ -572,7 +572,7 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
     [InlineData(0x80000000u, true, 91u)]
     [InlineData(1u, false, 91u)]
     [InlineData(0x80000000u, false, 37u)]
-    public void MixedImageDimensionsSelectTheirOwnBinding(uint mask, bool arrayFirst, uint expected)
+    public void MixedImageDimensionsReadTheirOwnTexture(uint mask, bool arrayFirst, uint expected)
     {
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan)) return;
@@ -585,7 +585,10 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
         var views = new DescriptorImageInfo[images.Length];
         for (var index = 0; index < images.Length; index++)
         {
-            var array = request.Resources.Info.Images[index].Dimension == ImageDimension.Dim2DArray;
+            // The T# says what the texture holds; the module reads a 2D one, whose only layer it reads at slice 1, as a
+            // one-layer array.
+            var array = snapshot.Images[index][3] >> 28 == 13;
+            var arrayView = request.Resources.Info.Images[index].Dimension == ImageDimension.Dim2DArray;
             var description = Describe((ulong)index * 0x10000, Format.R32Uint, GuestPixelFormat.Bits32UInt, 1, 1, 1);
             description.Resources = new SubresourceCount(1, array ? 2u : 1u);
             images[index] = harness.CreateImage(description);
@@ -596,7 +599,7 @@ public sealed class LayoutImageShaderTests(HeadlessVulkanFixture fixture, ITestO
                 ImageView = images[index].GetOrCreateView(ImageViewDescription.Default with
                 {
                     Format = Format.R32Uint,
-                    Type = array ? ImageViewType.Type2DArray : ImageViewType.Type2D,
+                    Type = arrayView ? ImageViewType.Type2DArray : ImageViewType.Type2D,
                     LayerCount = description.Resources.Layers,
                 }),
                 ImageLayout = ImageLayout.General,
