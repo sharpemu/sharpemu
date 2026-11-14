@@ -16,8 +16,11 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
 {
     private readonly HeadlessVulkan? _vulkan = fixture.Vulkan;
 
-    private static void Attach(CacheHarness harness, HeadlessVulkan vulkan) =>
+    private static void Attach(CacheHarness harness, HeadlessVulkan vulkan, bool eagerReadbacks = true)
+    {
         harness.Cache.AsyncReadback = new VulkanAsyncReadback(vulkan.DeviceInfo, harness.Scheduler, vulkan.Queue, vulkan.QueueFamily);
+        harness.Cache.EagerReadbacksEnabled = eagerReadbacks;
+    }
 
     private static void Detach(CacheHarness harness) => harness.Worker.Run(() =>
     {
@@ -140,6 +143,31 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
         QueueRead(harness, address);
 
         Assert.Equal(1, harness.Cache.EagerReadbacksUsed);
+        Assert.False(harness.Cache.HasGpuDirtyBytes(address, 0x100));
+        Assert.Equal(0x02020202u, BitConverter.ToUInt32(harness.Read(address + 0x40, 4)));
+        Detach(harness);
+        harness.Shutdown();
+    }
+
+    // Eager readbacks are off by default: a GPU write into a hot window starts none, and the next read still lands the
+    // newest bytes through its own download.
+    [Fact]
+    public void AHotWindowIsNotReadAheadUnlessEagerReadbacksAreEnabled()
+    {
+        if (_vulkan is null || !GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        using var fatal = new FatalScope();
+        Assert.False(harness.Cache.EagerReadbacksEnabled);
+        Attach(harness, _vulkan, eagerReadbacks: false);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        GpuWrite(harness, address, 0x01010101);
+        QueueRead(harness, address);
+
+        GpuWrite(harness, address, 0x02020202);
+        SubmitBatch(harness);
+        Assert.Equal(0, harness.Cache.EagerReadbacksStarted);
+        QueueRead(harness, address);
+
         Assert.False(harness.Cache.HasGpuDirtyBytes(address, 0x100));
         Assert.Equal(0x02020202u, BitConverter.ToUInt32(harness.Read(address + 0x40, 4)));
         Detach(harness);

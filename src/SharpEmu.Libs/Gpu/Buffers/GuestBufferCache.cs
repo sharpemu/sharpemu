@@ -1760,6 +1760,11 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     private readonly record struct HotWindow(ulong Address, ulong Size, long LastHit, int Strikes = 0, long MutedUntil = 0);
 
+    // Eager readbacks are off unless SHARPEMU_EAGER_READBACKS=1: the CPU consumes few of them, while each still ends
+    // rendering early to flush its batch and downloads its whole window.
+    internal bool EagerReadbacksEnabled { get; set; } =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_EAGER_READBACKS"), "1", StringComparison.Ordinal);
+
     internal long EagerReadbacksStarted { get; private set; }
 
     internal long EagerReadbacksUsed { get; private set; }
@@ -1808,7 +1813,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     private void NoteHotWindowWrite(ulong guestAddress, ulong size)
     {
-        if (_hotWindows.Count == 0 || size == 0)
+        if (!EagerReadbacksEnabled || _hotWindows.Count == 0 || size == 0)
         {
             return;
         }
