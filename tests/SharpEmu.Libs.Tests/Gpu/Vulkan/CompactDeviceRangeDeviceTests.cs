@@ -17,6 +17,7 @@ namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 // only. S_LOAD_DWORDX8 starts 20 bytes before a page end, so dwords 0-4 lie in the first page and 5-7 in the next;
 // BUFFER_LOAD_DWORDX4 through a run-time V# does the same per lane at 4-byte steps. With the next page mapped every dword
 // reads its bytes; without it the dwords there read zero and its page is reported missing.
+[Collection(SharedDeviceLoadState.Name)]
 public sealed class CompactDeviceRangeDeviceTests(HeadlessVulkanFixture fixture, ITestOutputHelper output) : IClassFixture<HeadlessVulkanFixture>
 {
     private const ulong PageSize = Gen5SpirvTranslator.DeviceAddressPageSize;
@@ -28,9 +29,11 @@ public sealed class CompactDeviceRangeDeviceTests(HeadlessVulkanFixture fixture,
     private const uint ResultBytes = Lanes * 64;
 
     [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void RangesAcrossAPageEndReadEachDwordFromItsPage(bool secondPageMapped)
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public void RangesAcrossAPageEndReadEachDwordFromItsPage(bool secondPageMapped, bool sharedLoads)
     {
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
@@ -67,7 +70,19 @@ public sealed class CompactDeviceRangeDeviceTests(HeadlessVulkanFixture fixture,
             [new(12, 14, 24, 14, 16, [new ShaderCallTarget(0x2000, 1, function)])]);
         var (plan, resources, layout) = Prepare(program);
         var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = Lanes, ThreadCountX = Lanes, ScratchDwords = 32 };
-        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var previous = Gen5SpirvTranslator.SharedDeviceLoads;
+        Gen5SpirvShader shader;
+        string error;
+        try
+        {
+            Gen5SpirvTranslator.SharedDeviceLoads = sharedLoads;
+            Gen5SpirvTranslator.SharedDeviceLoads = sharedLoads;
+            Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out shader, out error), error);
+        }
+        finally
+        {
+            Gen5SpirvTranslator.SharedDeviceLoads = previous;
+        }
 
         var first = ImageTestHarness.Pattern((int)PageSize, 41);
         var second = ImageTestHarness.Pattern((int)PageSize, 42);

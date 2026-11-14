@@ -505,6 +505,7 @@ public static partial class Gen5SpirvTranslator
                 // After every function that may call it.
                 EmitTypedElementDecoder();
                 EmitCallRecordSearch();
+                EmitDeviceDwordFunction();
 
                 var model = _stage switch
                 {

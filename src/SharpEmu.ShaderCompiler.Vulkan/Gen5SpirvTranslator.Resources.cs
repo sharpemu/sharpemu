@@ -1170,6 +1170,12 @@ public static partial class Gen5SpirvTranslator
         // Loads one aligned dword through a device address; an unmapped page reads zero.
         private uint LoadDeviceDword(uint address64)
         {
+            if (UsesSharedDeviceLoads)
+            {
+                var always = _module.ConstantBool(true);
+                return CallDeviceDword(address64, always, always);
+            }
+
             var (pointer, valid) = ResolveDeviceAddress(address64);
             if (_compactMemoryAccess)
             {
@@ -1185,6 +1191,11 @@ public static partial class Gen5SpirvTranslator
         // As above when allowed, in a compact program; otherwise the dword reads zero and reports no fault.
         private uint LoadDeviceDword(uint address64, uint allowed)
         {
+            if (UsesSharedDeviceLoads)
+            {
+                return CallDeviceDword(address64, allowed, allowed);
+            }
+
             var (pointer, valid) = ResolveCompactDeviceAddress(address64, allowed);
             return LoadMappedDeviceDword(pointer, LogicalAnd(allowed, valid));
         }
@@ -1193,7 +1204,9 @@ public static partial class Gen5SpirvTranslator
         {
             var (pointer, valid) = ResolveDeviceAddress(address64);
             EmitConditional(LogicalAnd(allowed, valid), () =>
-                _module.AddStatement(SpirvOp.Store, DeviceWordPointer(pointer), value, 2u, 4u));
+            {
+                _module.AddStatement(SpirvOp.Store, DeviceWordPointer(pointer), value, 2u, 4u);
+            });
         }
 
         private void StoreDeviceMaskedWord(uint address64, uint value, uint mask, uint allowed)
@@ -1397,6 +1410,20 @@ public static partial class Gen5SpirvTranslator
             if (count == 1)
             {
                 return [LoadDeviceDword(address64, allowed[0])];
+            }
+
+            // Through the shared function, one call per dword in order: the last call that reports a missing page leaves it,
+            // as the second page's report after the first page's does below.
+            if (UsesSharedDeviceLoads)
+            {
+                var called = new uint[count];
+                for (var dword = 0; dword < count; dword++)
+                {
+                    called[dword] = CallDeviceDword(dword == 0 ? address64 : IAdd64(address64, ULong((ulong)dword * sizeof(uint))),
+                        allowed[dword], allowed[dword]);
+                }
+
+                return called;
             }
 
             // The page offset of the first dword decides which dwords lie in its page: dword i does when
@@ -2256,6 +2283,12 @@ public static partial class Gen5SpirvTranslator
 
         private uint LoadBoundedDeviceDword(uint address64, uint inRange)
         {
+            // The compact path below reports a missing page whether or not the dword is in range.
+            if (UsesSharedDeviceLoads)
+            {
+                return CallDeviceDword(address64, inRange, _module.ConstantBool(true));
+            }
+
             var (pointer, valid) = ResolveDeviceAddress(address64);
             if (_compactMemoryAccess)
             {
