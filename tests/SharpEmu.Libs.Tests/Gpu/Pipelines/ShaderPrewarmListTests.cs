@@ -88,8 +88,10 @@ public sealed class ShaderPrewarmListTests : IDisposable
         Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
     }
 
-    [Fact]
-    public void OlderFormatRecordsAreRejectedBeforeAppending()
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(3u)]
+    public void OlderFormatRecordsAreRejectedBeforeAppending(uint version)
     {
         using (var list = Open())
             CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
@@ -97,7 +99,7 @@ public sealed class ShaderPrewarmListTests : IDisposable
         using (var stream = new FileStream(path, FileMode.Open, FileAccess.Write))
         {
             stream.Position = sizeof(uint);
-            stream.Write(BitConverter.GetBytes(1u));
+            stream.Write(BitConverter.GetBytes(version));
         }
         using (var list = Open())
         {
@@ -283,6 +285,66 @@ public sealed class ShaderPrewarmListTests : IDisposable
         Assert.Equal(2, identities.Length);
         Assert.NotEqual(identities[0], identities[1]);
         Assert.Equal(identities[0], ShaderPrewarmList.Identity(reloaded.LoadedComputes()[0].Record));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void RecordedSpecializationPreservesAliasesAndMipStatistics(int changedField)
+    {
+        using (var list = Open())
+            CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+
+        ResourceSpecialization expected;
+        ulong baselineIdentity;
+        ulong changedIdentity;
+        using (var list = Open())
+        {
+            var (seed, code) = Assert.Single(list.LoadedComputes());
+            var baseline = seed.Specialization.Clone();
+            var image = new ImageSpecialization(ImageNumericClass.Float, ImageDimension.Dim2D,
+                1, 0, DescriptorConstants.IdentityDestinationSelect, DescriptorConstants.NoIndex, 0, 0, false);
+            baseline.Images.Add(image);
+            baseline.Images.Add(image);
+            expected = baseline.Clone();
+            switch (changedField)
+            {
+                case 0: expected.ImageDescriptorGroups.AddRange([0u, 0u]); break;
+                case 1: expected.SamplerDescriptorGroups.AddRange([0u, 0u]); break;
+                case 2: expected.Images[0] = expected.Images[0] with { MipStatistics = true }; break;
+            }
+
+            ComputePrewarmRecord WithSpecialization(ResourceSpecialization specialization) => new()
+            {
+                Hash = seed.Hash,
+                CodeSize = seed.CodeSize,
+                Address = seed.Address,
+                ContinuationAddressOffset = seed.ContinuationAddressOffset,
+                UserDataBase = seed.UserDataBase,
+                UserDataCount = seed.UserDataCount,
+                PushDataCursor = seed.PushDataCursor,
+                Info = seed.Info,
+                SystemRegisters = seed.SystemRegisters,
+                Specialization = specialization,
+            };
+
+            var first = WithSpecialization(baseline);
+            var second = WithSpecialization(expected);
+            baselineIdentity = ShaderPrewarmList.Identity(first);
+            changedIdentity = ShaderPrewarmList.Identity(second);
+            Assert.NotEqual(baselineIdentity, changedIdentity);
+            list.RecordCompute(code, first);
+            list.RecordCompute(code, second);
+            list.RecordCompute(code, second);
+        }
+
+        using var reloaded = Open();
+        var loaded = reloaded.LoadedComputes();
+        Assert.Equal(3, loaded.Count); // Seed plus the two distinct variants; duplicate remains deduplicated.
+        Assert.Contains(loaded, item => ShaderPrewarmList.Identity(item.Record) == baselineIdentity);
+        var restored = Assert.Single(loaded, item => ShaderPrewarmList.Identity(item.Record) == changedIdentity);
+        Assert.True(expected.Equals(restored.Record.Specialization));
     }
 
     [Fact]
