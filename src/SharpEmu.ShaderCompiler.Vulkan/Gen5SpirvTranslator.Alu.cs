@@ -5252,13 +5252,12 @@ public static partial class Gen5SpirvTranslator
                 _module.AddInstruction(SpirvOp.UGreaterThanEqual, _boolType, bits, UInt(0x4F80_0000)),
                 UInt(uint.MaxValue),
                 converted);
-            // Negative values, including negative NaN, have the sign bit set.
-            converted = _module.AddInstruction(
+            // Above +Inf as unsigned bits: a positive NaN or a negative value (negative NaN and -0 included).
+            return _module.AddInstruction(
                 SpirvOp.Select, _uintType,
-                _module.AddInstruction(SpirvOp.UGreaterThanEqual, _boolType, bits, UInt(0x8000_0000)),
+                _module.AddInstruction(SpirvOp.UGreaterThan, _boolType, bits, UInt(0x7F80_0000)),
                 UInt(0),
                 converted);
-            return _module.AddInstruction(SpirvOp.Select, _uintType, IsNanBits(value), UInt(0), converted);
         }
 
         private uint ConvertDoubleToIntegerSaturated(uint value, bool signed)
