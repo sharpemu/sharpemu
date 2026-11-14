@@ -84,6 +84,9 @@ internal static unsafe partial class VulkanVideoPresenter
         StableImageDescriptorLimits IShaderPipelineHost.ComputeImageDescriptorLimits =>
             ShaderDescriptorLimits.ComputeImageLimits(_shaderDescriptorLimits);
 
+        StableImageDescriptorLimits IShaderPipelineHost.GraphicsImageDescriptorLimits =>
+            ShaderDescriptorLimits.GraphicsImageLimits(_shaderDescriptorLimits);
+
         bool IShaderPipelineHost.TryCopyImage(in ImageRequest source, in ImageRequest destination) =>
             _imageCache.TryCopyImage(source, destination);
         bool IShaderPipelineHost.TableBlocks => true;

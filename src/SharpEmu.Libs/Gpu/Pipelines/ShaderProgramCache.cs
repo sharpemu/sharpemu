@@ -1491,6 +1491,7 @@ internal sealed partial class ShaderProgramCache
                     _ => 32u,
                 }, dynamicUserData: options.VertexInfo?.StartInstanceUserData ?? -1,
                 bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: _host.SupportsBindlessHeap,
+                stableImageLimits: StableImageLimits(_host, source.Stage),
                 deviceRecordCounts: DeviceRecordCountPlan.Enabled && options.DeviceRecordCounts,
                 normalizeBufferDescriptor: source.Registered.Frontend?.NormalizeBufferDescriptor,
                 normalizeImageDescriptor: ImageNormalizer(source.Registered.Frontend),
@@ -2114,6 +2115,10 @@ internal sealed partial class ShaderProgramCache
         }
     }
 
+    // The budget within which a program's images bind one per slot, whatever descriptors a draw repeats (StableImageBindings).
+    private static StableImageDescriptorLimits StableImageLimits(IShaderPipelineHost host, ShaderStage stage) =>
+        stage == ShaderStage.Compute ? host.ComputeImageDescriptorLimits : host.GraphicsImageDescriptorLimits;
+
     private static BindingLayout AllocateLayout(Gen5ShaderProgram program, ShaderResourcePlan plan, SpecializedResourceInfo resources,
         uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits, bool usesMeshDrawParameters = false,
         bool usesBufferLengths = false, bool usesTessellationData = false, bool tableBlocks = false) =>
@@ -2252,7 +2257,7 @@ internal sealed partial class ShaderProgramCache
 
             var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, record.Hash, record.UserDataBase, record.UserDataCount,
                 waveSize: 32, bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: host.SupportsBindlessHeap,
-                stableImageLimits: host.ComputeImageDescriptorLimits,
+                stableImageLimits: host.GraphicsImageDescriptorLimits,
                 deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts);
             var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor, false,
@@ -2320,7 +2325,7 @@ internal sealed partial class ShaderProgramCache
                 fetch?.Loads.Select(load => load.Pc).ToHashSet(), waveSize: record.Mesh ? record.MeshInfo!.Geometry.WaveSize : 32u,
                 dynamicUserData: record.VertexInfo?.StartInstanceUserData ?? -1,
                 bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: host.SupportsBindlessHeap,
-                stableImageLimits: host.ComputeImageDescriptorLimits,
+                stableImageLimits: host.GraphicsImageDescriptorLimits,
                 deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts);
             var resources = ResourceMaterializer.ApplyTo(plan, record.Specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor, false,

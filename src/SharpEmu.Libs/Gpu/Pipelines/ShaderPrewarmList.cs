@@ -347,7 +347,9 @@ internal sealed partial class ShaderPrewarmList : IDisposable
     // Kinds 5 and 6 (vertex prewarm records): ShaderPrewarmList.Vertex.cs.
     private const int LinkedCompilePayloadBytes = sizeof(ulong) + 1 + sizeof(long);
     private const uint ExtensionMagic = 0x58504553;
-    private const uint ExtensionFormatVersion = 1;
+    // 2: graphics programs bind their images one per slot when the layout fits, so the graphics records of version 1
+    // would not translate as sessions now do; a side file of another version starts empty.
+    private const uint ExtensionFormatVersion = 2;
     private const int ExtensionHeaderBytes = 2 * sizeof(uint);
     private const int RecordHeaderBytes = sizeof(uint) + sizeof(ulong);
     // The pipeline file's kinds besides CodeKind, a numbering of its own. 2: stage records hold their resource

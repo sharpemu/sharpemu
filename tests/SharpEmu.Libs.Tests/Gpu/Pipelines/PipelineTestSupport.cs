@@ -55,6 +55,8 @@ internal class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public StableImageDescriptorLimits ComputeImageDescriptorLimits { get; set; }
 
+    public StableImageDescriptorLimits GraphicsImageDescriptorLimits { get; set; }
+
     public bool ComputeWave64Supported => true;
 
     public bool GraphicsSubgroupOperationsEnabled => true;

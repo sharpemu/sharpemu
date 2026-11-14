@@ -33,6 +33,26 @@ public sealed unsafe class ShaderDescriptorLimitsTests
         Assert.Equal(DescriptorHeap.PoolCapacity.StorageImages, budget.StorageImages);
     }
 
+    // The two stages of a pipeline built whole share one set and one pool, so each takes half of both.
+    [Fact]
+    public void StableGraphicsBudgetHalvesTheSetAndPoolLimits()
+    {
+        var limits = new PhysicalDeviceLimits
+        {
+            MaxPerStageDescriptorSampledImages = 16, MaxDescriptorSetSampledImages = 24,
+            MaxPerStageDescriptorStorageImages = 4, MaxDescriptorSetStorageImages = 64,
+            MaxPerStageDescriptorSamplers = uint.MaxValue, MaxDescriptorSetSamplers = uint.MaxValue,
+            MaxPerStageDescriptorStorageBuffers = uint.MaxValue, MaxDescriptorSetStorageBuffers = uint.MaxValue,
+            MaxPerStageResources = 27,
+        };
+        var budget = ShaderDescriptorLimits.GraphicsImageLimits(limits);
+        Assert.Equal(12u, budget.SampledImages);
+        Assert.Equal(4u, budget.StorageImages);
+        Assert.Equal(DescriptorHeap.PoolCapacity.Samplers / 2, budget.Samplers);
+        Assert.Equal(DescriptorHeap.PoolCapacity.StorageBuffers / 2, budget.StorageBuffers);
+        Assert.Equal(27u, budget.Resources);
+    }
+
     [Fact]
     public void CountsPhysicalDescriptorsAcrossBindingsAndStages()
     {

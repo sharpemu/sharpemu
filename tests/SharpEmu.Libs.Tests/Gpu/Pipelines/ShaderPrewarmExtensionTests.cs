@@ -92,6 +92,29 @@ public sealed class ShaderPrewarmExtensionTests : IDisposable
     }
 
     [Fact]
+    public void ASideFileOfAnotherVersionStartsEmpty()
+    {
+        var (code, record) = Pixel();
+        using (var list = Open())
+        {
+            list.RecordPixel(code, record);
+            list.RecordLinkedCompile(0x1234, slow: true, milliseconds: 90_000);
+        }
+
+        var bytes = File.ReadAllBytes(ExtensionPath);
+        BitConverter.TryWriteBytes(bytes.AsSpan(sizeof(uint), sizeof(uint)), 1u);
+        File.WriteAllBytes(ExtensionPath, bytes);
+        using (var reloaded = Open())
+        {
+            Assert.Empty(reloaded.LoadedGraphicsPrewarm());
+            Assert.False(reloaded.IsSlowLinkedCompile(0x1234));
+        }
+
+        Assert.Equal(ExtensionHeaderBytes, new FileInfo(ExtensionPath).Length);
+        Assert.Equal(2u, BitConverter.ToUInt32(File.ReadAllBytes(ExtensionPath), sizeof(uint)));
+    }
+
+    [Fact]
     public void LinkedCompileOutcomesPersist_AndTheLastOneWins()
     {
         const ulong slow = 0xE6D7_6D24_F59F_8015;

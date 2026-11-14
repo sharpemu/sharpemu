@@ -21,6 +21,20 @@ internal static class ShaderDescriptorLimits
             limits.MaxPerStageResources);
     }
 
+    // A graphics stage shares its set and pool with the pipeline's other stage when the pipeline is built whole, so each
+    // stage takes at most half the per-set and pool budget (and its per-stage limits): any two stages then fit together.
+    public static StableImageDescriptorLimits GraphicsImageLimits(PhysicalDeviceLimits limits)
+    {
+        var pool = DescriptorHeap.PoolCapacity;
+        return new(
+            Math.Min(limits.MaxPerStageDescriptorSampledImages, Math.Min(limits.MaxDescriptorSetSampledImages, pool.SampledImages) / 2),
+            Math.Min(limits.MaxPerStageDescriptorStorageImages, Math.Min(limits.MaxDescriptorSetStorageImages, pool.StorageImages) / 2),
+            Math.Min(limits.MaxPerStageDescriptorSamplers, Math.Min(limits.MaxDescriptorSetSamplers, pool.Samplers) / 2),
+            Math.Min(limits.MaxPerStageDescriptorStorageBuffers,
+                Math.Min(limits.MaxDescriptorSetStorageBuffers, pool.StorageBuffers) / 2),
+            limits.MaxPerStageResources);
+    }
+
     public static void Validate(IReadOnlyList<DescriptorSetLayoutBinding> bindings, PhysicalDeviceLimits limits)
     {
         ValidateScope(bindings, 0, limits, false);

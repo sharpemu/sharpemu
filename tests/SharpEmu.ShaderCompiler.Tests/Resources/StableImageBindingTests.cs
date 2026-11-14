@@ -43,10 +43,20 @@ public sealed class StableImageBindingTests
         Assert.Equal(expected, plan.StableImageBindings);
     }
 
-    [Fact]
-    public void GraphicsDynamicMipAndIndirectPlansStayCompact()
+    // A graphics stage binds its images one per slot within the budget its caller passes for that stage.
+    [Theory]
+    [InlineData(ShaderStage.Pixel)]
+    [InlineData(ShaderStage.Vertex)]
+    public void AGraphicsStageFitsItsOwnBudget(ShaderStage stage)
     {
-        Assert.False(Plan(Limits, ShaderStage.Pixel).StableImageBindings);
+        Assert.True(Plan(Limits, stage).StableImageBindings);
+        Assert.False(Plan(Limits with { SampledImages = 15 }, stage).StableImageBindings);
+        Assert.False(Plan(default, stage).StableImageBindings);
+    }
+
+    [Fact]
+    public void DynamicMipAndIndirectPlansStayCompact()
+    {
         var mip = ShaderResourcePlan.Extract(ImageProgram(1, "ImageStoreMip"), ShaderStage.Compute, Hash, 0, 2,
             stableImageLimits: Limits);
         Assert.Equal(ImageMipMode.DynamicStorage, Assert.Single(mip.Info.Images).MipMode);
@@ -61,6 +71,7 @@ public sealed class StableImageBindingTests
     public void StorageImagesUseTheirOwnLimit()
     {
         var program = ImageProgram(2, "ImageStore");
+        // The budget leaves no room for the device-address buffers that device scalar data reads would add.
         ShaderResourcePlan ExtractWith(uint storage) => ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 2,
             stableImageLimits: new(0, storage, 0, 3, 5), scalarDataOnDevice: false);
         Assert.True(ExtractWith(2).StableImageBindings);

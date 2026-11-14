@@ -11,9 +11,10 @@ public readonly record struct StableImageDescriptorLimits(
     internal bool Fits(ShaderResourcePlan plan)
     {
         var info = plan.Info;
+        // The caller passes the stage's own budget: graphics stages share a set when a pipeline is built whole
         // (ShaderDescriptorLimits.GraphicsImageLimits). Linked, heap and candidate layouts need a separate
         // bound on their full demand; dynamic storage images can add a descriptor for every mip.
-        if (Resources == 0 || plan.Stage != ShaderStage.Compute || info.Images.Count == 0 ||
+        if (Resources == 0 || info.Images.Count == 0 ||
             plan.RequiresSpecializationMemory || plan.IndirectImages.Count != 0 || plan.BufferCandidateTables.Count != 0 ||
             info.UsesBindlessHeap || info.UsesCallRecords || info.UsesCallMarks ||
             Gen5ShaderCallLinker.IsLinked(plan.Graph.Program) ||
