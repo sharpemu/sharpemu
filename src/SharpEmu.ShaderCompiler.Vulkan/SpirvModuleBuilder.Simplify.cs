@@ -16,7 +16,17 @@ public sealed partial class SpirvModuleBuilder
     private readonly Dictionary<uint, ulong> _wideConstantValues = [];
     private readonly Dictionary<uint, uint> _floatConstantBits = [];
     private readonly Dictionary<uint, Definition> _definitions = [];
-    private readonly Dictionary<InstructionKey, uint> _blockValues = [];
+    // The current block's expressions. A snapshot (BlockState) and the blocks that inherit all of it share one table: it
+    // is copied before its first change and replaced instead of cleared, so neither a branch nor an inheriting block
+    // entry copies it.
+    private ExpressionTable _blockValues = new();
+    private bool _blockValuesShared;
+    // A copy of a shared table holds all of its entries with the same values: a shared table never changes again, and a
+    // copy only gains entries. A table is cleared only while unshared, so no other table names it as a base.
+    private const int MaxExpressionBases = 32;
+    private int _blockValuesSerial;
+    private int[] _blockValuesBases = [];
+    private int _nextExpressionSerial;
     private readonly HashSet<uint> _localVariables = [];
     private readonly HashSet<uint> _escapedVariables = [];
     private readonly Dictionary<uint, uint> _elementBases = [];
@@ -49,7 +59,59 @@ public sealed partial class SpirvModuleBuilder
 
     private readonly record struct Definition(SpirvOp Opcode, uint Type, uint[] Operands);
 
-    private sealed record BlockState(Dictionary<uint, uint> Values, Dictionary<InstructionKey, uint> Expressions);
+    // ExpressionSerial names the expression table; ExpressionBases are the tables it was copied from, nearest first.
+    private sealed record BlockState(Dictionary<uint, uint> Values, ExpressionTable Expressions,
+        int ExpressionSerial, int[] ExpressionBases);
+
+    // A block expression table: an immutable base, shared with other tables, and the table's own entries, which never
+    // repeat a key of the base. A copy keeps the base and copies only the own entries; once those are many, the copy
+    // folds them into a new base. A table that shares an inherited table of thousands of entries copies a few.
+    private sealed class ExpressionTable
+    {
+        private const int MaxOwnEntries = 512;
+
+        private Dictionary<InstructionKey, uint>? _base;
+        private Dictionary<InstructionKey, uint> _own = [];
+
+        public int Count => (_base?.Count ?? 0) + _own.Count;
+
+        public Dictionary<InstructionKey, uint>? Base => _base;
+
+        public Dictionary<InstructionKey, uint> Own => _own;
+
+        public bool TryGetValue(InstructionKey key, out uint value) =>
+            _own.TryGetValue(key, out value) || (_base is not null && _base.TryGetValue(key, out value));
+
+        public void Set(InstructionKey key, uint value) => _own[key] = value;
+
+        public void Clear()
+        {
+            _base = null;
+            _own.Clear();
+        }
+
+        public ExpressionTable Copy()
+        {
+            if (_own.Count < MaxOwnEntries)
+            {
+                return new ExpressionTable { _base = _base, _own = new Dictionary<InstructionKey, uint>(_own) };
+            }
+
+            if (_base is null)
+            {
+                return new ExpressionTable { _base = new Dictionary<InstructionKey, uint>(_own) };
+            }
+
+            var merged = new Dictionary<InstructionKey, uint>(_base);
+            merged.EnsureCapacity(_base.Count + _own.Count);
+            foreach (var (key, value) in _own)
+            {
+                merged.Add(key, value);
+            }
+
+            return new ExpressionTable { _base = merged };
+        }
+    }
 
     private readonly struct InstructionKey : IEquatable<InstructionKey>
     {
@@ -141,7 +203,7 @@ public sealed partial class SpirvModuleBuilder
 
         var result = EmitResult(_functions, opcode, resultType, operands);
         var key = new InstructionKey(opcode, resultType, operands.ToArray());
-        _blockValues[key] = result;
+        WritableBlockValues().Set(key, result);
         _definitions[result] = new Definition(opcode, resultType, key.Operands);
         return result;
     }
@@ -197,7 +259,7 @@ public sealed partial class SpirvModuleBuilder
         {
             element = EmitResult(_functions, SpirvOp.AccessChain, resultType, operands);
             var key = new InstructionKey(SpirvOp.AccessChain, resultType, operands.ToArray());
-            _blockValues[key] = element;
+            WritableBlockValues().Set(key, element);
             _definitions[element] = new Definition(SpirvOp.AccessChain, resultType, key.Operands);
         }
 
@@ -462,7 +524,8 @@ public sealed partial class SpirvModuleBuilder
                 continue;
             }
 
-            state ??= new BlockState(new Dictionary<uint, uint>(_variableValues), new Dictionary<InstructionKey, uint>(_blockValues));
+            state ??= new BlockState(new Dictionary<uint, uint>(_variableValues), ShareBlockValues(), _blockValuesSerial,
+                _blockValuesBases);
             if (!_incomingStates.TryGetValue(target, out var incoming))
             {
                 incoming = [];
@@ -484,11 +547,24 @@ public sealed partial class SpirvModuleBuilder
         }
 
         var first = incoming[0].State;
-        foreach (var (expression, value) in first.Expressions)
+        if (incoming.Count == 1)
         {
+            // One predecessor: the block inherits every expression of its state.
+            InheritBlockValues(first);
+        }
+        else if (CommonExpressionBase(incoming) is { } common)
+        {
+            // Every incoming table is this one or a copy of it with more entries: their common expressions are its own.
+            InheritBlockValues(common);
+        }
+        else
+        {
+            if (first.Expressions.Base is { } inherited)
             {
-                _blockValues[expression] = value;
+                InheritHeldExpressions(incoming, inherited);
             }
+
+            InheritHeldExpressions(incoming, first.Expressions.Own);
         }
 
         if (!_loopHeaders.Contains(label))
@@ -505,6 +581,49 @@ public sealed partial class SpirvModuleBuilder
         }
 
         _inheritedLabels[label] = incoming.Count;
+    }
+
+    private void InheritBlockValues(BlockState state)
+    {
+        _blockValues = state.Expressions;
+        _blockValuesShared = true;
+        _blockValuesSerial = state.ExpressionSerial;
+        _blockValuesBases = state.ExpressionBases;
+    }
+
+    // The incoming state whose expression table every incoming table is or was copied from, if one is.
+    private static BlockState? CommonExpressionBase(List<(uint Block, BlockState State)> incoming)
+    {
+        var candidate = incoming[0].State;
+        foreach (var (_, state) in incoming)
+        {
+            if (state.Expressions.Count < candidate.Expressions.Count)
+            {
+                candidate = state;
+            }
+        }
+
+        foreach (var (_, state) in incoming)
+        {
+            if (state.ExpressionSerial != candidate.ExpressionSerial &&
+                Array.IndexOf(state.ExpressionBases, candidate.ExpressionSerial) < 0)
+            {
+                return null;
+            }
+        }
+
+        return candidate;
+    }
+
+    private void InheritHeldExpressions(List<(uint Block, BlockState State)> incoming, Dictionary<InstructionKey, uint> expressions)
+    {
+        foreach (var (expression, value) in expressions)
+        {
+            if (HeldByOthers(incoming, expression, value))
+            {
+                _blockValues.Set(expression, value);
+            }
+        }
     }
 
     // Whether every incoming state after the first holds the first state's expression with the same value. A loop, not a
@@ -602,7 +721,41 @@ public sealed partial class SpirvModuleBuilder
     private void ResetBlockState()
     {
         ResetMemoryState();
-        _blockValues.Clear();
+        if (_blockValuesShared)
+        {
+            _blockValues = new ExpressionTable();
+            _blockValuesShared = false;
+        }
+        else
+        {
+            _blockValues.Clear();
+        }
+
+        _blockValuesSerial = ++_nextExpressionSerial;
+        _blockValuesBases = [];
+    }
+
+    // The expression table for a snapshot: the live dictionary itself, which is copied before its next change.
+    private ExpressionTable ShareBlockValues()
+    {
+        _blockValuesShared = true;
+        return _blockValues;
+    }
+
+    private ExpressionTable WritableBlockValues()
+    {
+        if (_blockValuesShared)
+        {
+            _blockValues = _blockValues.Copy();
+            _blockValuesShared = false;
+            var bases = new int[Math.Min(_blockValuesBases.Length + 1, MaxExpressionBases)];
+            bases[0] = _blockValuesSerial;
+            Array.Copy(_blockValuesBases, 0, bases, 1, bases.Length - 1);
+            _blockValuesBases = bases;
+            _blockValuesSerial = ++_nextExpressionSerial;
+        }
+
+        return _blockValues;
     }
 
     private void NoteResultType(uint id, uint type) => _resultTypes[id] = type;
