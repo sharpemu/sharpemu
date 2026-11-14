@@ -14,7 +14,12 @@ public sealed class RuntimeValueValidator
     private readonly uint _userDataCount;
     private readonly int _tableReadCount;
     private readonly ScalarValue? _activeMask;
-    private readonly HashSet<ScalarValue> _visiting = [];
+    // The nodes on the path from the root, by depth, and the results already proved. A result is kept only when its
+    // walk went back to no node above it on the path: the cycle cut there could make it depend on the path. Walking
+    // every path through a web of selects or phis instead took exponential time.
+    private readonly Dictionary<ScalarValue, int> _path = [];
+    private readonly Dictionary<ScalarValue, bool> _known = [];
+    private int _lowestReentry = int.MaxValue;
 
     // Set when a failure traces back to a phi that isn't loop-invariant (e.g. a
     // hash-table/linear-probe bindless lookup): the value genuinely has no single
@@ -68,19 +73,35 @@ public sealed class RuntimeValueValidator
             return true;
         }
 
-        if (!_visiting.Add(value))
+        if (_known.TryGetValue(value, out var known))
         {
+            return known;
+        }
+
+        if (_path.TryGetValue(value, out var reentry))
+        {
+            _lowestReentry = Math.Min(_lowestReentry, reentry);
             return false;
         }
 
+        var depth = _path.Count;
+        var outerReentry = _lowestReentry;
+        _lowestReentry = int.MaxValue;
+        _path.Add(value, depth);
         try
         {
             var result = ValidateNode(value);
+            if (_lowestReentry >= depth)
+            {
+                _known.Add(value, result);
+            }
+
             return result;
         }
         finally
         {
-            _visiting.Remove(value);
+            _path.Remove(value);
+            _lowestReentry = Math.Min(outerReentry, _lowestReentry);
         }
     }
 

@@ -814,44 +814,17 @@ public sealed partial class ResourceTracker
 
     private static bool HasRuntimeReadKind(ScalarValue value, ScalarValueKind kind) => HasRuntimeReadKind(value, kind, []);
 
-    private static bool HasRuntimeReadKind(ScalarValue value, ScalarValueKind kind, HashSet<ScalarValue> visiting)
-    {
-        if (!visiting.Add(value))
-        {
-            return false;
-        }
+    // Both searches keep every node they have seen. The search ends at the first match, so a node seen before was
+    // either explored without one or lies on the current path. Walking it again for every path that reaches it took
+    // exponential time on the phis of a shader with many branches.
+    private static bool HasRuntimeReadKind(ScalarValue value, ScalarValueKind kind, HashSet<ScalarValue> seen) =>
+        seen.Add(value) &&
+        (value.Kind == kind || value.Operands.Any(operand => HasRuntimeReadKind(operand, kind, seen)));
 
-        try
-        {
-            return value.Kind == kind || value.Operands.Any(operand => HasRuntimeReadKind(operand, kind, visiting));
-        }
-        finally
-        {
-            visiting.Remove(value);
-        }
-    }
-
-    private static bool HasRuntimeRead(ScalarValue value, HashSet<ScalarValue> visiting)
-    {
-        if (!visiting.Add(value))
-        {
-            return false;
-        }
-
-        try
-        {
-            if (value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord)
-            {
-                return true;
-            }
-
-            return value.Operands.Any(operand => HasRuntimeRead(operand, visiting));
-        }
-        finally
-        {
-            visiting.Remove(value);
-        }
-    }
+    private static bool HasRuntimeRead(ScalarValue value, HashSet<ScalarValue> seen) =>
+        seen.Add(value) &&
+        (value.Kind is ScalarValueKind.ScalarAddressWord or ScalarValueKind.ScalarBufferWord ||
+         value.Operands.Any(operand => HasRuntimeRead(operand, seen)));
 
     // ---- dense tables ----
 

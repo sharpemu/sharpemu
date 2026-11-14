@@ -31,6 +31,122 @@ public sealed class ResourceTrackerTests
         Assert.Equal(wide, image.Atomic64);
     }
 
+    // A descriptor word that 40 branches each change on both sides is a web with 2^40 paths. Planning and evaluating
+    // it must look at each node once: walking every path did not finish.
+    [Fact]
+    public void ADescriptorWordMergedThroughManyBranchesIsPlannedQuickly()
+    {
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            // s5..s7 are loaded words; s4 starts as user data.
+            ScalarLoad(0, 0, 8, count: 4),
+            MoveScalarRegister(8, 5, 9),
+            MoveScalarRegister(12, 6, 10),
+            MoveScalarRegister(16, 7, 11),
+            MoveScalarRegister(20, 4, 2),
+        };
+        var pc = 24u;
+        for (var branch = 0; branch < 40; branch++, pc += 20)
+        {
+            // if (s3 == 0) s4 += 1; else s4 += 2;
+            instructions.Add(Sopc(pc, "SCmpEqU32", Gen5Operand.Scalar(3), Operand(0)));
+            instructions.Add(Branch(pc + 4, "SCbranchScc0", 2));
+            instructions.Add(Sop2(pc + 8, "SAddU32", 4, Gen5Operand.Scalar(4), Operand(1)));
+            instructions.Add(Branch(pc + 12, "SBranch", 1));
+            instructions.Add(Sop2(pc + 16, "SAddU32", 4, Gen5Operand.Scalar(4), Operand(2)));
+        }
+
+        instructions.Add(BufferLoad(pc, 4));
+        instructions.Add(EndProgram(pc + 8));
+        var program = Program([.. instructions]);
+
+        // The V# words s5..s7 are read at 0x1000; s2 = 0x2000 and s3 = 0, so every branch adds 1.
+        var memory = new TestWordMemory { Words = [0, 0, 16, 0] };
+        var userData = new uint[64];
+        userData[0] = 0x1000;
+        userData[2] = 0x2000;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var materialized = false;
+        Exception? failure = null;
+        var planning = new Thread(() =>
+        {
+            try
+            {
+                var plan = Extract(program);
+                materialized = ResourceMaterializer.Materialize(plan, Inputs(userData, memory.Read, memory.Read),
+                    ref snapshot, ref specialization);
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        planning.Start();
+
+        Assert.True(planning.Join(TimeSpan.FromSeconds(30)), "planning did not finish");
+        Assert.Null(failure);
+        Assert.True(materialized);
+        Assert.Equal(0x2000u + 40u, Assert.Single(snapshot.Buffers)[0]);
+    }
+
+    // Behind exec branches the same word is a web of phis, which the runtime-descriptor check walks for a memory read.
+    // A buffer base that differs per lane cannot be bound, so the plan is rejected, at once.
+    [Fact]
+    public void ADescriptorWordMergedThroughManyExecBranchesIsPlannedQuickly()
+    {
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            ScalarLoad(0, 0, 8, count: 4),
+            MoveScalarRegister(8, 5, 9),
+            MoveScalarRegister(12, 6, 10),
+            MoveScalarRegister(16, 7, 11),
+            MoveScalarRegister(20, 4, 2),
+            // One more exec branch makes s5..s7 phis too, which the check accepts as runtime words.
+            Vopc(24, "VCmpxEqU32", Operand(1), 24),
+            Branch(28, "SCbranchExecz", 3),
+            Sop2(32, "SAddU32", 5, Gen5Operand.Scalar(5), Operand(1)),
+            Sop2(36, "SAddU32", 6, Gen5Operand.Scalar(6), Operand(1)),
+            Sop2(40, "SAddU32", 7, Gen5Operand.Scalar(7), Operand(1)),
+        };
+        var pc = 44u;
+        for (var branch = 0; branch < 40; branch++, pc += 12)
+        {
+            // Lanes where v24 == 1 add 1 to s4; with none, the block is skipped.
+            instructions.Add(Vopc(pc, "VCmpxEqU32", Operand(1), 24));
+            instructions.Add(Branch(pc + 4, "SCbranchExecz", 1));
+            instructions.Add(Sop2(pc + 8, "SAddU32", 4, Gen5Operand.Scalar(4), Operand(1)));
+        }
+
+        instructions.Add(BufferLoad(pc, 4));
+        instructions.Add(EndProgram(pc + 8));
+        var program = Program([.. instructions]);
+
+        Exception? failure = null;
+        var planning = new Thread(() =>
+        {
+            try
+            {
+                Extract(program);
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        planning.Start();
+
+        Assert.True(planning.Join(TimeSpan.FromSeconds(30)), "planning did not finish");
+        var rejection = Assert.IsType<ResourcePlanException>(failure);
+        Assert.Contains("BufferHandle dword 0 is not a valid runtime value", rejection.Message);
+    }
+
     [Fact]
     public void DenseBufferTracking()
     {
