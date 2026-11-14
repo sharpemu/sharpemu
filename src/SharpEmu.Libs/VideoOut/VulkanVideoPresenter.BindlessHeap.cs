@@ -18,6 +18,105 @@ namespace SharpEmu.Libs.VideoOut;
 // set 1.
 internal static unsafe partial class VulkanVideoPresenter
 {
+    // Revalidation reads the heap records it compares in runs, one guest read per run of nearby records, instead of one
+    // read per record (SHARPEMU_HEAP_BULK_READS=0 reads each record on its own). A run that cannot be read falls back to
+    // reading its records one by one, so every entry compares the words its own read would return.
+    internal static readonly bool HeapBulkReadsConfigured = Environment.GetEnvironmentVariable("SHARPEMU_HEAP_BULK_READS") != "0";
+    // Tests set it.
+    internal static bool? HeapBulkReadsOverride;
+    internal static bool HeapBulkReadsActive => HeapBulkReadsOverride ?? HeapBulkReadsConfigured;
+
+    // A run spans at most this many bytes and skips at most HeapRunGapBytes between two records it reads.
+    internal const uint HeapRunMaxBytes = 64 << 10;
+    internal const uint HeapRunGapBytes = 1 << 10;
+
+    // The end (exclusive) of the run of sorted record indexes that starts at start: every index in it is below records,
+    // the run spans at most HeapRunMaxBytes, and no two neighbors are more than HeapRunGapBytes of records apart.
+    internal static int HeapRecordRunEnd(ReadOnlySpan<uint> indexes, int start, uint recordBytes, uint records)
+    {
+        var first = indexes[start];
+        var last = first;
+        var end = start + 1;
+        while (end < indexes.Length)
+        {
+            var next = indexes[end];
+            if (next >= records || (ulong)(next - last) * recordBytes > HeapRunGapBytes + recordBytes ||
+                ((ulong)next - first + 1) * recordBytes > HeapRunMaxBytes)
+            {
+                break;
+            }
+
+            last = next;
+            end++;
+        }
+
+        return end;
+    }
+
+    // What revalidation in runs reads and visits. The presenter implements it over its heaps, guest memory and
+    // entries (Presenter.HeapRunVisitor); tests implement it over fakes.
+    internal interface IHeapRunVisitor
+    {
+        // The heap as it is now: a resolve may move it.
+        BindlessHeapDescriptor Heap(bool sampler);
+
+        bool TryRead(ulong address, Span<byte> destination);
+
+        // The record of the entry at position, read on its own as ReadHeapRecord reads it; the word count.
+        int ReadRecord(int position, Span<uint> words);
+
+        // Touches and compares the entry at position, and resolves it again when its words changed; true when it did.
+        bool Visit(int position, ReadOnlySpan<uint> words);
+    }
+
+    // Visits the entries at positions [from, to) of one heap, whose sorted record indexes are indexes, each with the
+    // words of its record. Records are read in runs (HeapRecordRunEnd) into buffer. A visit that resolved ends its run:
+    // the next entry starts a new one, read after that resolve, with the heap as the resolve left it. So no entry compares
+    // bytes read before an earlier entry's resolve (which may land GPU data or move the heap), and buffer is never read
+    // across one (a nested revalidation may reuse it). A run that cannot be read falls back to one read per entry, each
+    // right before its visit. Entries the heap cannot hold get no words, as ReadHeapRecord gives them.
+    internal static void VisitHeapRuns<T>(ref T visitor, ReadOnlySpan<uint> indexes, int from, int to, bool sampler,
+        Span<byte> buffer, Span<uint> scratch) where T : IHeapRunVisitor
+    {
+        var bytes = sampler ? BindlessHeap.SamplerRecordBytes : BindlessHeap.ImageRecordBytes;
+        indexes = indexes[..to];
+        var start = from;
+        while (start < to)
+        {
+            var heap = visitor.Heap(sampler);
+            if (heap.Base == 0 || indexes[start] >= heap.Records)
+            {
+                _ = visitor.Visit(start, ReadOnlySpan<uint>.Empty);
+                start++;
+                continue;
+            }
+
+            var end = HeapRecordRunEnd(indexes, start, bytes, heap.Records);
+            var first = indexes[start];
+            var run = buffer[..checked((int)(((ulong)indexes[end - 1] - first + 1) * bytes))];
+            if (!visitor.TryRead(heap.Base + (ulong)first * bytes, run))
+            {
+                for (; start < end; start++)
+                {
+                    _ = visitor.Visit(start, scratch[..visitor.ReadRecord(start, scratch)]);
+                }
+
+                continue;
+            }
+
+            while (start < end)
+            {
+                var offset = checked((int)((indexes[start] - first) * bytes));
+                var resolved = visitor.Visit(start, System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(run.Slice(offset, (int)bytes)));
+                start++;
+                if (resolved)
+                {
+                    break;
+                }
+            }
+        }
+    }
+
     private sealed partial class Presenter
     {
         private const DescriptorBindingFlags HeapElementFlags =
@@ -62,6 +161,14 @@ internal static unsafe partial class VulkanVideoPresenter
         private BindlessHeapDescriptor _samplerHeap;
         private ulong _heapRevalidatedTick;
         private object? _heapPreparedFor;
+        // Changes whenever _heapEntries does; the entries in record order (image heap, then sampler heap, each by
+        // index), their indexes and where the sampler heap's begin, as of _heapRunVersion; and the run buffer.
+        private long _heapEntriesVersion;
+        private long _heapRunVersion;
+        private HeapEntry[]? _heapRunOrder;
+        private uint[]? _heapRunIndexes;
+        private int _heapRunSamplerStart;
+        private byte[]? _heapRunBytes;
         private Sampler _heapNullSampler;
         private Action<CachedImage>? _heapImageChanged;
         private int _heapReports;
@@ -252,6 +359,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _heapEntriesByImage.Clear();
             _heapEntries.Clear();
+            _heapEntriesVersion++;
             _callRecordEntries.Clear();
             Array.Clear(_callRecordNext);
             _heapFeedback?.Dispose();
@@ -391,6 +499,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                     var entry = new HeapEntry { Slot = slot, Index = index };
                     _heapEntries[(slot, index)] = entry;
+                    _heapEntriesVersion++;
                     entry.Words = ReadHeapRecord(slot, index);
                     ResolveHeapEntry(entry);
                 }
@@ -401,19 +510,15 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             _heapRevalidatedTick = _scheduler.CurrentTick;
             Span<uint> scratch = stackalloc uint[8];
-            foreach (var entry in _heapEntries.Values)
+            if (HeapBulkReadsActive)
             {
-                var words = scratch[..ReadHeapRecord(entry.Slot, entry.Index, scratch)];
-                if (entry.Image is { } image && _imageCache.TryGetImage(entry.ImageIdentifier, out var found) && ReferenceEquals(found, image))
+                RevalidateHeapEntriesInRuns(scratch);
+            }
+            else
+            {
+                foreach (var entry in _heapEntries.Values)
                 {
-                    // Keeps the image the heap reads from the cache's collection of unused images.
-                    _ = _imageCache.GetImage(entry.ImageIdentifier);
-                }
-
-                if (!words.SequenceEqual(entry.Words))
-                {
-                    entry.Words = words.ToArray();
-                    ResolveHeapEntry(entry);
+                    RevalidateHeapEntry(entry, scratch[..ReadHeapRecord(entry.Slot, entry.Index, scratch)]);
                 }
             }
 
@@ -425,6 +530,66 @@ internal static unsafe partial class VulkanVideoPresenter
                     _ = _imageCache.GetImage(entry.ImageIdentifier);
                 }
             }
+        }
+
+        // True when the entry's words changed and it was resolved again.
+        private bool RevalidateHeapEntry(HeapEntry entry, ReadOnlySpan<uint> words)
+        {
+            if (entry.Image is { } image && _imageCache.TryGetImage(entry.ImageIdentifier, out var found) && ReferenceEquals(found, image))
+            {
+                // Keeps the image the heap reads from the cache's collection of unused images.
+                _ = _imageCache.GetImage(entry.ImageIdentifier);
+            }
+
+            if (words.SequenceEqual(entry.Words))
+            {
+                return false;
+            }
+
+            entry.Words = words.ToArray();
+            ResolveHeapEntry(entry);
+            return true;
+        }
+
+        // The presenter's side of VisitHeapRuns, over the entries in record order.
+        private readonly struct HeapRunVisitor(Presenter owner, HeapEntry[] order) : IHeapRunVisitor
+        {
+            public BindlessHeapDescriptor Heap(bool sampler) => sampler ? owner._samplerHeap : owner._textureHeap;
+
+            public bool TryRead(ulong address, Span<byte> destination) => owner._guestMemory.TryRead(address, destination);
+
+            public int ReadRecord(int position, Span<uint> words) =>
+                owner.ReadHeapRecord(order[position].Slot, order[position].Index, words);
+
+            public bool Visit(int position, ReadOnlySpan<uint> words) => owner.RevalidateHeapEntry(order[position], words);
+        }
+
+        // Every entry, in record order, compared with words read in runs (HeapRecordRunEnd).
+        private void RevalidateHeapEntriesInRuns(Span<uint> scratch)
+        {
+            if (_heapRunOrder is null || _heapRunIndexes is null || _heapRunVersion != _heapEntriesVersion)
+            {
+                var order = _heapEntries.Values.ToArray();
+                Array.Sort(order, static (left, right) =>
+                {
+                    var heap = (left.Slot >= BindlessHeap.ImageKinds.Length).CompareTo(right.Slot >= BindlessHeap.ImageKinds.Length);
+                    return heap != 0 ? heap : left.Index != right.Index ? left.Index.CompareTo(right.Index) : left.Slot.CompareTo(right.Slot);
+                });
+                _heapRunOrder = order;
+                _heapRunIndexes = Array.ConvertAll(order, static entry => entry.Index);
+                _heapRunSamplerStart = Array.FindIndex(order, static entry => entry.Slot >= BindlessHeap.ImageKinds.Length);
+                if (_heapRunSamplerStart < 0) _heapRunSamplerStart = order.Length;
+                _heapRunVersion = _heapEntriesVersion;
+            }
+
+            // The arrays are replaced, never changed, when the entries change: a nested revalidation leaves these intact.
+            var runOrder = _heapRunOrder!;
+            var runIndexes = _heapRunIndexes!;
+            var samplerStart = _heapRunSamplerStart;
+            var visitor = new HeapRunVisitor(this, runOrder);
+            var buffer = (_heapRunBytes ??= new byte[HeapRunMaxBytes]).AsSpan();
+            VisitHeapRuns(ref visitor, runIndexes, 0, samplerStart, sampler: false, buffer, scratch);
+            VisitHeapRuns(ref visitor, runIndexes, samplerStart, runOrder.Length, sampler: true, buffer, scratch);
         }
 
         // The record's words, or none when the heap has no such record or it cannot be read.
