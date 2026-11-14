@@ -110,9 +110,9 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         _tracker = new GuestPageTracker(pages);
         _managedWrites = pages.ManagedWrites;
         _staging = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Upload, 512 * MiB);
-        _uploader = new GuestBufferUploader(device, scheduler, guest, _staging);
-        // Up to three helper threads copy a large sweep's guest bytes with the render thread.
+        // Up to three helper threads copy a large sweep's guest bytes with the render thread, and a large upload's.
         _sweepCopy = new ParallelGuestCopy(guest, Math.Clamp(Environment.ProcessorCount - 1, 0, 3));
+        _uploader = new GuestBufferUploader(device, scheduler, guest, _staging, _sweepCopy);
         _stream = new GpuRingBuffer(device, scheduler, GpuMemoryPlacement.StreamRing, 64 * MiB, GpuBuffer.AddressedFlags);
         _download = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Download, 64 * MiB);
         _deviceRing = new GpuRingBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 128 * MiB);
