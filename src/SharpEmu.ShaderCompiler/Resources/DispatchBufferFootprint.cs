@@ -29,6 +29,7 @@ public static partial class DispatchBufferFootprint
         var steps = 0;
         for (uint group = 0; group < dispatch.GroupsX; group++)
         {
+            var groupSteps = 0;
             var initial = new State(program.Instructions[0].Pc) { FullHigh = dispatch.WaveSize == 64 ? uint.MaxValue : 0 };
             for (var index = 0; index < userData.Count; index++) initial.S[userDataBase + index] = Word.Of(userData[index]);
             void SystemRegister(uint? register, uint value)
@@ -52,8 +53,10 @@ public static partial class DispatchBufferFootprint
             {
                 while (true)
                 {
-                    if (++steps > 256_000 || visited.Count > 4096 || !instructions.TryGetValue(state.Pc, out var instruction))
-                        return false;
+                    // Groups have independent state. Bound each group and the entire background job separately.
+                    if (++steps > 1_048_576 || ++groupSteps > 256_000) return false;
+                    if (visited.Count > 4096) return false;
+                    if (!instructions.TryGetValue(state.Pc, out var instruction)) return false;
                     var next = instruction.Pc + (uint)instruction.Words.Count * 4;
                     var opcode = instruction.Opcode;
                     if (opcode == "SEndpgm") break;

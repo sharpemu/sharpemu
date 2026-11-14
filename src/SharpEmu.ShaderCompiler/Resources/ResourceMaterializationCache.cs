@@ -1160,6 +1160,8 @@ public sealed partial class ResourceMaterializationCache
         out ResourceMaterializationFailure failure,
         ref MaterializationTiming timing)
     {
+        if (plan.DeviceRecordCounts is { } counts && inputs.ComputeState is { } compute)
+            inputs = inputs.WithComputeState(compute with { DeviceCountProofRevision = counts.MaterializationRevision(inputs) });
         // A frontend image conversion can depend on GPU attachments or detile guest
         // texels. Unchanged descriptor bytes do not prove that its result is current.
         if (plan.NormalizeImageDescriptor is not null && plan.Info.Images.Count != 0 && plan.ImageNormalizationVersion is null)

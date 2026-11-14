@@ -14,10 +14,48 @@ public sealed class DeviceRecordCountPlan
     private readonly HashSet<ScalarValue> _skipCounts;
     private readonly HashSet<uint> _pcs;
     private readonly object _gate = new();
-    private sealed record ProofEntry(uint[] UserData, DispatchBufferFootprint.Dispatch Dispatch,
-        Dictionary<uint, DispatchBufferFootprint.Span>? Spans);
+    private sealed class ProofEntry(uint[] userData, DispatchBufferFootprint.Dispatch dispatch)
+    {
+        public uint[] UserData { get; } = userData;
+        public DispatchBufferFootprint.Dispatch Dispatch { get; } = dispatch;
+        public Dictionary<uint, DispatchBufferFootprint.Span>? Spans { get; set; }
+    }
     private readonly ProofEntry?[] _proofs = new ProofEntry[32];
     private uint[] _inputWords = [];
+    private long _proofRevision;
+    internal long ProofRevision => Volatile.Read(ref _proofRevision);
+    // Tests can control completion without timing races. Production always uses the bounded worker.
+    internal Func<Action, bool> QueueProof { get; set; } = DeviceCountProofWorker.TryQueue;
+
+    internal long MaterializationRevision(ResourceRuntimeInputs inputs)
+    {
+        lock (_gate)
+        {
+            if (inputs.ComputeState is { DeviceCountProof: true, Dispatch: { } dispatch })
+            {
+                foreach (var entry in _proofs)
+                {
+                    if (entry?.Spans is not { } spans || entry.Dispatch != dispatch ||
+                        entry.UserData.Length != inputs.UserData.Count) continue;
+                    var matches = true;
+                    for (var index = 0; index < entry.UserData.Length; index++)
+                        if (entry.UserData[index] != inputs.UserData[index]) { matches = false; break; }
+                    if (matches) return Mapped(spans, inputs) ? _proofRevision : -_proofRevision;
+                }
+                // Eviction by pending/refused shapes need not publish a new proof. A previously proved
+                // materialization must still stop serving until this exact input is proved and mapped again.
+                return -_proofRevision;
+            }
+            return _proofRevision;
+        }
+    }
+
+    private static bool Mapped(Dictionary<uint, DispatchBufferFootprint.Span> spans, ResourceRuntimeInputs inputs)
+    {
+        foreach (var span in spans.Values)
+            if (inputs.IsRangeMapped?.Invoke(span.Base, span.Size) != true) return false;
+        return true;
+    }
 
     private DeviceRecordCountPlan(ScalarValueGraph graph, Dictionary<int, ScalarValue> handles)
     {
@@ -110,15 +148,26 @@ public sealed class DeviceRecordCountPlan
                     // A bounded LRU retains alternating dispatch shapes and refusals. It stores only mathematics;
                     // current mappings and the actual count fallback are still checked below on every evaluation.
                     var userData = (uint[])_inputWords.Clone();
-                    var evaluated = DispatchBufferFootprint.TryEvaluate(plan.Graph.Program, userData, plan.Graph.UserDataBase,
-                        dispatch, _pcs, out var proved) ? proved : null;
-                    cached = new(userData, dispatch, evaluated);
+                    cached = new(userData, dispatch);
                     Array.Copy(_proofs, 0, _proofs, 1, _proofs.Length - 1);
                     _proofs[0] = cached;
+                    var pending = cached;
+                    // The closure owns only immutable analysis inputs, never readers, mappings or GPU state.
+                    var program = plan.Graph.Program;
+                    var userDataBase = plan.Graph.UserDataBase;
+                    if (!QueueProof(() => PrepareProof(program, userDataBase, pending)))
+                    {
+                        _proofs[0] = null; // Queue pressure is temporary: retry on a later dispatch.
+                        // The cached fallback must retry admission too, even when its count word stays unchanged.
+                        Interlocked.Increment(ref _proofRevision);
+                    }
                 }
                 spans = cached.Spans;
             }
         }
+        // Use one eligibility state for all selected ranges. Materialization-cache hits check it too,
+        // including unmap/remap changes after an immutable mathematical proof was published.
+        if (spans is not null && !Mapped(spans, inputs)) spans = null;
         var result = new List<DeviceAddressRange>(ordinary);
         using var scratch = RuntimeEvaluationScratch.Rent();
         var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs);
@@ -156,5 +205,18 @@ public sealed class DeviceRecordCountPlan
             if (seen.Add((address, size, written))) result.Add(new((uint)result.Count, address, size, true, written));
         }
         return result.ToArray();
+    }
+
+    private void PrepareProof(Gen5ShaderProgram program, uint userDataBase, ProofEntry pending)
+    {
+        var proved = DispatchBufferFootprint.TryEvaluate(program, pending.UserData, userDataBase,
+            pending.Dispatch, _pcs, out var spans);
+        lock (_gate)
+        {
+            if (!proved || !_proofs.Contains(pending)) return;
+            pending.Spans = spans;
+            // Previously cached exact-count snapshots must discover the new proof on their next use.
+            Interlocked.Increment(ref _proofRevision);
+        }
     }
 }

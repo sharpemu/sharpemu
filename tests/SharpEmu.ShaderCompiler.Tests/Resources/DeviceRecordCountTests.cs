@@ -21,8 +21,94 @@ public sealed class DeviceRecordCountTests
         dataIndex ? Vop1(36, "VMovB32", 1, Gen5Operand.Scalar(2)) : Nop(36),
         BufferAccess(40, "BufferStoreDwordx4", 0, dwords: 4, indexEnabled: true, vectorAddress: 1), EndProgram(48));
 
-    private static ShaderResourcePlan Plan(Gen5ShaderProgram program, bool enabled = true) =>
-        ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 4, deviceRecordCounts: enabled);
+    private static ShaderResourcePlan Plan(Gen5ShaderProgram program, bool enabled = true)
+    {
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 4,
+            deviceRecordCounts: enabled);
+        if (plan.DeviceRecordCounts is { } counts) counts.QueueProof = action => { action(); return true; };
+        return plan;
+    }
+
+    [Fact]
+    public void PendingProofUsesTheExactCountThenInvalidatesItsCachedMaterialization()
+    {
+        var plan = Plan(CountProgram());
+        var jobs = new Queue<Action>();
+        var counts = plan.DeviceRecordCounts!;
+        counts.QueueProof = action => { jobs.Enqueue(action); return true; };
+        var reads = 0;
+        bool Read(ulong address, out uint value) { reads++; value = 7; return true; }
+        static bool Resident(ulong address, Span<byte> destination, bool clean)
+        {
+            for (var index = 0; index < destination.Length; index++)
+                destination[index] = index % 4 == 0 ? (byte)7 : (byte)0;
+            return true;
+        }
+        var cache = new ResourceMaterializationCache();
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var inputs = InputsFor(Read);
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(112ul, Assert.Single(snapshot.DeviceAddressRanges).Size);
+        Assert.Equal(0, counts.ProofRevision);
+        Assert.Single(jobs);
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Single(jobs); // Pending cache hits never enqueue the shape twice.
+        jobs.Dequeue()();
+        Assert.Equal(1, counts.ProofRevision);
+        var oldReads = reads;
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(256ul, Assert.Single(snapshot.DeviceAddressRanges).Size);
+        Assert.Equal(oldReads, reads);
+        Assert.Empty(jobs);
+        Assert.True(cache.Materialize(plan, InputsFor(Read, mapped: false), Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(112ul, Assert.Single(snapshot.DeviceAddressRanges).Size);
+        Assert.Equal(oldReads + 1, reads);
+        Assert.True(cache.Materialize(plan, inputs, Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(256ul, Assert.Single(snapshot.DeviceAddressRanges).Size);
+        Assert.Equal(oldReads + 1, reads);
+    }
+
+    [Fact]
+    public void EvictionByPendingShapesCannotReuseAnUnmappedMaterialization()
+    {
+        var plan = Plan(CountProgram());
+        static bool Read(ulong address, out uint value) { value = 7; return true; }
+        static bool Resident(ulong address, Span<byte> destination, bool clean) => false;
+        var cache = new ResourceMaterializationCache();
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(cache.Materialize(plan, InputsFor(Read), Resident, ref snapshot, ref specialization, out _));
+        Assert.True(cache.Materialize(plan, InputsFor(Read), Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(256ul, Assert.Single(snapshot.DeviceAddressRanges).Size);
+        var revision = plan.DeviceRecordCounts!.ProofRevision;
+        var jobs = new Queue<Action>();
+        plan.DeviceRecordCounts.QueueProof = action => { jobs.Enqueue(action); return true; };
+        for (uint groups = 3; groups <= 34; groups++)
+            DeviceAddressRangePlanner.Evaluate(plan, InputsFor(Read, groups: groups));
+        Assert.Equal(revision, plan.DeviceRecordCounts.ProofRevision);
+        Assert.Equal(32, jobs.Count);
+        Assert.True(cache.Materialize(plan, InputsFor(Read, mapped: false), Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(112ul, Assert.Single(snapshot.DeviceAddressRanges).Size);
+        Assert.Equal(33, jobs.Count);
+    }
+
+    [Fact]
+    public void FullProofQueueFallsBackAndRetriesAdmissionLater()
+    {
+        var plan = Plan(CountProgram());
+        static bool Read(ulong address, out uint value) { value = 7; return true; }
+        static bool Resident(ulong address, Span<byte> destination, bool clean) => false;
+        var cache = new ResourceMaterializationCache();
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        plan.DeviceRecordCounts!.QueueProof = _ => false;
+        Assert.True(cache.Materialize(plan, InputsFor(Read), Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(112ul, Assert.Single(snapshot.DeviceAddressRanges).Size);
+        plan.DeviceRecordCounts.QueueProof = action => { action(); return true; };
+        Assert.True(cache.Materialize(plan, InputsFor(Read), Resident, ref snapshot, ref specialization, out _));
+        Assert.Equal(256ul, Assert.Single(snapshot.DeviceAddressRanges).Size);
+    }
 
     private static ResourceRuntimeInputs InputsFor(GuestWordReader reader, uint groups = 2, bool mapped = true, bool proof = true) => new()
     {

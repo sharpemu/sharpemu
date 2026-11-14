@@ -29,6 +29,13 @@ public sealed class ResourceRuntimeInputs
 
     public bool ReadsClean { get; init; }
 
+    internal ResourceRuntimeInputs WithComputeState(ComputeSelectorState state) => new()
+    {
+        UserData = UserData, ShaderBase = ShaderBase, ReadMemory = ReadMemory, ReadCleanMemory = ReadCleanMemory,
+        ComputeState = state, IsRangeMapped = IsRangeMapped, TraceImageCandidate = TraceImageCandidate,
+        TablePhase = TablePhase, ReadResidentMemory = ReadResidentMemory, ReadsClean = ReadsClean,
+    };
+
     public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => new()
     {
         UserData = UserData,
@@ -88,4 +95,5 @@ public readonly record struct ComputeSelectorState(uint WaveSize, uint ThreadsX,
 {
     public DispatchBufferFootprint.Dispatch? Dispatch { get; init; }
     public bool DeviceCountProof { get; init; }
+    internal long DeviceCountProofRevision { get; init; }
 }
