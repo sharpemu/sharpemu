@@ -92,13 +92,13 @@ internal sealed unsafe class MeshIndirectPipeline : IDisposable
             GpuBuffer.AllFlags | BufferUsageFlags.ShaderDeviceAddressBit, bucket);
     }
 
+    // No host clear: the helper's invocation 0 writes the status word on every exit (each dispatch has at least one
+    // group, and the shader has no early return), before the completion action reads it.
     private GpuBuffer RentStatus(SubmissionScheduler scheduler)
     {
         GpuBuffer? status = null;
         lock (_resourceGate) _freeStatuses.TryPop(out status);
         status ??= new GpuBuffer(_device, scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, 4);
-        status.Mapped.Clear();
-        status.Flush(0, 4);
         return status;
     }
 
@@ -148,10 +148,16 @@ internal sealed unsafe class MeshIndirectPipeline : IDisposable
         if (result != Result.Success) throw SubmissionScheduler.Fatal($"The indirect mesh resource could not be created: result={result}.");
     }
 
+    [System.Runtime.CompilerServices.InlineArray((int)SpirvMeshIndirect.PushWordCount)]
+    private struct PushWords
+    {
+        private uint _word;
+    }
+
     internal sealed class PreparedDraw : IDisposable
     {
         private readonly MeshIndirectPipeline _owner;
-        private readonly uint[] _push;
+        private PushWords _push;
         private readonly uint _capacity;
         private GpuBuffer? _output;
         private GpuBuffer? _status;
@@ -234,7 +240,7 @@ internal sealed unsafe class MeshIndirectPipeline : IDisposable
             vk.CmdBindPipeline(command, PipelineBindPoint.Compute, _owner._pipeline);
             var set = _set;
             vk.CmdBindDescriptorSets(command, PipelineBindPoint.Compute, _owner._layout, 0, 1, &set, 0, null);
-            fixed (uint* push = _push)
+            fixed (uint* push = &_push[0])
                 vk.CmdPushConstants(command, _owner._layout, ShaderStageFlags.ComputeBit, 0, SpirvMeshIndirect.PushWordCount * 4, push);
             NativeBindingEpoch.Advance();
             vk.CmdDispatch(command, Math.Max(1u, (_capacity + 63) / 64), 1, 1);

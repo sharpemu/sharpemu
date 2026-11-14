@@ -56,6 +56,48 @@ public sealed unsafe partial class RenderHostDeviceTests
         harness.Shutdown();
     }
 
+    // The helper writes its status word on every exit, so a reused status buffer needs no host clear: a draw over the
+    // group limits (status 2) returns its status buffer, and the next draw, which rents the same buffer, reports 0.
+    [Fact]
+    public void AReusedIndirectMeshStatusReportsTheNewDrawWithoutAHostClear()
+    {
+        if (!GatePrerequisites.Ready(_vulkan, shaderInt64: true)) return;
+        if (!_vulkan.SupportsMeshShaders)
+        {
+            Assert.False(GatePrerequisites.DeviceRequired, "This test requires mesh shader support.");
+            return;
+        }
+        using var worker = new CacheWorker(_vulkan);
+        worker.Run(() =>
+        {
+            var scheduler = worker.Scheduler;
+            scheduler.Begin(new SubmissionContext { QueueName = "mesh-indirect-status.test", SubmissionId = 1 });
+            using var arguments = new GpuBuffer(_vulkan.DeviceInfo, scheduler, GpuBufferUsage.DeviceLocal,
+                0, GpuBuffer.AllFlags, 16);
+            using var pipeline = new MeshIndirectPipeline(_vulkan.DeviceInfo);
+            var request = IndirectMeshDrawRequest.ForAutomaticDraw(0, false, 1,
+                new MeshExecutionLimits { MaxGroupCountX = 32, MaxGroupCountY = 64, MaxGroupTotalCount = 64 });
+            var binding = new BufferBinding(arguments.Handle.Handle, 0);
+            uint Run(uint count, uint instances)
+            {
+                using var prepared = pipeline.Prepare(scheduler, binding, binding, 0, request);
+                var command = new CommandBuffer(scheduler.Current.Handle);
+                uint* words = stackalloc uint[4] { count, instances, 0, 0 };
+                _vulkan.Vk.CmdUpdateBuffer(command, arguments.Handle, 0, 16, words);
+                prepared.Record(command);
+                scheduler.Finish();
+                return prepared.ReadStatus();
+            }
+
+            Assert.Equal(2u, Run(120, 2));
+            Assert.Equal(0u, Run(6, 2));
+            Assert.Equal(2u, Run(120, 2));
+            Assert.Equal(0u, Run(0, 2));
+            scheduler.Finish();
+        });
+        _vulkan.AssertNoValidationMessages();
+    }
+
     // An automatic draw: the groups follow the vertex count, and the parameters carry the
     // first vertex and instance with no index buffer.
     [Theory]
