@@ -278,6 +278,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     shaderDeviceClock: ShaderDeviceClockEnabled,
                     bindlessHeap: _bindlessHeapSupported,
                     stableImageLimits: ((IShaderPipelineHost)this).ComputeImageDescriptorLimits,
+                    bufferInt64Atomics: BufferInt64AtomicsEnabled,
                     frontendOf: Agc.AgcExports.ShaderFrontendForDomain))
             {
                 NoteShaderPrewarmFailure("cs", record.Hash, record.Address, error);

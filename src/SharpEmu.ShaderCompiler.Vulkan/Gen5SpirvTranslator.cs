@@ -87,6 +87,7 @@ public static partial class Gen5SpirvTranslator
         private readonly Dictionary<uint, Dictionary<uint, uint>> _savedLaneValues = new();
         private readonly bool _usesBufferAtomics;
         private readonly bool _usesCoherentBufferPairs;
+        private readonly bool _usesBufferQwordAtomics;
 
         // Safety valve for the PC-dispatcher loop. Each iteration executes one
         // GCN basic block; a correctly-translated shader always reaches its
@@ -188,6 +189,7 @@ public static partial class Gen5SpirvTranslator
         private readonly Dictionary<(uint Register, uint Lane), uint> _laneSpillSlots = new();
         private uint _globalBuffers;
         private uint _globalBufferPairs;
+        private uint _globalBufferQwords;
         private uint _gfx10BufferFormatTable;
         private uint _storageBlockPointer;
         private uint _storagePairBlockPointer;
@@ -3406,6 +3408,26 @@ public static partial class Gen5SpirvTranslator
             });
         }
 
+        // An X2 buffer atomic (SWAP, AND, OR) as one 64-bit atomic on the pair in the data registers, low dword first; with
+        // glc the registers take the pair from before it.
+        private void EmitQwordAtomic(SpirvOp op, uint pointer, Gen5BufferMemoryControl control)
+        {
+            _module.AddCapability(SpirvCapability.Int64Atomics);
+            var original = EmitAtomic(
+                op,
+                _ulongType,
+                pointer,
+                scope: 1,
+                semantics: 0x48,
+                value: () => Pair64(LoadV(control.VectorData), LoadV(control.VectorData + 1)),
+                comparator: () => ULong(0));
+            if (control.Glc)
+            {
+                StoreV(control.VectorData, Narrow(original));
+                StoreV(control.VectorData + 1, Narrow(ShiftRightLogical64(original, ULong(32))));
+            }
+        }
+
         // Maps the AMD atomic-op name suffix shared by buffer/image atomics to a SPIR-V opcode.
         // Inc/Dec approximate the AMD wrap-clamp semantics (MEM = tmp >= DATA ? 0 : tmp + 1),
         // which is exact for the common 0xFFFFFFFF clamp operand.
@@ -3753,8 +3775,14 @@ public static partial class Gen5SpirvTranslator
             byteAddress = ApplyGuestBufferByteBias(bindingIndex, byteAddress);
             var dwordAddress = ShiftRightLogical(byteAddress, UInt(2));
 
-            if (instruction.Opcode is "BufferAtomicSwapX2" or "BufferAtomicOrX2")
+            if (instruction.Opcode is "BufferAtomicSwapX2" or "BufferAtomicAndX2" or "BufferAtomicOrX2")
             {
+                var atomicOp = instruction.Opcode switch
+                {
+                    "BufferAtomicSwapX2" => SpirvOp.AtomicExchange,
+                    "BufferAtomicAndX2" => SpirvOp.AtomicAnd,
+                    _ => SpirvOp.AtomicOr,
+                };
                 EmitExecConditional(() =>
                 {
                     var firstInRange = IsBufferWordInRange(bindingIndex, dwordAddress);
@@ -3762,30 +3790,51 @@ public static partial class Gen5SpirvTranslator
                     var secondInRange = IsBufferWordInRange(bindingIndex, secondAddress);
                     EmitBufferAtomicInRange(LogicalAnd(firstInRange, secondInRange), control.Glc, control.VectorData, 2, () =>
                     {
-                        var atomicOp = instruction.Opcode == "BufferAtomicSwapX2"
-                            ? SpirvOp.AtomicExchange
-                            : SpirvOp.AtomicOr;
-                        var first = EmitAtomic(
-                            atomicOp,
-                            _uintType,
-                            BufferWordPointer(bindingIndex, dwordAddress),
-                            scope: 1,
-                            semantics: 0x48,
-                            value: () => LoadV(control.VectorData),
-                            comparator: () => UInt(0));
-                        var second = EmitAtomic(
-                            atomicOp,
-                            _uintType,
-                            BufferWordPointer(bindingIndex, secondAddress),
-                            scope: 1,
-                            semantics: 0x48,
-                            value: () => LoadV(control.VectorData + 1),
-                            comparator: () => UInt(0));
-                        if (control.Glc)
+                        void EmitDwordAtomics()
                         {
-                            StoreV(control.VectorData, first);
-                            StoreV(control.VectorData + 1, second);
+                            var first = EmitAtomic(
+                                atomicOp,
+                                _uintType,
+                                BufferWordPointer(bindingIndex, dwordAddress),
+                                scope: 1,
+                                semantics: 0x48,
+                                value: () => LoadV(control.VectorData),
+                                comparator: () => UInt(0));
+                            var second = EmitAtomic(
+                                atomicOp,
+                                _uintType,
+                                BufferWordPointer(bindingIndex, secondAddress),
+                                scope: 1,
+                                semantics: 0x48,
+                                value: () => LoadV(control.VectorData + 1),
+                                comparator: () => UInt(0));
+                            if (control.Glc)
+                            {
+                                StoreV(control.VectorData, first);
+                                StoreV(control.VectorData + 1, second);
+                            }
                         }
+
+                        if (!_usesBufferQwordAtomics)
+                        {
+                            EmitDwordAtomics();
+                            return;
+                        }
+
+                        // An 8-byte aligned pair is one 64-bit word; any other address names none, so it stays two dword atomics.
+                        EmitConditional(
+                            _module.AddInstruction(SpirvOp.IEqual, _boolType, BitwiseAnd(byteAddress, UInt(7)), UInt(0)),
+                            () => EmitQwordAtomic(
+                                atomicOp,
+                                _module.AddInstruction(
+                                    SpirvOp.AccessChain,
+                                    _storageUlongPointer,
+                                    _globalBufferQwords,
+                                    UInt((uint)bindingIndex),
+                                    UInt(0),
+                                    ShiftRightLogical(dwordAddress, UInt(1))),
+                                control),
+                            EmitDwordAtomics);
                     });
                 });
                 return true;
@@ -4288,9 +4337,14 @@ public static partial class Gen5SpirvTranslator
         {
             error = string.Empty;
             var atomicSuffix = instruction.Opcode["BufferAtomic".Length..];
-            if (atomicSuffix is "SwapX2" or "OrX2")
+            if (atomicSuffix is "SwapX2" or "AndX2" or "OrX2")
             {
-                var atomicOp = atomicSuffix == "SwapX2" ? SpirvOp.AtomicExchange : SpirvOp.AtomicOr;
+                var atomicOp = atomicSuffix switch
+                {
+                    "SwapX2" => SpirvOp.AtomicExchange,
+                    "AndX2" => SpirvOp.AtomicAnd,
+                    _ => SpirvOp.AtomicOr,
+                };
                 EmitExecConditional(() =>
                 {
                     var valid = IsDeviceBufferByteRangeInRange(size, byteAddress, 2 * sizeof(uint));
@@ -4298,23 +4352,53 @@ public static partial class Gen5SpirvTranslator
                     var secondAddress = And64(IAdd64(baseAddress, Widen(IAdd(byteAddress, UInt(sizeof(uint))))), ULong(DeviceAddressMask & ~3ul));
                     EmitBufferAtomicInRange(valid, control.Glc, control.VectorData, 2, () =>
                     {
-                        var (firstPointer, firstMapped) = ResolveDeviceAddress(firstAddress);
-                        var (secondPointer, secondMapped) = ResolveDeviceAddress(secondAddress);
-                        var bothMapped = LogicalAnd(firstMapped, secondMapped);
-                        EmitBufferAtomicInRange(bothMapped, control.Glc, control.VectorData, 2, () =>
+                        void EmitDwordAtomics()
                         {
-                            var originalLow = EmitAtomic(
-                                atomicOp, _uintType, DeviceWordPointer(firstPointer), 1, 0x48,
-                                () => LoadV(control.VectorData), () => UInt(0));
-                            var originalHigh = EmitAtomic(
-                                atomicOp, _uintType, DeviceWordPointer(secondPointer), 1, 0x48,
-                                () => LoadV(control.VectorData + 1), () => UInt(0));
-                            if (control.Glc)
+                            var (firstPointer, firstMapped) = ResolveDeviceAddress(firstAddress);
+                            var (secondPointer, secondMapped) = ResolveDeviceAddress(secondAddress);
+                            var bothMapped = LogicalAnd(firstMapped, secondMapped);
+                            EmitBufferAtomicInRange(bothMapped, control.Glc, control.VectorData, 2, () =>
                             {
-                                StoreV(control.VectorData, originalLow);
-                                StoreV(control.VectorData + 1, originalHigh);
-                            }
-                        });
+                                var originalLow = EmitAtomic(
+                                    atomicOp, _uintType, DeviceWordPointer(firstPointer), 1, 0x48,
+                                    () => LoadV(control.VectorData), () => UInt(0));
+                                var originalHigh = EmitAtomic(
+                                    atomicOp, _uintType, DeviceWordPointer(secondPointer), 1, 0x48,
+                                    () => LoadV(control.VectorData + 1), () => UInt(0));
+                                if (control.Glc)
+                                {
+                                    StoreV(control.VectorData, originalLow);
+                                    StoreV(control.VectorData + 1, originalHigh);
+                                }
+                            });
+                        }
+
+                        if (!_request.SupportsBufferInt64Atomics)
+                        {
+                            EmitDwordAtomics();
+                            return;
+                        }
+
+                        // An 8-byte aligned pair is one 64-bit word on one page; any other address names none.
+                        var aligned = _module.AddInstruction(
+                            SpirvOp.IEqual,
+                            _boolType,
+                            And64(IAdd64(baseAddress, Widen(byteAddress)), ULong(7)),
+                            ULong(0));
+                        EmitConditional(aligned, () =>
+                        {
+                            var (pointer, mapped) = ResolveDeviceAddress(firstAddress);
+                            EmitBufferAtomicInRange(mapped, control.Glc, control.VectorData, 2, () =>
+                            {
+                                EmitQwordAtomic(
+                                    atomicOp,
+                                    _module.AddInstruction(
+                                        SpirvOp.ConvertUToPtr,
+                                        _module.TypePointer(SpirvStorageClass.PhysicalStorageBuffer, _ulongType),
+                                        pointer),
+                                    control);
+                            });
+                        }, EmitDwordAtomics);
                     });
                 });
                 return true;

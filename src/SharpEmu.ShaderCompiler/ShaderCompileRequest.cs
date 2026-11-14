@@ -319,6 +319,11 @@ public sealed class ShaderCompileRequest
     // 32-bit ones, which is not atomic as a pair.
     public bool SupportsSharedInt64Atomics { get; init; }
 
+    // The device supports 64-bit integer atomics on storage buffers (shaderBufferInt64Atomics). When set, an
+    // aligned X2 buffer atomic (SWAP, AND, OR) is one 64-bit atomic, as on the GPU; as two 32-bit atomics another
+    // thread group can read one half of a pair from one update and the other half from another.
+    public bool SupportsBufferInt64Atomics { get; init; }
+
     // The device supports 64-bit integer atomics on images (shaderImageInt64Atomics). Without
     // it a program that uses an atomic on a 64-bit texel is rejected at compile time.
     public bool SupportsImageInt64Atomics { get; init; }

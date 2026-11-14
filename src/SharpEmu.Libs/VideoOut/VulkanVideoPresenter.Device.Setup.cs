@@ -1130,6 +1130,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var supportsTimelineSemaphore = vulkan12Features.TimelineSemaphore;
             var supportsBufferDeviceAddress = vulkan12Features.BufferDeviceAddress;
             var supportsSharedInt64Atomics = vulkan12Features.ShaderSharedInt64Atomics;
+            var supportsBufferInt64Atomics = vulkan12Features.ShaderBufferInt64Atomics;
             _supportsShaderLayer = vulkan12Features.ShaderOutputLayer;
             var supportsViewportIndexLayer = IsDeviceExtensionAvailable("VK_EXT_shader_viewport_index_layer") &&
                 vulkan12Features.ShaderOutputViewportIndex && vulkan12Features.ShaderOutputLayer;
@@ -1143,6 +1144,13 @@ internal static unsafe partial class VulkanVideoPresenter
             _canRequireComputeSubgroup32 &= vulkan13Features.SubgroupSizeControl;
             _canRequireComputeSubgroup64 &= vulkan13Features.SubgroupSizeControl;
             SetSharedInt64AtomicsCapability(supportsSharedInt64Atomics);
+            SetBufferInt64AtomicsCapability(supportsBufferInt64Atomics);
+            if (!supportsBufferInt64Atomics)
+            {
+                Console.Error.WriteLine(
+                    "[LOADER][WARN] GPU does not support shaderBufferInt64Atomics: " +
+                    "64-bit buffer atomics fall back to a non-atomic pair of 32-bit atomics.");
+            }
             if (!supportsSharedInt64Atomics)
             {
                 Console.Error.WriteLine(
@@ -1305,6 +1313,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     TimelineSemaphore = true,
                     BufferDeviceAddress = true,
                     ShaderSharedInt64Atomics = supportsSharedInt64Atomics,
+                    ShaderBufferInt64Atomics = supportsBufferInt64Atomics,
                     ShaderOutputLayer = _supportsShaderLayer,
                     ShaderOutputViewportIndex = supportsViewportIndexLayer,
                     DescriptorIndexing = _bindlessHeapSupported,

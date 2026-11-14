@@ -227,6 +227,8 @@ public static partial class Gen5SpirvTranslator
             _usesCoherentBufferPairs = request.Program.Instructions.Any(static instruction =>
                 instruction.Opcode is "BufferLoadDwordx2" or "BufferStoreDwordx2" &&
                 instruction.Control is Gen5BufferMemoryControl { Glc: true });
+            _usesBufferQwordAtomics = request.SupportsBufferInt64Atomics && request.Program.Instructions.Any(static instruction =>
+                instruction.Opcode is "BufferAtomicSwapX2" or "BufferAtomicAndX2" or "BufferAtomicOrX2");
             _stage = request.Stage switch
             {
                 ShaderStage.Vertex => Gen5SpirvStage.Vertex,
@@ -510,6 +512,11 @@ public static partial class Gen5SpirvTranslator
             {
                 DeclareBufferPairArray(count, bindingNumber);
             }
+
+            if (_usesBufferQwordAtomics)
+            {
+                DeclareBufferQwordArray(count, bindingNumber);
+            }
         }
 
         // The same buffers as dword pairs. The GPU does an aligned DWORDX2 access as one 64-bit access, so a thread
@@ -537,6 +544,31 @@ public static partial class Gen5SpirvTranslator
             }
 
             _interfaces.Add(_globalBufferPairs);
+        }
+
+        // The same buffers as 64-bit words. The GPU does each X2 buffer atomic (SWAP, AND, OR) as one 64-bit atomic, so a
+        // thread group reading another's {value, status} pair never takes one half of it from an older update.
+        private void DeclareBufferQwordArray(uint count, uint bindingNumber)
+        {
+            _module.AddCapability(SpirvCapability.Int64Atomics);
+            var block = _module.TypeStruct(AddressRuntimeArray());
+            _module.AddDecoration(block, SpirvDecoration.Block);
+            _module.AddMemberDecoration(block, 0, SpirvDecoration.Offset, 0);
+            _globalBufferQwords = _module.AddGlobalVariable(
+                _module.TypePointer(SpirvStorageClass.StorageBuffer, _module.TypeArray(block, count)),
+                SpirvStorageClass.StorageBuffer);
+            _module.AddName(_globalBufferQwords, "guestBufferQwords");
+            _module.AddDecoration(_globalBufferQwords, SpirvDecoration.DescriptorSet, 0);
+            _module.AddDecoration(_globalBufferQwords, SpirvDecoration.Binding, bindingNumber);
+            if (!_usesCoherentBufferPairs)
+            {
+                // The pair view already marks the dword view aliased.
+                _module.AddDecoration(_globalBuffers, SpirvDecoration.Aliased);
+            }
+
+            _module.AddDecoration(_globalBufferQwords, SpirvDecoration.Aliased);
+            _module.AddDecoration(_globalBufferQwords, SpirvDecoration.Coherent);
+            _interfaces.Add(_globalBufferQwords);
         }
 
         // One storage block holding a runtime array of dwords.

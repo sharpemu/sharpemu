@@ -1811,6 +1811,7 @@ public static partial class Gen5ShaderTranslator
             0x4B => "BufferAtomicXor",
             0x4C => "BufferAtomicInc",
             0x50 => "BufferAtomicSwapX2",
+            0x59 => "BufferAtomicAndX2",
             0x5A => "BufferAtomicOrX2",
             0x71 => "BufferGl0Inv",
             0x72 => "BufferGl1Inv",
@@ -2961,7 +2962,7 @@ public static partial class Gen5ShaderTranslator
                     "BufferStoreDwordx2" => 2u,
                     "BufferStoreDwordx3" => 3u,
                     "BufferStoreDwordx4" => 4u,
-                    "BufferAtomicCmpswap" or "BufferAtomicSwapX2" or "BufferAtomicOrX2" => 2u,
+                    "BufferAtomicCmpswap" or "BufferAtomicSwapX2" or "BufferAtomicAndX2" or "BufferAtomicOrX2" => 2u,
                     _ when opcode.StartsWith("BufferAtomic", StringComparison.Ordinal) => 1u,
                     _ => 0u,
                 };

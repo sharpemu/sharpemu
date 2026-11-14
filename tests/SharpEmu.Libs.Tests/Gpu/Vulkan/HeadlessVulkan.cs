@@ -61,6 +61,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         }
     }
     public bool SupportsImageInt64Atomics { get; private init; }
+    public bool SupportsBufferInt64Atomics { get; private init; }
 
     public bool SupportsGraphicsPipelineLibrary { get; private init; }
 
@@ -346,6 +347,12 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             vk.GetPhysicalDeviceFeatures2(physical, &query);
         }
         var imageAtomicInt64 = (bool)imageAtomicInt64Features.ShaderImageInt64Atomics;
+        var atomicInt64Features = new PhysicalDeviceShaderAtomicInt64Features
+        {
+            SType = StructureType.PhysicalDeviceShaderAtomicInt64Features,
+        };
+        var atomicInt64Query = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &atomicInt64Features };
+        vk.GetPhysicalDeviceFeatures2(physical, &atomicInt64Query);
         const string pipelineLibraryExtension = "VK_KHR_pipeline_library";
         const string graphicsPipelineLibraryExtension = "VK_EXT_graphics_pipeline_library";
         var graphicsPipelineLibraryFeatures = new PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT
@@ -439,6 +446,17 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             barycentricFeatures.PNext = vulkan13Features.PNext;
             vulkan13Features.PNext = &barycentricFeatures;
         }
+        var bufferInt64Atomics = (bool)atomicInt64Features.ShaderBufferInt64Atomics && baseFeatures.ShaderInt64;
+        if (bufferInt64Atomics)
+        {
+            atomicInt64Features = new PhysicalDeviceShaderAtomicInt64Features
+            {
+                SType = StructureType.PhysicalDeviceShaderAtomicInt64Features,
+                ShaderBufferInt64Atomics = true,
+                PNext = vulkan13Features.PNext,
+            };
+            vulkan13Features.PNext = &atomicInt64Features;
+        }
         imageAtomicInt64 &= baseFeatures.ShaderInt64;
         if (imageAtomicInt64)
         {
@@ -507,6 +525,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             SupportsMeshShaders = meshShaders,
             CanRequireComputeSubgroup32 = computeSubgroup32,
             SupportsImageInt64Atomics = imageAtomicInt64,
+            SupportsBufferInt64Atomics = bufferInt64Atomics,
             SupportsGraphicsPipelineLibrary = graphicsPipelineLibrary,
         };
         if (validation)

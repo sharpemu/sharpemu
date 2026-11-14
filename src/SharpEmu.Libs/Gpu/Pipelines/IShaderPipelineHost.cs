@@ -100,6 +100,10 @@ internal interface IShaderPipelineHost
     // emitted as real 64-bit atomics instead of a non-atomic 32-bit pair.
     bool SharedInt64AtomicsEnabled { get; }
 
+    // The device supports shaderBufferInt64Atomics, so a 64-bit buffer atomic (BUFFER_ATOMIC_*_X2) is
+    // one 64-bit atomic instead of a pair of 32-bit ones, which is not atomic as a pair.
+    bool BufferInt64AtomicsEnabled => false;
+
     // The device supports shaderImageInt64Atomics, so an atomic on a 64-bit image texel
     // (a 32_32 UINT image) can be compiled; without it such a program is rejected.
     bool ImageInt64AtomicsEnabled => false;
