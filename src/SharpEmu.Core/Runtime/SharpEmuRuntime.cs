@@ -1518,6 +1518,16 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             return;
         }
 
+        if (HostSessionControl.IsShutdownRequested)
+        {
+            // A host shutdown tears the presentation down on its own thread, which still returns pages to their guest
+            // protection and downloads GPU results into guest memory; the process exits after it. Releasing the page
+            // guard or unmapping the guest space here would race that teardown.
+            Console.Error.WriteLine(
+                "[RUNTIME] Host shutdown: the presentation tears down guest GPU memory; keeping the guest address space mapped.");
+            return;
+        }
+
         if (_gpuMemory != null)
         {
             if (GuestGpuMemoryHook.TryTakeShutdownSummary(out var gpuSummary))
