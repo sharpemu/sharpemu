@@ -126,4 +126,25 @@ internal sealed class ShaderPrewarmQueue<T>
 
         return ordered;
     }
+
+    // The order of the background lane of linked records (VulkanVideoPresenter.StartLinkedPrewarm), which compiles one at a
+    // time: every caller's newest record before any caller's older one, since one ready permutation already runs the
+    // caller's dispatches while a newer one compiles; within each round, callers a session saw compile for minutes first,
+    // since a session cannot compile those in time itself; otherwise the places NewestLinkedFirst gives.
+    internal static T[] LinkedLaneOrder(IReadOnlyList<T> records, Func<T, ulong> caller, Func<ulong, bool> slow)
+    {
+        var newestFirst = NewestLinkedFirst(records, record => caller(record));
+        var rounds = new Dictionary<ulong, int>();
+        var keyed = new (T Record, int Round, bool Slow, int Place)[newestFirst.Length];
+        for (var place = 0; place < newestFirst.Length; place++)
+        {
+            var hash = caller(newestFirst[place]);
+            var round = rounds.GetValueOrDefault(hash);
+            rounds[hash] = round + 1;
+            keyed[place] = (newestFirst[place], round, slow(hash), place);
+        }
+
+        return [.. keyed.OrderBy(static entry => entry.Round).ThenByDescending(static entry => entry.Slow)
+            .ThenBy(static entry => entry.Place).Select(static entry => entry.Record)];
+    }
 }

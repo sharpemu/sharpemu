@@ -35,6 +35,24 @@ public sealed class ShaderPrewarmQueueTests
             ordered.Select(static item => item.Name));
     }
 
+    // The background lane takes every caller's newest record before any older one, slow callers first within a round, and
+    // otherwise the places NewestLinkedFirst gives.
+    [Fact]
+    public void TheLinkedLaneTakesEachCallersNewestRecordFirstAndSlowCallersFirst()
+    {
+        Item[] items =
+        [
+            new("a-old", 0xA), new("b-old", 0xB), new("a-mid", 0xA), new("c-old", 0xC), new("a-new", 0xA),
+            new("c-new", 0xC), new("b-new", 0xB),
+        ];
+
+        var ordered = ShaderPrewarmQueue<Item>.LinkedLaneOrder(items, static item => item.Caller!.Value,
+            static caller => caller == 0xC);
+
+        Assert.Equal(new[] { "c-new", "a-new", "b-new", "c-old", "a-mid", "b-old", "a-old" },
+            ordered.Select(static item => item.Name));
+    }
+
     // A peek leaves the record in place, and a take without waiting returns at once when every record left waits on a
     // busy caller.
     [Fact]

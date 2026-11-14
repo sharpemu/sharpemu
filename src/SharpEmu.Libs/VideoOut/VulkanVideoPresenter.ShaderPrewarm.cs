@@ -37,6 +37,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private int _shaderPrewarmFailed;
         private int _shaderPrewarmRuntimeHits;
         private int _shaderPrewarmDroppedLinked;
+        // The background lane of the recorded linked permutations (StartLinkedPrewarm); teardown joins it.
+        private Thread? _linkedPrewarmThread;
         // The splash's warm-up view: the items each kind has done and holds, every lane's threads, and the start.
         private int _shaderPrewarmComputeDone;
         private int _shaderPrewarmComputeTotal;
@@ -208,6 +210,7 @@ internal static unsafe partial class VulkanVideoPresenter
             return true;
         }
 
+
         private ShaderCacheProgressView ShaderPrewarmProgressView() => new(
             "Warming up shaders",
             "Rebuilding pipelines recorded in earlier sessions",
@@ -218,7 +221,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     Volatile.Read(ref _shaderPrewarmGraphicsDone), Volatile.Read(ref _shaderPrewarmGraphicsTotal)),
             ],
             [
-                $"Warmed {Volatile.Read(ref _shaderPrewarmCompiled)} / Failed {Volatile.Read(ref _shaderPrewarmFailed)}",
+                $"Warmed {Volatile.Read(ref _shaderPrewarmCompiled) + Volatile.Read(ref _graphicsPrewarmCompiled)} / " +
+                $"Failed {Volatile.Read(ref _shaderPrewarmFailed) + Volatile.Read(ref _graphicsPrewarmFailed)}",
                 string.Create(System.Globalization.CultureInfo.InvariantCulture,
                     $"{Volatile.Read(ref _shaderPrewarmWorkers)} workers / {Stopwatch.GetElapsedTime(_shaderPrewarmStarted).TotalSeconds:F0} seconds"),
             ],
@@ -294,7 +298,16 @@ internal static unsafe partial class VulkanVideoPresenter
             ShaderCodeCapture code,
             IGuestGpuBackend compiler,
             bool sharedInt64Atomics,
-            bool execGuardElision)
+            bool execGuardElision) =>
+            PrewarmComputePipelineCore(record, code, compiler, sharedInt64Atomics, execGuardElision, waitForAdmission: false);
+
+        private bool PrewarmComputePipelineCore(
+            ComputePrewarmRecord record,
+            ShaderCodeCapture code,
+            IGuestGpuBackend compiler,
+            bool sharedInt64Atomics,
+            bool execGuardElision,
+            bool waitForAdmission)
         {
             if (!ShaderProgramCache.TryCompilePrewarm(
                     record, code, compiler, sharedInt64Atomics, execGuardElision,
@@ -322,12 +335,13 @@ internal static unsafe partial class VulkanVideoPresenter
             Pipeline pipeline = default;
             DriverCacheShard? linkedCache = null;
             var created = false;
-            // A linked record compiles only when the admission of the session's linked compiles (LinkedCompileAdmission)
-            // admits it at once, so the prewarm's linked compiles keep to the same commit budget and no prewarm thread waits
-            // behind the session's; a record that is not admitted is dropped, as the older ones are (SHARPEMU_PREWARM_LINKED).
-            // The try that releases the admission follows at once.
+            // A linked record compiles only once the admission of the session's linked compiles (LinkedCompileAdmission)
+            // admits it, so the prewarm's linked compiles keep to the same commit budget. The prewarm the game waits for
+            // takes only an admission given at once, so none of its threads waits behind the session's, and drops the record
+            // otherwise; the background lane (StartLinkedPrewarm) waits for it. The try that releases the admission follows
+            // at once.
             var linked = layout!.CallTargetCount != 0;
-            if (linked && !WaitForLinkedAdmission(record.Hash, payload.Length, mayWait: false))
+            if (linked && !WaitForLinkedAdmission(record.Hash, payload.Length, mayWait: waitForAdmission))
             {
                 Interlocked.Increment(ref _shaderPrewarmDroppedLinked);
                 return false;
@@ -335,6 +349,12 @@ internal static unsafe partial class VulkanVideoPresenter
 
             try
             {
+                // An admission can come after teardown began; a compile that cannot be cancelled must not start then.
+                if (linked && _shaderPrewarmStopping)
+                {
+                    return false;
+                }
+
                 CollectLayoutBindings(bindings, layout, ShaderStage.Compute);
                 setLayout = CreateDescriptorSetLayout(bindings, out var usesPushDescriptors, out _);
                 pipelineLayout = CreatePipelineLayout(setLayout, ShaderStageFlags.ComputeBit, layout.UsesBindlessHeap);
@@ -700,6 +720,9 @@ internal static unsafe partial class VulkanVideoPresenter
             // own compiles.
             _prewarmPool?.Stop();
             _prewarmPool = null;
+            // The linked lane stops after its current permutation in the same way; one still waiting for its admission gives
+            // up, as teardown closed the admission first.
+            Interlocked.Exchange(ref _linkedPrewarmThread, null)?.Join();
             DestroyPrewarmedComputePipelines();
             if (Interlocked.Exchange(ref _shaderPrewarmList, null) is { } list)
             {

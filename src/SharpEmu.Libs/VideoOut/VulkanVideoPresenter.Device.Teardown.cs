@@ -28,7 +28,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 _vk.DeviceWaitIdle(_device);
             }
 
-            // Linked compiles still waiting for admission give up, so the drain below does not wait for them.
+            // Linked compiles still waiting for admission give up, so neither the prewarm's stop nor the drain below waits for
+            // them.
             _linkedAdmissionClosed = true;
             StopShaderPrewarm();
             DrainPendingComputePipelines();
