@@ -638,8 +638,9 @@ public static partial class Gen5SpirvTranslator
             EmitConditional(_module.AddInstruction(SpirvOp.ULessThan, _boolType, lane, primitives), () =>
             {
                 var packed = Load(_uintType, _meshPrimitiveValue);
+                // Three 9-bit vertex indices at bits 0, 10 and 20; bit 9 of each field is that vertex's edge flag.
                 uint Vertex(uint bit) => _module.AddInstruction(SpirvOp.BitFieldUExtract,
-                    _uintType, packed, UInt(bit), UInt(10));
+                    _uintType, packed, UInt(bit), UInt(9));
                 var indices = _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec3Type,
                     Vertex(0), Vertex(10), Vertex(20));
                 Store(MeshArrayElement(_meshPrimitiveIndicesOutput, _uvec3Type, lane,

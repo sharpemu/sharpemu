@@ -553,6 +553,64 @@ public sealed class Gen5MeshShaderTests
         ValidateWithInstalledSdk(shader.Spirv);
     }
 
+    // A primitive export packs three 9-bit vertex indices at bits 0, 10 and 20; bit 9 of each field is the vertex's
+    // edge flag, so a set edge flag must not move the index past 511.
+    [Fact]
+    public void PrimitiveExportIndicesLeaveOutTheEdgeFlags()
+    {
+        var program = new Gen5ShaderProgram(0,
+        [
+            new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Sop1, "SMovB32", [0],
+                [Gen5Operand.Source(131)], [Gen5Operand.Scalar(124)], null),
+            new Gen5ShaderInstruction(4, Gen5ShaderEncoding.Sopp, "SSendmsg", [0xBF900009],
+                [], [], null),
+            new Gen5ShaderInstruction(8, Gen5ShaderEncoding.Exp, "Exp", [0, 0],
+                [Gen5Operand.Vector(0), Gen5Operand.Vector(1),
+                    Gen5Operand.Vector(2), Gen5Operand.Vector(3)], [],
+                new Gen5ExportControl(12, 15, false, false, false)),
+            new Gen5ShaderInstruction(16, Gen5ShaderEncoding.Exp, "Exp", [0, 0],
+                [Gen5Operand.Vector(4), Gen5Operand.Vector(4),
+                    Gen5Operand.Vector(4), Gen5Operand.Vector(4)], [],
+                new Gen5ExportControl(20, 1, false, true, false)),
+            new Gen5ShaderInstruction(24, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000],
+                [], [], null),
+        ]);
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(
+            program, ShaderStage.Mesh, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            WaveSize = 32,
+            LocalSizeX = 32,
+            Mesh = new MeshShaderConfiguration(32, 16, 0, 8, 24, 0),
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+
+        var words = new uint[shader.Spirv.Length / 4];
+        Buffer.BlockCopy(shader.Spirv, 0, words, 0, shader.Spirv.Length);
+        var constants = new Dictionary<uint, uint>();
+        var extracts = new List<(uint Offset, uint Count)>();
+        for (var index = 5; index < words.Length; index += (int)(words[index] >> 16))
+        {
+            var opcode = (SpirvOp)(words[index] & 0xFFFF);
+            if (opcode == SpirvOp.Constant && words[index] >> 16 == 4)
+                constants[words[index + 2]] = words[index + 3];
+            else if (opcode == SpirvOp.BitFieldUExtract)
+                extracts.Add((words[index + 4], words[index + 5]));
+        }
+
+        var fields = extracts.Select(extract =>
+            (Offset: constants.GetValueOrDefault(extract.Offset, uint.MaxValue),
+             Count: constants.GetValueOrDefault(extract.Count, uint.MaxValue))).ToList();
+        // (0, 10) also decodes the vertex count of the GS allocation request, so only fields 1 and 2 tell the old width.
+        foreach (var offset in new[] { 0u, 10u, 20u })
+        {
+            Assert.Contains((offset, 9u), fields);
+        }
+
+        Assert.DoesNotContain((10u, 10u), fields);
+        Assert.DoesNotContain((20u, 10u), fields);
+    }
+
     private sealed class MeshFixtureTheoryAttribute : TheoryAttribute
     {
         public MeshFixtureTheoryAttribute()
