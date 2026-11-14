@@ -1182,11 +1182,10 @@ public sealed partial class SpirvModuleBuilder
         params uint[] operands)
     {
         var result = AllocateId();
-        var values = new uint[operands.Length + 2];
-        values[0] = resultType;
-        values[1] = result;
-        operands.CopyTo(values, 2);
-        Emit(section, opcode, values);
+        section.Add(((uint)(operands.Length + 3) << 16) | (ushort)opcode);
+        section.Add(resultType);
+        section.Add(result);
+        section.AddRange(operands);
         NoteResultType(result, resultType);
         return result;
     }

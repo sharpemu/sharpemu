@@ -163,8 +163,7 @@ public sealed partial class ResourceTracker
                 if (!allowedImage && (ReadsScalar(instruction, destination.Value) ||
                     (instruction.Encoding == Gen5ShaderEncoding.Sopk && instruction.Opcode is "SAddkI32" or "SMulkI32" &&
                         instruction.Destinations.Contains(destination)))) return false;
-                overwritten = instruction.Destinations.Any(target => target.Kind == Gen5OperandKind.ScalarRegister &&
-                    (target == destination || (instruction.DestinationWidth > 1 && target.Value + 1 == destination.Value))) ||
+                overwritten = WritesScalar(instruction, destination) ||
                     instruction.Control is Gen5Vop3Control { ScalarDestination: { } scalarDestination } &&
                         destination.Value >= scalarDestination && destination.Value - scalarDestination < 2 ||
                     instruction.Control is Gen5SdwaControl { ScalarDestination: { } compareDestination } &&
@@ -178,12 +177,32 @@ public sealed partial class ResourceTracker
         return true;
     }
 
+    // Loops, not closures: the consumer walk asks these of every instruction it passes.
+    private static bool WritesScalar(Gen5ShaderInstruction instruction, Gen5Operand destination)
+    {
+        var targets = instruction.Destinations;
+        for (var index = 0; index < targets.Count; index++)
+        {
+            var target = targets[index];
+            if (target.Kind == Gen5OperandKind.ScalarRegister &&
+                (target == destination || (instruction.DestinationWidth > 1 && target.Value + 1 == destination.Value)))
+                return true;
+        }
+
+        return false;
+    }
+
     private static bool ReadsScalar(Gen5ShaderInstruction instruction, uint register)
     {
         bool InRange(uint first, uint width) => register >= first && register - first < width;
         var width = instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
-        if (instruction.Sources.Any(source => source.Kind == Gen5OperandKind.ScalarRegister && InRange(source.Value, width)))
-            return true;
+        var sources = instruction.Sources;
+        for (var index = 0; index < sources.Count; index++)
+        {
+            if (sources[index].Kind == Gen5OperandKind.ScalarRegister && InRange(sources[index].Value, width))
+                return true;
+        }
+
         return instruction.Control switch
         {
             Gen5ImageControl image => InRange(image.ScalarResource, 8) || InRange(image.ScalarSampler, 4),

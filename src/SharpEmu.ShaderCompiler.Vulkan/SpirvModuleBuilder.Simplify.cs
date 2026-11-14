@@ -1352,11 +1352,21 @@ public sealed partial class SpirvModuleBuilder
         return IsValueOperation(opcode, []);
     }
 
+    // The passes over every function word index ids in arrays (every id is below _nextId); a word at or past it is a
+    // literal that names no variable, chain or definition.
     private HashSet<uint> FindUnreadVariables(out HashSet<uint> unreadPointers)
     {
         var words = _functions;
-        var chainBases = new Dictionary<uint, uint>();
-        var read = new HashSet<uint>();
+        var local = new bool[_nextId];
+        foreach (var variable in _localVariables)
+        {
+            local[variable] = true;
+        }
+
+        // The variable of each access chain into a local variable, once the scan has passed the chain (0: none).
+        var chainBases = new uint[_nextId];
+        var chains = new List<uint>();
+        var read = new bool[_nextId];
         for (var offset = 0; offset < words.Count; offset += (int)(words[offset] >> 16))
         {
             var wordCount = (int)(words[offset] >> 16);
@@ -1369,7 +1379,8 @@ public sealed partial class SpirvModuleBuilder
                 case SpirvOp.Store when wordCount == 3:
                     first = 2;
                     break;
-                case SpirvOp.AccessChain when wordCount >= 4 && _localVariables.Contains(words[offset + 3]):
+                case SpirvOp.AccessChain when wordCount >= 4 && words[offset + 3] < (uint)local.Length && local[words[offset + 3]]:
+                    chains.Add(words[offset + 2]);
                     chainBases[words[offset + 2]] = words[offset + 3];
                     first = 4;
                     break;
@@ -1378,22 +1389,27 @@ public sealed partial class SpirvModuleBuilder
             for (var word = first; word < wordCount; word++)
             {
                 var id = words[offset + word];
-                if (_localVariables.Contains(id))
+                if (id >= (uint)local.Length)
                 {
-                    read.Add(id);
+                    continue;
                 }
-                else if (chainBases.TryGetValue(id, out var variable))
+
+                if (local[id])
                 {
-                    read.Add(variable);
+                    read[id] = true;
+                }
+                else if (chainBases[id] != 0)
+                {
+                    read[chainBases[id]] = true;
                 }
             }
         }
 
-        var unread = KeepsUnreadVariables ? [] : new HashSet<uint>(_localVariables.Where(variable => !read.Contains(variable)));
+        var unread = KeepsUnreadVariables ? [] : new HashSet<uint>(_localVariables.Where(variable => !read[variable]));
         unreadPointers = new HashSet<uint>(unread);
-        foreach (var (chain, variable) in chainBases)
+        foreach (var chain in chains)
         {
-            if (unread.Contains(variable))
+            if (unread.Contains(chainBases[chain]))
             {
                 unreadPointers.Add(chain);
             }
@@ -1474,8 +1490,10 @@ public sealed partial class SpirvModuleBuilder
         }
 
         var removed = new bool[starts.Count];
-        var uses = new Dictionary<uint, int>();
-        var definers = new Dictionary<uint, int>();
+        var uses = new int[_nextId];
+        // The instruction (index + 1; 0: none) defining an id whose definition may be removed, and those ids in order.
+        var definers = new int[_nextId];
+        var defined = new List<uint>();
         for (var index = 0; index < starts.Count; index++)
         {
             var offset = starts[index];
@@ -1492,23 +1510,27 @@ public sealed partial class SpirvModuleBuilder
             var first = 1;
             if (IsRemovableDefinition(words, offset, wordCount))
             {
-                definers[words[offset + 2]] = index;
+                definers[words[offset + 2]] = index + 1;
+                defined.Add(words[offset + 2]);
                 first = 3;
             }
 
             for (var word = first; word < wordCount; word++)
             {
                 var id = words[offset + word];
-                uses[id] = uses.GetValueOrDefault(id) + 1;
+                if (id < (uint)uses.Length)
+                {
+                    uses[id]++;
+                }
             }
         }
 
         var pending = new Stack<int>();
-        foreach (var (id, index) in definers)
+        foreach (var id in defined)
         {
-            if (uses.GetValueOrDefault(id) == 0)
+            if (uses[id] == 0)
             {
-                pending.Push(index);
+                pending.Push(definers[id] - 1);
             }
         }
 
@@ -1526,15 +1548,14 @@ public sealed partial class SpirvModuleBuilder
             for (var word = 3; word < wordCount; word++)
             {
                 var id = words[offset + word];
-                if (!uses.TryGetValue(id, out var count))
+                if (id >= (uint)uses.Length || uses[id] == 0)
                 {
                     continue;
                 }
 
-                uses[id] = --count;
-                if (count == 0 && definers.TryGetValue(id, out var definer) && !removed[definer])
+                if (--uses[id] == 0 && definers[id] != 0 && !removed[definers[id] - 1])
                 {
-                    pending.Push(definer);
+                    pending.Push(definers[id] - 1);
                 }
             }
         }
