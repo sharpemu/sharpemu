@@ -5222,8 +5222,15 @@ public static partial class Gen5SpirvTranslator
         {
             var result = Ext(operation, _floatType, left, right);
             result = _module.AddInstruction(SpirvOp.Select, _floatType, IsNanBits(right), left, result);
-            return _module.AddInstruction(SpirvOp.Select, _floatType, IsNanBits(left), right, result);
+            return _module.AddInstruction(SpirvOp.Select, _floatType, IsNan(left), right, result);
         }
+
+        // A module that declares SignedZeroInfNanPreserve keeps OpIsNan exact; without it a driver may assume no NaN, and
+        // the test reads the bits.
+        private uint IsNan(uint value) =>
+            _request.ShaderSignedZeroInfNanPreserveFloat32Supported
+                ? _module.AddInstruction(SpirvOp.IsNan, _boolType, value)
+                : IsNanBits(value);
 
         // NaN tested on the bits, which fast math cannot assume away.
         private uint IsNanBits(uint value) =>
