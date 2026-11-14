@@ -49,6 +49,7 @@ internal static unsafe partial class VulkanVideoPresenter
         internal bool _supportsDepthBiasClamp;
         private bool _supportsShaderSignedZeroInfNanPreserveFloat32;
         internal bool _robustBufferAccess2Enabled;
+        private bool _nativeFloat16Conversions;
         private bool _supportsPipelineBinaries;
         private uint _maxColorAttachments;
         internal Device _device;
@@ -652,6 +653,13 @@ internal static unsafe partial class VulkanVideoPresenter
             _vk.GetPhysicalDeviceProperties2(_physicalDevice, &properties2);
             _supportsShaderSignedZeroInfNanPreserveFloat32 =
                 floatControls.ShaderSignedZeroInfNanPreserveFloat32;
+            // The 16-bit float controls of NativeFloat16Conversions, which must not need the same modes for 32 or 64 bits;
+            // CreateDevice adds shaderFloat16. SHARPEMU_NATIVE_FLOAT16=0 keeps the integer conversions.
+            _nativeFloat16Conversions = floatControls.ShaderRoundingModeRtefloat16 && floatControls.ShaderDenormPreserveFloat16 &&
+                floatControls.ShaderSignedZeroInfNanPreserveFloat16 &&
+                floatControls.RoundingModeIndependence == ShaderFloatControlsIndependence.IndependenceAll &&
+                floatControls.DenormBehaviorIndependence == ShaderFloatControlsIndependence.IndependenceAll &&
+                Environment.GetEnvironmentVariable("SHARPEMU_NATIVE_FLOAT16") != "0";
             if (pushDescriptorProperties.PNext != null)
             {
                 var ignoreMeshGranularity = _physicalDeviceVendorId == AmdVendorId;
@@ -1151,6 +1159,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var supportsBufferDeviceAddress = vulkan12Features.BufferDeviceAddress;
             var supportsSharedInt64Atomics = vulkan12Features.ShaderSharedInt64Atomics;
             var supportsBufferInt64Atomics = vulkan12Features.ShaderBufferInt64Atomics;
+            _nativeFloat16Conversions &= vulkan12Features.ShaderFloat16;
+            Console.Error.WriteLine($"[LOADER][INFO] Vulkan native f16 conversions: {(_nativeFloat16Conversions ? "on" : "off")}");
             _supportsShaderLayer = vulkan12Features.ShaderOutputLayer;
             var supportsViewportIndexLayer = IsDeviceExtensionAvailable("VK_EXT_shader_viewport_index_layer") &&
                 vulkan12Features.ShaderOutputViewportIndex && vulkan12Features.ShaderOutputLayer;
@@ -1336,6 +1346,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     BufferDeviceAddress = true,
                     ShaderSharedInt64Atomics = supportsSharedInt64Atomics,
                     ShaderBufferInt64Atomics = supportsBufferInt64Atomics,
+                    ShaderFloat16 = _nativeFloat16Conversions,
                     ShaderOutputLayer = _supportsShaderLayer,
                     ShaderOutputViewportIndex = supportsViewportIndexLayer,
                     DescriptorIndexing = _bindlessHeapSupported,

@@ -339,6 +339,11 @@ public sealed class ShaderCompileRequest
     // The device bounds every storage buffer access by its descriptor's range and reads zero past it (robustBufferAccess2),
     // so a guest buffer load needs no bounds check of its own.
     public bool RobustBufferAccess2 { get; init; }
+
+    // The device has 16-bit floats (shaderFloat16) and float controls that can give them alone round-to-nearest-even, kept
+    // denormals and kept signed zero, infinity and NaN, so an f16 value widens and narrows with OpFConvert as the guest
+    // converts it.
+    public bool NativeFloat16Conversions { get; init; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
 
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];

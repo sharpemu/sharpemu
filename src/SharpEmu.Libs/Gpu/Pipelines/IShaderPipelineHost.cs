@@ -117,6 +117,9 @@ internal interface IShaderPipelineHost
     // The device was created with robustBufferAccess2: a storage buffer access past its descriptor's range reads zero and
     // writes nothing.
     bool RobustBufferAccess2Enabled => false;
+
+    // The device was created with shaderFloat16 and converts f16 exactly under float controls (NativeFloat16Conversions).
+    bool NativeFloat16Conversions => false;
     bool ExecGuardElisionEnabled => true;
     ShaderPrewarmList? ShaderPrewarm => null;
     bool PerVertexPixelInputsSupported => true;

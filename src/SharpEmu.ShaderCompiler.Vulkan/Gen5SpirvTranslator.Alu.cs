@@ -2220,11 +2220,8 @@ public static partial class Gen5SpirvTranslator
             uint value;
             if (readAsHalf)
             {
-                var raw = GetRawSource(instruction, index);
-                var half = ((control.OpSelMask >> index) & 1) != 0
-                    ? ShiftRightLogical(raw, UInt(16))
-                    : raw;
-                value = Bitcast(_floatType, EmitHalfToFloat(half));
+                value = Bitcast(_floatType,
+                    EmitHalfToFloat(GetRawSource(instruction, index), ((control.OpSelMask >> index) & 1) != 0));
             }
             else
             {
@@ -2329,11 +2326,8 @@ public static partial class Gen5SpirvTranslator
                 })
                 : GetRawSource(instruction, index);
 
-        private uint EmitPackedF16Half(uint raw, bool highLane)
-        {
-            var half = highLane ? ShiftRightLogical(raw, UInt(16)) : raw;
-            return Bitcast(_floatType, EmitHalfToFloat(half));
-        }
+        private uint EmitPackedF16Half(uint raw, bool highLane) =>
+            Bitcast(_floatType, EmitHalfToFloat(raw, highLane));
 
         // Saturates an f32 bit pattern to [0, 1] the way the VOP3P clamp modifier
         // does: below 0 (and NaN, since the ordered compare is false for it) becomes
@@ -2428,10 +2422,7 @@ public static partial class Gen5SpirvTranslator
         {
             var raw = GetPackedF16Source(instruction, index);
             var selectMask = highLane ? control.OpSelHiMask : control.OpSelMask;
-            var half = ((selectMask >> index) & 1) != 0
-                ? ShiftRightLogical(raw, UInt(16))
-                : raw;
-            var value = Bitcast(_floatType, EmitHalfToFloat(half));
+            var value = Bitcast(_floatType, EmitHalfToFloat(raw, ((selectMask >> index) & 1) != 0));
             var negateMask = highLane ? control.NegHiMask : control.NegLoMask;
             if (((negateMask >> index) & 1) != 0)
             {
@@ -2547,15 +2538,25 @@ public static partial class Gen5SpirvTranslator
             return EmitHalfResult(instruction, destination, bits);
         }
 
-        // Widens an f16 value held in the low 16 bits of `halfBits` to an f32 bit
+        // Widens an f16 value held in the low 16 bits of `halfBits` (the high 16 bits when `high` is set) to an f32 bit
         // pattern, exactly (subnormals normalised, Inf/NaN and signed zero preserved).
         // The exponent and mantissa move into place and the exponent is re-biased;
         // Inf/NaN take a second re-bias to the all-ones exponent. A subnormal m becomes
         // 2^-14 * (1 + m / 1024) - 2^-14: both floats are normal and their difference
         // m * 2^-24 is representable, so the subtraction is exact even when the driver
         // flushes denormals.
-        private uint EmitHalfToFloat(uint halfBits)
+        private uint EmitHalfToFloat(uint halfBits, bool high = false)
         {
+            if (_request.NativeFloat16Conversions && !_module.TryGetConstantValue(halfBits, out _))
+            {
+                return EmitNativeHalfToFloat(halfBits, high);
+            }
+
+            if (high)
+            {
+                halfBits = ShiftRightLogical(halfBits, UInt(16));
+            }
+
             var magnitude = ShiftLeftLogical(BitwiseAnd(halfBits, UInt(0x7FFF)), UInt(13));
             var exponent = BitwiseAnd(magnitude, UInt(0x0F80_0000));
             var rebiased = IAdd(magnitude, UInt(112u << 23));
@@ -2572,8 +2573,14 @@ public static partial class Gen5SpirvTranslator
         // Narrows an f32 bit pattern to an f16 value in the low 16 bits, rounding to
         // nearest even (subnormals, overflow-to-Inf and NaN/Inf handled). Mirrors the
         // branchless FloatToHalf reference validated exhaustively against System.Half.
+        // A NaN becomes the quiet NaN of its sign, 0x7E00.
         private uint EmitFloatToHalf(uint bits)
         {
+            if (_request.NativeFloat16Conversions && !_module.TryGetConstantValue(bits, out _))
+            {
+                return EmitNativeFloatToHalf(bits);
+            }
+
             var sign = BitwiseAnd(ShiftRightLogical(bits, UInt(16)), UInt(0x8000));
             var absolute = BitwiseAnd(bits, UInt(0x7FFF_FFFF));
 
@@ -2620,6 +2627,53 @@ public static partial class Gen5SpirvTranslator
             var isSubnormal = UCmp(SpirvOp.ULessThanEqual, exponent, UInt(112));
             var finite = SelectU(isSubnormal, subnormal, normal);
             return SelectU(isInfinityNan, infinityNan, BitwiseOr(sign, finite));
+        }
+
+        private uint _halfType;
+        private uint _half2Type;
+
+        // The f16 type of the native conversions. Its first use declares it with the float controls under which OpFConvert
+        // converts as the guest does (the entry point gets their execution modes): round-to-nearest-even, kept denormals,
+        // kept signed zero, infinity and NaN, all for 16-bit floats.
+        private uint HalfType()
+        {
+            if (_halfType == 0)
+            {
+                _module.AddCapability(SpirvCapability.Float16);
+                _module.AddCapability(SpirvCapability.DenormPreserve);
+                _module.AddCapability(SpirvCapability.RoundingModeRte);
+                _module.AddCapability(SpirvCapability.SignedZeroInfNanPreserve);
+                _halfType = _module.TypeFloat(16);
+                _half2Type = _module.TypeVector(_halfType, 2);
+            }
+
+            return _halfType;
+        }
+
+        // EmitHalfToFloat with NativeFloat16Conversions. OpFConvert widens; a NaN keeps its payload as the integer sequence
+        // keeps it, which the device need not do: the half at the top of a word, shifted right arithmetically by 3, has the
+        // sign, exponent and mantissa of the f32 NaN in place, and 0x70000000 fills the rest of its exponent.
+        private uint EmitNativeHalfToFloat(uint bits, bool high)
+        {
+            var half = _module.AddInstruction(SpirvOp.CompositeExtract, HalfType(), Bitcast(_half2Type, bits), high ? 1u : 0u);
+            var top = high ? BitwiseAnd(bits, UInt(0xFFFF_0000)) : ShiftLeftLogical(bits, UInt(16));
+            var nan = BitwiseOr(_module.AddInstruction(SpirvOp.ShiftRightArithmetic, _uintType, top, UInt(3)), UInt(0x7000_0000));
+            return Bitcast(_uintType, _module.AddInstruction(SpirvOp.Select, _floatType,
+                _module.AddInstruction(SpirvOp.IsNan, _boolType, half),
+                Bitcast(_floatType, nan),
+                _module.AddInstruction(SpirvOp.FConvert, _floatType, half)));
+        }
+
+        // EmitFloatToHalf with NativeFloat16Conversions. OpFConvert rounds to nearest even, makes f16 denormals and overflows
+        // to infinity; a NaN becomes 0x7E00 with its sign, as in the integer sequence.
+        private uint EmitNativeFloatToHalf(uint bits)
+        {
+            var half = HalfType();
+            var value = Bitcast(_floatType, bits);
+            var narrowed = _module.AddInstruction(SpirvOp.CompositeConstruct, _half2Type,
+                _module.AddInstruction(SpirvOp.FConvert, half, value), _module.Constant(half, 0));
+            var nan = SelectU(UCmp(SpirvOp.UGreaterThan, bits, UInt(0x7FFF_FFFF)), UInt(0xFE00), UInt(0x7E00));
+            return SelectU(IsNan(value), nan, Bitcast(_uintType, narrowed));
         }
 
         private uint SelectU(uint condition, uint whenTrue, uint whenFalse) =>
@@ -4809,13 +4863,8 @@ public static partial class Gen5SpirvTranslator
                     instruction,
                     sourceIndex,
                     applySdwaIntegerModifiers: false);
-                if (instruction.Control is Gen5Vop3Control control &&
-                    (control.OperandSelect & (1u << sourceIndex)) != 0)
-                {
-                    raw = ShiftRightLogical(raw, UInt(16));
-                }
-
-                value = Bitcast(_floatType, EmitHalfToFloat(raw));
+                value = Bitcast(_floatType, EmitHalfToFloat(raw,
+                    instruction.Control is Gen5Vop3Control control && (control.OperandSelect & (1u << sourceIndex)) != 0));
             }
 
             uint absoluteMask = 0;

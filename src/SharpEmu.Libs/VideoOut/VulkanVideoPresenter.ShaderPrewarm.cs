@@ -269,6 +269,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 ((IShaderPipelineHost)this).SharedInt64AtomicsEnabled,
                 ((IShaderPipelineHost)this).ExecGuardElisionEnabled,
                 _supportsShaderSignedZeroInfNanPreserveFloat32,
+                _nativeFloat16Conversions,
                 SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.TraceEnabled,
                 Volatile.Read(ref _nativeSubgroupSize),
                 _canRequireComputeSubgroup32,
@@ -306,6 +307,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     stableImageLimits: ((IShaderPipelineHost)this).ComputeImageDescriptorLimits,
                     bufferInt64Atomics: BufferInt64AtomicsEnabled,
                     robustBufferAccess2: _robustBufferAccess2Enabled,
+                    nativeFloat16Conversions: _nativeFloat16Conversions,
                     frontendOf: Agc.AgcExports.ShaderFrontendForDomain))
             {
                 NoteShaderPrewarmFailure("cs", record.Hash, record.Address, error);
@@ -592,6 +594,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public bool ShaderDeviceClockEnabled => _inner.ShaderDeviceClockEnabled;
             public bool ShaderSignedZeroInfNanPreserveFloat32Supported => _inner.ShaderSignedZeroInfNanPreserveFloat32Supported;
             public bool RobustBufferAccess2Enabled => _inner.RobustBufferAccess2Enabled;
+            public bool NativeFloat16Conversions => _inner.NativeFloat16Conversions;
             public bool ExecGuardElisionEnabled => _inner.ExecGuardElisionEnabled;
             public bool PerVertexPixelInputsSupported => _inner.PerVertexPixelInputsSupported;
             public bool ClipDistanceEnabled => _inner.ClipDistanceEnabled;

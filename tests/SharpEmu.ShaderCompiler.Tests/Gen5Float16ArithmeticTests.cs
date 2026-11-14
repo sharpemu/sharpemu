@@ -145,6 +145,24 @@ public sealed class Gen5Float16ArithmeticTests
         Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
     }
 
+    // With NativeFloat16Conversions v_rcp_f16 widens its operand and narrows its result with OpFConvert, and the module declares
+    // 16-bit floats with the float controls of the conversions (round-to-nearest-even, denormals and NaN kept, three execution
+    // modes beside LocalSize).
+    [Fact]
+    public void NativeFloat16ConversionsDeclareTheirFloatControls()
+    {
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(Decode([0x64000501, SEndpgm]), userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout) { NativeFloat16Conversions = true };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var opcodes = ReadOpcodes(shader.Spirv);
+        Assert.Equal(3, opcodes.Count(opcode => opcode == (ushort)SpirvOp.FConvert));
+        Assert.Equal(4, opcodes.Count(opcode => opcode == (ushort)SpirvOp.ExecutionMode));
+        Assert.Superset(
+            new HashSet<ushort>([(ushort)SpirvCapability.Float16, (ushort)SpirvCapability.DenormPreserve,
+                (ushort)SpirvCapability.RoundingModeRte, (ushort)SpirvCapability.SignedZeroInfNanPreserve]),
+            ReadCapabilities(shader.Spirv).ToHashSet());
+    }
+
     [Theory]
     [InlineData(0x54u, "VRcpF16")]
     [InlineData(0x55u, "VSqrtF16")]

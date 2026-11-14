@@ -67,6 +67,10 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     // As on the presenter's device: a storage buffer access past its descriptor's range reads zero and writes nothing.
     public bool RobustBufferAccess2 { get; private init; }
 
+    // As on the presenter's device: shaderFloat16 is enabled and the 16-bit float controls of
+    // ShaderCompileRequest.NativeFloat16Conversions are available.
+    public bool NativeFloat16Conversions { get; private init; }
+
     public bool SupportsGraphicsPipelineLibrary { get; private init; }
 
     private static readonly string[] RenderingExtensionNames =
@@ -364,6 +368,16 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         };
         var atomicInt64Query = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &atomicInt64Features };
         vk.GetPhysicalDeviceFeatures2(physical, &atomicInt64Query);
+        var float16Features = new PhysicalDeviceShaderFloat16Int8Features { SType = StructureType.PhysicalDeviceShaderFloat16Int8Features };
+        var float16Query = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &float16Features };
+        vk.GetPhysicalDeviceFeatures2(physical, &float16Query);
+        var floatControls = new PhysicalDeviceFloatControlsProperties { SType = StructureType.PhysicalDeviceFloatControlsProperties };
+        var floatControlsQuery = new PhysicalDeviceProperties2 { SType = StructureType.PhysicalDeviceProperties2, PNext = &floatControls };
+        vk.GetPhysicalDeviceProperties2(physical, &floatControlsQuery);
+        var nativeFloat16 = float16Features.ShaderFloat16 && floatControls.ShaderRoundingModeRtefloat16 &&
+            floatControls.ShaderDenormPreserveFloat16 && floatControls.ShaderSignedZeroInfNanPreserveFloat16 &&
+            floatControls.RoundingModeIndependence == ShaderFloatControlsIndependence.IndependenceAll &&
+            floatControls.DenormBehaviorIndependence == ShaderFloatControlsIndependence.IndependenceAll;
         const string pipelineLibraryExtension = "VK_KHR_pipeline_library";
         const string graphicsPipelineLibraryExtension = "VK_EXT_graphics_pipeline_library";
         var graphicsPipelineLibraryFeatures = new PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT
@@ -476,6 +490,16 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             imageAtomicInt64Features.PNext = vulkan13Features.PNext;
             vulkan13Features.PNext = &imageAtomicInt64Features;
         }
+        if (nativeFloat16)
+        {
+            float16Features = new PhysicalDeviceShaderFloat16Int8Features
+            {
+                SType = StructureType.PhysicalDeviceShaderFloat16Int8Features,
+                ShaderFloat16 = true,
+                PNext = vulkan13Features.PNext,
+            };
+            vulkan13Features.PNext = &float16Features;
+        }
         var robustBufferAccess2 = (bool)robustness2Features.RobustBufferAccess2 && baseFeatures.RobustBufferAccess;
         if (robustBufferAccess2)
         {
@@ -554,6 +578,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             SupportsBufferInt64Atomics = bufferInt64Atomics,
             SupportsGraphicsPipelineLibrary = graphicsPipelineLibrary,
             RobustBufferAccess2 = robustBufferAccess2,
+            NativeFloat16Conversions = nativeFloat16,
         };
         if (validation)
         {

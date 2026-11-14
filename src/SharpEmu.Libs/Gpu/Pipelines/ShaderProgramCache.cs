@@ -1698,6 +1698,7 @@ internal sealed partial class ShaderProgramCache
                 _host.ComputeWave64SubgroupNative, _host.ImageInt64AtomicsEnabled);
         var bufferInt64Atomics = _host.BufferInt64AtomicsEnabled;
         var robustBufferAccess2 = _host.RobustBufferAccess2Enabled;
+        var nativeFloat16 = _host.NativeFloat16Conversions;
         var subgroup32 = _host.ComputeRunsOn32LaneSubgroups(current);
         var usesBufferLengths = source.Registered.Frontend?.RequiresExplicitBufferLengths ?? false;
         var tessellationHull = options.TessellationHull;
@@ -1709,7 +1710,7 @@ internal sealed partial class ShaderProgramCache
                 usesBufferLengths: usesBufferLengths, usesTessellationData: usesTessellationData);
             var request = BuildComputeRequest(plan, resources, layout, info, systemRegisters, sharedInt64Atomics, execGuardElision,
                 signedZeroInfNanPreserve, wave64Native, subgroup32, imageInt64Atomics, bufferInt64Atomics: bufferInt64Atomics,
-                robustBufferAccess2: robustBufferAccess2, tessellationHull: tessellationHull);
+                robustBufferAccess2: robustBufferAccess2, nativeFloat16Conversions: nativeFloat16, tessellationHull: tessellationHull);
             var translated = TranslationDiskCache.TryTranslate(compiler, request,
                 TranslationDiskCache.Key(key, userDataBase, specialization, pushDataCursor, request), out var compiled, out var error);
             return new DeferredTranslation(resources, layout, request, translated, compiled, error);
@@ -2002,6 +2003,7 @@ internal sealed partial class ShaderProgramCache
             SupportsShaderDeviceClock = host.ShaderDeviceClockEnabled,
             ShaderSignedZeroInfNanPreserveFloat32Supported = host.ShaderSignedZeroInfNanPreserveFloat32Supported,
             RobustBufferAccess2 = host.RobustBufferAccess2Enabled,
+            NativeFloat16Conversions = host.NativeFloat16Conversions,
             RequiredVertexOutputCount = options.RequiredVertexOutputCount,
             Tessellation = options.Tessellation,
             VertexInputs = vertexInputs,
@@ -2036,6 +2038,7 @@ internal sealed partial class ShaderProgramCache
             SupportsBufferInt64Atomics = host.BufferInt64AtomicsEnabled,
             SupportsShaderDeviceClock = host.ShaderDeviceClockEnabled,
             RobustBufferAccess2 = host.RobustBufferAccess2Enabled,
+            NativeFloat16Conversions = host.NativeFloat16Conversions,
             RequiredVertexOutputCount = options.RequiredVertexOutputCount,
             PositionExportControl = info.Geometry.PositionExportControl,
             MeshOutputLocationMask = options.MeshOutputLocationMask,
@@ -2075,6 +2078,7 @@ internal sealed partial class ShaderProgramCache
             SupportsShaderDeviceClock = host.ShaderDeviceClockEnabled,
             ShaderSignedZeroInfNanPreserveFloat32Supported = host.ShaderSignedZeroInfNanPreserveFloat32Supported,
             RobustBufferAccess2 = host.RobustBufferAccess2Enabled,
+            NativeFloat16Conversions = host.NativeFloat16Conversions,
             PixelOutputs = options.PixelOutputs,
             PixelDepthExportEnable = info.DepthExportEnable,
             PixelInputEnable = options.PixelInputEnable,
@@ -2116,7 +2120,7 @@ internal sealed partial class ShaderProgramCache
                 return BuildComputeRequest(entry.Plan, resources, layout, options.ComputeInfo!, options.ComputeSystemRegisters,
                     sharedInt64Atomics, _host.ExecGuardElisionEnabled, signedZeroInfNanPreserve, _host.ComputeWave64SubgroupNative,
                     _host.ComputeRunsOn32LaneSubgroups(options.ComputeInfo!), imageInt64Atomics, shaderDeviceClock,
-                    bufferInt64Atomics, _host.RobustBufferAccess2Enabled, options.TessellationHull);
+                    bufferInt64Atomics, _host.RobustBufferAccess2Enabled, _host.NativeFloat16Conversions, options.TessellationHull);
         }
     }
 
@@ -2145,7 +2149,7 @@ internal sealed partial class ShaderProgramCache
         ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision,
         bool signedZeroInfNanPreserve, bool hostWave64Supported = false, bool hostComputeSubgroup32 = false,
         bool imageInt64Atomics = false, bool shaderDeviceClock = false, bool bufferInt64Atomics = false,
-        bool robustBufferAccess2 = false, Gen5TessellationHullInfo? tessellationHull = null) =>
+        bool robustBufferAccess2 = false, bool nativeFloat16Conversions = false, Gen5TessellationHullInfo? tessellationHull = null) =>
         new(plan, resources, layout)
         {
             WaveSize = info.WaveSize,
@@ -2162,6 +2166,8 @@ internal sealed partial class ShaderProgramCache
             SupportsBufferInt64Atomics = bufferInt64Atomics,
             SupportsShaderDeviceClock = shaderDeviceClock,
             ShaderSignedZeroInfNanPreserveFloat32Supported = signedZeroInfNanPreserve,
+            RobustBufferAccess2 = robustBufferAccess2,
+            NativeFloat16Conversions = nativeFloat16Conversions,
             ComputeSystemRegisters = systemRegisters,
             LocalDataShareDwords = info.LocalDataShareDwords,
             LocalSizeX = Math.Max(info.ThreadsX, 1),
@@ -2174,7 +2180,7 @@ internal sealed partial class ShaderProgramCache
         out BindingLayout? layout, out string error, bool hostWave64Supported = false, bool hostComputeSubgroup32 = false,
         bool imageInt64Atomics = false, bool shaderDeviceClock = false, bool bindlessHeap = false,
         StableImageDescriptorLimits stableImageLimits = default, bool bufferInt64Atomics = false, bool robustBufferAccess2 = false,
-        bool tableBlocks = false, Func<ulong, IShaderFrontend?>? frontendOf = null)
+        bool nativeFloat16Conversions = false, bool tableBlocks = false, Func<ulong, IShaderFrontend?>? frontendOf = null)
     {
         compiled = null;
         layout = null;
@@ -2232,7 +2238,7 @@ internal sealed partial class ShaderProgramCache
                 tableBlocks: tableBlocks);
             var request = BuildComputeRequest(plan, resources, layout, record.Info, record.SystemRegisters,
                 sharedInt64Atomics, execGuardElision, signedZeroInfNanPreserve, hostWave64Supported, hostComputeSubgroup32,
-                imageInt64Atomics, shaderDeviceClock, bufferInt64Atomics, robustBufferAccess2);
+                imageInt64Atomics, shaderDeviceClock, bufferInt64Atomics, robustBufferAccess2, nativeFloat16Conversions);
             return compiler.TryCompileProgram(request, out compiled, out error) && compiled is not null;
         }
         catch (Exception exception)
