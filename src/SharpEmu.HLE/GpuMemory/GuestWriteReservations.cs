@@ -21,7 +21,7 @@ namespace SharpEmu.HLE.GpuMemory;
 // own record instead of the shared slot table and then reads the marks again; a mark that appeared while the write
 // premarked sends it on to the slot table, where the claim history decides whether it premarks again. The claim that
 // marks a chunk first makes every thread either see the mark or show its record (Interlocked.MemoryBarrierProcessWide)
-// and waits out the recorded writes over its range. Writes on unmarked chunks do not exclude each other; each landed
+// and waits out every recorded write in the chunk. Writes on unmarked chunks do not exclude each other; each landed
 // notification marks its pages again.
 internal sealed class GuestWriteReservations
 {
@@ -426,8 +426,9 @@ internal sealed class GuestWriteReservations
     }
 
     // Marks the chunks of a claim's range. The claim that marks a chunk first waits until every thread either sees the
-    // mark or shows its record, and then until the recorded writes over its range have released. No write that begins
-    // afterwards reserves a marked chunk in its record, so a later claim finds none there.
+    // mark or shows its record, and then until every recorded write in its chunks has released, over its own pages or
+    // not: a later claim over another page of a marked chunk reads no records. No write that begins afterwards reserves a
+    // marked chunk in its record.
     private void MarkChunks(ulong start, ulong end)
     {
         var first = start >> ChunkShift;
@@ -444,7 +445,7 @@ internal sealed class GuestWriteReservations
         if (!marked) return;
         Interlocked.MemoryBarrierProcessWide();
         var spin = new SpinWait();
-        while (RecordOverlaps(start, end))
+        while (RecordOverlaps(first << ChunkShift, (last + 1) << ChunkShift))
         {
             GpuClaimWaitingForTest?.Invoke();
             spin.SpinOnce(sleep1Threshold: -1);

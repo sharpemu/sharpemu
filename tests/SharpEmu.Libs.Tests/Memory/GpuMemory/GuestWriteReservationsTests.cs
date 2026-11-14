@@ -334,6 +334,46 @@ public sealed class GuestWriteReservationsTests
         }
     }
 
+    // The claim that marks a chunk waits for a write recorded anywhere in the chunk, not only over its own pages: a later
+    // claim over the recorded pages finds the chunk marked and reads no records.
+    [Fact]
+    public async Task ClaimThatMarksAChunkWaitsForAWriteRecordedElsewhereInIt()
+    {
+        var owner = new GuestWriteReservations();
+        var blocked = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reserved = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var releaseCpu = new ManualResetEventSlim();
+        owner.GpuClaimWaitingForTest = () => blocked.TrySetResult(true);
+        var cpu = Task.Run(() =>
+        {
+            using var attempt = owner.BeginCpuAttempt(Address, 16);
+            Assert.True(attempt.TryReserve());
+            reserved.TrySetResult(true);
+            if (!releaseCpu.Wait(Deadline)) throw new TimeoutException("The test did not release the CPU reservation.");
+        });
+        await reserved.Task.WaitAsync(Deadline);
+        var admitted = false;
+        var gpu = Task.Run(() =>
+        {
+            using var claim = owner.BeginGpuClaim(Address + 5 * TrackerLayout.PageBytes, 16);
+            admitted = true;
+        });
+        try
+        {
+            await blocked.Task.WaitAsync(Deadline);
+            Assert.False(gpu.IsCompleted);
+            Assert.False(admitted);
+        }
+        finally
+        {
+            releaseCpu.Set();
+            await cpu.WaitAsync(Deadline);
+            await gpu.WaitAsync(Deadline);
+            owner.GpuClaimWaitingForTest = null;
+        }
+        Assert.True(admitted);
+    }
+
     // A claimer marks a fresh chunk every 20 ms while writers reserve all over the chunks, so writes keep meeting a chunk
     // as it is marked: an admitted claim never overlaps a reserved write, and a reserved write never overlaps an admitted
     // claim.
