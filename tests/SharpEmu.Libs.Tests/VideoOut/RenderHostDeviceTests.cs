@@ -769,6 +769,52 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         harness.Shutdown();
     }
 
+    private delegate bool DescriptorsAlreadyBoundCall(CommandBuffer command, PipelineBindPoint bindPoint, PipelineLayout layout,
+        ReadOnlySpan<WriteDescriptorSet> writes, uint setIndex);
+
+    // A set bound with another pipeline layout disturbs the sets bound before it, so committing the same pixel descriptors
+    // again binds them again instead of reusing the earlier binding.
+    [Fact]
+    public void DescriptorShadow_BindsASetAgainAfterAnotherLayoutBindsASet()
+    {
+        var reuse = typeof(SharpEmu.Libs.VideoOut.VulkanVideoPresenter).GetField("NativeStateReuse",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        if (!Ready() || !(bool)reuse.GetValue(null)!)
+        {
+            return;
+        }
+
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var method = PresenterUnderTest.RecordingHostType.GetMethod("DescriptorsAlreadyBound", PresenterUnderTest.InstanceMembers)!;
+        var alreadyBound = (DescriptorsAlreadyBoundCall)Delegate.CreateDelegate(typeof(DescriptorsAlreadyBoundCall), presenter.Recording, method);
+        presenter.Run(() =>
+        {
+            presenter.InvokeMethod("CurrentRecording");
+            var command = presenter.Command;
+            var info = new DescriptorBufferInfo { Buffer = new Silk.NET.Vulkan.Buffer(1), Offset = 0, Range = 16 };
+            ReadOnlySpan<WriteDescriptorSet> writes =
+            [
+                new WriteDescriptorSet
+                {
+                    SType = StructureType.WriteDescriptorSet, DescriptorType = DescriptorType.StorageBuffer, DescriptorCount = 1, PBufferInfo = &info,
+                },
+            ];
+            PipelineLayout first = new(1), second = new(2);
+
+            Assert.False(alreadyBound(command, PipelineBindPoint.Graphics, first, writes, 2));
+            Assert.True(alreadyBound(command, PipelineBindPoint.Graphics, first, writes, 2));
+            Assert.False(alreadyBound(command, PipelineBindPoint.Graphics, second, writes, 0));
+            Assert.False(alreadyBound(command, PipelineBindPoint.Graphics, first, writes, 2));
+
+            // The bindless heap set binds without a descriptor commit and disturbs the other sets too.
+            Assert.True(alreadyBound(command, PipelineBindPoint.Graphics, first, writes, 2));
+            presenter.InvokeMethod("NoteSetBinding", command, PipelineBindPoint.Graphics, second);
+            Assert.False(alreadyBound(command, PipelineBindPoint.Graphics, first, writes, 2));
+        });
+        presenter.Harness.Finish();
+        presenter.Harness.Shutdown();
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

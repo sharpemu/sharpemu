@@ -2245,6 +2245,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         throw Serial("bindless heap", resumable: true);
                     }
 
+                    NoteSetBinding(command, bindPoint, entry.Layout);
                     _presenter.BindBindlessHeap(command, bindPoint, entry.Layout);
                 }
 

@@ -154,6 +154,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return true;
             }
 
+            DropSetsOfOtherLayouts(bindPoint, layout);
             if (shadow.Key.Length < length)
             {
                 shadow.Key = new ulong[Math.Max(length, shadow.Key.Length * 2)];
@@ -164,6 +165,38 @@ internal static unsafe partial class VulkanVideoPresenter
             shadow.Layout = layout;
             shadow.Valid = true;
             return false;
+        }
+
+        // A set bound without a descriptor commit (the bindless heap) disturbs the other sets the same way.
+        private void NoteSetBinding(CommandBuffer command, PipelineBindPoint bindPoint, PipelineLayout layout)
+        {
+            if (SyncNativeShadow(command))
+            {
+                DropSetsOfOtherLayouts(bindPoint, layout);
+            }
+        }
+
+        // Binding a set with one layout disturbs the sets of the same bind point that an incompatible layout bound (pipeline
+        // layout compatibility counts the sets below the one bound), so their shadows go and the next commit binds them again.
+        // Any other layout counts as incompatible.
+        private void DropSetsOfOtherLayouts(PipelineBindPoint bindPoint, PipelineLayout layout)
+        {
+            if (bindPoint == PipelineBindPoint.Compute)
+            {
+                DropUnlessBoundWith(_computeDescriptorShadow, layout);
+                return;
+            }
+
+            DropUnlessBoundWith(_graphicsDescriptorShadow, layout);
+            DropUnlessBoundWith(_graphicsPixelDescriptorShadow, layout);
+        }
+
+        private static void DropUnlessBoundWith(DescriptorShadow? shadow, PipelineLayout layout)
+        {
+            if (shadow is not null && shadow.Layout.Handle != layout.Handle)
+            {
+                shadow.Valid = false;
+            }
         }
 
         private int DescriptorKey(ReadOnlySpan<WriteDescriptorSet> writes)
