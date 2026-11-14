@@ -57,12 +57,18 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
     // The sites whose tables name each address at this dispatch.
     public Dictionary<ulong, HashSet<uint>> CurrentSites { get; init; } = [];
 
+    // With call-library reuse on, the token of this library's topology: every field but Records, CurrentCodeHashes and
+    // CurrentSites, which are this dispatch's own (ShaderCallLibraryMemo). Null otherwise.
+    internal object? Topology { get; init; }
+
     // The host reads the tables and the functions they name as it reads any shader code and resource table, so bytes
     // the GPU wrote are brought back and an image the GPU wrote over memory the game has since reused does not refuse
     // the game's own bytes.
+    // With memo (call-library reuse), a run-time-record library whose topology a previous read derived reuses it
+    // (ShaderCallLibraryMemo.Runtime); the tables and functions are read as without it.
     public static ShaderCallLibrary Read(Gen5ShaderProgram caller, MemoryAccessTable memory,
         ResourceSnapshot snapshot, GuestWordReader read, ShaderFunctionCache? functionCache = null, bool runtimeArguments = false,
-        uint userDataBase = 0, ResidentGuestBytesReader? readBytes = null)
+        uint userDataBase = 0, ResidentGuestBytesReader? readBytes = null, ShaderCallLibraryMemo? memo = null)
     {
         // A runtime-argument library names its sites from the callees' code hashes (WithRuntimeSites), so its read hashes
         // neither the tables nor the code.
@@ -209,7 +215,7 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
         }
         identity?.AppendData(BitConverter.GetBytes(caller.Address));
         if (runtimeArguments)
-            return WithRuntimeArguments(caller, calls, codeHashes, codeRuns) with
+            return (memo?.Runtime(caller, calls, codeHashes, codeRuns) ?? WithRuntimeArguments(caller, calls, codeHashes, codeRuns)) with
             {
                 CurrentSites = currentSites,
             };
@@ -223,6 +229,13 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
             layoutHash.AppendData(BitConverter.GetBytes(argument == 0 ? -1 : slotOf[argument]));
         return new(Convert.ToHexString(identityHash.GetHashAndReset()), calls, Convert.ToHexString(layoutHash.GetHashAndReset()), arguments);
     }
+
+    // A code hash as text. With call-library reuse on, one string per code array: the arrays are never written.
+    internal static string CodeKey(byte[] code) => ShaderCallLibraryMemo.Enabled
+        ? CodeKeys.GetValue(code, static bytes => Convert.ToHexString(bytes))
+        : Convert.ToHexString(code);
+
+    private static readonly ConditionalWeakTable<byte[], string> CodeKeys = new();
 
     // The table bytes of the call site being read; valid until the next table read on this thread.
     [ThreadStatic]
@@ -257,7 +270,7 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
         return bytes[..offset];
     }
 
-    private static ShaderCallLibrary WithRuntimeArguments(Gen5ShaderProgram caller, List<ShaderCallSite> calls,
+    internal static ShaderCallLibrary WithRuntimeArguments(Gen5ShaderProgram caller, List<ShaderCallSite> calls,
         Dictionary<ulong, byte[]> codeHashes, Dictionary<ulong, (ulong Address, byte[] Bytes)[]> codeRuns)
     {
         var sites = new List<ShaderCallSite>(calls.Count);
@@ -314,7 +327,7 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
             Records = records,
             CodeHashes = codeHashes,
             CodeRuns = codeRuns,
-            Bodies = sites.SelectMany(static site => site.Targets).Select(target => Convert.ToHexString(codeHashes[target.Address]))
+            Bodies = sites.SelectMany(static site => site.Targets).Select(target => CodeKey(codeHashes[target.Address]))
                 .Distinct().Count(),
         };
     }
@@ -387,21 +400,28 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
     // address, which this updates): a callee that leaves the tables keeps its copy, so tables that drop and regain it link
     // to the same program. An address whose code changed takes the new code, and a site that would pass maxCallees starts
     // over from its current callees.
-    public ShaderCallLibrary Unite(ulong callerAddress, Dictionary<uint, Dictionary<ulong, UnitedCallee>> union, int maxCallees)
+    public ShaderCallLibrary Unite(ulong callerAddress, Dictionary<uint, Dictionary<ulong, UnitedCallee>> union, int maxCallees) =>
+        Unite(callerAddress, union, maxCallees, out _);
+
+    // changed: whether the union changed. A call that changed nothing returns the same library again for the same union
+    // (ShaderCallLibraryMemo keeps that result).
+    public ShaderCallLibrary Unite(ulong callerAddress, Dictionary<uint, Dictionary<ulong, UnitedCallee>> union, int maxCallees,
+        out bool changed)
     {
+        changed = false;
         // Callees whose code is the same share one decoded program, so the module can share their function: the translator
         // compares instructions whose controls hold register lists by reference (SameBody).
         var programs = new Dictionary<string, Gen5ShaderProgram>();
         foreach (var known in union.Values.SelectMany(static callees => callees.Values))
         {
-            programs.TryAdd(Convert.ToHexString(known.Code), known.Target.Program);
+            programs.TryAdd(CodeKey(known.Code), known.Target.Program);
         }
 
         UnitedCallee Current(ShaderCallTarget target)
         {
             var code = CodeHashes[target.Address];
-            var program = programs.TryGetValue(Convert.ToHexString(code), out var shared) ? shared : target.Program;
-            programs.TryAdd(Convert.ToHexString(code), program);
+            var program = programs.TryGetValue(CodeKey(code), out var shared) ? shared : target.Program;
+            programs.TryAdd(CodeKey(code), program);
             return new UnitedCallee(target with { Program = program }, code, CodeRuns[target.Address]);
         }
 
@@ -420,6 +440,7 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
                 if (named.TryGetValue(address, out var target) && !known.Code.AsSpan().SequenceEqual(CodeHashes[address]))
                 {
                     callees[address] = Current(target);
+                    changed = true;
                 }
             }
         }
@@ -458,9 +479,13 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
         {
             foreach (var (from, to) in moved)
             {
-                if (callees.Remove(from) && !callees.ContainsKey(to))
+                if (callees.Remove(from))
                 {
-                    callees[to] = Current(named[to]);
+                    changed = true;
+                    if (!callees.ContainsKey(to))
+                    {
+                        callees[to] = Current(named[to]);
+                    }
                 }
             }
         }
@@ -471,11 +496,13 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
             {
                 callees = [];
                 union.Add(site.Pc, callees);
+                changed = true;
             }
 
             if (site.Targets.Count(target => !callees.ContainsKey(target.Address)) + callees.Count > maxCallees)
             {
                 callees.Clear();
+                changed = true;
             }
 
             foreach (var target in site.Targets)
@@ -483,6 +510,7 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
                 if (!callees.ContainsKey(target.Address))
                 {
                     callees[target.Address] = Current(target);
+                    changed = true;
                 }
             }
         }

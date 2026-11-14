@@ -289,6 +289,9 @@ internal sealed class ShaderProgramCache
     // The functions the call tables name, decoded once while their code stays the same.
     private readonly ShaderFunctionCache _functions;
 
+    // Call-library reuse (SHARPEMU_CALL_LIBRARY_REUSE), on by default. Null on a cache made without its initializers.
+    private ShaderCallLibraryMemo? _libraryMemo = ShaderCallLibraryMemo.Enabled ? new() : null;
+
     private static readonly bool PrefetchEnabled = Environment.GetEnvironmentVariable("SHARPEMU_RESOURCE_PREFETCH") != "0";
 
     // An image or sampler descriptor loaded at an index the host cannot evaluate (a bindless heap entry) reads as a null
@@ -663,8 +666,11 @@ internal sealed class ShaderProgramCache
                     var caller = entry.Program with { Address = source.Address };
                     // Tables and function code are read like the caller's code: a stale image over reused memory must not hide them.
                     var runtimeRecords = runtimeFallback is not null || (RuntimeCallRecords && !_perRecordCallers.Contains(source.Hash));
-                    var library = ShaderCallLibrary.Read(caller, entry.Plan.Memory, snapshot, _readGuestWord, _functions, runtimeRecords,
-                        source.UserDataBase, _readResidentGuestBytes);
+                    var library = _libraryMemo is { } readMemo
+                        ? readMemo.Read(caller, entry.Plan.Memory, snapshot, _readGuestWord, _functions, runtimeRecords, source.UserDataBase,
+                            _readResidentGuestBytes)
+                        : ShaderCallLibrary.Read(caller, entry.Plan.Memory, snapshot, _readGuestWord, _functions, runtimeRecords,
+                            source.UserDataBase, _readResidentGuestBytes);
                     if (runtimeRecords)
                     {
                         if (!_calleeUnions.TryGetValue(programKey, out var union))
@@ -679,14 +685,18 @@ internal sealed class ShaderProgramCache
                             }
                         }
 
-                        library = library.Unite(caller.Address, union, MaxUnitedCallees);
+                        library = _libraryMemo is { } uniteMemo
+                            ? uniteMemo.Unite(library, caller.Address, union, MaxUnitedCallees)
+                            : library.Unite(caller.Address, union, MaxUnitedCallees);
                         if (_calleeTiers.TryGetValue(programKey, out var tiers))
                         {
                             if (runtimeFallback is null)
                             {
                                 tiers.Observe(library, programKey.Hash, _host);
-                                library = library.WithSiteCallees(caller.Address,
-                                    tiers.Choose(union, FallbackGeneration(programKey), _host.CallMarkSnapshots));
+                                var chosen = tiers.Choose(union, FallbackGeneration(programKey), _host.CallMarkSnapshots);
+                                library = _libraryMemo is { } chosenMemo
+                                    ? chosenMemo.WithSiteCallees(library, caller.Address, chosen)
+                                    : library.WithSiteCallees(caller.Address, chosen);
                             }
                         }
                         else if (runtimeFallback is null && !_runtimeFallbacks.ContainsKey(programKey))
@@ -694,7 +704,9 @@ internal sealed class ShaderProgramCache
                             // A caller with no ready program first links the callees an earlier session kept for it, whose pipeline
                             // the linked cache holds, or none, so its dispatches run within seconds instead of being skipped until
                             // the driver has compiled the callees' code.
-                            library = library.WithSiteCallees(caller.Address, _keptCallees[programKey]);
+                            library = _libraryMemo is { } keptMemo
+                                ? keptMemo.WithSiteCallees(library, caller.Address, _keptCallees[programKey])
+                                : library.WithSiteCallees(caller.Address, _keptCallees[programKey]);
                         }
                     }
 
@@ -1139,7 +1151,7 @@ internal sealed class ShaderProgramCache
             {
                 if (!served.Contains(address))
                 {
-                    var key = Convert.ToHexString(code);
+                    var key = ShaderCallLibrary.CodeKey(code);
                     if (!byCode.TryGetValue(key, out var addresses))
                     {
                         byCode.Add(key, addresses = []);
@@ -1152,7 +1164,7 @@ internal sealed class ShaderProgramCache
             for (var slot = 0; slot < targets.Length; slot++)
             {
                 if (targets[slot] != NoTarget || slot >= program.CallTargetCodes.Length ||
-                    !byCode.TryGetValue(Convert.ToHexString(program.CallTargetCodes[slot]), out var candidates))
+                    !byCode.TryGetValue(ShaderCallLibrary.CodeKey(program.CallTargetCodes[slot]), out var candidates))
                 {
                     continue;
                 }
@@ -1178,9 +1190,9 @@ internal sealed class ShaderProgramCache
             }
         }
 
-        var codes = program.CallTargetCodes.Select(Convert.ToHexString).ToHashSet();
+        var codes = program.CallTargetCodes.Select(ShaderCallLibrary.CodeKey).ToHashSet();
         var unservedCopy = library.CurrentCodeHashes.Any(named =>
-            !served.Contains(named.Key) && codes.Contains(Convert.ToHexString(named.Value)));
+            !served.Contains(named.Key) && codes.Contains(ShaderCallLibrary.CodeKey(named.Value)));
         return (targets, [.. library.Records.Where(record => served.Contains(record.Target))], unservedCopy);
     }
 

@@ -34,7 +34,7 @@ internal sealed class ShaderCalleeTiers
     // session, and a first program that held them too would be another compile of minutes.
     public ShaderCalleeTiers(IReadOnlyDictionary<uint, Dictionary<ulong, UnitedCallee>> kept)
     {
-        _called = [.. kept.Values.SelectMany(static callees => callees.Values).Select(static callee => Convert.ToHexString(callee.Code))];
+        _called = [.. kept.Values.SelectMany(static callees => callees.Values).Select(static callee => ShaderCallLibrary.CodeKey(callee.Code))];
         if (kept.Count != 0)
         {
             _chosen = kept.ToDictionary(static site => site.Key, static site => site.Value);
@@ -53,7 +53,7 @@ internal sealed class ShaderCalleeTiers
         var added = 0;
         foreach (var (address, code) in library.CurrentCodeHashes)
         {
-            var key = Convert.ToHexString(code);
+            var key = ShaderCallLibrary.CodeKey(code);
             if (_called.Contains(key))
             {
                 continue;
@@ -112,7 +112,7 @@ internal sealed class ShaderCalleeTiers
             var linked = new Dictionary<ulong, UnitedCallee>();
             foreach (var (address, callee) in callees)
             {
-                if (_called.Contains(Convert.ToHexString(callee.Code)))
+                if (_called.Contains(ShaderCallLibrary.CodeKey(callee.Code)))
                 {
                     linked.Add(address, callee);
                 }
