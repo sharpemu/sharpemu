@@ -96,9 +96,10 @@ internal sealed class ShaderCallLibraryMemo
     private readonly List<ulong> _sorted = new();
 
     // ShaderCallLibrary.WithRuntimeArguments for a read's sites and callees, reusing a previous read's topology. Called by
-    // ShaderCallLibrary.Read; the caller attaches the read's current sites.
+    // ShaderCallLibrary.Read; the caller attaches the read's current sites. records: the read's records when it collected
+    // them itself (a one-pass read, whose sites hold each callee once); null collects them from the sites.
     internal ShaderCallLibrary Runtime(Gen5ShaderProgram caller, List<ShaderCallSite> calls, Dictionary<ulong, byte[]> codeHashes,
-        Dictionary<ulong, (ulong Address, byte[] Bytes)[]> codeRuns)
+        Dictionary<ulong, (ulong Address, byte[] Bytes)[]> codeRuns, (ulong Target, ulong Argument)[]? records = null)
     {
         var words = _topologyWords;
         var programs = _topologyPrograms;
@@ -144,13 +145,8 @@ internal sealed class ShaderCallLibraryMemo
                 Count(Counter.TopologyHit);
                 // The records, as WithRuntimeArguments collects them: every site's distinct target and argument pairs, in
                 // first occurrence.
-                var records = new HashSet<(ulong Target, ulong Argument)>();
-                foreach (var site in calls)
-                {
-                    foreach (var target in site.Targets) records.Add((target.Address, target.Argument));
-                }
-
-                return topology.Library with { Records = [.. records], CurrentCodeHashes = codeHashes };
+                var current = records ?? ShaderCallLibrary.RuntimeRecords(calls);
+                return topology.Library with { Records = current, CurrentCodeHashes = codeHashes };
             }
         }
 
@@ -161,7 +157,8 @@ internal sealed class ShaderCallLibraryMemo
             _topologyCount = 0;
         }
 
-        var library = ShaderCallLibrary.WithRuntimeArguments(caller, calls, codeHashes, codeRuns) with { Topology = new object() };
+        var library = ShaderCallLibrary.WithRuntimeArguments(caller, calls, codeHashes, codeRuns,
+            records ?? ShaderCallLibrary.RuntimeRecords(calls)) with { Topology = new object() };
         if (!_topologies.TryGetValue(key, out candidates)) _topologies[key] = candidates = new List<Topology>(1);
         candidates.Add(new Topology(words.ToArray(), programs.ToArray(), library));
         _topologyCount++;

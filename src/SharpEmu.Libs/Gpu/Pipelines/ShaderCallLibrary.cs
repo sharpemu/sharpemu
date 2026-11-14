@@ -19,7 +19,7 @@ internal sealed record UnitedCallee(ShaderCallTarget Target, byte[] Code, (ulong
 // elsewhere as often as every frame; such a table links to the same program, whose plan and module read Arguments (the
 // distinct nonzero record arguments, Gen5ShaderCallLinker.CallEntryArguments) from each dispatch. A library read with
 // runtimeArguments holds its records as dispatch data (Records): its Identity is its LayoutIdentity.
-internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCallSite> Calls, string LayoutIdentity,
+internal sealed partial record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCallSite> Calls, string LayoutIdentity,
     ulong[] Arguments)
 {
     private const ulong MaxTableBytes = 65536;
@@ -61,14 +61,10 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
     // CurrentSites, which are this dispatch's own (ShaderCallLibraryMemo). Null otherwise.
     internal object? Topology { get; init; }
 
-    // The host reads the tables and the functions they name as it reads any shader code and resource table, so bytes
-    // the GPU wrote are brought back and an image the GPU wrote over memory the game has since reused does not refuse
-    // the game's own bytes.
-    // With memo (call-library reuse), a run-time-record library whose topology a previous read derived reuses it
-    // (ShaderCallLibraryMemo.Runtime); the tables and functions are read as without it.
-    public static ShaderCallLibrary Read(Gen5ShaderProgram caller, MemoryAccessTable memory,
-        ResourceSnapshot snapshot, GuestWordReader read, ShaderFunctionCache? functionCache = null, bool runtimeArguments = false,
-        uint userDataBase = 0, ResidentGuestBytesReader? readBytes = null, ShaderCallLibraryMemo? memo = null)
+    // Read without the one-pass table scan (ShaderCallLibrary.TableScan.cs), which is also the scan's reference.
+    private static ShaderCallLibrary ReadOriginal(Gen5ShaderProgram caller, MemoryAccessTable memory,
+        ResourceSnapshot snapshot, GuestWordReader read, ShaderFunctionCache? functionCache, bool runtimeArguments,
+        uint userDataBase, ResidentGuestBytesReader? readBytes, ShaderCallLibraryMemo? memo)
     {
         // A runtime-argument library names its sites from the callees' code hashes (WithRuntimeSites), so its read hashes
         // neither the tables nor the code.
@@ -272,20 +268,38 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
     }
 
     internal static ShaderCallLibrary WithRuntimeArguments(Gen5ShaderProgram caller, List<ShaderCallSite> calls,
-        Dictionary<ulong, byte[]> codeHashes, Dictionary<ulong, (ulong Address, byte[] Bytes)[]> codeRuns)
+        Dictionary<ulong, byte[]> codeHashes, Dictionary<ulong, (ulong Address, byte[] Bytes)[]> codeRuns) =>
+        WithRuntimeArguments(caller, calls, codeHashes, codeRuns, RuntimeRecords(calls));
+
+    // The records of a read's sites as a run-time library holds them: every site's distinct target and argument pairs, in
+    // first occurrence, site by site.
+    internal static (ulong Target, ulong Argument)[] RuntimeRecords(List<ShaderCallSite> calls)
     {
-        var sites = new List<ShaderCallSite>(calls.Count);
         var records = new HashSet<(ulong Target, ulong Argument)>();
         foreach (var site in calls)
         {
             foreach (var target in site.Targets) records.Add((target.Address, target.Argument));
+        }
+
+        return [.. records];
+    }
+
+    // records: RuntimeRecords of the read's sites. A one-pass read (ReadScanned) collects them itself, and its sites hold
+    // each callee once.
+    internal static ShaderCallLibrary WithRuntimeArguments(Gen5ShaderProgram caller, List<ShaderCallSite> calls,
+        Dictionary<ulong, byte[]> codeHashes, Dictionary<ulong, (ulong Address, byte[] Bytes)[]> codeRuns,
+        (ulong Target, ulong Argument)[] records)
+    {
+        var sites = new List<ShaderCallSite>(calls.Count);
+        foreach (var site in calls)
+        {
             sites.Add(site with
             {
                 Targets = [.. site.Targets.DistinctBy(static target => target.Address).Select(static target => target with { Argument = 0 })],
             });
         }
 
-        var library = WithRuntimeSites(caller.Address, "", sites, [.. records], codeHashes, codeRuns);
+        var library = WithRuntimeSites(caller.Address, "", sites, records, codeHashes, codeRuns);
         return library with { Identity = library.LayoutIdentity, CurrentCodeHashes = codeHashes };
     }
 
