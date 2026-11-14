@@ -4169,6 +4169,13 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
+            if (instruction.Opcode.StartsWith("BufferStoreFormat", StringComparison.Ordinal) &&
+                !instruction.Opcode.Contains("D16", StringComparison.Ordinal))
+            {
+                EmitExecConditional(() => EmitDeviceBufferFormatStore(baseAddress, size, byteAddress, descriptorWord3, control));
+                return true;
+            }
+
             if (instruction.Opcode.Contains("Format", StringComparison.Ordinal))
             {
                 error = $"device buffer descriptor operation {instruction.Opcode} is not supported";
@@ -5010,6 +5017,117 @@ public static partial class Gen5SpirvTranslator
                 StoreBufferElementBits(bindingIndex, byteAddress, element);
             });
             return true;
+        }
+
+        // A runtime V# names its format only when the shader runs, so each buffer format stores through its own
+        // branch, converting the registers as a formatted store through a bound buffer does.
+        private void EmitDeviceBufferFormatStore(
+            uint baseAddress,
+            uint size,
+            uint byteAddress,
+            uint descriptorWord3,
+            Gen5BufferMemoryControl control)
+        {
+            var unifiedFormat = BitwiseAnd(ShiftRightLogical(descriptorWord3, UInt(12)), UInt(0x7F));
+            for (uint format = 1; format <= 0x7F; format++)
+            {
+                if (!Gfx10UnifiedFormat.TryDecode(format, out var dataFormat, out var numberFormat))
+                {
+                    continue;
+                }
+
+                var componentCount = Math.Min(control.DwordCount, Gfx10UnifiedFormat.ComponentCount(dataFormat));
+                if (componentCount == 0)
+                {
+                    continue;
+                }
+
+                var elementBytes = Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, componentCount);
+                var selected = LogicalAnd(
+                    _module.AddInstruction(SpirvOp.IEqual, _boolType, unifiedFormat, UInt(format)),
+                    IsDeviceBufferByteRangeInRange(size, byteAddress, elementBytes));
+                EmitConditional(selected, () =>
+                {
+                    var element = new (uint Value, uint Mask)[(elementBytes + 3) / 4];
+                    for (var index = 0; index < element.Length; index++)
+                    {
+                        element[index] = (UInt(0), 0);
+                    }
+
+                    for (uint component = 0; component < componentCount; component++)
+                    {
+                        Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out var byteOffset, out var bitOffset, out var bitCount);
+                        var register = LoadV(control.VectorData + component);
+                        var dword = (int)(byteOffset / 4);
+                        if (bitCount == 32)
+                        {
+                            // Dword components keep their register bits.
+                            element[dword] = (register, uint.MaxValue);
+                            continue;
+                        }
+
+                        var encoded = EncodeGfx10BufferComponent(register, bitCount, numberFormat, dataFormat);
+                        var bit = ((byteOffset & 3) * 8) + bitOffset;
+                        var (value, mask) = element[dword];
+                        element[dword] = (
+                            BitwiseOr(value, bit == 0 ? encoded : ShiftLeftLogical(encoded, UInt(bit))),
+                            mask | (((1u << (int)bitCount) - 1) << (int)bit));
+                    }
+
+                    StoreDeviceElementBits(baseAddress, byteAddress, element);
+                });
+            }
+        }
+
+        // The device form of StoreBufferElementBits: each dword the element touches takes its masked bits.
+        private void StoreDeviceElementBits(uint baseAddress, uint byteAddress, IReadOnlyList<(uint Value, uint Mask)> element)
+        {
+            var alignment = BitwiseAnd(byteAddress, UInt(3));
+            var shift = ShiftLeftLogical(alignment, UInt(3));
+            var aligned = _module.AddInstruction(SpirvOp.IEqual, _boolType, alignment, UInt(0));
+            var carryShift = _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(32), shift);
+            var firstAddress = And64(
+                IAdd64(baseAddress, Widen(BitwiseAnd(byteAddress, UInt(~3u)))),
+                ULong(DeviceAddressMask & ~3ul));
+            for (var index = 0; index <= element.Count; index++)
+            {
+                var value = UInt(0);
+                var mask = UInt(0);
+                if (index < element.Count)
+                {
+                    var (elementValue, elementMask) = element[index];
+                    value = ShiftLeftLogical(BitwiseAnd(elementValue, UInt(elementMask)), shift);
+                    mask = ShiftLeftLogical(UInt(elementMask), shift);
+                }
+
+                if (index > 0)
+                {
+                    // An unaligned element carries its high bits into the next dword.
+                    var (previousValue, previousMask) = element[index - 1];
+                    value = BitwiseOr(
+                        value,
+                        _module.AddInstruction(
+                            SpirvOp.Select,
+                            _uintType,
+                            aligned,
+                            UInt(0),
+                            ShiftRightLogical(BitwiseAnd(previousValue, UInt(previousMask)), carryShift)));
+                    mask = BitwiseOr(
+                        mask,
+                        _module.AddInstruction(
+                            SpirvOp.Select,
+                            _uintType,
+                            aligned,
+                            UInt(0),
+                            ShiftRightLogical(UInt(previousMask), carryShift)));
+                }
+
+                StoreDeviceMaskedWord(
+                    index == 0 ? firstAddress : IAdd64(firstAddress, ULong((ulong)index * sizeof(uint))),
+                    value,
+                    mask,
+                    _module.ConstantBool(true));
+            }
         }
 
         // Converts one register to the bits its component stores, per the number format.
