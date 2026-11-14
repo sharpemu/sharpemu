@@ -8847,12 +8847,23 @@ public static partial class Gen5SpirvTranslator
                 _uintType,
                 buffer,
                 0);
-            return _module.AddInstruction(
-                SpirvOp.ULessThan,
+            // NVIDIA's driver reports a length of zero for a storage binding over 2 GiB, though its loads read the
+            // memory. A bound view holds at least a dword, so zero is an unknown length: robust buffer access bounds
+            // those accesses.
+            return LogicalOr(
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, length, UInt(0)),
+                _module.AddInstruction(
+                    SpirvOp.ULessThan,
                 _boolType,
                 dwordAddress,
-                length);
+                    length));
         }
+
+        // The device address of a dword of a table-block buffer.
+        private uint TableBufferByteAddress(int binding, uint dwordAddress) =>
+            IAdd64(
+                CapturedBufferValue(_bufferBaseValues, binding) ?? Load(_ulongType, TableBufferBasePointer(binding)),
+                ShiftLeftLogical64(Widen(dwordAddress), ULong(2)));
 
         private uint BufferWordPointer(int binding, uint dwordAddress) =>
             _request.Bindings.UsesTableBlock ? TableBufferWordPointer(binding, dwordAddress) :
