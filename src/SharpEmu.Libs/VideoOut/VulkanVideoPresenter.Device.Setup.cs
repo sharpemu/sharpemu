@@ -89,6 +89,13 @@ internal static unsafe partial class VulkanVideoPresenter
             SelectPhysicalDevice();
             CreateDevice();
             CreatePipelineCache();
+            // The scalar graph and translation disk caches keep this game's entries beside its pipeline cache.
+            var gameCache = VulkanPipelineCacheStorage.ResolvePath(
+                VideoOutExports.GetApplicationTitleId(),
+                Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_PATH"));
+            SharpEmu.ShaderCompiler.Resources.ShaderAnalysisCache.UseGameFolder(gameCache + ".analysis");
+            TranslationDiskCache.UseGameFolder(gameCache + ".translations",
+                BuildShaderPrewarmStamp(typeof(SharpEmu.Libs.Gpu.Vulkan.VulkanGuestGpuBackend), DriverCacheSignature()));
             if (_supportsPipelineBinaries)
             {
                 InitializePipelineBinaries(VulkanPipelineCacheStorage.ResolvePath(

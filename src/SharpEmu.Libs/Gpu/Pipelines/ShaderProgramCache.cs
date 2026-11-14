@@ -1704,7 +1704,8 @@ internal sealed partial class ShaderProgramCache
                 usesBufferLengths: usesBufferLengths, usesTessellationData: usesTessellationData);
             var request = BuildComputeRequest(plan, resources, layout, info, systemRegisters, sharedInt64Atomics, execGuardElision,
                 signedZeroInfNanPreserve, wave64Native, subgroup32, imageInt64Atomics, bufferInt64Atomics: bufferInt64Atomics, tessellationHull: tessellationHull);
-            var translated = compiler.TryCompileProgram(request, out var compiled, out var error);
+            var translated = TranslationDiskCache.TryTranslate(compiler, request,
+                TranslationDiskCache.Key(key, userDataBase, specialization, pushDataCursor, request), out var compiled, out var error);
             return new DeferredTranslation(resources, layout, request, translated, compiled, error);
         }));
         throw new ShaderProgramPendingException();
@@ -1787,7 +1788,8 @@ internal sealed partial class ShaderProgramCache
         {
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramTranslation))
             {
-                translated = _compiler.TryCompileProgram(request, out compiled, out error);
+                translated = TranslationDiskCache.TryTranslate(_compiler, request,
+                    TranslationDiskCache.Key(key, source.UserDataBase, specialization, pushDataCursor, request), out compiled, out error);
             }
         }
 

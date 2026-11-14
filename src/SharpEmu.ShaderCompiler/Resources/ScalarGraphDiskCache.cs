@@ -22,7 +22,7 @@ internal static class ScalarGraphDiskCache
     // Each game keeps its own cache, up to 8 GiB of compressed entries, trimmed by last use. One small folder shared by
     // every game and trimmed by write time cannot hold one game's graphs: a game's opening and half an hour of play can
     // build hundreds of megabytes of them, and play keeps adding graphs. A warm graph takes about a third off planning.
-    private const long MaxCacheBytes = 2048L * 1024 * 1024;
+    private const long MaxCacheBytes = 8L * 1024 * 1024 * 1024;
     // A trim that passes the cap stops at this size, so the writes after it do not each list and trim the folder again.
     private const long TrimTargetBytes = MaxCacheBytes / 10 * 9;
     // SHARPEMU_SHADER_ANALYSIS_CACHE_PATH names the folder ("0" turns the cache off). Otherwise it is the running game's
