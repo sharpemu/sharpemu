@@ -74,6 +74,50 @@ public sealed class AgcDrawIndex2Tests
     }
 
     [Theory]
+    [InlineData(0u, 0u, 3)]
+    [InlineData(1u, 2u, 2)]
+    public void NonIndexedMultiDrawWritesItsPacketAndDrawsEachRecord(uint countFromMemory, uint memoryCount, int expectedDraws)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var commandBufferAddress = BaseAddress + 0x80;
+        var stackAddress = BaseAddress + 0x500;
+        WriteUInt64(memory, commandBufferAddress + 0x10, CommandAddress);
+        WriteUInt64(memory, commandBufferAddress + 0x18, CommandAddress + 40);
+        WriteUInt64(memory, stackAddress + 8, 0);
+        context[CpuRegister.Rdi] = commandBufferAddress;
+        context[CpuRegister.Rsi] = 16;
+        context[CpuRegister.Rdx] = countFromMemory;
+        context[CpuRegister.Rcx] = 3;
+        context[CpuRegister.R8] = StreamRunner.LabelAddress;
+        context[CpuRegister.R9] = 32;
+        context[CpuRegister.Rsp] = stackAddress;
+        AgcExports.DcbDrawIndirectMulti(context);
+        Assert.Equal(CommandAddress, context[CpuRegister.Rax]);
+        Span<byte> bytes = stackalloc byte[40];
+        Assert.True(memory.TryRead(CommandAddress, bytes));
+        var packet = new uint[10];
+        for (var index = 0; index < packet.Length; index++)
+            packet[index] = BinaryPrimitives.ReadUInt32LittleEndian(bytes[(index * 4)..]);
+        Assert.Equal(new uint[] { PacketHeader.Make(10, PacketOpcode.DrawIndirectMulti),
+            16, 0x280, 0x280, countFromMemory << 30, 3,
+            StreamRunner.Low(StreamRunner.LabelAddress), StreamRunner.High(StreamRunner.LabelAddress), 32, 2 }, packet);
+
+        var runner = new StreamRunner();
+        runner.Host.WriteDword(StreamRunner.LabelAddress, memoryCount);
+        for (var draw = 0u; draw < 3; draw++)
+            runner.Host.WriteWords(StreamRunner.DataAddress + 16 + draw * 32, new uint[] { 7 + draw, 2, 0, 0 });
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(
+            StreamRunner.Packet(PacketOpcode.SetBase, 1, StreamRunner.Low(StreamRunner.DataAddress), StreamRunner.High(StreamRunner.DataAddress)), packet));
+        Assert.Equal(expectedDraws, runner.Host.AutoDraws.Count);
+        for (var draw = 0; draw < expectedDraws; draw++)
+        {
+            Assert.Equal((uint)(7 + draw), runner.Host.AutoDraws[draw].VertexCount);
+            Assert.Equal(2u, runner.Host.AutoDraws[draw].InstanceCount);
+        }
+    }
+
+    [Theory]
     [InlineData(0UL, 0x280u, 0x280u, 2u)]
     [InlineData(0x40000100UL, 0x280u, 0x280u, 0x22u)]
     [InlineData(0x140000100UL, 0x280u, 0x280u, 2u)]

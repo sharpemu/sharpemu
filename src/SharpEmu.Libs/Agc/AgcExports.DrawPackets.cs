@@ -283,7 +283,20 @@ public static partial class AgcExports
         ExportName = "sceAgcDcbDrawIndexIndirectMulti",
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
-    public static int DcbDrawIndexIndirectMulti(CpuContext ctx)
+    public static int DcbDrawIndexIndirectMulti(CpuContext ctx) =>
+        EmitDrawIndirectMulti(ctx, ItDrawIndexIndirectMulti, "agc.dcb_draw_index_indirect_multi");
+
+    [SysAbiExport(
+        Nid = "kUlvghKs-mA",
+        ExportName = "sceAgcDcbDrawIndirectMulti",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDrawIndirectMulti(CpuContext ctx) =>
+        EmitDrawIndirectMulti(ctx, ItDrawIndirectMulti, "agc.dcb_draw_indirect_multi");
+
+    // Both multi draws take the same arguments and write the same ten-dword packet; the register the modifier names
+    // holds the base vertex of an indexed draw and the start vertex of the other.
+    private static int EmitDrawIndirectMulti(CpuContext ctx, uint opcode, string trace)
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var dataOffset = (uint)ctx[CpuRegister.Rsi];
@@ -310,7 +323,7 @@ public static partial class AgcExports
 
         if (commandBufferAddress == 0 ||
             !TryAllocateCommandDwords(ctx, commandBufferAddress, 10, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(10, ItDrawIndexIndirectMulti, 0)) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(10, opcode, 0)) ||
             !TryWriteUInt32(ctx, commandAddress + 4, dataOffset) ||
             !ctx.TryWriteUInt64(commandAddress + 8, registerLocations) ||
             !TryWriteUInt32(ctx, commandAddress + 16, countFromMemory << 30) ||
@@ -323,7 +336,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.dcb_draw_index_indirect_multi buf=0x{commandBufferAddress:X16} " +
+            $"{trace} buf=0x{commandBufferAddress:X16} " +
             $"cmd=0x{commandAddress:X16} offset=0x{dataOffset:X8} draws={drawCount} " +
             $"stride={stride} modifier=0x{modifier:X8}");
         return ReturnPointer(ctx, commandAddress);

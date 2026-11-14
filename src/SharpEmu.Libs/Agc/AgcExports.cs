@@ -33,6 +33,7 @@ public static partial class AgcExports
     private const uint ItDrawIndexMultiAuto = 0x30;
     private const uint ItDrawIndexOffset2 = 0x35;
     private const uint ItDrawIndexIndirectMulti = 0x38;
+    private const uint ItDrawIndirectMulti = 0x2C;
     private const uint DrawIndexedIndirectArgsSize = 20;
     private const uint DrawIndexedIndirectMaxScan = 1024;
     private const uint ItWriteData = 0x37;
