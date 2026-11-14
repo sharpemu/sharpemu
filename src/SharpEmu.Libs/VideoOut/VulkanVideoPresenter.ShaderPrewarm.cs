@@ -29,6 +29,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private ConcurrentDictionary<string, byte>? _prewarmedShaderIdentities;
         private ConcurrentDictionary<string, byte>? _runtimeComputeIdentities;
         private Thread[] _shaderPrewarmThreads = [];
+        private PrewarmPool? _prewarmPool;
+        private PrewarmPool PrewarmWorkers => _prewarmPool ??= new PrewarmPool(() => _shaderPrewarmStopping);
         private volatile bool _shaderPrewarmStopping;
         private volatile bool _shaderPrewarmFinished;
         private int _shaderPrewarmCompiled;
@@ -59,6 +61,9 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 SetShaderPrewarmState(false);
             }
+
+            // The pool's threads begin once every lane is in.
+            _prewarmPool?.Start();
         }
 
         private bool StartShaderPrewarmCore()
@@ -575,6 +580,11 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _shaderPrewarmThreads = [];
+            // A worker stops after its current item. Its pipeline create cannot be cancelled and teardown destroys the
+            // device next, so each one is joined without a bound, as DrainPendingComputePipelines waits for the session's
+            // own compiles.
+            _prewarmPool?.Stop();
+            _prewarmPool = null;
             if (Interlocked.Exchange(ref _shaderPrewarmList, null) is { } list)
             {
                 list.Dispose();

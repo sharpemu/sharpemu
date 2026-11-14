@@ -191,6 +191,8 @@ public sealed class VertexPrewarmTests : IDisposable
             item => Assert.Equal(1u, Assert.IsType<PixelPrewarmItem>(item).Record.UserDataBase),
             item => Assert.Equal(state, Assert.IsType<PreRasterizationPrewarmItem>(item).State),
             item => Assert.Equal(2u, Assert.IsType<PixelPrewarmItem>(item).Record.UserDataBase));
+        // The prewarm pool schedules the items by their first uses.
+        Assert.Equal(new[] { 10f, 50f, 100f }, reloaded.LoadedGraphicsPrewarm().Select(static item => item.FirstUse));
     }
 
     [Fact]

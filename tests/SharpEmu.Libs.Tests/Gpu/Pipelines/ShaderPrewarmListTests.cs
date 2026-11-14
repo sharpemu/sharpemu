@@ -236,6 +236,8 @@ public sealed class ShaderPrewarmListTests : IDisposable
 
         using var reloaded = Open();
         Assert.Equal([BufferDescriptorWords.Format32x4UInt, BufferDescriptorWords.Format32UInt], Formats(reloaded));
+        // Scheduled by these starts: 50 - 40.2 for the second record, the first one's first use for the first.
+        Assert.Equal(new[] { 50f - 40.2f, 10f }, reloaded.LoadedComputeStarts().Select(static item => item.StartBy));
     }
 
     // A schema fingerprint that changes discards every recorded main list and graphics list and every pixel and vertex

@@ -35,6 +35,27 @@ public sealed class ShaderPrewarmQueueTests
             ordered.Select(static item => item.Name));
     }
 
+    // A peek leaves the record in place, and a take without waiting returns at once when every record left waits on a
+    // busy caller.
+    [Fact]
+    public void APeekLeavesTheRecordAndATakeWithoutWaitingReturnsAtOnce()
+    {
+        var queue = Queue(new("a-old", 0xA), new("a-new", 0xA));
+        Assert.True(queue.TryPeek(out var peeked));
+        Assert.Equal("a-new", peeked.Name);
+        Assert.True(queue.TryTake(Never, out var first, out var gate));
+        Assert.Equal("a-new", first.Name);
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        Assert.False(queue.TryTake(Never, out _, out _, mayWait: false));
+        Assert.True(watch.ElapsedMilliseconds < Wait);
+        Assert.Equal(1, queue.Count);
+        queue.Release(gate);
+        Assert.True(queue.TryTake(Never, out var second, out var secondGate, mayWait: false));
+        Assert.Equal("a-old", second.Name);
+        queue.Release(secondGate);
+        Assert.False(queue.TryPeek(out _));
+    }
+
     [Fact]
     public void ABusyCallersRecordGoesBackAndTheNextRecordIsTaken()
     {

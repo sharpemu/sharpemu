@@ -45,7 +45,10 @@ internal readonly record struct PreRasterizationState(
     bool NegativeOneToOne);
 
 // One unit of the graphics prewarm; its identity keys the prewarm's progress, and its first use orders it.
-internal abstract record GraphicsPrewarmItem(ulong Identity);
+internal abstract record GraphicsPrewarmItem(ulong Identity)
+{
+    public float FirstUse { get; init; }
+}
 
 internal sealed record PixelPrewarmItem(PixelPrewarmRecord Record, ShaderCodeCapture Code, ulong Identity)
     : GraphicsPrewarmItem(Identity);
@@ -110,14 +113,14 @@ internal sealed partial class ShaderPrewarmList
     public IReadOnlyList<GraphicsPrewarmItem> LoadedGraphicsPrewarm()
     {
         var items = new List<GraphicsPrewarmItem>(_graphicsOrder.Count);
-        foreach (var (kind, index, _) in _graphicsOrder.OrderBy(static item => item.FirstUse))
+        foreach (var (kind, index, firstUse) in _graphicsOrder.OrderBy(static item => item.FirstUse))
         {
             if (kind == PixelKind)
             {
                 var pixel = _loadedPixels[index];
                 if (_loadedCodes.TryGetValue(pixel.CodeKey, out var pixelCode))
                 {
-                    items.Add(new PixelPrewarmItem(pixel, pixelCode, Identity(pixel)));
+                    items.Add(new PixelPrewarmItem(pixel, pixelCode, Identity(pixel)) { FirstUse = firstUse });
                 }
 
                 continue;
@@ -126,7 +129,7 @@ internal sealed partial class ShaderPrewarmList
             var (program, state, identity) = _loadedPreRasterizations[index];
             if (_loadedVertices.TryGetValue(program, out var vertex) && _loadedCodes.TryGetValue(vertex.CodeKey, out var code))
             {
-                items.Add(new PreRasterizationPrewarmItem(vertex, code, state, identity));
+                items.Add(new PreRasterizationPrewarmItem(vertex, code, state, identity) { FirstUse = firstUse });
             }
         }
 

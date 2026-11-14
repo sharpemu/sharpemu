@@ -478,11 +478,15 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         }
     }
 
+    // The recorded compute programs in prewarm order (LoadedComputeStarts).
+    public IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code)> LoadedComputes() =>
+        [.. LoadedComputeStarts().Select(static item => (item.Record, item.Code))];
+
     // The recorded compute programs by the time each must start to be ready at its earliest use (the recorded first use
     // minus the recorded compile time; infinite for an untimed record), then the untimed ones, each group in list
     // order. Sessions record first uses and the prewarm its compile times while the list is open, so the times are read
     // under the gate; the loaded records and codes are written only while the file loads.
-    public IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code)> LoadedComputes()
+    public IReadOnlyList<(ComputePrewarmRecord Record, ShaderCodeCapture Code, float StartBy)> LoadedComputeStarts()
     {
         var identities = _loadedComputes.Select(static record => Identity(record)).ToArray();
         var startBy = new float[identities.Length];
@@ -494,13 +498,13 @@ internal sealed partial class ShaderPrewarmList : IDisposable
             }
         }
 
-        var result = new List<(ComputePrewarmRecord, ShaderCodeCapture)>(identities.Length);
+        var result = new List<(ComputePrewarmRecord, ShaderCodeCapture, float)>(identities.Length);
         foreach (var index in Enumerable.Range(0, identities.Length).OrderBy(index => startBy[index]))
         {
             var record = _loadedComputes[index];
             if (_loadedCodes.TryGetValue(record.CodeKey, out var code))
             {
-                result.Add((record, code));
+                result.Add((record, code, startBy[index]));
             }
         }
 

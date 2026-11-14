@@ -34,7 +34,13 @@ internal sealed class ShaderPrewarmQueue<T>
     // Waits for a release at most this long before it looks again, so stopping is seen.
     internal const int ReleaseWaitMilliseconds = 250;
 
-    public bool TryTake(Func<bool> stopping, out T record, out SemaphoreSlim? gate)
+    // The next record without taking it (PrewarmPool orders the prewarm's lanes by it); false when none is left.
+    public bool TryPeek(out T record) => _work.TryPeek(out record!);
+
+    // The next record this worker may compile now, with the gate it then holds (null for a plain record); false when none
+    // is left or stopping says so, and, without mayWait, when every record left waits on a busy caller. Release(gate) after
+    // the compile.
+    public bool TryTake(Func<bool> stopping, out T record, out SemaphoreSlim? gate, bool mayWait = true)
     {
         var deferred = 0;
         var passStart = Interlocked.Read(ref _releases);
@@ -54,6 +60,11 @@ internal sealed class ShaderPrewarmQueue<T>
             }
 
             // Every record of the pass waits on a busy caller.
+            if (!mayWait)
+            {
+                break;
+            }
+
             lock (_released)
             {
                 while (Interlocked.Read(ref _releases) == passStart && !stopping())

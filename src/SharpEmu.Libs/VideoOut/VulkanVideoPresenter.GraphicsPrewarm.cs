@@ -21,11 +21,10 @@ internal static unsafe partial class VulkanVideoPresenter
         // translation cache), and their libraries are compiled the way the session builds them, which stores their
         // binaries. After a new build or translator change, a program's first draw then links stored libraries instead
         // of compiling them while the command stream waits, which can take seconds per library. Items go in the order
-        // sessions first met them, on below-normal threads beside the compute prewarm; the side file's progress skips the
-        // items this build already prewarmed.
+        // sessions first met them, on the prewarm pool's below-normal threads beside the compute records, the more
+        // urgent first (PrewarmPool); the side file's progress skips the items this build already prewarmed.
         private static readonly bool GraphicsPrewarmEnabled = Environment.GetEnvironmentVariable("SHARPEMU_GRAPHICS_PREWARM") != "0";
 
-        private Thread[] _graphicsPrewarmThreads = [];
         private readonly ConcurrentQueue<ulong> _graphicsPrewarmCompleted = new();
         // The payloads the prewarm compiled, and the pixel modules the session created while it runs: the prewarm leaves a
         // pixel item of a session module to the session's early pixel library, which stores the same binaries. A
@@ -79,7 +78,6 @@ internal static unsafe partial class VulkanVideoPresenter
             _prewarmedGraphicsModules = new ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
             var work = new ConcurrentQueue<GraphicsPrewarmItem>(pending);
             var workerCount = Math.Clamp(Environment.ProcessorCount / 4, 1, 4);
-            var remaining = workerCount;
             var started = Stopwatch.GetTimestamp();
             Interlocked.Add(ref _shaderPrewarmGraphicsTotal, pending.Count);
             Interlocked.Add(ref _shaderPrewarmWorkers, workerCount);
@@ -87,40 +85,42 @@ internal static unsafe partial class VulkanVideoPresenter
                 $"[LOADER][INFO] Graphics prewarm started: pixel={pending.Count(static item => item is PixelPrewarmItem)} " +
                 $"pre_rasterization={pending.Count(static item => item is PreRasterizationPrewarmItem)} " +
                 $"resumed={recorded - pending.Count} missing={missing} workers={workerCount}");
-            _graphicsPrewarmThreads = new Thread[workerCount];
-            for (var index = 0; index < workerCount; index++)
-            {
-                _graphicsPrewarmThreads[index] = new Thread(() =>
+            PrewarmWorkers.Add(new PrewarmPool.Lane(pending.Count,
+                (out float start) =>
                 {
-                    while (!_shaderPrewarmStopping && work.TryDequeue(out var item))
+                    var any = work.TryPeek(out var next);
+                    start = any ? next!.FirstUse : 0;
+                    return any;
+                },
+                _ =>
+                {
+                    if (!work.TryDequeue(out var item))
                     {
-                        if (Prewarm(item, compiler))
-                        {
-                            _graphicsPrewarmCompleted.Enqueue(item.Identity);
-                        }
-
-                        if (Interlocked.Increment(ref _graphicsPrewarmProgress) % PrewarmProgressBatch == 0)
-                        {
-                            FlushGraphicsPrewarmProgress(list, buildStamp);
-                        }
+                        return false;
                     }
 
+                    if (Prewarm(item, compiler))
+                    {
+                        _graphicsPrewarmCompleted.Enqueue(item.Identity);
+                    }
+
+                    Interlocked.Increment(ref _shaderPrewarmGraphicsDone);
+                    if (Interlocked.Increment(ref _graphicsPrewarmProgress) % PrewarmProgressBatch == 0)
+                    {
+                        FlushGraphicsPrewarmProgress(list, buildStamp);
+                    }
+
+                    return true;
+                },
+                () =>
+                {
                     FlushGraphicsPrewarmProgress(list, buildStamp);
-                    if (Interlocked.Decrement(ref remaining) == 0)
-                    {
-                        Console.Error.WriteLine(
-                            $"[LOADER][INFO] Graphics prewarm done: compiled={Volatile.Read(ref _graphicsPrewarmCompiled)} " +
-                            $"taken={Volatile.Read(ref _graphicsPrewarmTaken)} failed={Volatile.Read(ref _graphicsPrewarmFailed)} " +
-                            $"stopped={_shaderPrewarmStopping} ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}");
-                    }
-                })
-                {
-                    IsBackground = true,
-                    Priority = ThreadPriority.BelowNormal,
-                    Name = $"SharpEmu graphics prewarm {index}",
-                };
-                _graphicsPrewarmThreads[index].Start();
-            }
+                    Console.Error.WriteLine(
+                        $"[LOADER][INFO] Graphics prewarm done: compiled={Volatile.Read(ref _graphicsPrewarmCompiled)} " +
+                        $"taken={Volatile.Read(ref _graphicsPrewarmTaken)} failed={Volatile.Read(ref _graphicsPrewarmFailed)} " +
+                        $"stopped={_shaderPrewarmStopping} ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0}");
+                }),
+                workerCount, "SharpEmu graphics prewarm");
         }
 
         private void FlushGraphicsPrewarmProgress(ShaderPrewarmList list, string stamp)
