@@ -118,8 +118,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public bool TryDeferOrderedWrite(int queueId, ulong address, ReadOnlySpan<byte> source)
         {
             if (!InCrossQueueOrderWindow(queueId)) return false;
-            var entry = _guestPublications.AddWrite(queueId, address, (ulong)source.Length);
             var payload = source.ToArray();
+            var entry = _guestPublications.AddWrite(queueId, address, (ulong)source.Length, payload);
             try
             {
                 if (OnCommandThread) _commandThread!.Post(() => RecordDeferredWrite(entry, payload));

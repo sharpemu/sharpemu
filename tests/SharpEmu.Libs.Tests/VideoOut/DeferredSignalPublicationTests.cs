@@ -233,25 +233,52 @@ public sealed class DeferredSignalPublicationTests
         harness.Scheduler.RunCompletedOperations();
     }
 
-    [Fact]
-    public void WriteAfterForeignLabelWaitIsHeldUntilTheLabelPublishes()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void WriteAfterForeignLabelWaitIsHeldUntilTheLabelPublishes(bool forward)
     {
         var (harness, graphics, compute) = CrossQueueWindow();
         using var owner = harness;
+        harness.Pending.ForwardHeldWrites = forward;
         var flag = StreamRunner.LabelAddress + 0x200;
         Assert.Equal(SubmissionProgress.Complete, compute.Run(
             StreamRunner.Packet(PacketOpcode.WriteData, 0x00000500u, StreamRunner.Low(flag), StreamRunner.High(flag), 5)));
         Assert.Equal(0u, graphics.Host.ReadDword(flag));
         Assert.True(harness.Pending.HasQueue(33));
-        // A later wait on the held-back value must not read the old memory.
+        // A later wait on the held-back value never reads the old memory: it takes the held value, or without
+        // forwarding waits for the publication. The CPU reads the old memory until the publication either way.
         var wait = StreamRunner.Packet(PacketOpcode.WaitRegisterMemory, 0x13,
             StreamRunner.Low(flag), StreamRunner.High(flag), 5, uint.MaxValue, 0);
-        Assert.Equal(SubmissionProgress.Blocked, compute.Run(wait));
+        Assert.Equal(forward ? SubmissionProgress.Complete : SubmissionProgress.Blocked, compute.Run(wait));
+        Assert.Equal(0u, graphics.Host.ReadDword(flag));
         PublishAll(harness);
         Assert.Equal(1u, graphics.Host.ReadDword(StreamRunner.LabelAddress));
         Assert.Equal(5u, graphics.Host.ReadDword(flag));
         Assert.Equal((1UL << 63) | 37, graphics.Host.ReadQword(StreamRunner.DataAddress));
         Assert.Equal(SubmissionProgress.Complete, compute.Run());
+        Assert.Equal(0, harness.Pending.Count);
+    }
+
+    // Another queue takes a held write's value at once and keeps its own later write behind it: the CPU sees neither
+    // before the foreign label publishes, then both.
+    [Fact]
+    public void ForeignWaitTakesHeldWriteAndHoldsItsOwnWriteBehindIt()
+    {
+        var (harness, graphics, compute) = CrossQueueWindow();
+        using var owner = harness;
+        var flag = StreamRunner.LabelAddress + 0x200;
+        var reply = StreamRunner.LabelAddress + 0x280;
+        Assert.Equal(SubmissionProgress.Complete, compute.Run(
+            StreamRunner.Packet(PacketOpcode.WriteData, 0x00000500u, StreamRunner.Low(flag), StreamRunner.High(flag), 5)));
+        Assert.Equal(SubmissionProgress.Complete, graphics.Run(
+            StreamRunner.Packet(PacketOpcode.WaitRegisterMemory, 0x13, StreamRunner.Low(flag), StreamRunner.High(flag), 5, uint.MaxValue, 0),
+            StreamRunner.Packet(PacketOpcode.WriteData, 0x00000500u, StreamRunner.Low(reply), StreamRunner.High(reply), 9)));
+        Assert.Equal(0u, graphics.Host.ReadDword(flag));
+        Assert.Equal(0u, graphics.Host.ReadDword(reply));
+        PublishAll(harness);
+        Assert.Equal(5u, graphics.Host.ReadDword(flag));
+        Assert.Equal(9u, graphics.Host.ReadDword(reply));
         Assert.Equal(0, harness.Pending.Count);
     }
 

@@ -15,8 +15,10 @@ internal sealed class PendingGuestPublications
         internal bool Registered;
         internal volatile bool Completed;
         internal bool DeferredLabel;
-        // A held-back command write: command-processor reads wait for it, unlike a label they forward.
+        // A held-back command write: CPU reads wait for its publication; command-processor reads take Payload, as
+        // they take a deferred label, and keep their order after it (ForwardHeldWrites).
         internal bool HeldWrite;
+        internal byte[]? Payload;
         internal ulong Value;
         // A dump with a GPU slot can be copied into a reading buffer instead of waited for.
         internal long GpuSlot = -1;
@@ -160,7 +162,27 @@ internal sealed class PendingGuestPublications
             foreach (var entry in _entries)
             {
                 if (entry.Size == 0 || address >= entry.Address + entry.Size || entry.Address >= address + size) continue;
-                if (!entry.DeferredLabel) return false;
+                if (!entry.DeferredLabel)
+                {
+                    // A command-processor reader may take a held write's known bytes; the CPU never does.
+                    if (!(entry.HeldWrite && entry.Payload is { } payload && readerQueue >= 0 && ForwardHeldWrites))
+                    {
+                        return false;
+                    }
+
+                    if (entry.Queue != readerQueue) newestForeign = entry;
+                    var heldFirst = Math.Max(address, entry.Address);
+                    var heldLast = Math.Min(address + size, entry.Address + entry.Size);
+                    for (var byteAddress = heldFirst; byteAddress < heldLast; byteAddress++)
+                    {
+                        var index = (int)(byteAddress - address);
+                        bytes[index] = payload[byteAddress - entry.Address];
+                        coveredMask |= 1 << index;
+                    }
+
+                    continue;
+                }
+
                 if (readerQueue >= 0 && entry.Queue != readerQueue) newestForeign = entry;
                 var first = Math.Max(address, entry.Address);
                 var last = Math.Min(address + size, entry.Address + entry.Size);
@@ -204,14 +226,21 @@ internal sealed class PendingGuestPublications
     }
 
     // A held-back command-processor write; readers wait for it like a dump.
-    internal Entry AddWrite(int queue, ulong address, ulong size)
+    // A command-processor label read takes a held write's bytes instead of waiting for its publication: the write was
+    // held only so the CPU sees it after the foreign label it follows, and the reading queue keeps its own order after
+    // it. SHARPEMU_FORWARD_HELD_WRITES=0 makes the reads wait again.
+    private static readonly bool DefaultForwardHeldWrites = Environment.GetEnvironmentVariable("SHARPEMU_FORWARD_HELD_WRITES") != "0";
+
+    internal bool ForwardHeldWrites { get; set; } = DefaultForwardHeldWrites;
+
+    internal Entry AddWrite(int queue, ulong address, ulong size, byte[]? payload = null)
     {
         if (size == 0 || address > ulong.MaxValue - size)
             throw new ArgumentOutOfRangeException(nameof(size));
         lock (_gate)
         {
             ThrowIfFailed();
-            var entry = new Entry(queue, address, size) { HeldWrite = true };
+            var entry = new Entry(queue, address, size) { HeldWrite = true, Payload = payload };
             _entries.Add(entry);
             Track(entry);
             Index(entry, 1);
