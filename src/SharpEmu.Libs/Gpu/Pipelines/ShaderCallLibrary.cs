@@ -23,8 +23,10 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
     private const ulong MaxTableBytes = 65536;
 
     // With runtimeArguments a site links each callee once, so a table's size sets only how many records the host reads and
-    // resolves at each dispatch.
-    private const ulong MaxRuntimeTableBytes = 1 << 20;
+    // resolves at each dispatch. A ray tracer's hit table can reserve hundreds of thousands of records: up to 16 MiB.
+    private const ulong MaxRuntimeTableBytes = 16 << 20;
+
+    private static int _unreadableTargetReports;
 
     // Read with runtimeArguments, a site's Calls hold each callee once (in the order of their code, so the program does not
     // depend on the tables' order), LayoutIdentity names only the sites and the callees' code, and Records holds every
@@ -52,7 +54,7 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
     // the game's own bytes.
     public static ShaderCallLibrary Read(Gen5ShaderProgram caller, MemoryAccessTable memory,
         ResourceSnapshot snapshot, GuestWordReader read, ShaderFunctionCache? functionCache = null, bool runtimeArguments = false,
-        uint userDataBase = 0)
+        uint userDataBase = 0, ResidentGuestBytesReader? readBytes = null)
     {
         using var identity = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         using var layout = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -62,13 +64,27 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
         var codeRuns = new Dictionary<ulong, (ulong Address, byte[] Bytes)[]>();
         var currentSites = new Dictionary<ulong, HashSet<uint>>();
 
+        var unreadable = new HashSet<ulong>();
+
         // A target a site names: its function, read once per library, joins both identities.
-        ShaderCallTarget Target(uint site, ulong address, ulong argument)
+        ShaderCallTarget Target(uint site, ulong address, ulong argument) =>
+            TryTarget(site, address, argument, out var target, out var failure)
+                ? target
+                : throw new ShaderFunctionReadException(address, failure!);
+
+        bool TryTarget(uint site, ulong address, ulong argument, out ShaderCallTarget target, out ShaderFunctionReadResult? failure)
         {
+            target = null!;
+            failure = null;
             if (!functions.TryGetValue(address, out var function))
             {
                 var result = functionCache?.Read(address, read) ?? ShaderFunctionReader.Read(address, read);
-                if (!result.Complete) throw new ShaderFunctionReadException(address, result);
+                if (!result.Complete)
+                {
+                    failure = result;
+                    return false;
+                }
+
                 function = result.Program;
                 identity.AppendData(result.Bytes);
                 layout.AppendData(result.Bytes);
@@ -91,7 +107,8 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
             }
 
             layout.AppendData(BitConverter.GetBytes(address));
-            return new(address, argument, function);
+            target = new(address, argument, function);
+            return true;
         }
 
         foreach (var (call, index) in caller.Instructions.Select((instruction, index) => (instruction, index)))
@@ -178,7 +195,7 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
                 throw new InvalidOperationException(
                     $"The shader call table extent or layout is not supported: address=0x{address:X} stride={stride} records={descriptor[2]} " +
                     $"swizzle={descriptor[1] >> 31} dynamic={loadControl.DynamicOffsetRegister.HasValue} offset={loadControl.ImmediateOffsetBytes}.");
-            var table = ShaderCallDump.ReadPrefix(address, (int)size, read);
+            ReadOnlySpan<byte> table = ReadTable(address, (int)size, read, readBytes);
             if ((ulong)table.Length != size)
                 throw new InvalidOperationException(
                     $"The shader call table is not CPU-readable at this submission: address=0x{address:X} bytes={size} readable={table.Length}.");
@@ -191,10 +208,31 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
             var recordEnd = loadControl.DynamicOffsetRegister.HasValue ? table.Length : firstRecord + 16;
             for (var offset = firstRecord; offset < recordEnd; offset += 16)
             {
-                var target = BinaryPrimitives.ReadUInt64LittleEndian(table.AsSpan(offset));
-                var argument = BinaryPrimitives.ReadUInt64LittleEndian(table.AsSpan(offset + 8));
-                if (target == 0 || !records.Add((target, argument))) continue;
-                targets.Add(Target(call.Pc, target, argument));
+                var target = BinaryPrimitives.ReadUInt64LittleEndian(table[offset..]);
+                var argument = BinaryPrimitives.ReadUInt64LittleEndian(table[(offset + 8)..]);
+                if (target == 0 || !records.Add((target, argument)) || unreadable.Contains(target)) continue;
+                if (!runtimeArguments)
+                {
+                    targets.Add(Target(call.Pc, target, argument));
+                    continue;
+                }
+
+                // A table can hold records past the ones the game wrote for this dispatch, naming functions it has since
+                // unloaded, and the GPU never calls those. A record whose function cannot be read is left out: its call
+                // returns at once, as one to a callee the program does not hold does.
+                if (TryTarget(call.Pc, target, argument, out var linked, out var failure))
+                {
+                    targets.Add(linked);
+                    continue;
+                }
+
+                unreadable.Add(target);
+                if (Interlocked.Increment(ref _unreadableTargetReports) <= 8)
+                {
+                    Console.Error.WriteLine(
+                        $"[GPU][WARN][LINKED_PROGRAM] A call table record names a function that cannot be read; its calls return at once: " +
+                        $"caller=0x{caller.Address:X} table=0x{address:X} record={offset / 16} target=0x{target:X} error={failure!.Error}.");
+                }
             }
             layout.AppendData(BitConverter.GetBytes(targets.Count));
             calls.Add(new(call.Pc, call.Sources[0].Value, argumentRegister, call.Destinations[0].Value, returnAddress, targets));
@@ -212,6 +250,39 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
         foreach (var argument in recordArguments)
             layout.AppendData(BitConverter.GetBytes(argument == 0 ? -1 : slotOf[argument]));
         return new(Convert.ToHexString(identity.GetHashAndReset()), calls, Convert.ToHexString(layout.GetHashAndReset()), arguments);
+    }
+
+    // The table bytes of the call site being read; valid until the next table read on this thread.
+    [ThreadStatic]
+    private static byte[]? _tableScratch;
+
+    // A table is copied at once when the host can read it without first bringing back bytes the GPU wrote; otherwise it is
+    // read a word at a time, as the host reads any shader resource. Either way into one buffer per thread: a ray tracer's
+    // table is megabytes, read at each of its dispatches, and a new array each time is a large-object allocation.
+    private static ReadOnlySpan<byte> ReadTable(ulong address, int size, GuestWordReader read, ResidentGuestBytesReader? readBytes)
+    {
+        var scratch = _tableScratch;
+        if (scratch is null || scratch.Length < size)
+        {
+            _tableScratch = scratch = new byte[(size + 0xFFFF) & ~0xFFFF];
+        }
+
+        var bytes = scratch.AsSpan(0, size);
+        if (readBytes is not null && readBytes(address, bytes, false))
+        {
+            return bytes;
+        }
+
+        // As ShaderCallDump.ReadPrefix: whole words up to the first unreadable one.
+        var offset = 0;
+        while (offset + sizeof(uint) <= (size & ~3) && address <= ulong.MaxValue - (ulong)offset - 3 &&
+            read(address + (ulong)offset, out var word))
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes[offset..], word);
+            offset += sizeof(uint);
+        }
+
+        return bytes[..offset];
     }
 
     private static ShaderCallLibrary WithRuntimeArguments(Gen5ShaderProgram caller, string identity, List<ShaderCallSite> calls,

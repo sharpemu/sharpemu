@@ -665,7 +665,7 @@ internal sealed class ShaderProgramCache
                     // Tables and function code are read like the caller's code: a stale image over reused memory must not hide them.
                     var runtimeRecords = runtimeFallback is not null || (RuntimeCallRecords && !_perRecordCallers.Contains(source.Hash));
                     var library = ShaderCallLibrary.Read(caller, entry.Plan.Memory, snapshot, _readGuestWord, _functions, runtimeRecords,
-                        source.UserDataBase);
+                        source.UserDataBase, _readResidentGuestBytes);
                     if (runtimeRecords)
                     {
                         if (!_calleeUnions.TryGetValue(programKey, out var union))

@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Resources;
@@ -107,6 +108,76 @@ public sealed class ShaderCallLibraryTests
         Assert.Equal(fixedOffset ? 1 : recordCount, targets.Count);
         Assert.Equal((ulong)(fixedOffset ? offset / 16 : recordCount - 1), targets[^1].Argument);
         Assert.All(targets, target => Assert.Same(targets[0].Program, target.Program));
+    }
+
+    // A ray tracer's hit table reserves far more records than one frame fills: 360,000 records of 16 bytes, copied at once.
+    // Records past the filled ones can name functions the game has since unloaded. With run-time arguments such a record is
+    // left out and the tables' other callees still link; a table past 16 MiB is refused.
+    [Fact]
+    public void RuntimeArguments_ReadALargeHitTableAndLeaveOutUnreadableFunctions()
+    {
+        const int Records = 360000;
+        const ulong TableAddress = 0x10_0000_0000;
+        var caller = Program(
+            Sop2(0, "SLshlB32", 20, Gen5Operand.Scalar(20), Operand(4)),
+            ScalarBufferLoad(4, 0, 16, 4, dynamicOffsetRegister: 20),
+            Vop1(12, "VMovB32", 111, Operand(0)),
+            new(16, Gen5ShaderEncoding.Sopp, "SWaitcnt", [0xBF8C0000], [], [], null),
+            MoveScalarRegister(20, 14, 16), MoveScalarRegister(24, 15, 17),
+            MoveScalarRegister(28, 16, 18), MoveScalarRegister(32, 17, 19),
+            Sop1(36, "SSwappcB64", 14, Gen5Operand.Scalar(14)), EndProgram(40));
+        var memory = new MemoryAccessTable();
+        memory.Add(new() { Pc = 4, Kind = MemoryResourceKind.ScalarBuffer, Resource = 0 });
+        ResourceSnapshot Snapshot(uint records) =>
+            new() { Buffers = [[unchecked((uint)TableAddress), (uint)(TableAddress >> 32) | (16u << 16), records, 0]] };
+        var table = new byte[Records * 16];
+        void Record(int index, ulong target, ulong argument)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(table.AsSpan(index * 16), target);
+            BinaryPrimitives.WriteUInt64LittleEndian(table.AsSpan(index * 16 + 8), argument);
+        }
+
+        Record(0, 0x200000, 0x5000);
+        Record(1, 0x300000, 0x5100);
+        Record(4095, 0x200000, 0x5200);
+        Record(Records - 1, 0x900000, 0x6000);
+        var code = new Dictionary<ulong, uint>
+        {
+            [0x200000] = 0xBF800000, [0x200004] = 0xBE80200E,
+            [0x300000] = 0xBF800000, [0x300004] = 0xBF800000, [0x300008] = 0xBE80200E,
+        };
+        var tableWordReads = 0;
+        bool ReadWord(ulong address, out uint word)
+        {
+            if (address >= TableAddress && address - TableAddress < (ulong)table.Length)
+            {
+                tableWordReads++;
+                word = BinaryPrimitives.ReadUInt32LittleEndian(table.AsSpan((int)(address - TableAddress)));
+                return true;
+            }
+
+            return code.TryGetValue(address, out word);
+        }
+
+        bool ReadBytes(ulong address, Span<byte> destination, bool clean)
+        {
+            if (address < TableAddress || address - TableAddress + (ulong)destination.Length > (ulong)table.Length) return false;
+            table.AsSpan((int)(address - TableAddress), destination.Length).CopyTo(destination);
+            return true;
+        }
+
+        var library = ShaderCallLibrary.Read(caller, memory, Snapshot(Records), ReadWord, runtimeArguments: true, readBytes: ReadBytes);
+        Assert.Equal(0, tableWordReads);
+        var site = Assert.Single(library.Calls);
+        Assert.Equal(new ulong[] { 0x200000, 0x300000 }, site.Targets.Select(static target => target.Address).Order());
+        Assert.Equal(new (ulong, ulong)[] { (0x200000, 0x5000), (0x200000, 0x5200), (0x300000, 0x5100) },
+            library.Records.Select(static record => (record.Target, record.Argument)).Order());
+
+        // A copy per record reads tables of up to 64 KiB; past 16 MiB a table is refused in either mode.
+        Assert.Throws<InvalidOperationException>(() =>
+            ShaderCallLibrary.Read(caller, memory, Snapshot(Records), ReadWord, readBytes: ReadBytes));
+        Assert.Throws<InvalidOperationException>(() =>
+            ShaderCallLibrary.Read(caller, memory, Snapshot((16u << 20) / 16 + 1), ReadWord, runtimeArguments: true, readBytes: ReadBytes));
     }
 
     // A caller may pass its function pointer and argument in user data: the call registers are copied from user-data
