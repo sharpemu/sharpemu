@@ -545,9 +545,11 @@ public sealed partial class RenderExecutor
         }
 
         ResolveShaderPrograms(banks, ref state);
-        if (arguments.IndirectArgumentsAddress != 0 && state.Programs.SolidClear is not null)
+        if (arguments.IndirectArgumentsAddress != 0 &&
+            (state.Programs.SolidClear is not null || (state.Programs.Available && MayBeMetadataClearQuad(banks, ref state))))
         {
-            // A clear program stands in for the draw only when the draw has something to draw.
+            // A clear program stands in for the draw only when the draw has something to draw, and a metadata clear
+            // quad is recognized from its count and positions.
             Record(record);
             DrawAutoWithCpuArguments(submitId, banks, in arguments);
             return;

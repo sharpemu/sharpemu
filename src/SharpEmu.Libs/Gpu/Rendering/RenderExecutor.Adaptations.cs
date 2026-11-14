@@ -106,11 +106,16 @@ public sealed partial class RenderExecutor
         blend.Enable && blend.ColorSourceFactor == BlendFactorOne && blend.ColorDestinationFactor == BlendFactorOneMinusSourceAlpha && blend.ColorFunction == BlendFunctionAdd;
 
     // A covering quad that only programs the DCC clear codes; its shaded output is discarded.
-    private bool IsMetadataClearQuad(RegisterBanks banks, in DrawCall draw, ref DrawState state)
+    private bool IsMetadataClearQuad(RegisterBanks banks, in DrawCall draw, ref DrawState state) =>
+        draw.Count == DccFastClearVertexCount && MayBeMetadataClearQuad(banks, ref state) &&
+        CoversClipSpace(state.Programs.PositionStream, draw.Count);
+
+    // Everything of a metadata clear quad but its count and positions.
+    private bool MayBeMetadataClearQuad(RegisterBanks banks, ref DrawState state)
     {
         var programs = state.Programs;
         var context = banks.Context;
-        if (draw.Count != DccFastClearVertexCount || (GuestPrimitiveType)banks.UserConfig.PrimitiveType != GuestPrimitiveType.TriangleStrip ||
+        if ((GuestPrimitiveType)banks.UserConfig.PrimitiveType != GuestPrimitiveType.TriangleStrip ||
             state.ColorCount == 0 || programs.PixelInput.Stage.Program is not { Images.Length: 0 } || programs.VertexInput.Stage.Program is not { Images.Length: 0 })
         {
             return false;
@@ -126,7 +131,7 @@ public sealed partial class RenderExecutor
 
         var slot = state.Colors[0].Slot;
         var words = context.ColorTargets[slot];
-        return words.DccEnabled && words.ClearWord0 == 0 && context.ColorClearWord1[slot] == 0 && CoversClipSpace(programs.PositionStream, draw.Count);
+        return words.DccEnabled && words.ClearWord0 == 0 && context.ColorClearWord1[slot] == 0;
     }
 
     // The quad covers the clip volume when its positions span [-1, 1] on both axes.

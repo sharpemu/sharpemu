@@ -370,6 +370,9 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void DrawIndexedIndirect(BufferBinding arguments) =>
         Calls.Add($"draw_indexed_indirect {arguments.Handle:X}:{arguments.Offset:X}");
 
+    public void DrawIndirect(BufferBinding arguments) =>
+        Calls.Add($"draw_indirect {arguments.Handle:X}:{arguments.Offset:X}");
+
     public void DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ) =>
         Calls.Add($"draw_mesh {groupCountX} {groupCountY} {groupCountZ}");
 

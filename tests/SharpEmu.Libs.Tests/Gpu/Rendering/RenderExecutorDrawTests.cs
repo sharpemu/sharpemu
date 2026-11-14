@@ -223,6 +223,27 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indexed ", StringComparison.Ordinal));
     }
 
+    // A GPU-culled automatic draw reads its four arguments on the GPU, so nothing here waits for the culling pass. So does a
+    // triangle strip whose state cannot make it a metadata clear quad (RenderExecutorAdaptationTests).
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void IndirectAutoDraw_LetsTheGpuReadTheArguments(bool strip)
+    {
+        WriteIndirectArguments(6, 2, 4, 3);
+        var arguments = Auto(0, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, strip ? Banks(PrimitiveTriangleStrip) : Banks(), arguments);
+
+        Assert.Equal(0, _host.GuestReads);
+        AssertOrder(
+            "obtain 100600000 10 written=False",
+            "begin_rendering",
+            "bind_pipeline Graphics A1",
+            "draw_indirect",
+            "reset_bindings");
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw ", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void IndirectIndexedStrip_ReadsTheArgumentsOnTheCpu()
     {
