@@ -216,6 +216,11 @@ public sealed partial class SpirvModuleBuilder
 
         if (operands.Length != 1 || !IsTrackedPointer(pointer))
         {
+            if (operands.Length != 1)
+            {
+                InvalidateExplicitAccessMemoryState(pointer);
+            }
+
             return EmitResult(_functions, SpirvOp.Load, resultType, operands);
         }
 
@@ -246,7 +251,11 @@ public sealed partial class SpirvModuleBuilder
         var pointer = operands[0];
         if (operands.Length != 2 || !IsTrackedPointer(pointer))
         {
-            if (_localVariables.Contains(pointer))
+            if (operands.Length != 2)
+            {
+                InvalidateExplicitAccessMemoryState(pointer);
+            }
+            else if (_localVariables.Contains(pointer))
             {
                 _variableValues.Remove(pointer);
                 _pendingStores.Remove(pointer);
@@ -547,6 +556,20 @@ public sealed partial class SpirvModuleBuilder
         }
 
         _inheritedPointers.Clear();
+    }
+
+    private void InvalidateExplicitAccessMemoryState(uint pointer)
+    {
+        if (!IsTrackedPointer(pointer) && !_localVariables.Contains(pointer))
+        {
+            return;
+        }
+
+        // The access bypasses forwarding, but must still end pending-store eligibility.
+        // Preserve evidence of an inherited value already used in this block.
+        var inheritedValueUsed = _inheritedValueUsed;
+        ResetMemoryState();
+        _inheritedValueUsed = inheritedValueUsed;
     }
 
     private void ResetMemoryState()
