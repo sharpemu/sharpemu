@@ -141,6 +141,7 @@ internal sealed class ComputePrewarmRecord
     public required ComputeInputInfo Info { get; init; }
     public Gen5ComputeSystemRegisters? SystemRegisters { get; init; }
     public required ResourceSpecialization Specialization { get; init; }
+    public LinkedShaderPrewarm? Linked { get; init; }
 
     public (ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset) CodeKey =>
         (Hash, CodeSize, Address, ContinuationAddressOffset);
@@ -302,7 +303,7 @@ internal sealed class ShaderPrewarmList : IDisposable
 
     private const uint Magic = 0x57504553;
     private const uint GraphicsMagic = 0x47504553;
-    private const uint FormatVersion = 5;
+    private const uint FormatVersion = 6;
     private const uint GraphicsFormatVersion = 1;
     private const byte CodeKind = 1;
     private const byte ComputeKind = 2;
@@ -444,6 +445,9 @@ internal sealed class ShaderPrewarmList : IDisposable
             Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm stamp write failed: {exception.Message}");
         }
     }
+
+    // The global cache stamp cannot certify a separate caller cache or pipeline binary file.
+    public bool HasLinkedComputes => _loadedComputes.Any(record => record.Linked is not null);
 
     public static ulong Identity(ComputePrewarmRecord record) => XxHash3.HashToUInt64(SerializeCompute(record));
 
@@ -693,7 +697,8 @@ internal sealed class ShaderPrewarmList : IDisposable
 
     private static readonly uint SchemaFingerprint = ComputeSchemaFingerprint(
         typeof(ComputeInputInfo), typeof(Gen5ComputeSystemRegisters), typeof(ResourceSpecialization),
-        typeof(BufferSpecialization), typeof(ImageSpecialization), typeof(BufferCandidateTableSpecialization));
+        typeof(BufferSpecialization), typeof(ImageSpecialization), typeof(BufferCandidateTableSpecialization),
+        typeof(LinkedShaderPrewarm), typeof(LinkedPrewarmFunction), typeof(LinkedPrewarmSite), typeof(LinkedPrewarmTarget));
 
     private static readonly uint GraphicsSchemaFingerprint = ComputeSchemaFingerprint(
         typeof(StageCompileOptions), typeof(VertexInputInfo), typeof(VertexInputBuffer), typeof(VertexAttributeResource),
@@ -846,6 +851,9 @@ internal sealed class ShaderPrewarmList : IDisposable
         }
 
         WriteSpecialization(writer, record.Specialization);
+        writer.Write(record.Linked is not null);
+        record.Linked?.Write(writer);
+
         writer.Flush();
         return stream.ToArray();
     }
@@ -1350,6 +1358,9 @@ internal sealed class ShaderPrewarmList : IDisposable
             : null;
 
         var specialization = ReadSpecialization(reader, payload.Length);
+        var linked = reader.ReadBoolean() ? LinkedShaderPrewarm.Read(reader) : null;
+        if (reader.BaseStream.Position != reader.BaseStream.Length)
+            throw new ArgumentException("Trailing prewarm compute data.");
         return new ComputePrewarmRecord
         {
             Hash = hash,
@@ -1362,6 +1373,7 @@ internal sealed class ShaderPrewarmList : IDisposable
             Info = info,
             SystemRegisters = registers,
             Specialization = specialization,
+            Linked = linked,
         };
     }
 

@@ -127,7 +127,7 @@ public sealed class ShaderPrewarmListTests : IDisposable
     [InlineData(1u)]
     [InlineData(3u)]
     [InlineData(4u)]
-    [InlineData(4u)]
+    [InlineData(5u)]
     public void OlderFormatRecordsAreRejectedBeforeAppending(uint version)
     {
         using (var list = Open())

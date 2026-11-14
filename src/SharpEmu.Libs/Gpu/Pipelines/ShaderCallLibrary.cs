@@ -47,7 +47,7 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
     // Each callee's code hash, by address, when read with runtimeArguments.
     public Dictionary<ulong, byte[]> CodeHashes { get; init; } = [];
 
-    // The words each callee's decode read, by address, when read with runtimeArguments.
+    // The words each callee's decode read, by address; also retained for exact prewarm replay of static links.
     public Dictionary<ulong, (ulong Address, byte[] Bytes)[]> CodeRuns { get; init; } = [];
 
     // The hash of the code at each address the tables name, as this dispatch read it; CodeHashes holds the code the library
@@ -108,8 +108,8 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
                 if (runtimeArguments)
                 {
                     codeHashes.Add(address, CodeDigest(result));
-                    codeRuns.Add(address, result.Runs);
                 }
+                codeRuns.Add(address, result.Runs);
             }
 
             if (runtimeArguments)
@@ -227,7 +227,8 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
         var slotOf = arguments.Select((argument, slot) => (argument, slot)).ToDictionary(entry => entry.argument, entry => entry.slot);
         foreach (var argument in recordArguments)
             layoutHash.AppendData(BitConverter.GetBytes(argument == 0 ? -1 : slotOf[argument]));
-        return new(Convert.ToHexString(identityHash.GetHashAndReset()), calls, Convert.ToHexString(layoutHash.GetHashAndReset()), arguments);
+        return new(Convert.ToHexString(identityHash.GetHashAndReset()), calls, Convert.ToHexString(layoutHash.GetHashAndReset()), arguments)
+        { CodeRuns = codeRuns };
     }
 
     // A code hash as text. With call-library reuse on, one string per code array: the arrays are never written.

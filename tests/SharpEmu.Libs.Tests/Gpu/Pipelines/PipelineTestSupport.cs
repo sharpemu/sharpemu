@@ -61,6 +61,8 @@ internal class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public bool SharedInt64AtomicsEnabled => false;
 
+    public bool RuntimeCallRecordsSupported { get; set; }
+
     public bool CallMarksSupported { get; set; }
 
     public long CallMarkSnapshots { get; set; }

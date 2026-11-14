@@ -202,8 +202,9 @@ public sealed partial class RenderExecutor
 
     private bool SkipWhileLinkedModuleCompiles(ComputeInputInfo input, ShaderProgram handle, ShaderProgramInfo program)
     {
-        if (program.Bindings is not { CallTargetCount: not 0 } ||
-            _pipelines.TryCreateComputePipeline(input, handle, out _)) return false;
+        if (program.Bindings is not { CallTargetCount: not 0 }) return false;
+        var ready = _pipelines.TryCreateComputePipeline(input, handle, out _);
+        if (ready) return false;
         var skipped = LinkedCompileSkips.AddOrUpdate(program.Hash, 1, static (_, count) => count + 1);
         if ((skipped & (skipped - 1)) == 0)
             Console.Error.WriteLine($"[GPU][WARN][LINKED_COMPILE] Dispatches of a linked program are skipped while its module compiles: hash=0x{program.Hash:X16} skipped={skipped}.");

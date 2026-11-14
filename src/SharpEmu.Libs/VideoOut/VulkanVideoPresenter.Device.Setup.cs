@@ -61,7 +61,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private const long PipelineCacheRetryMs = 1_000;
         private long _pipelineCacheRetryTick;
         private const ulong MaxPipelineCacheBytes = 256UL * 1024 * 1024;
-        private HashSet<string>? _resetPipelineCachePaths;
+        private System.Collections.Concurrent.ConcurrentDictionary<string, byte>? _resetPipelineCachePaths;
         private nuint _pipelineCacheSavedBytes;
         private Queue _queue;
         private uint _queueFamilyIndex;
@@ -1839,7 +1839,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (size > byteLimit)
                 {
-                    if ((_resetPipelineCachePaths ??= new HashSet<string>(StringComparer.Ordinal)).Add(path))
+                    if (LazyInitializer.EnsureInitialized(ref _resetPipelineCachePaths,
+                            static () => new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.Ordinal)).TryAdd(path, 0))
                     {
                         WritePipelineCacheFile(path, []);
                         Console.Error.WriteLine(
@@ -1897,7 +1898,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Directory.CreateDirectory(directory);
             }
 
-            var temporaryPath = path + $".{Environment.ProcessId}.tmp";
+            var temporaryPath = path + $".{Environment.ProcessId}.{Environment.CurrentManagedThreadId}.tmp";
             File.WriteAllBytes(temporaryPath, PipelineCacheSignature.Wrap(DriverCacheSignature(), data));
             File.Move(temporaryPath, path, overwrite: true);
         }

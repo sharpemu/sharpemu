@@ -1742,6 +1742,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
             // A linked program's own pipeline cache (CreateLinkedPipelineCache), written once its pipeline is registered.
             public DriverCacheShard? LinkedCache;
+
+            // A linked program (Bindings.CallTargetCount != 0): its compile waits for LinkedCompileAdmission.
+            public bool Linked;
         }
 
         private readonly Dictionary<ulong, PendingComputePipeline> _pendingComputePipelines = new();
@@ -1852,6 +1855,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SpirvBytes = SpirvBytesOf(computeModule.Handle),
                 StartTimestamp = Stopwatch.GetTimestamp(),
                 LinkedCache = linkedCache,
+                Linked = linked,
             };
             started.Compile = Task.Factory.StartNew(
                 () =>

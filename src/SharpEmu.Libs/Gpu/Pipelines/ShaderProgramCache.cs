@@ -145,10 +145,12 @@ internal sealed class ProgramSourceEntry
 
     // The order of its link among all linked programs: a newer program of a caller replaces an older one as its fallback.
     public long Generation { get; init; }
+    public string LibraryIdentity { get; init; } = string.Empty;
 
     // With RuntimeCallRecords, the hash of the code linked for each of CallTargets, and each site's callees with their code.
     public byte[][] CallTargetCodes { get; init; } = [];
     public Dictionary<uint, UnitedCallee[]>? RuntimeCallees { get; init; }
+    public LinkedShaderPrewarm? LinkedPrewarm { get; init; }
     public ConstantFill? ConstantFill { get; init; }
     public BoundedFill? BoundedFill { get; init; }
     public BoundedCopy? BoundedCopy { get; init; }
@@ -731,7 +733,7 @@ internal sealed class ShaderProgramCache
                         {
                             linked = LinkProgram(caller, library, source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length,
                                 waveSize, captureLinkedImages ? plan => failedLinkedPlan = plan : null, runtimeRecords, runtimeRecords && CalleeTiering,
-                                _host.SupportsBindlessHeap, source.Registered.Frontend) ??
+                                _host.SupportsBindlessHeap, _host.ShaderPrewarm is not null, source.Registered.Frontend) ??
                                 RefuseRuntimeCallRecords(source.Hash);
                             failedLinkedPlan = null;
                         }
@@ -896,6 +898,7 @@ internal sealed class ShaderProgramCache
         }
     }
 
+
     // The key of the entry the static state was just built for.
     private ProgramKey BuildProgramKey(ShaderSource source) =>
         new(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
@@ -906,7 +909,7 @@ internal sealed class ShaderProgramCache
     // links a copy per record from then on (RefuseRuntimeCallRecords).
     private ProgramSourceEntry? LinkProgram(Gen5ShaderProgram caller, ShaderCallLibrary library, ShaderStage stage, ulong hash,
         uint userDataBase, uint userDataCount, uint waveSize, Action<ShaderResourcePlan>? beforeResourceTracking, bool runtimeRecords = false,
-        bool callMarks = false, bool bindlessHeap = false, IShaderFrontend? frontend = null)
+        bool callMarks = false, bool bindlessHeap = false, bool capturePrewarm = false, IShaderFrontend? frontend = null)
     {
         Gen5ShaderProgram program;
         ShaderResourcePlan plan;
@@ -934,7 +937,10 @@ internal sealed class ShaderProgramCache
             CallTargets = callTargets,
             CallTargetCodes = [.. callTargets.Select(address => library.CodeHashes[address])],
             RuntimeCallees = runtimeRecords ? library.SiteCallees() : null,
+            LinkedPrewarm = capturePrewarm && stage == ShaderStage.Compute
+                ? LinkedShaderPrewarm.Capture(library, runtimeRecords, callMarks, bindlessHeap) : null,
             Generation = Interlocked.Increment(ref _linkGenerations),
+            LibraryIdentity = library.LayoutIdentity,
             HasShaderCalls = program.Instructions.Any(instruction => instruction.Opcode == "SSwappcB64"),
             HasBitwiseExclusiveOr = program.Instructions.Any(instruction => instruction.Opcode.Contains("Xor", StringComparison.Ordinal)) };
     }
@@ -1226,9 +1232,11 @@ internal sealed class ShaderProgramCache
         var (stage, hash, userDataBase, userDataCount) = (source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length);
         var callMarks = runtimeRecords && CalleeTiering;
         var bindlessHeap = _host.SupportsBindlessHeap;
+        var capturePrewarm = _host.ShaderPrewarm is not null;
         var frontend = source.Registered.Frontend;
         _pendingLinks.Add(source.Hash, (linkedKey, Task.Run(() =>
-            LinkProgram(caller, library, stage, hash, userDataBase, userDataCount, waveSize, null, runtimeRecords, callMarks, bindlessHeap, frontend))));
+            LinkProgram(caller, library, stage, hash, userDataBase, userDataCount, waveSize, null, runtimeRecords, callMarks, bindlessHeap,
+                capturePrewarm, frontend))));
         throw new ShaderProgramPendingException();
     }
 
@@ -1713,6 +1721,7 @@ internal sealed class ShaderProgramCache
         }
         if (source.Stage == ShaderStage.Compute && options.TessellationHull is null &&
             _host.ShaderPrewarm is { } prewarm &&
+            (!Gen5ShaderCallLinker.IsLinked(program) || entry.LinkedPrewarm is not null) &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var capture))
         {
             prewarm.RecordCompute(capture, new ComputePrewarmRecord
@@ -1727,6 +1736,7 @@ internal sealed class ShaderProgramCache
                 Info = options.ComputeInfo!,
                 SystemRegisters = options.ComputeSystemRegisters,
                 Specialization = specialization.Clone(),
+                Linked = entry.LinkedPrewarm,
             });
         }
 
@@ -1960,8 +1970,20 @@ internal sealed class ShaderProgramCache
                 return false;
             }
 
+            var linked = record.Linked;
+            if (linked is not null)
+            {
+                if (linked.BindlessHeap != bindlessHeap)
+                    throw new InvalidOperationException("The linked prewarm binding policy differs from the host.");
+                program = linked.Link(program);
+            }
+            if (program.Instructions.Any(instruction => instruction.Opcode == "SSwappcB64"))
+                throw new InvalidOperationException("The prewarm program has unresolved shader calls.");
             var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, record.Hash, record.UserDataBase, record.UserDataCount,
                 waveSize: record.Info.WaveSize, bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: bindlessHeap,
+                // Match LinkProgram's extraction policy; linked plans currently do not use stable image tables.
+                stableImageLimits: linked is null ? stableImageLimits : default,
+                callRecords: linked?.RuntimeRecords ?? false, callMarks: linked?.CallMarks ?? false,
                 normalizeBufferDescriptor: frontend?.NormalizeBufferDescriptor,
                 normalizeImageDescriptor: frontend?.NormalizeImageDescriptor,
                 imageNormalizationVersion: frontend?.ImageNormalizationVersion);

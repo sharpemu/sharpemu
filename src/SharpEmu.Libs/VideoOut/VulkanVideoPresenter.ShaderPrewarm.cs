@@ -34,6 +34,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private int _shaderPrewarmCompiled;
         private int _shaderPrewarmFailed;
         private int _shaderPrewarmRuntimeHits;
+        private int _shaderPrewarmDroppedLinked;
         private int _shaderPrewarmComputeDone;
         private int _shaderPrewarmComputeTotal;
         private int _shaderPrewarmGraphicsDone;
@@ -223,7 +224,8 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private static bool CanSkipShaderPrewarm(ShaderPrewarmList list, string stamp, byte[] cache) =>
-            cache.Length != 0 && list.IsStampCurrent(ShaderPrewarmList.CacheStamp(stamp, cache));
+            cache.Length != 0 && !list.HasLinkedComputes &&
+            list.IsStampCurrent(ShaderPrewarmList.CacheStamp(stamp, cache));
 
         private static string ShaderPrewarmStampPart(Type type) =>
             type.Assembly.ManifestModule.ModuleVersionId.ToString("N");
@@ -260,6 +262,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Environment.GetEnvironmentVariable("SHARPEMU_STRUCTURED_FORWARD_BLOCKS"),
                 Environment.GetEnvironmentVariable("SHARPEMU_EXEC_GUARD_ELISION"),
                 Environment.GetEnvironmentVariable("SHARPEMU_EXEC_SELECT_ELIMINATION"),
+                Environment.GetEnvironmentVariable("SHARPEMU_PREWARM_LINKED"),
                 driverSignature.TrimEnd('\n'));
 
         private bool PrewarmComputePipeline(
@@ -290,14 +293,19 @@ internal static unsafe partial class VulkanVideoPresenter
             DescriptorSetLayout setLayout = default;
             PipelineLayout pipelineLayout = default;
             ShaderModule module = default;
+            DriverCacheShard? linkedCache = null;
+            var created = false;
             try
             {
                 CollectLayoutBindings(bindings, layout!, ShaderStage.Compute);
                 setLayout = CreateDescriptorSetLayout(bindings, out _, out _);
                 pipelineLayout = CreatePipelineLayout(setLayout, ShaderStageFlags.ComputeBit, layout!.UsesBindlessHeap);
                 module = CreateShaderModule(payload);
-                var pipeline = CompileComputePipeline(_vk, _device, _pipelineCache, module, pipelineLayout, ComputeRequiredSubgroupSize(record.Info));
+                linkedCache = layout.CallTargetCount != 0 ? CreateLinkedPipelineCache(record.Hash) : null;
+                var cache = ResolveGuestPipelineCache(linkedCache?.Cache);
+                var pipeline = CompileComputePipeline(_vk, _device, cache, module, pipelineLayout, ComputeRequiredSubgroupSize(record.Info));
                 _vk.DestroyPipeline(_device, pipeline, null);
+                created = true;
                 _prewarmedShaderIdentities![VulkanPipelineCacheStorage.CompiledShaderIdentity(payload)] = 0;
                 Interlocked.Increment(ref _shaderPrewarmCompiled);
                 return true;
@@ -309,6 +317,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             finally
             {
+                ReleaseLinkedPipelineCache(linkedCache, record.Hash, save: created);
                 if (module.Handle != 0)
                 {
                     _vk.DestroyShaderModule(_device, module, null);
@@ -523,7 +532,8 @@ internal static unsafe partial class VulkanVideoPresenter
             _pipelineCacheDirty = true;
             Console.Error.WriteLine(
                 $"[LOADER][INFO] Shader prewarm done: compiled={Volatile.Read(ref _shaderPrewarmCompiled)} " +
-                $"failed={Volatile.Read(ref _shaderPrewarmFailed)} ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
+                $"failed={Volatile.Read(ref _shaderPrewarmFailed)} dropped_linked={Volatile.Read(ref _shaderPrewarmDroppedLinked)} " +
+                $"ms={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} " +
                 $"runtime_compute_modules={runtime.Count} matched={matched}");
         }
 
