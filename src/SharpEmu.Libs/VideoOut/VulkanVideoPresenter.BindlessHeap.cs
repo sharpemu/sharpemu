@@ -352,9 +352,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void DestroyBindlessHeap()
         {
+            // The image cache disposes every slot after this, the ones the heap holds too.
             foreach (var image in _heapEntriesByImage.Keys)
             {
                 image.HeapChanged = null;
+                image.DeferredErase = null;
             }
 
             _heapEntriesByImage.Clear();
@@ -616,20 +618,24 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void ResolveHeapEntry(HeapEntry entry)
         {
-            DetachHeapEntry(entry);
+            var released = DetachHeapEntry(entry);
             if (entry.Slot >= BindlessHeap.ImageKinds.Length)
             {
                 WriteHeapSampler(entry);
-                return;
             }
-
-            ImageView view = default;
-            if (entry.Words.Length == 8 && ResourceMaterializer.IsFloatHeapImage(entry.Words))
+            else
             {
-                view = AcquireHeapImage(entry);
+                ImageView view = default;
+                if (entry.Words.Length == 8 && ResourceMaterializer.IsFloatHeapImage(entry.Words))
+                {
+                    view = AcquireHeapImage(entry);
+                }
+
+                WriteHeapImage(entry.Slot, entry.Index, view);
             }
 
-            WriteHeapImage(entry.Slot, entry.Index, view);
+            // A deleted image is freed once no element of the heap names its view.
+            released?.Invoke();
         }
 
         private static ShaderImageShape HeapImageShape(int slot)
@@ -706,8 +712,10 @@ internal static unsafe partial class VulkanVideoPresenter
             return view;
         }
 
-        private void DetachHeapEntry(HeapEntry entry)
+        // Returns the held erase of an image deleted while the heap named it, when this was its last element.
+        private Action? DetachHeapEntry(HeapEntry entry)
         {
+            Action? released = null;
             if (entry.Image is { } image && _heapEntriesByImage.TryGetValue(image, out var entries))
             {
                 entries.Remove(entry);
@@ -715,12 +723,15 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     _heapEntriesByImage.Remove(image);
                     image.HeapChanged = null;
+                    released = image.DeferredErase;
+                    image.DeferredErase = null;
                 }
             }
 
             entry.Image = null;
             entry.ImageIdentifier = default;
             entry.Resolved = false;
+            return released;
         }
 
         private void WriteHeapImage(int slot, uint index, ImageView view)

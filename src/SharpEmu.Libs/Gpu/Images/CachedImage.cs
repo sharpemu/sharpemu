@@ -106,6 +106,9 @@ public sealed unsafe partial class CachedImage : IDisposable
 
     // Set while descriptor set 1 holds a view of this image: told when its layout, contents or registration change.
     public Action<CachedImage>? HeapChanged;
+    // Set when the image is deleted while descriptor set 1 still holds its view; frees the slot after the current tick.
+    // The heap runs it once it has rewritten the last element that names the image.
+    public Action? DeferredErase;
     public bool Registered;
     public uint QueryEpoch;
     public ulong WatchBegin;
