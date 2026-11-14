@@ -53,21 +53,91 @@ internal sealed class GuestBufferUploader(
         return temporary;
     }
 
+    private const ulong GuestPageBytes = 0x1000;
+    private const int MaxUnmappedReports = 8;
+    private static int _unmappedReports;
+
     private void ReadGuestBytes(ulong address, Span<byte> destination, ulong requestedAddress, ulong requestedSize)
     {
-        if (!guest.TryRead(address, destination))
+        if (guest.TryRead(address, destination))
         {
-            Console.Error.WriteLine($"[GPU][READ_FAILURE] addr=0x{address:X16} size=0x{destination.Length:X}");
-            Console.Error.WriteLine($"[GPU][READ_FAILURE] binding=0x{requestedAddress:X16} size=0x{requestedSize:X}");
-            try
+            return;
+        }
+
+        // A buffer can cover pages the guest no longer maps: they hold nothing a GPU access may read, so they stage
+        // as zero. A mapped page that cannot be read still stops the game below.
+        if (TryReadMappedPages(guest, address, destination, out var unmappedBytes))
+        {
+            ReportUnmappedPages(address, destination.Length, unmappedBytes, requestedAddress, requestedSize);
+            return;
+        }
+
+        Console.Error.WriteLine($"[GPU][READ_FAILURE] addr=0x{address:X16} size=0x{destination.Length:X}");
+        Console.Error.WriteLine($"[GPU][READ_FAILURE] binding=0x{requestedAddress:X16} size=0x{requestedSize:X}");
+        try
+        {
+            Console.Error.WriteLine(guest.DescribeReadRange(address, (ulong)destination.Length));
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine($"[GPU][READ_FAILURE] mapping query failed: {error.GetType().Name}");
+        }
+        throw SubmissionScheduler.Fatal($"Could not read guest memory: addr=0x{address:X16} size=0x{destination.Length:X}");
+    }
+
+    // Reads the range page by page: a page without a guest mapping reads as zero, a mapped page must read. False when a
+    // mapped page could not be read.
+    internal static bool TryReadMappedPages(ICpuMemory memory, ulong address, Span<byte> destination, out ulong unmappedBytes)
+    {
+        unmappedBytes = 0;
+        var offset = 0;
+        while (offset < destination.Length)
+        {
+            var pageAddress = address + (ulong)offset;
+            var length = (int)Math.Min((ulong)(destination.Length - offset), GuestPageBytes - (pageAddress & (GuestPageBytes - 1)));
+            var piece = destination.Slice(offset, length);
+            if (memory.CanRead(pageAddress, (ulong)length))
             {
-                Console.Error.WriteLine(guest.DescribeReadRange(address, (ulong)destination.Length));
+                if (!memory.TryRead(pageAddress, piece))
+                {
+                    return false;
+                }
             }
-            catch (Exception error)
+            else
             {
-                Console.Error.WriteLine($"[GPU][READ_FAILURE] mapping query failed: {error.GetType().Name}");
+                piece.Clear();
+                unmappedBytes += (ulong)length;
             }
-            throw SubmissionScheduler.Fatal($"Could not read guest memory: addr=0x{address:X16} size=0x{destination.Length:X}");
+
+            offset += length;
+        }
+
+        return true;
+    }
+
+    private void ReportUnmappedPages(ulong address, int length, ulong unmappedBytes, ulong requestedAddress, ulong requestedSize)
+    {
+        var report = Interlocked.Increment(ref _unmappedReports);
+        if (report > MaxUnmappedReports)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[GPU][WARN] A buffer upload covers guest pages without a mapping; they read as zero: addr=0x{address:X16} " +
+            $"size=0x{length:X} unmapped=0x{unmappedBytes:X} binding=0x{requestedAddress:X16} binding_size=0x{requestedSize:X}");
+        try
+        {
+            Console.Error.WriteLine(guest.DescribeReadRange(address, (ulong)length));
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine($"[GPU][WARN] mapping query failed: {error.GetType().Name}");
+        }
+
+        if (report == 1)
+        {
+            Console.Error.WriteLine($"[GPU][WARN] first unmapped upload requested from:{Environment.NewLine}{Environment.StackTrace}");
         }
     }
 }
