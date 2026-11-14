@@ -36,7 +36,6 @@ internal sealed class GuestWriteReservations
     private readonly ulong[] _entryEnds = new ulong[SlotCount * Ways];
     private readonly ClaimRecord[] _history = new ClaimRecord[HistorySize];
     private long _claimSequence;
-    private int _waiters;
 
     [ThreadStatic] private static FastAttempt? t_fast;
     [ThreadStatic] private static uint t_tokens;
@@ -284,23 +283,29 @@ internal sealed class GuestWriteReservations
         }
     }
 
-    // Waits under the gate for a release. A lock-free write pulses only while a waiter is counted, so the count is raised
-    // before the condition is read again; the timeout bounds the wait should a pulse still be missed.
+    // Waits under the gate for a release. Locked reservations and claims pulse the gate when they are released, and the
+    // timeout bounds the wait should a pulse still be missed. A lock-free write holds its entry for one copy and releases it
+    // without the gate, so a wait on lock-free entries alone spins outside the gate until they clear.
     private void WaitForRelease(ulong start, ulong end, int thread, bool cpu)
     {
-        Interlocked.Increment(ref _waiters);
+        if (ReservedOverlap(start, end) || (cpu && GpuOverlap(start, end, thread)))
+        {
+            Monitor.Wait(_gate, 10);
+            return;
+        }
+
+        Monitor.Exit(_gate);
         try
         {
-            var blocked = ReservedOverlap(start, end) || FastEntryOverlaps(start, end) ||
-                (cpu && GpuOverlap(start, end, thread));
-            if (blocked)
+            var spin = new SpinWait();
+            while (FastEntryOverlaps(start, end))
             {
-                Monitor.Wait(_gate, 10);
+                spin.SpinOnce(sleep1Threshold: -1);
             }
         }
         finally
         {
-            Interlocked.Decrement(ref _waiters);
+            Monitor.Enter(_gate);
         }
     }
 
@@ -384,18 +389,8 @@ internal sealed class GuestWriteReservations
         }
     }
 
-    // Cleared with a full fence, so the waiter count read below is not read before the entry is free.
-    private void ClearEntry(int entry)
-    {
-        Interlocked.Exchange(ref _entryTokens[entry], 0);
-        if (Volatile.Read(ref _waiters) != 0)
-        {
-            lock (_gate)
-            {
-                Monitor.PulseAll(_gate);
-            }
-        }
-    }
+    // Cleared after the copy's stores; a waiter on lock-free entries spins until it reads the entry free.
+    private void ClearEntry(int entry) => Volatile.Write(ref _entryTokens[entry], 0);
 
     private bool IsReleased(long id)
     {
