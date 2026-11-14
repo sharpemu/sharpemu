@@ -97,6 +97,27 @@ public sealed class BindlessHeapTests
         Assert.Equal((ImageNumericClass.Float, ImageDimension.Dim2D, false), (image.NumericClass, image.Dimension, image.Cube));
     }
 
+    // Materialized the way the program cache chooses its path, a heap program still reports its heap: the fast path
+    // assembles no heap descriptors, and with an empty heap the shader's records read nothing.
+    [Fact]
+    public void AHeapProgramKeepsItsHeapOnThePathTheCacheChooses()
+    {
+        var plan = Extract(ResourceTrackerTests.LaneIndexedImageProgram(), stage: ShaderStage.Compute, bindlessHeap: true);
+        var userData = new uint[64];
+        userData[0] = 0x0001_0000;
+        userData[1] = 32u << 16;
+        userData[2] = 4096;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        var materialized = ResourceMaterializer.CanMaterializeFast(plan)
+            ? ResourceMaterializer.MaterializeFast(plan, Inputs(userData), ref snapshot, ref specialization, out _)
+            : ResourceMaterializer.Materialize(plan, Inputs(userData), ref snapshot, ref specialization);
+
+        Assert.True(materialized);
+        Assert.Equal([new BindlessHeapDescriptor(false, 0x0001_0000, 4096, 32)], snapshot.Heaps);
+    }
+
     // A 3D read of a heap record also has the record's 2D-array element: a record that holds a 2D texture has a null 3D
     // element, and the hardware takes the third coordinate as the layer.
     [Fact]

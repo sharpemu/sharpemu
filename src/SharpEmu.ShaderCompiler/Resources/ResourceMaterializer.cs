@@ -347,8 +347,16 @@ public static partial class ResourceMaterializer
         return true;
     }
 
+    // The fast path assembles no bindless heap descriptors and evaluates only the planned ranges, so a program that reads
+    // heap records, or whose ranges the planner extends, takes the full path.
     public static bool CanMaterializeFast(ShaderResourcePlan plan) =>
-        plan.IndirectImages.Count == 0 && plan.BufferCandidateTables.Count == 0 && plan.MaterializationProgram is not null;
+        plan.IndirectImages.Count == 0 && plan.BufferCandidateTables.Count == 0 && plan.HeapRecordSources.Count == 0 &&
+        !ExtendsPlannedRanges(plan) && plan.MaterializationProgram is not null;
+
+    // DeviceAddressRangePlanner.Evaluate adds the ranges of the shader function buffers and of the device record counts
+    // after the planned ones; a materialization program evaluates the planned ranges only.
+    private static bool ExtendsPlannedRanges(ShaderResourcePlan plan) =>
+        plan.Graph.Program.FunctionBufferAccesses.Count != 0 || plan.DeviceRecordCounts is not null;
 
     // Materializes every draw from the plan's program: no cached snapshot to prove. The
     // specialization is a function of descriptor words only, so equal words reuse it.
@@ -800,8 +808,8 @@ public static partial class ResourceMaterializer
         if (program is not null && program.TryRun(plan, inputs, additionalTableWords, out values, out table, out var programRanges, out activeSources))
         {
             _programRuns.Increment();
-            ProgramCheck?.Invoke(plan, inputs, values, table, programRanges);
-            ranges = programRanges;
+            ranges = ExtendsPlannedRanges(plan) ? DeviceAddressRangePlanner.Evaluate(plan, inputs) : programRanges;
+            ProgramCheck?.Invoke(plan, inputs, values, table, ranges);
         }
         else
         {
