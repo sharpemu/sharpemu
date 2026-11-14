@@ -42,6 +42,7 @@ public sealed class GuestGpuManagedWriteLeaseTests
     [InlineData(true)]
     public void WriteAcrossUnregisteredGapNotifiesEveryMappedIntersection(bool closureFree)
     {
+        var savedOverride = HostCallTrims.MarkClosureFreeOverrideForTests;
         HostCallTrims.MarkClosureFreeOverrideForTests = closureFree;
         try
         {
@@ -63,7 +64,7 @@ public sealed class GuestGpuManagedWriteLeaseTests
         }
         finally
         {
-            HostCallTrims.MarkClosureFreeOverrideForTests = null;
+            HostCallTrims.MarkClosureFreeOverrideForTests = savedOverride;
         }
     }
 
@@ -73,6 +74,7 @@ public sealed class GuestGpuManagedWriteLeaseTests
     [InlineData(true)]
     public void WriteOutsideEverySpanNotifiesNothing(bool closureFree)
     {
+        var savedOverride = HostCallTrims.MarkClosureFreeOverrideForTests;
         HostCallTrims.MarkClosureFreeOverrideForTests = closureFree;
         try
         {
@@ -87,8 +89,43 @@ public sealed class GuestGpuManagedWriteLeaseTests
         }
         finally
         {
-            HostCallTrims.MarkClosureFreeOverrideForTests = null;
+            HostCallTrims.MarkClosureFreeOverrideForTests = savedOverride;
         }
+    }
+
+    // Compare allocation across complete BeginManagedWrite calls outside every span.
+    [Fact]
+    public void ClosureFreeMarksOutsideEverySpanAllocateLessThanTheClosure()
+    {
+        using var memory = new GuestGpuMemory(new RecordingAddressSpace());
+        memory.AttachStores(new Store(), null);
+        memory.Register(0x10000, 0x4000, GuestPageProtection.Read | GuestPageProtection.Write);
+
+        long Allocated(bool closureFree)
+        {
+            var savedOverride = HostCallTrims.MarkClosureFreeOverrideForTests;
+            HostCallTrims.MarkClosureFreeOverrideForTests = closureFree;
+            try
+            {
+                for (var warm = 0; warm < 16; warm++)
+                    using (memory.BeginManagedWrite(0x20000, 8)) { }
+                var before = GC.GetAllocatedBytesForCurrentThread();
+                for (var write = 0; write < 256; write++)
+                    using (memory.BeginManagedWrite(0x20000, 8)) { }
+                return GC.GetAllocatedBytesForCurrentThread() - before;
+            }
+            finally
+            {
+                HostCallTrims.MarkClosureFreeOverrideForTests = savedOverride;
+            }
+        }
+
+        var withClosure = Allocated(closureFree: false);
+        var closureFree = Allocated(closureFree: true);
+        // A whole-call allocation floor and difference; these assertions do not count individual objects.
+        Assert.True(withClosure >= 256 * 2 * 2 * 24, $"closure path allocated {withClosure} bytes");
+        Assert.True(withClosure - closureFree >= 256 * 2 * 2 * 24,
+            $"closure path {withClosure} bytes, closure-free {closureFree} bytes");
     }
 
     // A write through one backing view: the stores take PrepareEmulatorWrite and NoteEmulatorWrite for every intersection.

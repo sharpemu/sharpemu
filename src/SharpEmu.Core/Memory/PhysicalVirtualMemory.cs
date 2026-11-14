@@ -2361,6 +2361,55 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return needsStaging ? CopyThroughStaging(destinationAddress, sourceAddress, length) : copied;
     }
 
+    // HostCallTrims.MixedCopyDirect, under the read lock: a copy between the backing and private memory in one call,
+    // when the private side resolves, is committed and needs no protection change, as the TryRead or TryWrite of each
+    // staging piece would find it. The backing's read or write checks its whole span before it copies a byte, and the
+    // write notification is the one TryWrite makes. False leaves both sides untouched, and the caller stages the copy.
+    private bool TryCopyMixedDirect(ulong destinationAddress, ulong sourceAddress, ulong length,
+        MemoryRegion? sourceRegion, MemoryRegion? destinationRegion, bool sourceBacked)
+    {
+        var privateAddress = sourceBacked ? destinationAddress : sourceAddress;
+        var privateRegion = sourceBacked ? destinationRegion : sourceRegion;
+        // Armed watches depend on the ordinary staging pieces' call boundaries and lengths.
+        if (GuestWriteWatch.Armed || length > int.MaxValue || privateRegion is null || privateRegion.IsReservedOnly ||
+            !TryResolveRegionOffset(privateAddress, length, privateRegion, out var offset))
+        {
+            return false;
+        }
+
+        var pointer = privateRegion.VirtualAddress + offset;
+        if (sourceBacked)
+        {
+            if (!CanWriteWithoutProtectionChange(pointer, length, privateRegion))
+            {
+                return false;
+            }
+
+            var target = new Span<byte>((void*)pointer, (int)length);
+            if (!_backedSpace!.TryReadBacking(sourceAddress, target))
+            {
+                return false;
+            }
+
+            NotifyGuestWriteWatch(destinationAddress, target);
+            return true;
+        }
+
+        if (!CanReadWithoutProtectionChange(pointer, length, privateRegion))
+        {
+            return false;
+        }
+
+        var source = new ReadOnlySpan<byte>((void*)pointer, (int)length);
+        if (!_backedSpace!.TryWriteBacking(destinationAddress, source))
+        {
+            return false;
+        }
+
+        NotifyGuestWriteWatch(destinationAddress, source);
+        return true;
+    }
+
     private bool TryCopyCore(ulong destinationAddress, ulong sourceAddress, ulong length, out bool needsStaging)
     {
         needsStaging = false;
@@ -2385,6 +2434,12 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
             // The staged path re-enters TryRead/TryWrite, which may need the write lock.
             if (sourceBacked || destinationBacked)
             {
+                if (global::SharpEmu.HLE.HostCallTrims.MixedCopyDirect &&
+                    TryCopyMixedDirect(destinationAddress, sourceAddress, length, sourceRegion, destinationRegion, sourceBacked))
+                {
+                    return true;
+                }
+
                 goto staged;
             }
 
