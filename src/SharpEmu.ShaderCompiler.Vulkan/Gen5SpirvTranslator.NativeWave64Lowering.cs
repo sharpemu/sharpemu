@@ -118,12 +118,20 @@ public static partial class Gen5SpirvTranslator
                     SpirvOp.UConvert,
                     context._uintType,
                     context.ShiftRightLogical64(activeLanes, context._module.Constant64(context._ulongType, 32)));
-                var firstActiveLane = context._module.AddInstruction(
+                var firstSetLane = context._module.AddInstruction(
                     SpirvOp.Select,
                     context._uintType,
                     context._module.AddInstruction(SpirvOp.IEqual, context._boolType, activeLow, context.UInt(0)),
                     context.IAdd(context.Ext(73, context._uintType, activeHigh), context.UInt(32)),
                     context.Ext(73, context._uintType, activeLow));
+                // V_READFIRSTLANE_B32 reads lane 0 when EXEC is empty (RDNA2 ISA 12.8).
+                var firstActiveLane = context._module.AddInstruction(
+                    SpirvOp.Select,
+                    context._uintType,
+                    context._module.AddInstruction(SpirvOp.IEqual, context._boolType, activeLanes,
+                        context._module.Constant64(context._ulongType, 0)),
+                    context.UInt(0),
+                    firstSetLane);
                 return context._module.AddInstruction(
                     SpirvOp.GroupNonUniformBroadcast,
                     context._uintType,
