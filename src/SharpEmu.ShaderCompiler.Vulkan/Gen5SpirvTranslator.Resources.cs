@@ -2902,6 +2902,7 @@ public static partial class Gen5SpirvTranslator
                     return true;
                 }
                 case "DsRead2B64":
+                case "DsRead2St64B64":
                     return TryEmitDataShareReadPair64(instruction, control, out error);
                 case "DsRead2B32":
                 {
@@ -2959,6 +2960,9 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
+            // The ST64 form counts its offsets in 64 pairs of dwords, as DS_WRITE2ST64_B64 does.
+            var offsetStride = instruction.Opcode == "DsRead2St64B64" ? 512u : 8u;
+
             EmitExecConditional(() =>
             {
                 var address = GetRawSource(instruction, 0);
@@ -2967,7 +2971,7 @@ public static partial class Gen5SpirvTranslator
                 for (var component = 0; component < values.Length; component++)
                 {
                     var pairOffset = component < 2 ? control.Offset0 : control.Offset1;
-                    var byteOffset = pairOffset * sizeof(ulong) + (uint)(component % 2) * sizeof(uint);
+                    var byteOffset = pairOffset * offsetStride + (uint)(component % 2) * sizeof(uint);
                     values[component] = control.Gds
                         ? LoadBlockWord(_globalDataShare, GlobalDataShareIndex(address, byteOffset))
                         : Load(_uintType, LdsPointer(address, byteOffset));

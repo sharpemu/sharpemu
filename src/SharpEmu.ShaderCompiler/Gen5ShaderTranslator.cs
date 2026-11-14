@@ -1642,6 +1642,7 @@ public static partial class Gen5ShaderTranslator
             0x4F => "DsWrite2St64B64",
             0x76 => "DsReadB64",
             0x77 => "DsRead2B64",
+            0x78 => "DsRead2St64B64",
             0xA0 => "DsWriteB8D16Hi",
             0xA1 => "DsWriteB16D16Hi",
             0xA2 => "DsReadU8D16",
@@ -2800,7 +2801,7 @@ public static partial class Gen5ShaderTranslator
                         Gen5Operand.Vector(vectorDestination + 1),
                         Gen5Operand.Vector(vectorDestination + 2),
                     ],
-                    "DsReadB128" or "DsRead2B64" => [
+                    "DsReadB128" or "DsRead2B64" or "DsRead2St64B64" => [
                         Gen5Operand.Vector(vectorDestination),
                         Gen5Operand.Vector(vectorDestination + 1),
                         Gen5Operand.Vector(vectorDestination + 2),

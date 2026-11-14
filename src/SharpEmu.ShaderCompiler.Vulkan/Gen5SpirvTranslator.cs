@@ -2950,6 +2950,7 @@ public static partial class Gen5SpirvTranslator
                     return true;
                 }
                 case "DsRead2B64":
+                case "DsRead2St64B64":
                     return TryEmitDataShareReadPair64(instruction, control, out error);
                 case "DsRead2B32":
                 case "DsRead2St64B32":

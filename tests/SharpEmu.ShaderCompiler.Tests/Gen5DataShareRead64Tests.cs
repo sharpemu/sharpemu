@@ -43,6 +43,33 @@ public sealed class Gen5DataShareRead64Tests
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
     }
 
+    // DS_READ2ST64_B64 (opcode 0x78) reads the same two pairs at 512-byte offset steps.
+    [Theory]
+    [InlineData(false, 0u, 4u)]
+    [InlineData(true, 1u, 255u)]
+    public void EncodedStride64PairedReadHasFourDestinationsAndCompilesOnBothBackends(bool global, uint firstOffset, uint secondOffset)
+    {
+        var memory = new ShaderMemory();
+        uint[] words = [0xD9E00000u | (global ? 1u << 17 : 0) | firstOffset | (secondOffset << 8), 0x03000003, 0xBF810000];
+        var bytes = new byte[words.Length * sizeof(uint)];
+        for (var index = 0; index < words.Length; index++)
+            BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)), words[index]);
+        Assert.True(memory.TryWrite(0x1000, bytes));
+        Assert.True(Gen5ShaderTranslator.TryDecodeProgram(new CpuContext(memory, Generation.Gen5), 0x1000,
+            out var decoded, out var error), error);
+
+        var read = decoded.Instructions[0];
+        Assert.Equal("DsRead2St64B64", read.Opcode);
+        Assert.Equal([Gen5Operand.Vector(3), Gen5Operand.Vector(4), Gen5Operand.Vector(5), Gen5Operand.Vector(6)], read.Destinations);
+        var control = Assert.IsType<Gen5DataShareControl>(read.Control);
+        Assert.Equal((firstOffset, secondOffset, global), (control.Offset0, control.Offset1, control.Gds));
+        var program = Program(MoveVector(0, 3, SourceAddress), read with { Pc = 4 }, MoveScalar(12, 126, 1),
+            BufferAccess(16, "BufferStoreDwordx4", 4, dwords: 4, vectorData: 3), EndProgram(24));
+        var (plan, resources, layout) = Prepare(program);
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
+    }
+
     public static uint[] PairedReadExpected(uint firstOffset, uint secondOffset, bool readEnabled) => readEnabled
         ? [LowerWord ^ firstOffset, UpperWord ^ firstOffset, LowerWord ^ secondOffset, UpperWord ^ secondOffset]
         : [SourceAddress, UnchangedUpperWord, 0x11112222, 0x33334444];
