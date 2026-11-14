@@ -830,6 +830,116 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
         harness.Shutdown();
     }
 
+    public enum StageBindingPattern
+    {
+        StorageThenSampled,
+        SampledThenStorage,
+        SampledTarget,
+        SampledOnly,
+    }
+
+    [Theory]
+    [InlineData(false, StageBindingPattern.StorageThenSampled)]
+    [InlineData(true, StageBindingPattern.StorageThenSampled)]
+    [InlineData(false, StageBindingPattern.SampledThenStorage)]
+    [InlineData(true, StageBindingPattern.SampledThenStorage)]
+    [InlineData(false, StageBindingPattern.SampledTarget)]
+    [InlineData(true, StageBindingPattern.SampledTarget)]
+    [InlineData(false, StageBindingPattern.SampledOnly)]
+    [InlineData(true, StageBindingPattern.SampledOnly)]
+    public void StageTextureTransitions_UseCurrentRecordingBindings(bool worker, StageBindingPattern pattern)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var address = presenter.Harness.MapBacked(0x10000, ReadWrite);
+
+        presenter.Run(() =>
+        {
+            var acquired = AcquireTexture(presenter, Texture(address));
+            var identifier = (ResourceSlotIdentifier)GetFieldValue(acquired, "ImageIdentifier");
+            var image = (CachedImage)GetFieldValue(acquired, "CachedImage");
+            var request = (ImageRequest)GetFieldValue(acquired, "Request");
+            presenter.InvokeMethod("ResetImageBindings");
+            image.Transition(ImageAccessState.GuestStorageAccess, null, presenter.Command);
+
+            var previousWorker = presenter.GetField<bool>("_worker");
+            var previousBuffer = presenter.GetField<RecordingBuffer?>("_workerBuffer");
+            var previousHazards = presenter.GetField<SliceHazards?>("_hazards");
+            var hazards = new SliceHazards();
+            var shared = worker && pattern == StageBindingPattern.SampledOnly
+                ? new ImageBindingState { IsBound = true, IsTarget = true, ForceGeneral = true, ShaderWrite = true }
+                : default;
+            image.Binding = shared;
+            try
+            {
+                if (worker)
+                {
+                    presenter.SetField("_workerBuffer", presenter.Harness.Scheduler.Current);
+                    presenter.SetField("_hazards", hazards);
+                    presenter.SetField("_worker", true);
+                }
+
+                var uses = pattern switch
+                {
+                    StageBindingPattern.StorageThenSampled => new[] { true, false },
+                    StageBindingPattern.SampledThenStorage => new[] { false, true },
+                    _ => new[] { false },
+                };
+                var bindings = Array.CreateInstance(TextureResourceType, uses.Length);
+                for (var index = 0; index < uses.Length; index++)
+                {
+                    presenter.InvokeMethod("BindImage", identifier, uses[index]);
+                    var binding = Activator.CreateInstance(TextureResourceType, true)!;
+                    TextureResourceType.GetField("CachedImage")!.SetValue(binding, image);
+                    TextureResourceType.GetField("ImageIdentifier")!.SetValue(binding, identifier);
+                    TextureResourceType.GetField("Request")!.SetValue(binding, request);
+                    TextureResourceType.GetField("IsStorage")!.SetValue(binding, uses[index]);
+                    bindings.SetValue(binding, index);
+                }
+
+                if (pattern == StageBindingPattern.SampledTarget)
+                {
+                    presenter.InvokeMethod("BindRenderTarget", identifier);
+                }
+
+                // Exercise the stage path used by PushDescriptors, not the older draw-texture helper.
+                presenter.InvokeMethod("RecordStageTextureTransitions", bindings);
+                if (worker)
+                {
+                    Assert.Equal(shared, image.Binding);
+                }
+                presenter.InvokeMethod("ResetImageBindings");
+
+                // A subsequent read must still wait for writes from any binding in the previous stage.
+                var view = request.View;
+                var barriers = worker
+                    ? hazards.Transition(image, AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit, out _)
+                    : image.GetBarriers(AccessFlags.ShaderReadBit, PipelineStageFlags.FragmentShaderBit,
+                        new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount)).Barriers;
+                if (pattern == StageBindingPattern.SampledOnly)
+                {
+                    Assert.Empty(barriers);
+                }
+                else
+                {
+                    var expectedWrite = pattern == StageBindingPattern.SampledTarget
+                        ? AccessFlags2.ColorAttachmentWriteBit : AccessFlags2.ShaderWriteBit;
+                    var barrier = Assert.Single(barriers);
+                    Assert.Equal(expectedWrite, barrier.SrcAccessMask & expectedWrite);
+                    Assert.Equal(AccessFlags2.ShaderReadBit, barrier.DstAccessMask & AccessFlags2.ShaderReadBit);
+                }
+            }
+            finally
+            {
+                presenter.InvokeMethod("ResetImageBindings");
+                presenter.SetField("_worker", previousWorker);
+                presenter.SetField("_workerBuffer", previousBuffer!);
+                presenter.SetField("_hazards", previousHazards!);
+                image.Binding = default;
+            }
+        });
+    }
+
     [Fact]
     public void DepthTarget_AcquiresAViewWithoutAClear()
     {

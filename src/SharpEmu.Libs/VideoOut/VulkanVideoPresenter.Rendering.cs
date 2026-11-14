@@ -718,9 +718,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 var view = binding.Request.View;
                 var range = new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount);
                 var storage = binding.IsStorage;
+                ref var imageBinding = ref BindingOf(image);
                 if (ImageDescription.IsEmptyRange(image.Description.Data))
                 {
-                    TransitionImage(image, storage || image.Binding.ShaderWrite ? AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit : AccessFlags.ShaderReadBit, range, command);
+                    TransitionImage(image, storage || imageBinding.ShaderWrite ? AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit : AccessFlags.ShaderReadBit, range, command);
                 }
                 else if (depthImage is not null && ReferenceEquals(image, depthImage))
                 {
@@ -743,9 +744,9 @@ internal static unsafe partial class VulkanVideoPresenter
                         : 0;
                     TransitionImage(image, AccessFlags.ShaderReadBit | attachmentAccess, range, command);
                 }
-                else if ((image.Binding.ForceGeneral || image.Binding.IsTarget) && !image.Description.IsDepth)
+                else if ((imageBinding.ForceGeneral || imageBinding.IsTarget) && !image.Description.IsDepth)
                 {
-                    var storageAccess = image.Binding.ShaderWrite ? AccessFlags.ShaderWriteBit : 0;
+                    var storageAccess = imageBinding.ShaderWrite ? AccessFlags.ShaderWriteBit : 0;
                     TransitionImage(image,
                         AccessFlags.ShaderReadBit | storageAccess | AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit,
                         null,
