@@ -41,6 +41,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private int _pipelineBinaryLoads;
         private int _pipelineBinaryStores;
         private readonly ConcurrentDictionary<string, byte[]> _sharedPipelineBinaries = new();
+        private readonly PipelineBuildGate _pipelineBuilds = new();
 
         // A build at least this long stores its binaries (PipelineBinaryStorePolicy: SHARPEMU_PIPELINE_BINARY_MS, default
         // 20 ms), and a binary at least this large is shared (tests lower both).
@@ -88,7 +89,8 @@ internal static unsafe partial class VulkanVideoPresenter
         // Creates a pipeline from the binaries stored under its driver key, else builds it (capturing its data while
         // binaries are on) and stores the binaries of a slow build. next is the create info's pNext field. cache is used
         // only by a build that neither uses nor captures binaries (VUIDs pNext-09616 and pNext-09617). Safe on compile
-        // workers: it reads only state that device setup wrote.
+        // workers: it reads only state that device setup wrote. One thread at a time creates a key (PipelineBuildGate), so
+        // milliseconds includes any wait for another thread's build of it.
         private Result CreatePipelineWithBinaries(
             void* createInfo,
             void** next,
@@ -100,6 +102,32 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             var started = Stopwatch.GetTimestamp();
             var key = PipelineBinaryKey(createInfo);
+            var build = key is null ? null : _pipelineBuilds.Begin(Convert.ToHexString(key));
+            try
+            {
+                var result = LoadOrBuildPipeline(createInfo, next, cache, create, key, out pipeline, extraFlags);
+                milliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+                return result;
+            }
+            finally
+            {
+                if (build is not null)
+                {
+                    _pipelineBuilds.Finish(build);
+                }
+            }
+        }
+
+        private Result LoadOrBuildPipeline(
+            void* createInfo,
+            void** next,
+            PipelineCache cache,
+            delegate*<Vk, Device, PipelineCache, void*, Pipeline*, Result> create,
+            byte[]? key,
+            out Pipeline pipeline,
+            PipelineCreateFlags2 extraFlags)
+        {
+            var started = Stopwatch.GetTimestamp();
             var original = *next;
             Pipeline created = default;
             Result result;
@@ -128,7 +156,6 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     ReportPipelineBinaryCount("loaded", Interlocked.Increment(ref _pipelineBinaryLoads));
                     pipeline = created;
-                    milliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
                     return result;
                 }
 
@@ -148,10 +175,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
             result = create(_vk, _device, key is not null ? default : cache, createInfo, &created);
             *next = original;
-            milliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
             if (key is not null && result == Result.Success)
             {
-                if (milliseconds >= _pipelineBinarySlowMilliseconds)
+                if (Stopwatch.GetElapsedTime(started).TotalMilliseconds >= _pipelineBinarySlowMilliseconds)
                 {
                     StorePipelineBinaries(created, key);
                 }
