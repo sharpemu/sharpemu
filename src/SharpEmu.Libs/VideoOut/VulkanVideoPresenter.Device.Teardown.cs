@@ -72,6 +72,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _vk.DestroyPipelineCache(_device, _pipelineCache, null);
                     _pipelineCache = default;
                 }
+                SharpEmu.Libs.Gpu.Vulkan.DeviceFaultReport.Detach(_device);
                 _vk.DestroyDevice(_device, null);
                 _device = default;
             }

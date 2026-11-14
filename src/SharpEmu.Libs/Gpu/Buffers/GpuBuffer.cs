@@ -159,6 +159,8 @@ public unsafe class GpuBuffer : IDisposable
             {
                 throw SubmissionScheduler.Fatal("The buffer device address is unavailable.");
             }
+            if (DeviceFaultReport.Requested)
+                DeviceFaultReport.Track(_deviceAddress, Size, usage.ToString(), cpuAddress);
         }
 
         // A dedicated allocation arrives zeroed; keep that for a block another buffer used.
@@ -567,6 +569,7 @@ public unsafe class GpuBuffer : IDisposable
             }
         }
 
+        DeviceFaultReport.Untrack(_deviceAddress);
         _device.Vk.DestroyBuffer(_device.Device, _handle, null);
         if (_slab is { } slab)
         {

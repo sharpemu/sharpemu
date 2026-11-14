@@ -1204,6 +1204,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var pipelineBinaryExtension = (byte*)SilkMarshal.StringToPtr(PipelineBinaryExtensionName);
             var pipelineLibraryExtension = (byte*)SilkMarshal.StringToPtr(PipelineLibraryExtensionName);
             var graphicsPipelineLibraryExtension = (byte*)SilkMarshal.StringToPtr(GraphicsPipelineLibraryExtensionName);
+            var deviceFaultExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_device_fault");
             try
             {
                 var extensions = stackalloc byte*[24];
@@ -1461,6 +1462,26 @@ internal static unsafe partial class VulkanVideoPresenter
                     };
                     renderingChain = &graphicsPipelineLibraryFeatures;
                 }
+                var faultFeatures = new PhysicalDeviceFaultFeaturesEXT { SType = StructureType.PhysicalDeviceFaultFeaturesExt };
+                var reportDeviceFaults = false;
+                if (SharpEmu.Libs.Gpu.Vulkan.DeviceFaultReport.Requested && IsDeviceExtensionAvailable("VK_EXT_device_fault"))
+                {
+                    var faultSupport = new PhysicalDeviceFeatures2
+                    {
+                        SType = StructureType.PhysicalDeviceFeatures2,
+                        PNext = &faultFeatures,
+                    };
+                    _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &faultSupport);
+                    reportDeviceFaults = faultFeatures.DeviceFault;
+                    if (reportDeviceFaults)
+                    {
+                        // VendorBinary is a separate feature; retain only the capabilities the driver reported.
+                        extensions[extensionCount++] = deviceFaultExtension;
+                        faultFeatures.PNext = renderingChain;
+                        renderingChain = &faultFeatures;
+                    }
+                }
+
                 vulkan13Features = new PhysicalDeviceVulkan13Features
                 {
                     SType = StructureType.PhysicalDeviceVulkan13Features,
@@ -1487,6 +1508,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 };
 
                 Check(_vk.CreateDevice(_physicalDevice, &createInfo, null, out _device), "vkCreateDevice");
+                if (reportDeviceFaults)
+                    SharpEmu.Libs.Gpu.Vulkan.DeviceFaultReport.Attach(_vk, _device, faultFeatures.DeviceFaultVendorBinary);
+                else if (SharpEmu.Libs.Gpu.Vulkan.DeviceFaultReport.Requested)
+                    Console.Error.WriteLine("[GPU][FAULT] VK_EXT_device_fault requested but unsupported");
                 Console.Error.WriteLine(_graphicsPipelineLibraries
                     ? "[LOADER][INFO] Vulkan graphics pipeline libraries: on (SHARPEMU_GRAPHICS_PIPELINE_LIBRARY=0 builds whole pipelines)"
                     : "[LOADER][INFO] Vulkan graphics pipeline libraries: off");
@@ -1515,6 +1540,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)pipelineBinaryExtension);
                 SilkMarshal.Free((nint)pipelineLibraryExtension);
                 SilkMarshal.Free((nint)graphicsPipelineLibraryExtension);
+                SilkMarshal.Free((nint)deviceFaultExtension);
                 SilkMarshal.Free((nint)robustness2Extension);
                 SilkMarshal.Free((nint)portabilitySubsetExtension);
                 SilkMarshal.Free((nint)colorWriteEnableExtension);
