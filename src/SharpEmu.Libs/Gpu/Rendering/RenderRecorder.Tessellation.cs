@@ -52,7 +52,10 @@ internal sealed partial class RenderRecorder
             localDataSlotBytes = System.Numerics.BitOperations.RoundUpToPowerOf2(Math.Max(input.LocalDataShareDwords, 1u)) * sizeof(uint);
             if (ringAddress == 0 || ringBytes < localDataSlotBytes)
                 throw _host.Fatal("The tessellation local data ring is unavailable or smaller than one hull group.");
-            offchipBuffers = (uint)Math.Min(ringBytes / localDataSlotBytes, uint.MaxValue);
+            // A group also takes a slot of the local data ring, so the ring bounds the groups as well. It does not lift
+            // the off-chip bound: a group past the guest's off-chip buffers would write its off-chip data beyond them.
+            var ringSlots = (uint)Math.Min(ringBytes / localDataSlotBytes, uint.MaxValue);
+            offchipBuffers = offchipBuffers == 0 ? ringSlots : Math.Min(offchipBuffers, ringSlots);
         }
         var groupsPerBatch = offchipBuffers == 0 ? 1u : (uint)Math.Clamp(Math.Min(offchipBuffers, factorSize / groupFactorBytes), 1, uint.MaxValue);
         var batchCapacity = groupsPerBatch * layout.PatchesPerGroup;
