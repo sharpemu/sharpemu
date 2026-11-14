@@ -20,7 +20,7 @@ internal sealed class ShaderCalleeTiers
 
     // A choice waits this many snapshots after the last callee became called, and at most MaxSettle after the first one that
     // the chosen program lacks.
-    private const long Settle = 8;
+    internal const long Settle = 8;
     private const long MaxSettle = 64;
 
     private readonly HashSet<string> _called;
@@ -28,6 +28,12 @@ internal sealed class ShaderCalleeTiers
     private Dictionary<uint, Dictionary<ulong, UnitedCallee>>? _chosen;
     private long _lastCalled = -1;
     private long _firstUnchosen = -1;
+
+    // The union changes the program cache reports (NoteUnionChanged: each Unite that changed the union or failed), and the
+    // union revision and choice that HasUnchosenCalledSite last found fully chosen. The scan runs again only after either moves.
+    private long _unionRevision = 1;
+    private long _scannedRevision;
+    private object? _scannedChosen;
 
     // The callees an earlier session kept for the caller count as called, and its first program holds exactly those, whose
     // pipeline the linked cache holds. The union also names the other addresses the game loaded the same code at in this
@@ -42,6 +48,9 @@ internal sealed class ShaderCalleeTiers
     }
 
     public int Called => _called.Count;
+
+    // The program cache's Unite changed this caller's union (or failed while changing it): no earlier scan of it stands.
+    internal void NoteUnionChanged() => _unionRevision++;
 
     // The generation of the program linked from the chosen callees, once the caller has linked it.
     public long? LinkedGeneration { get; set; }
@@ -98,6 +107,28 @@ internal sealed class ShaderCalleeTiers
     public IReadOnlyDictionary<uint, Dictionary<ulong, UnitedCallee>> Choose(Dictionary<uint, Dictionary<ulong, UnitedCallee>> union,
         long fallbackGeneration, long snapshots)
     {
+        // A body already called at one site can appear at another without a new body or address. Marks are per body, and a
+        // globally served address is not an unserved copy, so neither observation would move the choice, and the program
+        // would keep no target at the new site. Batch this new site coverage like a call. Such a site can appear only after a
+        // union change the program cache reported or a new choice (a body that becomes called moves the choice in Observe).
+        if (_chosen is not null && _firstUnchosen < 0)
+        {
+            if (_scannedRevision != _unionRevision || !ReferenceEquals(_scannedChosen, _chosen))
+            {
+                if (HasUnchosenCalledSite(union))
+                {
+                    _firstUnchosen = snapshots;
+                    _lastCalled = snapshots;
+                }
+                else
+                {
+                    // Only the scan's cost depends on these, never Choose's result.
+                    _scannedRevision = _unionRevision;
+                    _scannedChosen = _chosen;
+                }
+            }
+        }
+
         if (_chosen is not null && (LinkedGeneration is not { } generation || fallbackGeneration < generation || _firstUnchosen < 0 ||
             snapshots - _lastCalled < Settle && snapshots - _firstUnchosen < MaxSettle))
         {
@@ -128,6 +159,27 @@ internal sealed class ShaderCalleeTiers
         }
 
         return _chosen;
+    }
+
+    // Compare code at the same site, not its address: moving an existing site's body can keep its slot through
+    // CurrentTargets, while additional address copies are reported there (NoteUnservedCopy).
+    private bool HasUnchosenCalledSite(Dictionary<uint, Dictionary<ulong, UnitedCallee>> union)
+    {
+        if (_chosen is not { } chosen) return false;
+        foreach (var (pc, callees) in union)
+        {
+            foreach (var callee in callees.Values)
+            {
+                if (!_called.Contains(ShaderCallLibrary.CodeKey(callee.Code))) continue;
+                if (!chosen.TryGetValue(pc, out var linked) ||
+                    !linked.Values.Any(known => known.Code.AsSpan().SequenceEqual(callee.Code)))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private static bool SameChoice(Dictionary<uint, Dictionary<ulong, UnitedCallee>> left, Dictionary<uint, Dictionary<ulong, UnitedCallee>> right)

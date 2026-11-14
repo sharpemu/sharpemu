@@ -771,9 +771,21 @@ internal sealed partial class ShaderProgramCache
                             }
                         }
 
-                        library = _libraryMemo is { } uniteMemo
-                            ? uniteMemo.Unite(library, caller.Address, union, MaxUnitedCallees)
-                            : library.Unite(caller.Address, union, MaxUnitedCallees);
+                        bool unionChanged;
+                        try
+                        {
+                            library = _libraryMemo is { } uniteMemo
+                                ? uniteMemo.Unite(library, caller.Address, union, MaxUnitedCallees, out unionChanged)
+                                : library.Unite(caller.Address, union, MaxUnitedCallees, out unionChanged);
+                        }
+                        catch
+                        {
+                            // A failed unite may have changed the union, so no earlier scan of it stands.
+                            if (_calleeTiers.TryGetValue(programKey, out var failedTiers)) failedTiers.NoteUnionChanged();
+                            throw;
+                        }
+
+                        if (unionChanged && _calleeTiers.TryGetValue(programKey, out var changedTiers)) changedTiers.NoteUnionChanged();
                         if (runtimeFallback is null && ReuseCallDispatch && captureIndirectImageFailure is null && !captureLinkedImages)
                         {
                             callPreparation = new(programKey, entry, inputs, snapshot, specialization, library);

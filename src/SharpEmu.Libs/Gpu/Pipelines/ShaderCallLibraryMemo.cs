@@ -206,14 +206,24 @@ internal sealed class ShaderCallLibraryMemo
     // ShaderCallLibrary.Unite (which updates union): a call that changed nothing is kept by the input's topology and the
     // union's version, and reused while both hold.
     internal ShaderCallLibrary Unite(ShaderCallLibrary library, ulong callerAddress, Dictionary<uint, Dictionary<ulong, UnitedCallee>> union,
-        int maxCallees)
+        int maxCallees) => Unite(library, callerAddress, union, maxCallees, out _);
+
+    // changed: whether this call changed the union (its version moved).
+    internal ShaderCallLibrary Unite(ShaderCallLibrary library, ulong callerAddress, Dictionary<uint, Dictionary<ulong, UnitedCallee>> union,
+        int maxCallees, out bool changed)
     {
+        changed = false;
         var version = _unionVersions.GetValue(union, static _ => new StrongBox<long>());
         if (library.Topology is not { } topology || !IsActive)
         {
             Count(Counter.UniteUntokened);
             var original = library.Unite(callerAddress, union, maxCallees, out var originalChanged);
-            if (originalChanged) version.Value++;
+            if (originalChanged)
+            {
+                version.Value++;
+                changed = true;
+            }
+
             return original;
         }
 
@@ -230,6 +240,7 @@ internal sealed class ShaderCallLibraryMemo
         {
             Count(Counter.UniteChanged);
             version.Value++;
+            changed = true;
             return output;
         }
 
