@@ -354,7 +354,7 @@ public static partial class Gen5ShaderTranslator
 
     // S_SWAPPC_B64 stores the address of the next instruction in its destination. With the NULL destination
     // it stores nothing, so it jumps like S_SETPC_B64 does and the code after it is not reached from here.
-    private static bool IsSwapProgramCounterWithoutReturnAddress(Gen5ShaderInstruction instruction) =>
+    internal static bool IsSwapProgramCounterWithoutReturnAddress(Gen5ShaderInstruction instruction) =>
         string.Equals(instruction.Opcode, "SSwappcB64", StringComparison.Ordinal) &&
         instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister, Value: NullScalarRegister }];
 

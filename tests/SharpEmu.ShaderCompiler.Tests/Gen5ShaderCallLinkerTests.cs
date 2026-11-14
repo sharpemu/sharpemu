@@ -84,7 +84,22 @@ public sealed class Gen5ShaderCallLinkerTests
     public void Link_RejectsUnsupportedFunctionControl(string opcode)
     {
         var body = Program(Sop1(0, opcode, 0, Gen5Operand.Scalar(0)), Sop1(4, "SSetpcB64", 0, Gen5Operand.Scalar(14)));
-        Assert.Throws<InvalidOperationException>(() => Link(body));
+        Assert.Throws<ShaderCallLinkException>(() => Link(body));
+    }
+
+    // s_swappc_b64 null, s[14:15] saves no return address, so it returns to the caller like s_setpc_b64; with another
+    // source it is a jump the linker cannot resolve.
+    [Fact]
+    public void Link_ReturnsThroughASwapWithTheNullDestination()
+    {
+        var caller = Program(Sop1(0, "SSwappcB64", 14, Gen5Operand.Scalar(14)), EndProgram(4));
+        var body = Program(Nop(0), Sop1(4, "SSwappcB64", 125, Gen5Operand.Scalar(14)));
+        var linked = Gen5ShaderCallLinker.Link(caller, [new(0, 14, 16, 14, 4, [new ShaderCallTarget(0x2000, 0x3000, body)])]);
+        Assert.DoesNotContain(linked.Instructions, instruction => instruction.Opcode is "SSwappcB64" or "SSetpcB64");
+        var branch = Assert.Single(linked.Instructions, instruction => instruction.Control is ShaderLinkedBranchControl);
+        Assert.Equal(linked.Instructions[^1].Pc, ((ShaderLinkedBranchControl)branch.Control!).TargetPc);
+
+        Assert.Throws<ShaderCallLinkException>(() => Link(Program(Nop(0), Sop1(4, "SSwappcB64", 125, Gen5Operand.Scalar(20)))));
     }
 
     // A function that reads its program address gets its own: the dispatch's shader base is the caller's address, and
@@ -125,9 +140,9 @@ public sealed class Gen5ShaderCallLinkerTests
     [Fact]
     public void Link_RejectsChangedOrUnresolvedReturnAddresses()
     {
-        Assert.Throws<InvalidOperationException>(() => Link(Program(MoveScalar(0, 15, 0), Sop1(4, "SSetpcB64", 0, Gen5Operand.Scalar(14)))));
-        Assert.Throws<InvalidOperationException>(() => Link(Program(Sop1(0, "SSetpcB64", 0, Gen5Operand.Scalar(12)))));
-        Assert.Throws<InvalidOperationException>(() => Link(Program(Nop(0))));
+        Assert.Throws<ShaderCallLinkException>(() => Link(Program(MoveScalar(0, 15, 0), Sop1(4, "SSetpcB64", 0, Gen5Operand.Scalar(14)))));
+        Assert.Throws<ShaderCallLinkException>(() => Link(Program(Sop1(0, "SSetpcB64", 0, Gen5Operand.Scalar(12)))));
+        Assert.Throws<ShaderCallLinkException>(() => Link(Program(Nop(0))));
         Assert.Throws<InvalidOperationException>(() => Link(Program(Branch(0, "SBranch", 100), Sop1(4, "SSetpcB64", 0, Gen5Operand.Scalar(14)))));
     }
 

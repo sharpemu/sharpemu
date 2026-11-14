@@ -6,6 +6,12 @@ using SharpEmu.ShaderCompiler.Ir;
 namespace SharpEmu.ShaderCompiler;
 
 public sealed record ShaderCallTarget(ulong Address, ulong Argument, Gen5ShaderProgram Program);
+
+// A call target whose code cannot be inlined; the message names the target and the instruction.
+public sealed class ShaderCallLinkException(string message, ShaderCallTarget target) : InvalidOperationException(message)
+{
+    public ShaderCallTarget Target { get; } = target;
+}
 public sealed record ShaderCallSite(uint Pc, uint AddressRegister, uint ArgumentRegister, uint ReturnRegister,
     ulong ReturnAddress, IReadOnlyList<ShaderCallTarget> Targets);
 // With RuntimeArgument, the test of the callee alone: every record of it matches.
@@ -101,10 +107,12 @@ public static class Gen5ShaderCallLinker
                 foreach (var operation in target.Program.Instructions)
                 {
                     labels.Add((body, operation.Pc), pc);
-                    if (operation.Opcode == "SSetpcB64")
+                    // A function may also return with s_swappc_b64 null, s[ret:ret+1], which jumps without saving an address.
+                    if (operation.Opcode == "SSetpcB64" || Gen5ShaderTranslator.IsSwapProgramCounterWithoutReturnAddress(operation))
                     {
                         if (operation.Sources.Count != 1 || operation.Sources[0] != Gen5Operand.Scalar(call.ReturnRegister))
-                            throw new InvalidOperationException("The shader function has an unresolved return target.");
+                            throw new ShaderCallLinkException(
+                                $"The shader function has an unresolved return target: {Describe(target, operation)}.", target);
                         Branch(0, returnPc);
                         continue;
                     }
@@ -112,7 +120,8 @@ public static class Gen5ShaderCallLinker
                         "SMovreldB32" or "SMovreldB64" or "SMovrelsd2B32" ||
                         operation.Destinations.Any(destination => destination.Kind == Gen5OperandKind.ScalarRegister &&
                             destination.Value < call.ReturnRegister + 2 && destination.Value + operation.DestinationWidth > call.ReturnRegister))
-                        throw new InvalidOperationException("The shader function changes its return address or calls another function.");
+                        throw new ShaderCallLinkException(
+                            $"The shader function changes its return address or calls another function: {Describe(target, operation)}.", target);
                     if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(operation, out var destinationPc))
                         branches.Add((instructions.Count, body, destinationPc));
                     if (operation.Control is Gen5BufferMemoryControl || operation.Opcode.StartsWith("SBufferLoad", StringComparison.Ordinal))
@@ -128,8 +137,9 @@ public static class Gen5ShaderCallLinker
                         }
                         : operation);
                 }
-                if (target.Program.Instructions.LastOrDefault()?.Opcode is not ("SSetpcB64" or "SEndpgm"))
-                    throw new InvalidOperationException("The shader function has no terminal return.");
+                if (target.Program.Instructions.LastOrDefault() is not { } last ||
+                    last.Opcode is not ("SSetpcB64" or "SEndpgm") && !Gen5ShaderTranslator.IsSwapProgramCounterWithoutReturnAddress(last))
+                    throw new ShaderCallLinkException($"The shader function has no terminal return: target=0x{target.Address:X}.", target);
                 var test = instructions[testIndex];
                 instructions[testIndex] = test with { Control = ((ShaderCallMatchControl)test.Control!) with { TargetPc = pc } };
             }
@@ -184,4 +194,8 @@ public static class Gen5ShaderCallLinker
     // Whether a program was linked with its shader calls: every site of a linked program holds call entries or a fault.
     public static bool IsLinked(Gen5ShaderProgram program) =>
         program.Instructions.Any(static instruction => instruction.Control is ShaderCallEntryControl or ShaderCallFaultControl);
+
+    private static string Describe(ShaderCallTarget target, Gen5ShaderInstruction operation) =>
+        $"target=0x{target.Address:X} pc=0x{operation.Pc:X} {operation.Opcode} {string.Join(',', operation.Destinations)} <- " +
+        string.Join(',', operation.Sources);
 }

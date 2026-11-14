@@ -109,6 +109,80 @@ public sealed class ShaderCallLibraryTests
         Assert.All(targets, target => Assert.Same(targets[0].Program, target.Program));
     }
 
+    // A caller may pass its function pointer and argument in user data: the call registers are copied from user-data
+    // registers nothing wrote before, and the target and argument come from the dispatch's user data. Another argument
+    // is another library, but the same layout, so it links to the same program.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void UserDataFunctionPointersLink(bool userDataOverwritten)
+    {
+        var caller = Program(
+            userDataOverwritten ? MoveScalarRegister(0, 2, 40) : Vop1(0, "VMovB32", 1, Operand(0)),
+            MoveScalarRegister(4, 14, 0), MoveScalarRegister(8, 15, 1),
+            MoveScalarRegister(12, 16, 2), MoveScalarRegister(16, 17, 3),
+            Vop1(20, "VMovB32", 5, Operand(0)),
+            Sop1(24, "SSwappcB64", 14, Gen5Operand.Scalar(14)), EndProgram(28));
+        var snapshot = new ResourceSnapshot { UserData = [0x200000, 0x11, 0x5000, 0x12] };
+        var words = new Dictionary<ulong, uint> { [0x11_0020_0000] = 0xBF800000, [0x11_0020_0004] = 0xBE80200E };
+        ShaderCallLibrary Read() => ShaderCallLibrary.Read(caller, new MemoryAccessTable(), snapshot,
+            (ulong address, out uint word) => words.TryGetValue(address, out word));
+        if (userDataOverwritten)
+        {
+            Assert.Throws<InvalidOperationException>(Read);
+            return;
+        }
+
+        var call = Assert.Single(Read().Calls);
+        Assert.Equal((14u, 16u), (call.AddressRegister, call.ArgumentRegister));
+        var target = Assert.Single(call.Targets);
+        Assert.Equal((0x11_0020_0000ul, 0x12_0000_5000ul), (target.Address, target.Argument));
+        Assert.Equal("SSetpcB64", target.Program.Instructions[^1].Opcode);
+        var other = ShaderCallLibrary.Read(caller, new MemoryAccessTable(), new ResourceSnapshot { UserData = [0x200000, 0x11, 0x6000, 0x12] },
+            (ulong address, out uint word) => words.TryGetValue(address, out word));
+        Assert.NotEqual(Read().Identity, other.Identity);
+        Assert.Equal(Read().LayoutIdentity, other.LayoutIdentity);
+    }
+
+    // The call registers may reach user data through copies: the caller saves the argument pair at entry, overwrites
+    // the call registers with another call, and copies the second target and the saved pair back for this call.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void UserDataFunctionPointersLinkThroughCopies(bool savedPairOverwritten)
+    {
+        var caller = Program(
+            Sop1(0, "SMovB64", 84, Gen5Operand.Scalar(14)),
+            savedPairOverwritten ? Sop2(4, "SAddU32", 85, Gen5Operand.Scalar(85), Gen5Operand.Scalar(0)) : Vop1(4, "VMovB32", 1, Operand(0)),
+            MoveScalarRegister(8, 14, 8), MoveScalarRegister(12, 15, 9), MoveScalarRegister(16, 16, 10), MoveScalarRegister(20, 17, 11),
+            Sop1(24, "SSwappcB64", 14, Gen5Operand.Scalar(14)),
+            MoveScalarRegister(28, 14, 12), MoveScalarRegister(32, 15, 13), MoveScalarRegister(36, 16, 84), MoveScalarRegister(40, 17, 85),
+            Sop1(44, "SSwappcB64", 14, Gen5Operand.Scalar(14)), EndProgram(48));
+        var snapshot = new ResourceSnapshot
+        {
+            UserData = [0, 0, 0, 0, 0, 0, 0, 0, 0x200000, 0x11, 0x5000, 0x12, 0x200100, 0x11, 0x6000, 0x12],
+        };
+        var words = new Dictionary<ulong, uint>
+        {
+            [0x11_0020_0000] = 0xBF800000, [0x11_0020_0004] = 0xBE80200E,
+            [0x11_0020_0100] = 0xBF800000, [0x11_0020_0104] = 0xBE80200E,
+        };
+        ShaderCallLibrary Read() => ShaderCallLibrary.Read(caller, new MemoryAccessTable(), snapshot,
+            (ulong address, out uint word) => words.TryGetValue(address, out word));
+        if (savedPairOverwritten)
+        {
+            Assert.Throws<InvalidOperationException>(Read);
+            return;
+        }
+
+        var calls = Read().Calls;
+        Assert.Equal(2, calls.Count);
+        var first = Assert.Single(calls[0].Targets);
+        Assert.Equal((0x11_0020_0000ul, 0x12_0000_5000ul), (first.Address, first.Argument));
+        var second = Assert.Single(calls[1].Targets);
+        Assert.Equal((0x11_0020_0100ul, 0x12_0000_6000ul), (second.Address, second.Argument));
+    }
+
     // A site linked with run-time records holds each callee once, so its table may hold more records than a site linked
     // per record.
     [Theory]

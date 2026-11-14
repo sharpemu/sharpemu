@@ -51,7 +51,8 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
     // the GPU wrote are brought back and an image the GPU wrote over memory the game has since reused does not refuse
     // the game's own bytes.
     public static ShaderCallLibrary Read(Gen5ShaderProgram caller, MemoryAccessTable memory,
-        ResourceSnapshot snapshot, GuestWordReader read, ShaderFunctionCache? functionCache = null, bool runtimeArguments = false)
+        ResourceSnapshot snapshot, GuestWordReader read, ShaderFunctionCache? functionCache = null, bool runtimeArguments = false,
+        uint userDataBase = 0)
     {
         using var identity = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         using var layout = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -60,12 +61,60 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
         var codeHashes = new Dictionary<ulong, byte[]>();
         var codeRuns = new Dictionary<ulong, (ulong Address, byte[] Bytes)[]>();
         var currentSites = new Dictionary<ulong, HashSet<uint>>();
+
+        // A target a site names: its function, read once per library, joins both identities.
+        ShaderCallTarget Target(uint site, ulong address, ulong argument)
+        {
+            if (!functions.TryGetValue(address, out var function))
+            {
+                var result = functionCache?.Read(address, read) ?? ShaderFunctionReader.Read(address, read);
+                if (!result.Complete) throw new ShaderFunctionReadException(address, result);
+                function = result.Program;
+                identity.AppendData(result.Bytes);
+                layout.AppendData(result.Bytes);
+                functions.Add(address, function);
+                if (runtimeArguments)
+                {
+                    codeHashes.Add(address, SHA256.HashData(result.Bytes));
+                    codeRuns.Add(address, result.Runs);
+                }
+            }
+
+            if (runtimeArguments)
+            {
+                if (!currentSites.TryGetValue(address, out var namedAt))
+                {
+                    currentSites.Add(address, namedAt = []);
+                }
+
+                namedAt.Add(site);
+            }
+
+            layout.AppendData(BitConverter.GetBytes(address));
+            return new(address, argument, function);
+        }
+
         foreach (var (call, index) in caller.Instructions.Select((instruction, index) => (instruction, index)))
         {
             if (call.Opcode != "SSwappcB64") continue;
             if (call.Sources.Count != 1 || call.Destinations.Count != 1 ||
                 call.Sources[0].Kind != Gen5OperandKind.ScalarRegister || call.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
                 throw new InvalidOperationException("The shader call does not use a supported table record.");
+            if (TryFindUserDataCall(caller, index, snapshot, userDataBase, out var userTarget, out var userArgument))
+            {
+                // A function pointer the dispatch passes in user data: one target, which the linked program still checks
+                // against the call registers when the call runs. Its argument is a record argument like a table's.
+                var userArgumentRegister = call.Sources[0].Value + 2;
+                var userReturn = unchecked(caller.Address + call.ProgramOffset + (ulong)call.Words.Count * sizeof(uint));
+                identity.AppendData(BitConverter.GetBytes(userTarget));
+                identity.AppendData(BitConverter.GetBytes(userArgument));
+                layout.AppendData(BitConverter.GetBytes(call.Pc));
+                layout.AppendData(BitConverter.GetBytes(userArgumentRegister));
+                List<ShaderCallTarget> userTargets = userTarget == 0 ? [] : [Target(call.Pc, userTarget, userArgument)];
+                layout.AppendData(BitConverter.GetBytes(userTargets.Count));
+                calls.Add(new(call.Pc, call.Sources[0].Value, userArgumentRegister, call.Destinations[0].Value, userReturn, userTargets));
+                continue;
+            }
             Gen5ShaderInstruction load;
             Gen5ScalarMemoryControl loadControl;
             uint argumentRegister = 0;
@@ -145,31 +194,7 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
                 var target = BinaryPrimitives.ReadUInt64LittleEndian(table.AsSpan(offset));
                 var argument = BinaryPrimitives.ReadUInt64LittleEndian(table.AsSpan(offset + 8));
                 if (target == 0 || !records.Add((target, argument))) continue;
-                if (!functions.TryGetValue(target, out var function))
-                {
-                    var result = functionCache?.Read(target, read) ?? ShaderFunctionReader.Read(target, read);
-                    if (!result.Complete) throw new ShaderFunctionReadException(target, result);
-                    function = result.Program;
-                    identity.AppendData(result.Bytes);
-                    layout.AppendData(result.Bytes);
-                    functions.Add(target, function);
-                    if (runtimeArguments)
-                    {
-                        codeHashes.Add(target, SHA256.HashData(result.Bytes));
-                        codeRuns.Add(target, result.Runs);
-                    }
-                }
-                targets.Add(new(target, argument, function));
-                if (runtimeArguments)
-                {
-                    if (!currentSites.TryGetValue(target, out var namedAt))
-                    {
-                        currentSites.Add(target, namedAt = []);
-                    }
-
-                    namedAt.Add(call.Pc);
-                }
-                layout.AppendData(BitConverter.GetBytes(target));
+                targets.Add(Target(call.Pc, target, argument));
             }
             layout.AppendData(BitConverter.GetBytes(targets.Count));
             calls.Add(new(call.Pc, call.Sources[0].Value, argumentRegister, call.Destinations[0].Value, returnAddress, targets));
@@ -393,6 +418,56 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
         }
 
         return WithSiteCallees(callerAddress, union);
+    }
+
+    // A caller may also copy its target and argument pairs from user data: each of the four call registers (the
+    // target pair, then the argument pair) still holds a user-data register, reached through S_MOV_B32 and
+    // S_MOV_B64 copies (a caller may save a pair at entry and reuse it after the call registers were overwritten).
+    private static bool TryFindUserDataCall(Gen5ShaderProgram caller, int index, ResourceSnapshot snapshot, uint userDataBase,
+        out ulong target, out ulong argument)
+    {
+        target = 0;
+        argument = 0;
+        var callRegister = caller.Instructions[index].Sources[0].Value;
+        var sources = new uint[4];
+        for (var slot = 0; slot < sources.Length; slot++)
+            if (!TryTraceUserDataRegister(caller, index, callRegister + (uint)slot, userDataBase, (uint)snapshot.UserData.Length,
+                    out sources[slot]))
+                return false;
+        if (sources[1] != sources[0] + 1 || sources[3] != sources[2] + 1) return false;
+        ulong Pair(uint first) => snapshot.UserData[first - userDataBase] | (ulong)snapshot.UserData[first - userDataBase + 1] << 32;
+        target = Pair(sources[0]);
+        argument = Pair(sources[2]);
+        return true;
+    }
+
+    // Follows one scalar register back from an instruction through register copies to the user-data register it
+    // holds. Any other writer ends the trace; a vector instruction's scalar result counts as a lane-mask pair.
+    private static bool TryTraceUserDataRegister(Gen5ShaderProgram caller, int before, uint register, uint userDataBase,
+        uint userDataCount, out uint userDataRegister)
+    {
+        userDataRegister = 0;
+        for (var cursor = before - 1; cursor >= 0; cursor--)
+        {
+            var instruction = caller.Instructions[cursor];
+            var vector = instruction.Encoding is Gen5ShaderEncoding.Vopc or Gen5ShaderEncoding.Vop3 or Gen5ShaderEncoding.Vop1 or
+                Gen5ShaderEncoding.Vop2;
+            foreach (var destination in instruction.Destinations)
+            {
+                var width = vector ? 2u : Math.Max(instruction.DestinationWidth, 1u);
+                if (destination.Kind != Gen5OperandKind.ScalarRegister || register < destination.Value ||
+                    register - destination.Value >= width) continue;
+                if (instruction.Opcode is not ("SMovB32" or "SMovB64") || instruction.Sources.Count != 1 ||
+                    instruction.Sources[0].Kind != Gen5OperandKind.ScalarRegister) return false;
+                register = instruction.Sources[0].Value + (register - destination.Value);
+                goto Traced;
+            }
+            continue;
+        Traced:;
+        }
+        if (register < userDataBase || register - userDataBase >= userDataCount) return false;
+        userDataRegister = register;
+        return true;
     }
 
     // A caller may also load one 16-byte record straight into the call registers: the target pair with an
