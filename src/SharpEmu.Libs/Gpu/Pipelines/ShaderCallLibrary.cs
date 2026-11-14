@@ -17,7 +17,8 @@ internal sealed record UnitedCallee(ShaderCallTarget Target, byte[] Code, (ulong
 // Identity names the tables and code exactly. LayoutIdentity names them up to the values of the records' arguments: it
 // keeps which records share an argument and which have none. A game rebuilds its tables with the argument data
 // elsewhere as often as every frame; such a table links to the same program, whose plan and module read Arguments (the
-// distinct nonzero record arguments, Gen5ShaderCallLinker.CallEntryArguments) from each dispatch.
+// distinct nonzero record arguments, Gen5ShaderCallLinker.CallEntryArguments) from each dispatch. A library read with
+// runtimeArguments holds its records as dispatch data (Records): its Identity is its LayoutIdentity.
 internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCallSite> Calls, string LayoutIdentity,
     ulong[] Arguments)
 {
@@ -28,6 +29,12 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
     private const ulong MaxRuntimeTableBytes = 16 << 20;
 
     private static int _unreadableTargetReports;
+
+    // Each callee's code hash, computed once for the decoded function the function cache returns while its code is unchanged.
+    private static readonly ConditionalWeakTable<ShaderFunctionReadResult, byte[]> CodeDigests = new();
+
+    private static byte[] CodeDigest(ShaderFunctionReadResult function) =>
+        CodeDigests.GetValue(function, static result => SHA256.HashData(result.Bytes));
 
     // Read with runtimeArguments, a site's Calls hold each callee once (in the order of their code, so the program does not
     // depend on the tables' order), LayoutIdentity names only the sites and the callees' code, and Records holds every
@@ -57,8 +64,10 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
         ResourceSnapshot snapshot, GuestWordReader read, ShaderFunctionCache? functionCache = null, bool runtimeArguments = false,
         uint userDataBase = 0, ResidentGuestBytesReader? readBytes = null)
     {
-        using var identity = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        using var layout = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        // A runtime-argument library names its sites from the callees' code hashes (WithRuntimeSites), so its read hashes
+        // neither the tables nor the code.
+        using var identity = runtimeArguments ? null : IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        using var layout = runtimeArguments ? null : IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var calls = new List<ShaderCallSite>();
         var functions = new Dictionary<ulong, Gen5ShaderProgram>();
         var codeHashes = new Dictionary<ulong, byte[]>();
@@ -87,12 +96,12 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
                 }
 
                 function = result.Program;
-                identity.AppendData(result.Bytes);
-                layout.AppendData(result.Bytes);
+                identity?.AppendData(result.Bytes);
+                layout?.AppendData(result.Bytes);
                 functions.Add(address, function);
                 if (runtimeArguments)
                 {
-                    codeHashes.Add(address, SHA256.HashData(result.Bytes));
+                    codeHashes.Add(address, CodeDigest(result));
                     codeRuns.Add(address, result.Runs);
                 }
             }
@@ -107,7 +116,7 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
                 namedAt.Add(site);
             }
 
-            layout.AppendData(BitConverter.GetBytes(address));
+            layout?.AppendData(BitConverter.GetBytes(address));
             target = new(address, argument, function);
             return true;
         }
@@ -124,12 +133,12 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
                 var userArgument = UserDataPair(snapshot, userDataBase, userData.Argument);
                 var userArgumentRegister = call.Sources[0].Value + 2;
                 var userReturn = unchecked(caller.Address + call.ProgramOffset + (ulong)call.Words.Count * sizeof(uint));
-                identity.AppendData(BitConverter.GetBytes(userTarget));
-                identity.AppendData(BitConverter.GetBytes(userArgument));
-                layout.AppendData(BitConverter.GetBytes(call.Pc));
-                layout.AppendData(BitConverter.GetBytes(userArgumentRegister));
+                identity?.AppendData(BitConverter.GetBytes(userTarget));
+                identity?.AppendData(BitConverter.GetBytes(userArgument));
+                layout?.AppendData(BitConverter.GetBytes(call.Pc));
+                layout?.AppendData(BitConverter.GetBytes(userArgumentRegister));
                 List<ShaderCallTarget> userTargets = userTarget == 0 ? [] : [Target(call.Pc, userTarget, userArgument)];
-                layout.AppendData(BitConverter.GetBytes(userTargets.Count));
+                layout?.AppendData(BitConverter.GetBytes(userTargets.Count));
                 calls.Add(new(call.Pc, call.Sources[0].Value, userArgumentRegister, call.Destinations[0].Value, userReturn, userTargets));
                 continue;
             }
@@ -144,8 +153,8 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
             var stride = (descriptor[1] >> 16) & 0x3FFF;
             var size = (ulong)descriptor[2] * Math.Max(stride, 1u);
             var returnAddress = unchecked(caller.Address + call.ProgramOffset + (ulong)call.Words.Count * sizeof(uint));
-            layout.AppendData(BitConverter.GetBytes(call.Pc));
-            layout.AppendData(BitConverter.GetBytes(argumentRegister));
+            layout?.AppendData(BitConverter.GetBytes(call.Pc));
+            layout?.AppendData(BitConverter.GetBytes(argumentRegister));
             if (size == 0)
             {
                 // A buffer without records reads zero for every load: a null target, so the call has no target.
@@ -160,7 +169,7 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
             if ((ulong)table.Length != size)
                 throw new InvalidOperationException(
                     $"The shader call table is not CPU-readable at this submission: address=0x{address:X} bytes={size} readable={table.Length}.");
-            identity.AppendData(table);
+            identity?.AppendData(table);
             var targets = new List<ShaderCallTarget>();
             var records = new HashSet<(ulong, ulong)>();
             var firstRecord = checked((int)loadControl.ImmediateOffsetBytes);
@@ -195,22 +204,24 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
                         $"caller=0x{caller.Address:X} table=0x{address:X} record={offset / 16} target=0x{target:X} error={failure!.Error}.");
                 }
             }
-            layout.AppendData(BitConverter.GetBytes(targets.Count));
+            layout?.AppendData(BitConverter.GetBytes(targets.Count));
             calls.Add(new(call.Pc, call.Sources[0].Value, argumentRegister, call.Destinations[0].Value, returnAddress, targets));
         }
-        identity.AppendData(BitConverter.GetBytes(caller.Address));
+        identity?.AppendData(BitConverter.GetBytes(caller.Address));
         if (runtimeArguments)
-            return WithRuntimeArguments(caller, Convert.ToHexString(identity.GetHashAndReset()), calls, codeHashes, codeRuns) with
+            return WithRuntimeArguments(caller, calls, codeHashes, codeRuns) with
             {
                 CurrentSites = currentSites,
             };
-        layout.AppendData(BitConverter.GetBytes(caller.Address));
+        var identityHash = identity!;
+        var layoutHash = layout!;
+        layoutHash.AppendData(BitConverter.GetBytes(caller.Address));
         ulong[] recordArguments = [.. calls.SelectMany(site => site.Targets).Select(target => target.Argument)];
         ulong[] arguments = [.. recordArguments.Where(argument => argument != 0).Distinct()];
         var slotOf = arguments.Select((argument, slot) => (argument, slot)).ToDictionary(entry => entry.argument, entry => entry.slot);
         foreach (var argument in recordArguments)
-            layout.AppendData(BitConverter.GetBytes(argument == 0 ? -1 : slotOf[argument]));
-        return new(Convert.ToHexString(identity.GetHashAndReset()), calls, Convert.ToHexString(layout.GetHashAndReset()), arguments);
+            layoutHash.AppendData(BitConverter.GetBytes(argument == 0 ? -1 : slotOf[argument]));
+        return new(Convert.ToHexString(identityHash.GetHashAndReset()), calls, Convert.ToHexString(layoutHash.GetHashAndReset()), arguments);
     }
 
     // The table bytes of the call site being read; valid until the next table read on this thread.
@@ -246,7 +257,7 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
         return bytes[..offset];
     }
 
-    private static ShaderCallLibrary WithRuntimeArguments(Gen5ShaderProgram caller, string identity, List<ShaderCallSite> calls,
+    private static ShaderCallLibrary WithRuntimeArguments(Gen5ShaderProgram caller, List<ShaderCallSite> calls,
         Dictionary<ulong, byte[]> codeHashes, Dictionary<ulong, (ulong Address, byte[] Bytes)[]> codeRuns)
     {
         var sites = new List<ShaderCallSite>(calls.Count);
@@ -260,7 +271,8 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
             });
         }
 
-        return WithRuntimeSites(caller.Address, identity, sites, [.. records], codeHashes, codeRuns) with { CurrentCodeHashes = codeHashes };
+        var library = WithRuntimeSites(caller.Address, "", sites, [.. records], codeHashes, codeRuns);
+        return library with { Identity = library.LayoutIdentity, CurrentCodeHashes = codeHashes };
     }
 
     // The library of sites whose callees are each named once, in the order of their code, and whose identity names only the
