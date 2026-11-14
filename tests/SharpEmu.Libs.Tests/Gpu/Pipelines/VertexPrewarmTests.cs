@@ -130,6 +130,39 @@ public sealed class VertexPrewarmTests : IDisposable
         Assert.NotEqual(identity, ShaderPrewarmList.Identity(VertexRecord(code, EmbeddedFetchInfo(DataBase, 32, 4))));
     }
 
+    // The same program met at another code address is one record.
+    [Fact]
+    public void ProgramsMetAtAnotherCodeAddressAreOneRecord()
+    {
+        var code = Code(0x1111);
+        var moved = new ShaderCodeCapture
+        {
+            Hash = code.Hash, CodeSize = code.CodeSize, Address = CodeAddress + 0x2000, Generation = Generation.Gen5,
+            Ranges = [new CodeRange(CodeAddress + 0x2000, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])],
+        };
+        var pixel = PixelRecord(code, 1);
+        var movedPixel = PixelRecord(moved, 1);
+        var vertex = VertexRecord(code, EmbeddedFetchInfo(DataBase, 16, 4));
+        var movedVertex = VertexRecord(moved, EmbeddedFetchInfo(DataBase, 16, 4));
+        Assert.Equal(ShaderPrewarmList.Identity(pixel), ShaderPrewarmList.Identity(movedPixel));
+        Assert.Equal(ShaderPrewarmList.Identity(vertex), ShaderPrewarmList.Identity(movedVertex));
+        var state = new PreRasterizationState(0, 2, 1, false, false, true, false);
+        using (var list = Open())
+        {
+            list.RecordPixel(code, pixel);
+            list.RecordPixel(moved, movedPixel);
+            list.RecordPreRasterization(list.RecordVertex(code, vertex), state);
+            Assert.Equal(list.RecordVertex(code, vertex), list.RecordVertex(moved, movedVertex));
+        }
+
+        using var reloaded = Open();
+        Assert.Equal(1, reloaded.LoadedPixelCount);
+        var items = reloaded.LoadedGraphicsPrewarm();
+        Assert.Equal(2, items.Count);
+        Assert.Equal(CodeAddress, Assert.IsType<PixelPrewarmItem>(items[0]).Record.Address);
+        Assert.Equal(CodeAddress, Assert.IsType<PreRasterizationPrewarmItem>(items[1]).Program.Address);
+    }
+
     [Fact]
     public void PixelProgramsAndPreRasterizationStatesLoadInTheOrderTheyWereRecorded()
     {

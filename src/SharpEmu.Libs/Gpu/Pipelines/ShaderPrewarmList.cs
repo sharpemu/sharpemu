@@ -539,7 +539,9 @@ internal sealed partial class ShaderPrewarmList : IDisposable
 
     public static ulong Identity(ComputePrewarmRecord record) => XxHash3.HashToUInt64(SerializeCompute(record));
 
-    public static ulong Identity(PixelPrewarmRecord record) => XxHash3.HashToUInt64(SerializePixel(record));
+    // A graphics program loaded at another address translates the same (the program cache keys omit the address), so
+    // its record's identity leaves the address out and a session that meets the program elsewhere records nothing new.
+    public static ulong Identity(PixelPrewarmRecord record) => XxHash3.HashToUInt64(SerializePixel(record, address: 0));
 
     private string ProgressPath(bool extension) => extension ? _extensionProgressPath : _progressPath;
 
@@ -652,8 +654,8 @@ internal sealed partial class ShaderPrewarmList : IDisposable
 
     public void RecordPixel(ShaderCodeCapture code, PixelPrewarmRecord record)
     {
-        var payload = SerializePixel(record);
-        var identity = XxHash3.HashToUInt64(payload);
+        var payload = SerializePixel(record, record.Address);
+        var identity = Identity(record);
         lock (_gate)
         {
             if (_failed || !_pixels.Add(identity))
@@ -911,7 +913,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
 
                 case PixelKind:
                     // A pixel record of another schema is skipped, not refused, so the records after it still load.
-                    if (TryDeserializePixel(payload) is { } pixel && _pixels.Add(XxHash3.HashToUInt64(payload)))
+                    if (TryDeserializePixel(payload) is { } pixel && _pixels.Add(Identity(pixel)))
                     {
                         _loadedPixels.Add(pixel);
                         _graphicsOrder.Add((PixelKind, _loadedPixels.Count - 1));
@@ -1343,14 +1345,15 @@ internal sealed partial class ShaderPrewarmList : IDisposable
 
     private static byte[] ReadBytes(BinaryReader reader, int limit) => reader.ReadBytes(CheckedCount(reader.ReadInt32(), limit));
 
-    private static byte[] SerializePixel(PixelPrewarmRecord record)
+    // address: the record's code address, or 0 for its identity.
+    private static byte[] SerializePixel(PixelPrewarmRecord record, ulong address)
     {
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream);
         writer.Write(PixelSchemaFingerprint);
         writer.Write(record.Hash);
         writer.Write(record.CodeSize);
-        writer.Write(record.Address);
+        writer.Write(address);
         writer.Write(record.ContinuationAddressOffset);
         writer.Write(record.UserDataBase);
         writer.Write(record.UserDataCount);

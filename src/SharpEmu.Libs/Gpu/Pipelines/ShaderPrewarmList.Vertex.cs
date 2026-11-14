@@ -76,7 +76,8 @@ internal sealed partial class ShaderPrewarmList
 
     public int LoadedPreRasterizationCount => _loadedPreRasterizations.Count;
 
-    public static ulong Identity(VertexPrewarmRecord record) => XxHash3.HashToUInt64(SerializeVertex(record));
+    // Without the code address, as a pixel record's.
+    public static ulong Identity(VertexPrewarmRecord record) => XxHash3.HashToUInt64(SerializeVertex(record, address: 0));
 
     // The recorded pixel programs and pre-rasterization states, in the order sessions first met them. A state whose program
     // or code is missing is left out.
@@ -109,8 +110,8 @@ internal sealed partial class ShaderPrewarmList
     // Returns the record's identity, under which RecordPreRasterization records the program's states.
     public ulong RecordVertex(ShaderCodeCapture code, VertexPrewarmRecord record)
     {
-        var payload = SerializeVertex(record);
-        var identity = XxHash3.HashToUInt64(payload);
+        var payload = SerializeVertex(record, record.Address);
+        var identity = Identity(record);
         lock (_gate)
         {
             if (!_failed && _vertices.Add(identity))
@@ -148,9 +149,9 @@ internal sealed partial class ShaderPrewarmList
         switch (kind)
         {
             case VertexKind:
-                if (TryDeserializeVertex(payload) is { } vertex && _vertices.Add(XxHash3.HashToUInt64(payload)))
+                if (TryDeserializeVertex(payload) is { } vertex && _vertices.Add(Identity(vertex)))
                 {
-                    _loadedVertices[XxHash3.HashToUInt64(payload)] = vertex;
+                    _loadedVertices[Identity(vertex)] = vertex;
                 }
 
                 return true;
@@ -170,7 +171,8 @@ internal sealed partial class ShaderPrewarmList
         }
     }
 
-    private static byte[] SerializeVertex(VertexPrewarmRecord record)
+    // address: the record's code address, or 0 for its identity.
+    private static byte[] SerializeVertex(VertexPrewarmRecord record, ulong address)
     {
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream);
@@ -178,7 +180,7 @@ internal sealed partial class ShaderPrewarmList
         writer.Write(record.Mesh);
         writer.Write(record.Hash);
         writer.Write(record.CodeSize);
-        writer.Write(record.Address);
+        writer.Write(address);
         writer.Write(record.ContinuationAddressOffset);
         writer.Write(record.UserDataBase);
         writer.Write(record.UserDataCount);
