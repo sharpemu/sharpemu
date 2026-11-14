@@ -122,9 +122,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private RenderPipelineEntry CreateLibraryPipelineEntry(GraphicsPipelineDescription description)
         {
-            var mesh = description.VertexStage.Stage == ShaderStageKind.Mesh;
             var vertexBindings = new List<DescriptorSetLayoutBinding>();
-            CollectLayoutBindings(vertexBindings, description.VertexStage, mesh ? ShaderStage.Mesh : ShaderStage.Vertex);
+            CollectVertexStageBindings(vertexBindings, description);
             var pixelBindings = new List<DescriptorSetLayoutBinding>();
             if (description.PixelStage is { } pixelStage)
             {
@@ -216,11 +215,12 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // Links the pipeline from its parts when its entry is laid out for them, else builds it whole, as when a part fails.
+        // A tessellated pipeline is built whole: a pre-rasterization part holds one vertex or mesh stage.
         private Result LinkOrBuildGraphicsPipeline(RenderPipelineEntry? libraries, GraphicsPipelineDescription description,
             bool expandRectangles, GraphicsPipelineCreateInfo* info, PipelineDynamicStateCreateInfo* baseDynamicState,
             PipelineCache cache, out Pipeline pipeline, out double milliseconds)
         {
-            if (libraries is { LinkedFromLibraries: true } && !expandRectangles &&
+            if (libraries is { LinkedFromLibraries: true } && description.Tessellation is null && !expandRectangles &&
                 CreateLinkedGraphicsPipeline(libraries, description, info, baseDynamicState, out pipeline, out milliseconds) == Result.Success)
             {
                 return Result.Success;

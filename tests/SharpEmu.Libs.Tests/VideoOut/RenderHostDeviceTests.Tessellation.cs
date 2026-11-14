@@ -77,14 +77,23 @@ public sealed unsafe partial class RenderHostDeviceTests
     public void Tessellation_VertexOffsetUsesPacketRegistersOrIndirectArguments(bool indexed) =>
         RenderTessellationPatch(0, false, true, verifyOffset: true, indexed: indexed);
 
+    // With pipeline libraries a pixel module reads its bindings from the pixel set, so a tessellated pipeline, which is
+    // built whole, binds them there too: the pixel stage here takes its color from its shader data binding.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Tessellation_PixelStageReadsItsBindingsWithPipelineLibraries(bool computeFactors) =>
+        RenderTessellationPatch(1f, true, computeFactors, libraries: true);
+
     private void RenderTessellationPatch(float firstOuter, bool visible, bool computeFactors, uint patchCount = 1,
-        bool verifyOffset = false, bool indexed = false, uint ringPatches = 1, uint primitiveType = 4)
+        bool verifyOffset = false, bool indexed = false, uint ringPatches = 1, uint primitiveType = 4, bool libraries = false)
     {
         if (!Ready()) return;
         Assert.False(GatePrerequisites.DeviceRequired && !_vulkan!.SupportsTessellation,
             "The required tessellation test needs the tessellationShader device feature.");
-        if (!_vulkan!.SupportsTessellation) return;
+        if (!_vulkan!.SupportsTessellation || (libraries && !_vulkan.SupportsGraphicsPipelineLibrary)) return;
         using var presenter = new PresenterUnderTest(_vulkan!);
+        presenter.SetField("_graphicsPipelineLibraries", libraries);
         _vulkan!.Vk.GetPhysicalDeviceProperties(_vulkan.Physical, out var properties);
         presenter.SetField("_minStorageBufferOffsetAlignment", properties.Limits.MinStorageBufferOffsetAlignment);
         presenter.LoadRenderingCommands();
@@ -98,7 +107,7 @@ public sealed unsafe partial class RenderHostDeviceTests
         var words = RegisterWords.Color(target, Size, Size);
         var executor = new RenderExecutor(presenter.RenderHost,
             new TessellationProgramProvider((IShaderPipelineHost)presenter.Instance, factors.DeviceAddress, guestFactors, firstOuter,
-                patchCount > 1 || verifyOffset, verifyOffset ? 2u : 0u, 24 * ringPatches));
+                patchCount > 1 || verifyOffset, verifyOffset ? 2u : 0u, 24 * ringPatches, pixelReadsShaderData: libraries));
         GuestGpuMemoryHook.Attach(harness.Gpu);
         try
         {
@@ -149,12 +158,17 @@ public sealed unsafe partial class RenderHostDeviceTests
     }
 
     private sealed class TessellationProgramProvider(IShaderPipelineHost host, ulong factorAddress, ulong guestFactors, float firstOuter,
-        bool useAbsolutePatchId, uint factorSourceRegister, uint factorRingBytes) : IShaderPipelineProvider
+        bool useAbsolutePatchId, uint factorSourceRegister, uint factorRingBytes, bool pixelReadsShaderData = false) : IShaderPipelineProvider
     {
         private ShaderProgram _vertex, _control, _domain, _pixel;
         private ShaderProgramInfo _domainInfo = null!;
         private ComputeProgram? _hull;
         private static readonly ShaderProgramInfo PixelInfo = FixedProgramProvider.EmptyProgram(ShaderStageKind.Pixel, 4);
+
+        // Four user-data registers that start past the push range, so the pixel stage reads them from its shader data binding.
+        private static readonly ShaderProgramInfo ShaderDataPixelInfo = FixedProgramProvider.EmptyProgram(ShaderStageKind.Pixel, 4,
+            userDataRegisters: [0, 1, 2, 3], pushDataStart: PushData.DwordCount);
+        private static readonly uint[] RedUserData = [BitConverter.SingleToUInt32Bits(1f), 0, 0, BitConverter.SingleToUInt32Bits(1f)];
 
         public GraphicsPrograms GetGraphicsPrograms(RegisterBanks banks, ReadOnlySpan<ColorComponentMap> mappings,
             bool pixelActive, bool depthBound) =>
@@ -186,7 +200,8 @@ public sealed unsafe partial class RenderHostDeviceTests
                 _vertex = new(1, host.CreateShaderModule(new VulkanCompiledGuestShader(SpirvFixedShaders.CreateFullscreenVertex(0)), ShaderStage.Vertex, 1, 1));
                 _control = new(2, host.CreateShaderModule(new VulkanCompiledGuestShader(Gen5TessellationBridge.CompileControl(layout, Gen5TessellationDomain.Quads).Spirv), ShaderStage.TessellationEvaluation, 2, 2));
                 _domain = new(3, host.CreateShaderModule(new VulkanCompiledGuestShader(shader.Spirv), ShaderStage.TessellationEvaluation, Hash, 3));
-                _pixel = new(4, host.CreateShaderModule(new VulkanCompiledGuestShader(SpirvFixedShaders.CreateSolidFragment(1, 0, 0, 1)), ShaderStage.Pixel, 4, 4));
+                _pixel = new(4, host.CreateShaderModule(new VulkanCompiledGuestShader(pixelReadsShaderData
+                    ? CreateShaderDataFragment() : SpirvFixedShaders.CreateSolidFragment(1, 0, 0, 1)), ShaderStage.Pixel, 4, 4));
                 if (guestFactors != 0) _hull = CreateHull();
             }
             var data = new uint[Gen5TessellationData.DwordCount];
@@ -201,8 +216,52 @@ public sealed unsafe partial class RenderHostDeviceTests
                 Vertex = _vertex, Pixel = _pixel,
                 Tessellation = _hull is null ? null : new(new(Gen5TessellationDomain.Quads, Gen5TessellationSpacing.Equal, false, false), new(4, 4, 1, 0), _hull),
                 VertexInput = new() { Tessellation = new(_control, _domain, 4), Stage = new(_domainInfo, new ResourceSnapshot()) { TessellationData = data } },
-                PixelInput = new() { Stage = new(PixelInfo, new ResourceSnapshot()) },
+                PixelInput = new()
+                {
+                    Stage = pixelReadsShaderData
+                        ? new(ShaderDataPixelInfo, new ResourceSnapshot { UserData = RedUserData })
+                        : new(PixelInfo, new ResourceSnapshot()),
+                },
             };
+        }
+
+        // outColor = the first four dwords of the pixel stage's shader data, as floats.
+        private static byte[] CreateShaderDataFragment()
+        {
+            var module = new SpirvModuleBuilder();
+            module.AddCapability(SpirvCapability.Shader);
+            var voidType = module.TypeVoid();
+            var uintType = module.TypeInt(32, false);
+            var floatType = module.TypeFloat(32);
+            var vec4Type = module.TypeVector(floatType, 4);
+            var words = module.TypeRuntimeArray(uintType);
+            module.AddDecoration(words, SpirvDecoration.ArrayStride, 4);
+            var block = module.TypeStruct(words);
+            module.AddDecoration(block, SpirvDecoration.Block);
+            module.AddMemberDecoration(block, 0, SpirvDecoration.Offset, 0);
+            var data = module.AddGlobalVariable(module.TypePointer(SpirvStorageClass.StorageBuffer, block), SpirvStorageClass.StorageBuffer);
+            module.AddDecoration(data, SpirvDecoration.NonWritable);
+            module.AddDecoration(data, SpirvDecoration.DescriptorSet, 0u);
+            module.AddDecoration(data, SpirvDecoration.Binding, BindingLayout.NativeBindingIndex(ShaderStage.Pixel, DescriptorBindingKind.ShaderData));
+            var output = module.AddGlobalVariable(module.TypePointer(SpirvStorageClass.Output, vec4Type), SpirvStorageClass.Output);
+            module.AddDecoration(output, SpirvDecoration.Location, 0);
+            var main = module.BeginFunction(voidType, module.TypeFunction(voidType));
+            module.AddLabel();
+            var wordPointer = module.TypePointer(SpirvStorageClass.StorageBuffer, uintType);
+            var channels = new uint[4];
+            for (uint index = 0; index < 4; index++)
+            {
+                var word = module.AddInstruction(SpirvOp.Load, uintType,
+                    module.AddInstruction(SpirvOp.AccessChain, wordPointer, data, module.Constant(uintType, 0), module.Constant(uintType, index)));
+                channels[index] = module.AddInstruction(SpirvOp.Bitcast, floatType, word);
+            }
+
+            module.AddStatement(SpirvOp.Store, output, module.AddInstruction(SpirvOp.CompositeConstruct, vec4Type, channels));
+            module.AddStatement(SpirvOp.Return);
+            module.EndFunction();
+            module.AddEntryPoint(SpirvExecutionModel.Fragment, main, "main", [data, output]);
+            module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
+            return module.Build();
         }
 
         private ComputeProgram CreateHull()

@@ -42,6 +42,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public ulong ProfilePixelHash;
         public ulong ProfileComputeHash;
 
+        // Laid out for pipeline libraries, and linked from them unless built whole: SetLayout is the vertex stage's set 0,
+        // PixelSetLayout the pixel stage's set 2.
         public bool LinkedFromLibraries;
         public DescriptorSetLayout PixelSetLayout;
         public DescriptorSetDemand PixelDemand;
@@ -987,6 +989,24 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private static bool UsesBindlessHeap(ShaderProgramInfo program) => program.Bindings?.UsesBindlessHeap == true;
 
+        // The bindings of the stage before rasterization, collected before any other stage's.
+        private static void CollectVertexStageBindings(List<DescriptorSetLayoutBinding> bindings, GraphicsPipelineDescription description)
+        {
+            CollectLayoutBindings(bindings, description.VertexStage,
+                description.Tessellation is not null ? ShaderStage.TessellationEvaluation
+                : description.VertexStage.Stage == ShaderStageKind.Mesh ? ShaderStage.Mesh : ShaderStage.Vertex);
+            if (description.Tessellation is not null)
+            {
+                // The control bridge reads the domain stage's runtime data.
+                var dataBinding = BindingLayout.NativeBindingIndex(ShaderStage.TessellationEvaluation, DescriptorBindingKind.ShaderData);
+                var dataIndex = bindings.FindIndex(binding => binding.Binding == dataBinding);
+                if (dataIndex < 0) throw SubmissionScheduler.Fatal("The tessellation pipeline has no runtime data binding.");
+                var dataLayout = bindings[dataIndex];
+                dataLayout.StageFlags |= ShaderStageFlags.TessellationControlBit;
+                bindings[dataIndex] = dataLayout;
+            }
+        }
+
         private static void CollectLayoutBindings(List<DescriptorSetLayoutBinding> bindings, BindingLayout layout, ShaderStage stage)
         {
             foreach (var binding in layout.Descriptors)
@@ -1111,26 +1131,15 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"The draw binds more color attachments than the device supports: count={description.Rendering.ColorCount} max={_maxColorAttachments}.");
             }
 
+            // With libraries every pixel module reads its bindings from set 2 (CreateShaderModule), so every pipeline is laid
+            // out for them, a tessellated one too (LinkOrBuildGraphicsPipeline).
             if (_graphicsPipelineLibraries)
             {
                 return CreateLibraryPipelineEntry(description);
             }
 
             var bindings = new List<DescriptorSetLayoutBinding>();
-            CollectLayoutBindings(bindings, description.VertexStage,
-                description.Tessellation is not null ? ShaderStage.TessellationEvaluation
-                : description.VertexStage.Stage == ShaderStageKind.Mesh ? ShaderStage.Mesh : ShaderStage.Vertex);
-            if (description.Tessellation is not null)
-            {
-                // The control bridge reads the domain stage's runtime data.
-                var dataBinding = BindingLayout.NativeBindingIndex(ShaderStage.TessellationEvaluation, DescriptorBindingKind.ShaderData);
-                var dataIndex = bindings.FindIndex(binding => binding.Binding == dataBinding);
-                if (dataIndex < 0) throw SubmissionScheduler.Fatal("The tessellation pipeline has no runtime data binding.");
-                var dataLayout = bindings[dataIndex];
-                dataLayout.StageFlags |= ShaderStageFlags.TessellationControlBit;
-                bindings[dataIndex] = dataLayout;
-            }
-
+            CollectVertexStageBindings(bindings, description);
             if (description.PixelStage is { } pixelStage)
             {
                 CollectLayoutBindings(bindings, pixelStage, ShaderStage.Pixel);
