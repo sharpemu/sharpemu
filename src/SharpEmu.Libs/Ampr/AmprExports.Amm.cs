@@ -158,18 +158,34 @@ public static partial class AmprExports
             return SetAmmResult(ctx, KernelEinval);
         }
 
-        var result = CompleteCommandBuffer(ctx, commandBuffer, out var executionResult, out var errorOffset);
+        var result = SubmitCommandBuffer(
+            ctx,
+            commandBuffer,
+            AmprEngine.Amm,
+            priority,
+            (_, executionResult, errorOffset) => ReportAmmFailure(commandBuffer, executionResult, errorOffset),
+            out var submission);
         if (result != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {
             return SetAmmResult(ctx, result);
         }
 
+        if (submission!.CompletedInline)
+        {
+            ReportAmmFailure(commandBuffer, submission.ExecutionResult, submission.ErrorOffset);
+        }
+
+        return SetAmmResult(ctx, 0);
+    }
+
+    // On hardware a failed command ends the application; here it is reported and the buffer stops.
+    private static void ReportAmmFailure(ulong commandBuffer, int executionResult, uint errorOffset)
+    {
         if (executionResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
         {
             Console.Error.WriteLine(
                 $"[LOADER][ERROR] ampr.amm command failed: buffer=0x{commandBuffer:X16} offset=0x{errorOffset:X} result=0x{executionResult:X8}");
         }
-        return SetAmmResult(ctx, 0);
     }
 
     private static int AppendAmmCommand(CpuContext ctx, bool unmap, ulong address, ulong size, int protection)
