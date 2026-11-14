@@ -45,6 +45,10 @@ public sealed partial class ShaderResourcePlan
     public IReadOnlyList<DescriptorSource> DescriptorSources { get; private set; } = [];
     public IReadOnlyList<uint> MaterializationSources { get; private set; } = [];
     public IReadOnlyList<ResourceBranchBlock> ResourceBranches { get; private set; } = [];
+    // Whether a plan with ResourceBranches writes memory, and the static buffers it writes through, which may be none
+    // when it writes only LDS or scratch (ResourceBranchWriteGuard).
+    public bool ResourceBranchesWithWrites { get; private set; }
+    public IReadOnlyList<uint> ResourceBranchWrites { get; private set; } = [];
     public IReadOnlyList<ResourceTableRead> TableReads { get; private set; } = [];
     public IReadOnlyDictionary<int, uint> FlattenedSlotByMemoryIndex { get; private set; } = new Dictionary<int, uint>();
     public IReadOnlyList<ScalarValue> DynamicReads { get; private set; } = [];
@@ -325,6 +329,8 @@ public sealed partial class ShaderResourcePlan
 
         plan.CleanFlatSlots = cleanSlots;
         plan.ResourceBranches = ResourceBranchBlock.Build(plan, Rewrite);
+        plan.ResourceBranchesWithWrites = plan.ResourceBranches.Count != 0 && ResourceBranchBlock.Writes(plan);
+        plan.ResourceBranchWrites = plan.ResourceBranchesWithWrites ? ResourceBranchBlock.WrittenBuffers(plan) ?? [] : [];
         plan.DeviceAddressRanges = DeviceAddressRangePlanner.Plan(plan);
         plan.CallRecordCallees = CallRecordPlanner.Plan(plan);
 

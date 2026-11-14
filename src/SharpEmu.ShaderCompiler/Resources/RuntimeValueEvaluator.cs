@@ -640,6 +640,10 @@ public sealed class RuntimeValueEvaluator : IEvaluatedValues
         foreach (var block in plan.ResourceBranches)
             foreach (var source in block.Sources) activeSources[source] = false;
 
+        // A plan that writes memory reads its predicates through a guard that keeps their addresses.
+        using var guard = plan.ResourceBranchesWithWrites && inputs.ReadCleanMemory is not null
+            ? new ResourceBranchWriteGuard(plan, inputs) : null;
+        var predicates = guard?.Evaluator ?? cleanEvaluator;
         var visited = scratch.PrepareBranches(plan.ResourceBranches.Count);
         var pending = scratch.PendingBranches;
         pending.Push(0);
@@ -650,12 +654,13 @@ public sealed class RuntimeValueEvaluator : IEvaluatedValues
             var block = plan.ResourceBranches[blockIndex];
             foreach (var source in block.Sources) activeSources[source] = true;
             // An unreadable predicate keeps both paths; never use the general reader to choose one.
-            if (block.Condition is { } condition && inputs.ReadCleanMemory is not null && cleanEvaluator.Evaluate(condition, out var value))
+            if (block.Condition is { } condition && inputs.ReadCleanMemory is not null && predicates.Evaluate(condition, out var value))
                 pending.Push(block.Successors[value != 0 ? 0 : 1]);
             else
                 foreach (var successor in block.Successors) pending.Push(successor);
         }
 
+        if (guard is not null && !guard.Holds()) Array.Fill(activeSources, true);
         ResourceMaterializationProfile.RecordActivity(activeSources);
         return activeSources;
     }
