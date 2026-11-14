@@ -571,6 +571,66 @@ public sealed partial class GuestImageCache
         return new OverlapResolution(mergedImageIdentifier);
     }
 
+    // Releases the images that a GPU write to their dimension twin left stale; true when one was released.
+    private bool ReleaseStaleDimensionTwins(in ImageQueryResults candidates)
+    {
+        var released = false;
+        foreach (var candidate in candidates)
+        {
+            if (_slots.TryGet(candidate) is { Registered: true, DimensionTwinStale: true })
+            {
+                ReleaseImage(candidate);
+                released = true;
+            }
+        }
+
+        return released;
+    }
+
+    // The image's registered twin when it gives the requested view.
+    private ResourceSlotIdentifier FindDimensionTwin(in ImageQueryResults candidates, CachedImage image, in ImageViewDescription view)
+    {
+        if (image.DimensionTwin is not { Registered: true, DimensionTwinStale: false } twin || !twin.SupportsViewType(view))
+        {
+            return ResourceSlotIdentifier.Invalid;
+        }
+
+        foreach (var candidate in candidates)
+        {
+            if (ReferenceEquals(_slots.TryGet(candidate), twin))
+            {
+                return candidate;
+            }
+        }
+
+        return ResourceSlotIdentifier.Invalid;
+    }
+
+    // An image of the other dimensional type beside the partner, filled from guest memory like any new image.
+    private ResourceSlotIdentifier InsertDimensionTwin(in ImageDescription description, CachedImage partner)
+    {
+        if (partner.DimensionTwin is { } previous)
+        {
+            previous.DimensionTwin = null;
+        }
+
+        var twinIdentifier = InsertImage(description);
+        var twin = _slots[twinIdentifier];
+        twin.Uses = partner.Uses;
+        if (_bufferCache.HasGpuDirtyBytes(twin.Description.Data.Address, twin.Description.Data.Size))
+        {
+            twin.MarkBufferModified();
+        }
+        else
+        {
+            PopulateFromGuest(twinIdentifier, ImageRequest.Refresh(description, UploadRole(twin)), "dimension-twin");
+        }
+
+        twin.DimensionTwin = partner;
+        partner.DimensionTwin = twin;
+        return twinIdentifier;
+    }
+
     // Replaces the source with a larger image that starts with the source contents.
     private ResourceSlotIdentifier GrowImage(in ImageDescription description, ResourceSlotIdentifier sourceImageIdentifier)
     {

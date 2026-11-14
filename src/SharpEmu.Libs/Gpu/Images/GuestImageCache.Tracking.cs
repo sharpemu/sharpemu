@@ -88,6 +88,12 @@ public sealed partial class GuestImageCache
             _parked.Remove(imageIdentifier);
         }
 
+        if (image.DimensionTwin is { } twin)
+        {
+            twin.DimensionTwin = null;
+            image.DimensionTwin = null;
+        }
+
         if (!image.DepthOwner.IsValid)
         {
             var associations = new List<ResourceSlotIdentifier>();

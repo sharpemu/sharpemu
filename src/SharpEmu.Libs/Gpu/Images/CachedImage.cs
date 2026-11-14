@@ -119,6 +119,11 @@ public sealed unsafe partial class CachedImage : IDisposable
     public bool Parked;
     public ulong ParkedTick;
 
+    // The image of the other dimensional type (1D or 2D) over the same single-row memory. Both are kept while they hold the
+    // same contents; a GPU write to either leaves the other stale, and the cache replaces the stale one on its next lookup.
+    public CachedImage? DimensionTwin;
+    public bool DimensionTwinStale;
+
     public CachedImage(GpuDeviceInfo device, SubmissionScheduler scheduler, IGuestBackedSpace guestBacking, in ImageDescription description,
         ImageBackingPool? pool = null, Action? reportAllocationFailure = null)
     {
@@ -496,6 +501,11 @@ public sealed unsafe partial class CachedImage : IDisposable
     {
         RawWriteAfterGpuWrite = false;
         _gpuModified = true;
+        if (DimensionTwin is { } twin)
+        {
+            twin.DimensionTwinStale = true;
+        }
+
         _bufferHoldsGpuContents = false;
         GpuWriteSequence = Interlocked.Increment(ref _gpuWriteCounter);
         _guestPieceHashes = null;

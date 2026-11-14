@@ -238,6 +238,11 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         if (ImageClearTrace.Enabled) ImageTraceRange.NoteImageLookup(request.Description.Data.Address, request.Description.Data.Size);
         PrintResourceHistory(request);
         var candidates = FindImagesInRange(request.Description.Data.Address, request.Description.Data.Size, pageOverlap: false);
+        if (ReleaseStaleDimensionTwins(candidates))
+        {
+            candidates = FindImagesInRange(request.Description.Data.Address, request.Description.Data.Size, pageOverlap: false);
+        }
+
         if (ImageClearTrace.Enabled && request.TraceTextureMetadataAddress != 0)
         {
             ImageClearTrace.Write($"texture-owner-search image=0x{request.Description.Data.Address:X16} candidates={candidates.Count}");
@@ -302,7 +307,14 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                 var replacement = resolved.Description;
                 replacement.Type = request.View.Type is ImageViewType.Type1D or ImageViewType.Type1DArray
                     ? GuestImageType.Color1D : GuestImageType.Color2D;
-                result = GrowImage(replacement, result);
+                // A texture read both as 1D and as 2D keeps an image of each type while both hold the guest's contents.
+                // Replacing one with the other on every lookup recreated the image endlessly when both types were read.
+                result = request.Role == ImageRole.Texture && !resolved.IsGpuModified && !resolved.IsBufferModified &&
+                    !resolved.DimensionTwinStale
+                    ? FindDimensionTwin(candidates, resolved, request.View) is { IsValid: true } twin
+                        ? twin
+                        : InsertDimensionTwin(replacement, resolved)
+                    : GrowImage(replacement, result);
             }
             else if (request.View.Type == ImageViewType.Type3D && resolved.Backing.ImageType != ImageType.Type3D)
             {
