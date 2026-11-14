@@ -205,8 +205,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            // Every stage a program that reads heap records can run in, the stages of a tessellated pipeline too.
             var stages = ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit | ShaderStageFlags.ComputeBit |
-                (_supportsMeshShader ? ShaderStageFlags.MeshBitExt : 0);
+                (_supportsMeshShader ? ShaderStageFlags.MeshBitExt : 0) |
+                (_supportsTessellation ? ShaderStageFlags.TessellationControlBit | ShaderStageFlags.TessellationEvaluationBit : 0);
             var count = BindlessHeap.ArrayCount + 1;
             var bindings = stackalloc DescriptorSetLayoutBinding[count];
             var flags = stackalloc DescriptorBindingFlags[count];
