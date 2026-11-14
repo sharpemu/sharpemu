@@ -109,6 +109,15 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The DMA destination selector is not supported: selector=0x{destinationSelect:X2} destination=0x{destination:X16}.");
         }
 
+        // A forwarded wait can pass before its foreign label publishes. The buffer cache may
+        // implement this transfer with CPU reads/writes, even when its ranges do not overlap
+        // the label. Keep the packet pending until that queue-order dependency completes.
+        if (_host.MustHoldForCrossQueueOrder(QueueId))
+        {
+            Suspend();
+            return;
+        }
+
         if (sourceSelect == 2)
         {
             _host.FillBuffer(destination, byteCount, (uint)sourceOrImmediate, destinationIsGds);

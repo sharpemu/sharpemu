@@ -31,6 +31,13 @@ public sealed class SubmitBundle
 
     public int WaitCount { get; private set; }
 
+    // Empties the bundle for reuse (the native recorder's submissions).
+    internal void Clear()
+    {
+        WaitCount = 0;
+        SignalCount = 0;
+    }
+
     public int SignalCount { get; private set; }
 
     public void AddWait(ulong semaphore, ulong tick = 1, uint stage = AllCommandsStage)
