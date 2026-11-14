@@ -964,7 +964,9 @@ internal sealed class ShaderProgramCache
         {
             var first = ranges.Count;
             if (slotOf.TryGetValue(record.Target, out var slot) &&
-                !CallRecordPlanner.AddRecordRanges(plan, slot, record.Argument, inputs, userDataBase, ranges))
+                (!CallRecordPlanner.AddRecordRanges(plan, slot, record.Argument, inputs, userDataBase, ranges) ||
+                 ranges.Skip(first).Any(static range =>
+                     ClassifyRecordBuffer(range.Base, range.Size, range.Written) == RecordBuffer.LeaveRecordOut)))
             {
                 ranges.RemoveRange(first, ranges.Count - first);
                 if (_invalidRecordReports++ < 8)
@@ -976,6 +978,14 @@ internal sealed class ShaderProgramCache
                 continue;
             }
 
+            for (var index = ranges.Count - 1; index >= first; index--)
+            {
+                if (ClassifyRecordBuffer(ranges[index].Base, ranges[index].Size, ranges[index].Written) != RecordBuffer.Resident)
+                {
+                    ranges.RemoveAt(index);
+                }
+            }
+
             kept.Add(record);
         }
 
@@ -983,6 +993,28 @@ internal sealed class ShaderProgramCache
     }
 
     private static int _invalidRecordReports;
+
+    // A record names a buffer of at most 4 GiB inside the address space the device-address cache maps (PageOwnerTable). Other
+    // words in its place (material constants, say, on a record whose callee does not read the buffer) describe no buffer.
+    internal static bool DescribesRecordBuffer(ulong address, ulong size) =>
+        size <= 1UL << 32 && address < Buffers.PageOwnerTable.AddressSpaceSize &&
+        size <= Buffers.PageOwnerTable.AddressSpaceSize - address;
+
+    internal enum RecordBuffer
+    {
+        Resident,
+        NotResident,
+        LeaveRecordOut,
+    }
+
+    // What a buffer a callee reads through its record's argument needs at a dispatch. A buffer is made resident. Words that
+    // describe no buffer are not, and a read through them returns zeros, as through any page the cache does not hold; when the
+    // callee writes the buffer, its record is left out instead (its call returns at once), so no store lands through them.
+    internal static RecordBuffer ClassifyRecordBuffer(ulong address, ulong size, bool written) =>
+        address == 0 || size == 0 ? RecordBuffer.NotResident
+        : DescribesRecordBuffer(address, size) ? RecordBuffer.Resident
+        : written ? RecordBuffer.LeaveRecordOut
+        : RecordBuffer.NotResident;
 
     // Whether a runtime-record program's pipeline is ready for this compute dispatch; its compile starts or is polled here, and a
     // ready program becomes the caller's fallback. Without a pipeline host every pipeline counts as ready.

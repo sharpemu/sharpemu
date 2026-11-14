@@ -36,7 +36,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var rows = new List<(uint Low, uint High, uint Callee, ulong Argument)>(stage.CallRecords?.Length ?? 0);
             foreach (var (target, argument) in stage.CallRecords ?? [])
             {
-                if (slotOf.TryGetValue(target, out var slot) && slot < callees.Count)
+                if (slotOf.TryGetValue(target, out var slot) && slot < callees.Count &&
+                    !LeavesRecordOut(callees[slot], target, argument, program.Hash))
                 {
                     rows.Add(((uint)argument, (uint)(argument >> 32), (uint)slot, argument));
                 }
@@ -98,7 +99,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     var address = buffer[0] | ((ulong)(buffer[1] & 0xFFFF) << 32);
                     var stride = (buffer[1] >> 16) & 0x3FFF;
                     var size = (ulong)buffer[2] * Math.Max(stride, 1u);
-                    if (size != 0 && address != 0)
+                    if (Gpu.Pipelines.ShaderProgramCache.ClassifyRecordBuffer(address, size, field.Written) ==
+                        Gpu.Pipelines.ShaderProgramCache.RecordBuffer.Resident)
                     {
                         ranges.Add(new DeviceAddressRange(uint.MaxValue, address, size, true, field.Written));
                     }
@@ -107,6 +109,36 @@ internal static unsafe partial class VulkanVideoPresenter
 
             ranges.AddRange(stage.CallRecordRanges ?? []);
             return (words, MergeCallRecordRanges(ranges));
+        }
+
+        // Whether a record is left out because a buffer its callee writes holds no buffer descriptor
+        // (ShaderProgramCache.ClassifyRecordBuffer): its call returns at once instead of storing through it.
+        private bool LeavesRecordOut(CallRecordCallee callee, ulong target, ulong argument, ulong hash)
+        {
+            Span<uint> buffer = stackalloc uint[4];
+            foreach (var field in callee.Buffers)
+            {
+                if (!_guestMemory.TryRead(argument + field.Immediate, MemoryMarshal.AsBytes(buffer)))
+                {
+                    continue;
+                }
+
+                var address = buffer[0] | ((ulong)(buffer[1] & 0xFFFF) << 32);
+                var size = (ulong)buffer[2] * Math.Max((buffer[1] >> 16) & 0x3FFF, 1u);
+                if (Gpu.Pipelines.ShaderProgramCache.ClassifyRecordBuffer(address, size, field.Written) ==
+                    Gpu.Pipelines.ShaderProgramCache.RecordBuffer.LeaveRecordOut)
+                {
+                    if (_callRecordReports++ < 8)
+                    {
+                        Console.Error.WriteLine($"[GPU][WARN][LINKED_PROGRAM] A call record's buffer describes no buffer; its call returns at once: " +
+                            $"hash=0x{hash:X16} target=0x{target:X} argument=0x{argument:X} base=0x{address:X} size=0x{size:X}.");
+                    }
+
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         // The element of set 1 that holds the descriptor a record's callee reads Immediate bytes past its argument: one per

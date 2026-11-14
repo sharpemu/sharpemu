@@ -223,6 +223,30 @@ public sealed class ShaderCallLibraryTests
             ShaderCallLibrary.Read(caller, memory, snapshot, (ulong address, out uint word) => words.TryGetValue(address, out word)).Calls));
     }
 
+    // A record buffer is at most 4 GiB and inside the address space the device-address cache maps. A record's buffer
+    // field can hold material constants instead (0.015f = 0x3C75C28F), which describe a buffer about 16 TiB long.
+    [Theory]
+    [InlineData(0x10A013F510ul, 0x1000ul, true)]
+    [InlineData(0x3C75C28Ful, 0xFC0430A3D71ul, false)]
+    [InlineData(0x1000ul, (1ul << 32) + 1, false)]
+    [InlineData((1ul << 40) - 0x1000, 0x1000ul, true)]
+    [InlineData((1ul << 40) - 0x1000, 0x2000ul, false)]
+    [InlineData(1ul << 44, 0x10ul, false)]
+    public void RecordBuffers_StayInsideTheDeviceAddressSpace(ulong address, ulong size, bool describes) =>
+        Assert.Equal(describes, ShaderProgramCache.DescribesRecordBuffer(address, size));
+
+    // A buffer is made resident. Words that describe no buffer (hit materials can hold text and floats there) are not:
+    // a read-only buffer keeps its record, whose call runs; a written one leaves the record out.
+    [Theory]
+    [InlineData(0x10A013F510ul, 0x1000ul, false, (int)ShaderProgramCache.RecordBuffer.Resident)]
+    [InlineData(0x10A013F510ul, 0x1000ul, true, (int)ShaderProgramCache.RecordBuffer.Resident)]
+    [InlineData(0x2F7372657463ul, 0x110B21D0AEA2ul, false, (int)ShaderProgramCache.RecordBuffer.NotResident)]
+    [InlineData(0x2F7372657463ul, 0x110B21D0AEA2ul, true, (int)ShaderProgramCache.RecordBuffer.LeaveRecordOut)]
+    [InlineData(0ul, 0x1000ul, true, (int)ShaderProgramCache.RecordBuffer.NotResident)]
+    [InlineData(0x10A013F510ul, 0ul, true, (int)ShaderProgramCache.RecordBuffer.NotResident)]
+    public void RecordBuffers_ReadOnlyKeepTheRecordAndWrittenLeaveItOut(ulong address, ulong size, bool written, int expected) =>
+        Assert.Equal((ShaderProgramCache.RecordBuffer)expected, ShaderProgramCache.ClassifyRecordBuffer(address, size, written));
+
     // A caller may pass its function pointer and argument in user data: the call registers are copied from user-data
     // registers nothing wrote before, and the target and argument come from the dispatch's user data. Another argument
     // is another library, but the same layout, so it links to the same program.

@@ -189,9 +189,16 @@ public static class CallRecordPlanner
                 continue;
             }
 
+            // Words that describe no buffer (constants in its place, on a record whose callee does not take the path that reads
+            // it): a read-only buffer is not made resident, and a written one leaves the record out, so no store lands through it.
             if (size > MaxRecordBufferBytes || address + size > 1UL << 48)
             {
-                return false;
+                if (buffer.Written)
+                {
+                    return false;
+                }
+
+                continue;
             }
 
             ranges.Add(new DeviceAddressRange(uint.MaxValue, address, size, true, buffer.Written));
