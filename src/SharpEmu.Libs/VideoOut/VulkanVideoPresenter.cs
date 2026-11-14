@@ -47,6 +47,11 @@ internal static class VulkanGraphicsSubgroupPolicy
                 (supportedShaderStages & (ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit)) ==
                 (ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit),
         };
+
+    // Pixel row reductions (Gen5SpirvTranslator.WaveReductions) need one host subgroup per guest wave32: a native
+    // subgroup of 32 lanes, which the diagnostic override of graphics subgroups does not provide.
+    internal static bool ShouldUsePixelSubgroupArithmetic(uint nativeSubgroupSize, bool graphicsSubgroups, bool fragmentArithmetic) =>
+        nativeSubgroupSize == 32 && graphicsSubgroups && fragmentArithmetic;
 }
 
 internal sealed record VulkanOffscreenColorClear(

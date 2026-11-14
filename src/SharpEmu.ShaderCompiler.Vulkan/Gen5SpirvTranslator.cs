@@ -1713,6 +1713,7 @@ public static partial class Gen5SpirvTranslator
             }
             var passedWorkgroupBarrier = false;
             var pendingSharedReads = false;
+            var waveReductions = FindWaveReductions(block);
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
                 var instruction = _request.Program.Instructions[index];
@@ -1759,6 +1760,11 @@ public static partial class Gen5SpirvTranslator
                 {
                     error = $"pc=0x{instruction.Pc:X} {instruction.Opcode}: {error}";
                     return false;
+                }
+
+                if (waveReductions is not null)
+                {
+                    ApplyWaveReduction(waveReductions, index);
                 }
 
                 CapturePixelVgprs(instruction);
@@ -8854,8 +8860,8 @@ public static partial class Gen5SpirvTranslator
                 _module.AddInstruction(SpirvOp.IEqual, _boolType, length, UInt(0)),
                 _module.AddInstruction(
                     SpirvOp.ULessThan,
-                _boolType,
-                dwordAddress,
+                    _boolType,
+                    dwordAddress,
                     length));
         }
 

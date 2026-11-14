@@ -80,6 +80,9 @@ internal interface IShaderPipelineHost
 
     bool MipStatisticsSubgroupReduction => false;
 
+    // The host subgroup of a pixel shader is one guest wave32 and has arithmetic operations.
+    bool PixelSubgroupArithmetic => false;
+
     // Whether the host reads a linked program's call records at run time, through descriptor set 1.
     bool RuntimeCallRecordsSupported => false;
 

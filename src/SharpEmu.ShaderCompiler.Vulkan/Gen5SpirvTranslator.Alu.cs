@@ -4530,23 +4530,58 @@ public static partial class Gen5SpirvTranslator
 
         private uint ApplyDppSource(Gen5DppControl control, uint value)
         {
+            GetDppSource(control, out var safeTarget, out var valid);
+            var shuffled = _pairedMeshLanes
+                ? ShufflePairedValue(_pairedDppSources[0], _pairedDppSources[1], safeTarget)
+                : ShuffleLane(value, safeTarget);
+            return _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                valid,
+                shuffled,
+                UInt(0));
+        }
+
+        // DPP16: the lane src0 is read from (the reading lane itself when the source is invalid) and whether the source is
+        // valid: in range, and active in the guest unless FI (fetch inactive) is set. An invalid source reads as zero;
+        // without BOUND_CTRL it also leaves the destination unwritten (IsDppWriteEnabled).
+        private void GetDppSource(Gen5DppControl control, out uint safeTarget, out uint valid)
+        {
             GetDppSourceLane(control, out var targetLane, out var inRange);
-            var lane = GuestWaveLane();
-            var safeTarget = _module.AddInstruction(
+            if (!_pairedMeshLanes && _waveLowering is NativeWave32Lowering && _subgroupInvocationIdInput != 0)
+            {
+                // A ballot names the lanes that can be read: an invocation missing from the host subgroup (a fragment warp
+                // that is not full) is never shuffled from, and without FI neither is a lane the guest has inactive.
+                _module.AddCapability(SpirvCapability.GroupNonUniformBallot);
+                var readable = _module.AddInstruction(
+                    SpirvOp.GroupNonUniformBallot,
+                    _uvec4Type,
+                    UInt(3),
+                    control.FetchInactive ? _module.ConstantBool(true) : Load(_boolType, _exec));
+                var target = BitwiseAnd(targetLane, UInt(31));
+                valid = _module.AddInstruction(
+                    SpirvOp.LogicalAnd,
+                    _boolType,
+                    inRange,
+                    _module.AddInstruction(SpirvOp.GroupNonUniformBallotBitExtract, _boolType, UInt(3), readable, target));
+                safeTarget = BitwiseAnd(
+                    _module.AddInstruction(SpirvOp.Select, _uintType, valid, target, GuestWaveLane()),
+                    UInt(NativeLaneMask));
+                return;
+            }
+
+            safeTarget = _module.AddInstruction(
                 SpirvOp.Select,
                 _uintType,
                 inRange,
                 targetLane,
-                lane);
+                GuestWaveLane());
             if (!_pairedMeshLanes)
             {
                 safeTarget = BitwiseAnd(safeTarget, UInt(NativeLaneMask));
             }
-            var shuffled = _pairedMeshLanes
-                ? ShufflePairedValue(_pairedDppSources[0], _pairedDppSources[1], safeTarget)
-                : ShuffleLane(value, safeTarget);
 
-            var sourceAvailable = inRange;
+            valid = inRange;
             if (!control.FetchInactive)
             {
                 var activeWord = _module.AddInstruction(
@@ -4558,19 +4593,12 @@ public static partial class Gen5SpirvTranslator
                 var shuffledActive = _pairedMeshLanes
                     ? ShufflePairedValue(_pairedActiveWords[0], _pairedActiveWords[1], safeTarget)
                     : ShuffleLane(activeWord, safeTarget);
-                sourceAvailable = _module.AddInstruction(
+                valid = _module.AddInstruction(
                     SpirvOp.LogicalAnd,
                     _boolType,
-                    sourceAvailable,
+                    valid,
                     IsNotZero(shuffledActive));
             }
-
-            return _module.AddInstruction(
-                SpirvOp.Select,
-                _uintType,
-                sourceAvailable,
-                shuffled,
-                UInt(0));
         }
 
         private uint ApplySdwaDestination(
@@ -4726,19 +4754,21 @@ public static partial class Gen5SpirvTranslator
 
         private uint IsDppWriteEnabled(Gen5DppControl control)
         {
-            GetDppSourceLane(control, out _, out var inRange);
             var lane = GuestWaveLane();
             var row = ShiftRightLogical(lane, UInt(4));
-            var bank = BitwiseAnd(lane, UInt(3));
+            // A bank is four consecutive lanes of each row (RDNA2 ISA, table 90).
+            var bank = BitwiseAnd(ShiftRightLogical(lane, UInt(2)), UInt(3));
             var rowEnabled = IsNotZero(BitwiseAnd(
                 UInt(control.RowMask),
                 ShiftLeftLogical(UInt(1), row)));
             var bankEnabled = IsNotZero(BitwiseAnd(
                 UInt(control.BankMask),
                 ShiftLeftLogical(UInt(1), bank)));
-            var sourceAllowsWrite = control.BoundControl
-                ? _module.ConstantBool(true)
-                : inRange;
+            var sourceAllowsWrite = _module.ConstantBool(true);
+            if (!control.BoundControl)
+            {
+                GetDppSource(control, out _, out sourceAllowsWrite);
+            }
             return _module.AddInstruction(
                 SpirvOp.LogicalAnd,
                 _boolType,

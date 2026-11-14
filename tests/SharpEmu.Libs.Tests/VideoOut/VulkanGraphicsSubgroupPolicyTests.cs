@@ -37,4 +37,21 @@ public sealed class VulkanGraphicsSubgroupPolicyTests
     {
         Assert.Equal(expected, VulkanGraphicsSubgroupPolicy.ShouldUseNativeGraphicsSubgroups(32, supportedStages, null));
     }
+
+    // A forced SHARPEMU_GRAPHICS_SUBGROUPS=1 on a 64-lane device enables graphics subgroups, not pixel reductions.
+    [Theory]
+    [InlineData(32u, true, true, true)]
+    [InlineData(64u, true, true, false)]
+    [InlineData(32u, false, true, false)]
+    [InlineData(32u, true, false, false)]
+    public void PixelSubgroupArithmeticNeedsANative32LaneSubgroup(
+        uint nativeSubgroupSize,
+        bool graphicsSubgroups,
+        bool fragmentArithmetic,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            VulkanGraphicsSubgroupPolicy.ShouldUsePixelSubgroupArithmetic(nativeSubgroupSize, graphicsSubgroups, fragmentArithmetic));
+    }
 }

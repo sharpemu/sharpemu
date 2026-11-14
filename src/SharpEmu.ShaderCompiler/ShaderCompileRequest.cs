@@ -309,6 +309,10 @@ public sealed class ShaderCompileRequest
 
     public bool MipStatisticsSubgroupReduction { get; init; }
 
+    // The host subgroup of this stage is one guest wave32 and has arithmetic operations: wave32 MIN/MAX scans then
+    // become subgroup reductions (Gen5SpirvTranslator.WaveReductions).
+    public bool SubgroupArithmetic { get; init; }
+
     // The device supports 64-bit integer atomics on workgroup memory
     // (VkPhysicalDeviceFeatures.shaderSharedInt64Atomics). When set, the LDS
     // 64-bit atomics are emitted as real 64-bit atomics instead of a pair of

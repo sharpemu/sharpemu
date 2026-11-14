@@ -317,7 +317,8 @@ public sealed class Gen5MeshShaderTests
             Assert.Equal(expectedMask, laneMasks[words[offset + 5]]);
             shuffleCount++;
         }
-        Assert.True(shuffleCount >= 2);
+        // A wave32 DPP16 source reads the guest EXEC of its lane from a ballot, not from a second shuffle.
+        Assert.True(shuffleCount >= (operation == "dpp" && waveSize == 32 ? 1 : 2));
         ValidateWithInstalledSdk(shader.Spirv);
     }
 
