@@ -14,9 +14,10 @@ public sealed class DeviceRecordCountPlan
     private readonly HashSet<ScalarValue> _skipCounts;
     private readonly HashSet<uint> _pcs;
     private readonly object _gate = new();
-    private uint[]? _lastUserData;
-    private DispatchBufferFootprint.Dispatch? _lastDispatch;
-    private Dictionary<uint, DispatchBufferFootprint.Span>? _lastSpans;
+    private sealed record ProofEntry(uint[] UserData, DispatchBufferFootprint.Dispatch Dispatch,
+        Dictionary<uint, DispatchBufferFootprint.Span>? Spans);
+    private readonly ProofEntry?[] _proofs = new ProofEntry[32];
+    private uint[] _inputWords = [];
 
     private DeviceRecordCountPlan(ScalarValueGraph graph, Dictionary<int, ScalarValue> handles)
     {
@@ -85,22 +86,37 @@ public sealed class DeviceRecordCountPlan
             // Indexing marks every input in the materialization cache's dependency recorder, even on a proof-cache hit.
             lock (_gate)
             {
-                var same = _lastUserData is not null && _lastDispatch == dispatch && _lastUserData.Length == inputs.UserData.Count;
+                if (_inputWords.Length != inputs.UserData.Count) _inputWords = new uint[inputs.UserData.Count];
                 for (var index = 0; index < inputs.UserData.Count; index++)
+                    _inputWords[index] = inputs.UserData[index];
+                bool Matches(ProofEntry? entry) => entry is not null && entry.Dispatch == dispatch &&
+                    _inputWords.AsSpan().SequenceEqual(entry.UserData);
+                var cached = _proofs[0];
+                if (!Matches(cached))
                 {
-                    var word = inputs.UserData[index];
-                    if (same && _lastUserData![index] != word) same = false;
+                    cached = null;
+                    for (var index = 1; index < _proofs.Length; index++)
+                    {
+                        var entry = _proofs[index];
+                        if (!Matches(entry)) continue;
+                        cached = entry;
+                        Array.Copy(_proofs, 0, _proofs, 1, index);
+                        _proofs[0] = entry;
+                        break;
+                    }
                 }
-                if (!same)
+                if (cached is null)
                 {
-                    var userData = new uint[inputs.UserData.Count];
-                    for (var index = 0; index < userData.Length; index++) userData[index] = inputs.UserData[index];
-                    _lastSpans = DispatchBufferFootprint.TryEvaluate(plan.Graph.Program, userData, plan.Graph.UserDataBase,
-                        dispatch, _pcs, out var evaluated) ? evaluated : null;
-                    _lastUserData = userData;
-                    _lastDispatch = dispatch;
+                    // A bounded LRU retains alternating dispatch shapes and refusals. It stores only mathematics;
+                    // current mappings and the actual count fallback are still checked below on every evaluation.
+                    var userData = (uint[])_inputWords.Clone();
+                    var evaluated = DispatchBufferFootprint.TryEvaluate(plan.Graph.Program, userData, plan.Graph.UserDataBase,
+                        dispatch, _pcs, out var proved) ? proved : null;
+                    cached = new(userData, dispatch, evaluated);
+                    Array.Copy(_proofs, 0, _proofs, 1, _proofs.Length - 1);
+                    _proofs[0] = cached;
                 }
-                spans = _lastSpans;
+                spans = cached.Spans;
             }
         }
         var result = new List<DeviceAddressRange>(ordinary);

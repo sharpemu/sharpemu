@@ -93,6 +93,21 @@ public sealed class DeviceRecordCountTests
     }
 
     [Fact]
+    public void ReturningToACachedShapeRechecksItsMapping()
+    {
+        var reads = 0;
+        bool Read(ulong address, out uint value) { reads++; value = 7; return true; }
+        var plan = Plan(CountProgram());
+        Assert.Equal(256ul, Assert.Single(DeviceAddressRangePlanner.Evaluate(plan, InputsFor(Read))).Size);
+        Assert.Equal(512ul, Assert.Single(DeviceAddressRangePlanner.Evaluate(plan, InputsFor(Read, groups: 4))).Size);
+        Assert.Equal(0, reads);
+        Assert.Equal(112ul, Assert.Single(DeviceAddressRangePlanner.Evaluate(plan, InputsFor(Read, mapped: false))).Size);
+        Assert.Equal(1, reads);
+        Assert.Equal(256ul, Assert.Single(DeviceAddressRangePlanner.Evaluate(plan, InputsFor(Read))).Size);
+        Assert.Equal(1, reads);
+    }
+
+    [Fact]
     public void UnmodifiedDescriptorAndCountStayEligibleAcrossLoopHeaders()
     {
         var instructions = CountProgram().Instructions.Where(instruction => instruction.Pc < 36).ToList();
