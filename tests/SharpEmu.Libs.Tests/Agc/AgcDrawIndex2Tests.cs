@@ -155,7 +155,14 @@ public sealed class AgcDrawIndex2Tests
             StreamRunner.Packet(PacketOpcode.SetBase, 1,
                 StreamRunner.Low(StreamRunner.DataAddress), StreamRunner.High(StreamRunner.DataAddress)), packet));
         var draw = Assert.Single(runner.Host.AutoDraws);
-        Assert.Equal((9u, 3u, 1u, 2u), (draw.VertexCount, draw.InstanceCount, draw.FirstVertex, draw.FirstInstance));
+        // A start the packet names a register for reaches the shader there (the start instance is written last), and
+        // the draw counts from 0.
+        var named = firstVertexRegister != 0x280u;
+        Assert.Equal((9u, 3u, named ? 0u : 1u, named ? 0u : 2u), (draw.VertexCount, draw.InstanceCount, draw.FirstVertex, draw.FirstInstance));
+        if (named)
+        {
+            Assert.Equal(2u, runner.Interpreter.Registers.Shader[firstInstanceRegister]);
+        }
     }
 
     [Theory]
@@ -195,8 +202,14 @@ public sealed class AgcDrawIndex2Tests
         Assert.Equal(7u, draw.IndexCount);
         Assert.Equal(2u, draw.InstanceCount);
         Assert.Equal(StreamRunner.DataAddress + 6, draw.IndexAddress);
-        Assert.Equal(4, draw.BaseVertex);
-        Assert.Equal(5u, draw.FirstInstance);
+        var named = (vertexLocations & 0xFFFFu) != 0x280u;
+        Assert.Equal(named ? 0 : 4, draw.BaseVertex);
+        Assert.Equal(named ? 0u : 5u, draw.FirstInstance);
+        if (named)
+        {
+            Assert.Equal(5u, runner.Interpreter.Registers.Shader[instanceLocation & 0xFFFFu]);
+        }
+            Assert.Equal(0u, runner.Interpreter.Registers.Shader[vertexLocations >> 16]);
     }
 
     [Theory]

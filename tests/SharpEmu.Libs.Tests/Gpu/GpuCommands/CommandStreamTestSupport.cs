@@ -90,6 +90,9 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public List<DrawAutoArguments> AutoDraws { get; } = new();
 
+    // Runs at every draw, while the interpreter's registers hold the draw's state.
+    public Action? OnDraw { get; set; }
+
     public Queue<Action> PendingCommands { get; } = new();
 
     public int PendingCommandRuns { get; private set; }
@@ -230,12 +233,14 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
     public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments)
     {
         IndexedDraws.Add(arguments);
+        OnDraw?.Invoke();
         Calls.Add($"draw_indexed {submitId} {arguments.IndexCount}");
     }
 
     public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
     {
         AutoDraws.Add(arguments);
+        OnDraw?.Invoke();
         Calls.Add($"draw_auto {submitId} {arguments.VertexCount}");
     }
 

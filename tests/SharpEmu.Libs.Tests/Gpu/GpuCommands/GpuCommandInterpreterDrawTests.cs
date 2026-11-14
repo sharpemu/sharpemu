@@ -127,6 +127,54 @@ public sealed class GpuCommandInterpreterDrawTests
         Assert.Contains("arguments base is zero", new StreamRunner().RunExpectingFatal(StreamRunner.Packet(PacketOpcode.DrawIndirect, 0, 0, 0, 2)).Message);
     }
 
+    // The CP writes the start vertex or base vertex and the start instance to the registers the packet names (0x280
+    // names none); the shader adds them to its vertex and instance ids, so the draw counts those from 0.
+    [Fact]
+    public void IndirectDraws_WriteTheRegistersThePacketNames()
+    {
+        var runner = new StreamRunner();
+        runner.Host.ResolvesIndirectDrawOnGpu = true;
+        runner.Host.WriteWords(Arguments, new uint[] { 9, 3, 1, 2 });
+        runner.Host.WriteWords(Arguments + 16, new uint[] { 50, 2, 4, 7, 5 });
+        var seen = new List<(uint BaseVertex, uint StartInstance)>();
+        runner.Host.OnDraw = () => seen.Add((runner.Interpreter.Registers.Shader[0xA9], runner.Interpreter.Registers.Shader[0xA8]));
+
+        runner.Run(
+            SetBase(Arguments, dispatch: false),
+            StreamRunner.Packet(PacketOpcode.IndexBase, StreamRunner.Low(Indices), StreamRunner.High(Indices)),
+            StreamRunner.Packet(PacketOpcode.IndexType, 0),
+            StreamRunner.Packet(PacketOpcode.IndexBufferSize, 40),
+            StreamRunner.Packet(PacketOpcode.DrawIndirect, 0, 0xA9, 0xA8, 2),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 16, 0xA9, 0xA8, 0x22),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 16, 0x280, 0xA8, 0x22));
+
+        Assert.Equal(new[] { (1u, 2u), (7u, 5u), (7u, 5u) }, seen);
+        var auto = Assert.Single(runner.Host.AutoDraws);
+        Assert.Equal((9u, 3u, 0u, 0u), (auto.VertexCount, auto.InstanceCount, auto.FirstVertex, auto.FirstInstance));
+        // The registers need the arguments, so they are read here although the host could leave them on the GPU.
+        Assert.All(runner.Host.IndexedDraws, draw => Assert.Equal(0ul, draw.IndirectArgumentsAddress));
+        Assert.Equal((Indices + 8, 0, 0u), (runner.Host.IndexedDraws[0].IndexAddress, runner.Host.IndexedDraws[0].BaseVertex, runner.Host.IndexedDraws[0].FirstInstance));
+        // A base the packet names no register for still reaches the draw.
+        Assert.Equal((7, 0u), (runner.Host.IndexedDraws[1].BaseVertex, runner.Host.IndexedDraws[1].FirstInstance));
+    }
+
+    [Fact]
+    public void IndirectMulti_WritesTheDrawIndexWhenEnabled()
+    {
+        var runner = new StreamRunner();
+        runner.Host.WriteWords(Arguments, new uint[] { 1, 1, 0, 3, 2, 1, 0, 4 });
+        var seen = new List<(uint StartInstance, uint DrawIndex)>();
+        runner.Host.OnDraw = () => seen.Add((runner.Interpreter.Registers.Shader[0xA8], runner.Interpreter.Registers.Shader[0xAA]));
+
+        runner.Run(
+            SetBase(Arguments, dispatch: false),
+            StreamRunner.Packet(PacketOpcode.DrawIndirectMulti, 0, 0xAAu << 16 | 0x280, 0xA8u | 1u << 27, 0, 2, 0, 0, 16, 2));
+
+        Assert.Equal(new[] { (3u, 0u), (4u, 1u) }, seen);
+        Assert.Equal(new uint[] { 1, 2 }, runner.Host.AutoDraws.Select(draw => draw.VertexCount));
+        Assert.All(runner.Host.AutoDraws, draw => Assert.Equal(0u, draw.FirstInstance));
+    }
+
     [Fact]
     public void IndexedIndirectDraws_LeaveArgumentsOnTheGpuWhenTheHostCan()
     {
@@ -199,6 +247,8 @@ public sealed class GpuCommandInterpreterDrawTests
         Assert.Contains("stride is smaller", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.DrawIndirectMulti, 0, 0, 0, 0, 1, 0, 0, 8, 2)).Message);
     }
 
+    // A start instance the packet names reaches its user register as the base vertex does: the CP writes it, so the draw
+    // reads its arguments, counts its instances from 0 and names no start instance user data, whatever the stage reads.
     [Fact]
     public void IndirectDraws_NameTheLiveUserRegisterOfTheirStartInstance()
     {
@@ -220,11 +270,13 @@ public sealed class GpuCommandInterpreterDrawTests
             StreamRunner.Packet(PacketOpcode.IndexType, 2),
             StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 16, 0x280, gs0 + 1, 0x22));
 
-        Assert.Equal(0, Assert.Single(runner.Host.AutoDraws).StartInstanceUserData);
+        var auto = Assert.Single(runner.Host.AutoDraws);
+        Assert.Equal((0u, -1), (auto.FirstInstance, auto.StartInstanceUserData));
         Assert.Equal(3, runner.Host.IndexedDraws.Count);
-        Assert.Equal((Arguments + 16, 2), (runner.Host.IndexedDraws[0].IndirectArgumentsAddress, runner.Host.IndexedDraws[0].StartInstanceUserData));
-        Assert.Equal((Arguments + 16, -1), (runner.Host.IndexedDraws[1].IndirectArgumentsAddress, runner.Host.IndexedDraws[1].StartInstanceUserData));
-        Assert.Equal((0ul, 1, 1u), (runner.Host.IndexedDraws[2].IndirectArgumentsAddress, runner.Host.IndexedDraws[2].StartInstanceUserData, runner.Host.IndexedDraws[2].FirstInstance));
+        Assert.All(runner.Host.IndexedDraws, draw => Assert.Equal((0ul, 0u, -1),
+            (draw.IndirectArgumentsAddress, draw.FirstInstance, draw.StartInstanceUserData)));
+        var shader = runner.Interpreter.Registers.Shader;
+        Assert.Equal((2u, 1u, 1u, 1u, 1u), (shader[gs0], shader[gs0 + 1], shader[gs0 + 2], shader[gs0 + 3], shader[gs0 + 9]));
     }
 
     [Fact]
