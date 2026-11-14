@@ -143,6 +143,58 @@ public sealed class RenderExecutorDrawTests : IDisposable
 
     private const ulong IndirectArguments = RecordingRenderHost.MemoryBase + 0x60_0000;
 
+    // A GPU-culled automatic draw of a mesh program reads its counts on the GPU; without the
+    // indirect mesh command it reads them here and draws from them.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AutoIndirectMeshDrawReadsItsArgumentsOnTheGpu(bool gpuIndirect)
+    {
+        _host.SupportsIndirectMeshDraw = gpuIndirect;
+        _pipelines.MeshShadersSupported = true;
+        _pipelines.Graphics = new GraphicsPrograms
+        {
+            Vertex = new ShaderProgram(0x11), Pixel = new ShaderProgram(0x22),
+            VertexInput = new VertexInputInfo { Stage = Stage(Program(ShaderStageKind.Mesh)) },
+            PixelInput = new PixelInputInfo { Stage = Stage(Program(ShaderStageKind.Pixel)) },
+            MeshInput = new MeshDrawConfiguration
+            {
+                Geometry = new GuestGeometryConfiguration { InputPrimitiveCountPerWorkgroup = 1, InputPointList = true },
+                Execution = new MeshExecutionLimits
+                {
+                    MaxGroupCountX = 65535, MaxGroupCountY = 65535, MaxGroupTotalCount = 65535,
+                },
+            },
+        };
+        MeshDrawParameters? parameters = null;
+        _host.PreparationFailure = stage =>
+        {
+            if (stage.Program?.Stage == ShaderStageKind.Mesh) parameters = stage.MeshDraw;
+            return null;
+        };
+        var banks = Banks(primitiveType: 1, withDepth: true);
+        banks.Context.ShaderStages = 0x2030u;
+        WriteIndirectArguments(6, 2, 4, 5);
+
+        _executor.DrawAuto(1, banks, Auto(0, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments });
+
+        if (gpuIndirect)
+        {
+            Assert.Equal(0, _host.GuestReads);
+            var request = _host.IndirectMeshRequest!.Value;
+            Assert.True(request.Automatic);
+            Assert.Equal((IndirectArguments, true, 1u), (request.ArgumentsAddress, request.PointList, request.PrimitivesPerGroup));
+            Assert.Equal(new MeshDrawParameters(0, 0, 0, uint.MaxValue, 0x9000), parameters);
+            AssertOrder("preparation_begin", "acquire_indirect_mesh", "prepare_bindings",
+                "prepare_indirect_mesh", "draw_indirect_mesh", "dispose_indirect_mesh", "preparation_end");
+            return;
+        }
+
+        Assert.Null(_host.IndirectMeshRequest);
+        Assert.Equal(new MeshDrawParameters(6, 4, 5, 0, 0), parameters);
+        AssertOrder("preparation_begin", "prepare_bindings", "draw_mesh 6 2 1", "preparation_end");
+    }
+
     private void WriteIndirectArguments(params uint[] words)
     {
         var bytes = new byte[words.Length * 4];

@@ -378,9 +378,12 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         ref readonly var indexSource = ref record.Index;
         using var preparation = _host.BeginPreparation();
         using var indirectMesh = meshInput is not null && emission.IndirectArgumentsAddress != 0
-            ? _host.PrepareIndirectMeshDraw(new IndirectMeshDrawRequest(emission.IndirectArgumentsAddress,
-                indexSource.Address, draw.Count, indexSource.Type == IndexType.Uint16 ? 2u : 4u,
-                topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution))
+            ? _host.PrepareIndirectMeshDraw(emission.Indexed
+                ? new IndirectMeshDrawRequest(emission.IndirectArgumentsAddress,
+                    indexSource.Address, draw.Count, indexSource.Type == IndexType.Uint16 ? 2u : 4u,
+                    topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution)
+                : IndirectMeshDrawRequest.ForAutomaticDraw(emission.IndirectArgumentsAddress,
+                    topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution))
             : null;
         var meshVertexCount = draw.Count;
         if (MeshDrawTrace.Active)

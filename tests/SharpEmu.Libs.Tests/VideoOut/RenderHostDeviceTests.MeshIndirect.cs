@@ -62,6 +62,79 @@ public sealed unsafe partial class RenderHostDeviceTests
         harness.Shutdown();
     }
 
+    // An automatic draw: the groups follow the vertex count, and the parameters carry the
+    // first vertex and instance with no index buffer.
+    [Theory]
+    [InlineData(true, 6u, 2u, 0u)]
+    [InlineData(false, 7u, 2u, 0u)]
+    [InlineData(true, 0u, 2u, 0u)]
+    [InlineData(true, 6u, 0u, 0u)]
+    [InlineData(true, 40u, 2u, 2u)]
+    public void AutomaticIndirectMeshPreparationReadsVertexArguments(bool points, uint count, uint instances, uint expectedStatus)
+    {
+        if (!GatePrerequisites.Ready(_vulkan, shaderInt64: true)) return;
+        if (!_vulkan.SupportsMeshShaders)
+        {
+            Assert.False(GatePrerequisites.DeviceRequired, "This test requires mesh shader support.");
+            return;
+        }
+        using var worker = new CacheWorker(_vulkan);
+        worker.Run(() =>
+        {
+            var scheduler = worker.Scheduler;
+            scheduler.Begin(new SubmissionContext { QueueName = "mesh-indirect-auto.test", SubmissionId = 1 });
+            using var arguments = new GpuBuffer(_vulkan.DeviceInfo, scheduler, GpuBufferUsage.DeviceLocal,
+                0, GpuBuffer.AllFlags, 16);
+            using var download = new GpuBuffer(_vulkan.DeviceInfo, scheduler, GpuBufferUsage.Download,
+                0, GpuBuffer.AllFlags, 64);
+            using var pipeline = new MeshIndirectPipeline(_vulkan.DeviceInfo);
+            var request = IndirectMeshDrawRequest.ForAutomaticDraw(0, points, 1,
+                new MeshExecutionLimits { MaxGroupCountX = 32, MaxGroupCountY = 64, MaxGroupTotalCount = 64 });
+            var binding = new BufferBinding(arguments.Handle.Handle, 0);
+            using var prepared = pipeline.Prepare(scheduler, binding, binding, 0, request);
+            try
+            {
+                var command = new CommandBuffer(scheduler.Current.Handle);
+                uint* words = stackalloc uint[4] { count, instances, 9, 5 };
+                _vulkan.Vk.CmdUpdateBuffer(command, arguments.Handle, 0, 16, words);
+                prepared.Record(command);
+                var barrier = new MemoryBarrier
+                {
+                    SType = StructureType.MemoryBarrier, SrcAccessMask = AccessFlags.ShaderWriteBit,
+                    DstAccessMask = AccessFlags.TransferReadBit,
+                };
+                _vulkan.Vk.CmdPipelineBarrier(command, PipelineStageFlags.ComputeShaderBit,
+                    PipelineStageFlags.TransferBit, 0, 1, &barrier, 0, null, 0, null);
+                var copy = new BufferCopy(0, 0, 64);
+                _vulkan.Vk.CmdCopyBuffer(command, prepared.CommandBuffer, download.Handle, 1, &copy);
+                barrier.SrcAccessMask = AccessFlags.TransferWriteBit;
+                barrier.DstAccessMask = AccessFlags.HostReadBit;
+                _vulkan.Vk.CmdPipelineBarrier(command, PipelineStageFlags.TransferBit,
+                    PipelineStageFlags.HostBit, 0, 1, &barrier, 0, null, 0, null);
+                scheduler.Finish();
+                Assert.Equal(expectedStatus, prepared.ReadStatus());
+                download.Invalidate(0, 64);
+                var result = MemoryMarshal.Cast<byte, uint>(download.Mapped[..64]);
+                var primitives = points ? count : count / 3;
+                var execute = expectedStatus != 2 && count != 0 && instances != 0;
+                Assert.Equal(execute ? primitives : 0, result[0]);
+                Assert.Equal(execute ? instances : 0, result[1]);
+                Assert.Equal(1u, result[2]);
+                Assert.Equal(execute ? points ? count : primitives * 3 : 0, result[4]);
+                Assert.Equal(9u, result[5]);
+                Assert.Equal(5u, result[6]);
+                Assert.Equal(0u, result[7]);
+                Assert.Equal(0u, result[8]);
+                Assert.Equal(0u, result[9]);
+            }
+            finally
+            {
+                scheduler.Finish();
+            }
+        });
+        _vulkan.AssertNoValidationMessages();
+    }
+
     [Theory]
     [InlineData(2u, false, 6u, 1u, 2u, 64u, 0u)]
     [InlineData(4u, false, 7u, 1u, 2u, 64u, 0u)]

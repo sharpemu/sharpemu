@@ -32,17 +32,23 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _ = RequirePreparation();
             if (!SupportsIndirectMeshDraw) throw SubmissionScheduler.Fatal("The Vulkan device has no indirect mesh command.");
-            var indexBase = request.IndexAddress & ~3ul;
-            var prefix = checked((uint)(request.IndexAddress - indexBase));
-            var size = (prefix + (ulong)request.IndexCapacity * request.IndexElementSize + 3) & ~3ul;
-            var arguments = RetainMeshInput(request.ArgumentsAddress, 20);
+            var arguments = RetainMeshInput(request.ArgumentsAddress, request.Automatic ? 16ul : 20ul);
             RetainedMeshInput? indices = null;
             MeshIndirectPipeline.PreparedDraw? resources = null;
             try
             {
-                indices = RetainMeshInput(indexBase, size);
+                var prefix = 0u;
+                if (!request.Automatic)
+                {
+                    var indexBase = request.IndexAddress & ~3ul;
+                    prefix = checked((uint)(request.IndexAddress - indexBase));
+                    var size = (prefix + (ulong)request.IndexCapacity * request.IndexElementSize + 3) & ~3ul;
+                    indices = RetainMeshInput(indexBase, size);
+                }
+
                 var pipeline = _presenter._meshIndirectPipeline ??= new MeshIndirectPipeline(_deviceInfo);
-                resources = pipeline.Prepare(_scheduler, arguments.Binding, indices.Binding, prefix, request);
+                // An automatic draw reads no indices; its arguments fill the unused binding.
+                resources = pipeline.Prepare(_scheduler, arguments.Binding, (indices ?? arguments).Binding, prefix, request);
                 return new PreparedIndirectMesh(this, resources, arguments, indices, request.ArgumentsAddress, request.IndexCapacity);
             }
             catch
@@ -84,7 +90,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private sealed class PreparedIndirectMesh(RecordingHost owner, MeshIndirectPipeline.PreparedDraw resources,
-            RetainedMeshInput arguments, RetainedMeshInput indices, ulong argumentsAddress, uint capacity) : IIndirectMeshDraw
+            RetainedMeshInput arguments, RetainedMeshInput? indices, ulong argumentsAddress, uint capacity) : IIndirectMeshDraw
         {
             private bool _recorded;
             private bool _disposed;
@@ -140,7 +146,7 @@ internal static unsafe partial class VulkanVideoPresenter
             private void ReleaseResources()
             {
                 resources.Dispose();
-                indices.Dispose();
+                indices?.Dispose();
                 arguments.Dispose();
             }
         }

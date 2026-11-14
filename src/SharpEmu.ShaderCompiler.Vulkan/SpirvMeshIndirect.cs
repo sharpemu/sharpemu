@@ -68,6 +68,9 @@ public static class SpirvMeshIndirect
         var indexByteOffset = LoadPush(1);
         var capacity = LoadPush(2);
         var elementSize = LoadPush(3);
+        // An element size of 0 marks an automatic draw: no index buffer, and the arguments are
+        // (vertexCount, instanceCount, firstVertex, firstInstance) instead of the indexed five.
+        var automatic = Compare(SpirvOp.IEqual, elementSize, Constant(0));
         var perGroup = LoadPush(4);
         var pointList = Compare(SpirvOp.INotEqual, LoadPush(5), Constant(0));
         // The count is bounded by the buffer, as on the CPU path; status 1 reports a first index past it.
@@ -79,7 +82,7 @@ public static class SpirvMeshIndirect
         var room = Operation(SpirvOp.ISub, capacity, firstIndex);
         var count = Select(Compare(SpirvOp.ULessThan, requested, room), requested, room);
         var baseVertex = Read(0, Operation(SpirvOp.IAdd, argumentsOffset, Constant(3)));
-        var firstInstance = Read(0, Operation(SpirvOp.IAdd, argumentsOffset, Constant(4)));
+        var firstInstance = Read(0, Operation(SpirvOp.IAdd, argumentsOffset, Select(automatic, Constant(3), Constant(4))));
         uint IndexAt(uint ordinal)
         {
             var byteOffset = Operation(SpirvOp.IAdd, indexByteOffset,
@@ -109,15 +112,16 @@ public static class SpirvMeshIndirect
             Write(2, 1, Select(execute, instances, Constant(0)));
             Write(2, 2, Constant(1));
             Write(2, 4, Select(execute, vertices, Constant(0)));
-            Write(2, 5, Constant(0));
+            // An automatic draw counts its vertices from the first one; an indexed draw reads the expanded indices.
+            Write(2, 5, Select(automatic, firstIndex, Constant(0)));
             Write(2, 6, firstInstance);
-            Write(2, 7, Constant(4));
-            Write(2, 8, LoadPush(9));
-            Write(2, 9, LoadPush(10));
+            Write(2, 7, Select(automatic, Constant(0), Constant(4)));
+            Write(2, 8, Select(automatic, Constant(0), LoadPush(9)));
+            Write(2, 9, Select(automatic, Constant(0), LoadPush(10)));
             var error = Select(limitsValid, Select(rangeValid, Constant(0), Constant(1)), Constant(2));
             Write(3, 0, Select(requestedActive, error, Constant(0)));
         });
-        If(And(execute, Compare(SpirvOp.ULessThan, id, vertices)), () =>
+        If(And(And(execute, Compare(SpirvOp.INotEqual, elementSize, Constant(0))), Compare(SpirvOp.ULessThan, id, vertices)), () =>
             module.AddStatement(SpirvOp.Store, Pointer(2, Operation(SpirvOp.IAdd, id, Constant(HeaderWords))),
                 Operation(SpirvOp.IAdd, IndexAt(id), baseVertex)));
         module.AddStatement(SpirvOp.Return);

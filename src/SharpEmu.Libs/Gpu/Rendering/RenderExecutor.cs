@@ -398,7 +398,12 @@ public sealed partial class RenderExecutor
 
     private bool CanDrawAutoIndirectOnGpu(RegisterBanks banks, ulong argumentsAddress)
     {
-        if (UsesMeshExecution(banks) || Pipelines.ShaderPipelineCache.IsMergedTessellationMask(banks.Context.ShaderStages) ||
+        if (UsesMeshExecution(banks))
+        {
+            return CanDrawMeshAutoIndirectOnGpu(banks, argumentsAddress);
+        }
+
+        if (Pipelines.ShaderPipelineCache.IsMergedTessellationMask(banks.Context.ShaderStages) ||
             (argumentsAddress & 3) != 0 || argumentsAddress > ulong.MaxValue - AutoIndirectArgumentsSize ||
             _host.ClampMappedSize(argumentsAddress, AutoIndirectArgumentsSize) != AutoIndirectArgumentsSize)
         {
@@ -408,6 +413,20 @@ public sealed partial class RenderExecutor
         return (GuestPrimitiveType)banks.UserConfig.PrimitiveType is GuestPrimitiveType.PointList or GuestPrimitiveType.LineList or
             GuestPrimitiveType.LineStrip or GuestPrimitiveType.TriangleList or GuestPrimitiveType.TriangleStrip or
             GuestPrimitiveType.TriangleFan or GuestPrimitiveType.Polygon or GuestPrimitiveType.RectangleList;
+    }
+
+    // A mesh program of a point or triangle list reads the arguments of an automatic indirect
+    // draw on the GPU, which derives its workgroup counts; every other mesh draw reads them here.
+    private bool CanDrawMeshAutoIndirectOnGpu(RegisterBanks banks, ulong argumentsAddress)
+    {
+        if (!_host.SupportsIndirectMeshDraw ||
+            (GuestPrimitiveType)banks.UserConfig.PrimitiveType is not (GuestPrimitiveType.PointList or GuestPrimitiveType.TriangleList) ||
+            (argumentsAddress & 3) != 0 || argumentsAddress > ulong.MaxValue - AutoIndirectArgumentsSize)
+        {
+            return false;
+        }
+
+        return _host.ClampMappedSize(argumentsAddress, AutoIndirectArgumentsSize) == AutoIndirectArgumentsSize;
     }
 
     private void DrawAutoWithCpuArguments(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
@@ -445,7 +464,8 @@ public sealed partial class RenderExecutor
 
         var userConfig = banks.UserConfig;
         var shader = banks.Shader;
-        if (arguments.VertexCount == 0 || arguments.InstanceCount == 0)
+        // An indirect draw's counts are still on the GPU.
+        if (arguments.IndirectArgumentsAddress == 0 && (arguments.VertexCount == 0 || arguments.InstanceCount == 0))
         {
             TraceDrawTargets(banks, "zero-count");
             Record(record);
@@ -525,6 +545,14 @@ public sealed partial class RenderExecutor
         }
 
         ResolveShaderPrograms(banks, ref state);
+        if (arguments.IndirectArgumentsAddress != 0 && state.Programs.SolidClear is not null)
+        {
+            // A clear program stands in for the draw only when the draw has something to draw.
+            Record(record);
+            DrawAutoWithCpuArguments(submitId, banks, in arguments);
+            return;
+        }
+
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
         var rectangleList = topology == PrimitiveTopology.PatchList;
