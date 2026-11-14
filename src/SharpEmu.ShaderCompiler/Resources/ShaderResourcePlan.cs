@@ -19,7 +19,7 @@ public sealed record IndirectImageAccess(int MemoryIndex, ScalarValue Key, uint 
 
 // The immutable resource analysis of one program: graph, descriptor sources, flattened
 // reads and dense tables. Built once, materialised per draw, free of any draw's user data.
-public sealed class ShaderResourcePlan
+public sealed partial class ShaderResourcePlan
 {
     private ShaderResourcePlan(ScalarValueGraph graph, ShaderStage stage, ulong hash)
     {
@@ -100,6 +100,7 @@ public sealed class ShaderResourcePlan
         lock (_compileGate)
         {
             if (Volatile.Read(ref _compiledEvaluatorState) == 2) return _compiledEvaluator;
+            CompileRangesNow();
             CompiledResourceEvaluator? compiled;
             try
             {

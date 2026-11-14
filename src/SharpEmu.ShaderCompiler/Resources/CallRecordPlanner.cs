@@ -160,6 +160,20 @@ public static class CallRecordPlanner
     public static bool AddRecordRanges(ShaderResourcePlan plan, int callee, ulong argument, ResourceRuntimeInputs inputs,
         uint userDataBase, List<DeviceAddressRange> ranges)
     {
+        if ((uint)callee >= (uint)plan.CallRecordCallees.Count || plan.CallRecordCallees[callee].BufferWords.Length == 0)
+        {
+            return true;
+        }
+
+        return CompiledDeviceAddressRanges.Configured == CompiledDeviceAddressRanges.Mode.Off
+            ? AddRecordRangesInterpreted(plan, callee, argument, inputs, userDataBase, ranges)
+            : CompiledDeviceAddressRanges.ServeRecord(plan, callee, argument, inputs, userDataBase, ranges);
+    }
+
+    // An evaluator per record; the reference of the compiled records.
+    internal static bool AddRecordRangesInterpreted(ShaderResourcePlan plan, int callee, ulong argument, ResourceRuntimeInputs inputs,
+        uint userDataBase, List<DeviceAddressRange> ranges)
+    {
         const ulong MaxRecordBufferBytes = 1UL << 32;
         if ((uint)callee >= (uint)plan.CallRecordCallees.Count || plan.CallRecordCallees[callee].BufferWords.Length == 0)
         {

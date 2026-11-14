@@ -367,9 +367,20 @@ public static class DeviceAddressRangePlanner
         };
     }
 
+    internal const string MissingFunctionDescriptor = "The shader function buffer has no descriptor.";
+    internal const string UnresolvedFunctionBuffer = "The shader function buffer range cannot be resolved.";
+    internal const string SwizzledFunctionBuffer = "The shader function uses an unsupported swizzled buffer.";
+    internal const string WrappingFunctionBuffer = "The shader function buffer range wraps the guest address space.";
+
     // Evaluates the planned ranges for one draw. A bounded range spans its lowest byte to
     // its extent; an unbounded one starts at the lowest immediate and takes the cap.
-    public static DeviceAddressRange[] Evaluate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+    public static DeviceAddressRange[] Evaluate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs) =>
+        CompiledDeviceAddressRanges.Configured == CompiledDeviceAddressRanges.Mode.Off
+            ? EvaluateInterpreted(plan, inputs)
+            : CompiledDeviceAddressRanges.Serve(plan, inputs);
+
+    // One evaluator for every range and then the function V#s; the reference of CompiledDeviceAddressRanges.
+    internal static DeviceAddressRange[] EvaluateInterpreted(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
     {
         var ranges = plan.DeviceAddressRanges;
         var result = new DeviceAddressRange[ranges.Count];
@@ -405,7 +416,7 @@ public static class DeviceAddressRangePlanner
             if (!memory.DeviceDescriptor || !plan.Graph.Program.FunctionBufferAccesses.Contains(memory.Pc)) continue;
             if (!plan.Memory.TryGetIndex(memory.Pc, memory.ComponentIndex, out var memoryIndex) ||
                 plan.Accesses[memoryIndex]?.Handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } handle)
-                throw new ResourcePlanException("The shader function buffer has no descriptor.");
+                throw new ResourcePlanException(MissingFunctionDescriptor);
             var words = new uint[4];
             var resolved = true;
             for (var component = 0; component < 4 && resolved; component++)
@@ -414,17 +425,17 @@ public static class DeviceAddressRangePlanner
             {
                 // A V# of a callee linked with run-time arguments: the host resolves it for each record (CallRecordCallee).
                 if (plan.CallRecordCallees.Count != 0) continue;
-                throw new ResourcePlanException("The shader function buffer range cannot be resolved.");
+                throw new ResourcePlanException(UnresolvedFunctionBuffer);
             }
             var address = words[0] | ((ulong)(words[1] & 0xFFFF) << 32);
             if ((words[1] & 0x80000000) != 0)
-                throw new ResourcePlanException("The shader function uses an unsupported swizzled buffer.");
+                throw new ResourcePlanException(SwizzledFunctionBuffer);
             var stride = (words[1] >> 16) & 0x3FFF;
             var size = (ulong)words[2] * Math.Max(stride, 1u);
             var written = memory.Access is MemoryAccess.Write or MemoryAccess.Atomic;
             if (size == 0) continue;
             if (size > AddressMask - address + 1)
-                throw new ResourcePlanException("The shader function buffer range wraps the guest address space.");
+                throw new ResourcePlanException(WrappingFunctionBuffer);
             if (seen.Add((address, size, written)))
                 functionRanges.Add(new((uint)functionRanges.Count, address, size, true, written));
         }
