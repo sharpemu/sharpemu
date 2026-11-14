@@ -1731,6 +1731,7 @@ public static partial class Gen5SpirvTranslator
             var passedWorkgroupBarrier = false;
             var pendingSharedReads = false;
             var waveReductions = FindWaveReductions(block);
+            _deferGuards = waveReductions is null && CanDeferGuards;
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
                 var instruction = _request.Program.Instructions[index];
@@ -1738,6 +1739,11 @@ public static partial class Gen5SpirvTranslator
                 if (IsBranch(instruction.Opcode) || instruction.Opcode == "SEndpgm")
                 {
                     continue;
+                }
+
+                if (_deferGuards && ReadsOtherLanes(instruction))
+                {
+                    FlushDeferredGuards();
                 }
 
                 if (lastWorkgroupBarrierIndex >= 0)
@@ -1790,6 +1796,8 @@ public static partial class Gen5SpirvTranslator
                 CapturePixelExec(instruction);
             }
 
+            FlushDeferredGuards();
+            _deferGuards = false;
             if (_stage != Gen5SpirvStage.Mesh) _waveLowering.EndBlock();
             return true;
         }
@@ -4210,6 +4218,8 @@ public static partial class Gen5SpirvTranslator
             out string error)
         {
             error = string.Empty;
+            // Addresses come from VGPRs, as on the physical storage buffer path: inactive lanes must hold their own values.
+            FlushDeferredGuards();
             if (control.Typed || instruction.Opcode.StartsWith("TBuffer", StringComparison.Ordinal))
             {
                 error = $"device buffer descriptor operation {instruction.Opcode} is not supported";
@@ -9405,6 +9415,11 @@ public static partial class Gen5SpirvTranslator
             if (!preserveSavedLanes) _savedLaneValues.Remove(register);
             if (guardWithExec && !_execKnownFull && !_unobservedWrites.Contains(register))
             {
+                if (TryDeferGuard(register, value))
+                {
+                    return;
+                }
+
                 var active = Load(_boolType, _exec);
                 var oldValue = LoadV(register);
                 value = _module.AddInstruction(
@@ -9491,6 +9506,12 @@ public static partial class Gen5SpirvTranslator
 
         private void Store(uint pointer, uint value)
         {
+            if (pointer == _exec && _deferredGuards.Count != 0)
+            {
+                // The region of the current EXEC ends.
+                FlushDeferredGuards();
+            }
+
             if (_executingWave != 0 && pointer == _exec) value = LogicalAnd(value, _executingWave);
             if (_executingWave != 0 && (pointer == _scc || pointer == _programActive))
             {

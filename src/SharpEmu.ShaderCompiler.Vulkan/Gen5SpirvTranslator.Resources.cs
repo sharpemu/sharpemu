@@ -211,6 +211,7 @@ public static partial class Gen5SpirvTranslator
             ulong[]? callArguments = null, ulong[]? callTargets = null, bool inheritBlockState = true)
         {
             _module = new SpirvModuleBuilder { InheritBlockState = inheritBlockState };
+            _module.BeforeBlockExit = FlushDeferredGuards;
             _request = request;
             // The layout decides: ShaderResourcePlan binds the fallback address for a program it lowers compactly.
             _compactMemoryAccess = Gen5ShaderCallLinker.IsLinked(request.Program) ||
@@ -2075,6 +2076,7 @@ public static partial class Gen5SpirvTranslator
             out string error)
         {
             error = string.Empty;
+            FlushDeferredGuards();
             if (control.Typed || instruction.Opcode.Contains("Format", StringComparison.Ordinal))
             {
                 error = $"runtime buffer descriptor does not support the formatted access {instruction.Opcode}";

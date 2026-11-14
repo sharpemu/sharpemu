@@ -262,6 +262,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Environment.GetEnvironmentVariable("SHARPEMU_STRUCTURED_FORWARD_BLOCKS"),
                 Environment.GetEnvironmentVariable("SHARPEMU_EXEC_GUARD_ELISION"),
                 Environment.GetEnvironmentVariable("SHARPEMU_EXEC_SELECT_ELIMINATION"),
+                Environment.GetEnvironmentVariable("SHARPEMU_DEFERRED_EXEC_GUARDS"),
                 Environment.GetEnvironmentVariable("SHARPEMU_PREWARM_LINKED"),
                 driverSignature.TrimEnd('\n'));
 

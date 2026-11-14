@@ -208,12 +208,34 @@ public sealed partial class SpirvModuleBuilder
         return result;
     }
 
+    // Runs before a statement that ends the current block, or a call made through AddStatement, so the emitter can
+    // finish work it keeps for the block (deferred EXEC guards). A call made through AddInstruction does not run it: the
+    // emitter flushes before each call into guest code itself.
+    public Action? BeforeBlockExit { get; set; }
+    private bool _inBlockExit;
+
     public void AddStatement(SpirvOp opcode, params uint[] operands)
     {
         if (opcode == SpirvOp.Store)
         {
             AddStore(operands);
             return;
+        }
+
+        if (BeforeBlockExit is not null && !_inBlockExit &&
+            opcode is SpirvOp.SelectionMerge or SpirvOp.LoopMerge or SpirvOp.Branch or SpirvOp.BranchConditional or
+                SpirvOp.Switch or SpirvOp.Return or SpirvOp.ReturnValue or SpirvOp.Kill or SpirvOp.Unreachable or
+                SpirvOp.FunctionCall)
+        {
+            _inBlockExit = true;
+            try
+            {
+                BeforeBlockExit();
+            }
+            finally
+            {
+                _inBlockExit = false;
+            }
         }
 
         NoteVariableUses(operands);
